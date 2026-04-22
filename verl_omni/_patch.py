@@ -22,10 +22,7 @@ def _patch_diffusion_agent_loop() -> None:
     """Alias ``verl.experimental.agent_loop.diffusion_agent_loop`` to the
     ``verl_omni`` implementation so that upstream lazy imports
     (e.g. inside ``AgentLoopManager.__init__``) resolve to it.
-
-    Must be invoked *before* ``verl.experimental.agent_loop`` is imported
-    for the first time, since that package's ``__init__`` eagerly imports
-    ``diffusion_agent_loop``.
+    TODO (mike): to be dropped
     """
     import verl_omni.experimental.agent_loop.diffusion_agent_loop as _omni_dal
 
@@ -42,7 +39,9 @@ def _patch_diffusion_agent_loop() -> None:
 def _patch_vllm_omni_replica() -> None:
     """Replace the upstream ``vllm_omni`` rollout replica registration so
     that verl-omni's ``vLLMOmniReplica`` (which uses verl-omni's
-    ``DiffusionModelConfig`` / ``DiffusionRolloutConfig``) is used."""
+    ``DiffusionModelConfig`` / ``DiffusionRolloutConfig``) is used.
+    TODO (mike): to be dropped
+    """
     from verl.workers.rollout.replica import RolloutReplicaRegistry
 
     def _load_vllm_omni():
@@ -61,7 +60,9 @@ def _patch_diffusers_model() -> None:
     submodules) to verl-omni's ``verl_omni.models.diffusion_model`` so
     that upstream code using the verl-side ``DiffusionModelBase`` registry
     (e.g. ``verl/workers/engine/fsdp/diffusers_impl.py``) resolves to the
-    verl-omni registry where pipelines are actually registered."""
+    verl-omni registry where pipelines are actually registered.
+    TODO (mike): to be dropped
+    """
     import verl_omni.models.diffusion_model as _omni_pkg
     import verl_omni.models.diffusion_model.base as _omni_base
     import verl_omni.models.diffusion_model.utils as _omni_utils
@@ -75,6 +76,31 @@ def _patch_diffusers_model() -> None:
         parent.diffusers_model = _omni_pkg
 
 
+def _patch_fsdp_diffusers_engine() -> None:
+    """Alias ``verl.workers.engine.fsdp.diffusers_impl`` to verl-omni's
+    implementation so that ``EngineRegistry`` resolves the
+    ``diffusion_model`` engine to verl-omni's ``DiffusersFSDPEngine``.
+    TODO (mike): to be dropped
+    """
+    # Force-trigger verl's eager import chain so that upstream's
+    # ``DiffusersFSDPEngine`` registers first.
+    import verl.workers.engine  # noqa: F401
+    from verl.workers.engine.base import EngineRegistry
+
+    # Drop upstream's ``diffusion_model`` registration so that verl-omni's
+    # decorator (which would otherwise be a no-op) wins.
+    EngineRegistry._engines.pop("diffusion_model", None)
+
+    # Import verl-omni's implementation to (re-)register its engine.
+    import verl_omni.workers.engine.fsdp.diffusers_impl as _omni_impl
+
+    # Alias the module path so any direct references resolve to ours.
+    sys.modules["verl.workers.engine.fsdp.diffusers_impl"] = _omni_impl
+    parent = sys.modules.get("verl.workers.engine.fsdp")
+    if parent is not None:
+        parent.diffusers_impl = _omni_impl
+
+
 def apply_patches() -> None:
     """Apply all verl-omni compatibility patches.  Safe to call multiple
     times."""
@@ -84,4 +110,5 @@ def apply_patches() -> None:
     _patch_diffusion_agent_loop()
     _patch_vllm_omni_replica()
     _patch_diffusers_model()
+    _patch_fsdp_diffusers_engine()
     _PATCHED = True
