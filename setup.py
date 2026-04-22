@@ -48,7 +48,7 @@ install_requires = [
 
 TEST_REQUIRES = ["pytest", "pre-commit", "py-spy", "pytest-asyncio", "pytest-rerunfailures"]
 GPU_REQUIRES = ["flash-attn"]
-VLLM_REQUIRES = ["tensordict>=0.12.0", "vllm>=0.18.0"]
+VLLM_REQUIRES = ["tensordict>=0.8.0,<=0.10.0,!=0.9.0", "vllm>=0.8.5,<=0.12.0"]
 
 extras_require = {
     "test": TEST_REQUIRES,
