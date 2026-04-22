@@ -19,7 +19,6 @@ import numpy as np
 import pytest
 import ray
 from omegaconf import DictConfig
-
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
 
@@ -59,7 +58,7 @@ def _create_tp_compatible_model(parent_dir, src_model_path, num_attention_heads=
 def init_config() -> DictConfig:
     from hydra import compose, initialize_config_dir
 
-    with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
+    with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config")):
         config = compose(config_name="diffusion_trainer")
 
     base_model_path = os.path.expanduser("~/models/tiny-random/Qwen-Image")
