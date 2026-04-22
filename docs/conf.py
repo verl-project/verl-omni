@@ -1,4 +1,4 @@
-# Copyright 2026 verl-omni contributors
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
 project = "verl-omni"
-copyright = "2026 verl-omni contributors"
+copyright = "2026 Bytedance Ltd. and/or its affiliates"
 author = "verl-omni contributors"
 
 master_doc = "index"
