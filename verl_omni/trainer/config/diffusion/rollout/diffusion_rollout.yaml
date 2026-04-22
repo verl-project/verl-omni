@@ -199,6 +199,7 @@ prometheus:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.workers.config.PrometheusConfig
 
+  # Whether to enable prometheus metrics
   enable: false
 
 # type of quantization in vllm-omni

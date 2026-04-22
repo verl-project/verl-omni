@@ -50,5 +50,5 @@ forward_only: false
 # fsdp or fsdp2
 strategy: fsdp
 
-# Mixed precision training param dtype
-dtype: bfloat16 # ["bfloat16", "float16"]
+# Mixed precision training param dtype. Options: ["bfloat16", "float16"]
+dtype: bfloat16
