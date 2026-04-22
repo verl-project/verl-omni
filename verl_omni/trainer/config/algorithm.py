@@ -12,30 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Diffusion-specific algorithm config additions for verl_omni.
-
-Standard algorithm configs (``AlgoConfig``, ``KLControlConfig``,
-``FilterGroupsConfig``, ``RolloutCorrectionConfig``) are re-exported from
-``verl.trainer.config.algorithm`` so they remain a single source of truth.
-"""
+"""Diffusion-specific algorithm config additions for verl_omni."""
 
 from dataclasses import dataclass
 
 from verl.base_config import BaseConfig
-from verl.trainer.config.algorithm import (
-    AlgoConfig,
-    FilterGroupsConfig,
-    KLControlConfig,
-    RolloutCorrectionConfig,
-)
-
-__all__ = [
-    "AlgoConfig",
-    "DiffusionAlgoConfig",
-    "FilterGroupsConfig",
-    "KLControlConfig",
-    "RolloutCorrectionConfig",
-]
 
 
 @dataclass
