@@ -50,12 +50,13 @@ from verl.workers.config import (
     TrainingWorkerConfig,
 )
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
+from verl.workers.utils.losses import ppo_loss
 
 from verl_omni.workers.config import (
     DiffusionActorConfig,
     DiffusionModelConfig,
 )
-from verl_omni.workers.utils.losses import diffusion_loss, ppo_loss
+from verl_omni.workers.utils.losses import diffusion_loss
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
