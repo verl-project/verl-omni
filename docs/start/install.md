@@ -19,9 +19,7 @@ Install in this order to avoid dependency conflicts:
 pip install "vllm==0.18" "vllm-omni==0.18"
 
 # 2. verl-omni
-git clone https://github.com/verl-project/verl-omni.git
-cd verl-omni
-pip install -e .
+pip install git+https://github.com/verl-project/verl-omni.git
 ```
 
 ```{note}

@@ -1,18 +1,22 @@
 # Qwen-Image lora RL, vllm_omni rollout
 set -x
 
-ocr_train_path=$HOME/data/ocr/train.parquet
-ocr_test_path=$HOME/data/ocr/test.parquet
+# Set WORKSPACE to any writable directory; defaults to $HOME
+WORKSPACE=${WORKSPACE:-$HOME}
+
+ocr_train_path=$WORKSPACE/data/ocr/train.parquet
+ocr_test_path=$WORKSPACE/data/ocr/test.parquet
 
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
 reward_path=examples/flowgrpo_trainer/reward_fn.py
-reward_model_name=$HOME/models/Qwen/Qwen3-VL-8B-Instruct
+# Can also be an HF Hub model ID, e.g. "Qwen/Qwen3-VL-8B-Instruct"
+reward_model_name=${REWARD_MODEL_PATH:-$WORKSPACE/models/Qwen/Qwen3-VL-8B-Instruct}
 
 NUM_GPUS_ACTOR_ROLLOUT=4
 NUM_GPUS_REWARD=1
-ROLLOUT_TP=1
+ACTOR_TP=1
 REWARD_TP=1
 
 
@@ -22,8 +26,8 @@ python3 -m verl.trainer.main_flowgrpo \
     data.val_files=$ocr_test_path \
     data.train_batch_size=32 \
     data.max_prompt_length=256 \
-    actor_rollout_ref.model.path=$HOME/models/Qwen/Qwen-Image \
-    actor_rollout_ref.model.tokenizer_path=$HOME/models/Qwen/Qwen-Image/tokenizer \
+    actor_rollout_ref.model.path=${ACTOR_MODEL_PATH:-$WORKSPACE/models/Qwen/Qwen-Image} \
+    actor_rollout_ref.model.tokenizer_path=${ACTOR_TOKENIZER_PATH:-$WORKSPACE/models/Qwen/Qwen-Image/tokenizer} \
     actor_rollout_ref.model.external_lib="examples.flowgrpo_trainer.diffusers_impl" \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
@@ -40,7 +44,7 @@ python3 -m verl.trainer.main_flowgrpo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.n=16 \
-    actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT / ROLLOUT_TP)) \
+    actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT / ACTOR_TP)) \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.true_cfg_scale=4.0 \
