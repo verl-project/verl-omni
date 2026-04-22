@@ -1,0 +1,39 @@
+### What does this PR do?
+
+> Add **concise** overview of what this PR aims to achieve or accomplish. Reference related GitHub issues and PRs that help with the review.
+
+### Checklist Before Starting
+
+- [ ] Search for similar PRs. Paste at least one query link here: ...
+- [ ] Format the PR title as `[{modules}] {type}: {description}` (This will be checked by the CI)
+  - `{modules}` include `fsdp`, `vllm_omni`, `rollout`, `trainer`, `ci`, `training_utils`, `recipe`, `ray`, `worker`, `single_controller`, `misc`, `perf`, `model`, `algo`, `env`, `tool`, `ckpt`, `doc`, `data`, `cfg`, `reward`, `diffusion`, `omni`
+  - If this PR involves multiple modules, separate them with `,` like `[diffusion, doc]`
+  - `{type}` is in `feat`, `fix`, `refactor`, `chore`, `test`
+  - If this PR breaks any API (CLI arguments, config, function signature, etc.), add `[BREAKING]` to the beginning of the title.
+  - Example: `[BREAKING][diffusion, fsdp] feat: new rollout scheduler`
+
+### Test
+
+> For changes that can not be tested by CI (e.g., algorithm implementation, new model support), validate by experiment(s) and show results like training curve plots, evaluation results, etc.
+
+### API and Usage Example
+
+> Demonstrate how the API changes if any, and provide usage example(s) if possible.
+
+```python
+# Add code snippet or script demonstrating how to use this
+```
+
+### Design & Code Changes
+
+> Demonstrate the high-level design if this PR is complex, and list the specific changes.
+
+### Checklist Before Submitting
+
+> [!IMPORTANT]
+> Please check all the following items before requesting a review, otherwise the reviewer might deprioritize this PR for review.
+
+- [ ] Read the [Contribute Guide](https://github.com/verl-project/verl-omni/blob/main/CONTRIBUTING.md).
+- [ ] Apply [pre-commit checks](https://github.com/verl-project/verl-omni/blob/main/CONTRIBUTING.md#code-linting-and-formatting): `pre-commit install && pre-commit run --all-files --show-diff-on-failure --color=always`
+- [ ] Add / Update the documentation.
+- [ ] Add unit or end-to-end test(s) to [the CI workflow](https://github.com/verl-project/verl-omni/tree/main/.github/workflows) to cover all the code. If not feasible, explain why: ...
