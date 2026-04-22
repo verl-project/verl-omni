@@ -26,6 +26,7 @@ with open(os.path.join(version_folder, "verl_omni/version/version")) as f:
 install_requires = [
     "verl>=0.7.1",
     "accelerate",
+    "cachetools",
     "codetiming",
     "datasets",
     "diffusers",

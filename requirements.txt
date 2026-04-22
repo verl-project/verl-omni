@@ -1,6 +1,7 @@
 # requirements.txt records the full set of dependencies for development
 verl>=0.7.1
 accelerate
+cachetools
 codetiming
 datasets
 diffusers
