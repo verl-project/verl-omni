@@ -32,12 +32,8 @@ def extract_solution(solution_str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--hdfs_dir", default=None)
-    parser.add_argument(
-        "--input_dir", default="~/dataset/ocr/", help="Path to the raw OCR dataset directory."
-    )
-    parser.add_argument(
-        "--output_dir", default="~/data/ocr", help="Directory to save the preprocessed parquet files."
-    )
+    parser.add_argument("--input_dir", default="~/dataset/ocr/", help="Path to the raw OCR dataset directory.")
+    parser.add_argument("--output_dir", default="~/data/ocr", help="Directory to save the preprocessed parquet files.")
 
     args = parser.parse_args()
     local_dataset_path = os.path.expanduser(args.input_dir)
