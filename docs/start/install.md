@@ -1,5 +1,7 @@
 # Installation
 
+Last updated: 04/22/2026
+
 ## Requirements
 
 | Dependency | Version |
