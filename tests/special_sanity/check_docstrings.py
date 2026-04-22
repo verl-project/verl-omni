@@ -89,12 +89,10 @@ def main():
     """Main function to check docstrings in specified files."""
 
     files_to_check = [
-        "verl/trainer/ppo/ray_trainer.py",
-        "verl/trainer/main_ppo.py",
-        "verl/trainer/ppo/reward.py",
-        "verl/utils/reward_score/__init__.py",
-        "verl/trainer/ppo/core_algos.py",
-        "verl/experimental/agent_loop/agent_loop.py",
+        "verl_omni/trainer/main_flowgrpo.py",
+        "verl_omni/trainer/diffusion/ray_diffusion_trainer.py",
+        "verl_omni/trainer/diffusion/diffusion_algos.py",
+        "verl_omni/experimental/agent_loop/diffusion_agent_loop.py",
     ]
 
     script_dir = os.path.dirname(os.path.abspath(__file__))

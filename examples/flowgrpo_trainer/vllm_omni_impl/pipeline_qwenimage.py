@@ -20,7 +20,7 @@ from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
-from verl.models.diffusion_model import VllmOmniPipelineBase
+from verl_omni.models.diffusion_model import VllmOmniPipelineBase
 
 from ..scheduler import FlowMatchSDEDiscreteScheduler
 

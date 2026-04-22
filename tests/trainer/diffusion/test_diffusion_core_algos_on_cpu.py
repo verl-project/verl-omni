@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 import torch
 
-from verl.trainer.diffusion import diffusion_algos
+from verl_omni.trainer.diffusion import diffusion_algos
 
 
 @pytest.mark.parametrize("norm_adv_by_std_in_grpo", [True, False])
@@ -41,9 +41,9 @@ def test_flow_grpo_advantage_return(norm_adv_by_std_in_grpo: bool, global_std: b
 
 def test_compute_policy_loss_flow_grpo() -> None:
     from hydra import compose, initialize_config_dir
-
     from verl.utils.config import omega_conf_to_dataclass
-    from verl.workers.config.diffusion.actor import FSDPDiffusionActorConfig
+
+    from verl_omni.workers.config.diffusion.actor import FSDPDiffusionActorConfig
 
     batch_size = 8
     steps = 10

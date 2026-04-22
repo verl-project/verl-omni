@@ -14,12 +14,14 @@
 
 
 def test_import():
+    import verl_omni
+
+    print(verl_omni.__version__)
+
+
+def test_upstream_verl_import():
     import verl
-
-    print(verl.__version__)
-
-
-def test_single_controller_import():
     import verl.single_controller
 
+    print(verl.__version__)
     print(verl.single_controller.__version__)

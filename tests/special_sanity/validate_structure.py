@@ -68,8 +68,8 @@ def main() -> None:
     parser.add_argument(
         "--impl-root",
         type=Path,
-        default="verl",
-        help="Implementation root (default: my_project)",
+        default="verl_omni",
+        help="Implementation root (default: verl_omni)",
     )
     parser.add_argument(
         "--tests-root",

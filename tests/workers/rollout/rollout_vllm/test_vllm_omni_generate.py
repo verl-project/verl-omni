@@ -29,10 +29,10 @@ import ray
 import torch
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
-
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.replica import DiffusionOutput, RolloutMode
-from verl.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
+
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
 MODEL_PATH = Path(os.path.expanduser("~/models/tiny-random/Qwen-Image"))
 
@@ -75,7 +75,7 @@ def init_server():
 
     rollout_cfg = OmegaConf.create(
         {
-            "_target_": "verl.workers.config.diffusion.DiffusionRolloutConfig",
+            "_target_": "verl_omni.workers.config.diffusion.DiffusionRolloutConfig",
             "name": "vllm_omni",
             "mode": "async",
             "tensor_model_parallel_size": 1,
@@ -103,7 +103,7 @@ def init_server():
 
     model_cfg = OmegaConf.create(
         {
-            "_target_": "verl.workers.config.diffusion.DiffusionModelConfig",
+            "_target_": "verl_omni.workers.config.diffusion.DiffusionModelConfig",
             "path": model_path,
             "tokenizer_path": os.path.join(model_path, "tokenizer"),
             "trust_remote_code": True,
