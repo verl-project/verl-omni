@@ -1,16 +1,16 @@
 <div align="center">
 
-# verl-omni
+# VeRL-Omni
 
 ### Easy, fast, and stable RL training for diffusion and omni-modality models
 
 </div>
 
-`verl-omni` is a general RL training framework focused on diffusion and omni-modality generative models.
+`VeRL-Omni` is a general RL training framework focused on diffusion and omni-modality generative models.
 
 It starts from the multi-modal generation RL work incubated in [`verl`](https://github.com/verl-project/verl), and provides a dedicated home for building and evolving this stack in a more focused way.
 
-## Why `verl-omni` 
+## Why `VeRL-Omni` 
 
 Diffusion and omni-modality RL training differs from text-only LLM RL not only in model structure, but also in I/O patterns, compute characteristics, and runtime bottlenecks.
 
@@ -31,7 +31,7 @@ Future work is tracked here:
 
 ## Getting Started
 
-TBD
+Coming soon
 
 ## Contributing
 
