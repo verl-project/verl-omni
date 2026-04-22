@@ -48,35 +48,50 @@ The preprocessing script converts the raw dataset into parquet files that contai
 Step 1: Prepare the dataset
 ---------------------------
 
-First, obtain the raw OCR dataset from the original Flow-GRPO repository and place it under ``$HOME/data/ocr`` on local disk. Then preprocess it into ``train.parquet`` and ``test.parquet``:
+Set the ``WORKSPACE`` environment variable to any writable directory you prefer (defaults to ``$HOME`` if unset):
+
+.. code-block:: bash
+
+   export WORKSPACE=${WORKSPACE:-$HOME}
+
+Obtain the raw OCR dataset from the original Flow-GRPO repository and place it under ``$WORKSPACE/data/ocr``. Then preprocess it into ``train.parquet`` and ``test.parquet``:
 
 .. code-block:: bash
 
    python3 examples/flowgrpo_trainer/data_process/qwenimage_ocr.py \
-     --local_dataset_path $HOME/data/ocr \
-     --local_save_dir $HOME/data/ocr
+     --input_dir $WORKSPACE/data/ocr \
+     --output_dir $WORKSPACE/data/ocr
 
 The command above writes:
 
-- ``$HOME/data/ocr/train.parquet``
-- ``$HOME/data/ocr/test.parquet``
+- ``$WORKSPACE/data/ocr/train.parquet``
+- ``$WORKSPACE/data/ocr/test.parquet``
 
 These parquet files are the inputs consumed by the FlowGRPO training script.
 
-Step 2: Download models for RL training
----------------------------------------
+Step 2: Obtain models for RL training
+--------------------------------------
 
 In this example, we train ``Qwen/Qwen-Image`` with LoRA and use ``Qwen/Qwen3-VL-8B-Instruct`` as the OCR reward model.
 
-Download the models or place them under local paths that match the example script. The provided script expects:
+**Policy model (Qwen-Image):** download the weights to a local directory (e.g. ``$WORKSPACE/models/Qwen/Qwen-Image``).
+
+**Reward model (Qwen3-VL-8B-Instruct):** you can either download to a local path *or* use the Hugging Face Hub directly. When using the Hub, set ``REWARD_MODEL_PATH`` to the Hub model ID:
 
 .. code-block:: bash
 
-   $HOME/models/Qwen/Qwen-Image
-   $HOME/models/Qwen/Qwen-Image/tokenizer
-   $HOME/models/Qwen/Qwen3-VL-8B-Instruct
+   export REWARD_MODEL_PATH=Qwen/Qwen3-VL-8B-Instruct   # HF Hub ID
+   # or point to a local copy:
+   export REWARD_MODEL_PATH=$WORKSPACE/models/Qwen/Qwen3-VL-8B-Instruct
 
-If you store the models elsewhere, update the corresponding path overrides in ``examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh`` when running the example.
+The run script exposes three environment variables to override all model and data paths without editing the script:
+
+.. code-block:: bash
+
+   WORKSPACE              # base directory for data and models (default: $HOME)
+   ACTOR_MODEL_PATH       # policy model path (default: $WORKSPACE/models/Qwen/Qwen-Image)
+   ACTOR_TOKENIZER_PATH   # tokenizer path   (default: $WORKSPACE/models/Qwen/Qwen-Image/tokenizer)
+   REWARD_MODEL_PATH      # reward model path or HF Hub ID (default: $WORKSPACE/models/Qwen/Qwen3-VL-8B-Instruct)
 
 Step 3: Perform FlowGRPO training
 ---------------------------------
@@ -101,14 +116,7 @@ Optional KL loss tuning:
 - ``actor_rollout_ref.actor.use_kl_loss=True``
 - ``actor_rollout_ref.actor.kl_loss_coef=0.001``
 
-The script assumes the following ``$HOME`` layout:
-
-- dataset files at ``$HOME/data/ocr/train.parquet`` and ``$HOME/data/ocr/test.parquet``,
-- ``Qwen-Image`` weights under ``$HOME/models/Qwen/Qwen-Image``,
-- the OCR reward model under ``$HOME/models/Qwen/Qwen3-VL-8B-Instruct``.
-
-If your local data or models live elsewhere, set ``$HOME`` accordingly or edit
-the corresponding lines in the script before launching.
+The script uses ``$WORKSPACE`` (default: ``$HOME``) as the base directory. Override any path via the environment variables described in Step 2, or set ``WORKSPACE`` to point to a volume with enough free space before launching.
 
 You are expected to see training, validation, actor, critic, and reward metrics logged through the configured backends. By default, checkpoints are saved under:
 

@@ -14,8 +14,9 @@ Key capabilities:
 
 .. toctree::
    :maxdepth: 2
-   :caption: Quickstart
+   :caption: Getting Started
 
+   start/install
    start/flowgrpo_quickstart
 
 .. toctree::

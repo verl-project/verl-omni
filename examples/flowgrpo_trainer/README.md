@@ -63,10 +63,12 @@ Optional KL loss tuning:
 The script runs `python3 -m verl.trainer.main_flowgrpo` with:
 
 - `algorithm.adv_estimator=flow_grpo`
+- `actor_rollout_ref.model.path=Qwen/Qwen-Image`
+- `actor_rollout_ref.model.lora_rank=64`
+- `actor_rollout_ref.model.lora_alpha=128`
 - `actor_rollout_ref.rollout.name=vllm_omni`
 - `reward.reward_manager.name=visual`
 - `reward.custom_reward_function.name=compute_score_ocr`
-- LoRA fine-tuning for `Qwen-Image`
 - `trainer.n_gpus_per_node=4`
 
 ## Logging
