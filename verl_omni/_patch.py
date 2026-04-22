@@ -13,7 +13,10 @@
 # limitations under the License.
 from __future__ import annotations
 
+import logging
 import sys
+
+logger = logging.getLogger(__name__)
 
 _PATCHED = False
 
@@ -107,6 +110,11 @@ def apply_patches() -> None:
     global _PATCHED
     if _PATCHED:
         return
+    logger.warning(
+        "Applying verl-omni monkey-patches to override upstream verl's legacy "
+        "diffusion implementations. These patches are temporary and will be "
+        "dropped once upstream verl no longer ships its legacy diffusion code."
+    )
     _patch_diffusion_agent_loop()
     _patch_vllm_omni_replica()
     _patch_diffusers_model()
