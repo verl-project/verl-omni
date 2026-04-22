@@ -203,7 +203,7 @@ ppo_micro_batch_size_per_gpu       = 16
   post-processing function such as `compute_score_ocr`.
 
 For an end-to-end OCR training walkthrough, including dataset preparation and
-the full runnable command, see `docs/start/flowgrpo_quickstart.rst`.
+the full runnable command, see `docs/start/flowgrpo_quickstart.md`.
 
 
 ## Reference Example
