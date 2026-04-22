@@ -21,6 +21,9 @@ def pytest_configure(config):
 def pytest_collection_modifyitems(config, items):
     try:
         import vllm_omni  # noqa: F401
+
+        # TODO (mike): drop this once `verl` drops diffusion related config
+        import verl_omni.workers.rollout  # noqa: F401
     except ImportError:
         skip = pytest.mark.skip(reason="vllm-omni not installed")
         for item in items:
