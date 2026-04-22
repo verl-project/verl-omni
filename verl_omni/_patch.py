@@ -56,6 +56,25 @@ def _patch_vllm_omni_replica() -> None:
     RolloutReplicaRegistry.register("vllm_omni", _load_vllm_omni)
 
 
+def _patch_diffusers_model() -> None:
+    """Alias ``verl.models.diffusers_model`` (and its ``base`` / ``utils``
+    submodules) to verl-omni's ``verl_omni.models.diffusion_model`` so
+    that upstream code using the verl-side ``DiffusionModelBase`` registry
+    (e.g. ``verl/workers/engine/fsdp/diffusers_impl.py``) resolves to the
+    verl-omni registry where pipelines are actually registered."""
+    import verl_omni.models.diffusion_model as _omni_pkg
+    import verl_omni.models.diffusion_model.base as _omni_base
+    import verl_omni.models.diffusion_model.utils as _omni_utils
+
+    sys.modules["verl.models.diffusers_model"] = _omni_pkg
+    sys.modules["verl.models.diffusers_model.base"] = _omni_base
+    sys.modules["verl.models.diffusers_model.utils"] = _omni_utils
+
+    parent = sys.modules.get("verl.models")
+    if parent is not None:
+        parent.diffusers_model = _omni_pkg
+
+
 def apply_patches() -> None:
     """Apply all verl-omni compatibility patches.  Safe to call multiple
     times."""
@@ -64,4 +83,5 @@ def apply_patches() -> None:
         return
     _patch_diffusion_agent_loop()
     _patch_vllm_omni_replica()
+    _patch_diffusers_model()
     _PATCHED = True
