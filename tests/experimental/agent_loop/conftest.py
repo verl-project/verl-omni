@@ -13,6 +13,13 @@
 # limitations under the License.
 import pytest
 
+# TODO (mike): to be dropped once `verl` drops its legacy diffusion
+# implementations.
+try:
+    import verl_omni  # noqa: F401
+except ImportError:
+    pass
+
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "vllm_omni: requires the vllm-omni package")
@@ -21,9 +28,6 @@ def pytest_configure(config):
 def pytest_collection_modifyitems(config, items):
     try:
         import vllm_omni  # noqa: F401
-
-        # TODO (mike): drop this once `verl` drops diffusion related config
-        import verl_omni.workers.rollout  # noqa: F401
     except ImportError:
         skip = pytest.mark.skip(reason="vllm-omni not installed")
         for item in items:

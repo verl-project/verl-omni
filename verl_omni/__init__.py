@@ -15,3 +15,12 @@ import os
 
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/version")) as f:
     __version__ = f.read().strip()
+
+
+# TODO (mike): to be dropped once `verl` drops its legacy diffusion
+# implementations.
+from verl_omni._patch import apply_patches as _apply_patches
+
+_apply_patches()
+
+del _apply_patches
