@@ -2,17 +2,27 @@
 
 This example shows how to post-train `Qwen-Image` with FlowGRPO on an OCR-style image generation task using `vllm-omni` rollout and a visual generative reward model (`Qwen3-VL-8B-Instruct` in this example).
 
-For the full installation and quickstart guide, see `docs/start/flowgrpo_quickstart.rst`. For algorithm details and rule-based reward training (e.g. JPEG incompressibility), see `docs/algo/flowgrpo.md`.
+For the full installation and quickstart guide, see `docs/start/flowgrpo_quickstart.md`. For algorithm details and rule-based reward training (e.g. JPEG incompressibility), see `docs/algo/flowgrpo.md`.
 
 ## Installation
 
-Install `verl` following the installation guide in `docs/start/install.rst`.
-
-Then install the FlowGRPO example-specific dependencies in the same environment:
+Install dependencies in this order to avoid conflicts:
 
 ```bash
-pip install "vllm==0.18" "vllm-omni==0.18" Levenshtein
+# 1. vLLM and vLLM-Omni rollout backend
+pip install "vllm==0.18" "vllm-omni==0.18"
+
+# 2. verl
+pip install git+https://github.com/verl-project/verl.git@3eab8ccc6143c624e7f11c871896f941b3fec900
+
+# 3. verl-omni
+pip install git+https://github.com/verl-project/verl-omni.git@main
+
+# 4. FlowGRPO example-specific dependency
+pip install Levenshtein
 ```
+
+For full installation details see `docs/start/install.md`.
 
 The provided script is configured for a single node with `4` GPUs.
 
@@ -37,15 +47,22 @@ This produces:
 
 ## Prepare the models
 
-The example script expects the following local model paths:
+The scripts use `WORKSPACE` (default: `$HOME`) as the base directory. Set it to any writable location before launching:
 
 ```bash
-$HOME/models/Qwen/Qwen-Image
-$HOME/models/Qwen/Qwen-Image/tokenizer
-$HOME/models/Qwen/Qwen3-VL-8B-Instruct
+export WORKSPACE=/path/to/your/workspace   # optional, defaults to $HOME
 ```
 
-If your models live elsewhere, update the path overrides in `examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh`.
+**Policy model (Qwen-Image):** download the weights locally. The default expected path is `$WORKSPACE/models/Qwen/Qwen-Image` (with the tokenizer at `$WORKSPACE/models/Qwen/Qwen-Image/tokenizer`).
+
+**Reward model (Qwen3-VL-8B-Instruct):** the script defaults to the Hugging Face Hub ID `Qwen/Qwen3-VL-8B-Instruct`, so no manual download is required — Hugging Face will cache it automatically on first run.
+
+Override any path without editing the script via environment variables:
+
+```bash
+ACTOR_MODEL_PATH      # policy model path     (default: $WORKSPACE/models/Qwen/Qwen-Image)
+ACTOR_TOKENIZER_PATH  # tokenizer path        (default: $WORKSPACE/models/Qwen/Qwen-Image/tokenizer)
+```
 
 ## Run training
 

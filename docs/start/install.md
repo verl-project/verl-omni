@@ -1,6 +1,6 @@
 # Installation
 
-Last updated: 04/22/2026
+Last updated: 04/23/2026
 
 ## Requirements
 
@@ -18,8 +18,11 @@ Install in this order to avoid dependency conflicts:
 # 1. vLLM and vLLM-Omni rollout backend
 pip install "vllm==0.18" "vllm-omni==0.18"
 
-# 2. verl-omni
-pip install git+https://github.com/verl-project/verl-omni.git
+# 2. verl
+pip install git+https://github.com/verl-project/verl.git@3eab8ccc6143c624e7f11c871896f941b3fec900
+
+# 3. verl-omni
+pip install git+https://github.com/verl-project/verl-omni.git@main
 ```
 
 ```{note}
