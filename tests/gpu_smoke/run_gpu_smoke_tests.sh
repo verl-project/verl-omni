@@ -40,7 +40,7 @@ export PYTHONUNBUFFERED=1
 export RAY_DEDUP_LOGS=0
 # Ensure CUDA compat libs are visible when running inside a conda env
 if [[ -n "${CONDA_PREFIX:-}" ]]; then
-    export LD_LIBRARY_PATH="${CONDA_PREFIX}/cuda-compat:${LD_LIBRARY_PATH:-}"
+    export LD_LIBRARY_PATH="${CONDA_PREFIX}/cuda-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 fi
 
 # ── GPU detection ──────────────────────────────────────────────────────────────
