@@ -191,7 +191,8 @@ class TaskRunner:
         )
 
         if config.actor_rollout_ref.model.tokenizer_path is None:
-            config.actor_rollout_ref.model.tokenizer_path = os.path.join(local_path, "tokenizer")
+            tokenizer_path = os.path.join(local_path, "tokenizer")
+            config.actor_rollout_ref.model.tokenizer_path = tokenizer_path if os.path.exists(tokenizer_path) else local_path
 
         # Instantiate the tokenizer and processor.
         from verl.utils import hf_processor, hf_tokenizer
