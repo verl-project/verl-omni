@@ -68,6 +68,10 @@ def test_flow_grpo_advantage_grouped_uids(norm_adv_by_std_in_grpo: bool, global_
         torch.testing.assert_close(advantages[1], torch.full((steps,), 1.0))
         torch.testing.assert_close(advantages[2], torch.full((steps,), -1.0))
         torch.testing.assert_close(advantages[3], torch.full((steps,), 1.0))
+    else:
+        # With std scaling: mean should be 0 for each group
+        torch.testing.assert_close(advantages[0:2].mean(), torch.tensor(0.0), atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(advantages[2:4].mean(), torch.tensor(0.0), atol=1e-6, rtol=1e-6)
 
 
 def test_compute_policy_loss_flow_grpo() -> None:
