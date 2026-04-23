@@ -1,6 +1,8 @@
 (metrics)=
 # Diffusion Training Metrics
 
+Last updated: 04/23/2026
+
 The table below describes metrics specific to diffusion FlowGRPO training, logged each step to your configured backend (console / W&B).
 
 | Metric | Definition | Interpretation |

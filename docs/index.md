@@ -25,6 +25,7 @@ start/metrics.md
 :caption: Algorithms
 
 algo/flowgrpo.md
+algo/performance.md
 ```
 
 ## Contribution
