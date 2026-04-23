@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import (
-    diffusers_training,  # noqa: F401
-    vllm_omni_rollout,  # noqa: F401
+import importlib.util
+
+from . import (  # noqa: F401
+    diffusers_training,
+    vllm_omni_rollout,
 )
+
+if importlib.util.find_spec("vllm_omni") is not None:
+    from .qwen_image import vllm_omni_rollout_adapter  # noqa: F401, E402
