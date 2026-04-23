@@ -21,6 +21,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip3 install --no-deps "verl @ git+https://github.com/verl-project/verl.git@main"
           pip3 install -r requirements.txt
           pip3 install --no-deps -e .
       - name: Run type annotation coverage check
@@ -28,4 +29,4 @@ jobs:
           python3 tests/special_sanity/type_coverage_check.py
       - name: Run docstring coverage check
         run: |
-          python3 tests/special_sanity/check_api_docs.py verl
+          python3 tests/special_sanity/check_api_docs.py verl_omni

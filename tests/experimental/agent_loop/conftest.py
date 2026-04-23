@@ -13,6 +13,13 @@
 # limitations under the License.
 import pytest
 
+# TODO (mike): to be dropped once `verl` drops its legacy diffusion
+# implementations.
+try:
+    import verl_omni  # noqa: F401
+except ImportError:
+    pass
+
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "vllm_omni: requires the vllm-omni package")

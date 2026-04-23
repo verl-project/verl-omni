@@ -35,6 +35,7 @@ jobs:
       - name: Install the current repository
         run: |
           pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip3 install --no-deps "verl @ git+https://github.com/verl-project/verl.git@main"
           pip3 install -r requirements.txt
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
