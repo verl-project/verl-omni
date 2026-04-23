@@ -12,12 +12,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-try:
-    from . import diffusers_training  # noqa: F401
-except ImportError:
-    pass
-
-try:
-    from . import vllm_omni_rollout  # noqa: F401
-except ImportError:
-    pass
+from . import diffusers_training  # noqa: F401
+from . import vllm_omni_rollout  # noqa: F401

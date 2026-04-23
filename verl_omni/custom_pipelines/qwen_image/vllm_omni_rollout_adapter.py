@@ -27,6 +27,7 @@ from verl_omni.models.diffusion_model import VllmOmniPipelineBase
 from .common import apply_true_cfg
 
 __all__ = ["QwenImagePipelineWithLogProb"]
+
 def _maybe_to_cpu(value):
     if isinstance(value, torch.Tensor):
         return value.detach().cpu()
