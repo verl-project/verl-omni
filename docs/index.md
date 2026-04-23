@@ -17,6 +17,7 @@ Key capabilities:
 
 start/install.md
 start/flowgrpo_quickstart.md
+start/metrics.md
 ```
 
 ```{toctree}
