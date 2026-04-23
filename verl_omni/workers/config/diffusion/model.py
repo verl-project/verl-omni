@@ -95,7 +95,8 @@ class DiffusionModelConfig(BaseConfig):
         import_external_libs(self.external_lib)
         self.local_path = resolve_model_local_dir(self.path, use_shm=self.use_shm)
         if self.tokenizer_path is None:
-            self.tokenizer_path = os.path.join(self.local_path, "tokenizer")
+            tokenizer_path = os.path.join(self.local_path, "tokenizer")
+            self.tokenizer_path = tokenizer_path if os.path.exists(tokenizer_path) else self.local_path
 
         if self.architecture is None:
             import json
