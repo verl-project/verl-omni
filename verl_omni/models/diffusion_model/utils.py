@@ -17,8 +17,8 @@ from typing import Optional
 import torch
 from diffusers import ModelMixin, SchedulerMixin
 from tensordict import TensorDict
-from verl.utils.device import get_device_name
 
+from verl.utils.device import get_device_name
 from verl_omni.workers.config import DiffusionModelConfig
 
 from .base import DiffusionModelBase

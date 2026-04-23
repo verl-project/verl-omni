@@ -17,7 +17,9 @@ import torch
 QWEN_IMAGE_VAE_SCALE_FACTOR = 8
 
 
-def build_img_shapes(height: int, width: int, batch_size: int, vae_scale_factor: int) -> list[list[tuple[int, int, int]]]:
+def build_img_shapes(
+    height: int, width: int, batch_size: int, vae_scale_factor: int
+) -> list[list[tuple[int, int, int]]]:
     latent_height = height // vae_scale_factor // 2
     latent_width = width // vae_scale_factor // 2
     return [[(1, latent_height, latent_width)]] * batch_size
