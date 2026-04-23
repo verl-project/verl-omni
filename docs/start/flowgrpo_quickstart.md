@@ -11,7 +11,7 @@ In this example, we post-train a `Qwen-Image` policy with FlowGRPO for OCR-style
 
 ## Prerequisite
 
-- Install verl-omni and its dependencies following the {doc}`installation guide <install>`. Also install the FlowGRPO-specific reward dependency:
+- Install VeRL-Omni and its dependencies following the {doc}`installation guide <install>`. Also install the FlowGRPO-specific reward dependency:
 
 ```bash
 pip install Levenshtein

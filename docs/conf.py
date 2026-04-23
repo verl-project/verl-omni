@@ -15,9 +15,9 @@
 # Configuration file for the Sphinx documentation builder.
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
-project = "verl-omni"
+project = "VeRL-Omni"
 copyright = "2026 Bytedance Ltd. and/or its affiliates"
-author = "verl-omni contributors"
+author = "VeRL-Omni contributors"
 
 master_doc = "index"
 

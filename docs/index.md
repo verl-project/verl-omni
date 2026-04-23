@@ -1,8 +1,8 @@
-# Welcome to verl-omni's documentation!
+# Welcome to VeRL-Omni's documentation!
 
 Last updated: 04/23/2026
 
-[verl-omni](https://github.com/verl-project/verl-omni) is a general RL training framework focused on diffusion and omni-modality generative models. It starts from the multimodal generation RL work incubated in [verl](https://github.com/verl-project/verl) and provides a dedicated home for building and evolving this stack in a more focused way.
+[VeRL-Omni](https://github.com/verl-project/verl-omni) is a general RL training framework focused on diffusion and omni-modality generative models. It starts from the multimodal generation RL work incubated in [verl](https://github.com/verl-project/verl) and provides a dedicated home for building and evolving this stack in a more focused way.
 
 Key capabilities:
 
@@ -28,7 +28,7 @@ algo/flowgrpo.md
 
 ## Contribution
 
-verl-omni is free software; you can redistribute it and/or modify it under the terms
+VeRL-Omni is free software; you can redistribute it and/or modify it under the terms
 of the Apache License 2.0. We welcome contributions.
 Join us on [GitHub](https://github.com/verl-project/verl-omni) for discussions.
 
