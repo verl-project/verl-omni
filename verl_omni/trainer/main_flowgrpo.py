@@ -170,7 +170,8 @@ class TaskRunner:
         from pprint import pprint
 
         from omegaconf import OmegaConf
-        from verl.utils.fs import copy_to_local
+
+        from verl_omni.utils.fs import resolve_model_local_dir
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         pprint(OmegaConf.to_container(config, resolve=True))
@@ -183,11 +184,14 @@ class TaskRunner:
         # Add a reference policy worker if KL loss is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)
 
-        # Download the checkpoint from HDFS to the local machine.
-        # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on
-        local_path = copy_to_local(
+        # Resolve the model path to an on-disk directory (downloads from HDFS or HF Hub
+        # if necessary). `use_shm` enables shared-memory copy for faster reloads.
+        local_path = resolve_model_local_dir(
             config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False)
         )
+
+        if config.actor_rollout_ref.model.tokenizer_path is None:
+            config.actor_rollout_ref.model.tokenizer_path = os.path.join(local_path, "tokenizer")
 
         # Instantiate the tokenizer and processor.
         from verl.utils import hf_processor, hf_tokenizer
@@ -195,9 +199,8 @@ class TaskRunner:
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(config.actor_rollout_ref.model.tokenizer_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
-        if os.path.exists(os.path.join(local_path, "processor")):
-            processor_path = os.path.join(local_path, "processor")
-        else:
+        processor_path = os.path.join(local_path, "processor")
+        if not os.path.exists(processor_path):
             processor_path = local_path
         processor = hf_processor(processor_path, trust_remote_code=trust_remote_code, use_fast=True)
 

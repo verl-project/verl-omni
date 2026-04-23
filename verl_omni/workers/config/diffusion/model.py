@@ -23,6 +23,8 @@ from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 from verl.workers.config.model import MtpConfig
 
+from verl_omni.utils.fs import resolve_model_local_dir
+
 from .rollout import DiffusionRolloutAlgoConfig
 
 __all__ = ["DiffusionModelConfig"]
@@ -91,9 +93,9 @@ class DiffusionModelConfig(BaseConfig):
 
     def __post_init__(self):
         import_external_libs(self.external_lib)
+        self.local_path = resolve_model_local_dir(self.path, use_shm=self.use_shm)
         if self.tokenizer_path is None:
-            self.tokenizer_path = os.path.join(self.path, "tokenizer")
-        self.local_path = copy_to_local(self.path, use_shm=self.use_shm)
+            self.tokenizer_path = os.path.join(self.local_path, "tokenizer")
 
         if self.architecture is None:
             import json

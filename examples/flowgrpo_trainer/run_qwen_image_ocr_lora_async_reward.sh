@@ -7,16 +7,17 @@ WORKSPACE=${WORKSPACE:-$HOME}
 ocr_train_path=$WORKSPACE/data/ocr/train.parquet
 ocr_test_path=$WORKSPACE/data/ocr/test.parquet
 
-ENGINE=vllm_omni
-REWARD_ENGINE=vllm
-
-reward_path=examples/flowgrpo_trainer/reward_fn.py
+model_path=Qwen/Qwen-Image
 reward_model_name=Qwen/Qwen3-VL-8B-Instruct
+reward_path=examples/flowgrpo_trainer/reward_fn.py
 
 NUM_GPUS_ACTOR_ROLLOUT=4
 NUM_GPUS_REWARD=1
 ROLLOUT_TP=1
 REWARD_TP=1
+
+ENGINE=vllm_omni
+REWARD_ENGINE=vllm
 
 
 python3 -m verl_omni.trainer.main_flowgrpo \
@@ -25,8 +26,7 @@ python3 -m verl_omni.trainer.main_flowgrpo \
     data.val_files=$ocr_test_path \
     data.train_batch_size=32 \
     data.max_prompt_length=256 \
-    actor_rollout_ref.model.path=${MODEL_PATH:-$WORKSPACE/models/Qwen/Qwen-Image} \
-    actor_rollout_ref.model.tokenizer_path=${ACTOR_TOKENIZER_PATH:-$WORKSPACE/models/Qwen/Qwen-Image/tokenizer} \
+    actor_rollout_ref.model.path=$model_path \
     actor_rollout_ref.model.external_lib="examples.flowgrpo_trainer.diffusers_impl" \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
