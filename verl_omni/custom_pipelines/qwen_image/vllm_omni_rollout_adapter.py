@@ -322,7 +322,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             generator,
             latents,
         )
-        img_shapes = [[(1, height // self.vae_scale_factor // 2, width // self.vae_scale_factor // 2)]] * batch_size
+        img_shapes = build_img_shapes(height, width, batch_size, self.vae_scale_factor)
 
         timesteps, num_inference_steps = self.prepare_timesteps(num_inference_steps, sigmas, latents.shape[1])
         self._num_timesteps = len(timesteps)
