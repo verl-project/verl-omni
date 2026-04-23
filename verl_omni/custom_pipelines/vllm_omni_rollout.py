@@ -13,10 +13,19 @@
 # limitations under the License.
 
 """
-Import vLLM-Omni rollout adapters so registered pipelines can be resolved by
-architecture at runtime.
+vLLM-Omni rollout pipeline exports. ``QwenImagePipelineWithLogProb`` is defined
+in ``qwen_image.vllm_omni_rollout_adapter`` and requires the optional
+``vllm_omni`` package. This module uses lazy attribute loading so that
+``verl_omni`` can be imported without vllm-omni installed.
 """
 
-from .qwen_image.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
+__all__ = ["QwenImagePipelineWithLogProb"]  # noqa: F822
 
-__all__ = ["QwenImagePipelineWithLogProb"]
+
+def __getattr__(name: str):
+    if name == "QwenImagePipelineWithLogProb":
+        from .qwen_image.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
+
+        return QwenImagePipelineWithLogProb
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
