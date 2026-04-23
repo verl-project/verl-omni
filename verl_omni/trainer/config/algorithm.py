@@ -18,6 +18,8 @@ from dataclasses import dataclass
 
 from verl.base_config import BaseConfig
 
+__all__ = ["DiffusionAlgoConfig"]
+
 
 @dataclass
 class DiffusionAlgoConfig(BaseConfig):
