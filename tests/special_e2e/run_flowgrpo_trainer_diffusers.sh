@@ -40,7 +40,7 @@ python3 -m verl_omni.trainer.main_flowgrpo \
     data.max_prompt_length=${max_prompt_length} \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.model.tokenizer_path=${TOKENIZER_PATH} \
-    actor_rollout_ref.model.external_lib="verl_omni.custom_pipelines.qwen_image.diffusers_training_adapter" \
+    actor_rollout_ref.model.external_lib="verl_omni.custom_pipelines.diffusers_training" \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \
     actor_rollout_ref.model.target_modules=all-linear \
@@ -73,7 +73,7 @@ python3 -m verl_omni.trainer.main_flowgrpo \
     actor_rollout_ref.rollout.algo.sde_window_range="[0,4]" \
     actor_rollout_ref.rollout.val_kwargs.num_inference_steps=4 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
-    actor_rollout_ref.rollout.external_lib=verl_omni.custom_pipelines.qwen_image.vllm_omni_rollout_adapter \
+    actor_rollout_ref.rollout.external_lib=verl_omni.custom_pipelines.vllm_omni_rollout \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${micro_bsz_per_gpu} \
     reward.num_workers=1 \
     reward.reward_manager.name=visual \

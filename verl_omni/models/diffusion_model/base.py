@@ -50,7 +50,7 @@ class DiffusionModelBase(ABC):
     to the dotted module path so it is imported (and thus registered)
     before the registry is queried::
 
-        actor_rollout_ref.model.external_lib="verl_omni.custom_pipelines.qwen_image.diffusers_training_adapter"
+        actor_rollout_ref.model.external_lib="verl_omni.custom_pipelines.diffusers_training"
     """
 
     _registry: dict[str, type["DiffusionModelBase"]] = {}
@@ -193,7 +193,7 @@ class VllmOmniPipelineBase:
     ``DiffusionRolloutConfig`` to the dotted module path so it is imported
     just before the registry is queried in ``run_server``::
 
-        actor_rollout_ref.rollout.external_lib="verl_omni.custom_pipelines.qwen_image.vllm_omni_rollout_adapter"
+        actor_rollout_ref.rollout.external_lib="verl_omni.custom_pipelines.vllm_omni_rollout"
     """
 
     _registry: dict[str, type] = {}
