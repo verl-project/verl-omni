@@ -108,7 +108,7 @@ def init_server():
             "tokenizer_path": os.path.join(model_path, "tokenizer"),
             "trust_remote_code": True,
             "load_tokenizer": True,
-            "external_lib": "examples.flowgrpo_trainer.diffusers_impl",
+            "external_lib": "verl_omni.custom_pipelines.qwen_image.diffusers_impl",
         }
     )
 

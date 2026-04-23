@@ -40,7 +40,7 @@ python3 -m verl_omni.trainer.main_flowgrpo \
     data.max_prompt_length=${max_prompt_length} \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.model.tokenizer_path=${TOKENIZER_PATH} \
-    actor_rollout_ref.model.external_lib="examples.flowgrpo_trainer.diffusers_impl" \
+    actor_rollout_ref.model.external_lib="verl_omni.custom_pipelines.qwen_image.diffusers_impl" \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \
     actor_rollout_ref.model.target_modules=all-linear \
