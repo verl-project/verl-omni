@@ -21,7 +21,6 @@ def test_embeds_padding_2_no_padding_varying_lengths():
     batch_size = 3
     max_seq_len = 20
     dim = 16
-    num_steps = 8
 
     # Simulate different valid lengths: 20, 15, 10 (rest are padding zeros)
     valid_lens = [20, 15, 10]
@@ -29,13 +28,11 @@ def test_embeds_padding_2_no_padding_varying_lengths():
     prompt_embeds_mask = torch.zeros(batch_size, max_seq_len, dtype=torch.int32)
     for i, vlen in enumerate(valid_lens):
         prompt_embeds_mask[i, :vlen] = 1
-    response_mask = torch.ones(batch_size, num_steps)
 
     data = TensorDict(
         {
             "prompt_embeds": prompt_embeds,
             "prompt_embeds_mask": prompt_embeds_mask,
-            "response_mask": response_mask,
         },
         batch_size=batch_size,
     )
@@ -53,6 +50,34 @@ def test_embeds_padding_2_no_padding_varying_lengths():
         torch.testing.assert_close(sample_embed, prompt_embeds[i, :vlen, :])
 
 
+def test_embeds_padding_2_no_padding_uniform_length():
+    """When all sequences are fully valid (no padding), no tokens should be dropped."""
+    batch_size = 4
+    max_seq_len = 12
+    dim = 8
+
+    prompt_embeds = torch.randn(batch_size, max_seq_len, dim)
+    # All positions valid
+    prompt_embeds_mask = torch.ones(batch_size, max_seq_len, dtype=torch.int32)
+
+    data = TensorDict(
+        {
+            "prompt_embeds": prompt_embeds,
+            "prompt_embeds_mask": prompt_embeds_mask,
+        },
+        batch_size=batch_size,
+    )
+
+    result = embeds_padding_2_no_padding(data)
+
+    assert result["prompt_embeds"].is_nested
+    embeds_nested = result["prompt_embeds"]
+    for i in range(batch_size):
+        assert embeds_nested[i].shape[0] == max_seq_len
+        torch.testing.assert_close(embeds_nested[i], prompt_embeds[i])
+
+
 if __name__ == "__main__":
     test_embeds_padding_2_no_padding_varying_lengths()
+    test_embeds_padding_2_no_padding_uniform_length()
     print("All padding tests passed!")

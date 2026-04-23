@@ -1,0 +1,54 @@
+name: cpu_unit_tests
+
+on:
+  push:
+    branches:
+      - main
+      - v0.*
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "**/*.py"
+      - .github/workflows/cpu_unit_tests.yml
+
+# Cancel jobs on the same ref if a new one is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
+jobs:
+  cpu_unit_tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        python-version: ["3.10"]
+    env:
+      TORCH_COMPILE_DISABLE: 1
+      TORCHINDUCTOR_DISABLE: 1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies (CPU-only torch)
+        run: |
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@main"
+          pip install -r requirements.txt
+          pip install -r requirements-test.txt
+          pip install --no-deps -e .
+      - name: Run CPU unit tests
+        run: |
+          echo '[pytest]' > pytest.ini
+          echo 'python_files = *_on_cpu.py' >> pytest.ini
+          pytest -s -x --asyncio-mode=auto tests/
