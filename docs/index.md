@@ -26,6 +26,13 @@ start/flowgrpo_quickstart.md
 algo/flowgrpo.md
 ```
 
+```{toctree}
+:maxdepth: 1
+:caption: Contributing
+
+contributing/editing-agent-instructions.md
+```
+
 ## Contribution
 
 VeRL-Omni is free software; you can redistribute it and/or modify it under the terms
