@@ -1,13 +1,15 @@
 (metrics)=
 # Diffusion Training Metrics
 
-The table below describes the metrics that are specific to diffusion FlowGRPO training and are logged to your configured backend (console / W&B) during each training step.
+The table below describes metrics specific to diffusion FlowGRPO training, logged each step to your configured backend (console / W&B).
 
-| Metric | Definition | Implication |
-|--------|------------|-------------|
-| `critic/rewards/zero_std_ratio` | Fraction of prompt groups (out of `train_batch_size`) where all $n$ generated images received identical rewards, i.e. within-group $\sigma = 0$ | GRPO's learning signal comes from *relative* rewards within a group; a group with $\sigma = 0$ contributes no gradient regardless of the absolute reward value. A persistently high ratio (e.g. $> 0.5$) indicates the reward model is saturated or the task difficulty is poorly calibrated — the policy is not receiving useful training signal. |
-| `critic/rewards/std_mean` | Mean of per-group reward standard deviations across the batch: $\frac{1}{B}\sum_{i=1}^{B}\sigma_i$ | Complements `zero_std_ratio` — tracks the average reward spread across the whole batch before full collapse. A declining `std_mean` is an early warning of saturation *before* `zero_std_ratio` spikes. |
-| `actor/pg_clipfrac_higher` | Fraction of $(image, timestep)$ pairs where $\pi_\theta / \pi_{\theta_\mathrm{old}} > 1 + \varepsilon_\mathrm{clip}$ | The policy is trying to increase the probability of high-advantage denoising steps beyond what the clip threshold permits. `pg_clipfrac_higher` $\gg$ `pg_clipfrac_lower` signals an upward-dominant learning direction and can guide tuning of `clip_ratio` or the learning rate. |
-| `actor/pg_clipfrac_lower` | Fraction of $(image, timestep)$ pairs where $\pi_\theta / \pi_{\theta_\mathrm{old}} < 1 - \varepsilon_\mathrm{clip}$ | The policy is suppressing low-advantage denoising steps more aggressively than the clip allows. Together with `pg_clipfrac_higher`, the asymmetry between the two values reveals the dominant learning direction. |
-| `timing_per_image_ms/{stage}` | Per-image wall-clock latency (ms) for each pipeline stage: `gen` (rollout), `ref` (reference log-prob), `old_log_prob`, `adv` (advantage computation), `update_actor` | Identifies which stage dominates step time and where to focus optimisation effort. |
-| `perf/throughput` | Images processed per GPU per second: $(B \times n) \;/\; (t_\mathrm{step} \times N_\mathrm{GPU})$, where $B$ is `train_batch_size`, $n$ is `rollout.n` | Overall training throughput. Use alongside `timing_per_image_ms` to evaluate scaling efficiency and spot regressions between runs. |
+**Variables.** $B$ = `train_batch_size`; $n$ = `rollout.n`, images generated per prompt; $\sigma_i$ = reward standard deviation within group $i$; $r$ = probability ratio $\pi_\theta / \pi_{\theta_\mathrm{old}}$ per (image, denoising-timestep) pair; $\varepsilon$ = `clip_ratio`; $N$ = number of GPUs; $t_\mathrm{step}$ = wall-clock time per training step.
+
+| Metric | Definition | Interpretation |
+|--------|------------|----------------|
+| critic/rewards/zero_std_ratio | $\frac{1}{B}\lvert\{i : \sigma_i = 0\}\rvert$ | GRPO derives its learning signal from relative rewards within a group; $\sigma_i = 0$ means group $i$ contributes no gradient regardless of absolute reward. A persistently high value (e.g. $> 0.5$) indicates reward saturation or poorly calibrated task difficulty. |
+| critic/rewards/std_mean | $\frac{1}{B}\sum_{i=1}^{B} \sigma_i$ | Tracks average reward diversity across the batch. A declining trend is an early warning of saturation, typically visible before zero_std_ratio spikes. |
+| actor/pg_clipfrac_higher | $\hat{P}(r > 1 + \varepsilon)$ | The policy is reinforcing high-advantage denoising steps beyond the clip threshold. pg_clipfrac_higher $\gg$ pg_clipfrac_lower signals upward-dominant learning and can guide tuning of clip_ratio or the learning rate. |
+| actor/pg_clipfrac_lower | $\hat{P}(r < 1 - \varepsilon)$ | The policy is suppressing low-advantage denoising steps beyond the clip threshold. Asymmetry between higher and lower clipfrac reveals the dominant learning direction. |
+| timing_per_image_ms | Latency (ms/image) per stage: rollout, reference log-prob, old log-prob, advantage computation, actor update | Identifies which stage dominates step time; use to focus optimization effort. |
+| perf/throughput | $\dfrac{B \times n}{t_\mathrm{step} \times N}$ (images / GPU / s) | Overall training throughput. Use alongside timing_per_image_ms to evaluate scaling efficiency and detect regressions across runs. |
