@@ -22,15 +22,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-# ── Colour helpers ─────────────────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
-
-log()  { echo -e "${CYAN}[$(date '+%Y-%m-%d %H:%M:%S')]${RESET} $*"; }
-pass() { echo -e "${GREEN}[PASS]${RESET} $*"; }
-fail() { echo -e "${RED}[FAIL]${RESET} $*"; }
-warn() { echo -e "${YELLOW}[WARN]${RESET} $*"; }
-sep()  { echo -e "${BOLD}$(printf '─%.0s' {1..78})${RESET}"; }
+# ── Logging helpers ──────────────────────────────────────────────────────────
+log()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+pass() { echo "[PASS] $*"; }
+fail() { echo "[FAIL] $*"; }
+warn() { echo "[WARN] $*"; }
+sep()  { printf '%0.s-' {1..78}; echo; }
 
 # ── Timestamp / log directory ──────────────────────────────────────────────────
 TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
@@ -129,7 +126,7 @@ fi
 
 # ── Print header ───────────────────────────────────────────────────────────────
 sep
-echo -e "${BOLD}  verl-omni GPU Smoke Test Suite${RESET}"
+echo "  verl-omni GPU Smoke Test Suite"
 echo -e "  Date      : $(date '+%Y-%m-%d %H:%M:%S')"
 echo -e "  Repo root : ${REPO_ROOT}"
 echo -e "  Log dir   : ${LOG_DIR}"
@@ -207,7 +204,7 @@ fi
 # ══════════════════════════════════════════════════════════════════════════════
 
 sep
-echo -e "${BOLD}  SMOKE TEST SUMMARY${RESET}"
+echo "  SMOKE TEST SUMMARY"
 sep
 
 passed=0; failed=0; skipped=0
@@ -226,28 +223,25 @@ for i in "${!TEST_NAMES[@]}"; do
     logfile="${TEST_LOG_FILES[$i]}"
 
     case "${result}" in
-        PASS)
-            colour="${GREEN}"; (( passed++  )) ;;
-        FAIL)
-            colour="${RED}";   (( failed++  )) ;;
-        SKIP)
-            colour="${YELLOW}"; (( skipped++ )) ;;
+        PASS) (( passed++  )) ;;
+        FAIL) (( failed++  )) ;;
+        SKIP) (( skipped++ )) ;;
     esac
 
-    printf "%-4s  ${colour}%-7s${RESET}  %-8s  %s\n" \
+    printf "%-4s  %-7s  %-8s  %s\n" \
         "${i}" "${result}" "${elapsed}" "${name}" | tee -a "${SUMMARY_LOG}"
 
     if [[ "${result}" == "FAIL" && "${logfile}" != "-" ]]; then
-        echo -e "            ${RED}└─ log: ${logfile}${RESET}" | tee -a "${SUMMARY_LOG}"
+        echo "            └─ log: ${logfile}" | tee -a "${SUMMARY_LOG}"
     fi
 done
 
 sep | tee -a "${SUMMARY_LOG}"
 
 total=$(( passed + failed + skipped ))
-echo -e "  Total: ${total}  |  ${GREEN}Passed: ${passed}${RESET}  |  ${RED}Failed: ${failed}${RESET}  |  ${YELLOW}Skipped: ${skipped}${RESET}" \
+echo "  Total: ${total}  |  Passed: ${passed}  |  Failed: ${failed}  |  Skipped: ${skipped}" \
     | tee -a "${SUMMARY_LOG}"
-echo -e "  Full logs: ${LOG_DIR}" | tee -a "${SUMMARY_LOG}"
+echo "  Full logs: ${LOG_DIR}" | tee -a "${SUMMARY_LOG}"
 sep | tee -a "${SUMMARY_LOG}"
 
 # Exit non-zero if any test failed
