@@ -103,12 +103,6 @@ the rollout section is the main place to override sampling behavior.
 - `actor_rollout_ref.rollout.guidance_scale`: Distilled guidance scale for
   models that expose a guidance embedding; keep `null` to disable it.
 
-- `actor_rollout_ref.rollout.external_lib`: Python module path imported on
-  every rollout worker before the engine starts. Use this to register custom
-  pipeline implementations (e.g., `verl_omni.custom_pipelines.vllm_omni_rollout`
-  for vLLM-Omni rollout registration). The module must call
-  `@VllmOmniPipelineBase.register(...)` at import time.
-
 #### Model
 
 - `actor_rollout_ref.model.path`: Base diffusion model path.

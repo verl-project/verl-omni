@@ -24,3 +24,6 @@ from verl_omni._patch import apply_patches as _apply_patches
 _apply_patches()
 
 del _apply_patches
+
+# Import custom pipelines to auto-register them
+import verl_omni.custom_pipelines  # noqa: E402, F401
