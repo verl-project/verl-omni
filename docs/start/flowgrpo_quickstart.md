@@ -87,7 +87,7 @@ For datasets with a different ground-truth extraction scheme (e.g. a CSV with an
 
 In this example, we train `Qwen/Qwen-Image` with LoRA and use `Qwen/Qwen3-VL-8B-Instruct` as the OCR reward model.
 
-**Policy model (Qwen-Image):** the script uses the Hugging Face Hub ID `Qwen/Qwen-Image` directly — no manual download is required. Hugging Face will cache the weights automatically on first run. To use a local copy instead, edit the `model_path` variable in the script directly.
+**Policy model (Qwen-Image):** the script uses the Hugging Face Hub ID `Qwen/Qwen-Image` directly — no manual download is required. Hugging Face will cache the weights automatically on first run. To use a local copy instead, edit the `model_name` variable in the script directly.
 
 **Reward model (Qwen3-VL-8B-Instruct):** the script defaults to the Hugging Face Hub ID `Qwen/Qwen3-VL-8B-Instruct`, so no manual download is required — Hugging Face will cache it automatically on first run. To use a local copy instead, edit the `reward_model_name` variable in the script directly.
 

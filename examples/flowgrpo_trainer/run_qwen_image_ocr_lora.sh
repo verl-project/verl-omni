@@ -7,9 +7,9 @@ WORKSPACE=${WORKSPACE:-$HOME}
 ocr_train_path=$WORKSPACE/data/ocr/train.parquet
 ocr_test_path=$WORKSPACE/data/ocr/test.parquet
 
-model_path=Qwen/Qwen-Image
+model_name=Qwen/Qwen-Image
 reward_model_name=Qwen/Qwen3-VL-8B-Instruct
-reward_path=examples/flowgrpo_trainer/reward_fn.py
+reward_function_path=examples/flowgrpo_trainer/reward_fn.py
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=4
 ROLLOUT_TP=1
@@ -25,7 +25,7 @@ python3 -m verl_omni.trainer.main_flowgrpo \
     data.val_files=$ocr_test_path \
     data.train_batch_size=32 \
     data.max_prompt_length=256 \
-    actor_rollout_ref.model.path=$model_path \
+    actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.external_lib="examples.flowgrpo_trainer.diffusers_impl" \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
@@ -61,7 +61,7 @@ python3 -m verl_omni.trainer.main_flowgrpo \
     reward.reward_model.model_path=$reward_model_name \
     reward.reward_model.rollout.name=$REWARD_ENGINE \
     reward.reward_model.rollout.tensor_model_parallel_size=4 \
-    reward.custom_reward_function.path=$reward_path \
+    reward.custom_reward_function.path=$reward_function_path \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=flow_grpo \
