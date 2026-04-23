@@ -28,13 +28,16 @@ from .common import apply_true_cfg
 
 __all__ = ["QwenImagePipelineWithLogProb"]
 
+
 def _maybe_to_cpu(value):
     if isinstance(value, torch.Tensor):
         return value.detach().cpu()
     return value
 
+
 def _coalesce_not_none(value, default):
     return default if value is None else value
+
 
 # Custom pipeline class for QwenImage that returns log probabilities during the diffusion process.
 @VllmOmniPipelineBase.register("QwenImagePipeline")
@@ -114,6 +117,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         prompt_embeds_mask = prompt_embeds_mask.view(batch_size * num_images_per_prompt, seq_len)
 
         return prompt_embeds, prompt_embeds_mask
+
     def diffuse(
         self,
         prompt_embeds,
