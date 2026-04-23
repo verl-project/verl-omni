@@ -19,7 +19,7 @@ ROLLOUT_TP=1
 REWARD_TP=1
 
 
-python3 -m verl.trainer.main_flowgrpo \
+python3 -m verl_omni.trainer.main_flowgrpo \
     algorithm.adv_estimator=flow_grpo \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \

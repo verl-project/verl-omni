@@ -32,18 +32,18 @@ Obtain the raw OCR dataset from the original Flow-GRPO repository:
 
 - https://github.com/yifan123/flow_grpo/tree/main/dataset/ocr
 
-Place the raw dataset under `$HOME/data/ocr`, then preprocess it into parquet files:
+Place the raw dataset under `$WORKSPACE/data/ocr` (where `WORKSPACE` defaults to `$HOME`), then preprocess it into parquet files:
 
 ```bash
 python3 examples/flowgrpo_trainer/data_process/qwenimage_ocr.py \
-  --local_dataset_path $HOME/data/ocr \
-  --local_save_dir $HOME/data/ocr
+  --input_dir $WORKSPACE/data/ocr \
+  --output_dir $WORKSPACE/data/ocr
 ```
 
 This produces:
 
-- `$HOME/data/ocr/train.parquet`
-- `$HOME/data/ocr/test.parquet`
+- `$WORKSPACE/data/ocr/train.parquet`
+- `$WORKSPACE/data/ocr/test.parquet`
 
 ## Prepare the models
 
@@ -77,7 +77,7 @@ Optional KL loss tuning:
 - `actor_rollout_ref.actor.use_kl_loss=True`
 - `actor_rollout_ref.actor.kl_loss_coef=0.001`
 
-The script runs `python3 -m verl.trainer.main_flowgrpo` with:
+The script runs `python3 -m verl_omni.trainer.main_flowgrpo` with:
 
 - `algorithm.adv_estimator=flow_grpo`
 - `actor_rollout_ref.model.path=Qwen/Qwen-Image`
