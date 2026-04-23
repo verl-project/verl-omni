@@ -101,7 +101,7 @@ ACTOR_TOKENIZER_PATH   # tokenizer path   (default: $WORKSPACE/models/Qwen/Qwen-
 
 ## Step 3: Perform FlowGRPO training
 
-The provided example script launches `python3 -m verl.trainer.main_flowgrpo` with the FlowGRPO-specific config needed for this OCR task:
+The provided example script launches `python3 -m verl_omni.trainer.main_flowgrpo` with the FlowGRPO-specific config needed for this OCR task:
 
 - `algorithm.adv_estimator=flow_grpo`
 - `actor_rollout_ref.rollout.name=vllm_omni`
