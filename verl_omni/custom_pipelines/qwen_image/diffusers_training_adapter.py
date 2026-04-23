@@ -32,6 +32,7 @@ from verl_omni.workers.config import DiffusionModelConfig
 
 from .common import QWEN_IMAGE_VAE_SCALE_FACTOR, apply_true_cfg, build_img_shapes
 
+__all__ = ["QwenImage"]
 
 def _build_qwen_image_scheduler(model_path: str) -> FlowMatchSDEDiscreteScheduler:
     return FlowMatchSDEDiscreteScheduler.from_pretrained(
@@ -162,5 +163,3 @@ class QwenImage(DiffusionModelBase):
         )
         return log_prob, prev_sample_mean, std_dev_t
 
-
-__all__ = ["QwenImage"]

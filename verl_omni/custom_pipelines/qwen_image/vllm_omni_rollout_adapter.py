@@ -36,7 +36,7 @@ def _maybe_to_cpu(value):
 def _coalesce_not_none(value, default):
     return default if value is None else value
 
-
+# Custom pipeline class for QwenImage that returns log probabilities during the diffusion process.
 @VllmOmniPipelineBase.register("QwenImagePipeline")
 class QwenImagePipelineWithLogProb(QwenImagePipeline):
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
@@ -72,22 +72,18 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         )
         hidden_states = encoder_hidden_states.hidden_states[-1]
         split_hidden_states = self._extract_masked_hidden(hidden_states, attention_mask)
-        split_hidden_states = [embed[drop_idx:] for embed in split_hidden_states]
-        attn_mask_list = [
-            torch.ones(embed.size(0), dtype=torch.long, device=embed.device) for embed in split_hidden_states
-        ]
-        max_seq_len = max([embed.size(0) for embed in split_hidden_states])
+        split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
+        attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=e.device) for e in split_hidden_states]
+        max_seq_len = max([e.size(0) for e in split_hidden_states])
         prompt_embeds = torch.stack(
-            [
-                torch.cat([embed, embed.new_zeros(max_seq_len - embed.size(0), embed.size(1))])
-                for embed in split_hidden_states
-            ]
+            [torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))]) for u in split_hidden_states]
         )
         encoder_attention_mask = torch.stack(
-            [torch.cat([mask, mask.new_zeros(max_seq_len - mask.size(0))]) for mask in attn_mask_list]
+            [torch.cat([u, u.new_zeros(max_seq_len - u.size(0))]) for u in attn_mask_list]
         )
 
         prompt_embeds = prompt_embeds.to(dtype=dtype)
+
         return prompt_embeds, encoder_attention_mask
 
     def encode_prompt(
@@ -118,7 +114,6 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         prompt_embeds_mask = prompt_embeds_mask.view(batch_size * num_images_per_prompt, seq_len)
 
         return prompt_embeds, prompt_embeds_mask
-
     def diffuse(
         self,
         prompt_embeds,
@@ -152,15 +147,17 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             elif i == sde_window[0]:
                 cur_noise_level = noise_level
                 all_latents.append(latents)
-            elif i < sde_window[1]:
+            elif i > sde_window[0] and i < sde_window[1]:
                 cur_noise_level = noise_level
             else:
                 cur_noise_level = 0.0
 
             self._current_timestep = timestep_value
+            # Broadcast timestep to match batch size
             timestep = timestep_value.expand(latents.shape[0]).to(device=latents.device, dtype=latents.dtype)
 
             self.transformer.do_true_cfg = do_true_cfg
+            # Forward pass for positive prompt (or unconditional if no CFG)
             noise_pred = self.transformer(
                 hidden_states=latents,
                 timestep=timestep / 1000,
@@ -172,6 +169,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
                 attention_kwargs=self.attention_kwargs,
                 return_dict=False,
             )[0]
+            # Forward pass for negative prompt (CFG)
             if do_true_cfg:
                 neg_noise_pred = self.transformer(
                     hidden_states=latents,
@@ -186,6 +184,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
                 )[0]
                 noise_pred = apply_true_cfg(noise_pred, neg_noise_pred, true_cfg_scale)
 
+            # compute the previous noisy sample x_t -> x_t-1
             latents, log_prob, _, _ = self.scheduler.step(
                 noise_pred,
                 timestep_value,
@@ -278,6 +277,8 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         elif prompt_embeds is not None:
             batch_size = prompt_embeds.shape[0]
         else:
+            # Both prompt_ids and prompt_embeds are None (e.g. during warmup/dummy run).
+            # Return a minimal dummy output to avoid crashing.
             return DiffusionOutput(output=None, custom_output={})
 
         if isinstance(negative_prompt_ids, list):
