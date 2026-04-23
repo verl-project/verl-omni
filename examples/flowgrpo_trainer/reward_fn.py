@@ -72,7 +72,6 @@ async def compute_score_ocr(
     import re
 
     import Levenshtein
-
     from verl.utils.experimental.reward_utils import pil_image_to_base64
     from verl.utils.ray_utils import get_event_loop
 

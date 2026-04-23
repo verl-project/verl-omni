@@ -19,12 +19,12 @@ import numpy as np
 import pytest
 import ray
 import torch
-
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils import tensordict_utils as tu
 from verl.workers.config import TrainingWorkerConfig
 from verl.workers.utils.padding import embeds_padding_2_no_padding
+
 from verl_omni.models.diffusion_model import build_scheduler
 from verl_omni.workers.config import DiffusionModelConfig, FSDPDiffusionActorConfig
 from verl_omni.workers.engine_workers import TrainingWorker
@@ -45,7 +45,6 @@ def create_training_config(model_type, strategy, device_count, model):
 
     if strategy in ["fsdp", "fsdp2"]:
         from hydra import compose, initialize_config_dir
-
         from verl.utils.config import omega_conf_to_dataclass
 
         with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/model")):

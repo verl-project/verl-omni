@@ -23,9 +23,9 @@ import torch
 from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformer2DModel
 from diffusers.pipelines.qwenimage.pipeline_qwenimage import calculate_shift
 from tensordict import TensorDict
-
 from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_name
+
 from verl_omni.custom_pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.models.diffusion_model import DiffusionModelBase
 from verl_omni.workers.config import DiffusionModelConfig

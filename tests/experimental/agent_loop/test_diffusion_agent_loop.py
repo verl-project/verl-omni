@@ -19,7 +19,6 @@ import numpy as np
 import pytest
 import ray
 from omegaconf import DictConfig
-
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
 

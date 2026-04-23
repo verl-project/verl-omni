@@ -19,14 +19,6 @@ from typing import Any, Optional
 import ray
 import torchvision.transforms as T
 import vllm_omni.entrypoints.cli.serve
-from vllm.entrypoints.openai.api_server import build_app
-from vllm_omni.engine.arg_utils import OmniEngineArgs
-from vllm_omni.entrypoints import AsyncOmni
-from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
-from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
-from vllm_omni.lora.request import LoRARequest
-from vllm_omni.outputs import OmniRequestOutput
-
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import import_external_libs
 from verl.utils.tokenizer import normalize_token_ids
@@ -38,6 +30,14 @@ from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_PATH,
 )
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
+from vllm.entrypoints.openai.api_server import build_app
+from vllm_omni.engine.arg_utils import OmniEngineArgs
+from vllm_omni.entrypoints import AsyncOmni
+from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
+from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
+from vllm_omni.lora.request import LoRARequest
+from vllm_omni.outputs import OmniRequestOutput
+
 from verl_omni.models.diffusion_model import VllmOmniPipelineBase
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 
