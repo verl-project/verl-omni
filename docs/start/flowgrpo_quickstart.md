@@ -87,16 +87,14 @@ For datasets with a different ground-truth extraction scheme (e.g. a CSV with an
 
 In this example, we train `Qwen/Qwen-Image` with LoRA and use `Qwen/Qwen3-VL-8B-Instruct` as the OCR reward model.
 
-**Policy model (Qwen-Image):** download the weights to a local directory (e.g. `$WORKSPACE/models/Qwen/Qwen-Image`).
+**Policy model (Qwen-Image):** the script uses the Hugging Face Hub ID `Qwen/Qwen-Image` directly — no manual download is required. Hugging Face will cache the weights automatically on first run. To use a local copy instead, edit the `model_name` variable in the script directly.
 
 **Reward model (Qwen3-VL-8B-Instruct):** the script defaults to the Hugging Face Hub ID `Qwen/Qwen3-VL-8B-Instruct`, so no manual download is required — Hugging Face will cache it automatically on first run. To use a local copy instead, edit the `reward_model_name` variable in the script directly.
 
-The run script exposes the following environment variables to override model and data paths without editing the script:
+The run script exposes the following environment variable:
 
 ```bash
-WORKSPACE              # base directory for data and models (default: $HOME)
-MODEL_PATH             # policy model path (default: $WORKSPACE/models/Qwen/Qwen-Image)
-ACTOR_TOKENIZER_PATH   # tokenizer path   (default: $WORKSPACE/models/Qwen/Qwen-Image/tokenizer)
+WORKSPACE              # base directory for data (default: $HOME)
 ```
 
 ## Step 3: Perform FlowGRPO training

@@ -12,20 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Diffusion-specific algorithm config additions for verl_omni."""
+import os
 
-from dataclasses import dataclass
+from verl.utils.fs import copy_to_local
 
-from verl.base_config import BaseConfig
-
-__all__ = ["DiffusionAlgoConfig"]
+__all__ = ["resolve_model_local_dir"]
 
 
-@dataclass
-class DiffusionAlgoConfig(BaseConfig):
-    """Diffusion-specific algorithm config."""
+def resolve_model_local_dir(path: str, use_shm: bool = False) -> str:
+    """Resolve ``path`` to an on-disk directory."""
+    local_path = copy_to_local(path, use_shm=use_shm)
+    if not os.path.isdir(local_path):
+        from huggingface_hub import snapshot_download
 
-    adv_estimator: str = "flow_grpo"
-    norm_adv_by_std_in_grpo: bool = True
-    bypass_mode: bool = False
-    global_std: bool = True
+        local_path = snapshot_download(path)
+    return local_path

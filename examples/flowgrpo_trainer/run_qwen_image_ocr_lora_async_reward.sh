@@ -7,16 +7,17 @@ WORKSPACE=${WORKSPACE:-$HOME}
 ocr_train_path=$WORKSPACE/data/ocr/train.parquet
 ocr_test_path=$WORKSPACE/data/ocr/test.parquet
 
-ENGINE=vllm_omni
-REWARD_ENGINE=vllm
-
-reward_path=examples/flowgrpo_trainer/reward_fn.py
+model_name=Qwen/Qwen-Image
 reward_model_name=Qwen/Qwen3-VL-8B-Instruct
+reward_function_path=examples/flowgrpo_trainer/reward_fn.py
 
 NUM_GPUS_ACTOR_ROLLOUT=4
 NUM_GPUS_REWARD=1
 ROLLOUT_TP=1
 REWARD_TP=1
+
+ENGINE=vllm_omni
+REWARD_ENGINE=vllm
 
 
 python3 -m verl_omni.trainer.main_flowgrpo \
@@ -25,9 +26,9 @@ python3 -m verl_omni.trainer.main_flowgrpo \
     data.val_files=$ocr_test_path \
     data.train_batch_size=32 \
     data.max_prompt_length=256 \
-    actor_rollout_ref.model.path=${MODEL_PATH:-$WORKSPACE/models/Qwen/Qwen-Image} \
-    actor_rollout_ref.model.tokenizer_path=${ACTOR_TOKENIZER_PATH:-$WORKSPACE/models/Qwen/Qwen-Image/tokenizer} \
+    actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.external_lib="verl_omni.custom_pipelines.qwen_image.diffusers_training_adapter" \
+    actor_rollout_ref.model.external_lib="examples.flowgrpo_trainer.diffusers_impl" \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
     actor_rollout_ref.model.target_modules="['to_q','to_k','to_v','to_out.0','add_q_proj','add_k_proj','add_v_proj','to_add_out','img_mlp.net.0.proj','img_mlp.net.2','txt_mlp.net.0.proj','txt_mlp.net.2']" \
@@ -68,7 +69,7 @@ python3 -m verl_omni.trainer.main_flowgrpo \
     reward.reward_model.rollout.free_cache_engine=False \
     reward.reward_model.rollout.tensor_model_parallel_size=1 \
     reward.reward_model.rollout.enforce_eager=False \
-    reward.custom_reward_function.path=$reward_path \
+    reward.custom_reward_function.path=$reward_function_path \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=flow_grpo \
