@@ -47,22 +47,9 @@ This produces:
 
 ## Prepare the models
 
-The scripts use `WORKSPACE` (default: `$HOME`) as the base directory. Set it to any writable location before launching:
+**Policy model (Qwen-Image):** the script uses the Hugging Face Hub ID `Qwen/Qwen-Image` directly — no manual download is required. Hugging Face will cache the weights automatically on first run. To use a local copy instead, edit the `model_path` variable in the script directly.
 
-```bash
-export WORKSPACE=/path/to/your/workspace   # optional, defaults to $HOME
-```
-
-**Policy model (Qwen-Image):** download the weights locally. The default expected path is `$WORKSPACE/models/Qwen/Qwen-Image` (with the tokenizer at `$WORKSPACE/models/Qwen/Qwen-Image/tokenizer`).
-
-**Reward model (Qwen3-VL-8B-Instruct):** the script defaults to the Hugging Face Hub ID `Qwen/Qwen3-VL-8B-Instruct`, so no manual download is required — Hugging Face will cache it automatically on first run.
-
-Override any path without editing the script via environment variables:
-
-```bash
-MODEL_PATH            # policy model path     (default: $WORKSPACE/models/Qwen/Qwen-Image)
-ACTOR_TOKENIZER_PATH  # tokenizer path        (default: $WORKSPACE/models/Qwen/Qwen-Image/tokenizer)
-```
+**Reward model (Qwen3-VL-8B-Instruct):** the script defaults to the Hugging Face Hub ID `Qwen/Qwen3-VL-8B-Instruct`, so no manual download is required — Hugging Face will cache it automatically on first run. To use a local copy instead, edit the `reward_model_name` variable in the script directly.
 
 ## Run training
 
