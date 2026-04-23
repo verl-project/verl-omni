@@ -110,9 +110,9 @@ class TestDiffusionLossRegistry(unittest.TestCase):
 
         from verl_omni.workers.config.diffusion.actor import FSDPDiffusionActorConfig
 
-        with initialize_config_dir(
-            config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/actor"), version_base=None
-        ):
+        import verl_omni
+        config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/diffusion/actor")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
             cfg = compose(
                 config_name="dp_diffusion_actor",
                 overrides=["strategy=fsdp", "ppo_micro_batch_size_per_gpu=4"],
