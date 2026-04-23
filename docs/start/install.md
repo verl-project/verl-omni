@@ -25,10 +25,8 @@ pip install git+https://github.com/verl-project/verl.git@3eab8ccc6143c624e7f11c8
 pip install git+https://github.com/verl-project/verl-omni.git@main
 ```
 
-```{note}
-Install vLLM and vLLM-Omni first — they may override your existing PyTorch installation,
+Note: Install vLLM and vLLM-Omni first — they may override your existing PyTorch installation,
 so installing them before verl and verl-omni ensures a compatible CUDA-aware torch version.
-```
 
 ## Optional Dependencies
 

@@ -24,7 +24,7 @@ python3 -m verl_omni.trainer.main_flowgrpo \
     data.val_files=$ocr_test_path \
     data.train_batch_size=32 \
     data.max_prompt_length=256 \
-    actor_rollout_ref.model.path=${ACTOR_MODEL_PATH:-$WORKSPACE/models/Qwen/Qwen-Image} \
+    actor_rollout_ref.model.path=${MODEL_PATH:-$WORKSPACE/models/Qwen/Qwen-Image} \
     actor_rollout_ref.model.tokenizer_path=${ACTOR_TOKENIZER_PATH:-$WORKSPACE/models/Qwen/Qwen-Image/tokenizer} \
     actor_rollout_ref.model.external_lib="examples.flowgrpo_trainer.diffusers_impl" \
     actor_rollout_ref.model.lora_rank=64 \

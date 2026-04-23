@@ -60,7 +60,7 @@ export WORKSPACE=/path/to/your/workspace   # optional, defaults to $HOME
 Override any path without editing the script via environment variables:
 
 ```bash
-ACTOR_MODEL_PATH      # policy model path     (default: $WORKSPACE/models/Qwen/Qwen-Image)
+MODEL_PATH            # policy model path     (default: $WORKSPACE/models/Qwen/Qwen-Image)
 ACTOR_TOKENIZER_PATH  # tokenizer path        (default: $WORKSPACE/models/Qwen/Qwen-Image/tokenizer)
 ```
 

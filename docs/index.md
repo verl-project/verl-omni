@@ -1,6 +1,6 @@
 # Welcome to verl-omni's documentation!
 
-Last updated: 04/22/2026
+Last updated: 04/23/2026
 
 [verl-omni](https://github.com/verl-project/verl-omni) is a general RL training framework focused on diffusion and omni-modality generative models. It starts from the multimodal generation RL work incubated in [verl](https://github.com/verl-project/verl) and provides a dedicated home for building and evolving this stack in a more focused way.
 

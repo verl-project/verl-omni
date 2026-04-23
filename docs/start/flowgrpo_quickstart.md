@@ -1,7 +1,7 @@
 (flowgrpo_quickstart)=
 # Quickstart: FlowGRPO training on Qwen-Image OCR dataset
 
-Last updated: 04/22/2026
+Last updated: 04/23/2026
 
 Post-train a diffusion image generation model with FlowGRPO.
 
@@ -89,21 +89,14 @@ In this example, we train `Qwen/Qwen-Image` with LoRA and use `Qwen/Qwen3-VL-8B-
 
 **Policy model (Qwen-Image):** download the weights to a local directory (e.g. `$WORKSPACE/models/Qwen/Qwen-Image`).
 
-**Reward model (Qwen3-VL-8B-Instruct):** you can either download to a local path *or* use the Hugging Face Hub directly. When using the Hub, set `REWARD_MODEL_PATH` to the Hub model ID:
+**Reward model (Qwen3-VL-8B-Instruct):** the script defaults to the Hugging Face Hub ID `Qwen/Qwen3-VL-8B-Instruct`, so no manual download is required — Hugging Face will cache it automatically on first run. To use a local copy instead, edit the `reward_model_name` variable in the script directly.
 
-```bash
-export REWARD_MODEL_PATH=Qwen/Qwen3-VL-8B-Instruct   # HF Hub ID
-# or point to a local copy:
-export REWARD_MODEL_PATH=$WORKSPACE/models/Qwen/Qwen3-VL-8B-Instruct
-```
-
-The run script exposes three environment variables to override all model and data paths without editing the script:
+The run script exposes the following environment variables to override model and data paths without editing the script:
 
 ```bash
 WORKSPACE              # base directory for data and models (default: $HOME)
-ACTOR_MODEL_PATH       # policy model path (default: $WORKSPACE/models/Qwen/Qwen-Image)
+MODEL_PATH             # policy model path (default: $WORKSPACE/models/Qwen/Qwen-Image)
 ACTOR_TOKENIZER_PATH   # tokenizer path   (default: $WORKSPACE/models/Qwen/Qwen-Image/tokenizer)
-REWARD_MODEL_PATH      # reward model path or HF Hub ID (default: $WORKSPACE/models/Qwen/Qwen3-VL-8B-Instruct)
 ```
 
 ## Step 3: Perform FlowGRPO training
