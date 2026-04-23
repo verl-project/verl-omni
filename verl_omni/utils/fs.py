@@ -22,8 +22,17 @@ __all__ = ["resolve_model_local_dir"]
 def resolve_model_local_dir(path: str, use_shm: bool = False) -> str:
     """Resolve ``path`` to an on-disk directory."""
     local_path = copy_to_local(path, use_shm=use_shm)
-    if not os.path.isdir(local_path):
+    local_path_expanded = os.path.expanduser(local_path)
+    if not os.path.isdir(local_path_expanded):
         from huggingface_hub import snapshot_download
 
+        if os.path.isabs(local_path_expanded):
+            parts = local_path_expanded.rstrip("/").split("/")
+            if len(parts) >= 2:
+                repo_id = f"{parts[-2]}/{parts[-1]}"
+                return snapshot_download(repo_id, local_dir=local_path_expanded)
+
         local_path = snapshot_download(path)
+    else:
+        local_path = local_path_expanded
     return local_path
