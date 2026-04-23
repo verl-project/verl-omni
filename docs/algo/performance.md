@@ -11,7 +11,7 @@ Below are reference benchmark results for VeRL-Omni training runs.
 
 ### Experiment Settings and Throughput
 
-| Script | # GPUs | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | Images per Prompt | LR | Throughput (images/s) | Time per Step (s) |
+| Script | # GPUs | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | Images per Prompt | LR | Throughput (images/GPU/s) | Time per Step (s) |
 |--------|--------|------------------|--------------------|-------------------------|------------|-------------------|----|-----------------------|-------------------|
 | `run_qwen_image_ocr_lora.sh` | 4 | 4 | 4 | 0 (sync) | 32 | 16 | 3e-4 | 0.305 | 420 |
 | `run_qwen_image_ocr_lora_async_reward.sh` | 5 | 4 | 4 | 1 | 32 | 16 | 3e-4 | 0.280 | 360 |
