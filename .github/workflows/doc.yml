@@ -1,4 +1,4 @@
-name: doc_test
+name: doc
 
 on:
   push:
@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 jobs:
-  doc_test:
+  doc:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

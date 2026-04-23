@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - main
+      - v0.*
   pull_request:
     branches:
       - main
+      - v0.*
     paths:
       - "**/*.py"
       - .github/workflows/sanity.yml
@@ -34,11 +36,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install the current repository
         run: |
-          pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip3 install --no-deps "verl @ git+https://github.com/verl-project/verl.git@main"
-          pip3 install -r requirements.txt
-          pip3 install -r requirements-test.txt
-          pip3 install --no-deps -e .
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@main"
+          pip install -r requirements.txt
+          pip install -r requirements-test.txt
+          pip install --no-deps -e .
       - name: Run sanity test
         run: |
           pytest -s -x tests/special_sanity

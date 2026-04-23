@@ -1,24 +1,30 @@
+name: check_pr_title
+
 on:
   pull_request:
     types: [opened, edited, synchronize]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
-  check-title:
+  check_pr_title:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
-          python-version: '3.11'
-
+          python-version: "3.11"
       - name: Run PR title checker
         run: python3 tests/special_sanity/check_pr_title.py
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
-
       - name: Run PR description checker
         run: python3 tests/special_sanity/check_pr_description.py
         env:
