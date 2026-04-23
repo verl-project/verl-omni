@@ -26,12 +26,11 @@ from verl_omni.models.diffusion_model import VllmOmniPipelineBase
 
 from .common import apply_true_cfg
 
-
+__all__ = ["QwenImagePipelineWithLogProb"]
 def _maybe_to_cpu(value):
     if isinstance(value, torch.Tensor):
         return value.detach().cpu()
     return value
-
 
 def _coalesce_not_none(value, default):
     return default if value is None else value
@@ -399,6 +398,3 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
                 "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
             },
         )
-
-
-__all__ = ["QwenImagePipelineWithLogProb"]
