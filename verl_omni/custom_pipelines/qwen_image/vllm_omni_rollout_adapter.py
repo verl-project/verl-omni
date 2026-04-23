@@ -24,7 +24,7 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 from verl_omni.custom_pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.models.diffusion_model import VllmOmniPipelineBase
 
-from .common import apply_true_cfg
+from .common import apply_true_cfg, build_img_shapes
 
 __all__ = ["QwenImagePipelineWithLogProb"]
 
