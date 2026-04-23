@@ -7,9 +7,6 @@ WORKSPACE=${WORKSPACE:-$HOME}
 ocr_train_path=$WORKSPACE/data/ocr/train.parquet
 ocr_test_path=$WORKSPACE/data/ocr/test.parquet
 
-ENGINE=vllm_omni
-REWARD_ENGINE=vllm
-
 model_name=Qwen/Qwen-Image
 reward_model_name=Qwen/Qwen3-VL-8B-Instruct
 reward_function_path=examples/flowgrpo_trainer/reward_fn.py
@@ -17,6 +14,9 @@ reward_function_path=examples/flowgrpo_trainer/reward_fn.py
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=4
 ROLLOUT_TP=1
 REWARD_TP=4
+
+ENGINE=vllm_omni
+REWARD_ENGINE=vllm
 
 
 python3 -m verl_omni.trainer.main_flowgrpo \
