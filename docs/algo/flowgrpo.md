@@ -105,8 +105,8 @@ the rollout section is the main place to override sampling behavior.
 
 - `actor_rollout_ref.rollout.external_lib`: Python module path imported on
   every rollout worker before the engine starts. Use this to register custom
-  pipeline implementations (e.g., `examples.flowgrpo_trainer.vllm_omni_impl`
-  for the Qwen-Image `vllm_omni` example). The module must call
+  pipeline implementations (e.g., `verl_omni.custom_pipelines.qwen_image.vllm_omni_rollout_adapter`
+  for the Qwen-Image rollout path). The module must call
   `@VllmOmniPipelineBase.register(...)` at import time.
 
 #### Model

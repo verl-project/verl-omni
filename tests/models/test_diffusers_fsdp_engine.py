@@ -30,7 +30,7 @@ from verl_omni.workers.config import DiffusionModelConfig, FSDPDiffusionActorCon
 from verl_omni.workers.engine_workers import TrainingWorker
 from verl_omni.workers.utils.losses import diffusion_loss
 
-EXTERNAL_LIB = "verl_omni.custom_pipelines.qwen_image.diffusers_impl"
+EXTERNAL_LIB = "verl_omni.custom_pipelines.qwen_image.diffusers_training_adapter"
 
 
 def create_training_config(model_type, strategy, device_count, model):

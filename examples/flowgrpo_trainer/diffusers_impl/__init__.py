@@ -11,6 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .qwen_image import QwenImage
+from verl_omni.custom_pipelines.qwen_image.diffusers_training_adapter import QwenImage
 
 __all__ = ["QwenImage"]

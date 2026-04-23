@@ -45,12 +45,12 @@ class DiffusionModelBase(ABC):
     Loading external implementations
     ---------------------------------
     Implementations live outside the core verl package (e.g. under
-    ``verl_omni.custom_pipelines``).  Set ``external_lib`` on
+    ``verl_omni.custom_pipelines``). Set ``external_lib`` on
     ``DiffusionModelConfig``
     to the dotted module path so it is imported (and thus registered)
     before the registry is queried::
 
-        actor_rollout_ref.model.external_lib="verl_omni.custom_pipelines.qwen_image.diffusers_impl"
+        actor_rollout_ref.model.external_lib="verl_omni.custom_pipelines.qwen_image.diffusers_training_adapter"
     """
 
     _registry: dict[str, type["DiffusionModelBase"]] = {}
@@ -193,7 +193,7 @@ class VllmOmniPipelineBase:
     ``DiffusionRolloutConfig`` to the dotted module path so it is imported
     just before the registry is queried in ``run_server``::
 
-        actor_rollout_ref.rollout.external_lib="examples.flowgrpo_trainer.vllm_omni_impl"
+        actor_rollout_ref.rollout.external_lib="verl_omni.custom_pipelines.qwen_image.vllm_omni_rollout_adapter"
     """
 
     _registry: dict[str, type] = {}

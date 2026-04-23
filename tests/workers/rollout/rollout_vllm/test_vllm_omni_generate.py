@@ -97,7 +97,7 @@ def init_server():
             "height": 512,
             "width": 512,
             "num_inference_steps": 10,
-            "external_lib": "examples.flowgrpo_trainer.vllm_omni_impl",
+            "external_lib": "verl_omni.custom_pipelines.qwen_image.vllm_omni_rollout_adapter",
         }
     )
 
@@ -108,7 +108,7 @@ def init_server():
             "tokenizer_path": os.path.join(model_path, "tokenizer"),
             "trust_remote_code": True,
             "load_tokenizer": True,
-            "external_lib": "verl_omni.custom_pipelines.qwen_image.diffusers_impl",
+            "external_lib": "verl_omni.custom_pipelines.qwen_image.diffusers_training_adapter",
         }
     )
 

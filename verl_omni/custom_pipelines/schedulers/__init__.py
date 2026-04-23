@@ -12,6 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .scheduling_flow_match_sde_discrete import FlowMatchSDEDiscreteScheduler
+from .flow_match_sde import FlowMatchSDEDiscreteScheduler
 
 __all__ = ["FlowMatchSDEDiscreteScheduler"]

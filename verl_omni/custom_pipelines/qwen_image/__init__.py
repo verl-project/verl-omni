@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .diffusers_impl import QwenImage
+from .diffusers_training_adapter import QwenImage
+from .vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
 
-__all__ = ["QwenImage"]
+__all__ = ["QwenImage", "QwenImagePipelineWithLogProb"]
