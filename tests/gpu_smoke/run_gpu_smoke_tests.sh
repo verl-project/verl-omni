@@ -140,8 +140,12 @@ echo ""
 
 # ── Test 0: vllm-omni rollout ─────────────────────────────────────────────────
 if [[ "${RUN_TEST[0]}" == "1" ]]; then
-    run_test 0 "vllm-omni rollout" \
-        pytest -s tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py
+    if [[ "${NUM_GPUS}" -lt 1 ]]; then
+        skip_test 0 "vllm-omni rollout" "requires at least 1 GPU"
+    else
+        run_test 0 "vllm-omni rollout" \
+            pytest -s tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py
+    fi
 else
     skip_test 0 "vllm-omni rollout" "not selected"
 fi
