@@ -74,8 +74,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         split_hidden_states = self._extract_masked_hidden(hidden_states, attention_mask)
         split_hidden_states = [embed[drop_idx:] for embed in split_hidden_states]
         attn_mask_list = [
-            torch.ones(embed.size(0), dtype=torch.long, device=embed.device)
-            for embed in split_hidden_states
+            torch.ones(embed.size(0), dtype=torch.long, device=embed.device) for embed in split_hidden_states
         ]
         max_seq_len = max([embed.size(0) for embed in split_hidden_states])
         prompt_embeds = torch.stack(
@@ -85,10 +84,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             ]
         )
         encoder_attention_mask = torch.stack(
-            [
-                torch.cat([mask, mask.new_zeros(max_seq_len - mask.size(0))])
-                for mask in attn_mask_list
-            ]
+            [torch.cat([mask, mask.new_zeros(max_seq_len - mask.size(0))]) for mask in attn_mask_list]
         )
 
         prompt_embeds = prompt_embeds.to(dtype=dtype)
@@ -105,16 +101,12 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
     ):
         prompt_ids = prompt_ids.unsqueeze(0) if prompt_ids.ndim == 1 else prompt_ids
         attention_mask = (
-            attention_mask.unsqueeze(0)
-            if attention_mask is not None and attention_mask.ndim == 1
-            else attention_mask
+            attention_mask.unsqueeze(0) if attention_mask is not None and attention_mask.ndim == 1 else attention_mask
         )
         batch_size = prompt_ids.shape[0] if prompt_embeds is None else prompt_embeds.shape[0]
 
         if prompt_embeds is None:
-            prompt_embeds, prompt_embeds_mask = self._get_qwen_prompt_embeds(
-                prompt_ids, attention_mask=attention_mask
-            )
+            prompt_embeds, prompt_embeds_mask = self._get_qwen_prompt_embeds(prompt_ids, attention_mask=attention_mask)
 
         prompt_embeds = prompt_embeds[:, :max_sequence_length]
         prompt_embeds_mask = prompt_embeds_mask[:, :max_sequence_length]
@@ -211,11 +203,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
                 all_timesteps.append(timestep_value)
 
         all_latents = torch.stack(all_latents, dim=1)
-        all_log_probs = (
-            torch.stack(all_log_probs, dim=1)
-            if all_log_probs and all_log_probs[0] is not None
-            else None
-        )
+        all_log_probs = torch.stack(all_log_probs, dim=1) if all_log_probs and all_log_probs[0] is not None else None
         all_timesteps = torch.stack(all_timesteps).unsqueeze(0).expand(latents.shape[0], -1)
         return latents, all_latents, all_log_probs, all_timesteps
 
@@ -262,12 +250,8 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         num_inference_steps = sampling_params.num_inference_steps or num_inference_steps
         max_sequence_length = sampling_params.max_sequence_length or max_sequence_length
 
-        noise_level = _coalesce_not_none(
-            sampling_params.extra_args.get("noise_level", None), noise_level
-        )
-        sde_window_size = _coalesce_not_none(
-            sampling_params.extra_args.get("sde_window_size", None), sde_window_size
-        )
+        noise_level = _coalesce_not_none(sampling_params.extra_args.get("noise_level", None), noise_level)
+        sde_window_size = _coalesce_not_none(sampling_params.extra_args.get("sde_window_size", None), sde_window_size)
         sde_window_range = _coalesce_not_none(
             sampling_params.extra_args.get("sde_window_range", None), sde_window_range
         )
@@ -333,9 +317,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             generator,
             latents,
         )
-        img_shapes = [
-            [(1, height // self.vae_scale_factor // 2, width // self.vae_scale_factor // 2)]
-        ] * batch_size
+        img_shapes = [[(1, height // self.vae_scale_factor // 2, width // self.vae_scale_factor // 2)]] * batch_size
 
         timesteps, num_inference_steps = self.prepare_timesteps(num_inference_steps, sigmas, latents.shape[1])
         self._num_timesteps = len(timesteps)
@@ -398,10 +380,8 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
                 .view(1, self.vae.config.z_dim, 1, 1, 1)
                 .to(latents.device, latents.dtype)
             )
-            latents_std = (
-                1.0 / torch.tensor(self.vae.config.latents_std)
-                .view(1, self.vae.config.z_dim, 1, 1, 1)
-                .to(latents.device, latents.dtype)
+            latents_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(1, self.vae.config.z_dim, 1, 1, 1).to(
+                latents.device, latents.dtype
             )
             latents = latents / latents_std + latents_mean
             image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
