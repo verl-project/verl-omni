@@ -103,9 +103,9 @@ class TestFSDPDiffusionActorConfig:
         from hydra import compose, initialize_config_dir
         from verl.utils.config import omega_conf_to_dataclass
 
-        with initialize_config_dir(
-            config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/actor"), version_base=None
-        ):
+        import verl_omni
+        config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/diffusion/actor")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
             cfg = compose(
                 config_name="dp_diffusion_actor",
                 overrides=[
