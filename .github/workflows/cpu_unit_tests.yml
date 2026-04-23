@@ -5,12 +5,19 @@ on:
     branches:
       - main
       - v0.*
+    paths:
+      - "verl_omni/**"
+      - "tests/**/*_on_cpu.py"
+      - "requirements*.txt"
+      - .github/workflows/cpu_unit_tests.yml
   pull_request:
     branches:
       - main
       - v0.*
     paths:
-      - "**/*.py"
+      - "verl_omni/**"
+      - "tests/**/*_on_cpu.py"
+      - "requirements*.txt"
       - .github/workflows/cpu_unit_tests.yml
 
 # Cancel jobs on the same ref if a new one is triggered
