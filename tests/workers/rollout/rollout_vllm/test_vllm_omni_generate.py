@@ -30,8 +30,9 @@ import torch
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 from verl.utils.tokenizer import normalize_token_ids
-from verl.workers.rollout.replica import DiffusionOutput, RolloutMode
+from verl.workers.rollout.replica import RolloutMode
 
+from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
 MODEL_PATH = Path(os.path.expanduser("~/models/tiny-random/Qwen-Image"))
