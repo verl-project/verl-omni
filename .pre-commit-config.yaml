@@ -15,7 +15,7 @@ repos:
   - repo: local
     hooks:
       - id: autogen-trainer-cfg
-        name: Generate and verify verl/trainer/config/_generated_*.yaml
+        name: Generate and verify verl_omni/trainer/config/_generated_*.yaml
         entry: scripts/generate_trainer_config.sh
         language: script
         pass_filenames: false

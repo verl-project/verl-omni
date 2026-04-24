@@ -17,7 +17,6 @@ import os
 import ray
 import torch
 from hydra import compose, initialize_config_dir
-
 from verl.experimental.reward_loop import RewardLoopManager
 from verl.protocol import DataProto
 from verl.utils import hf_tokenizer
@@ -65,8 +64,8 @@ def test_reward_model_genrm():
             }
         }
     )
-    with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
-        config = compose(config_name="ppo_trainer")
+    with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config")):
+        config = compose(config_name="diffusion_trainer")
 
     rollout_model_name = os.path.expanduser("~/models/tiny-random/Qwen-Image")
     reward_model_name = os.path.expanduser("~/models/tiny-random/qwen3-vl")
@@ -118,8 +117,8 @@ def test_rule_reward():
             }
         }
     )
-    with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config")):
-        config = compose(config_name="ppo_trainer")
+    with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config")):
+        config = compose(config_name="diffusion_trainer")
 
     rollout_model_name = os.path.expanduser("~/models/tiny-random/Qwen-Image")
 

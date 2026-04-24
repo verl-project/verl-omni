@@ -20,7 +20,6 @@ import argparse
 import os
 
 import datasets
-
 from verl.utils.hdfs_io import copy, makedirs
 
 
@@ -31,18 +30,12 @@ def extract_solution(solution_str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local_dir", default=None)
     parser.add_argument("--hdfs_dir", default=None)
-    parser.add_argument(
-        "--local_dataset_path", default="~/dataset/ocr/", help="The local path to the raw dataset, if it exists."
-    )
-    parser.add_argument(
-        "--local_save_dir", default="~/data/ocr", help="The save directory for the preprocessed dataset."
-    )
+    parser.add_argument("--input_dir", default="~/dataset/ocr/", help="Path to the raw OCR dataset directory.")
+    parser.add_argument("--output_dir", default="~/data/ocr", help="Directory to save the preprocessed parquet files.")
 
     args = parser.parse_args()
-    if args.local_dataset_path is not None:
-        local_dataset_path = os.path.expanduser(args.local_dataset_path)
+    local_dataset_path = os.path.expanduser(args.input_dir)
 
     data_source = "flow_grpo/ocr"
 
@@ -89,11 +82,7 @@ if __name__ == "__main__":
     test_dataset = test_dataset.map(function=make_map_fn("test"), with_indices=True)
 
     hdfs_dir = args.hdfs_dir
-    local_save_dir = args.local_dir
-    if local_save_dir is not None:
-        print("Warning: Argument 'local_dir' is deprecated. Please use 'local_save_dir' instead.")
-    else:
-        local_save_dir = args.local_save_dir
+    local_save_dir = args.output_dir
 
     local_save_dir = os.path.expanduser(local_save_dir)
     train_dataset.to_parquet(os.path.join(local_save_dir, "train.parquet"))

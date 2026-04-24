@@ -1,0 +1,50 @@
+name: doc_test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "**/*.py"
+      - "docs/**"
+      - .github/workflows/doc.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  doc_test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Python 3.11
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install --no-deps -e .
+          pip install -r docs/requirements-docs.txt
+      - name: Build docs
+        run: |
+          cd docs
+          make clean
+          make html SPHINXOPTS="--keep-going -w _build/sphinx.log"
+          if grep -q ": ERROR:" _build/sphinx.log; then
+            echo "Sphinx build contained ERRORs - see _build/sphinx.log"
+            cat _build/sphinx.log
+            exit 1
+          fi
+          if grep -q "WARNING: document isn't included in any toctree" _build/sphinx.log; then
+            echo "Sphinx build WARNING: document not included in any toctree"
+            cat _build/sphinx.log
+            exit 1
+          fi

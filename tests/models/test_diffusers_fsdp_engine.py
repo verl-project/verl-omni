@@ -19,17 +19,16 @@ import numpy as np
 import pytest
 import ray
 import torch
-
 from verl import DataProto
-from verl.models.diffusion_model import build_scheduler
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils import tensordict_utils as tu
-from verl.workers.config import DiffusionModelConfig, FSDPDiffusionActorConfig, TrainingWorkerConfig
-from verl.workers.engine_workers import TrainingWorker
-from verl.workers.utils.losses import diffusion_loss
+from verl.workers.config import TrainingWorkerConfig
 from verl.workers.utils.padding import embeds_padding_2_no_padding
 
-EXTERNAL_LIB = "examples.flowgrpo_trainer.diffusers_impl.qwen_image"
+from verl_omni.models.diffusion_model import build_scheduler
+from verl_omni.workers.config import DiffusionModelConfig, FSDPDiffusionActorConfig
+from verl_omni.workers.engine_workers import TrainingWorker
+from verl_omni.workers.utils.losses import diffusion_loss
 
 
 def create_training_config(model_type, strategy, device_count, model):
@@ -40,20 +39,18 @@ def create_training_config(model_type, strategy, device_count, model):
         fsdp_size = 4
     path = os.path.expanduser(model)
     tokenizer_path = os.path.join(path, "tokenizer")
-    model_config = DiffusionModelConfig(path=path, tokenizer_path=tokenizer_path, external_lib=EXTERNAL_LIB)
+    model_config = DiffusionModelConfig(path=path, tokenizer_path=tokenizer_path)
 
     if strategy in ["fsdp", "fsdp2"]:
         from hydra import compose, initialize_config_dir
-
         from verl.utils.config import omega_conf_to_dataclass
 
-        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/diffusion/model")):
+        with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/model")):
             cfg = compose(
                 config_name="diffusion_model",
                 overrides=[
                     "path=" + path,
                     "tokenizer_path=" + tokenizer_path,
-                    "external_lib=" + EXTERNAL_LIB,
                     "lora_rank=8",
                     "lora_alpha=16",
                     "true_cfg_scale=4.0",
@@ -63,7 +60,7 @@ def create_training_config(model_type, strategy, device_count, model):
             )
         model_config: DiffusionModelConfig = omega_conf_to_dataclass(cfg)
 
-        with initialize_config_dir(config_dir=os.path.abspath("verl/trainer/config/diffusion/actor")):
+        with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/actor")):
             cfg = compose(
                 config_name="dp_diffusion_actor",
                 overrides=[
