@@ -9,7 +9,7 @@ ocr_test_path=$WORKSPACE/data/ocr/test.parquet
 
 model_name=Qwen/Qwen-Image
 reward_model_name=Qwen/Qwen3-VL-8B-Instruct
-reward_function_path=examples/flowgrpo_trainer/reward_fn.py
+reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=4
 ROLLOUT_TP=1

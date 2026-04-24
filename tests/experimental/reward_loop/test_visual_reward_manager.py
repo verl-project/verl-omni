@@ -72,7 +72,7 @@ def test_reward_model_genrm():
 
     config.actor_rollout_ref.model.path = rollout_model_name
     config.actor_rollout_ref.model.tokenizer_path = os.path.join(rollout_model_name, "tokenizer")
-    config.reward.custom_reward_function.path = "examples/flowgrpo_trainer/reward_fn.py"
+    config.reward.custom_reward_function.path = "verl_omni/utils/reward_score/genrm_ocr.py"
     config.reward.custom_reward_function.name = "compute_score_ocr"
     config.reward.num_workers = 1
     config.reward.reward_manager.name = "visual"
