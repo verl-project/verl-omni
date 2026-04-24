@@ -22,12 +22,14 @@ _PATCHED = False
 
 
 def _patch_diffusion_agent_loop() -> None:
-    """Alias ``verl.experimental.agent_loop.diffusion_agent_loop`` to the
-    ``verl_omni`` implementation so that upstream lazy imports
-    (e.g. inside ``AgentLoopManager.__init__``) resolve to it.
+    """Alias ``verl.experimental.agent_loop.diffusion_agent_loop`` and
+    ``verl.experimental.agent_loop.single_turn_agent_loop`` to the
+    ``verl_omni`` implementations so that upstream lazy imports
+    (e.g. inside ``AgentLoopManager.__init__``) resolve to them.
     TODO (mike): to be dropped
     """
     import verl_omni.experimental.agent_loop.diffusion_agent_loop as _omni_dal
+    import verl_omni.experimental.agent_loop.single_turn_agent_loop  # noqa: F401
 
     sys.modules["verl.experimental.agent_loop.diffusion_agent_loop"] = _omni_dal
 
