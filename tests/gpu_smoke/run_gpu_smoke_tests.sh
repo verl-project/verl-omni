@@ -173,7 +173,7 @@ if [[ "${RUN_TEST[3]}" == "1" ]]; then
     else
         CUDA_VISIBLE_DEVICES=0,1,2,3 \
         run_test 3 "diffusers FSDP engine" \
-            pytest -s tests/models/test_diffusers_fsdp_engine.py
+            pytest -s tests/workers/test_diffusers_fsdp_engine.py
     fi
 else
     skip_test 3 "diffusers FSDP engine" "not selected"

@@ -25,7 +25,7 @@ from verl.utils import tensordict_utils as tu
 from verl.workers.config import TrainingWorkerConfig
 from verl.workers.utils.padding import embeds_padding_2_no_padding
 
-from verl_omni.models.diffusion_model import build_scheduler
+from verl_omni.custom_pipelines.utils import build_scheduler
 from verl_omni.workers.config import DiffusionModelConfig, FSDPDiffusionActorConfig
 from verl_omni.workers.engine_workers import TrainingWorker
 from verl_omni.workers.utils.losses import diffusion_loss

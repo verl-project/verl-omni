@@ -62,15 +62,15 @@ def _patch_vllm_omni_replica() -> None:
 
 def _patch_diffusers_model() -> None:
     """Alias ``verl.models.diffusers_model`` (and its ``base`` / ``utils``
-    submodules) to verl-omni's ``verl_omni.models.diffusion_model`` so
+    submodules) to verl-omni's ``verl_omni.custom_pipelines`` so
     that upstream code using the verl-side ``DiffusionModelBase`` registry
     (e.g. ``verl/workers/engine/fsdp/diffusers_impl.py``) resolves to the
     verl-omni registry where pipelines are actually registered.
     TODO (mike): to be dropped
     """
-    import verl_omni.models.diffusion_model as _omni_pkg
-    import verl_omni.models.diffusion_model.base as _omni_base
-    import verl_omni.models.diffusion_model.utils as _omni_utils
+    import verl_omni.custom_pipelines as _omni_pkg
+    import verl_omni.custom_pipelines.base as _omni_base
+    import verl_omni.custom_pipelines.utils as _omni_utils
 
     sys.modules["verl.models.diffusers_model"] = _omni_pkg
     sys.modules["verl.models.diffusers_model.base"] = _omni_base

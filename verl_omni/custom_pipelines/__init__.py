@@ -14,4 +14,4 @@
 
 from . import qwen_image
 
-__all__ = ["qwen_image"]
+__all__ = qwen_image.__all__
