@@ -16,7 +16,7 @@ uv venv --python 3.12 --seed
 source .venv/bin/activate
 
 # Install vllm, vllm-omni, then verl in order
-uv pip install vllm==0.18.0 --torch-backend=auto
+uv pip install vllm==0.18.0
 uv pip install vllm-omni==0.18
 uv pip install git+https://github.com/verl-project/verl.git@3eab8ccc6143c624e7f11c871896f941b3fec900
 
