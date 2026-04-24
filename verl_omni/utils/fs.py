@@ -27,9 +27,11 @@ def resolve_model_local_dir(path: str, use_shm: bool = False) -> str:
         from huggingface_hub import snapshot_download
 
         if os.path.isabs(local_path_expanded):
-            parts = local_path_expanded.rstrip("/").split("/")
-            if len(parts) >= 2:
-                repo_id = f"{parts[-2]}/{parts[-1]}"
+            normalized_path = os.path.normpath(local_path_expanded)
+            head, repo = os.path.split(normalized_path)
+            _, owner = os.path.split(head)
+            if owner and repo:
+                repo_id = f"{owner}/{repo}"
                 return snapshot_download(repo_id, local_dir=local_path_expanded)
 
         local_path = snapshot_download(path)
