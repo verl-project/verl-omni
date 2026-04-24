@@ -31,7 +31,10 @@ Future work is tracked here:
 
 ## Getting Started
 
-Coming soon
+Visit our documentation to learn more.
+
+- [Installation](docs/start/install.md)
+- [Quickstart](docs/start/flowgrpo_quickstart.md)
 
 ## Contributing
 
