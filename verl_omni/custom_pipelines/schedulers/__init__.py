@@ -11,19 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
 
-with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/version")) as f:
-    __version__ = f.read().strip()
+from .flow_match_sde import FlowMatchSDEDiscreteScheduler
 
-
-# TODO (mike): to be dropped once `verl` drops its legacy diffusion
-# implementations.
-from verl_omni._patch import apply_patches as _apply_patches
-
-_apply_patches()
-
-del _apply_patches
-
-# Import custom pipelines to auto-register them
-import verl_omni.custom_pipelines  # noqa: E402, F401
+__all__ = ["FlowMatchSDEDiscreteScheduler"]

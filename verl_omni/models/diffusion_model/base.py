@@ -41,15 +41,6 @@ class DiffusionModelBase(ABC):
         @DiffusionModelBase.register("QwenImagePipeline")
         class QwenImage(DiffusionModelBase):
             ...
-
-    Loading external implementations
-    ---------------------------------
-    Implementations live outside the core verl package (e.g. under
-    ``examples/``).  Set ``external_lib`` on ``DiffusionModelConfig``
-    to the dotted module path so it is imported (and thus registered)
-    before the registry is queried::
-
-        actor_rollout_ref.model.external_lib="examples.flowgrpo_trainer.diffusers_impl"
     """
 
     _registry: dict[str, type["DiffusionModelBase"]] = {}
@@ -183,16 +174,6 @@ class VllmOmniPipelineBase:
         @VllmOmniPipelineBase.register("QwenImagePipeline")
         class QwenImagePipelineWithLogProb(QwenImagePipeline):
             ...
-
-    Loading external implementations
-    ---------------------------------
-    Implementations live outside the core verl package (e.g. under
-    ``examples/``).  Ensure the module containing your subclass is imported
-    before the registry is queried.  Set ``external_lib`` on
-    ``DiffusionRolloutConfig`` to the dotted module path so it is imported
-    just before the registry is queried in ``run_server``::
-
-        actor_rollout_ref.rollout.external_lib="examples.flowgrpo_trainer.vllm_omni_impl"
     """
 
     _registry: dict[str, type] = {}

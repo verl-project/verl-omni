@@ -97,7 +97,6 @@ def init_server():
             "height": 512,
             "width": 512,
             "num_inference_steps": 10,
-            "external_lib": "examples.flowgrpo_trainer.vllm_omni_impl",
         }
     )
 
@@ -108,7 +107,6 @@ def init_server():
             "tokenizer_path": os.path.join(model_path, "tokenizer"),
             "trust_remote_code": True,
             "load_tokenizer": True,
-            "external_lib": "examples.flowgrpo_trainer.diffusers_impl",
         }
     )
 

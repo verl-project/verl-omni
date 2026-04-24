@@ -30,8 +30,6 @@ from verl_omni.workers.config import DiffusionModelConfig, FSDPDiffusionActorCon
 from verl_omni.workers.engine_workers import TrainingWorker
 from verl_omni.workers.utils.losses import diffusion_loss
 
-EXTERNAL_LIB = "examples.flowgrpo_trainer.diffusers_impl.qwen_image"
-
 
 def create_training_config(model_type, strategy, device_count, model):
     if device_count == 1:
@@ -41,7 +39,7 @@ def create_training_config(model_type, strategy, device_count, model):
         fsdp_size = 4
     path = os.path.expanduser(model)
     tokenizer_path = os.path.join(path, "tokenizer")
-    model_config = DiffusionModelConfig(path=path, tokenizer_path=tokenizer_path, external_lib=EXTERNAL_LIB)
+    model_config = DiffusionModelConfig(path=path, tokenizer_path=tokenizer_path)
 
     if strategy in ["fsdp", "fsdp2"]:
         from hydra import compose, initialize_config_dir
@@ -53,7 +51,6 @@ def create_training_config(model_type, strategy, device_count, model):
                 overrides=[
                     "path=" + path,
                     "tokenizer_path=" + tokenizer_path,
-                    "external_lib=" + EXTERNAL_LIB,
                     "lora_rank=8",
                     "lora_alpha=16",
                     "true_cfg_scale=4.0",

@@ -11,8 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """
-Qwen-Image diffusion model implementation for FlowGRPO training.
+Qwen-Image training-side adapter for diffusers-based diffusion RL.
 """
 
 from typing import Optional
@@ -25,39 +26,60 @@ from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_name
 
+from verl_omni.custom_pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.models.diffusion_model import DiffusionModelBase
 from verl_omni.workers.config import DiffusionModelConfig
 
-from ..scheduler import FlowMatchSDEDiscreteScheduler
+from .common import QWEN_IMAGE_VAE_SCALE_FACTOR, apply_true_cfg, build_img_shapes
+
+__all__ = ["QwenImage"]
+
+
+def _build_qwen_image_scheduler(model_path: str) -> FlowMatchSDEDiscreteScheduler:
+    return FlowMatchSDEDiscreteScheduler.from_pretrained(
+        pretrained_model_name_or_path=model_path,
+        subfolder="scheduler",
+    )
+
+
+def _configure_qwen_image_scheduler(
+    scheduler: FlowMatchSDEDiscreteScheduler,
+    *,
+    height: int,
+    width: int,
+    num_inference_steps: int,
+    device: str,
+) -> None:
+    latent_height = height // QWEN_IMAGE_VAE_SCALE_FACTOR // 2
+    latent_width = width // QWEN_IMAGE_VAE_SCALE_FACTOR // 2
+    sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
+    mu = calculate_shift(
+        latent_height * latent_width,
+        scheduler.config.get("base_image_seq_len", 256),
+        scheduler.config.get("max_image_seq_len", 4096),
+        scheduler.config.get("base_shift", 0.5),
+        scheduler.config.get("max_shift", 1.15),
+    )
+    scheduler.set_timesteps(num_inference_steps, device=device, sigmas=sigmas, mu=mu)
 
 
 @DiffusionModelBase.register("QwenImagePipeline")
 class QwenImage(DiffusionModelBase):
     @classmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig):
-        scheduler = FlowMatchSDEDiscreteScheduler.from_pretrained(
-            pretrained_model_name_or_path=model_config.local_path, subfolder="scheduler"
-        )
+        scheduler = _build_qwen_image_scheduler(model_config.local_path)
         cls.set_timesteps(scheduler, model_config, get_device_name())
         return scheduler
 
     @classmethod
     def set_timesteps(cls, scheduler: FlowMatchSDEDiscreteScheduler, model_config: DiffusionModelConfig, device: str):
-        vae_scale_factor = 8
-        latent_height, latent_width = (
-            model_config.height // vae_scale_factor // 2,
-            model_config.width // vae_scale_factor // 2,
+        _configure_qwen_image_scheduler(
+            scheduler,
+            height=model_config.height,
+            width=model_config.width,
+            num_inference_steps=model_config.num_inference_steps,
+            device=device,
         )
-        num_inference_steps = model_config.num_inference_steps
-        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
-        mu = calculate_shift(
-            latent_height * latent_width,
-            scheduler.config.get("base_image_seq_len", 256),
-            scheduler.config.get("max_image_seq_len", 4096),
-            scheduler.config.get("base_shift", 0.5),
-            scheduler.config.get("max_shift", 1.15),
-        )
-        scheduler.set_timesteps(num_inference_steps, device=device, sigmas=sigmas, mu=mu)
 
     @classmethod
     def prepare_model_inputs(
@@ -76,7 +98,7 @@ class QwenImage(DiffusionModelBase):
         height = tu.get_non_tensor_data(data=micro_batch, key="height", default=None)
         width = tu.get_non_tensor_data(data=micro_batch, key="width", default=None)
         vae_scale_factor = tu.get_non_tensor_data(data=micro_batch, key="vae_scale_factor", default=None)
-        img_shapes = [[(1, height // vae_scale_factor // 2, width // vae_scale_factor // 2)]] * latents.shape[0]
+        img_shapes = build_img_shapes(height, width, latents.shape[0], vae_scale_factor)
 
         guidance_scale = model_config.guidance_scale
         if getattr(module.config, "guidance_embeds", False):
@@ -129,10 +151,7 @@ class QwenImage(DiffusionModelBase):
         if true_cfg_scale > 1.0:
             assert negative_model_inputs is not None
             neg_noise_pred = module(**negative_model_inputs)[0]
-            comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
-            cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
-            noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
-            noise_pred = comb_pred * (cond_norm / noise_norm)
+            noise_pred = apply_true_cfg(noise_pred, neg_noise_pred, true_cfg_scale)
 
         _, log_prob, prev_sample_mean, std_dev_t = scheduler.sample_previous_step(
             sample=latents[:, step].float(),

@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import os
 from typing import Any, Literal
 
@@ -20,15 +21,18 @@ from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
+from verl_omni.custom_pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.models.diffusion_model import VllmOmniPipelineBase
 
-from ..scheduler import FlowMatchSDEDiscreteScheduler
+from .common import apply_true_cfg, build_img_shapes
+
+__all__ = ["QwenImagePipelineWithLogProb"]
 
 
-def _maybe_to_cpu(v):
-    if isinstance(v, torch.Tensor):
-        return v.detach().cpu()
-    return v
+def _maybe_to_cpu(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    return value
 
 
 def _coalesce_not_none(value, default):
@@ -36,18 +40,18 @@ def _coalesce_not_none(value, default):
 
 
 # Custom pipeline class for QwenImage that returns log probabilities during the diffusion process.
-# This is compatible with API of vllm-omni custom pipeline
 @VllmOmniPipelineBase.register("QwenImagePipeline")
 class QwenImagePipelineWithLogProb(QwenImagePipeline):
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
         self.device = get_local_device()
         model = od_config.model
-        # Check if model is a local path
         local_files_only = os.path.exists(model)
 
         self.scheduler = FlowMatchSDEDiscreteScheduler.from_pretrained(
-            model, subfolder="scheduler", local_files_only=local_files_only
+            model,
+            subfolder="scheduler",
+            local_files_only=local_files_only,
         )
 
     def _get_qwen_prompt_embeds(
@@ -138,7 +142,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         all_log_probs = []
         all_timesteps = []
         self.scheduler.set_begin_index(0)
-        for i, t in enumerate(timesteps):
+        for i, timestep_value in enumerate(timesteps):
             if self.interrupt:
                 continue
 
@@ -152,13 +156,12 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             else:
                 cur_noise_level = 0.0
 
-            self._current_timestep = t
-
+            self._current_timestep = timestep_value
             # Broadcast timestep to match batch size
-            timestep = t.expand(latents.shape[0]).to(device=latents.device, dtype=latents.dtype)
+            timestep = timestep_value.expand(latents.shape[0]).to(device=latents.device, dtype=latents.dtype)
 
-            # Forward pass for positive prompt (or unconditional if no CFG)
             self.transformer.do_true_cfg = do_true_cfg
+            # Forward pass for positive prompt (or unconditional if no CFG)
             noise_pred = self.transformer(
                 hidden_states=latents,
                 timestep=timestep / 1000,
@@ -183,14 +186,12 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
                     attention_kwargs=self.attention_kwargs,
                     return_dict=False,
                 )[0]
-                comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
-                cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
-                noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
-                noise_pred = comb_pred * (cond_norm / noise_norm)
+                noise_pred = apply_true_cfg(noise_pred, neg_noise_pred, true_cfg_scale)
+
             # compute the previous noisy sample x_t -> x_t-1
             latents, log_prob, _, _ = self.scheduler.step(
                 noise_pred,
-                t,
+                timestep_value,
                 latents,
                 generator=generator,
                 noise_level=cur_noise_level,
@@ -202,17 +203,11 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             if i >= sde_window[0] and i < sde_window[1]:
                 all_latents.append(latents)
                 all_log_probs.append(log_prob)
-                all_timesteps.append(t)
+                all_timesteps.append(timestep_value)
 
         all_latents = torch.stack(all_latents, dim=1)
-
-        if all_log_probs[0] is not None:
-            all_log_probs = torch.stack(all_log_probs, dim=1)
-        else:
-            all_log_probs = None
-
+        all_log_probs = torch.stack(all_log_probs, dim=1) if all_log_probs and all_log_probs[0] is not None else None
         all_timesteps = torch.stack(all_timesteps).unsqueeze(0).expand(latents.shape[0], -1)
-
         return latents, all_latents, all_log_probs, all_timesteps
 
     def forward(
@@ -245,7 +240,6 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         sde_type: Literal["sde", "cps"] = "sde",
         logprobs: bool = True,
     ) -> DiffusionOutput:
-        # Extract prompt data from OmniCustomPrompt in req.prompts[0]
         custom_prompt = req.prompts[0] if req.prompts else {}
         if isinstance(custom_prompt, dict):
             prompt_ids = custom_prompt.get("prompt_ids", prompt_ids)
@@ -253,24 +247,25 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
             negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)
 
-        # Read sampling params from req.sampling_params
-        sp = req.sampling_params
-        height = sp.height or self.default_sample_size * self.vae_scale_factor
-        width = sp.width or self.default_sample_size * self.vae_scale_factor
-        num_inference_steps = sp.num_inference_steps or num_inference_steps
-        max_sequence_length = sp.max_sequence_length or max_sequence_length
+        sampling_params = req.sampling_params
+        height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
+        width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
+        num_inference_steps = sampling_params.num_inference_steps or num_inference_steps
+        max_sequence_length = sampling_params.max_sequence_length or max_sequence_length
 
-        noise_level = _coalesce_not_none(sp.extra_args.get("noise_level", None), noise_level)
-        sde_window_size = _coalesce_not_none(sp.extra_args.get("sde_window_size", None), sde_window_size)
-        sde_window_range = _coalesce_not_none(sp.extra_args.get("sde_window_range", None), sde_window_range)
-        sde_type = _coalesce_not_none(sp.extra_args.get("sde_type", None), sde_type)
-        logprobs = _coalesce_not_none(sp.extra_args.get("logprobs", None), logprobs)
+        noise_level = _coalesce_not_none(sampling_params.extra_args.get("noise_level", None), noise_level)
+        sde_window_size = _coalesce_not_none(sampling_params.extra_args.get("sde_window_size", None), sde_window_size)
+        sde_window_range = _coalesce_not_none(
+            sampling_params.extra_args.get("sde_window_range", None), sde_window_range
+        )
+        sde_type = _coalesce_not_none(sampling_params.extra_args.get("sde_type", None), sde_type)
+        logprobs = _coalesce_not_none(sampling_params.extra_args.get("logprobs", None), logprobs)
 
-        generator = sp.generator or generator
-        if generator is None and sp.seed is not None:
-            generator = torch.Generator(device=self.device).manual_seed(sp.seed)
-        true_cfg_scale = _coalesce_not_none(sp.true_cfg_scale, true_cfg_scale)
-        req_num_outputs = getattr(sp, "num_outputs_per_prompt", None)
+        generator = sampling_params.generator or generator
+        if generator is None and sampling_params.seed is not None:
+            generator = torch.Generator(device=self.device).manual_seed(sampling_params.seed)
+        true_cfg_scale = _coalesce_not_none(sampling_params.true_cfg_scale, true_cfg_scale)
+        req_num_outputs = getattr(sampling_params, "num_outputs_per_prompt", None)
         if req_num_outputs and req_num_outputs > 0:
             num_images_per_prompt = req_num_outputs
 
@@ -327,13 +322,11 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             generator,
             latents,
         )
-        img_shapes = [[(1, height // self.vae_scale_factor // 2, width // self.vae_scale_factor // 2)]] * batch_size
+        img_shapes = build_img_shapes(height, width, batch_size, self.vae_scale_factor)
 
         timesteps, num_inference_steps = self.prepare_timesteps(num_inference_steps, sigmas, latents.shape[1])
-        # num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
-        # handle guidance
         if self.transformer.guidance_embeds:
             guidance = torch.full([1], guidance_scale, dtype=torch.float32)
             guidance = guidance.expand(latents.shape[0])

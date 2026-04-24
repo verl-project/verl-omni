@@ -11,6 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .qwen_image import QwenImage
+
+"""
+Import diffusers training adapters so registered model handlers can be resolved
+by architecture at runtime.
+"""
+
+from .qwen_image.diffusers_training_adapter import QwenImage
 
 __all__ = ["QwenImage"]
