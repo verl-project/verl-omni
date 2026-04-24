@@ -17,6 +17,7 @@ Key capabilities:
 
 start/install.md
 start/flowgrpo_quickstart.md
+start/metrics.md
 ```
 
 ```{toctree}
@@ -24,6 +25,7 @@ start/flowgrpo_quickstart.md
 :caption: Algorithms
 
 algo/flowgrpo.md
+algo/performance.md
 ```
 
 ## Contribution
