@@ -153,7 +153,7 @@ fi
 # ── Test 1: diffusion agent loop ──────────────────────────────────────────────
 if [[ "${RUN_TEST[1]}" == "1" ]]; then
     run_test 1 "diffusion agent loop" \
-        pytest -s tests/experimental/agent_loop/test_diffusion_agent_loop.py
+        pytest -s tests/agent_loop/test_diffusion_agent_loop.py
 else
     skip_test 1 "diffusion agent loop" "not selected"
 fi
@@ -161,7 +161,7 @@ fi
 # ── Test 2: visual reward manager ─────────────────────────────────────────────
 if [[ "${RUN_TEST[2]}" == "1" ]]; then
     run_test 2 "visual reward manager" \
-        pytest -s tests/experimental/reward_loop/test_visual_reward_manager.py
+        pytest -s tests/reward_loop/test_visual_reward_manager.py
 else
     skip_test 2 "visual reward manager" "not selected"
 fi
