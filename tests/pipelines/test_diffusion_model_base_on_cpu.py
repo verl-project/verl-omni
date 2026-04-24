@@ -15,7 +15,7 @@
 
 import pytest
 
-from verl_omni.custom_pipelines.base import DiffusionModelBase
+from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
 
 # ---------------------------------------------------------------------------

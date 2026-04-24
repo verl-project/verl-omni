@@ -25,5 +25,5 @@ _apply_patches()
 
 del _apply_patches
 
-# Import custom pipelines to auto-register them
-import verl_omni.custom_pipelines  # noqa: E402, F401
+# Import pipelines to auto-register them
+import verl_omni.pipelines  # noqa: E402, F401

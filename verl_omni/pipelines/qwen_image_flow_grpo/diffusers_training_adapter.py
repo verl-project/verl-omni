@@ -26,8 +26,8 @@ from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_name
 
-from verl_omni.custom_pipelines.base import DiffusionModelBase
-from verl_omni.custom_pipelines.schedulers import FlowMatchSDEDiscreteScheduler
+from verl_omni.pipelines.model_base import DiffusionModelBase
+from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.workers.config import DiffusionModelConfig
 
 from .common import QWEN_IMAGE_VAE_SCALE_FACTOR, apply_true_cfg, build_img_shapes
@@ -67,7 +67,7 @@ def _configure_qwen_image_scheduler(
 class QwenImage(DiffusionModelBase):
     """Training adapter for the Qwen-Image diffusion model.
 
-    Implements the :class:`~verl_omni.custom_pipelines.base.DiffusionModelBase`
+    Implements the :class:`~verl_omni.pipelines.model_base.DiffusionModelBase`
     interface for the ``QwenImagePipeline`` architecture, providing scheduler
     configuration, model-input construction, and the forward/sampling step
     used during RL training (e.g. FlowGRPO).
