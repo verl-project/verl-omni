@@ -104,6 +104,21 @@ def _patch_fsdp_diffusers_engine() -> None:
         parent.diffusers_impl = _omni_impl
 
 
+def _patch_visual_reward_manager() -> None:
+    """Replace the ``"visual"`` entry in verl's ``REWARD_MANAGER`` registry
+    with verl-omni's ``VisualRewardManager``, which uses verl-omni's
+    ``default_compute_score_image`` dispatcher (supporting reward score
+    functions defined in ``verl_omni.utils.reward_score``).
+    TODO (mike): to be dropped
+    """
+    import verl.experimental.reward_loop.reward_manager  # noqa: F401 — triggers verl's @register("visual")
+    from verl.experimental.reward_loop.reward_manager.registry import REWARD_MANAGER
+
+    from verl_omni.experimental.reward_loop.reward_manager.visual import VisualRewardManager as _OmniVisual
+
+    REWARD_MANAGER["visual"] = _OmniVisual
+
+
 def apply_patches() -> None:
     """Apply all verl-omni compatibility patches.  Safe to call multiple
     times."""
@@ -111,12 +126,12 @@ def apply_patches() -> None:
     if _PATCHED:
         return
     logger.warning(
-        "Applying verl-omni monkey-patches to override upstream verl's legacy "
-        "diffusion implementations. These patches are temporary and will be "
-        "dropped once upstream verl no longer ships its legacy diffusion code."
+        "Applying verl-omni monkey-patches to override upstream verl's "
+        "diffusion implementations with verl-omni's extended versions."
     )
     _patch_diffusion_agent_loop()
     _patch_vllm_omni_replica()
     _patch_diffusers_model()
     _patch_fsdp_diffusers_engine()
+    _patch_visual_reward_manager()
     _PATCHED = True
