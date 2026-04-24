@@ -14,13 +14,13 @@
 
 from .diffusers_training_adapter import QwenImage
 
-__all__ = ["QwenImage", "QwenImagePipelineWithLogProb"]
+__all__ = ["QwenImage"]
+
+try:
+    from .vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
+except ImportError:
+    QwenImagePipelineWithLogProb = None
 
 
-def __getattr__(name: str):
-    if name == "QwenImagePipelineWithLogProb":
-        from .vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
-
-        return QwenImagePipelineWithLogProb
-    msg = f"module {__name__!r} has no attribute {name!r}"
-    raise AttributeError(msg)
+if QwenImagePipelineWithLogProb is not None:
+    __all__.append("QwenImagePipelineWithLogProb")
