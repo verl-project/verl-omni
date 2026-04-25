@@ -39,5 +39,5 @@ so installing them before verl and VeRL-Omni ensures a compatible CUDA-aware tor
 ```bash
 python -c "import torch; print('torch', torch.__version__, '| CUDA', torch.version.cuda)"
 python -c "import vllm; print('vllm', vllm.__version__)"
-python -c "import verl; print('VeRL-Omni ready')"
+python -c "import verl_omni; print('VeRL-Omni ready')"
 ```

@@ -12,14 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .base import DiffusionModelBase, VllmOmniPipelineBase
-from .utils import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs, set_timesteps
+from .diffusion_agent_loop import DiffusionAgentLoopOutput, DiffusionAgentLoopWorker
+from .single_turn_agent_loop import DiffusionSingleTurnAgentLoop
 
 __all__ = [
-    "DiffusionModelBase",
-    "VllmOmniPipelineBase",
-    "build_scheduler",
-    "set_timesteps",
-    "prepare_model_inputs",
-    "forward_and_sample_previous_step",
+    "DiffusionAgentLoopOutput",
+    "DiffusionAgentLoopWorker",
+    "DiffusionSingleTurnAgentLoop",
 ]
