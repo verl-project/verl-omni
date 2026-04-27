@@ -9,7 +9,7 @@ ocr_test_path=$WORKSPACE/data/ocr/test.parquet
 
 model_name=Qwen/Qwen-Image
 reward_model_name=Qwen/Qwen3-VL-8B-Instruct
-reward_function_path=examples/flowgrpo_trainer/reward_fn.py
+reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
 
 NUM_GPUS_ACTOR_ROLLOUT=4
 NUM_GPUS_REWARD=1
@@ -20,7 +20,7 @@ ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
 
-python3 -m verl_omni.trainer.main_flowgrpo \
+python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     algorithm.adv_estimator=flow_grpo \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \

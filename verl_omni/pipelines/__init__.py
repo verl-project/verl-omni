@@ -12,11 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Import diffusers training adapters so registered model handlers can be resolved
-by architecture at runtime.
-"""
+from .qwen_image_flow_grpo import *  # noqa: F401, F403
 
-from .qwen_image.diffusers_training_adapter import QwenImage
-
-__all__ = ["QwenImage"]
+__all__ = qwen_image_flow_grpo.__all__

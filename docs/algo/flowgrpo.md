@@ -37,7 +37,7 @@ Empirically, RL-tuned SD3.5-M with Flow-GRPO raises GenEval accuracy from 63% to
 
 ## Configuration
 
-Diffusion training now uses dedicated diffusion config blocks. In `verl/trainer/config/diffusion_trainer.yaml`,
+Diffusion training now uses dedicated diffusion config blocks. In `verl_omni/trainer/config/diffusion_trainer.yaml`,
 the main sections are:
 
 - `algorithm`: diffusion-specific advantage computation and normalization
@@ -216,7 +216,7 @@ bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh
 FlowGRPO also supports rule-based rewards that score images directly without a
 VLM reward model, using the same `reward.reward_manager.name=visual` setup.
 
-`verl/utils/reward_score/jpeg_compressibility.py` rewards images that are
+`verl_omni/utils/reward_score/jpeg_compressibility.py` rewards images that are
 harder to JPEG-compress (richer texture, more complex content). No extra
 dependencies or reward model process are required.
 

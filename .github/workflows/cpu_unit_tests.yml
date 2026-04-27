@@ -1,48 +1,59 @@
-name: sanity
+name: cpu_unit_tests
 
 on:
   push:
     branches:
       - main
       - v0.*
+    paths:
+      - "verl_omni/**"
+      - "tests/**/*_on_cpu.py"
+      - "requirements*.txt"
+      - .github/workflows/cpu_unit_tests.yml
   pull_request:
     branches:
       - main
       - v0.*
     paths:
-      - "**/*.py"
-      - .github/workflows/sanity.yml
-      - "tests/special_sanity/**"
+      - "verl_omni/**"
+      - "tests/**/*_on_cpu.py"
+      - "requirements*.txt"
+      - .github/workflows/cpu_unit_tests.yml
 
+# Cancel jobs on the same ref if a new one is triggered
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# Declare permissions just read content.
 permissions:
   contents: read
 
 jobs:
-  sanity:
+  cpu_unit_tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     strategy:
       matrix:
         python-version: ["3.10"]
+    env:
+      TORCH_COMPILE_DISABLE: 1
+      TORCHINDUCTOR_DISABLE: 1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install the current repository
+      - name: Install dependencies (CPU-only torch)
         run: |
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@main"
           pip install -r requirements.txt
           pip install -r requirements-test.txt
           pip install --no-deps -e .
-      - name: Run sanity test
+      - name: Run CPU unit tests
         run: |
-          pytest -s -x tests/special_sanity
-      - name: Assert documentation requirement for functions
-        run: python3 tests/special_sanity/validate_imported_docs.py
+          echo '[pytest]' > pytest.ini
+          echo 'python_files = *_on_cpu.py' >> pytest.ini
+          pytest -s -x --asyncio-mode=auto tests/

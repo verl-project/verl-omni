@@ -22,12 +22,14 @@ _PATCHED = False
 
 
 def _patch_diffusion_agent_loop() -> None:
-    """Alias ``verl.experimental.agent_loop.diffusion_agent_loop`` to the
-    ``verl_omni`` implementation so that upstream lazy imports
-    (e.g. inside ``AgentLoopManager.__init__``) resolve to it.
+    """Alias ``verl.experimental.agent_loop.diffusion_agent_loop`` and
+    ``verl.experimental.agent_loop.single_turn_agent_loop`` to the
+    ``verl_omni`` implementations so that upstream lazy imports
+    (e.g. inside ``AgentLoopManager.__init__``) resolve to them.
     TODO (mike): to be dropped
     """
-    import verl_omni.experimental.agent_loop.diffusion_agent_loop as _omni_dal
+    import verl_omni.agent_loop.diffusion_agent_loop as _omni_dal
+    import verl_omni.agent_loop.single_turn_agent_loop  # noqa: F401
 
     sys.modules["verl.experimental.agent_loop.diffusion_agent_loop"] = _omni_dal
 
@@ -60,15 +62,15 @@ def _patch_vllm_omni_replica() -> None:
 
 def _patch_diffusers_model() -> None:
     """Alias ``verl.models.diffusers_model`` (and its ``base`` / ``utils``
-    submodules) to verl-omni's ``verl_omni.models.diffusion_model`` so
+    submodules) to verl-omni's ``verl_omni.pipelines`` so
     that upstream code using the verl-side ``DiffusionModelBase`` registry
     (e.g. ``verl/workers/engine/fsdp/diffusers_impl.py``) resolves to the
     verl-omni registry where pipelines are actually registered.
     TODO (mike): to be dropped
     """
-    import verl_omni.models.diffusion_model as _omni_pkg
-    import verl_omni.models.diffusion_model.base as _omni_base
-    import verl_omni.models.diffusion_model.utils as _omni_utils
+    import verl_omni.pipelines as _omni_pkg
+    import verl_omni.pipelines.model_base as _omni_base
+    import verl_omni.pipelines.utils as _omni_utils
 
     sys.modules["verl.models.diffusers_model"] = _omni_pkg
     sys.modules["verl.models.diffusers_model.base"] = _omni_base
@@ -104,6 +106,21 @@ def _patch_fsdp_diffusers_engine() -> None:
         parent.diffusers_impl = _omni_impl
 
 
+def _patch_visual_reward_manager() -> None:
+    """Replace the ``"visual"`` entry in verl's ``REWARD_MANAGER`` registry
+    with verl-omni's ``VisualRewardManager``, which uses verl-omni's
+    ``default_compute_score_image`` dispatcher (supporting reward score
+    functions defined in ``verl_omni.utils.reward_score``).
+    TODO (mike): to be dropped
+    """
+    import verl.experimental.reward_loop.reward_manager  # noqa: F401 — triggers verl's @register("visual")
+    from verl.experimental.reward_loop.reward_manager.registry import REWARD_MANAGER
+
+    from verl_omni.reward_loop.reward_manager.visual import VisualRewardManager as _OmniVisual
+
+    REWARD_MANAGER["visual"] = _OmniVisual
+
+
 def apply_patches() -> None:
     """Apply all verl-omni compatibility patches.  Safe to call multiple
     times."""
@@ -119,4 +136,5 @@ def apply_patches() -> None:
     _patch_vllm_omni_replica()
     _patch_diffusers_model()
     _patch_fsdp_diffusers_engine()
+    _patch_visual_reward_manager()
     _PATCHED = True

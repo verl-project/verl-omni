@@ -12,15 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .diffusers_training_adapter import QwenImage
+from .visual import VisualRewardManager
 
-__all__ = ["QwenImage", "QwenImagePipelineWithLogProb"]
-
-
-def __getattr__(name: str):
-    if name == "QwenImagePipelineWithLogProb":
-        from .vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
-
-        return QwenImagePipelineWithLogProb
-    msg = f"module {__name__!r} has no attribute {name!r}"
-    raise AttributeError(msg)
+__all__ = ["VisualRewardManager"]

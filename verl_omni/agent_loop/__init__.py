@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib.util
+from .diffusion_agent_loop import DiffusionAgentLoopOutput, DiffusionAgentLoopWorker
+from .single_turn_agent_loop import DiffusionSingleTurnAgentLoop
 
-from . import (  # noqa: F401
-    diffusers_training,
-    vllm_omni_rollout,
-)
-
-if importlib.util.find_spec("vllm_omni") is not None:
-    from .qwen_image import vllm_omni_rollout_adapter  # noqa: F401, E402
+__all__ = [
+    "DiffusionAgentLoopOutput",
+    "DiffusionAgentLoopWorker",
+    "DiffusionSingleTurnAgentLoop",
+]

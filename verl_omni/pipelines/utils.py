@@ -21,7 +21,7 @@ from verl.utils.device import get_device_name
 
 from verl_omni.workers.config import DiffusionModelConfig
 
-from .base import DiffusionModelBase
+from .model_base import DiffusionModelBase
 
 
 def prepare_model_inputs(

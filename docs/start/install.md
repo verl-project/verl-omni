@@ -4,29 +4,30 @@ Last updated: 04/23/2026
 
 ## Requirements
 
-| Dependency | Version |
-|---|---|
-| Python | >= 3.10 |
-| CUDA | >= 12.1 |
-| GPU | NVIDIA GPU (≥ 24 GB VRAM recommended) |
+- **Python**: Version >= 3.10
+- **CUDA**: Version >= 12.8
 
 ## Install
 
-Install in this order to avoid dependency conflicts:
+Install in the following order to avoid dependency conflicts:
 
 ```bash
-# 1. vLLM and vLLM-Omni rollout backend
-pip install "vllm==0.18" "vllm-omni==0.18"
+uv venv --python 3.12 --seed
+source .venv/bin/activate
 
-# 2. verl
-pip install git+https://github.com/verl-project/verl.git@3eab8ccc6143c624e7f11c871896f941b3fec900
+# Install vllm, vllm-omni, then verl in order
+uv pip install vllm==0.18.0
+uv pip install vllm-omni==0.18
+uv pip install git+https://github.com/verl-project/verl.git@3eab8ccc6143c624e7f11c871896f941b3fec900
 
-# 3. VeRL-Omni
-pip install git+https://github.com/verl-project/verl-omni.git@main
+# Install verl-omni from source
+git clone https://github.com/verl-project/verl-omni.git
+cd verl-omni
+uv pip install -e .
 ```
 
-Note: Install vLLM and vLLM-Omni first — they may override your existing PyTorch installation,
-so installing them before verl and VeRL-Omni ensures a compatible CUDA-aware torch version.
+Note: Install vllm and vllm-omni first — they may override your existing PyTorch installation,
+so installing them before verl and verl-omni ensures a compatible CUDA-aware torch version.
 
 ## Optional Dependencies
 
@@ -39,5 +40,5 @@ so installing them before verl and VeRL-Omni ensures a compatible CUDA-aware tor
 ```bash
 python -c "import torch; print('torch', torch.__version__, '| CUDA', torch.version.cuda)"
 python -c "import vllm; print('vllm', vllm.__version__)"
-python -c "import verl; print('VeRL-Omni ready')"
+python -c "import verl_omni; print('VeRL-Omni ready')"
 ```

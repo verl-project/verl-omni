@@ -12,14 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .base import DiffusionModelBase, VllmOmniPipelineBase
-from .utils import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs, set_timesteps
+from .diffusers_training_adapter import QwenImage
 
-__all__ = [
-    "DiffusionModelBase",
-    "VllmOmniPipelineBase",
-    "build_scheduler",
-    "set_timesteps",
-    "prepare_model_inputs",
-    "forward_and_sample_previous_step",
-]
+__all__ = ["QwenImage"]
+
+try:
+    from .vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
+except ImportError:
+    QwenImagePipelineWithLogProb = None
+
+
+if QwenImagePipelineWithLogProb is not None:
+    __all__.append("QwenImagePipelineWithLogProb")

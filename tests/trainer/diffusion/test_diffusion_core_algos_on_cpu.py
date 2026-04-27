@@ -39,6 +39,41 @@ def test_flow_grpo_advantage_return(norm_adv_by_std_in_grpo: bool, global_std: b
     assert advantages.shape == returns.shape == (batch_size, steps)
 
 
+@pytest.mark.parametrize("norm_adv_by_std_in_grpo", [True, False])
+@pytest.mark.parametrize("global_std", [True, False])
+def test_flow_grpo_advantage_grouped_uids(norm_adv_by_std_in_grpo: bool, global_std: bool) -> None:
+    """Exercises the len > 1 branch: multiple samples sharing the same prompt UID."""
+    steps = 5
+    # 4 samples: uid-0 × 2, uid-1 × 2  →  2 groups of size 2
+    group_rewards = torch.tensor(
+        [[1.0] * steps, [3.0] * steps, [0.0] * steps, [2.0] * steps],
+        dtype=torch.float32,
+    )
+    uid = np.array(["uid-0", "uid-0", "uid-1", "uid-1"], dtype=object)
+
+    advantages, returns = diffusion_algos.compute_flow_grpo_outcome_advantage(
+        sample_level_rewards=group_rewards,
+        index=uid,
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        global_std=global_std,
+    )
+
+    assert advantages.shape == returns.shape == (4, steps)
+
+    if not norm_adv_by_std_in_grpo:
+        # Without std scaling: advantage = reward - group_mean
+        # group uid-0 mean = (1+3)/2 = 2.0  →  advantages: -1, +1
+        # group uid-1 mean = (0+2)/2 = 1.0  →  advantages: -1, +1
+        torch.testing.assert_close(advantages[0], torch.full((steps,), -1.0))
+        torch.testing.assert_close(advantages[1], torch.full((steps,), 1.0))
+        torch.testing.assert_close(advantages[2], torch.full((steps,), -1.0))
+        torch.testing.assert_close(advantages[3], torch.full((steps,), 1.0))
+    else:
+        # With std scaling: mean should be 0 for each group
+        torch.testing.assert_close(advantages[0:2].mean(), torch.tensor(0.0), atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(advantages[2:4].mean(), torch.tensor(0.0), atol=1e-6, rtol=1e-6)
+
+
 def test_compute_policy_loss_flow_grpo() -> None:
     from hydra import compose, initialize_config_dir
     from verl.utils.config import omega_conf_to_dataclass
@@ -76,3 +111,6 @@ def test_compute_policy_loss_flow_grpo() -> None:
         assert pg_loss.shape == ()
         assert isinstance(pg_loss.item(), float)
         assert "actor/ppo_kl" in pg_metrics
+        assert "actor/pg_clipfrac" in pg_metrics
+        assert "actor/pg_clipfrac_higher" in pg_metrics
+        assert "actor/pg_clipfrac_lower" in pg_metrics

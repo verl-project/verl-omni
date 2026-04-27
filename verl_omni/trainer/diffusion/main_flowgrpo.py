@@ -28,7 +28,7 @@ from verl.utils.device import auto_set_device
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import RayFlowGRPOTrainer
 
 
-@hydra.main(config_path="config", config_name="diffusion_trainer", version_base=None)
+@hydra.main(config_path="../config", config_name="diffusion_trainer", version_base=None)
 def main(config):
     """Main entry point for FlowGRPO / diffusion model training with Hydra configuration management.
 
