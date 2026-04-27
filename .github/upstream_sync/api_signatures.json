@@ -7,5 +7,3679 @@
       "vllm_omni": "vllm-omni==0.18"
     }
   },
-  "signatures": {}
+  "signatures": {
+    "verl.base_config.BaseConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.checkpoint_engine.CheckpointEngineManager": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "trainer": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "replicas": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.checkpoint_engine.CheckpointEngineRegistry": {
+      "kind": "class",
+      "methods": {
+        "register": {
+          "params": {
+            "backend": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.experimental.agent_loop.AgentLoopManager": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "worker_group": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "rollout_resource_pool": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "teacher_model_manager": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "reward_loop_worker_handles": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "generate_sequences": {
+          "params": {
+            "prompts": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.experimental.agent_loop.agent_loop.AgentLoopBase": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "trainer_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "server_manager": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "tokenizer": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "processor": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "dataset_cls": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "data_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "kwargs": {
+              "kind": "VAR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        },
+        "run": {
+          "params": {
+            "sampling_params": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "kwargs": {
+              "kind": "VAR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      },
+      "abstract_methods": [
+        "run"
+      ]
+    },
+    "verl.experimental.agent_loop.agent_loop.AgentLoopMetrics": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "data": {
+              "kind": "VAR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.experimental.agent_loop.agent_loop.AsyncLLMServerManager": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "servers": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "load_balancer_handle": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        },
+        "generate": {
+          "params": {
+            "request_id": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "prompt_ids": {
+              "kind": "KEYWORD_ONLY",
+              "required": true
+            },
+            "sampling_params": {
+              "kind": "KEYWORD_ONLY",
+              "required": true
+            },
+            "image_data": {
+              "kind": "KEYWORD_ONLY",
+              "required": false
+            },
+            "video_data": {
+              "kind": "KEYWORD_ONLY",
+              "required": false
+            },
+            "kwargs": {
+              "kind": "VAR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.experimental.agent_loop.agent_loop.DictConfigWrap": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.experimental.agent_loop.agent_loop._agent_loop_registry": {
+      "kind": "dict"
+    },
+    "verl.experimental.agent_loop.agent_loop._get_rollout_and_model_config": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "config": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.experimental.agent_loop.agent_loop.register": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "agent_name": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.experimental.agent_loop.utils.resolve_config_path": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "config_path": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.experimental.dataset.sampler.AbstractCurriculumSampler": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "data_source": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "data_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.experimental.reward_loop.RewardLoopManager": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "rm_resource_pool": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.experimental.reward_loop.reward_manager.base.RewardManagerBase": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "tokenizer": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "compute_score": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        },
+        "run_single": {
+          "params": {
+            "data": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      },
+      "abstract_methods": [
+        "run_single"
+      ]
+    },
+    "verl.experimental.reward_loop.reward_manager.registry.REWARD_MANAGER": {
+      "kind": "dict"
+    },
+    "verl.protocol.DataProto": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "batch": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "non_tensor_batch": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "meta_info": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.protocol.pad_dataproto_to_divisor": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "data": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "size_divisor": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.protocol.unpad_dataproto": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "data": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "pad_size": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.single_controller.base.Worker": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "cuda_visible_devices": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.single_controller.base.decorator.Dispatch": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "name": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "value": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "name": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.single_controller.base.decorator.make_nd_compute_dataproto_dispatch_fn": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "mesh_name": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.single_controller.base.decorator.register": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "dispatch_mode": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "execute_mode": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "blocking": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "materialize_futures": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.single_controller.ray.RayClassWithInitArgs": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "cls": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "args": {
+              "kind": "VAR_POSITIONAL",
+              "required": false
+            },
+            "kwargs": {
+              "kind": "VAR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.single_controller.ray.RayWorkerGroup": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "resource_pool": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "ray_cls_with_init": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "bin_pack": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "name_prefix": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "detached": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "worker_names": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "worker_handles": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "ray_wait_register_center_timeout": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "kwargs": {
+              "kind": "VAR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.single_controller.ray.ResourcePoolManager": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "resource_pool_spec": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "mapping": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "resource_pool_dict": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.single_controller.ray.base.create_colocated_worker_cls": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "class_dict": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.trainer.config.CheckpointConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "save_contents": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "load_contents": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "async_save": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "mbridge_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.trainer.config.DiffusionAlgoConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "adv_estimator": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "norm_adv_by_std_in_grpo": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "rollout_correction": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "global_std": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.trainer.constants_ppo.get_ppo_ray_runtime_env": {
+      "kind": "function",
+      "signature": {
+        "params": {}
+      }
+    },
+    "verl.trainer.distillation.distillation_ppo_loss": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "config": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "distillation_config": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "model_output": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "data": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "dp_group": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "student_logits": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "data_format": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.trainer.distillation.is_distillation_enabled": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "config": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.trainer.main_ppo.create_rl_dataset": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "data_paths": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "data_config": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "tokenizer": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "processor": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "is_train": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "max_samples": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.trainer.main_ppo.create_rl_sampler": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "data_config": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "dataset": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.trainer.ppo.metric_utils.compute_variance_proxy_metrics": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "batch": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "gradient_norm": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.trainer.ppo.metric_utils.process_validation_metrics": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "data_sources": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "sample_uids": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "infos_dict": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "seed": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.trainer.ppo.ray_trainer.ResourcePoolManager": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "resource_pool_spec": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "mapping": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "resource_pool_dict": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.trainer.ppo.ray_trainer.Role": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "args": {
+              "kind": "VAR_POSITIONAL",
+              "required": false
+            },
+            "kwds": {
+              "kind": "VAR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.trainer.ppo.reward.extract_reward": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "batch": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.trainer.ppo.utils.Role": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "args": {
+              "kind": "VAR_POSITIONAL",
+              "required": false
+            },
+            "kwds": {
+              "kind": "VAR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.trainer.ppo.utils.WorkerType": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "args": {
+            "kind": "VAR_POSITIONAL",
+            "required": false
+          },
+          "kwargs": {
+            "kind": "VAR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.trainer.ppo.utils.need_reference_policy": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "config": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.trainer.ppo.utils.need_reward_model": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "config": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.hf_processor": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "name_or_path": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "kwargs": {
+            "kind": "VAR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.hf_tokenizer": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "name_or_path": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "correct_pad_token": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "correct_gemma2": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "kwargs": {
+            "kind": "VAR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.tensordict_utils": {
+      "kind": "module"
+    },
+    "verl.utils.checkpoint.checkpoint_manager.find_latest_ckpt_path": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "path": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "directory_format": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.checkpoint.checkpoint_manager.should_save_ckpt_esi": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "max_steps_duration": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "save_ckpt_duration": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "redundant_time": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.checkpoint.fsdp_checkpoint_manager.FSDPCheckpointManager": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "model": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "optimizer": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "lr_scheduler": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "processing_class": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "checkpoint_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "trust_remote_code": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "kwargs": {
+              "kind": "VAR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.utils.config.omega_conf_to_dataclass": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "config": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "dataclass_type": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.dataset.rl_dataset.collate_fn": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "data_list": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.dataset.rl_dataset.get_dataset_class": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "data_config": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.debug.log_gpu_memory_usage": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "head": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "logger": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "level": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "rank": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.debug.marked_timer": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "name": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "timing_raw": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "color": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "domain": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "category": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.device.auto_set_device": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "config": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.device.get_device_id": {
+      "kind": "function",
+      "signature": {
+        "params": {}
+      }
+    },
+    "verl.utils.device.get_device_name": {
+      "kind": "function",
+      "signature": {
+        "params": {}
+      }
+    },
+    "verl.utils.device.is_npu_available": {
+      "kind": "bool"
+    },
+    "verl.utils.device.set_expandable_segments": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "enable": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.distributed.initialize_global_process_group_ray": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "timeout_second": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "backend": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.distributed.set_numa_affinity": {
+      "kind": "function",
+      "signature": {
+        "params": {}
+      }
+    },
+    "verl.utils.experimental.reward_utils.pil_image_to_base64": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "image": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.flops_counter.FlopsCounter": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.utils.fs.copy_to_local": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "src": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "cache_dir": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "filelock": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "verbose": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "always_recopy": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "use_shm": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.fs.local_mkdir_safe": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "path": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.fsdp_utils.CPUOffloadPolicy": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "pin_memory": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.utils.fsdp_utils.FSDPModule": {
+      "kind": "class"
+    },
+    "verl.utils.fsdp_utils.MixedPrecisionPolicy": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "param_dtype": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "reduce_dtype": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "output_dtype": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "cast_forward_inputs": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.utils.fsdp_utils.apply_fsdp2": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "model": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "fsdp_kwargs": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "config": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.fsdp_utils.collect_lora_params": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "module": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "layered_summon": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "base_sync_done": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "is_diffusers": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.fsdp_utils.fsdp2_clip_grad_norm_": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "parameters": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "max_norm": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "norm_type": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "error_if_nonfinite": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "foreach": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.fsdp_utils.fsdp2_load_full_state_dict": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "model": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "full_state": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "device_mesh": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "cpu_offload": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.fsdp_utils.fsdp_version": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "model": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.fsdp_utils.get_fsdp_wrap_policy": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "module": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "config": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "is_lora": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.fsdp_utils.get_init_weight_context_manager": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "use_meta_tensor": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "mesh": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.fsdp_utils.init_fn": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "x": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.fsdp_utils.load_fsdp_model_to_gpu": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "model": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.fsdp_utils.load_fsdp_optimizer": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "optimizer": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "device_id": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.fsdp_utils.offload_fsdp_model_to_cpu": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "model": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "empty_cache": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.fsdp_utils.offload_fsdp_optimizer": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "optimizer": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.fsdp_utils.replace_lora_wrapper": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "k": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "peft_config": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.import_utils.import_external_libs": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "external_libs": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.import_utils.load_class_from_fqn": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "fqn": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "description": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.memory_utils.aggressive_empty_cache": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "force_sync": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "max_retries": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.metric.AggregationType": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "args": {
+              "kind": "VAR_POSITIONAL",
+              "required": false
+            },
+            "kwds": {
+              "kind": "VAR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.utils.metric.Metric": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "aggregation": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "value": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.utils.metric.reduce_metrics": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "metrics": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.metric.utils.Metric": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "aggregation": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "value": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.utils.model.convert_weight_keys": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "state_dict": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "model": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.model.print_model_size": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "model": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "name": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.profiler.DistProfiler": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "rank": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "tool_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "kwargs": {
+              "kind": "VAR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.utils.profiler.DistProfilerExtension": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "profiler": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "dispatch_mode": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "execute_mode": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "blocking": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "materialize_futures": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.utils.profiler.ProfilerConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "tool": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enable": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "all_ranks": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "ranks": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "save_path": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "tool_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "global_tool_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.utils.profiler.log_gpu_memory_usage": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "head": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "logger": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "level": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "rank": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.profiler.simple_timer": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "name": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "timing_raw": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.py_functional.append_to_dict": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "data": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "new_data": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "prefix": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.py_functional.convert_to_regular_types": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "obj": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.py_functional.rename_dict": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "data": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "prefix": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.ray_utils.get_event_loop": {
+      "kind": "function",
+      "signature": {
+        "params": {}
+      }
+    },
+    "verl.utils.tensordict_utils.maybe_fix_3d_position_ids": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "data": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.tokenizer.normalize_token_ids": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "tokenized_output": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.utils.torch_dtypes.PrecisionType": {
+      "kind": "class"
+    },
+    "verl.utils.torch_functional.allgather_dict_into_dict": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "data": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "group": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.torch_functional.get_constant_schedule_with_warmup": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "optimizer": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "num_warmup_steps": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "last_epoch": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.torch_functional.get_cosine_schedule_with_warmup": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "optimizer": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "num_warmup_steps": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "num_training_steps": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "min_lr_ratio": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "num_cycles": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "last_epoch": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "init_lr_ratio": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "zero_indexed_step": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.utils.tracking.Tracking": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "project_name": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "experiment_name": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "default_backend": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.utils.tracking.ValidationGenerationsLogger": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "project_name": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "experiment_name": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.config.ActorConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "strategy": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "ppo_mini_batch_size": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "ppo_micro_batch_size": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "ppo_micro_batch_size_per_gpu": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "ppo_infer_micro_batch_size_per_gpu": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_dynamic_bsz": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "ppo_max_token_len_per_gpu": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "ppo_infer_max_token_len_per_gpu": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "clip_ratio": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "clip_ratio_low": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "clip_ratio_high": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "freeze_vision_tower": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "policy_loss": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "clip_ratio_c": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "loss_agg_mode": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "loss_scale_factor": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "entropy_coeff": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "tau_pos": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "tau_neg": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "calculate_entropy": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "calculate_sum_pi_squared": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_kl_loss": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_prefix_grouper": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_torch_compile": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "kl_loss_coef": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "kl_loss_type": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "ppo_epochs": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "shuffle": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "data_loader_seed": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "checkpoint": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "optim": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_fused_kernels": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "profiler": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "engine": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "rollout_n": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "model_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "router_replay": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "global_batch_info": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "qat": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.config.DistillationConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enabled": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "n_gpus_per_node": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "nnodes": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "teacher_models": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "teacher_key": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "distillation_loss": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.config.FSDPEngineConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "param_offload": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "optimizer_offload": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "grad_offload": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "forward_only": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "strategy": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "dtype": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_dynamic_bsz": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "max_token_len_per_gpu": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "micro_batch_size_per_gpu": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "infer_max_token_len_per_gpu": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "infer_micro_batch_size_per_gpu": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_fused_kernels": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_remove_padding": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "seed": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "full_determinism": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "router_replay": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "wrap_policy": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "offload_policy": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "reshard_after_forward": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "fsdp_size": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "forward_prefetch": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "model_dtype": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_orig_params": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "mixed_precision": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "ulysses_sequence_parallel_size": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "entropy_from_logits_with_chunking": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_torch_compile": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "entropy_checkpointing": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "qat": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.config.FSDPOptimizerConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "lr": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "lr_warmup_steps_ratio": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "total_training_steps": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "weight_decay": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "lr_warmup_steps": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "betas": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "clip_grad": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "grad_clip": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "optimizer": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "optimizer_impl": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "min_lr_ratio": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "warmup_style": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "lr_scheduler_type": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "num_cycles": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "override_optimizer_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "zero_indexed_step": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.config.HFModelConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "path": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "local_path": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "hf_config_path": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "local_hf_config_path": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "tokenizer_path": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "local_tokenizer_path": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "model_type": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "load_tokenizer": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "hf_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "generation_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "tokenizer": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "processor": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_shm": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "trust_remote_code": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "custom_chat_template": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "external_lib": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "override_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enable_gradient_checkpointing": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enable_activation_offload": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_remove_padding": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "lora_rank": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "lora_alpha": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "target_modules": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "target_parameters": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "exclude_modules": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "lora": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "lora_adapter_path": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_liger": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_fused_kernels": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "fused_kernel_options": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "tiled_mlp": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "architectures": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "mtp": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.config.MtpConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enable": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enable_train": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enable_rollout": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "detach_encoder": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "mtp_loss_scaling_factor": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "speculative_algorithm": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "speculative_num_steps": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "speculative_eagle_topk": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "speculative_num_draft_tokens": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "method": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "num_speculative_tokens": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.config.RolloutConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "name": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "mode": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "nnodes": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "n_gpus_per_node": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "temperature": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "top_k": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "top_p": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "do_sample": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "n": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "repetition_penalty": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "over_sample_rate": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "prompt_length": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "response_length": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "dtype": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "gpu_memory_utilization": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "ignore_eos": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enforce_eager": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "cudagraph_capture_sizes": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "free_cache_engine": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "data_parallel_size": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "expert_parallel_size": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "tensor_model_parallel_size": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "pipeline_model_parallel_size": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "moe_tensor_parallel_size": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "max_num_batched_tokens": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "logprobs_mode": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "scheduling_policy": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "val_kwargs": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "max_model_len": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "max_num_seqs": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "log_prob_micro_batch_size": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "log_prob_micro_batch_size_per_gpu": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "log_prob_use_dynamic_bsz": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "log_prob_max_token_len_per_gpu": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "disable_log_stats": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "multi_stage_wake_up": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "engine_kwargs": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "calculate_log_probs": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "agent": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "trace": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "multi_turn": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "server": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "prometheus": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "custom": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "checkpoint_manager_class": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "checkpoint_engine": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "skip": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "profiler": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enable_chunked_prefill": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enable_prefix_caching": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "load_format": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "layered_summon": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "layer_name_map": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "sglang_engine_mode": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "limit_images": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "skip_tokenizer_init": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "quantization": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "quantization_config_file": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enable_rollout_routing_replay": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enable_sleep_mode": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "mtp": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "qat": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.config.TrainingWorkerConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "model_type": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "model_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "engine_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "optimizer_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "checkpoint_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "profiler_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "auto_select_engine_optim_fn": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.config.engine.FSDPEngineConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "param_offload": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "optimizer_offload": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "grad_offload": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "forward_only": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "strategy": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "dtype": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_dynamic_bsz": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "max_token_len_per_gpu": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "micro_batch_size_per_gpu": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "infer_max_token_len_per_gpu": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "infer_micro_batch_size_per_gpu": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_fused_kernels": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_remove_padding": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "seed": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "full_determinism": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "router_replay": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "wrap_policy": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "offload_policy": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "reshard_after_forward": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "fsdp_size": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "forward_prefetch": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "model_dtype": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_orig_params": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "mixed_precision": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "ulysses_sequence_parallel_size": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "entropy_from_logits_with_chunking": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_torch_compile": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "entropy_checkpointing": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "qat": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.config.model.MtpConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enable": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enable_train": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enable_rollout": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "detach_encoder": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "mtp_loss_scaling_factor": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "speculative_algorithm": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "speculative_num_steps": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "speculative_eagle_topk": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "speculative_num_draft_tokens": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "method": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "num_speculative_tokens": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.config.optimizer.OptimizerConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "lr": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "lr_warmup_steps_ratio": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "total_training_steps": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "weight_decay": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "lr_warmup_steps": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "betas": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "clip_grad": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "grad_clip": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.config.optimizer.build_optimizer": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "parameters": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "config": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.workers.config.rollout.AgentLoopConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "num_workers": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "default_agent_loop": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "agent_loop_config_path": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "custom_async_server": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "agent_loop_manager_class": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.config.rollout.CheckpointEngineConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "backend": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "update_weights_bucket_megabytes": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "engine_kwargs": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "custom_backend_module": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.config.rollout.MultiTurnConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enable": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "max_assistant_turns": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "tool_config_path": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "max_user_turns": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "max_parallel_calls": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "max_tool_response_length": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "tool_response_truncate_side": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "use_inference_chat_template": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "tokenization_sanity_check_mode": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "format": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "num_repeat_rollouts": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.config.rollout.PrometheusConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "enable": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "port": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "file": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "served_model_name": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.config.rollout.SamplingConfig": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "_target_": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "temperature": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "top_k": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "top_p": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "do_sample": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            },
+            "n": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.engine.BaseEngine": {
+      "kind": "class"
+    },
+    "verl.workers.engine.EngineRegistry": {
+      "kind": "class",
+      "methods": {
+        "register": {
+          "params": {
+            "model_type": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "backend": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "device": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.engine.base.BaseEngine": {
+      "kind": "class"
+    },
+    "verl.workers.engine.base.BaseEngineCtx": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "engine": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "mode": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "kwargs": {
+              "kind": "VAR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.engine.base.EngineRegistry": {
+      "kind": "class",
+      "methods": {
+        "register": {
+          "params": {
+            "model_type": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "backend": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "device": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": false
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.engine.fsdp.utils.create_device_mesh": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "world_size": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "fsdp_size": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.workers.engine.fsdp.utils.get_sharding_strategy": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "device_mesh": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.workers.engine.utils.enable_full_determinism": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "seed": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.workers.engine.utils.prepare_micro_batches": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "data": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "dp_group": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "num_batches_divided_by": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "same_micro_num_in_dp": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "min_num_micro_batch": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          },
+          "use_dynamic_bsz_balance": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.workers.rollout.base.BaseRollout": {
+      "kind": "class",
+      "methods": {
+        "__init__": {
+          "params": {
+            "config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "model_config": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "device_mesh": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "args": {
+              "kind": "VAR_POSITIONAL",
+              "required": false
+            },
+            "kwargs": {
+              "kind": "VAR_KEYWORD",
+              "required": false
+            }
+          }
+        },
+        "generate_sequences": {
+          "params": {
+            "prompts": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        },
+        "register": {
+          "params": {
+            "subclass": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      },
+      "abstract_methods": [
+        "release",
+        "resume",
+        "update_weights"
+      ]
+    },
+    "verl.workers.rollout.base.get_rollout_class": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "rollout_name": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "mode": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.workers.rollout.replica.RolloutReplicaRegistry": {
+      "kind": "class",
+      "methods": {
+        "register": {
+          "params": {
+            "name": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            },
+            "loader": {
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "required": true
+            }
+          }
+        }
+      }
+    },
+    "verl.workers.rollout.utils.run_uvicorn": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "app": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "server_args": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "server_address": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    },
+    "verl.workers.utils.losses.ppo_loss": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "config": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "model_output": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "data": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          },
+          "dp_group": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": false
+          }
+        }
+      }
+    },
+    "verl.workers.utils.padding.embeds_padding_2_no_padding": {
+      "kind": "function",
+      "signature": {
+        "params": {
+          "data": {
+            "kind": "POSITIONAL_OR_KEYWORD",
+            "required": true
+          }
+        }
+      }
+    }
+  }
 }
