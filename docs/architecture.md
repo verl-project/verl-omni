@@ -1,6 +1,6 @@
 # verl-omni Architecture Overview
 
-Last updated: 04/24/2026
+Last updated: 04/27/2026
 
 This document gives community developers a visual map of **verl-omni**: its
 modules, the main public APIs, how the modules talk to each other, and how the

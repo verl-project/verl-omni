@@ -30,6 +30,13 @@ algo/performance.md
 
 ```{toctree}
 :maxdepth: 1
+:caption: Architecture
+
+architecture.md
+```
+
+```{toctree}
+:maxdepth: 1
 :caption: Contributing
 
 contributing/editing-agent-instructions.md
