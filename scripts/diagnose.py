@@ -104,11 +104,11 @@ def check_verl_omni():
         print("Version      :", verl_omni.__version__)
         verl_omni_dir = os.path.dirname(verl_omni.__file__)
         print("Directory    :", verl_omni_dir)
-        try:
-            commit_hash = _get_current_git_commit()
+        commit_hash = _get_current_git_commit()
+        if commit_hash:
             print("Commit Hash  :", commit_hash)
-        except AttributeError:
-            print("Commit hash not found. ")
+        else:
+            print("Commit hash not found.")
     except ImportError as e:
         print(f"No VeRL-Omni installed: {e}")
     except Exception as e:
