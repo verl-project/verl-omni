@@ -107,7 +107,44 @@ jobs:
         run: python scripts/upstream_sync/apply_signature_fixes.py
 
       # -----------------------------------------------------------------------
-      # 5. Run sanity checks on edited code
+      # 5. Complex tier: Cursor agent for structural signature changes
+      #    Runs only when apply_signature_fixes.py found cases it couldn't
+      #    handle mechanically (params_restructured, symbol_gone, etc.).
+      #    Cursor edits are added to the SAME PR as mechanical fixes so all
+      #    Track 1 changes are reviewed together.
+      # -----------------------------------------------------------------------
+      - name: Generate complex-tier Cursor prompt
+        if: steps.fix.outputs.has_complex == 'true'
+        run: python scripts/upstream_sync/generate_track1_complex_prompt.py
+
+      - name: Install Cursor CLI (complex tier)
+        if: steps.fix.outputs.has_complex == 'true'
+        run: |
+          curl https://cursor.com/install -fsS | bash
+          echo "$HOME/.cursor/bin" >> "$GITHUB_PATH"
+
+      - name: Run Cursor agent on complex signature changes
+        if: steps.fix.outputs.has_complex == 'true'
+        id: cursor_complex
+        # Restricted: Cursor may read anything but only write verl_omni Python files.
+        # Git operations stay in explicit workflow steps.
+        run: |
+          cursor agent \
+            -p "$(cat track1_complex_cursor_prompt.md)" \
+            --model gpt-5.2 \
+            --allow "Read(**)" \
+            --allow "Write(verl_omni/**/*.py)" \
+            --deny  "Shell(git)" \
+            --deny  "Shell(gh)" \
+            --deny  "Write(.github/**)" \
+            --deny  "Write(scripts/**)" \
+            --deny  "Write(requirements*.txt)" \
+            --deny  "Write(setup.py)"
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+
+      # -----------------------------------------------------------------------
+      # 6. Run sanity checks on all edited code (mechanical + Cursor)
       # -----------------------------------------------------------------------
       - name: Sanity check edited code
         if: steps.fix.outputs.has_pr_content == 'true'
@@ -154,6 +191,9 @@ jobs:
           LABELS="upstream-sync"
           if [ "${{ steps.fix.outputs.needs_human_review }}" = "true" ]; then
             LABELS="$LABELS,needs-human-review"
+          fi
+          if [ "${{ steps.cursor_complex.outcome }}" = "success" ]; then
+            LABELS="$LABELS,ai-assisted"
           fi
           if [ "${{ steps.sanity.outcome }}" = "failure" ]; then
             LABELS="$LABELS,sanity-failed"
@@ -212,6 +252,7 @@ jobs:
         if: always()
         run: |
           rm -f signature_changes.json remaining_complex.json pr_body_track1.md \
+                track1_complex_cursor_prompt.md \
                 .github/upstream_sync/api_signatures_fresh.json
 
   # =========================================================================

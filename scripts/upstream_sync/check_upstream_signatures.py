@@ -171,6 +171,11 @@ def diff_snapshots(old_snap: dict, new_snap: dict) -> list[dict]:
         for change in changes:
             module_path, _, symbol = key.rpartition(".")
             change["verl_omni_usages"] = find_importing_files(module_path, symbol)
+            # Include old/new snapshot data for complex changes so the Cursor
+            # prompt can show a concrete before/after without re-loading the snapshot.
+            if change.get("tier") == "complex":
+                change["old_signature"] = old_info
+                change["new_signature"] = new_info
             all_changes.append(change)
 
     return all_changes

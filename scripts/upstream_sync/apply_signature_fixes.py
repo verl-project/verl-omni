@@ -256,10 +256,12 @@ def main() -> int:
     import os
     has_pr_content = bool(tier1_notes or tier3_notes or tier4_notes or all_complex)
     needs_human = bool(tier4_notes or all_complex)
+    has_complex = bool(all_complex)
     if gha_output := os.environ.get("GITHUB_OUTPUT"):
         with open(gha_output, "a") as f:
             f.write(f"has_pr_content={'true' if has_pr_content else 'false'}\n")
             f.write(f"needs_human_review={'true' if needs_human else 'false'}\n")
+            f.write(f"has_complex={'true' if has_complex else 'false'}\n")
 
     return 0
 
