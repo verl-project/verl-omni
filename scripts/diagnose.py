@@ -78,11 +78,8 @@ def check_python():
 def check_pip():
     print("------------Pip Info-----------")
     try:
-        import pip
-
-        print("Version      :", pip.__version__)
-        print("Directory    :", os.path.dirname(pip.__file__))
-    except ImportError:
+        print("Version      :", importlib.metadata.version("pip"))
+    except importlib.metadata.PackageNotFoundError:
         print("No corresponding pip install for current python.")
 
 
