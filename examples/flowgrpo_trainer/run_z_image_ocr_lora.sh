@@ -27,6 +27,7 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     data.val_files=$ocr_test_path \
     data.train_batch_size=32 \
     data.max_prompt_length=512 \
+    data.apply_chat_template_kwargs="{enable_thinking: true}" \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.height=1024 \
     actor_rollout_ref.model.width=1024 \

@@ -142,7 +142,7 @@ class ZImage(DiffusionModelBase):
         }
 
         negative_model_inputs = None
-        if model_config.true_cfg_scale > 0.0 and negative_prompt_embeds is not None:
+        if (model_config.guidance_scale or 0.0) > 0.0 and negative_prompt_embeds is not None:
             neg_cap_feats = split_padded_embeds_to_list(negative_prompt_embeds, negative_prompt_embeds_mask)
             negative_model_inputs = {
                 "x": x,
@@ -170,10 +170,16 @@ class ZImage(DiffusionModelBase):
         timesteps = scheduler_inputs["all_timesteps"]
 
         noise_pred = stack_transformer_output(module(**model_inputs)[0])
-        true_cfg_scale = model_config.true_cfg_scale
-        if true_cfg_scale > 0.0 and negative_model_inputs is not None:
+        guidance_scale = model_config.guidance_scale or 0.0
+        cfg_normalization = bool(getattr(model_config, "cfg_normalization", False))
+        if guidance_scale > 0.0 and negative_model_inputs is not None:
             neg_noise_pred = stack_transformer_output(module(**negative_model_inputs)[0])
-            noise_pred = apply_z_image_cfg(noise_pred, neg_noise_pred, true_cfg_scale)
+            noise_pred = apply_z_image_cfg(
+                noise_pred,
+                neg_noise_pred,
+                guidance_scale,
+                cfg_normalization=cfg_normalization,
+            )
 
         _, log_prob, prev_sample_mean, std_dev_t = scheduler.sample_previous_step(
             sample=latents[:, step].float(),

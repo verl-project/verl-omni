@@ -94,7 +94,7 @@ class TestCommonHelpers:
         neg = torch.tensor([[[[0.5, 1.0]]]])
         scale = 4.0
 
-        out = apply_z_image_cfg(pos, neg, scale, cfg_normalization=0.0)
+        out = apply_z_image_cfg(pos, neg, scale, cfg_normalization=False)
         expected = pos + scale * (pos - neg)
         assert torch.allclose(out, expected)
 
@@ -102,11 +102,11 @@ class TestCommonHelpers:
         torch.manual_seed(0)
         pos = torch.randn(2, 4, 3, 3)
         neg = torch.zeros_like(pos)
-        out = apply_z_image_cfg(pos, neg, cfg_scale=10.0, cfg_normalization=1.0)
+        out = apply_z_image_cfg(pos, neg, cfg_scale=10.0, cfg_normalization=True)
 
         pos_norm = pos.flatten(1).norm(dim=1)
         out_norm = out.flatten(1).norm(dim=1)
-        # With cfg_normalization=1.0 the post-CFG norm cannot exceed the
+        # With cfg_normalization=True the post-CFG norm cannot exceed the
         # positive-prediction norm.
         assert torch.all(out_norm <= pos_norm + 1e-5)
 

@@ -80,13 +80,15 @@ def apply_z_image_cfg(
     noise_pred: torch.Tensor,
     negative_noise_pred: torch.Tensor,
     cfg_scale: float,
-    cfg_normalization: float = 0.0,
+    cfg_normalization: bool = False,
 ) -> torch.Tensor:
     """Apply Z-Image style classifier-free guidance with optional renormalization.
 
-    Implements ``pred = pos + cfg_scale * (pos - neg)``; when
-    ``cfg_normalization > 0`` the resulting per-sample norm is clipped to
-    ``cfg_normalization * ||pos||``.
+    Implements ``pred = pos + cfg_scale * (pos - neg)``. When
+    ``cfg_normalization`` is true, the per-sample norm of the combined
+    prediction is clipped so it never exceeds ``||pos||`` (matching the
+    diffusers / vllm-omni Z-Image pipeline behaviour with the default
+    upstream "renormalize ratio" of 1.0).
 
     Args:
         noise_pred (torch.Tensor): Positive (conditional) noise prediction of
@@ -94,9 +96,9 @@ def apply_z_image_cfg(
         negative_noise_pred (torch.Tensor): Negative (unconditional) noise
             prediction with the same shape.
         cfg_scale (float): Classifier-free guidance scale.
-        cfg_normalization (float, *optional*): Maximum allowed ratio between the
-            CFG-combined norm and the positive-only norm. ``0`` disables
-            renormalization.
+        cfg_normalization (bool, *optional*): Whether to clip the combined
+            prediction's per-sample norm to ``||pos||``. Disabled by default,
+            matching the Z-Image HF model card.
 
     Returns:
         torch.Tensor: CFG-combined noise prediction of shape ``(B, C, H, W)``.
@@ -105,15 +107,14 @@ def apply_z_image_cfg(
     neg = negative_noise_pred.float()
     pred = pos + cfg_scale * (pos - neg)
 
-    if cfg_normalization and float(cfg_normalization) > 0.0:
+    if cfg_normalization:
         flat_pos = pos.flatten(1)
         flat_pred = pred.flatten(1)
         ori_pos_norm = torch.linalg.vector_norm(flat_pos, dim=1, keepdim=True)
         new_pos_norm = torch.linalg.vector_norm(flat_pred, dim=1, keepdim=True)
-        max_new_norm = ori_pos_norm * float(cfg_normalization)
         scale = torch.where(
-            new_pos_norm > max_new_norm,
-            (max_new_norm / new_pos_norm.clamp(min=1e-12)).to(pred.dtype),
+            new_pos_norm > ori_pos_norm,
+            (ori_pos_norm / new_pos_norm.clamp(min=1e-12)).to(pred.dtype),
             pred.new_tensor(1.0),
         )
         pred = pred * scale.view(-1, *([1] * (pred.dim() - 1)))

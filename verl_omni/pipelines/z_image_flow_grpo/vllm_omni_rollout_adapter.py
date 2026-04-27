@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
 from typing import Any, Literal
 
@@ -34,6 +35,8 @@ from .common import (
 )
 
 __all__ = ["ZImagePipelineWithLogProb"]
+
+logger = logging.getLogger(__name__)
 
 
 def _maybe_to_cpu(value):
@@ -109,9 +112,14 @@ class ZImagePipelineWithLogProb(ZImagePipeline):
 
         mask = attention_mask.to(self.device).long()
         # Trim trailing padding columns to keep the transported tensor compact.
+        # If the input batch is entirely padding (lengths == 0), raise instead
+        # of silently keeping a padding token in the prompt embedding -- the
+        # downstream ``split_padded_embeds_to_list`` would otherwise produce
+        # zero-length tensors that the transformer cannot consume.
         lengths = mask.sum(dim=1)
-        max_len = int(lengths.max().item()) if lengths.numel() > 0 else 0
-        max_len = max(max_len, 1)
+        if lengths.numel() == 0 or int(lengths.max().item()) == 0:
+            raise ValueError("encode_prompt received an entirely-padding batch (no valid tokens).")
+        max_len = int(lengths.max().item())
         hidden_states = hidden_states[:, :max_len]
         mask = mask[:, :max_len]
 
@@ -148,7 +156,6 @@ class ZImagePipelineWithLogProb(ZImagePipeline):
         attention_mask = (
             attention_mask.unsqueeze(0) if attention_mask is not None and attention_mask.ndim == 1 else attention_mask
         )
-        batch_size = prompt_ids.shape[0] if prompt_embeds is None else prompt_embeds.shape[0]
 
         if prompt_embeds is None:
             prompt_embeds, prompt_embeds_mask = self._encode_prompt_ids(prompt_ids, attention_mask=attention_mask)
@@ -156,11 +163,9 @@ class ZImagePipelineWithLogProb(ZImagePipeline):
         prompt_embeds = prompt_embeds[:, :max_sequence_length]
         prompt_embeds_mask = prompt_embeds_mask[:, :max_sequence_length]
 
-        _, seq_len, _ = prompt_embeds.shape
-        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-        prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
-        prompt_embeds_mask = prompt_embeds_mask.repeat(1, num_images_per_prompt, 1)
-        prompt_embeds_mask = prompt_embeds_mask.view(batch_size * num_images_per_prompt, seq_len)
+        if num_images_per_prompt > 1:
+            prompt_embeds = prompt_embeds.repeat_interleave(num_images_per_prompt, dim=0)
+            prompt_embeds_mask = prompt_embeds_mask.repeat_interleave(num_images_per_prompt, dim=0)
 
         return prompt_embeds, prompt_embeds_mask
 
@@ -284,7 +289,7 @@ class ZImagePipelineWithLogProb(ZImagePipeline):
         prompt_mask: torch.Tensor | None = None,
         negative_prompt_ids: torch.Tensor | list[int] | None = None,
         negative_prompt_mask: torch.Tensor | None = None,
-        guidance_scale: float = 4.0,
+        guidance_scale: float = 5.0,
         cfg_normalization: bool = False,
         height: int | None = None,
         width: int | None = None,
@@ -336,6 +341,15 @@ class ZImagePipelineWithLogProb(ZImagePipeline):
         cfg_normalization = _coalesce_not_none(
             sampling_params.extra_args.get("cfg_normalization", None), cfg_normalization
         )
+        cfg_truncation = _coalesce_not_none(sampling_params.extra_args.get("cfg_truncation", None), 1.0)
+        if float(cfg_truncation) != 1.0:
+            # The diffusers Z-Image pipeline supports a time-aware ``cfg_truncation``
+            # knob. The FlowGRPO training adapter does not yet mirror that schedule,
+            # so allowing it here would silently desync rollout vs training log-probs.
+            raise NotImplementedError(
+                "cfg_truncation != 1.0 is not supported by the Z-Image FlowGRPO rollout adapter "
+                "(would desync from training-side log-probabilities)."
+            )
 
         generator = sampling_params.generator or generator
         if generator is None and sampling_params.seed is not None:
@@ -351,7 +365,7 @@ class ZImagePipelineWithLogProb(ZImagePipeline):
         self._current_timestep = None
         self._interrupt = False
         self._cfg_normalization = cfg_normalization
-        self._cfg_truncation = 1.0
+        self._cfg_truncation = cfg_truncation
 
         vae_scale = self.vae_scale_factor * 2
         if height % vae_scale != 0 or width % vae_scale != 0:
@@ -372,6 +386,17 @@ class ZImagePipelineWithLogProb(ZImagePipeline):
         has_neg_prompt = negative_prompt_ids is not None or (
             negative_prompt_embeds is not None and negative_prompt_embeds_mask is not None
         )
+        if guidance_scale > 0 and not has_neg_prompt:
+            # Upstream diffusers ZImagePipeline auto-fills an empty-string negative
+            # prompt when CFG is active. We require it to be supplied explicitly so
+            # that training can replay the same trajectory; warn the user when CFG
+            # is silently disabled because of a missing negative prompt.
+            logger.warning(
+                "guidance_scale=%s > 0 but no negative prompt provided; "
+                "CFG will be disabled. Pass `negative_prompt_ids` (or use the "
+                "data preprocessor's empty-string default) to enable CFG.",
+                guidance_scale,
+            )
         do_true_cfg = guidance_scale > 0 and has_neg_prompt
 
         prompt_embeds, prompt_embeds_mask = self.encode_prompt(
