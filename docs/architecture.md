@@ -179,7 +179,12 @@ To add a new architecture, create a sub-directory, implement the three abstract 
 - `fs.py` — remote filesystem utilities.
 
 ---
-
+- agent_loop/: Contains DiffusionSingleTurnAgentLoop (registered as "diffusion_single_turn_agent"). Handles tokenization, multi-modal extraction, and async generation calls to vllm-omni.
+- reward_loop/: Contains VisualRewardManager. Dispatches to a configurable compute_score callable (sync or async).
+- utils/reward_score/:
+    - genrm_ocr.py: Implements async OCR scoring via an OpenAI-compatible VLM router.
+    - jpeg_compressibility.py: Provides factory functions to measure JPEG file size as a reward signal.
+- utils/: Holds vllm_omni/ specific helpers and fs.py for remote filesystem utilities.
 ## 3. Main public APIs
 
 | API | Location | Purpose |
