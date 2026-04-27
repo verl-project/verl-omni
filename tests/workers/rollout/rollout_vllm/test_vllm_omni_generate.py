@@ -141,84 +141,8 @@ def init_server():
 
 
 def test_generate(init_server):
-    """generate() returns a valid DiffusionOutput with CHW image in [0, 1]."""
+    """Concurrent generate() calls covering basic output, logprobs, and multi-request correctness."""
     server = init_server
-    prompt_ids = _tokenize_prompt(
-        "a beautiful sunset over the ocean with vibrant orange and purple clouds "
-        "reflecting on the calm water surface near a rocky coastline"
-    )
-
-    request_id = f"test_{uuid4().hex[:8]}"
-    output = ray.get(
-        server.generate.remote(
-            prompt_ids=prompt_ids,
-            sampling_params={
-                "num_inference_steps": 10,
-                "true_cfg_scale": 4.0,
-                "height": 512,
-                "width": 512,
-            },
-            request_id=request_id,
-        ),
-        timeout=300,
-    )
-
-    assert isinstance(output, DiffusionOutput)
-    assert len(output.diffusion_output) == 3, f"Expected 3 channels (CHW), got {len(output.diffusion_output)}"
-    h, w = len(output.diffusion_output[0]), len(output.diffusion_output[0][0])
-    assert h > 0 and w > 0
-    assert output.stop_reason in ("completed", "aborted", None)
-
-    # spot-check pixel range
-    assert 0.0 <= output.diffusion_output[0][0][0] <= 1.0
-
-    print(f"image: C=3 H={h} W={w}  stop_reason={output.stop_reason}")
-
-
-def test_generate_with_logprobs(init_server):
-    """generate() with logprobs=True returns non-empty log_probs (tensor or sequence)."""
-    server = init_server
-    prompt_ids = _tokenize_prompt(
-        "a futuristic city at night with neon lights glowing on tall glass "
-        "skyscrapers and flying vehicles soaring between the buildings"
-    )
-
-    request_id = f"test_lp_{uuid4().hex[:8]}"
-    output = ray.get(
-        server.generate.remote(
-            prompt_ids=prompt_ids,
-            sampling_params={
-                "num_inference_steps": 10,
-                "true_cfg_scale": 4.0,
-                "height": 512,
-                "width": 512,
-                "logprobs": True,
-            },
-            request_id=request_id,
-        ),
-        timeout=300,
-    )
-
-    assert isinstance(output, DiffusionOutput)
-    assert len(output.diffusion_output) == 3
-    lp = output.log_probs
-    assert lp is not None, "log_probs should be present when logprobs=True"
-    if isinstance(lp, torch.Tensor):
-        assert lp.numel() > 0
-        sample = lp.detach().cpu().flatten()[:3].tolist()
-        n = lp.numel()
-    else:
-        assert len(lp) > 0
-        sample = lp[:3]
-        n = len(lp)
-
-    print(f"log_probs: {n} values, sample: {sample}")
-
-
-def test_generate_concurrent(init_server):
-    """Multiple concurrent generate() calls all return valid DiffusionOutput."""
-    server = init_server
-    n_requests = 4
 
     prompts = [
         "a beautiful sunset over the ocean with vibrant orange and purple clouds "
@@ -232,15 +156,16 @@ def test_generate_concurrent(init_server):
     ]
 
     refs = []
-    for i in range(n_requests):
-        rid = f"concurrent_{i}_{uuid4().hex[:8]}"
+    for i, prompt in enumerate(prompts):
+        rid = f"test_{i}_{uuid4().hex[:8]}"
         ref = server.generate.remote(
-            prompt_ids=_tokenize_prompt(prompts[i]),
+            prompt_ids=_tokenize_prompt(prompt),
             sampling_params={
                 "num_inference_steps": 10,
                 "true_cfg_scale": 4.0,
                 "height": 512,
                 "width": 512,
+                "logprobs": i == 0,  # first request includes logprobs
             },
             request_id=rid,
         )
@@ -248,9 +173,20 @@ def test_generate_concurrent(init_server):
 
     results = ray.get(refs, timeout=600)
 
-    for i, res in enumerate(results):
-        assert isinstance(res, DiffusionOutput), f"Request {i}: expected DiffusionOutput"
-        assert len(res.diffusion_output) == 3, f"Request {i}: expected 3 channels"
-        assert res.stop_reason in ("completed", "aborted", None)
+    for i, output in enumerate(results):
+        assert isinstance(output, DiffusionOutput), f"Request {i}: expected DiffusionOutput"
+        assert len(output.diffusion_output) == 3, f"Request {i}: expected 3 channels (CHW)"
+        h, w = len(output.diffusion_output[0]), len(output.diffusion_output[0][0])
+        assert h > 0 and w > 0, f"Request {i}: image dimensions must be positive"
+        assert output.stop_reason in ("completed", "aborted", None), f"Request {i}: unexpected stop_reason"
+        assert 0.0 <= output.diffusion_output[0][0][0] <= 1.0, f"Request {i}: pixel values must be in [0, 1]"
 
-    print(f"All {n_requests} concurrent requests returned valid DiffusionOutput")
+    # Verify logprobs for the first request
+    lp = results[0].log_probs
+    assert lp is not None, "log_probs should be present when logprobs=True"
+    if isinstance(lp, torch.Tensor):
+        assert lp.numel() > 0
+    else:
+        assert len(lp) > 0
+
+    print(f"All {len(prompts)} concurrent requests returned valid DiffusionOutput")
