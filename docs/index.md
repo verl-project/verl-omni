@@ -32,6 +32,7 @@ algo/performance.md
 :maxdepth: 1
 :caption: Contributing
 
+contributing/adding_a_diffusion_model.md
 contributing/editing-agent-instructions.md
 ```
 
