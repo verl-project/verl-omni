@@ -99,7 +99,7 @@ def _get_current_git_commit():
 
 
 def check_verl_omni():
-    print("----------verl-omni Info-----------")
+    print("----------VeRL-Omni Info-----------")
     try:
         sys.path.insert(0, os.getcwd())
         import verl_omni
@@ -113,12 +113,12 @@ def check_verl_omni():
         except AttributeError:
             print("Commit hash not found. ")
     except ImportError as e:
-        print(f"No verl-omni installed: {e}")
+        print(f"No VeRL-Omni installed: {e}")
     except Exception as e:
         import traceback
 
         if not isinstance(e, IOError):
-            print("An error occurred trying to import verl-omni.")
+            print("An error occurred trying to import VeRL-Omni.")
             print("This is very likely due to missing or incompatible library files.")
         print(traceback.format_exc())
 
@@ -175,7 +175,7 @@ def check_environment():
 
 
 def check_pip_package_versions():
-    packages = ["vllm", "vllm-omni", "verl", "sglang", "ray", "torch"]
+    packages = ["vllm", "vllm-omni", "verl", "verl-omni", "sglang", "ray", "torch"]
     for package in packages:
         try:
             version = importlib.metadata.version(package)
