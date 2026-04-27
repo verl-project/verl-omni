@@ -13,9 +13,7 @@ rollout backend.
 ## 1. The big picture
 
 `verl-omni` is a **diffusion / multi-modal extension layer** that sits on top
-of [`verl`](https://github.com/verl-project/verl) (the core RLHF framework)
-and uses [`vllm-omni`](https://github.com/vllm-project/vllm-omni) as its
-rollout engine. It does **not** fork verl: every verl-omni component either
+of [`verl`](https://github.com/verl-project/verl) (the core RLHF framework). It does **not** fork verl: every verl-omni component either
 **subclasses** an extension point exposed by verl (e.g. `AgentLoopBase`,
 `RewardManagerBase`) or **directly imports** verl utilities (`DataProto`,
 `RayWorkerGroup`, `ResourcePoolManager`, `CheckpointEngineManager`,
@@ -44,7 +42,6 @@ flowchart TB
 |---|---|---|
 | `verl` | Generic (LLM-focused) RLHF framework: Ray single-controller, FSDP, `DataProto`, checkpointing, metrics, dataset, tracking. | **Imports**: `verl.DataProto`, `verl.single_controller.ray.{RayWorkerGroup, ResourcePoolManager}`, `verl.checkpoint_engine.CheckpointEngineManager`, `verl.trainer.ppo.{utils, reward, metric_utils}`, `verl.utils.{tracking, fs, config, debug}`. **Subclasses**: `verl.experimental.agent_loop.AgentLoopBase`, `verl.experimental.reward_loop.RewardManagerBase`. |
 | `verl-omni` | Adds **diffusion / image / video** training (Flow-GRPO), diffusers FSDP engine, diffusion pipelines & schedulers, visual reward managers, and the bridge to vllm-omni. | `RayFlowGRPOTrainer`, `DiffusersFSDPEngine`, `DiffusionModelBase`, `DiffusionSingleTurnAgentLoop`, `VisualRewardManager`. |
-| `vllm-omni` | Diffusion **rollout engine** — the analogue of vLLM for image/video generation. Driven from verl-omni via an async HTTP server (`vLLMOmniHttpServer` / `vLLMOmniReplica`). | Receives `OmniDiffusionRequest`, returns `DiffusionOutput` (latents/images + metadata). |
 
 > **Note**: verl-omni does *not* subclass verl's `RayPPOTrainer`. Instead,
 > `RayFlowGRPOTrainer` is a sibling single-controller that reuses verl's
