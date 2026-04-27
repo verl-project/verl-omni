@@ -92,7 +92,10 @@ flowchart TB
 - **`diffusion_algos.py`** — exposes `DIFFUSION_LOSS_REGISTRY` and `DIFFUSION_ADV_ESTIMATOR_REGISTRY`. To add a new loss or advantage estimator, decorate a function with `@register_diffusion_loss("name")` or `@register_diffusion_adv_estimator("name")` and set the matching key in the Hydra config.
 
 ```mermaid
-flowchart TB
+Houses the Hydra CLI entry and the Flow-GRPO trainer:
+- diffusion/main_flowgrpo.py: The CLI entry that calls run_flowgrpo(config).
+- ray_diffusion_trainer.py: Contains RayFlowGRPOTrainer, the single-controller that drives the rollout -> advantage computation -> actor update loop.
+- diffusion_algos.py: Exposes DIFFUSION_LOSS_REGISTRY and DIFFUSION_ADV_ESTIMATOR_REGISTRY. To add a new loss or advantage estimator, decorate a function with @register_diffusion_loss("name") or @register_diffusion_adv_estimator("name") and set the matching key in the Hydra config.
     WORKERS["workers/"]
     WORKERS --> W1["engine/fsdp/<br/>diffusers_impl"]
     WORKERS --> W2["rollout/vllm_rollout/<br/>vllm_omni_async_server"]
