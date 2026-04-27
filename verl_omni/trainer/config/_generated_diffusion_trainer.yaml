@@ -161,6 +161,7 @@ actor_rollout_ref:
     width: 512
     num_inference_steps: 10
     true_cfg_scale: 1.0
+    cfg_normalization: false
     max_sequence_length: 512
     guidance_scale: null
     external_lib: null

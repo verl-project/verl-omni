@@ -124,6 +124,8 @@ class DiffusionRolloutConfig(BaseConfig):
 
     true_cfg_scale: float = 1.0
 
+    cfg_normalization: bool = False
+
     max_sequence_length: int = 512
 
     guidance_scale: Optional[float] = None
