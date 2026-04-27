@@ -6,11 +6,11 @@
 
 </div>
 
-`VeRL-Omni` is a general RL training framework focused on diffusion and omni-modality generative models, built on top of [`verl`](https://github.com/verl-project/verl).
+`verl-omni` is a general RL training framework focused on diffusion and omni-modality generative models.
 
-It starts from the multi-modal generation RL work incubated in `verl`, and provides a dedicated home for building and evolving this stack in a more focused way.
+It starts from the multi-modal generation RL work incubated in [`verl`](https://github.com/verl-project/verl), and provides a dedicated home for building and evolving this stack in a more focused way.
 
-## Why `VeRL-Omni` 
+## Why `verl-omni` 
 
 Diffusion and omni-modality RL training differs from text-only LLM RL not only in model structure, but also in I/O patterns, compute characteristics, and runtime bottlenecks.
 
@@ -23,6 +23,14 @@ As diffusion and omni-modality model training expands, it is useful to have a de
 - **Modular training backends** that can easily integrate various parallism (FSDP, USP) and other optimizations instead of rebuilding the full stack from scratch.
 - **E2E examples and benchmarks** for validating high-efficiency e2e RL training on model families such as QwenImage, Qwen-Omni, and BAGEL, in co-located sync or fully-async mode. 
 
+## Supported Models & Algorithms
+
+| Model | Algo | State |
+|---|---|---|
+| QwenImage | FlowGRPO | ✅ |
+| BAGEL | FlowGRPO | WIP |
+| Qwen3-Omni-Thinker | GRPO | WIP |
+
 ## Roadmap
 
 Future work is tracked here:
@@ -31,10 +39,7 @@ Future work is tracked here:
 
 ## Getting Started
 
-Visit our documentation to learn more.
-
-- [Installation](docs/start/install.md)
-- [Quickstart](docs/start/flowgrpo_quickstart.md)
+TBD
 
 ## Contributing
 
