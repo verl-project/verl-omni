@@ -138,7 +138,11 @@ To add a new engine backend, implement `BaseEngine` under `engine/` and register
 To add a new architecture, create a sub-directory, implement the three abstract methods, and decorate the class with `@DiffusionModelBase.register("YourArchName")`.
 
 ```mermaid
-flowchart TB
+- model_base.py: Defines DiffusionModelBase (ABC) with abstract methods build_scheduler, prepare_model_inputs, and forward_and_sample_previous_step.
+- Registration: Use @DiffusionModelBase.register("ArchName"). ArchName must match the _class_name in the model's model_index.json.
+- utils.py: Provides top-level dispatch helpers called by the FSDP engine.
+- qwen_image_flow_grpo/: Reference implementation for Qwen-Image.
+- Extension: To add a new architecture, create a sub-directory, implement the three abstract methods, and decorate the class with @DiffusionModelBase.register("YourArchName").
     AL["agent_loop/"]
     AL --> A1["diffusion_agent_loop.py"]
     AL --> A2["single_turn_agent_loop.py"]
