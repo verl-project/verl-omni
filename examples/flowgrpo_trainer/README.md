@@ -6,23 +6,11 @@ For the full installation and quickstart guide, see `docs/start/flowgrpo_quickst
 
 ## Installation
 
-Install dependencies in this order to avoid conflicts:
+Follow the [installation guide](../../docs/start/install.md) to set up the base environment, then install the FlowGRPO-specific dependency:
 
 ```bash
-# 1. vLLM and vLLM-Omni rollout backend
-pip install "vllm==0.18" "vllm-omni==0.18"
-
-# 2. verl
-pip install git+https://github.com/verl-project/verl.git@3eab8ccc6143c624e7f11c871896f941b3fec900
-
-# 3. verl-omni
-pip install git+https://github.com/verl-project/verl-omni.git@main
-
-# 4. FlowGRPO example-specific dependency
 pip install Levenshtein
 ```
-
-For full installation details see `docs/start/install.md`.
 
 The provided script is configured for a single node with `4` GPUs.
 
