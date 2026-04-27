@@ -213,3 +213,259 @@ jobs:
         run: |
           rm -f signature_changes.json remaining_complex.json pr_body_track1.md \
                 .github/upstream_sync/api_signatures_fresh.json
+
+  # =========================================================================
+  # Track 2 — behavioral drift
+  # Detects changes in upstream files that verl-omni mirrors/extends, then
+  # calls the Cursor agent to propose minimal adaptations.
+  # =========================================================================
+  track2-behavioral:
+    name: "Track 2 — behavioral drift"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Run independently of track1 — both can open PRs on the same day
+    needs: []
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Setup
+      # -----------------------------------------------------------------------
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.10"
+
+      - name: Install minimal Python deps
+        run: pip install pyyaml
+
+      # -----------------------------------------------------------------------
+      # 2. Read last processed SHAs from repository variables
+      # -----------------------------------------------------------------------
+      - name: Read upstream SHAs
+        id: shas
+        run: |
+          VERL_SHA=$(gh api "repos/${{ github.repository }}/actions/variables/UPSTREAM_VERL_SHA" \
+            --jq '.value' 2>/dev/null || echo "")
+          VLLM_OMNI_SHA=$(gh api "repos/${{ github.repository }}/actions/variables/UPSTREAM_VLLM_OMNI_SHA" \
+            --jq '.value' 2>/dev/null || echo "")
+          echo "UPSTREAM_VERL_SHA=$VERL_SHA"         >> "$GITHUB_ENV"
+          echo "UPSTREAM_VLLM_OMNI_SHA=$VLLM_OMNI_SHA" >> "$GITHUB_ENV"
+          echo "verl_sha=${VERL_SHA:0:12}"           >> "$GITHUB_OUTPUT"
+          echo "vllm_omni_sha=${VLLM_OMNI_SHA:0:12}" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # 3. Check open PR backlog (shared limit with track1)
+      # -----------------------------------------------------------------------
+      - name: Check open upstream-sync PR backlog
+        id: backlog
+        run: |
+          OPEN=$(gh pr list \
+            --label "upstream-sync" \
+            --state open \
+            --json number \
+            --jq 'length')
+          if [ "$OPEN" -ge 3 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::$OPEN upstream-sync PRs open — skipping Track 2"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # 4. Detect behavioral drift via GitHub compare API
+      # -----------------------------------------------------------------------
+      - name: Detect behavioral drift
+        if: steps.backlog.outputs.skip == 'false'
+        id: detect
+        run: |
+          python scripts/upstream_sync/check_upstream_behavioral.py
+          EXIT=$?
+          if [ $EXIT -eq 2 ]; then
+            echo "::error::GitHub API error in behavioral check"
+            exit 1
+          fi
+          exit 0  # EXIT 0 = no drift, EXIT 1 = drift; both are workflow OK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # 5. Generate Cursor prompt
+      # -----------------------------------------------------------------------
+      - name: Generate Cursor prompt
+        if: steps.backlog.outputs.skip == 'false' && steps.detect.outputs.has_changes == 'true'
+        run: python scripts/upstream_sync/generate_track2_prompt.py
+
+      # -----------------------------------------------------------------------
+      # 6. Install and run Cursor agent (restricted autonomy)
+      # -----------------------------------------------------------------------
+      - name: Install Cursor CLI
+        if: steps.backlog.outputs.skip == 'false' && steps.detect.outputs.has_changes == 'true'
+        run: |
+          curl https://cursor.com/install -fsS | bash
+          echo "$HOME/.cursor/bin" >> "$GITHUB_PATH"
+
+      - name: Run Cursor agent on behavioral drift
+        if: steps.backlog.outputs.skip == 'false' && steps.detect.outputs.has_changes == 'true'
+        id: cursor
+        # Restricted autonomy: Cursor may only read anything and write verl_omni/*.py.
+        # All git/gh operations remain in explicit workflow steps below.
+        run: |
+          cursor agent \
+            -p "$(cat track2_cursor_prompt.md)" \
+            --model gpt-5.2 \
+            --allow "Read(**)" \
+            --allow "Write(verl_omni/**/*.py)" \
+            --deny  "Shell(git)" \
+            --deny  "Shell(gh)" \
+            --deny  "Write(.github/**)" \
+            --deny  "Write(scripts/**)" \
+            --deny  "Write(requirements*.txt)" \
+            --deny  "Write(setup.py)"
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+
+      # -----------------------------------------------------------------------
+      # 7. Sanity check Cursor's edits
+      # -----------------------------------------------------------------------
+      - name: Sanity check Cursor edits
+        if: steps.cursor.outcome == 'success'
+        id: sanity
+        continue-on-error: true
+        run: |
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@main"
+          pip install -r requirements.txt --no-deps
+          pip install --no-deps -e .
+          pytest -s -x tests/special_sanity
+
+      # -----------------------------------------------------------------------
+      # 8. Open auto-PR with Cursor's changes
+      # -----------------------------------------------------------------------
+      - name: Configure git identity
+        if: steps.cursor.outcome == 'success'
+        run: |
+          git config user.name  "upstream-sync-bot"
+          git config user.email "upstream-sync-bot@users.noreply.github.com"
+
+      - name: Create branch and open PR
+        if: steps.cursor.outcome == 'success'
+        id: pr
+        run: |
+          BRANCH="bot/upstream-sync-track2-$(date -u +%Y%m%d)"
+
+          if git ls-remote --exit-code origin "refs/heads/$BRANCH" 2>/dev/null; then
+            echo "::notice::Branch $BRANCH already exists — skipping"
+            exit 0
+          fi
+
+          # Only proceed if Cursor actually changed something
+          if git diff --quiet; then
+            echo "::notice::Cursor made no file changes — nothing to commit"
+            exit 0
+          fi
+
+          git checkout -b "$BRANCH"
+          git add verl_omni/
+          git commit -m "chore(upstream-sync): Track 2 behavioral drift $(date -u +%Y-%m-%d)"
+          git push origin "$BRANCH"
+
+          LABELS="upstream-sync,upstream-sync-track2"
+          if [ "${{ steps.sanity.outcome }}" = "failure" ]; then
+            LABELS="$LABELS,sanity-failed"
+          fi
+
+          # Build PR body from behavioral_changes.json
+          python3 - <<'PYEOF'
+          import json, pathlib, textwrap
+          root = pathlib.Path(".")
+          data = json.loads((root / "behavioral_changes.json").read_text())
+          changes = data.get("changes", [])
+          lines = [
+              "## Upstream Sync — Track 2: Behavioral Drift",
+              "",
+              "_Auto-generated by the daily upstream-sync bot + Cursor agent._",
+              "",
+              "### Upstream changes analyzed",
+          ]
+          for c in changes:
+              e = c["entry"]
+              lines.append(f"- `{e['file']}` ({e['upstream_repo']}) — symbols: {e['symbols']}")
+          lines += [
+              "",
+              "### Review checklist",
+              "- [ ] Read all Cursor-generated edits line by line",
+              "- [ ] Run the full test suite on GPU if training-path code changed",
+              "- [ ] Verify diffusion semantics are preserved (not just LLM logic copied)",
+              "- [ ] Check `tests/special_sanity` passes",
+          ]
+          pathlib.Path("pr_body_track2.md").write_text("\n".join(lines) + "\n")
+          PYEOF
+
+          gh pr create \
+            --title "[bot][upstream-sync] Track 2: behavioral drift $(date -u +%Y-%m-%d)" \
+            --body-file pr_body_track2.md \
+            --label "$LABELS" \
+            --base main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # 9. Update SHA variables to current upstream HEAD
+      #    Only update after a successful run (detect + no API errors).
+      #    If Cursor or PR creation fails, SHA is NOT updated so the next run
+      #    re-processes the same upstream changes.
+      # -----------------------------------------------------------------------
+      - name: Update upstream SHA variables
+        if: steps.detect.outcome == 'success'
+        run: |
+          if [ ! -f upstream_current_shas.json ]; then
+            echo "::notice::No current SHAs file found — variables not updated"
+            exit 0
+          fi
+
+          python3 - <<'PYEOF'
+          import json, os, subprocess, sys
+
+          shas = json.loads(open("upstream_current_shas.json").read())
+          repo = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ["GH_TOKEN"]
+
+          VAR_MAP = {
+              "verl-project/verl":        "UPSTREAM_VERL_SHA",
+              "vllm-project/vllm-omni":   "UPSTREAM_VLLM_OMNI_SHA",
+          }
+
+          for upstream_repo, sha in shas.items():
+              var_name = VAR_MAP.get(upstream_repo)
+              if not var_name or not sha:
+                  continue
+              for method in ("PATCH", "POST"):
+                  r = subprocess.run(
+                      ["gh", "api", f"repos/{repo}/actions/variables/{var_name}",
+                       "--method", method, "-f", f"value={sha}"],
+                      capture_output=True, text=True
+                  )
+                  if r.returncode == 0:
+                      print(f"Updated {var_name} = {sha[:12]}")
+                      break
+                  if "404" not in r.stderr:
+                      print(f"ERROR updating {var_name}: {r.stderr}", file=sys.stderr)
+                      break
+          PYEOF
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # 10. Clean up temp files
+      # -----------------------------------------------------------------------
+      - name: Clean up temp files
+        if: always()
+        run: |
+          rm -f behavioral_changes.json track2_cursor_prompt.md \
+                pr_body_track2.md upstream_current_shas.json
