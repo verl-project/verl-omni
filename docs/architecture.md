@@ -92,10 +92,7 @@ flowchart TB
 - **`diffusion_algos.py`** — exposes `DIFFUSION_LOSS_REGISTRY` and `DIFFUSION_ADV_ESTIMATOR_REGISTRY`. To add a new loss or advantage estimator, decorate a function with `@register_diffusion_loss("name")` or `@register_diffusion_adv_estimator("name")` and set the matching key in the Hydra config.
 
 ```mermaid
-Houses the Hydra CLI entry and the Flow-GRPO trainer:
-- diffusion/main_flowgrpo.py: The CLI entry that calls run_flowgrpo(config).
-- ray_diffusion_trainer.py: Contains RayFlowGRPOTrainer, the single-controller that drives the rollout -> advantage computation -> actor update loop.
-- diffusion_algos.py: Exposes DIFFUSION_LOSS_REGISTRY and DIFFUSION_ADV_ESTIMATOR_REGISTRY. To add a new loss or advantage estimator, decorate a function with @register_diffusion_loss("name") or @register_diffusion_adv_estimator("name") and set the matching key in the Hydra config.
+flowchart TB
     WORKERS["workers/"]
     WORKERS --> W1["engine/fsdp/<br/>diffusers_impl"]
     WORKERS --> W2["rollout/vllm_rollout/<br/>vllm_omni_async_server"]
@@ -114,10 +111,7 @@ Houses the Hydra CLI entry and the Flow-GRPO trainer:
 To add a new engine backend, implement `BaseEngine` under `engine/` and register it with `EngineRegistry`.
 
 ```mermaid
-- DiffusersFSDPEngine (engine/fsdp/diffusers_impl.py): Wraps a HuggingFace diffusers model with FSDP, handling LoRA, mixed precision, gradient checkpointing, and device-mesh sharding.
-- Rollout (rollout/vllm_rollout/): Bridges DataProto batches to vllm-omni's OmniDiffusionRequest and collects DiffusionOutput per sample.
-- Config (config/diffusion/): Holds dataclass configs (DiffusionActorConfig, DiffusionModelConfig, DiffusionRolloutConfig) that control mini-batch size, PPO epochs, LoRA ranks, and num-inference-steps.
-- Extension: To add a new engine backend, implement BaseEngine under engine/ and register it with EngineRegistry.
+flowchart TB
     PIPES["pipelines/"]
     PIPES --> P0["model_base.py<br/>DiffusionModelBase + registry"]
     PIPES --> P1["qwen_image_flow_grpo/<br/>vllm_omni_rollout_adapter"]
@@ -138,11 +132,7 @@ To add a new engine backend, implement `BaseEngine` under `engine/` and register
 To add a new architecture, create a sub-directory, implement the three abstract methods, and decorate the class with `@DiffusionModelBase.register("YourArchName")`.
 
 ```mermaid
-- model_base.py: Defines DiffusionModelBase (ABC) with abstract methods build_scheduler, prepare_model_inputs, and forward_and_sample_previous_step.
-- Registration: Use @DiffusionModelBase.register("ArchName"). ArchName must match the _class_name in the model's model_index.json.
-- utils.py: Provides top-level dispatch helpers called by the FSDP engine.
-- qwen_image_flow_grpo/: Reference implementation for Qwen-Image.
-- Extension: To add a new architecture, create a sub-directory, implement the three abstract methods, and decorate the class with @DiffusionModelBase.register("YourArchName").
+flowchart TB
     AL["agent_loop/"]
     AL --> A1["diffusion_agent_loop.py"]
     AL --> A2["single_turn_agent_loop.py"]
@@ -179,12 +169,7 @@ To add a new architecture, create a sub-directory, implement the three abstract 
 - `fs.py` — remote filesystem utilities.
 
 ---
-- agent_loop/: Contains DiffusionSingleTurnAgentLoop (registered as "diffusion_single_turn_agent"). Handles tokenization, multi-modal extraction, and async generation calls to vllm-omni.
-- reward_loop/: Contains VisualRewardManager. Dispatches to a configurable compute_score callable (sync or async).
-- utils/reward_score/:
-    - genrm_ocr.py: Implements async OCR scoring via an OpenAI-compatible VLM router.
-    - jpeg_compressibility.py: Provides factory functions to measure JPEG file size as a reward signal.
-- utils/: Holds vllm_omni/ specific helpers and fs.py for remote filesystem utilities.
+
 ## 3. Main public APIs
 
 | API | Location | Purpose |
