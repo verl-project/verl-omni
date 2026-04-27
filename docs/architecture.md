@@ -87,7 +87,9 @@ flowchart TB
     class T1,T2,T3 leaf
 ```
 
-Houses the Hydra CLI entry and the Flow-GRPO trainer. `diffusion/main_flowgrpo.py` is the CLI entry that calls `run_flowgrpo(config)`; `ray_diffusion_trainer.py` contains `RayFlowGRPOTrainer`, the single-controller that drives rollout → advantage computation → actor update in each step; `diffusion_algos.py` exposes `DIFFUSION_LOSS_REGISTRY` and `DIFFUSION_ADV_ESTIMATOR_REGISTRY` — to add a new loss or advantage estimator, decorate a function with `@register_diffusion_loss("name")` or `@register_diffusion_adv_estimator("name")` and set the matching key in the Hydra config.
+- **`diffusion/main_flowgrpo.py`** — CLI entry; calls `run_flowgrpo(config)` to bootstrap Ray and start the trainer.
+- **`ray_diffusion_trainer.py`** — `RayFlowGRPOTrainer`, the single-controller that drives *rollout → advantage computation → actor update* each step.
+- **`diffusion_algos.py`** — exposes `DIFFUSION_LOSS_REGISTRY` and `DIFFUSION_ADV_ESTIMATOR_REGISTRY`. To add a new loss or advantage estimator, decorate a function with `@register_diffusion_loss("name")` or `@register_diffusion_adv_estimator("name")` and set the matching key in the Hydra config.
 
 ```mermaid
 flowchart TB
@@ -102,7 +104,11 @@ flowchart TB
     class W1,W2,W3 leaf
 ```
 
-`DiffusersFSDPEngine` in `engine/fsdp/diffusers_impl.py` wraps a HuggingFace diffusers model with FSDP, handling LoRA, mixed precision, gradient checkpointing, and device-mesh sharding; the rollout side (`rollout/vllm_rollout/`) bridges `DataProto` batches to vllm-omni's `OmniDiffusionRequest` and collects `DiffusionOutput` per sample; `config/diffusion/` holds the three dataclass configs (`DiffusionActorConfig`, `DiffusionModelConfig`, `DiffusionRolloutConfig`) that control mini-batch size, PPO epochs, LoRA ranks, and num-inference-steps. To add a new engine backend, implement `BaseEngine` under `engine/` and register it with `EngineRegistry`.
+- **`engine/fsdp/diffusers_impl.py`** — `DiffusersFSDPEngine` wraps a HuggingFace diffusers model with FSDP (LoRA, mixed precision, gradient checkpointing, device-mesh sharding).
+- **`rollout/vllm_rollout/`** — bridges `DataProto` batches to vllm-omni's `OmniDiffusionRequest` and collects `DiffusionOutput` per sample.
+- **`config/diffusion/`** — three dataclass configs (`DiffusionActorConfig`, `DiffusionModelConfig`, `DiffusionRolloutConfig`) controlling mini-batch size, PPO epochs, LoRA ranks, and num-inference-steps.
+
+To add a new engine backend, implement `BaseEngine` under `engine/` and register it with `EngineRegistry`.
 
 ```mermaid
 flowchart TB
@@ -118,7 +124,12 @@ flowchart TB
     class P0,P1,P2,P3 leaf
 ```
 
-`model_base.py` defines `DiffusionModelBase`, an ABC with three abstract methods (`build_scheduler`, `prepare_model_inputs`, `forward_and_sample_previous_step`) that must be implemented per architecture; registration is done with `@DiffusionModelBase.register("ArchName")` where `ArchName` must match the `_class_name` in the model's `model_index.json`; `utils.py` provides the top-level dispatch helpers (`build_scheduler`, `prepare_model_inputs`, `forward_and_sample_previous_step`) that the FSDP engine calls; `qwen_image_flow_grpo/` is the reference implementation for Qwen-Image. To add a new architecture, create a sub-directory, implement the three abstract methods, and decorate the class with `@DiffusionModelBase.register("YourArchName")`.
+- **`model_base.py`** — `DiffusionModelBase`, an ABC with three abstract methods (`build_scheduler`, `prepare_model_inputs`, `forward_and_sample_previous_step`). Register with `@DiffusionModelBase.register("ArchName")` where `ArchName` must match `_class_name` in the model's `model_index.json`.
+- **`qwen_image_flow_grpo/`** — reference implementation for Qwen-Image.
+- **`schedulers/`** — flow-match SDE schedulers.
+- **`utils.py`** — top-level dispatch helpers (`build_scheduler`, `prepare_model_inputs`, `forward_and_sample_previous_step`) called by the FSDP engine.
+
+To add a new architecture, create a sub-directory, implement the three abstract methods, and decorate the class with `@DiffusionModelBase.register("YourArchName")`.
 
 ```mermaid
 flowchart TB
@@ -140,7 +151,22 @@ flowchart TB
     class A1,A2,R1,U1,U2,U3 leaf
 ```
 
-`agent_loop/` contains `DiffusionSingleTurnAgentLoop` (registered as `"diffusion_single_turn_agent"`), which subclasses verl's `AgentLoopBase` and handles prompt tokenisation, multi-modal data extraction, and a single async generation call to vllm-omni, returning a `DiffusionAgentLoopOutput` (prompt ids + image/video tensor + optional reward score); to add a new rollout strategy, subclass `AgentLoopBase` and decorate with `@register("name")`. `reward_loop/` contains `VisualRewardManager` which extends verl's `RewardManagerBase` and dispatches to a configurable `compute_score` callable (sync or async) that receives the generated image tensor alongside `data_source`, `ground_truth`, and `extra_info`; to add a custom scorer, pass a callable as `compute_score` or place it in `utils/reward_score/`. `utils/reward_score/genrm_ocr.py` implements async OCR scoring by sending generated images to an OpenAI-compatible VLM router; `reward_score/jpeg_compressibility.py` provides `jpeg_compressibility()` / `jpeg_incompressibility()` factory functions that measure JPEG file size as a reward signal; `utils/vllm_omni/` holds vllm-omni-specific helpers and `utils/fs.py` provides remote filesystem utilities.
+**`agent_loop/`**
+
+- `DiffusionSingleTurnAgentLoop` (registered as `"diffusion_single_turn_agent"`) — subclasses verl's `AgentLoopBase`; handles prompt tokenisation, multi-modal data extraction, and a single async generation call to vllm-omni, returning a `DiffusionAgentLoopOutput` (prompt ids + image/video tensor + optional reward score).
+- To add a new rollout strategy, subclass `AgentLoopBase` and decorate with `@register("name")`.
+
+**`reward_loop/`**
+
+- `VisualRewardManager` — extends verl's `RewardManagerBase`; dispatches to a configurable `compute_score` callable (sync or async) that receives the generated image tensor alongside `data_source`, `ground_truth`, and `extra_info`.
+- To add a custom scorer, pass a callable as `compute_score` or place it in `utils/reward_score/`.
+
+**`utils/`**
+
+- `reward_score/genrm_ocr.py` — async OCR scoring by sending generated images to an OpenAI-compatible VLM router.
+- `reward_score/jpeg_compressibility.py` — `jpeg_compressibility()` / `jpeg_incompressibility()` factory functions that measure JPEG file size as a reward signal.
+- `vllm_omni/` — vllm-omni-specific helpers.
+- `fs.py` — remote filesystem utilities.
 
 ---
 
