@@ -114,7 +114,10 @@ Houses the Hydra CLI entry and the Flow-GRPO trainer:
 To add a new engine backend, implement `BaseEngine` under `engine/` and register it with `EngineRegistry`.
 
 ```mermaid
-flowchart TB
+- DiffusersFSDPEngine (engine/fsdp/diffusers_impl.py): Wraps a HuggingFace diffusers model with FSDP, handling LoRA, mixed precision, gradient checkpointing, and device-mesh sharding.
+- Rollout (rollout/vllm_rollout/): Bridges DataProto batches to vllm-omni's OmniDiffusionRequest and collects DiffusionOutput per sample.
+- Config (config/diffusion/): Holds dataclass configs (DiffusionActorConfig, DiffusionModelConfig, DiffusionRolloutConfig) that control mini-batch size, PPO epochs, LoRA ranks, and num-inference-steps.
+- Extension: To add a new engine backend, implement BaseEngine under engine/ and register it with EngineRegistry.
     PIPES["pipelines/"]
     PIPES --> P0["model_base.py<br/>DiffusionModelBase + registry"]
     PIPES --> P1["qwen_image_flow_grpo/<br/>vllm_omni_rollout_adapter"]
