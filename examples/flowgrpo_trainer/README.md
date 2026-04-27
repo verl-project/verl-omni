@@ -83,7 +83,7 @@ Override these values on the command line if you want to log under a different p
 
 ### Diffusion-specific metrics
 
-See [docs/start/metrics.md](../../docs/start/metrics.md) for a full description of all diffusion-specific training metrics.
+See the [Metrics Documentation](../../docs/start/metrics.md) for a full description of all diffusion-specific training metrics.
 
 ## Variants
 
