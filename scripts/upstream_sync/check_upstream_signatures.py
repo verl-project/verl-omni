@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Track 1: detect upstream API signature drift.
 
@@ -33,6 +46,7 @@ CHANGES_FILE = REPO_ROOT / "signature_changes.json"
 # Change classification
 # ---------------------------------------------------------------------------
 
+
 def _classify_param_change(method_name: str, old_params: dict, new_params: dict) -> dict | None:
     """Classify a change to a single method's parameter list."""
     if old_params == new_params:
@@ -46,20 +60,16 @@ def _classify_param_change(method_name: str, old_params: dict, new_params: dict)
     if not added and not removed:
         # Same names, different attributes (kind changed, required changed)
         changed = {n for n in old_names if old_params[n] != new_params[n]}
-        return {"method": method_name, "type": "param_attrs_changed",
-                "tier": "complex", "changed": sorted(changed)}
+        return {"method": method_name, "type": "param_attrs_changed", "tier": "complex", "changed": sorted(changed)}
 
     if added and not removed:
         all_optional = all(not new_params[p]["required"] for p in added)
         if all_optional:
-            return {"method": method_name, "type": "param_added_optional",
-                    "tier": 1, "added": sorted(added)}
-        return {"method": method_name, "type": "param_added_required",
-                "tier": "complex", "added": sorted(added)}
+            return {"method": method_name, "type": "param_added_optional", "tier": 1, "added": sorted(added)}
+        return {"method": method_name, "type": "param_added_required", "tier": "complex", "added": sorted(added)}
 
     if removed and not added:
-        return {"method": method_name, "type": "param_removed",
-                "tier": 4, "removed": sorted(removed)}
+        return {"method": method_name, "type": "param_removed", "tier": 4, "removed": sorted(removed)}
 
     # Both added and removed
     if len(added) == 1 and len(removed) == 1:
@@ -68,18 +78,27 @@ def _classify_param_change(method_name: str, old_params: dict, new_params: dict)
         old_p = old_params[next(iter(removed))]
         new_p = new_params[next(iter(added))]
         if old_p.get("kind") == new_p.get("kind") and old_p.get("required") == new_p.get("required"):
-            return {"method": method_name, "type": "param_renamed",
-                    "tier": 3, "old_name": next(iter(removed)), "new_name": next(iter(added))}
+            return {
+                "method": method_name,
+                "type": "param_renamed",
+                "tier": 3,
+                "old_name": next(iter(removed)),
+                "new_name": next(iter(added)),
+            }
 
-    return {"method": method_name, "type": "params_restructured",
-            "tier": "complex", "added": sorted(added), "removed": sorted(removed)}
+    return {
+        "method": method_name,
+        "type": "params_restructured",
+        "tier": "complex",
+        "added": sorted(added),
+        "removed": sorted(removed),
+    }
 
 
 def _compare_info(key: str, old: dict, new: dict) -> list[dict]:
     """Return a list of change records for one symbol (may span multiple methods)."""
     if "error" in new:
-        return [{"key": key, "method": None, "type": "symbol_gone",
-                 "tier": "complex", "detail": new["error"]}]
+        return [{"key": key, "method": None, "type": "symbol_gone", "tier": "complex", "detail": new["error"]}]
 
     changes = []
 
@@ -113,8 +132,16 @@ def _compare_info(key: str, old: dict, new: dict) -> list[dict]:
     if old_abs != new_abs:
         added_abs = sorted(new_abs - old_abs)
         removed_abs = sorted(old_abs - new_abs)
-        changes.append({"key": key, "method": None, "type": "abstract_methods_changed",
-                        "tier": "complex", "added": added_abs, "removed": removed_abs})
+        changes.append(
+            {
+                "key": key,
+                "method": None,
+                "type": "abstract_methods_changed",
+                "tier": "complex",
+                "added": added_abs,
+                "removed": removed_abs,
+            }
+        )
 
     return changes
 
@@ -155,11 +182,16 @@ def diff_snapshots(old_snap: dict, new_snap: dict) -> list[dict]:
         if key not in new_sigs:
             # Symbol we import is completely gone from upstream
             module_path, _, symbol = key.rpartition(".")
-            all_changes.append({
-                "key": key, "method": None, "type": "symbol_gone",
-                "tier": "complex", "detail": "symbol disappeared from snapshot",
-                "verl_omni_usages": find_importing_files(module_path, symbol),
-            })
+            all_changes.append(
+                {
+                    "key": key,
+                    "method": None,
+                    "type": "symbol_gone",
+                    "tier": "complex",
+                    "detail": "symbol disappeared from snapshot",
+                    "verl_omni_usages": find_importing_files(module_path, symbol),
+                }
+            )
             continue
 
         old_info = old_sigs[key]
@@ -253,9 +285,10 @@ def main() -> int:
 
     # Set GitHub Actions output for conditional workflow steps
     import os
+
     if gha_output := os.environ.get("GITHUB_OUTPUT"):
         with open(gha_output, "a") as f:
-            f.write(f"has_changes=true\n")
+            f.write("has_changes=true\n")
             f.write(f"has_mechanical={'true' if mechanical else 'false'}\n")
             f.write(f"has_complex={'true' if complex_ else 'false'}\n")
 

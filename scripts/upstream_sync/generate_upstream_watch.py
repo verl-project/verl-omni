@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Bootstrap script: generate .github/upstream_sync/upstream_watch.yaml.
 
@@ -50,7 +63,10 @@ MANUAL_ENTRIES = [
         "criteria": "registry_injection",
         "verl_omni_file": "verl_omni/_patch.py",
         "verl_omni_symbols": ["_patch_vllm_omni_replica"],
-        "note": "_patch_vllm_omni_replica calls RolloutReplicaRegistry.register('vllm_omni', ...); API or rename breaks the patch",
+        "note": (
+            "_patch_vllm_omni_replica calls RolloutReplicaRegistry.register('vllm_omni', ...); "
+            "API or rename breaks the patch"
+        ),
     },
     {
         "upstream_repo": "verl-project/verl",
@@ -87,7 +103,10 @@ MANUAL_ENTRIES = [
         "criteria": "structural_parallel",
         "verl_omni_file": "verl_omni/agent_loop/diffusion_agent_loop.py",
         "verl_omni_symbols": ["DiffusionAgentLoopWorker"],
-        "note": "DiffusionAgentLoopWorker is a parallel diffusion impl; upstream changes to agent loop lifecycle or metrics must be mirrored",
+        "note": (
+            "DiffusionAgentLoopWorker is a parallel diffusion impl; "
+            "upstream loop lifecycle or metric changes must be mirrored"
+        ),
     },
     # RayFlowGRPOTrainer mirrors RayPPOTrainer's train-loop structure (checkpoint,
     # validation, reward extraction, timing). Upstream additions to the training
@@ -99,7 +118,10 @@ MANUAL_ENTRIES = [
         "criteria": "structural_parallel",
         "verl_omni_file": "verl_omni/trainer/diffusion/ray_diffusion_trainer.py",
         "verl_omni_symbols": ["RayFlowGRPOTrainer"],
-        "note": "RayFlowGRPOTrainer mirrors RayPPOTrainer train-loop; upstream lifecycle or metric changes need diffusion equivalents",
+        "note": (
+            "RayFlowGRPOTrainer mirrors RayPPOTrainer train-loop; "
+            "upstream lifecycle or metric changes need diffusion equivalents"
+        ),
     },
 ]
 

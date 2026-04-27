@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Generate the Cursor prompt for Track 1 complex signature fixes.
 
@@ -40,15 +53,13 @@ def _format_params(info: dict) -> str:
     if sig:
         params = sig.get("params", {})
         param_str = ", ".join(
-            f"{n}" + ("?" if not v.get("required") else "") + f" [{v.get('kind', '')}]"
-            for n, v in params.items()
+            f"{n}" + ("?" if not v.get("required") else "") + f" [{v.get('kind', '')}]" for n, v in params.items()
         )
         lines.append(f"  (function)({param_str})")
     for method, minfo in sorted(methods.items()):
         params = minfo.get("params", {})
         param_str = ", ".join(
-            f"{n}" + ("?" if not v.get("required") else "") + f" [{v.get('kind', '')}]"
-            for n, v in params.items()
+            f"{n}" + ("?" if not v.get("required") else "") + f" [{v.get('kind', '')}]" for n, v in params.items()
         )
         lines.append(f"  .{method}({param_str})")
     return "\n".join(lines) if lines else "(no tracked methods)"
@@ -80,12 +91,12 @@ remaining cases need deeper analysis.
 ## Change type glossary
 | Type | Meaning | What to do |
 |------|---------|------------|
-| `params_restructured` | Multiple params changed at once — possible API redesign | Reconstruct call sites; may need to build a new config object |
-| `param_added_required` | New REQUIRED param — all callers must supply a value | Find instantiation sites, supply an appropriate value |
+| `params_restructured` | Multiple params changed simultaneously | Reconstruct call sites; may need new config object |
+| `param_added_required` | New REQUIRED param — callers must supply it | Find call sites; supply an appropriate value |
 | `symbol_gone` | Symbol disappeared from its module | Check if it moved; update the import; add TODO if not found |
-| `abstract_methods_changed` | Abstract interface of a base class changed | Implement any new abstract methods in the verl-omni subclass |
+| `abstract_methods_changed` | Base class abstract interface changed | Implement new abstract methods in subclass |
 | `method_removed` | A method verl-omni calls no longer exists upstream | Remove the call or find the replacement |
-| `param_attrs_changed` | Same param names, different `required`/`kind` status | Adjust how the param is passed at call sites |
+| `param_attrs_changed` | Same params, different `required`/`kind` | Adjust how the param is passed at call sites |
 
 ## Constraints (strictly enforced)
 - Only modify the **verl-omni files listed** in each change section.
@@ -116,124 +127,124 @@ def format_change(idx: int, change: dict) -> str:
     files = _read_verl_omni_files(usages)
 
     parts = [
-        f"---",
+        "---",
         f"## Change {idx}: `{key}`",
-        f"",
+        "",
         f"**Type:** `{change_type}`  ",
         f"**Affected method:** `{method or '(class-level)'}`  ",
         f"**verl-omni files to edit:** {', '.join(f'`{u}`' for u in usages) or '(none found — check manually)'}  ",
-        f"",
+        "",
     ]
 
     # Type-specific guidance
     if change_type == "params_restructured":
         parts += [
-            f"**Old signature:**",
-            f"```",
+            "**Old signature:**",
+            "```",
             _format_params(old_info),
-            f"```",
-            f"**New signature:**",
-            f"```",
+            "```",
+            "**New signature:**",
+            "```",
             _format_params(new_info),
-            f"```",
+            "```",
             f"**Parameters added:** {added}  ",
             f"**Parameters removed:** {removed}  ",
-            f"",
+            "",
             f"Find all call sites that pass `{'`, `'.join(removed)}` and update them to use",
-            f"the new API. If the new params require constructing a config/dataclass object,",
-            f"inspect the upstream module for its definition and build it from existing data.",
+            "the new API. If the new params require constructing a config/dataclass object,",
+            "inspect the upstream module for its definition and build it from existing data.",
         ]
 
     elif change_type == "param_added_required":
         parts += [
-            f"**Old signature:**",
-            f"```",
+            "**Old signature:**",
+            "```",
             _format_params(old_info),
-            f"```",
-            f"**New signature:**",
-            f"```",
+            "```",
+            "**New signature:**",
+            "```",
             _format_params(new_info),
-            f"```",
+            "```",
             f"**New required parameter(s):** {added}  ",
-            f"",
-            f"Find every place the affected class/function is **instantiated or called**",
+            "",
+            "Find every place the affected class/function is **instantiated or called**",
             f"in verl-omni and supply an appropriate value for `{'`, `'.join(added)}`.  ",
-            f"Use the surrounding context to infer the correct value (config fields,",
-            f"constructor arguments, existing attributes).",
+            "Use the surrounding context to infer the correct value (config fields,",
+            "constructor arguments, existing attributes).",
         ]
 
     elif change_type == "symbol_gone":
         parts += [
             f"**Detail:** {detail}  ",
-            f"",
+            "",
             f"The symbol `{key.rpartition('.')[2]}` can no longer be imported from",
             f"`{key.rpartition('.')[0]}`. Possible causes:",
-            f"1. It was moved to a different module (update the import path).",
-            f"2. It was renamed (update both import and usage).",
-            f"3. It was deleted (add `# TODO(upstream-sync): symbol removed — needs replacement`).",
-            f"",
-            f"Check the import statement in the listed verl-omni files and update accordingly.",
-            f"If you cannot determine the new location, add a TODO comment and do NOT guess.",
+            "1. It was moved to a different module (update the import path).",
+            "2. It was renamed (update both import and usage).",
+            "3. It was deleted (add `# TODO(upstream-sync): symbol removed — needs replacement`).",
+            "",
+            "Check the import statement in the listed verl-omni files and update accordingly.",
+            "If you cannot determine the new location, add a TODO comment and do NOT guess.",
         ]
 
     elif change_type == "abstract_methods_changed":
         parts += [
             f"**Abstract methods added upstream:** {added}  ",
             f"**Abstract methods removed upstream:** {removed}  ",
-            f"",
-            f"For each **added** abstract method: check whether the verl-omni subclass",
-            f"already has an equivalent implementation (possibly under a different name).",
-            f"If not, implement the method with the diffusion-model equivalent logic.",
-            f"For each **removed** abstract method: check if the verl-omni subclass still",
-            f"calls `super().<method>` and remove that call if so.",
+            "",
+            "For each **added** abstract method: check whether the verl-omni subclass",
+            "already has an equivalent implementation (possibly under a different name).",
+            "If not, implement the method with the diffusion-model equivalent logic.",
+            "For each **removed** abstract method: check if the verl-omni subclass still",
+            "calls `super().<method>` and remove that call if so.",
         ]
 
     elif change_type == "method_removed":
         parts += [
             f"**Method removed:** `{method}`  ",
-            f"",
-            f"Find every call to `.<method>(...)` in the listed verl-omni files.",
-            f"Either remove the call (if it was optional), find the replacement method",
-            f"in the new upstream API, or add a TODO comment if unclear.",
+            "",
+            "Find every call to `.<method>(...)` in the listed verl-omni files.",
+            "Either remove the call (if it was optional), find the replacement method",
+            "in the new upstream API, or add a TODO comment if unclear.",
         ]
 
     elif change_type == "param_attrs_changed":
         parts += [
             f"**Parameters with changed attributes:** {changed_params}  ",
-            f"**Old signature:**",
-            f"```",
+            "**Old signature:**",
+            "```",
             _format_params(old_info),
-            f"```",
-            f"**New signature:**",
-            f"```",
+            "```",
+            "**New signature:**",
+            "```",
             _format_params(new_info),
-            f"```",
-            f"",
-            f"The parameter names are the same but their `required` or `kind` changed",
-            f"(e.g. positional-or-keyword → keyword-only, or optional → required).",
-            f"Find call sites and adjust how the parameter is passed.",
+            "```",
+            "",
+            "The parameter names are the same but their `required` or `kind` changed",
+            "(e.g. positional-or-keyword → keyword-only, or optional → required).",
+            "Find call sites and adjust how the parameter is passed.",
         ]
 
     else:
         parts += [
             f"**Detail:** {detail or '(no additional detail)'}  ",
-            f"",
-            f"Review the old and new signatures below and apply the minimal fix:",
-            f"```",
+            "",
+            "Review the old and new signatures below and apply the minimal fix:",
+            "```",
             f"OLD:\n{_format_params(old_info)}",
             f"NEW:\n{_format_params(new_info)}",
-            f"```",
+            "```",
         ]
 
     # Always append the file contents so Cursor has context
     if files:
-        parts.append(f"\n### verl-omni file(s) to edit")
+        parts.append("\n### verl-omni file(s) to edit")
         for rel_path, content in files.items():
             parts += [
                 f"\n**`{rel_path}`**",
-                f"```python",
+                "```python",
                 content.rstrip(),
-                f"```",
+                "```",
             ]
 
     parts.append("")

@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Track 1: apply mechanical signature fixes (tiers 1-4) to verl_omni source.
 
@@ -40,6 +53,7 @@ PR_BODY_FILE = REPO_ROOT / "pr_body_track1.md"
 # Mechanical fix implementations
 # ---------------------------------------------------------------------------
 
+
 def _files_to_edit(usages: list[str]) -> list[Path]:
     return [REPO_ROOT / p for p in usages if (REPO_ROOT / p).exists()]
 
@@ -64,7 +78,7 @@ def fix_tier3_param_renamed(change: dict) -> tuple[list[str], str]:
 
     # Match `old_name=` as a keyword argument (not inside strings or comments).
     # Restrict to word-boundary match to avoid partial replacements.
-    pattern = re.compile(r'\b' + re.escape(old_name) + r'=')
+    pattern = re.compile(r"\b" + re.escape(old_name) + r"=")
     replacement = new_name + "="
 
     for py_file in _files_to_edit(change.get("verl_omni_usages", [])):
@@ -96,7 +110,7 @@ def fix_tier4_param_removed(change: dict) -> tuple[list[str], str]:
     annotated: list[str] = []
 
     for param_name in removed:
-        pattern = re.compile(r'(\b' + re.escape(param_name) + r'=)')
+        pattern = re.compile(r"(\b" + re.escape(param_name) + r"=)")
         todo = f"# TODO(upstream-sync): param `{param_name}` removed from upstream — verify and delete"
 
         for py_file in _files_to_edit(change.get("verl_omni_usages", [])):
@@ -136,6 +150,7 @@ def fix_tier4_param_removed(change: dict) -> tuple[list[str], str]:
 # PR body generation
 # ---------------------------------------------------------------------------
 
+
 def build_pr_body(
     tier1_notes: list[str],
     tier3_notes: list[str],
@@ -165,8 +180,7 @@ def build_pr_body(
         sections.append("These were **not** auto-fixed. Cursor will handle them in a follow-up PR:\n")
         for c in complex_changes:
             sections.append(
-                f"- `{c['key']}` (`{c.get('method', 'function')}`): "
-                f"`{c['type']}` — {c.get('detail', '')}\n"
+                f"- `{c['key']}` (`{c.get('method', 'function')}`): `{c['type']}` — {c.get('detail', '')}\n"
             )
 
     sections.append(
@@ -183,6 +197,7 @@ def build_pr_body(
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> int:
     if not CHANGES_FILE.exists():
@@ -233,6 +248,7 @@ def main() -> int:
     # Promote fresh snapshot → committed snapshot
     if FRESH_SNAPSHOT.exists():
         import shutil
+
         shutil.copy(FRESH_SNAPSHOT, SNAPSHOT_FILE)
         print(f"Updated {SNAPSHOT_FILE.relative_to(REPO_ROOT)}")
         FRESH_SNAPSHOT.unlink()
@@ -245,7 +261,7 @@ def main() -> int:
     PR_BODY_FILE.write_text(pr_body)
 
     # Summarize
-    print(f"\nApplied fixes:")
+    print("\nApplied fixes:")
     print(f"  Tier 1 (info-only):  {len(tier1_notes)}")
     print(f"  Tier 3 (renamed):    {len(tier3_notes)}")
     print(f"  Tier 4 (TODO'd):     {len(tier4_notes)}")
@@ -254,6 +270,7 @@ def main() -> int:
 
     # Set GHA output
     import os
+
     has_pr_content = bool(tier1_notes or tier3_notes or tier4_notes or all_complex)
     needs_human = bool(tier4_notes or all_complex)
     has_complex = bool(all_complex)

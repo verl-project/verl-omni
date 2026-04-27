@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Generate the Cursor prompt for Track 2 behavioral drift fixes.
 
@@ -85,9 +98,9 @@ def format_change(idx: int, change: dict) -> str:
         verl_omni_content = verl_omni_content[:max_chars] + "\n... (truncated for brevity)"
 
     lines = [
-        f"---",
+        "---",
         f"## Change {idx}: `{upstream_file}`",
-        f"",
+        "",
         f"**Upstream repo:** `{upstream_repo}`  ",
         f"**Watched symbols:** {', '.join(f'`{s}`' for s in symbols)}  ",
         f"**Criteria:** {criteria}  ",
@@ -98,22 +111,22 @@ def format_change(idx: int, change: dict) -> str:
         lines.append(f"**Note:** {note}  ")
 
     lines += [
-        f"",
-        f"### Upstream diff (filtered to watched symbols)",
-        f"```diff",
+        "",
+        "### Upstream diff (filtered to watched symbols)",
+        "```diff",
         upstream_patch.rstrip(),
-        f"```",
-        f"",
+        "```",
+        "",
         f"### Current upstream file (`{upstream_file}`)",
-        f"```python",
+        "```python",
         upstream_content.rstrip(),
-        f"```",
-        f"",
+        "```",
+        "",
         f"### verl-omni counterpart (`{verl_omni_file_label}`)",
-        f"```python",
+        "```python",
         verl_omni_content.rstrip(),
-        f"```",
-        f"",
+        "```",
+        "",
     ]
     return "\n".join(lines)
 

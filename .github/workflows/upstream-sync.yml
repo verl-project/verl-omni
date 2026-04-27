@@ -4,6 +4,8 @@ on:
   schedule:
     - cron: '0 2 * * *'  # daily 2 AM UTC
   workflow_dispatch:      # manual trigger for testing / backfill
+  push:
+    branches: [gitaction]  # TEMP: remove before merging to main
 
 concurrency:
   group: upstream-sync

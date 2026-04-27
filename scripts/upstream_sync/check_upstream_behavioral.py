@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 Track 2: detect behavioral drift in upstream symbols that verl-omni mirrors.
 
@@ -56,6 +69,7 @@ GH_API = "https://api.github.com"
 # GitHub API helpers
 # ---------------------------------------------------------------------------
 
+
 def _gh_request(path: str, token: str) -> dict:
     url = f"{GH_API}/{path.lstrip('/')}"
     req = urllib.request.Request(
@@ -87,10 +101,9 @@ def get_comparison(repo: str, base_sha: str, head_sha: str, token: str) -> dict:
 def get_file_content(repo: str, file_path: str, ref: str, token: str) -> str | None:
     """Fetch raw file content at a specific ref (for context in the Cursor prompt)."""
     try:
-        data = _gh_request(
-            f"repos/{repo}/contents/{file_path}?ref={ref}", token
-        )
+        data = _gh_request(f"repos/{repo}/contents/{file_path}?ref={ref}", token)
         import base64
+
         return base64.b64decode(data["content"]).decode()
     except (RuntimeError, KeyError):
         return None
@@ -99,6 +112,7 @@ def get_file_content(repo: str, file_path: str, ref: str, token: str) -> str | N
 # ---------------------------------------------------------------------------
 # Diff filtering
 # ---------------------------------------------------------------------------
+
 
 def _split_hunks(patch: str) -> list[str]:
     """Split a unified diff patch into individual @@ hunks."""
@@ -125,14 +139,14 @@ def filter_patch_to_symbols(patch: str, symbols: list[str]) -> str:
     if not patch:
         return ""
 
-    symbol_pattern = re.compile(r'\b(' + "|".join(re.escape(s) for s in symbols) + r')\b')
+    symbol_pattern = re.compile(r"\b(" + "|".join(re.escape(s) for s in symbols) + r")\b")
     kept: list[str] = []
 
     for hunk in _split_hunks(patch):
         lines = hunk.splitlines(keepends=True)
         # Check hunk header (first line) and any modified lines
         header = lines[0] if lines else ""
-        changed_lines = "".join(l for l in lines[1:] if l.startswith(("+", "-")))
+        changed_lines = "".join(line for line in lines[1:] if line.startswith(("+", "-")))
         if symbol_pattern.search(header) or symbol_pattern.search(changed_lines):
             kept.append(hunk)
 
@@ -152,6 +166,7 @@ def try_alt_paths(changed_files: dict[str, str], file_path: str) -> str | None:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> int:
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
@@ -194,6 +209,7 @@ def main() -> int:
             print(f"  No prior SHA ({config['sha_env']} not set) — using 7-day lookback")
             # Fall back: get SHA from 7 days ago as base
             from datetime import datetime, timedelta, timezone
+
             since = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
             commits = _gh_request(
                 f"repos/{repo}/commits?sha={config['default_branch']}&since={since}&per_page=1",
@@ -218,10 +234,7 @@ def main() -> int:
             return 2
 
         num_commits = len(comparison.get("commits", []))
-        changed_files: dict[str, str] = {
-            f["filename"]: f.get("patch", "")
-            for f in comparison.get("files", [])
-        }
+        changed_files: dict[str, str] = {f["filename"]: f.get("patch", "") for f in comparison.get("files", [])}
         print(f"  {num_commits} commit(s), {len(changed_files)} file(s) changed")
 
         # Check each watched entry
@@ -243,13 +256,15 @@ def main() -> int:
             # Fetch current upstream file content for Cursor context
             upstream_content = get_file_content(repo, file_path, current_sha, token)
 
-            all_results.append({
-                "entry": entry,
-                "upstream_patch": relevant_patch,
-                "upstream_content": upstream_content,
-                "current_sha": current_sha,
-                "last_sha": last_sha,
-            })
+            all_results.append(
+                {
+                    "entry": entry,
+                    "upstream_patch": relevant_patch,
+                    "upstream_content": upstream_content,
+                    "current_sha": current_sha,
+                    "last_sha": last_sha,
+                }
+            )
 
     # Write current SHAs for the workflow to update variables with
     current_shas_file = REPO_ROOT / "upstream_current_shas.json"
@@ -257,18 +272,14 @@ def main() -> int:
 
     if not all_results:
         print("\nNo behavioral drift detected.")
-        CHANGES_FILE.write_text(
-            json.dumps({"has_changes": False, "changes": []}, indent=2) + "\n"
-        )
+        CHANGES_FILE.write_text(json.dumps({"has_changes": False, "changes": []}, indent=2) + "\n")
         return 0
 
     print(f"\nBehavioral drift in {len(all_results)} upstream file(s):")
     for r in all_results:
         print(f"  {r['entry']['file']} → {r['entry']['verl_omni_file']}")
 
-    CHANGES_FILE.write_text(
-        json.dumps({"has_changes": True, "changes": all_results}, indent=2) + "\n"
-    )
+    CHANGES_FILE.write_text(json.dumps({"has_changes": True, "changes": all_results}, indent=2) + "\n")
 
     # Set GHA output
     if gha_output := os.environ.get("GITHUB_OUTPUT"):
