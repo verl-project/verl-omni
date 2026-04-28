@@ -36,6 +36,15 @@ Visit our documentation to learn more.
 - [Installation](docs/start/install.md)
 - [Quickstart](docs/start/flowgrpo_quickstart.md)
 
+## Supported Models & Algorithms
+
+| Model | Algorithm | State |
+|---|---|---|
+| Qwen-Image | FlowGRPO | ✅ |
+| Wan2.2 | DanceGRPO | WIP |
+| BAGEL | FlowGRPO | WIP |
+| Qwen3-Omni-Thinker | GRPO | WIP |
+
 ## Contributing
 
 Contributions are welcome.
