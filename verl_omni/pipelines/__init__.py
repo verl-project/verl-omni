@@ -16,5 +16,4 @@ from . import qwen_image_flow_grpo, z_image_flow_grpo
 from .qwen_image_flow_grpo import *  # noqa: F401, F403
 from .z_image_flow_grpo import *  # noqa: F401, F403
 
-__all__ = qwen_image_flow_grpo.__all__
-__all__ += z_image_flow_grpo.__all__
+__all__ = qwen_image_flow_grpo.__all__ + z_image_flow_grpo.__all__
