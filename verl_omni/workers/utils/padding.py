@@ -26,13 +26,13 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
     which means the valid tokens are continuous and start from the left.
 
     Args:
-        data: TensorDict with "prompt_embeds", "prompt_embeds_mask",
-              "negative_prompt_embeds", "negative_prompt_embeds_mask"
+        data: TensorDict with ``prompt_embeds``, ``prompt_embeds_mask``,
+            ``negative_prompt_embeds``, ``negative_prompt_embeds_mask``.
 
     Returns:
-        data: TensorDict with
-        - Tensor includes NestedTensors "prompt_embeds", "prompt_embeds_mask",
-          "negative_prompt_embeds", "negative_prompt_embeds_mask"
+        TensorDict where ``prompt_embeds``, ``prompt_embeds_mask``,
+        ``negative_prompt_embeds``, and ``negative_prompt_embeds_mask`` have been
+        replaced with jagged ``torch.nested`` tensors with padding stripped.
     """
 
     def _to_nested(embeds: torch.Tensor, mask: torch.Tensor):

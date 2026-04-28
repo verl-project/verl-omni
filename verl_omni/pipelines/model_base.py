@@ -29,12 +29,10 @@ class DiffusionModelBase(ABC):
     Subclass this ABC and implement the three abstract methods to plug your
     model into the verl training loop.
 
-    Registration
-    ------------
-    Decorate your subclass with ``@DiffusionModelBase.register("name")``.
-    The *name* must match the ``_class_name`` value in the pipeline's
-    ``model_index.json`` (which is auto-detected into
-    ``DiffusionModelConfig.architecture``).
+    To register, decorate your subclass with
+    ``@DiffusionModelBase.register("name")``. The *name* must match the
+    ``_class_name`` value in the pipeline's ``model_index.json`` (which is
+    auto-detected into ``DiffusionModelConfig.architecture``).
 
     Example::
 
@@ -161,13 +159,10 @@ class DiffusionModelBase(ABC):
 class VllmOmniPipelineBase:
     """Registry base for vllm-omni custom diffusion pipeline classes.
 
-    Registration
-    ------------
-    Decorate your custom pipeline class with
-    ``@VllmOmniPipelineBase.register("name")``.
-    The *name* must match the ``_class_name`` value in the pipeline's
-    ``model_index.json`` (which is auto-detected into
-    ``DiffusionModelConfig.architecture``).
+    To register, decorate your custom pipeline class with
+    ``@VllmOmniPipelineBase.register("name")``. The *name* must match the
+    ``_class_name`` value in the pipeline's ``model_index.json`` (which is
+    auto-detected into ``DiffusionModelConfig.architecture``).
 
     Example::
 

@@ -29,6 +29,18 @@ algo/performance.md
 ```
 
 ```{toctree}
+:maxdepth: 2
+:caption: API Reference
+
+api/trainer.rst
+api/workers.rst
+api/rollout.rst
+api/reward.rst
+api/pipelines.rst
+api/utils.rst
+```
+
+```{toctree}
 :maxdepth: 1
 :caption: Contributing
 

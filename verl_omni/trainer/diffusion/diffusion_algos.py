@@ -195,10 +195,11 @@ def compute_diffusion_loss_flow_grpo(
     advantages: torch.Tensor,
     config: Optional[DictConfig | DiffusionActorConfig] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
-    """
-    Compute the clipped policy objective and related metrics for FlowGRPO.
+    """Compute the clipped policy objective and related metrics for FlowGRPO.
+
     Adapted from
     https://github.com/yifan123/flow_grpo/blob/main/scripts/train_sd3_fast.py#L885
+
     Args:
         old_log_prob (torch.Tensor):
             Log-probabilities of actions under the old policy, shape (batch_size,).
@@ -206,8 +207,8 @@ def compute_diffusion_loss_flow_grpo(
             Log-probabilities of actions under the current policy, shape (batch_size,).
         advantages (torch.Tensor):
             Advantage estimates for each action, shape (batch_size,).
-        config: `(verl.trainer.config.DiffusionActorConfig)`:
-            config for the actor.
+        config (verl_omni.workers.config.DiffusionActorConfig):
+            Config for the actor.
     """
     assert config is not None
     assert isinstance(config, DiffusionActorConfig)

@@ -141,14 +141,17 @@ class DiffusionAgentLoopWorker:
             batch (DataProto): Input batch.
 
         Returns:
-            DataProto: Output batch.
-            - prompts: [bsz, prompt_length], prompt token ids from dataset.
-            - responses: diffusion output, typically [bsz, C, H, W] (image) or [bsz, T, C, H, W] (video).
-            - rm_scores (optional): [bsz, 1], reward model scores.
-            - meta_info:
-              - metrics: List[dict], per-sample agent loop metrics.
-              - reward_extra_keys (optional): List[str], keys for reward extra info for logging/validation.
-            ...
+            DataProto: Output batch with the following fields.
+
+            - ``prompts``: ``[bsz, prompt_length]`` prompt token ids from dataset.
+            - ``responses``: diffusion output, typically ``[bsz, C, H, W]`` (image)
+              or ``[bsz, T, C, H, W]`` (video).
+            - ``rm_scores`` (optional): ``[bsz, 1]`` reward model scores.
+            - ``meta_info``:
+
+              - ``metrics``: ``List[dict]``, per-sample agent loop metrics.
+              - ``reward_extra_keys`` (optional): ``List[str]``, keys for reward
+                extra info for logging/validation.
         """
         config = self.rollout_config
 
