@@ -86,7 +86,7 @@ class TestDiffusionRolloutAlgoConfig:
 class TestDiffusionSamplingConfig:
     def test_defaults(self):
         cfg = DiffusionSamplingConfig()
-        assert cfg.num_inference_steps == 40
+        assert cfg.pipeline.num_inference_steps == 40
         assert cfg.seed == 42
         assert isinstance(cfg.algo, DiffusionRolloutAlgoConfig)
 
