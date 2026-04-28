@@ -13,14 +13,6 @@
 # limitations under the License.
 
 from .diffusers_training_adapter import QwenImage
+from .vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
 
-__all__ = ["QwenImage"]
-
-try:
-    from .vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
-except ImportError:
-    QwenImagePipelineWithLogProb = None
-
-
-if QwenImagePipelineWithLogProb is not None:
-    __all__.append("QwenImagePipelineWithLogProb")
+__all__ = ["QwenImage", "QwenImagePipelineWithLogProb"]

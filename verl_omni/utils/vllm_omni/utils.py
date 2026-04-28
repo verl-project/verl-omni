@@ -32,6 +32,8 @@ class OmniTensorLoRARequest(OmniLoRARequest):
 
 
 class VLLMOmniHijack:
+    """Monkey-patches vllm-omni internals to support in-memory LoRA tensors."""
+
     @staticmethod
     def hijack():
         def hijack__load_adapter(self, lora_request: OmniTensorLoRARequest) -> tuple[LoRAModel, PEFTHelper]:

@@ -50,10 +50,7 @@ def _patch_vllm_omni_replica() -> None:
     from verl.workers.rollout.replica import RolloutReplicaRegistry
 
     def _load_vllm_omni():
-        try:
-            from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniReplica
-        except ImportError as err:
-            raise ImportError("vllm-omni rollout requires vllm-omni to be installed.") from err
+        from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniReplica
 
         return vLLMOmniReplica
 
