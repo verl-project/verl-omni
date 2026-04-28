@@ -23,6 +23,9 @@ As diffusion and omni-modality model training expands, it is useful to have a de
 - **Modular training backends** that can easily integrate various parallism (FSDP, USP) and other optimizations instead of rebuilding the full stack from scratch.
 - **E2E examples and benchmarks** for validating high-efficiency e2e RL training on model families such as QwenImage, Qwen-Omni, and BAGEL, in co-located sync or fully-async mode. 
 
+
+
+
 ## Roadmap
 
 Future work is tracked here:
