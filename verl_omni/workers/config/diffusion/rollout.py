@@ -23,7 +23,6 @@ from verl.workers.config.rollout import (
     CheckpointEngineConfig,
     MultiTurnConfig,
     PrometheusConfig,
-    SamplingConfig,
 )
 
 __all__ = [
@@ -55,9 +54,11 @@ class DiffusionPipelineConfig(BaseConfig):
 
 
 @dataclass
-class DiffusionSamplingConfig(SamplingConfig):
+class DiffusionSamplingConfig(BaseConfig):
+    # for validation only
+    n: int = 1
     seed: int = 42
-    pipeline: DiffusionPipelineConfig = field(default_factory=lambda: DiffusionPipelineConfig(num_inference_steps=40))
+    pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
     algo: DiffusionRolloutAlgoConfig = field(default_factory=DiffusionRolloutAlgoConfig)
 
 
