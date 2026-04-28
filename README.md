@@ -58,7 +58,7 @@ Contributions are welcome.
 
 See the [contribution guide](CONTRIBUTING.md).
 
-## Acknowledgement 
+## Acknowledgement 🌟
 
 `verl-omni` builds on the engineering foundations developed in [`verl`](https://github.com/verl-project/verl) and is closely aligned with multimodal inference systems such as [`vLLM-Omni`](https://github.com/vllm-project/vllm-omni).
 
