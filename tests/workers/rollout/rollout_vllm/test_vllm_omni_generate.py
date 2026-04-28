@@ -95,9 +95,12 @@ def init_server():
             "free_cache_engine": True,
             "disable_log_stats": True,
             "n": 4,
-            "height": 512,
-            "width": 512,
-            "num_inference_steps": 10,
+            "pipeline": {
+                "_target_": "verl_omni.workers.config.diffusion.rollout.DiffusionPipelineConfig",
+                "height": 512,
+                "width": 512,
+                "num_inference_steps": 10,
+            },
         }
     )
 

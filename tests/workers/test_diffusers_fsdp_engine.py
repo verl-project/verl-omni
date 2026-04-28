@@ -53,7 +53,7 @@ def create_training_config(model_type, strategy, device_count, model):
                     "tokenizer_path=" + tokenizer_path,
                     "lora_rank=8",
                     "lora_alpha=16",
-                    "true_cfg_scale=4.0",
+                    "pipeline.true_cfg_scale=4.0",
                     "algo.noise_level=1.2",
                     "algo.sde_type=sde",
                 ],

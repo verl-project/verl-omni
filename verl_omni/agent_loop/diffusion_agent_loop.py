@@ -159,7 +159,7 @@ class DiffusionAgentLoopWorker:
         }
 
         # override sampling params for validation
-        if batch.meta_info["validate"]:
+        if batch.meta_info.get("validate", False):
             sampling_params.update(_config_to_sampling_dict(config.val_kwargs.pipeline))
             sampling_params.update(_config_to_sampling_dict(config.val_kwargs.algo))
             sampling_params["seed"] = config.val_kwargs.seed
