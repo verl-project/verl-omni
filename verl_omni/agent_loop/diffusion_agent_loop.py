@@ -163,6 +163,7 @@ class DiffusionAgentLoopWorker:
             sampling_params.update(_config_to_sampling_dict(config.val_kwargs.pipeline))
             sampling_params.update(_config_to_sampling_dict(config.val_kwargs.algo))
             sampling_params["seed"] = config.val_kwargs.seed
+            sampling_params["logprobs"] = False
 
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch.non_tensor_batch:
