@@ -69,7 +69,7 @@ If you find the project helpful, please cite:
 ```bibtex
 @misc{verlomni_github,
   title        = {VeRL-Omni: Fast and Stable RL Training for Diffusion and Omni-Modality Models},
-  author       = {Yongxiang Huang and Cheung Kawai and Jingan Zhou and Yingshu Chen and openYuanrong Team and Xibin Wu},
+  author       = {Yongxiang Huang and Cheung Kawai and Jingan Zhou and Yingshu Chen and {openYuanrong Team} and Xibin Wu},
   year         = {2026},
   howpublished = {\url{https://github.com/verl-project/verl-omni}},
   urldate      = {2026-04-28}
