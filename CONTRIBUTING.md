@@ -21,24 +21,6 @@ Furthermore, you can learn the development plan and roadmap via the [RFC: Multi-
 
 ## Developing
 
-Install the dependencies in this order to avoid conflicts:
-
-```bash
-pip install -e .
-uv venv --python 3.12 --seed
-source .venv/bin/activate
-
-# Install vllm, vllm-omni, then verl in order
-uv pip install vllm==0.18.0
-uv pip install vllm-omni==0.18
-uv pip install git+https://github.com/verl-project/verl.git@3eab8ccc6143c624e7f11c871896f941b3fec900
-
-# Install verl-omni from source
-git clone https://github.com/verl-project/verl-omni.git
-cd verl-omni
-uv pip install -e .
-```
-
 For the full dependency setup, see the [installation doc](docs/start/install.md).
 
 ## Code Linting and Formatting

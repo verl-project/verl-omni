@@ -6,23 +6,11 @@ For the full installation and quickstart guide, see `docs/start/flowgrpo_quickst
 
 ## Installation
 
-Install dependencies in this order to avoid conflicts:
+Follow the [installation guide](../../docs/start/install.md) to set up the base environment, then install the FlowGRPO-specific dependency:
 
 ```bash
-# 1. vLLM and vLLM-Omni rollout backend
-pip install "vllm==0.18" "vllm-omni==0.18"
-
-# 2. verl
-pip install git+https://github.com/verl-project/verl.git@3eab8ccc6143c624e7f11c871896f941b3fec900
-
-# 3. verl-omni
-pip install git+https://github.com/verl-project/verl-omni.git@main
-
-# 4. FlowGRPO example-specific dependency
 pip install Levenshtein
 ```
-
-For full installation details see `docs/start/install.md`.
 
 The provided script is configured for a single node with `4` GPUs.
 
@@ -95,43 +83,7 @@ Override these values on the command line if you want to log under a different p
 
 ### Diffusion-specific metrics
 
-The following metrics are specific to diffusion FlowGRPO training.
-
-**`critic/rewards/zero_std_ratio`** — the fraction of prompt groups (out of
-`train_batch_size` prompts) where every one of the `n` generated images
-received the same reward, giving a within-group standard deviation of zero.
-GRPO derives its learning signal from *relative* rewards within a group, so a
-group with zero std contributes no gradient regardless of the absolute reward
-value. A persistently high ratio (e.g. above 0.5) means the reward model is
-saturated or the task difficulty is poorly calibrated — either all images are
-rewarded or none are — and the policy is not receiving useful training signal.
-
-**`critic/rewards/std_mean`** — the mean of the per-prompt reward standard
-deviations across all prompt groups in the batch. Complements
-`zero_std_ratio`: while `zero_std_ratio` flags completely collapsed groups,
-`std_mean` tracks the average reward spread within a group across the whole
-batch. A healthy, rising `std_mean` indicates the reward model is producing
-diverse signal; a declining `std_mean` is an early warning of reward
-saturation before `zero_std_ratio` spikes.
-
-**`actor/pg_clipfrac_higher`** and **`actor/pg_clipfrac_lower`** — these
-break down PPO clipping by direction. `pg_clipfrac_higher` is the fraction of
-`(image, denoising-timestep)` pairs where the probability ratio
-`π_new / π_old` exceeded `1 + clip_ratio`, meaning the policy is trying to
-increase the probability of high-advantage images more than the clip allows.
-`pg_clipfrac_lower` is the fraction where the ratio fell below
-`1 - clip_ratio`, meaning the policy is trying to suppress low-advantage
-images more aggressively than allowed. A large asymmetry between the two
-(e.g. `higher` >> `lower`) indicates the dominant learning direction and can
-guide tuning of `clip_ratio` or the learning rate.
-
-**`timing_per_image_ms/{stage}`** — per-image latency in milliseconds for
-each core compute stage: `gen` (rollout), `ref` (reference log-prob),
-`old_log_prob`, `adv` (advantage computation), and `update_actor`. Use
-these to pinpoint which stage dominates step time.
-
-**`perf/throughput`** — images processed per second per GPU, computed as
-`(train_batch_size × rollout.n) / (time_per_step × n_gpus)`.
+See the [Metrics Documentation](../../docs/start/metrics.md) for a full description of all diffusion-specific training metrics.
 
 ## Variants
 

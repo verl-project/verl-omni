@@ -154,6 +154,7 @@ class DiffusionAgentLoopWorker:
 
         sampling_params = {
             "true_cfg_scale": config.true_cfg_scale,
+            "guidance_scale": config.guidance_scale,
             "max_sequence_length": config.max_sequence_length,
             "height": config.height,
             "width": config.width,
