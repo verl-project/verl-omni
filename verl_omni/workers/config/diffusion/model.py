@@ -25,7 +25,7 @@ from verl.workers.config.model import MtpConfig
 
 from verl_omni.utils.fs import resolve_model_local_dir
 
-from .rollout import DiffusionRolloutAlgoConfig
+from .rollout import DiffusionPipelineConfig, DiffusionRolloutAlgoConfig
 
 __all__ = ["DiffusionModelConfig"]
 
@@ -83,12 +83,8 @@ class DiffusionModelConfig(BaseConfig):
 
     mtp: Optional[MtpConfig] = field(default_factory=MtpConfig)
 
-    height: int = 512
-    width: int = 512
-    num_inference_steps: int = 10
-    true_cfg_scale: float = 1.0
-    max_sequence_length: int = 512
-    guidance_scale: Optional[float] = None
+    pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
+
     algo: Optional[DiffusionRolloutAlgoConfig] = field(default_factory=DiffusionRolloutAlgoConfig)
 
     def __post_init__(self):

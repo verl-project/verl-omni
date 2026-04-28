@@ -105,9 +105,9 @@ class QwenImage(DiffusionModelBase):
         """
         _configure_qwen_image_scheduler(
             scheduler,
-            height=model_config.height,
-            width=model_config.width,
-            num_inference_steps=model_config.num_inference_steps,
+            height=model_config.pipeline.height,
+            width=model_config.pipeline.width,
+            num_inference_steps=model_config.pipeline.num_inference_steps,
             device=device,
         )
 
@@ -150,7 +150,7 @@ class QwenImage(DiffusionModelBase):
         vae_scale_factor = tu.get_non_tensor_data(data=micro_batch, key="vae_scale_factor", default=None)
         img_shapes = build_img_shapes(height, width, latents.shape[0], vae_scale_factor)
 
-        guidance_scale = model_config.guidance_scale
+        guidance_scale = model_config.pipeline.guidance_scale
         if getattr(module.config, "guidance_embeds", False):
             guidance = torch.full([1], guidance_scale, device=timesteps.device, dtype=torch.float32)
         else:
@@ -220,7 +220,7 @@ class QwenImage(DiffusionModelBase):
         timesteps = scheduler_inputs["all_timesteps"]
 
         noise_pred = module(**model_inputs)[0]
-        true_cfg_scale = model_config.true_cfg_scale
+        true_cfg_scale = model_config.pipeline.true_cfg_scale
         if true_cfg_scale > 1.0:
             assert negative_model_inputs is not None
             neg_noise_pred = module(**negative_model_inputs)[0]

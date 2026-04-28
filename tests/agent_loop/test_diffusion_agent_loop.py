@@ -70,7 +70,7 @@ def init_config() -> DictConfig:
         config.actor_rollout_ref.rollout.mode = "async"
         config.actor_rollout_ref.rollout.enforce_eager = True
         config.actor_rollout_ref.rollout.n = 4
-        config.actor_rollout_ref.rollout.num_inference_steps = 10
+        config.actor_rollout_ref.rollout.pipeline.num_inference_steps = 10
         config.actor_rollout_ref.rollout.calculate_log_probs = True
         config.actor_rollout_ref.rollout.agent.num_workers = 2
         config.actor_rollout_ref.rollout.agent.default_agent_loop = "diffusion_single_turn_agent"
@@ -82,8 +82,8 @@ def init_config() -> DictConfig:
         config.actor_rollout_ref.rollout.algo.sde_window_size = 2
         config.actor_rollout_ref.rollout.algo.sde_window_range = [0, 5]
 
-        config.actor_rollout_ref.rollout.true_cfg_scale = 4.0
-        config.actor_rollout_ref.rollout.max_sequence_length = max_length
+        config.actor_rollout_ref.rollout.pipeline.true_cfg_scale = 4.0
+        config.actor_rollout_ref.rollout.pipeline.max_sequence_length = max_length
         config.actor_rollout_ref.rollout.nnodes = 1
 
         config.reward.reward_manager.name = "image"

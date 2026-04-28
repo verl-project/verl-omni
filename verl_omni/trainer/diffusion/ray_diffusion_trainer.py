@@ -748,8 +748,8 @@ class RayFlowGRPOTrainer:
         batch_td = embeds_padding_2_no_padding(batch_td)
         metadata = {
             "compute_loss": False,
-            "height": self.config.actor_rollout_ref.model.height,
-            "width": self.config.actor_rollout_ref.model.width,
+            "height": self.config.actor_rollout_ref.model.pipeline.height,
+            "width": self.config.actor_rollout_ref.model.pipeline.width,
             "vae_scale_factor": self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
         }
         if self.ref_in_actor:
@@ -773,8 +773,8 @@ class RayFlowGRPOTrainer:
         tu.assign_non_tensor(
             batch_td,
             compute_loss=False,
-            height=self.config.actor_rollout_ref.model.height,
-            width=self.config.actor_rollout_ref.model.width,
+            height=self.config.actor_rollout_ref.model.pipeline.height,
+            width=self.config.actor_rollout_ref.model.pipeline.width,
             vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
         )
         output = self.actor_rollout_wg.compute_log_prob(batch_td)
@@ -801,8 +801,8 @@ class RayFlowGRPOTrainer:
             epochs=ppo_epochs,
             seed=seed,
             dataloader_kwargs={"shuffle": shuffle},
-            height=self.config.actor_rollout_ref.model.height,
-            width=self.config.actor_rollout_ref.model.width,
+            height=self.config.actor_rollout_ref.model.pipeline.height,
+            width=self.config.actor_rollout_ref.model.pipeline.width,
             vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
         )
 
