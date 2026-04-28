@@ -197,7 +197,7 @@ if [[ "${RUN_TEST[6]}" == "1" ]]; then
         skip_test 6 "FlowGRPO trainer e2e" "requires 4 GPUs, only ${NUM_GPUS} available"
     else
         run_test 6 "FlowGRPO trainer e2e" \
-            bash tests/special_e2e/run_flowgrpo_trainer_diffusers.sh
+            bash tests/special_e2e/run_flowgrpo_qwen_image.sh
     fi
 else
     skip_test 6 "FlowGRPO trainer e2e" "not selected"

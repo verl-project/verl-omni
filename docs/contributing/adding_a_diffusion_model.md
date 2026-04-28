@@ -6,7 +6,7 @@ This guide walks through everything you need to do to plug a new diffusion
 model into VeRL-Omni so that it can be used end-to-end for FlowGRPO-style RL
 training. We use the **Z-Image** integration as a worked example – see the
 files added under [`verl_omni/pipelines/z_image_flow_grpo/`](../../verl_omni/pipelines/z_image_flow_grpo/__init__.py)
-and the matching [`tests/pipelines/test_z_image_flow_grpo_on_cpu.py`](../../tests/pipelines/test_z_image_flow_grpo_on_cpu.py)
+and the matching [`tests/special_e2e/run_flowgrpo_z_image.sh`](../../tests/special_e2e/run_flowgrpo_z_image.sh)
 for the full source.
 
 The Qwen-Image pipeline ([`verl_omni/pipelines/qwen_image_flow_grpo/`](../../verl_omni/pipelines/qwen_image_flow_grpo/__init__.py))
@@ -264,18 +264,15 @@ operating point.
 
 ## 8. Add tests
 
-The bare minimum is a CPU-only test file under `tests/pipelines/`. Cover:
+Add an end-to-end smoke test script under `tests/special_e2e/`. The script
+should be modelled on
+[`tests/special_e2e/run_flowgrpo_z_image.sh`](../../tests/special_e2e/run_flowgrpo_z_image.sh)
+and must exercise the full pipeline with a `tiny-random/<ModelName>` checkpoint:
 
-1. `DiffusionModelBase.get_class(...)` returns your adapter for the
-   architecture string.
-2. Every helper in `common.py` (shape / value / sign expectations).
-3. The vllm-omni adapter is registered when the dependency is importable
-   (skipped otherwise).
-
-See [`tests/pipelines/test_z_image_flow_grpo_on_cpu.py`](../../tests/pipelines/test_z_image_flow_grpo_on_cpu.py)
-for the Z-Image example. End-to-end GPU smoke tests live under
-[`tests/agent_loop/`](../../tests/agent_loop/test_diffusion_agent_loop.py)
-and require both vllm-omni and a tiny-random checkpoint of the model.
+1. Generate dummy parquet data via `create_dummy_diffusion_data.py`.
+2. Launch `verl_omni.trainer.diffusion.main_flowgrpo` with model-specific config
+   knobs (architecture, prompt template, CFG parameters, sequence lengths).
+3. Assert the script exits `0` (training completes without error).
 
 ## 9. When to refactor instead of duplicating
 
@@ -299,7 +296,7 @@ Before opening the PR:
 
 - [ ] `verl_omni/pipelines/<model>_flow_grpo/{__init__,common,diffusers_training_adapter,vllm_omni_rollout_adapter}.py` exist.
 - [ ] `verl_omni/pipelines/__init__.py` re-exports the new package.
-- [ ] CPU tests pass: `pytest tests/pipelines/test_<model>_flow_grpo_on_cpu.py`.
+- [ ] E2E smoke test script exists: `tests/special_e2e/run_flowgrpo_<model>.sh`.
 - [ ] Example script in `examples/flowgrpo_trainer/` and a matching data
       preprocessor under `examples/flowgrpo_trainer/data_process/`.
 - [ ] Docs updated (this guide, plus the relevant `docs/algo/...` page if
