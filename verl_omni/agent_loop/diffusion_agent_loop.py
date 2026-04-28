@@ -159,9 +159,9 @@ class DiffusionAgentLoopWorker:
         }
 
         # override sampling params for validation
-        if batch.meta_info.get("validate", False):
+        if batch.meta_info["validate"]:
+            sampling_params.update(_config_to_sampling_dict(config.val_kwargs.pipeline))
             sampling_params.update(_config_to_sampling_dict(config.val_kwargs.algo))
-            sampling_params["num_inference_steps"] = config.val_kwargs.pipeline.num_inference_steps
             sampling_params["seed"] = config.val_kwargs.seed
 
         # by default, we assume it's a single turn agent
