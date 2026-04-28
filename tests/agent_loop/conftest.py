@@ -11,25 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import pytest
 
 # TODO (mike): to be dropped once `verl` drops its legacy diffusion
 # implementations.
-try:
-    import verl_omni  # noqa: F401
-except ImportError:
-    pass
+import verl_omni  # noqa: F401
 
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "vllm_omni: requires the vllm-omni package")
-
-
-def pytest_collection_modifyitems(config, items):
-    try:
-        import vllm_omni  # noqa: F401
-    except ImportError:
-        skip = pytest.mark.skip(reason="vllm-omni not installed")
-        for item in items:
-            if "vllm_omni" in item.keywords:
-                item.add_marker(skip)

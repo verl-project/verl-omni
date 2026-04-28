@@ -23,20 +23,21 @@ As diffusion and omni-modality model training expands, it is useful to have a de
 - **Modular training backends** that can easily integrate various parallism (FSDP, USP) and other optimizations instead of rebuilding the full stack from scratch.
 - **E2E examples and benchmarks** for validating high-efficiency e2e RL training on model families such as QwenImage, Qwen-Omni, and BAGEL, in co-located sync or fully-async mode. 
 
-## Roadmap
 
-Future work is tracked here:
+<div align="center">
+  <img src="docs/assets/arch.png" alt="verl-omni architecture diagram" width="70%">
+</div>
 
-- [RFC: Multi-modal Generation RL 2026Q2 Roadmap](https://github.com/verl-project/verl/issues/5755)
 
-## Getting Started
+
+## Getting Started  🚀
 
 Visit our documentation to learn more.
 
 - [Installation](docs/start/install.md)
 - [Quickstart](docs/start/flowgrpo_quickstart.md)
 
-## Supported Models & Algorithms
+## Model and Algorithm Support 🎨
 
 | Model | Algorithm | State |
 |---|---|---|
@@ -45,16 +46,32 @@ Visit our documentation to learn more.
 | BAGEL | FlowGRPO | WIP |
 | Qwen3-Omni-Thinker | GRPO | WIP |
 
-## Contributing
+## Roadmap 🗺
+
+Future work is tracked here:
+
+- [RFC: Multi-modal Generation RL 2026Q2 Roadmap](https://github.com/verl-project/verl/issues/5755)
+
+## Contributing 🤝
 
 Contributions are welcome.
 
 See the [contribution guide](CONTRIBUTING.md).
 
-## Acknowledgement
+## Acknowledgement 🌟
 
 `verl-omni` builds on the engineering foundations developed in [`verl`](https://github.com/verl-project/verl) and is closely aligned with multimodal inference systems such as [`vLLM-Omni`](https://github.com/vllm-project/vllm-omni).
 
-## Citation
+## Citation 📚
 
-TBD
+If you find the project helpful, please cite:
+
+```bibtex
+@misc{verlomni_github,
+  title        = {VeRL-Omni: Fast and Stable RL Training for Diffusion and Omni-Modality Models},
+  author       = {Yongxiang Huang and Cheung Kawai and Jingan Zhou and Yingshu Chen and {openYuanrong Team} and Xibin Wu},
+  year         = {2026},
+  howpublished = {\url{https://github.com/verl-project/verl-omni}},
+  urldate      = {2026-04-28}
+}
+```
