@@ -263,7 +263,7 @@ def main() -> None:
         "version": 1,
         "description": (
             "Upstream symbols that verl-omni subclasses, injects into, or structurally mirrors. "
-            "Watched by the daily upstream-sync bot (Track 2: behavioral drift). "
+            "Watched by the daily upstream-sync bot (behavioral-drift job). "
             "Auto-generated — edit MANUAL_ENTRIES in generate_upstream_watch.py to add/remove entries."
         ),
         "watch": all_entries,

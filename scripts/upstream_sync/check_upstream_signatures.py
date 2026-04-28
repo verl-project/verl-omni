@@ -13,13 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Track 1: detect upstream API signature drift.
+Signature-drift: detect upstream API signature drift.
 
 Generates fresh signatures from the currently installed upstream packages,
 diffs against the committed .github/upstream_sync/api_signatures.json snapshot,
 and writes:
   - signature_changes.json  — classified list of every changed symbol
   - api_signatures_fresh.json — new snapshot (committed by the workflow after fixes)
+
+Change classifications:
+  non_breaking_addition — new optional param; callers need no update
+  param_rename          — our snapshot suggests a rename; Cursor verifies and fixes
+  param_removal         — our snapshot suggests a removal; Cursor verifies and fixes
+  needs_ai_review       — structural change; Cursor verifies and fixes
 
 Exit codes:
   0 — no drift detected
@@ -28,6 +34,7 @@ Exit codes:
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -37,7 +44,12 @@ sys.path.insert(0, str(REPO_ROOT / "scripts" / "upstream_sync"))
 
 from generate_api_signatures import collect_upstream_imports, get_symbol_info  # noqa: E402
 
-SNAPSHOT_FILE = REPO_ROOT / ".github" / "upstream_sync" / "api_signatures.json"
+SNAPSHOT_FILE = Path(
+    os.environ.get(
+        "UPSTREAM_SYNC_SNAPSHOT_FILE",
+        str(REPO_ROOT / ".github" / "upstream_sync" / "api_signatures.json"),
+    )
+)
 FRESH_FILE = REPO_ROOT / ".github" / "upstream_sync" / "api_signatures_fresh.json"
 CHANGES_FILE = REPO_ROOT / "signature_changes.json"
 
@@ -60,16 +72,36 @@ def _classify_param_change(method_name: str, old_params: dict, new_params: dict)
     if not added and not removed:
         # Same names, different attributes (kind changed, required changed)
         changed = {n for n in old_names if old_params[n] != new_params[n]}
-        return {"method": method_name, "type": "param_attrs_changed", "tier": "complex", "changed": sorted(changed)}
+        return {
+            "method": method_name,
+            "type": "param_attrs_changed",
+            "classification": "needs_ai_review",
+            "changed": sorted(changed),
+        }
 
     if added and not removed:
         all_optional = all(not new_params[p]["required"] for p in added)
         if all_optional:
-            return {"method": method_name, "type": "param_added_optional", "tier": 1, "added": sorted(added)}
-        return {"method": method_name, "type": "param_added_required", "tier": "complex", "added": sorted(added)}
+            return {
+                "method": method_name,
+                "type": "param_added_optional",
+                "classification": "non_breaking_addition",
+                "added": sorted(added),
+            }
+        return {
+            "method": method_name,
+            "type": "param_added_required",
+            "classification": "needs_ai_review",
+            "added": sorted(added),
+        }
 
     if removed and not added:
-        return {"method": method_name, "type": "param_removed", "tier": 4, "removed": sorted(removed)}
+        return {
+            "method": method_name,
+            "type": "param_removed",
+            "classification": "param_removal",
+            "removed": sorted(removed),
+        }
 
     # Both added and removed
     if len(added) == 1 and len(removed) == 1:
@@ -81,7 +113,7 @@ def _classify_param_change(method_name: str, old_params: dict, new_params: dict)
             return {
                 "method": method_name,
                 "type": "param_renamed",
-                "tier": 3,
+                "classification": "param_rename",
                 "old_name": next(iter(removed)),
                 "new_name": next(iter(added)),
             }
@@ -89,7 +121,7 @@ def _classify_param_change(method_name: str, old_params: dict, new_params: dict)
     return {
         "method": method_name,
         "type": "params_restructured",
-        "tier": "complex",
+        "classification": "needs_ai_review",
         "added": sorted(added),
         "removed": sorted(removed),
     }
@@ -98,7 +130,15 @@ def _classify_param_change(method_name: str, old_params: dict, new_params: dict)
 def _compare_info(key: str, old: dict, new: dict) -> list[dict]:
     """Return a list of change records for one symbol (may span multiple methods)."""
     if "error" in new:
-        return [{"key": key, "method": None, "type": "symbol_gone", "tier": "complex", "detail": new["error"]}]
+        return [
+            {
+                "key": key,
+                "method": None,
+                "type": "symbol_gone",
+                "classification": "needs_ai_review",
+                "detail": new["error"],
+            }
+        ]
 
     changes = []
 
@@ -107,10 +147,24 @@ def _compare_info(key: str, old: dict, new: dict) -> list[dict]:
     new_methods = new.get("methods", {})
     for method in sorted(set(old_methods) | set(new_methods)):
         if method not in old_methods:
-            changes.append({"key": key, "method": method, "type": "method_added", "tier": 1})
+            changes.append(
+                {
+                    "key": key,
+                    "method": method,
+                    "type": "method_added",
+                    "classification": "non_breaking_addition",
+                }
+            )
             continue
         if method not in new_methods:
-            changes.append({"key": key, "method": method, "type": "method_removed", "tier": "complex"})
+            changes.append(
+                {
+                    "key": key,
+                    "method": method,
+                    "type": "method_removed",
+                    "classification": "needs_ai_review",
+                }
+            )
             continue
         old_p = old_methods[method].get("params", {})
         new_p = new_methods[method].get("params", {})
@@ -137,7 +191,7 @@ def _compare_info(key: str, old: dict, new: dict) -> list[dict]:
                 "key": key,
                 "method": None,
                 "type": "abstract_methods_changed",
-                "tier": "complex",
+                "classification": "needs_ai_review",
                 "added": added_abs,
                 "removed": removed_abs,
             }
@@ -187,7 +241,7 @@ def diff_snapshots(old_snap: dict, new_snap: dict) -> list[dict]:
                     "key": key,
                     "method": None,
                     "type": "symbol_gone",
-                    "tier": "complex",
+                    "classification": "needs_ai_review",
                     "detail": "symbol disappeared from snapshot",
                     "verl_omni_usages": find_importing_files(module_path, symbol),
                 }
@@ -203,9 +257,9 @@ def diff_snapshots(old_snap: dict, new_snap: dict) -> list[dict]:
         for change in changes:
             module_path, _, symbol = key.rpartition(".")
             change["verl_omni_usages"] = find_importing_files(module_path, symbol)
-            # Include old/new snapshot data for complex changes so the Cursor
+            # Include old/new snapshot data for needs_ai_review changes so the Cursor
             # prompt can show a concrete before/after without re-loading the snapshot.
-            if change.get("tier") == "complex":
+            if change.get("classification") == "needs_ai_review":
                 change["old_signature"] = old_info
                 change["new_signature"] = new_info
             all_changes.append(change)
@@ -264,33 +318,30 @@ def main() -> int:
         CHANGES_FILE.write_text(json.dumps({"has_changes": False, "changes": []}, indent=2) + "\n")
         return 0
 
-    mechanical = [c for c in changes if isinstance(c["tier"], int)]
-    complex_ = [c for c in changes if c["tier"] == "complex"]
+    non_ai = [c for c in changes if c["classification"] != "needs_ai_review"]
+    ai_review = [c for c in changes if c["classification"] == "needs_ai_review"]
 
     print(f"\nDrift detected: {len(changes)} change(s)")
-    print(f"  Mechanical (tiers 1-4): {len(mechanical)}")
-    print(f"  Complex (needs AI):     {len(complex_)}")
+    print(f"  Non-breaking / param drift: {len(non_ai)}")
+    print(f"  Needs AI review:            {len(ai_review)}")
     for c in changes:
-        tier_label = f"tier {c['tier']}" if isinstance(c["tier"], int) else c["tier"]
-        print(f"  [{tier_label:8s}] {c['key']} — {c['type']}")
+        print(f"  [{c['classification']:25s}] {c['key']} — {c['type']}")
 
     output = {
         "has_changes": True,
-        "summary": f"{len(changes)} change(s): {len(mechanical)} mechanical, {len(complex_)} complex",
+        "summary": f"{len(changes)} change(s): {len(non_ai)} non-ai-review, {len(ai_review)} needs_ai_review",
         "changes": changes,
-        "mechanical": mechanical,
-        "complex": complex_,
+        "non_ai_review": non_ai,
+        "needs_ai_review": ai_review,
     }
     CHANGES_FILE.write_text(json.dumps(output, indent=2) + "\n")
 
     # Set GitHub Actions output for conditional workflow steps
-    import os
-
     if gha_output := os.environ.get("GITHUB_OUTPUT"):
         with open(gha_output, "a") as f:
             f.write("has_changes=true\n")
-            f.write(f"has_mechanical={'true' if mechanical else 'false'}\n")
-            f.write(f"has_complex={'true' if complex_ else 'false'}\n")
+            f.write(f"has_mechanical={'true' if non_ai else 'false'}\n")
+            f.write(f"has_complex={'true' if ai_review else 'false'}\n")
 
     return 1
 

@@ -17,8 +17,8 @@ permissions:
   actions: write        # read/write SHA state variables
 
 jobs:
-  track1-signatures:
-    name: "Track 1 — signature drift"
+  signature-drift:
+    name: "Signature Drift — API compatibility"
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -43,7 +43,7 @@ jobs:
         run: |
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@main"
-          pip install "vllm-omni==0.18"
+          pip install "git+https://github.com/vllm-project/vllm-omni.git@main"
           pip install -r requirements.txt
           pip install -r requirements-test.txt
           pip install --no-deps -e .
@@ -101,73 +101,74 @@ jobs:
           exit 0
 
       # -----------------------------------------------------------------------
-      # 4. Apply mechanical fixes
+      # 4. Classify changes and prepare Cursor input
       # -----------------------------------------------------------------------
-      - name: Apply mechanical fixes (tiers 1-4)
+      - name: Classify changes and prepare Cursor input
         if: steps.backlog.outputs.skip == 'false' && steps.detect.outputs.has_changes == 'true'
         id: fix
         run: python scripts/upstream_sync/apply_signature_fixes.py
 
       # -----------------------------------------------------------------------
-      # 5. Complex tier: Cursor agent for structural signature changes
-      #    Runs only when apply_signature_fixes.py found cases it couldn't
-      #    handle mechanically (params_restructured, symbol_gone, etc.).
-      #    Cursor edits are added to the SAME PR as mechanical fixes so all
-      #    Track 1 changes are reviewed together.
+      # 5. Cursor agent for signature changes
+      #    Runs only when apply_signature_fixes.py found cases to route to Cursor
+      #    (param_rename, param_removal, needs_ai_review).
+      #    Cursor edits are added to the SAME PR as non-breaking notes.
       # -----------------------------------------------------------------------
-      - name: Generate complex-tier Cursor prompt
-        if: steps.fix.outputs.has_complex == 'true'
-        run: python scripts/upstream_sync/generate_track1_complex_prompt.py
+      - name: Generate Cursor prompt batches
+        if: steps.fix.outputs.has_cursor_work == 'true'
+        run: python scripts/upstream_sync/generate_signature_drift_prompt.py
 
-      - name: Install Cursor CLI (complex tier)
-        if: steps.fix.outputs.has_complex == 'true'
+      - name: Install Cursor CLI
+        if: steps.fix.outputs.has_cursor_work == 'true'
         run: |
           curl https://cursor.com/install -fsS | bash
           echo "$HOME/.cursor/bin" >> "$GITHUB_PATH"
 
-      - name: Run Cursor agent on complex signature changes
-        if: steps.fix.outputs.has_complex == 'true'
-        id: cursor_complex
+      - name: Run Cursor on signature drift changes
+        if: steps.fix.outputs.has_cursor_work == 'true'
+        id: cursor_sig
         # Restricted: Cursor may read anything but only write verl_omni Python files.
         # Git operations stay in explicit workflow steps.
         run: |
-          cursor agent \
-            -p "$(cat track1_complex_cursor_prompt.md)" \
-            --model gpt-5.2 \
-            --allow "Read(**)" \
-            --allow "Write(verl_omni/**/*.py)" \
-            --deny  "Shell(git)" \
-            --deny  "Shell(gh)" \
-            --deny  "Write(.github/**)" \
-            --deny  "Write(scripts/**)" \
-            --deny  "Write(requirements*.txt)" \
-            --deny  "Write(setup.py)"
+          for f in signature_drift_cursor_prompt_batch*.md; do
+            [ -f "$f" ] || continue
+            cursor agent \
+              -p "$(cat "$f")" \
+              --allow "Read(**)" \
+              --allow "Write(verl_omni/**/*.py)" \
+              --deny  "Shell(git)" \
+              --deny  "Shell(gh)" \
+              --deny  "Write(.github/**)" \
+              --deny  "Write(scripts/**)" \
+              --deny  "Write(requirements*.txt)" \
+              --deny  "Write(setup.py)"
+          done
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
 
       # -----------------------------------------------------------------------
-      # 6. Run sanity checks on all edited code (mechanical + Cursor)
+      # 6. Run sanity checks on all edited code
       # -----------------------------------------------------------------------
       - name: Sanity check edited code
-        if: steps.fix.outputs.has_pr_content == 'true'
+        if: steps.fix.outputs.has_cursor_work == 'true'
         id: sanity
         continue-on-error: true  # failure adds a label but doesn't block PR creation
         run: pytest -s -x tests/special_sanity
 
       # -----------------------------------------------------------------------
-      # 6. Open auto-PR
+      # 7. Open auto-PR
       # -----------------------------------------------------------------------
       - name: Configure git identity
-        if: steps.fix.outputs.has_pr_content == 'true'
+        if: steps.fix.outputs.has_cursor_work == 'true'
         run: |
           git config user.name  "upstream-sync-bot"
           git config user.email "upstream-sync-bot@users.noreply.github.com"
 
       - name: Create branch and open PR
-        if: steps.fix.outputs.has_pr_content == 'true'
+        if: steps.fix.outputs.has_cursor_work == 'true'
         id: pr
         run: |
-          BRANCH="bot/upstream-sync-track1-$(date -u +%Y%m%d)"
+          BRANCH="bot/upstream-sync-sig-$(date -u +%Y%m%d)"
 
           # Bail out if branch already exists (idempotency — same day re-run)
           if git ls-remote --exit-code origin "refs/heads/$BRANCH" 2>/dev/null; then
@@ -177,24 +178,26 @@ jobs:
 
           git checkout -b "$BRANCH"
 
+          # Promote fresh snapshot to committed snapshot
+          if [ -f .github/upstream_sync/api_signatures_fresh.json ]; then
+            cp .github/upstream_sync/api_signatures_fresh.json .github/upstream_sync/api_signatures.json
+          fi
+
           # Stage only the files we own: the snapshot + any edits to verl_omni/
           git add .github/upstream_sync/api_signatures.json
-          git add verl_omni/ || true  # may be empty if only tier-1 changes
+          git add verl_omni/ || true
 
           # Don't commit if nothing actually changed on disk
           if git diff --cached --quiet; then
-            echo "::notice::No file changes to commit — snapshot was already current"
+            echo "::notice::No file changes — upstream changed but no verl-omni edits needed"
             exit 0
           fi
 
-          git commit -m "chore(upstream-sync): Track 1 signature drift $(date -u +%Y-%m-%d)"
+          git commit -m "chore(upstream-sync): signature drift $(date -u +%Y-%m-%d)"
           git push origin "$BRANCH"
 
           LABELS="upstream-sync"
-          if [ "${{ steps.fix.outputs.needs_human_review }}" = "true" ]; then
-            LABELS="$LABELS,needs-human-review"
-          fi
-          if [ "${{ steps.cursor_complex.outcome }}" = "success" ]; then
+          if [ "${{ steps.cursor_sig.outcome }}" = "success" ]; then
             LABELS="$LABELS,ai-assisted"
           fi
           if [ "${{ steps.sanity.outcome }}" = "failure" ]; then
@@ -202,15 +205,15 @@ jobs:
           fi
 
           gh pr create \
-            --title "[bot][upstream-sync] Track 1: signature drift $(date -u +%Y-%m-%d)" \
-            --body-file pr_body_track1.md \
+            --title "[bot][upstream-sync] Signature drift $(date -u +%Y-%m-%d)" \
+            --body-file pr_body_signature_drift.md \
             --label "$LABELS" \
             --base main
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # -----------------------------------------------------------------------
-      # 7. Record upstream SHA for Track 2 (used starting Week 3)
+      # 8. Record upstream SHA for behavioral-drift job
       #    Stores the verl HEAD SHA so the behavioral-drift job can do
       #    `git log <last_sha>..HEAD` without re-processing old commits.
       # -----------------------------------------------------------------------
@@ -248,25 +251,24 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # -----------------------------------------------------------------------
-      # 8. Clean up temp files so they don't pollute the workspace
+      # 9. Clean up temp files so they don't pollute the workspace
       # -----------------------------------------------------------------------
       - name: Clean up temp files
         if: always()
         run: |
-          rm -f signature_changes.json remaining_complex.json pr_body_track1.md \
-                track1_complex_cursor_prompt.md \
+          rm -f signature_changes.json remaining_for_cursor.json pr_body_signature_drift.md \
+                signature_drift_cursor_prompt_batch*.md \
                 .github/upstream_sync/api_signatures_fresh.json
 
   # =========================================================================
-  # Track 2 — behavioral drift
-  # Detects changes in upstream files that verl-omni mirrors/extends, then
-  # calls the Cursor agent to propose minimal adaptations.
+  # Behavioral Drift — detects changes in upstream files that verl-omni
+  # mirrors/extends, then calls the Cursor agent to propose minimal adaptations.
   # =========================================================================
-  track2-behavioral:
-    name: "Track 2 — behavioral drift"
+  behavioral-drift:
+    name: "Behavioral Drift — upstream code changes"
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Run independently of track1 — both can open PRs on the same day
+    # Run independently of signature-drift — both can open PRs on the same day
     needs: []
 
     steps:
@@ -301,7 +303,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # -----------------------------------------------------------------------
-      # 3. Check open PR backlog (shared limit with track1)
+      # 3. Check open PR backlog (shared limit with signature-drift)
       # -----------------------------------------------------------------------
       - name: Check open upstream-sync PR backlog
         id: backlog
@@ -313,7 +315,7 @@ jobs:
             --jq 'length')
           if [ "$OPEN" -ge 3 ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::$OPEN upstream-sync PRs open — skipping Track 2"
+            echo "::warning::$OPEN upstream-sync PRs open — skipping behavioral-drift"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
@@ -338,11 +340,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # -----------------------------------------------------------------------
-      # 5. Generate Cursor prompt
+      # 5. Generate Cursor prompt batches
       # -----------------------------------------------------------------------
-      - name: Generate Cursor prompt
+      - name: Generate Cursor prompt batches
         if: steps.backlog.outputs.skip == 'false' && steps.detect.outputs.has_changes == 'true'
-        run: python scripts/upstream_sync/generate_track2_prompt.py
+        run: python scripts/upstream_sync/generate_behavioral_drift_prompt.py
 
       # -----------------------------------------------------------------------
       # 6. Install and run Cursor agent (restricted autonomy)
@@ -353,23 +355,25 @@ jobs:
           curl https://cursor.com/install -fsS | bash
           echo "$HOME/.cursor/bin" >> "$GITHUB_PATH"
 
-      - name: Run Cursor agent on behavioral drift
+      - name: Run Cursor on behavioral drift changes
         if: steps.backlog.outputs.skip == 'false' && steps.detect.outputs.has_changes == 'true'
         id: cursor
         # Restricted autonomy: Cursor may only read anything and write verl_omni/*.py.
         # All git/gh operations remain in explicit workflow steps below.
         run: |
-          cursor agent \
-            -p "$(cat track2_cursor_prompt.md)" \
-            --model gpt-5.2 \
-            --allow "Read(**)" \
-            --allow "Write(verl_omni/**/*.py)" \
-            --deny  "Shell(git)" \
-            --deny  "Shell(gh)" \
-            --deny  "Write(.github/**)" \
-            --deny  "Write(scripts/**)" \
-            --deny  "Write(requirements*.txt)" \
-            --deny  "Write(setup.py)"
+          for f in behavioral_drift_cursor_prompt_batch*.md; do
+            [ -f "$f" ] || continue
+            cursor agent \
+              -p "$(cat "$f")" \
+              --allow "Read(**)" \
+              --allow "Write(verl_omni/**/*.py)" \
+              --deny  "Shell(git)" \
+              --deny  "Shell(gh)" \
+              --deny  "Write(.github/**)" \
+              --deny  "Write(scripts/**)" \
+              --deny  "Write(requirements*.txt)" \
+              --deny  "Write(setup.py)"
+          done
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
 
@@ -400,7 +404,7 @@ jobs:
         if: steps.cursor.outcome == 'success'
         id: pr
         run: |
-          BRANCH="bot/upstream-sync-track2-$(date -u +%Y%m%d)"
+          BRANCH="bot/upstream-sync-behavioral-$(date -u +%Y%m%d)"
 
           if git ls-remote --exit-code origin "refs/heads/$BRANCH" 2>/dev/null; then
             echo "::notice::Branch $BRANCH already exists — skipping"
@@ -409,16 +413,16 @@ jobs:
 
           # Only proceed if Cursor actually changed something
           if git diff --quiet; then
-            echo "::notice::Cursor made no file changes — nothing to commit"
+            echo "::notice::Cursor made no file changes — no PR needed"
             exit 0
           fi
 
           git checkout -b "$BRANCH"
           git add verl_omni/
-          git commit -m "chore(upstream-sync): Track 2 behavioral drift $(date -u +%Y-%m-%d)"
+          git commit -m "chore(upstream-sync): behavioral drift $(date -u +%Y-%m-%d)"
           git push origin "$BRANCH"
 
-          LABELS="upstream-sync,upstream-sync-track2"
+          LABELS="upstream-sync,upstream-sync-behavioral"
           if [ "${{ steps.sanity.outcome }}" = "failure" ]; then
             LABELS="$LABELS,sanity-failed"
           fi
@@ -430,7 +434,7 @@ jobs:
           data = json.loads((root / "behavioral_changes.json").read_text())
           changes = data.get("changes", [])
           lines = [
-              "## Upstream Sync — Track 2: Behavioral Drift",
+              "## Upstream Sync — Behavioral Drift",
               "",
               "_Auto-generated by the daily upstream-sync bot + Cursor agent._",
               "",
@@ -447,12 +451,12 @@ jobs:
               "- [ ] Verify diffusion semantics are preserved (not just LLM logic copied)",
               "- [ ] Check `tests/special_sanity` passes",
           ]
-          pathlib.Path("pr_body_track2.md").write_text("\n".join(lines) + "\n")
+          pathlib.Path("pr_body_behavioral_drift.md").write_text("\n".join(lines) + "\n")
           PYEOF
 
           gh pr create \
-            --title "[bot][upstream-sync] Track 2: behavioral drift $(date -u +%Y-%m-%d)" \
-            --body-file pr_body_track2.md \
+            --title "[bot][upstream-sync] Behavioral drift $(date -u +%Y-%m-%d)" \
+            --body-file pr_body_behavioral_drift.md \
             --label "$LABELS" \
             --base main
         env:
@@ -510,5 +514,5 @@ jobs:
       - name: Clean up temp files
         if: always()
         run: |
-          rm -f behavioral_changes.json track2_cursor_prompt.md \
-                pr_body_track2.md upstream_current_shas.json
+          rm -f behavioral_changes.json behavioral_drift_cursor_prompt_batch*.md \
+                pr_body_behavioral_drift.md upstream_current_shas.json

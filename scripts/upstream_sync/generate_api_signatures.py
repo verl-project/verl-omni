@@ -23,11 +23,11 @@ verl_omni/, captures:
 
 Run with upstream deps installed:
     pip install "verl @ git+https://github.com/verl-project/verl.git@main"
-    pip install "vllm-omni==0.18"
+    pip install "git+https://github.com/vllm-project/vllm-omni.git@main"
     python scripts/upstream_sync/generate_api_signatures.py
 
 The daily upstream-sync bot runs this and diffs the output against the
-previously committed api_signatures.json to detect Track 1 signature drift.
+previously committed api_signatures.json to detect signature drift.
 
 Exit codes:
   0 — all symbols resolved
@@ -38,29 +38,19 @@ import ast
 import importlib
 import inspect
 import json
+import os
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-VERL_OMNI_DIR = REPO_ROOT / "verl_omni"
 OUTPUT_FILE = REPO_ROOT / ".github" / "upstream_sync" / "api_signatures.json"
 
-UPSTREAM_PREFIXES = ("verl.", "vllm_omni.", "vllm.")
-
-# Methods worth tracking on upstream classes (beyond __init__).
-# These are the integration points most likely to have behavioral contracts.
-TRACKED_METHODS = {
-    "__init__",
-    "run",
-    "generate_sequences",
-    "compute_score",
-    "run_single",
-    "forward",
-    "generate",
-    "register",  # registry APIs
-    "load",
-    "save",
-}
+VERL_OMNI_DIR = Path(
+    os.environ.get("UPSTREAM_SYNC_VERL_OMNI_DIR", str(REPO_ROOT / "verl_omni"))
+)
+UPSTREAM_PREFIXES = tuple(
+    os.environ.get("UPSTREAM_SYNC_PREFIXES", "verl.,vllm_omni.,vllm.").split(",")
+)
 
 
 def collect_upstream_imports() -> dict[str, set[str]]:
@@ -123,11 +113,9 @@ def get_symbol_info(module_path: str, symbol_name: str) -> dict:
     if inspect.isclass(obj):
         info["kind"] = "class"
         methods: dict = {}
-        for method_name in sorted(TRACKED_METHODS):
-            method = getattr(obj, method_name, None)
-            if method is None or not callable(method):
+        for method_name, method in inspect.getmembers(obj, predicate=callable):
+            if method_name.startswith("_") and method_name != "__init__":
                 continue
-            # skip if inherited from builtins (object.__init__ etc.)
             if method_name == "__init__" and obj.__init__ is object.__init__:
                 continue
             try:
@@ -207,7 +195,7 @@ def main() -> int:
             "generator": "scripts/upstream_sync/generate_api_signatures.py",
             "upstream_deps": {
                 "verl": "git+https://github.com/verl-project/verl.git@main",
-                "vllm_omni": "vllm-omni==0.18",
+                "vllm_omni": "git+https://github.com/vllm-project/vllm-omni.git@main",
             },
         },
         "signatures": signatures,
