@@ -109,14 +109,47 @@ val_kwargs:
   # whether to repeat n times for validation
   n: 1
 
-  # number of inference steps for diffusion model validation
-  num_inference_steps: 40
+  # Pipeline configuration for validation
+  pipeline:
 
-  # Rollout Algorithm configuration,
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
+
+    # image height for diffusion model validation
+    height: ${oc.select:actor_rollout_ref.rollout.pipeline.height,512}
+
+    # image width for diffusion model validation
+    width: ${oc.select:actor_rollout_ref.rollout.pipeline.width,512}
+
+    # number of inference steps for diffusion model validation
+    num_inference_steps: 50
+
+    # Classifier-free guidance scale (true CFG); values > 1.0 enable CFG with negative prompt
+    true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.true_cfg_scale,1.0}
+
+    # Maximum text-encoder token sequence length for prompt encoding
+    max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
+
+    # Distilled guidance scale for models with guidance_embeds; null to disable
+    guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
+
+  # Rollout Algorithm configuration for validation
   algo:
-  
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
+
     # Magnitude of SDE noise injected inside the active window during validation
     noise_level: 0.0
+
+    # SDE variant: "sde" or "cps"
+    sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
+
+    # Number of consecutive denoising steps in the active SDE window; null = all steps
+    sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
+
+    # [start, end) range for random window start-index sampling
+    sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,[0,5]}
 
 # Rollout Algorithm configuration,
 algo:
@@ -135,6 +168,30 @@ algo:
 
   # [start, end) range for random window start-index sampling
   sde_window_range: [0, 5]
+
+# Pipeline configuration for diffusion model generation
+pipeline:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
+
+  # image height for diffusion model rollout
+  height: 512
+
+  # image width for diffusion model rollout
+  width: 512
+
+  # number of inference steps for diffusion model rollout
+  num_inference_steps: 10
+
+  # Classifier-free guidance scale (true CFG); values > 1.0 enable CFG with negative prompt
+  true_cfg_scale: 1.0
+
+  # Maximum text-encoder token sequence length for prompt encoding
+  max_sequence_length: 512
+
+  # Distilled guidance scale for models with guidance_embeds; null to disable
+  guidance_scale: null
 
 # support logging rollout prob for debugging purpose
 calculate_log_probs: False
@@ -207,24 +264,6 @@ quantization: null
 
 # MTP configuration, reuse model configuration
 mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
-
-# image height for diffusion model rollout
-height: 512
-
-# image width for diffusion model rollout
-width: 512
-
-# number of inference steps for diffusion model rollout
-num_inference_steps: 10
-
-# Classifier-free guidance scale (true CFG); values > 1.0 enable CFG with negative prompt
-true_cfg_scale: 1.0
-
-# Maximum text-encoder token sequence length for prompt encoding
-max_sequence_length: 512
-
-# Distilled guidance scale for models with guidance_embeds; null to disable
-guidance_scale: null
 
 # external libs for rollout-side extensions (e.g., rollout pipeline registrations such as vllm-omni)
 external_lib: null

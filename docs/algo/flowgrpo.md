@@ -46,9 +46,7 @@ the main sections are:
 - `actor_rollout_ref.model`: model path plus diffusion-model / LoRA settings
 - `reward`: reward manager, reward model, and custom reward function
 
-The default diffusion model YAML mirrors several rollout fields
-(`num_inference_steps`, `true_cfg_scale`, `max_sequence_length`,
-`guidance_scale`, and `algo`) into `actor_rollout_ref.model.*`, so in practice
+The default diffusion model YAML mirrors rollout fields (`pipeline` and `algo`) into `actor_rollout_ref.model.*`, so in practice
 the rollout section is the main place to override sampling behavior.
 
 ### Core parameters
@@ -91,16 +89,16 @@ the rollout section is the main place to override sampling behavior.
 - `actor_rollout_ref.rollout.algo.sde_window_range`: Range used to sample the
   start of that active denoising window.
 
-- `actor_rollout_ref.rollout.num_inference_steps`: Number of denoising steps
+- `actor_rollout_ref.rollout.pipeline.num_inference_steps`: Number of denoising steps
   used for rollout generation during training.
 
-- `actor_rollout_ref.rollout.val_kwargs.num_inference_steps`: Number of
+- `actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps`: Number of
   denoising steps used during validation / evaluation.
 
-- `actor_rollout_ref.rollout.true_cfg_scale`: True classifier-free guidance
+- `actor_rollout_ref.rollout.pipeline.true_cfg_scale`: True classifier-free guidance
   scale used during rollout. Used in `Qwen-Image`.
 
-- `actor_rollout_ref.rollout.guidance_scale`: Distilled guidance scale for
+- `actor_rollout_ref.rollout.pipeline.guidance_scale`: Distilled guidance scale for
   models that expose a guidance embedding; keep `null` to disable it.
 
 #### Model

@@ -23,11 +23,11 @@ from verl.workers.config.rollout import (
     CheckpointEngineConfig,
     MultiTurnConfig,
     PrometheusConfig,
-    SamplingConfig,
 )
 
 __all__ = [
     "DiffusionRolloutAlgoConfig",
+    "DiffusionPipelineConfig",
     "DiffusionSamplingConfig",
     "DiffusionRolloutConfig",
 ]
@@ -43,9 +43,22 @@ class DiffusionRolloutAlgoConfig(BaseConfig):
 
 
 @dataclass
-class DiffusionSamplingConfig(SamplingConfig):
-    num_inference_steps: int = 40
+class DiffusionPipelineConfig(BaseConfig):
+    # for pipeline specific sampling parameters
+    height: int = 512
+    width: int = 512
+    num_inference_steps: int = 10
+    true_cfg_scale: float = 1.0
+    max_sequence_length: int = 512
+    guidance_scale: Optional[float] = None
+
+
+@dataclass
+class DiffusionSamplingConfig(BaseConfig):
+    # for validation only
+    n: int = 1
     seed: int = 42
+    pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
     algo: DiffusionRolloutAlgoConfig = field(default_factory=DiffusionRolloutAlgoConfig)
 
 
@@ -86,6 +99,8 @@ class DiffusionRolloutConfig(BaseConfig):
 
     engine_kwargs: dict = field(default_factory=dict)
 
+    pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
+
     calculate_log_probs: bool = False
 
     agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
@@ -115,18 +130,6 @@ class DiffusionRolloutConfig(BaseConfig):
     enable_sleep_mode: bool = True
 
     mtp: Optional[MtpConfig] = field(default_factory=MtpConfig)
-
-    height: int = 512
-
-    width: int = 512
-
-    num_inference_steps: int = 10
-
-    true_cfg_scale: float = 1.0
-
-    max_sequence_length: int = 512
-
-    guidance_scale: Optional[float] = None
 
     profiler: Optional[ProfilerConfig] = None
 

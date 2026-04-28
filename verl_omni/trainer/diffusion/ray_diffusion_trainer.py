@@ -315,7 +315,9 @@ class RayFlowGRPOTrainer:
             scores = batch.batch["sample_level_scores"].sum(-1).cpu().tolist()
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
 
-            reward_extra_infos_to_dump = reward_extra_infos_dict.copy()
+            reward_extra_infos_to_dump = {
+                k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in reward_extra_infos_dict.items()
+            }
             if "request_id" in batch.non_tensor_batch:
                 reward_extra_infos_to_dump.setdefault(
                     "request_id",
@@ -748,8 +750,8 @@ class RayFlowGRPOTrainer:
         batch_td = embeds_padding_2_no_padding(batch_td)
         metadata = {
             "compute_loss": False,
-            "height": self.config.actor_rollout_ref.model.height,
-            "width": self.config.actor_rollout_ref.model.width,
+            "height": self.config.actor_rollout_ref.model.pipeline.height,
+            "width": self.config.actor_rollout_ref.model.pipeline.width,
             "vae_scale_factor": self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
         }
         if self.ref_in_actor:
@@ -773,8 +775,8 @@ class RayFlowGRPOTrainer:
         tu.assign_non_tensor(
             batch_td,
             compute_loss=False,
-            height=self.config.actor_rollout_ref.model.height,
-            width=self.config.actor_rollout_ref.model.width,
+            height=self.config.actor_rollout_ref.model.pipeline.height,
+            width=self.config.actor_rollout_ref.model.pipeline.width,
             vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
         )
         output = self.actor_rollout_wg.compute_log_prob(batch_td)
@@ -801,8 +803,8 @@ class RayFlowGRPOTrainer:
             epochs=ppo_epochs,
             seed=seed,
             dataloader_kwargs={"shuffle": shuffle},
-            height=self.config.actor_rollout_ref.model.height,
-            width=self.config.actor_rollout_ref.model.width,
+            height=self.config.actor_rollout_ref.model.pipeline.height,
+            width=self.config.actor_rollout_ref.model.pipeline.width,
             vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
         )
 
