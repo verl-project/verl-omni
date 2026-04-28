@@ -128,6 +128,7 @@ actor_rollout_ref:
       _target_: verl_omni.workers.config.diffusion.DiffusionSamplingConfig
       'n': 1
       pipeline:
+        _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
         height: ${oc.select:actor_rollout_ref.rollout.pipeline.height,512}
         width: ${oc.select:actor_rollout_ref.rollout.pipeline.width,512}
         num_inference_steps: ${oc.select:actor_rollout_ref.rollout.pipeline.num_inference_steps,10}
@@ -135,7 +136,8 @@ actor_rollout_ref:
         max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
         guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
       algo:
-        noise_level: ${oc.select:actor_rollout_ref.rollout.algo.noise_level,1.0}
+        _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
+        noise_level: 0.0
         sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
         sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
         sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,[0,5]}

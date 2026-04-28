@@ -112,6 +112,9 @@ val_kwargs:
   # Pipeline configuration for validation
   pipeline:
 
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
+
     # image height for diffusion model validation
     height: ${oc.select:actor_rollout_ref.rollout.pipeline.height,512}
 
@@ -133,8 +136,11 @@ val_kwargs:
   # Rollout Algorithm configuration for validation
   algo:
 
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
+
     # Magnitude of SDE noise injected inside the active window during validation
-    noise_level: ${oc.select:actor_rollout_ref.rollout.algo.noise_level,1.0}
+    noise_level: 0.0
 
     # SDE variant: "sde" or "cps"
     sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
