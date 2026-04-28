@@ -109,7 +109,7 @@ skip_test() {
 
 # ── Determine which tests to run ───────────────────────────────────────────────
 declare -A RUN_TEST=(
-    [0]=1 [1]=1 [2]=1 [3]=1 [5]=1 [6]=1
+    [0]=1 [1]=1 [2]=1 [3]=1 [4]=1
 )
 
 # If explicit IDs were passed on the CLI, override to run only those.
@@ -179,28 +179,16 @@ else
     skip_test 3 "diffusers FSDP engine" "not selected"
 fi
 
-# ── Test 5: CPU-only algorithm + padding tests ────────────────────────────────
-if [[ "${RUN_TEST[5]}" == "1" ]]; then
-    # Two pytest invocations are combined under a single wrapper so they share
-    # one log entry and one pass/fail result.
-    run_test 5 "core algos + padding (CPU)" bash -c '
-        pytest -s tests/trainer/diffusion/test_diffusion_core_algos_on_cpu.py &&
-        pytest -s tests/utils/test_padding_on_cpu.py
-    '
-else
-    skip_test 5 "core algos + padding (CPU)" "not selected"
-fi
-
-# ── Test 6: FlowGRPO trainer e2e (vllm_omni rollout) ─────────────────────────
-if [[ "${RUN_TEST[6]}" == "1" ]]; then
+# ── Test 4: FlowGRPO trainer e2e (vllm_omni rollout) ─────────────────────────
+if [[ "${RUN_TEST[4]}" == "1" ]]; then
     if [[ "${NUM_GPUS}" -lt 4 ]]; then
-        skip_test 6 "FlowGRPO trainer e2e" "requires 4 GPUs, only ${NUM_GPUS} available"
+        skip_test 4 "FlowGRPO trainer e2e" "requires 4 GPUs, only ${NUM_GPUS} available"
     else
-        run_test 6 "FlowGRPO trainer e2e" \
+        run_test 4 "FlowGRPO trainer e2e" \
             bash tests/special_e2e/run_flowgrpo_trainer_diffusers.sh
     fi
 else
-    skip_test 6 "FlowGRPO trainer e2e" "not selected"
+    skip_test 4 "FlowGRPO trainer e2e" "not selected"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -227,9 +215,9 @@ for i in "${!TEST_NAMES[@]}"; do
     logfile="${TEST_LOG_FILES[$i]}"
 
     case "${result}" in
-        PASS) (( passed++  )) ;;
-        FAIL) (( failed++  )) ;;
-        SKIP) (( skipped++ )) ;;
+        PASS) (( ++passed  )) ;;
+        FAIL) (( ++failed  )) ;;
+        SKIP) (( ++skipped )) ;;
     esac
 
     printf "%-4s  %-7s  %-8s  %s\n" \
