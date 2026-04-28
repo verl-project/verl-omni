@@ -86,7 +86,7 @@ ours.
 | CFG formula | `apply_true_cfg` (norm-clipped true CFG) | `pos + s·(pos-neg)` + optional norm clip |
 | CFG active when | `true_cfg_scale > 1` | `guidance_scale > 0` |
 | VAE decode | `latents / std + mean` | `latents / scaling_factor + shift_factor` |
-| Prompt template | hard-coded `prompt_template_encode` with system role + `drop_idx=34` | user-only message via `apply_chat_template(..., add_generation_prompt=True, enable_thinking=True)`; no system prompt. **Pass `data.apply_chat_template_kwargs="{enable_thinking: true}"` so training-side tokenization matches rollout.** |
+| Prompt template | hard-coded `prompt_template_encode` with system role + `drop_idx=34` | user-only message via `apply_chat_template(..., add_generation_prompt=True, enable_thinking=True)`; no system prompt. **Pass `+data.apply_chat_template_kwargs.enable_thinking=true` so training-side tokenization matches rollout.** |
 | Default negative prompt | `" "` | `""` |
 
 Anything column-specific stays inside the model package

@@ -19,10 +19,16 @@ from typing import Any, Literal
 import numpy as np
 import torch
 from diffusers.pipelines.z_image.pipeline_z_image import calculate_shift, retrieve_timesteps
+from transformers import AutoModel, AutoTokenizer
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
+from vllm_omni.diffusion.distributed.autoencoders.autoencoder_kl import DistributedAutoencoderKL
 from vllm_omni.diffusion.distributed.utils import get_local_device
+from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.z_image import ZImagePipeline
+from vllm_omni.diffusion.models.z_image.z_image_transformer import ZImageTransformer2DModel
+from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.utils.tf_utils import get_transformer_config_kwargs
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
@@ -63,10 +69,49 @@ class ZImagePipelineWithLogProb(ZImagePipeline):
     """
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
-        super().__init__(od_config=od_config, prefix=prefix)
-        self.device = get_local_device()
+        # Bypass ZImagePipeline.__init__ to avoid constructing the transformer
+        # twice: the upstream init unconditionally uses hardcoded default params
+        # (dim=3840 etc.), which would immediately be discarded.  Instead, call
+        # nn.Module and the profiler mixin directly, then replicate the upstream
+        # setup with the correct architecture derived from od_config.tf_model_config.
+        torch.nn.Module.__init__(self)
+        DiffusionPipelineProfilerMixin.__init__(self)
+
+        self.od_config = od_config
+        self.weights_sources = [
+            DiffusersPipelineLoader.ComponentSource(
+                model_or_path=od_config.model,
+                subfolder="transformer",
+                revision=None,
+                prefix="transformer.",
+                fall_back_to_pt=True,
+            )
+        ]
+        self._execution_device = get_local_device()
+        self.device = self._execution_device
         model = od_config.model
         local_files_only = os.path.exists(model)
+
+        self.text_encoder = AutoModel.from_pretrained(
+            model, subfolder="text_encoder", local_files_only=local_files_only
+        )
+        self.vae = DistributedAutoencoderKL.from_pretrained(
+            model, subfolder="vae", local_files_only=local_files_only
+        ).to(self._execution_device)
+
+        # Initialize transformer from config.json so that the architecture
+        # matches the checkpoint (e.g. tiny-random models with dim != 3840).
+        # This is the same pattern used by qwen_image, flux, hunyuan_video, etc.
+        transformer_kwargs = get_transformer_config_kwargs(od_config.tf_model_config, ZImageTransformer2DModel)
+        self.transformer = ZImageTransformer2DModel(quant_config=od_config.quantization_config, **transformer_kwargs)
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model, subfolder="tokenizer", local_files_only=local_files_only)
+        self.vae_scale_factor = (
+            2 ** (len(self.vae.config.block_out_channels) - 1) if hasattr(self, "vae") and self.vae is not None else 8
+        )
+        self.setup_diffusion_pipeline_profiler(
+            enable_diffusion_pipeline_profiler=od_config.enable_diffusion_pipeline_profiler
+        )
 
         # Replace the upstream Euler scheduler with the SDE variant required by
         # FlowGRPO-style log-probability collection.

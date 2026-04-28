@@ -4,12 +4,12 @@
 # Exercises: parquet load -> vllm_omni rollout -> visual reward (jpeg_compressibility,
 # no reward model) -> flow_grpo -> FSDP LoRA -> sync.
 #
-# Requires: vllm-omni, diffusers>=0.37, tiny Z-Image at ~/models/tiny-random/Z-Image
+# Requires: vllm-omni, diffusers>=0.37, tiny Z-Image at ~/models/tiny-random/z-image
 set -xeuo pipefail
 
 # Override via env: NUM_GPUS, MODEL_PATH, DATA_DIR, TOTAL_TRAIN_STEPS, TRAIN_FILES, VAL_FILES
 NUM_GPUS=${NUM_GPUS:-4}
-MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/Z-Image}
+MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/z-image}
 TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_PATH}/tokenizer}
 DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_diffusion}
 dummy_train_path=${TRAIN_FILES:-${DATA_DIR}/train.parquet}
@@ -38,7 +38,7 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     data.val_files=${dummy_test_path} \
     data.train_batch_size=${train_batch_size} \
     data.max_prompt_length=${max_prompt_length} \
-    data.apply_chat_template_kwargs="{enable_thinking: true}" \
+    +data.apply_chat_template_kwargs.enable_thinking=true \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.model.tokenizer_path=${TOKENIZER_PATH} \
     actor_rollout_ref.model.lora_rank=8 \
