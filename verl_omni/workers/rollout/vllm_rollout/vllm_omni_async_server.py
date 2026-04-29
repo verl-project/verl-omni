@@ -81,7 +81,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return "vllm_omni"
 
     def _get_worker_extension_cls(self) -> str:
-        return "verl.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
+        return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
 
     def _get_cli_modules(self) -> list:
         return [vllm_omni.entrypoints.cli.serve]

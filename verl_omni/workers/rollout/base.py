@@ -11,11 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from verl.workers.rollout.base import _ROLLOUT_REGISTRY
 
-# TODO (mike): to be dropped once `verl` drops its legacy diffusion
-# implementations.
-import verl_omni  # noqa: F401
-
-
-def pytest_configure(config):
-    config.addinivalue_line("markers", "vllm_omni: requires the vllm-omni package")
+_ROLLOUT_REGISTRY[("vllm_omni", "async")] = "verl.workers.rollout.vllm_rollout.ServerAdapter"

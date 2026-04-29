@@ -17,13 +17,8 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/vers
     __version__ = f.read().strip()
 
 
-# TODO (mike): to be dropped once `verl` drops its legacy diffusion
-# implementations.
-from verl_omni._patch import apply_patches as _apply_patches
-
-_apply_patches()
-
-del _apply_patches
-
-# Import pipelines to auto-register them
+# Import pipelines / rollout / reward loop / engines to auto-register them
 import verl_omni.pipelines  # noqa: E402, F401
+import verl_omni.reward_loop  # noqa: E402, F401
+import verl_omni.workers.engine  # noqa: E402, F401
+import verl_omni.workers.rollout  # noqa: E402, F401

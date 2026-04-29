@@ -24,6 +24,7 @@ from pprint import pprint
 from typing import Any, Optional
 
 import numpy as np
+import ray
 import torch
 from omegaconf import OmegaConf, open_dict
 from PIL import Image
@@ -184,7 +185,7 @@ class RayFlowGRPOTrainer:
         Creates the train and validation dataloaders.
         """
         # TODO: we have to make sure the batch size is divisible by the dp size
-        from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
+        from verl_omni.utils.dataset.rl_dataset import create_rl_dataset, create_rl_sampler
 
         if train_dataset is None:
             train_dataset = create_rl_dataset(
@@ -207,7 +208,7 @@ class RayFlowGRPOTrainer:
         if train_sampler is None:
             train_sampler = create_rl_sampler(self.config.data, self.train_dataset)
         if collate_fn is None:
-            from verl.utils.dataset.rl_dataset import collate_fn as default_collate_fn
+            from verl_omni.utils.dataset.rl_dataset import collate_fn as default_collate_fn
 
             collate_fn = default_collate_fn
 
@@ -620,6 +621,10 @@ class RayFlowGRPOTrainer:
             AgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
         else:
             from verl.experimental.agent_loop import AgentLoopManager
+
+            from verl_omni.agent_loop import DiffusionAgentLoopWorker
+
+            AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
 
         # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
         # agent_reward_loop: streaming reward computation with actor rollout

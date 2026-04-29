@@ -14,6 +14,7 @@
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict
+from verl.workers.rollout.replica import RolloutReplicaRegistry
 
 
 class DiffusionOutput(BaseModel):
@@ -29,3 +30,12 @@ class DiffusionOutput(BaseModel):
     """number of preempted times for metric calculation"""
     extra_fields: dict[str, Any] = {}
     """Extra fields for dynamic addition."""
+
+
+def _load_vllm_omni():
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniReplica
+
+    return vLLMOmniReplica
+
+
+RolloutReplicaRegistry.register("vllm_omni", _load_vllm_omni)

@@ -35,7 +35,15 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.device import get_device_id, get_device_name
-from verl.utils.fsdp_utils import (
+from verl.utils.model import convert_weight_keys
+from verl.utils.py_functional import append_to_dict, convert_to_regular_types
+from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig
+from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
+from verl.workers.engine.fsdp.utils import create_device_mesh, get_sharding_strategy
+from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
+
+from verl_omni.pipelines.utils import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
+from verl_omni.utils.fsdp_utils import (
     CPUOffloadPolicy,
     FSDPModule,
     MixedPrecisionPolicy,
@@ -53,14 +61,6 @@ from verl.utils.fsdp_utils import (
     offload_fsdp_optimizer,
     replace_lora_wrapper,
 )
-from verl.utils.model import convert_weight_keys
-from verl.utils.py_functional import append_to_dict, convert_to_regular_types
-from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig
-from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
-from verl.workers.engine.fsdp.utils import create_device_mesh, get_sharding_strategy
-from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
-
-from verl_omni.pipelines.utils import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
 from verl_omni.workers.config import DiffusionModelConfig
 
 logger = logging.getLogger(__file__)

@@ -18,7 +18,7 @@ source .venv/bin/activate
 # Install vllm, vllm-omni, then verl in order
 uv pip install vllm==0.18.0
 uv pip install vllm-omni==0.18
-uv pip install git+https://github.com/verl-project/verl.git@3eab8ccc6143c624e7f11c871896f941b3fec900
+uv pip install git+https://github.com/verl-project/verl.git@a512e90fddcefb64baaa6384e9cf8571b6bfab0b
 
 # Install verl-omni from source
 git clone https://github.com/verl-project/verl-omni.git

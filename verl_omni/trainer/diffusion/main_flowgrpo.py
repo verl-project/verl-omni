@@ -209,8 +209,7 @@ class TaskRunner:
 
         resource_pool_manager = self.init_resource_pool_mgr(config)
 
-        from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
-        from verl.utils.dataset.rl_dataset import collate_fn
+        from verl_omni.utils.dataset.rl_dataset import collate_fn, create_rl_dataset, create_rl_sampler
 
         # Create training and validation datasets.
         train_dataset = create_rl_dataset(

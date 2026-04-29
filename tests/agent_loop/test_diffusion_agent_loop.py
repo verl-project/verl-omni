@@ -22,7 +22,7 @@ from omegaconf import DictConfig
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
 
-pytestmark = pytest.mark.vllm_omni
+from verl_omni.agent_loop import DiffusionAgentLoopWorker
 
 
 def _create_tp_compatible_model(parent_dir, src_model_path, num_attention_heads=2):
@@ -108,6 +108,7 @@ def test_single_turn(init_config):
         }
     )
     try:
+        AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
         agent_loop_manager = AgentLoopManager.create(init_config)
 
         system_prompt = (

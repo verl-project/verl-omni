@@ -15,17 +15,25 @@
 import inspect
 
 from verl import DataProto
+from verl.experimental.reward_loop.reward_manager import register
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
+from verl.utils.reward_score import default_compute_score as _upstream_default_compute_score
 
 from verl_omni.utils.reward_score import default_compute_score_image
 
 
+@register("visual")
 class VisualRewardManager(RewardManagerBase):
     """The reward manager for visual response."""
 
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
         super().__init__(config, tokenizer, compute_score)
-        self.compute_score = compute_score or default_compute_score_image
+
+        if compute_score is None or compute_score is _upstream_default_compute_score:
+            self.compute_score = default_compute_score_image
+        else:
+            self.compute_score = compute_score
+
         self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score)
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
