@@ -61,6 +61,11 @@ CHANGES_FILE = REPO_ROOT / "signature_changes.json"
 
 def _classify_param_change(method_name: str, old_params: dict, new_params: dict) -> dict | None:
     """Classify a change to a single method's parameter list."""
+    # Strip annotation before comparison: annotation-only changes don't affect call-site
+    # behavior, and old snapshots may predate the annotation field in the schema.
+    old_params = {n: {k: v for k, v in p.items() if k != "annotation"} for n, p in old_params.items()}
+    new_params = {n: {k: v for k, v in p.items() if k != "annotation"} for n, p in new_params.items()}
+
     if old_params == new_params:
         return None
 
