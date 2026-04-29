@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Generate Cursor prompt batches for signature-drift fixes.
+Generate AI agent prompt batches for signature-drift fixes.
 
-Reads remaining_for_cursor.json (produced by apply_signature_fixes.py) and
-writes signature_drift_cursor_prompt_batch{N}.md files. Each batch file contains
+Reads remaining_for_ai.json (produced by apply_signature_fixes.py) and
+writes signature_drift_ai_prompt_batch{N}.md files. Each batch file contains
 at most BATCH_SIZE change sections plus preamble and summary footer.
 
-The preamble tells Cursor exactly where upstream packages are installed so it
+The preamble tells the AI agent exactly where upstream packages are installed so it
 can use Read() to look up moved symbols or verify parameter names directly from
 the source.
 
@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-CURSOR_FILE = REPO_ROOT / "remaining_for_cursor.json"
+AI_QUEUE_FILE = REPO_ROOT / "remaining_for_ai.json"
 BATCH_SIZE = 3
 
 
@@ -87,7 +87,7 @@ def hint_sentence(change: dict) -> str:
         return f"new optional parameter(s) added: `{'`, `'.join(added)}` — likely non-breaking"
     else:
         t = change.get("type", "structural change")
-        return f"substantial change detected (`{t}`) — verify before editing"
+        return f"complex change (`{t}`) — verify from upstream source before editing"
 
 
 def build_preamble(upstream_path: str) -> str:
@@ -114,13 +114,14 @@ locate moved symbols, or verify parameter names and annotations. Use it.
 """
 
 
-SUMMARY_FOOTER = """---
+def make_summary_footer(batch_n: int) -> str:
+    return f"""---
 ## Summary of edits made
 
-After completing all edits above, append this block to your response:
+After completing all edits above, write the following block to `ai_edits_summary_batch{batch_n}.md`:
 
 ```
-### Edits made
+### Edits made (batch {batch_n})
 - Fix 1: <file>:<line> — <what you changed> OR "no change needed — <reason>"
 - Fix 2: ...
 ```
@@ -128,7 +129,7 @@ After completing all edits above, append this block to your response:
 
 
 def format_change(idx: int, change: dict, upstream_path: str) -> str:
-    """Produce one change section: minimal dynamic header, static procedure, dynamic data last."""
+    """Produce one change section: dynamic header, procedure, dynamic data."""
     key = change.get("key", "")
     method = change.get("method", "(class-level)")
     usages = change.get("verl_omni_usages", [])
@@ -137,7 +138,6 @@ def format_change(idx: int, change: dict, upstream_path: str) -> str:
 
     module_path = key.rpartition(".")[0]
     module_file = module_path.replace(".", "/") + ".py"
-    symbol_name = key.rpartition(".")[2]
 
     files_content = {}
     for rel in usages:
@@ -161,14 +161,13 @@ def format_change(idx: int, change: dict, upstream_path: str) -> str:
         "",
     ]
 
-    # --- Static procedure block (no dynamic values embedded) ---
-    # Kept static so the LLM cache can reuse this section across all changes.
+    # --- Procedure block ---
     parts += [
         "### Procedure",
         "",
         "**Step 1 — Read the upstream source**",
         "Using the upstream module path in the Data section below, read the source file.",
-        f"Find `{symbol_name}` and note its full parameter list and type annotations.",
+        "Find the symbol named in the Data section and note its full parameter list and type annotations.",
         "Check whether anything was moved, renamed, or removed.",
         "",
         "**Step 2 — Compare signatures**",
@@ -231,13 +230,13 @@ def format_change(idx: int, change: dict, upstream_path: str) -> str:
 
 
 def main() -> int:
-    if not CURSOR_FILE.exists():
-        print("No remaining_for_cursor.json — nothing to do.")
+    if not AI_QUEUE_FILE.exists():
+        print("No remaining_for_ai.json — nothing to do.")
         return 0
-    data = json.loads(CURSOR_FILE.read_text())
+    data = json.loads(AI_QUEUE_FILE.read_text())
     changes = data.get("changes", [])
     if not changes:
-        print("No changes queued for Cursor.")
+        print("No changes queued for AI agent.")
         return 0
 
     upstream_path = get_upstream_path()
@@ -248,8 +247,8 @@ def main() -> int:
         sections = [build_preamble(upstream_path)]
         for i, ch in enumerate(batch, 1):
             sections.append(format_change(i, ch, upstream_path))
-        sections.append(SUMMARY_FOOTER)
-        out_path = REPO_ROOT / f"signature_drift_cursor_prompt_batch{n}.md"
+        sections.append(make_summary_footer(n))
+        out_path = REPO_ROOT / f"signature_drift_ai_prompt_batch{n}.md"
         out_path.write_text("\n".join(sections))
         written.append(out_path)
         print(f"  Wrote {out_path.name} ({len(batch)} change(s))")

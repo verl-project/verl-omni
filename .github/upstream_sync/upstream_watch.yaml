@@ -1,39 +1,19 @@
 version: 1
-description: 'Upstream symbols that verl-omni subclasses, injects into, or structurally mirrors. Watched by the daily upstream-sync
+description: 'Upstream symbols that verl-omni subclasses or structurally mirrors. Watched by the weekly upstream-sync
   bot (behavioral-drift job). Auto-generated — edit MANUAL_ENTRIES in generate_upstream_watch.py to add/remove entries.'
 watch:
 - upstream_repo: verl-project/verl
-  file: verl/workers/rollout/replica.py
-  symbols:
-  - RolloutReplicaRegistry
-  criteria: registry_injection
-  verl_omni_file: verl_omni/_patch.py
-  verl_omni_symbols:
-  - _patch_vllm_omni_replica
-  note: _patch_vllm_omni_replica calls RolloutReplicaRegistry.register('vllm_omni', ...); API or rename breaks the patch
-- upstream_repo: verl-project/verl
   file: verl/workers/engine/base.py
   symbols:
-  - EngineRegistry
   - BaseEngine
   - BaseEngineCtx
-  criteria: registry_injection+direct_inheritance
-  verl_omni_file: verl_omni/_patch.py
+  criteria: direct_inheritance
+  verl_omni_file: verl_omni/workers/engine/fsdp/diffusers_impl.py
   verl_omni_symbols:
-  - _patch_fsdp_diffusers_engine
   - DiffusersFSDPEngine
   - EngineEvalModeCtx
   - EngineTrainModeCtx
-  note: _patch_fsdp_diffusers_engine pops 'diffusion_model' key and re-registers DiffusersFSDPEngine
-- upstream_repo: verl-project/verl
-  file: verl/experimental/reward_loop/reward_manager/registry.py
-  symbols:
-  - REWARD_MANAGER
-  criteria: registry_injection
-  verl_omni_file: verl_omni/_patch.py
-  verl_omni_symbols:
-  - _patch_visual_reward_manager
-  note: _patch_visual_reward_manager replaces REWARD_MANAGER['visual'] with VisualRewardManager
+  note: DiffusersFSDPEngine, EngineEvalModeCtx, EngineTrainModeCtx subclass BaseEngine/BaseEngineCtx directly
 - upstream_repo: verl-project/verl
   file: verl/experimental/agent_loop/agent_loop.py
   symbols:

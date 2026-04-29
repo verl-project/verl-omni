@@ -21,6 +21,10 @@ verl_omni/, captures:
   - For plain functions: their full signature
   - For non-callable objects (registries, dicts): their type only
 
+Each parameter captures: name, kind, required status, and type annotation (via
+inspect.formatannotation; None when unannotated). Annotations enable downstream
+scripts to confirm param renames without AI assistance.
+
 Run with upstream deps installed:
     pip install "verl @ git+https://github.com/verl-project/verl.git@main"
     pip install "git+https://github.com/vllm-project/vllm-omni.git@main"
@@ -78,11 +82,16 @@ def collect_upstream_imports() -> dict[str, set[str]]:
 
 
 def serialize_signature(sig: inspect.Signature) -> dict:
-    """Extract parameter names, kinds, and whether they have defaults."""
+    """Extract parameter names, kinds, required status, and type annotations."""
     params = {}
     for name, param in sig.parameters.items():
         if name == "self":
             continue
+        annotation = (
+            inspect.formatannotation(param.annotation)
+            if param.annotation is not inspect.Parameter.empty
+            else None
+        )
         params[name] = {
             "kind": param.kind.name,
             "required": param.default is inspect.Parameter.empty
@@ -91,6 +100,7 @@ def serialize_signature(sig: inspect.Signature) -> dict:
                 inspect.Parameter.VAR_POSITIONAL,
                 inspect.Parameter.VAR_KEYWORD,
             ),
+            "annotation": annotation,
         }
     return {"params": params}
 

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Track 2: detect behavioral drift in upstream symbols that verl-omni mirrors.
+Detect behavioral drift in upstream symbols that verl-omni mirrors.
 
 Uses the GitHub compare API (no upstream clone needed) to find commits that
 touched watched files since the last recorded SHA, then filters the diff to
@@ -23,7 +23,8 @@ Reads:
   .github/upstream_sync/upstream_watch.yaml
 
 Environment variables:
-  UPSTREAM_VERL_SHA       — last processed verl commit SHA (from GH Actions variable)
+  UPSTREAM_VERL_SHA       — last processed verl commit SHA (from GH Actions variable);
+                            falls back to the pinned baseline in REPO_CONFIG on first run
   UPSTREAM_VLLM_OMNI_SHA  — last processed vllm-omni commit SHA
   GH_TOKEN / GITHUB_TOKEN — GitHub API auth
 
@@ -32,7 +33,7 @@ Writes:
 
 Exit codes:
   0 — no relevant upstream changes
-  1 — behavioral drift detected (workflow proceeds to generate prompt + Cursor)
+  1 — behavioral drift detected (workflow proceeds to generate prompt + AI agent)
   2 — API error (missing token, rate limit, etc.)
 """
 
@@ -55,6 +56,9 @@ REPO_CONFIG = {
     "verl-project/verl": {
         "sha_env": "UPSTREAM_VERL_SHA",
         "default_branch": "main",
+        # Everything up to and including this commit has been manually verified.
+        # Used as the base when UPSTREAM_VERL_SHA is not yet set.
+        "fallback_sha": "e72fc27c3bf6d1a6bc3c59a2fa5778f0d044fdf8",
     },
     "vllm-project/vllm-omni": {
         "sha_env": "UPSTREAM_VLLM_OMNI_SHA",
@@ -99,7 +103,7 @@ def get_comparison(repo: str, base_sha: str, head_sha: str, token: str) -> dict:
 
 
 def get_file_content(repo: str, file_path: str, ref: str, token: str) -> str | None:
-    """Fetch raw file content at a specific ref (for context in the Cursor prompt)."""
+    """Fetch raw file content at a specific ref (for context in the AI agent prompt)."""
     try:
         data = _gh_request(f"repos/{repo}/contents/{file_path}?ref={ref}", token)
         import base64
@@ -204,22 +208,11 @@ def main() -> int:
         print(f"  Current HEAD: {current_sha[:12]}")
 
         # Get last processed SHA
-        last_sha = os.environ.get(config["sha_env"], "").strip()
+        last_sha = os.environ.get(config["sha_env"], "").strip() or config.get("fallback_sha", "")
         if not last_sha:
-            print(f"  No prior SHA ({config['sha_env']} not set) — using 7-day lookback")
-            # Fall back: get SHA from 7 days ago as base
-            from datetime import datetime, timedelta, timezone
-
-            since = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            commits = _gh_request(
-                f"repos/{repo}/commits?sha={config['default_branch']}&since={since}&per_page=1",
-                token,
-            )
-            if not commits:
-                print("  No commits in last 7 days — nothing to check")
-                continue
-            last_sha = commits[-1]["sha"]
-            print(f"  Using 7-day lookback base: {last_sha[:12]}")
+            print(f"  ERROR: {config['sha_env']} not set and no fallback_sha configured", file=sys.stderr)
+            return 2
+        print(f"  Base SHA: {last_sha[:12]}")
 
         if last_sha == current_sha:
             print("  No new commits since last run — skipping")
@@ -253,7 +246,7 @@ def main() -> int:
 
             print(f"  {file_path}: changes to {symbols} detected")
 
-            # Fetch current upstream file content for Cursor context
+            # Fetch current upstream file content for AI agent context
             upstream_content = get_file_content(repo, file_path, current_sha, token)
 
             all_results.append(

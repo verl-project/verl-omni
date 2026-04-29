@@ -2,7 +2,7 @@ name: upstream-sync
 
 on:
   schedule:
-    - cron: '0 2 * * *'  # daily 2 AM UTC
+    - cron: '0 2 * * 1'  # weekly Monday 2 AM UTC
   workflow_dispatch:      # manual trigger for testing / backfill
   push:
     branches: [gitaction]  # TEMP: remove before merging to main
@@ -49,46 +49,9 @@ jobs:
           pip install --no-deps -e .
 
       # -----------------------------------------------------------------------
-      # 2. Check open PRs — skip if backlog is too large
-      # -----------------------------------------------------------------------
-      - name: Check open upstream-sync PR backlog
-        id: backlog
-        run: |
-          OPEN=$(gh pr list \
-            --label "upstream-sync" \
-            --state open \
-            --json number \
-            --jq 'length')
-          echo "open_count=$OPEN" >> "$GITHUB_OUTPUT"
-          if [ "$OPEN" -ge 3 ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::$OPEN upstream-sync PRs still open — skipping new PR creation"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Comment on oldest open PR if backlog ≥ 3
-        if: steps.backlog.outputs.skip == 'true'
-        run: |
-          OLDEST_PR=$(gh pr list \
-            --label "upstream-sync" \
-            --state open \
-            --json number,createdAt \
-            --jq 'sort_by(.createdAt) | .[0].number')
-          if [ -n "$OLDEST_PR" ]; then
-            gh pr comment "$OLDEST_PR" \
-              --body "⚠️ **upstream-sync bot**: additional upstream changes were detected on $(date -u '+%Y-%m-%d') but skipped because ${{ steps.backlog.outputs.open_count }} upstream-sync PRs are already open. Please review and merge the open PRs to unblock future syncs."
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # -----------------------------------------------------------------------
-      # 3. Detect signature drift
+      # 2. Detect signature drift
       # -----------------------------------------------------------------------
       - name: Detect signature drift
-        if: steps.backlog.outputs.skip == 'false'
         id: detect
         run: |
           python scripts/upstream_sync/check_upstream_signatures.py
@@ -101,41 +64,42 @@ jobs:
           exit 0
 
       # -----------------------------------------------------------------------
-      # 4. Classify changes and prepare Cursor input
+      # 3. Classify changes and prepare AI agent input
       # -----------------------------------------------------------------------
-      - name: Classify changes and prepare Cursor input
-        if: steps.backlog.outputs.skip == 'false' && steps.detect.outputs.has_changes == 'true'
+      - name: Classify changes and prepare AI agent input
+        if: steps.detect.outputs.has_changes == 'true'
         id: fix
         run: python scripts/upstream_sync/apply_signature_fixes.py
 
       # -----------------------------------------------------------------------
-      # 5. Cursor agent for signature changes
-      #    Runs only when apply_signature_fixes.py found cases to route to Cursor
-      #    (param_rename, param_removal, needs_ai_review).
-      #    Cursor edits are added to the SAME PR as non-breaking notes.
+      # 4. AI agent for signature changes
+      #    Runs only when apply_signature_fixes.py found cases to route to the AI agent
+      #    (param_removal, others).
+      #    AI agent edits are added to the SAME PR as non-breaking and rename notes.
       # -----------------------------------------------------------------------
-      - name: Generate Cursor prompt batches
-        if: steps.fix.outputs.has_cursor_work == 'true'
+      - name: Generate AI agent prompt batches
+        if: steps.fix.outputs.has_ai_work == 'true'
         run: python scripts/upstream_sync/generate_signature_drift_prompt.py
 
-      - name: Install Cursor CLI
-        if: steps.fix.outputs.has_cursor_work == 'true'
+      - name: Install AI agent CLI
+        if: steps.fix.outputs.has_ai_work == 'true'
         run: |
           curl https://cursor.com/install -fsS | bash
           echo "$HOME/.cursor/bin" >> "$GITHUB_PATH"
 
-      - name: Run Cursor on signature drift changes
-        if: steps.fix.outputs.has_cursor_work == 'true'
-        id: cursor_sig
-        # Restricted: Cursor may read anything but only write verl_omni Python files.
-        # Git operations stay in explicit workflow steps.
+      - name: Run AI agent on signature drift changes
+        if: steps.fix.outputs.has_ai_work == 'true'
+        id: ai_sig
+        # Restricted: AI agent may read anything, write verl_omni Python files, and
+        # write per-batch edit summary files. Git operations stay in workflow steps.
         run: |
-          for f in signature_drift_cursor_prompt_batch*.md; do
+          for f in signature_drift_ai_prompt_batch*.md; do
             [ -f "$f" ] || continue
             cursor agent \
               -p "$(cat "$f")" \
               --allow "Read(**)" \
               --allow "Write(verl_omni/**/*.py)" \
+              --allow "Write(ai_edits_summary_batch*.md)" \
               --deny  "Shell(git)" \
               --deny  "Shell(gh)" \
               --deny  "Write(.github/**)" \
@@ -146,26 +110,44 @@ jobs:
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
 
+      - name: Append AI edit summaries to PR body
+        if: steps.fix.outputs.has_ai_work == 'true'
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib
+          summaries = sorted(pathlib.Path(".").glob("ai_edits_summary_batch*.md"))
+          if not summaries:
+              print("No edit summary files written by the AI agent.")
+          else:
+              pr_body = pathlib.Path("pr_body_signature_drift.md")
+              with pr_body.open("a") as f:
+                  f.write("\n### AI agent edit log\n")
+                  for s in summaries:
+                      f.write(s.read_text())
+                      f.write("\n")
+              print(f"Appended {len(summaries)} summary file(s) to PR body.")
+          PYEOF
+
       # -----------------------------------------------------------------------
-      # 6. Run sanity checks on all edited code
+      # 5. Run sanity checks on all edited code
       # -----------------------------------------------------------------------
       - name: Sanity check edited code
-        if: steps.fix.outputs.has_cursor_work == 'true'
+        if: steps.fix.outputs.has_ai_work == 'true'
         id: sanity
         continue-on-error: true  # failure adds a label but doesn't block PR creation
         run: pytest -s -x tests/special_sanity
 
       # -----------------------------------------------------------------------
-      # 7. Open auto-PR
+      # 6. Open auto-PR
       # -----------------------------------------------------------------------
       - name: Configure git identity
-        if: steps.fix.outputs.has_cursor_work == 'true'
+        if: steps.fix.outputs.has_changes == 'true'
         run: |
           git config user.name  "upstream-sync-bot"
           git config user.email "upstream-sync-bot@users.noreply.github.com"
 
       - name: Create branch and open PR
-        if: steps.fix.outputs.has_cursor_work == 'true'
+        if: steps.fix.outputs.has_changes == 'true'
         id: pr
         run: |
           BRANCH="bot/upstream-sync-sig-$(date -u +%Y%m%d)"
@@ -197,7 +179,7 @@ jobs:
           git push origin "$BRANCH"
 
           LABELS="upstream-sync"
-          if [ "${{ steps.cursor_sig.outcome }}" = "success" ]; then
+          if [ "${{ steps.ai_sig.outcome }}" = "success" ]; then
             LABELS="$LABELS,ai-assisted"
           fi
           if [ "${{ steps.sanity.outcome }}" = "failure" ]; then
@@ -213,7 +195,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # -----------------------------------------------------------------------
-      # 8. Record upstream SHA for behavioral-drift job
+      # 7. Record upstream SHA for behavioral-drift job
       #    Stores the verl HEAD SHA so the behavioral-drift job can do
       #    `git log <last_sha>..HEAD` without re-processing old commits.
       # -----------------------------------------------------------------------
@@ -251,18 +233,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # -----------------------------------------------------------------------
-      # 9. Clean up temp files so they don't pollute the workspace
+      # 8. Clean up temp files so they don't pollute the workspace
       # -----------------------------------------------------------------------
       - name: Clean up temp files
         if: always()
         run: |
-          rm -f signature_changes.json remaining_for_cursor.json pr_body_signature_drift.md \
-                signature_drift_cursor_prompt_batch*.md \
+          rm -f signature_changes.json remaining_for_ai.json pr_body_signature_drift.md \
+                signature_drift_ai_prompt_batch*.md ai_edits_summary_batch*.md \
                 .github/upstream_sync/api_signatures_fresh.json
 
   # =========================================================================
   # Behavioral Drift — detects changes in upstream files that verl-omni
-  # mirrors/extends, then calls the Cursor agent to propose minimal adaptations.
+  # mirrors/extends, then calls the AI agent to propose minimal adaptations.
   # =========================================================================
   behavioral-drift:
     name: "Behavioral Drift — upstream code changes"
@@ -303,30 +285,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # -----------------------------------------------------------------------
-      # 3. Check open PR backlog (shared limit with signature-drift)
-      # -----------------------------------------------------------------------
-      - name: Check open upstream-sync PR backlog
-        id: backlog
-        run: |
-          OPEN=$(gh pr list \
-            --label "upstream-sync" \
-            --state open \
-            --json number \
-            --jq 'length')
-          if [ "$OPEN" -ge 3 ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::$OPEN upstream-sync PRs open — skipping behavioral-drift"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # -----------------------------------------------------------------------
-      # 4. Detect behavioral drift via GitHub compare API
+      # 3. Detect behavioral drift via GitHub compare API
       # -----------------------------------------------------------------------
       - name: Detect behavioral drift
-        if: steps.backlog.outputs.skip == 'false'
         id: detect
         run: |
           python scripts/upstream_sync/check_upstream_behavioral.py
@@ -340,33 +301,34 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # -----------------------------------------------------------------------
-      # 5. Generate Cursor prompt batches
+      # 4. Generate AI agent prompt batches
       # -----------------------------------------------------------------------
-      - name: Generate Cursor prompt batches
-        if: steps.backlog.outputs.skip == 'false' && steps.detect.outputs.has_changes == 'true'
+      - name: Generate AI agent prompt batches
+        if: steps.detect.outputs.has_changes == 'true'
         run: python scripts/upstream_sync/generate_behavioral_drift_prompt.py
 
       # -----------------------------------------------------------------------
-      # 6. Install and run Cursor agent (restricted autonomy)
+      # 5. Install and run AI agent (restricted autonomy)
       # -----------------------------------------------------------------------
-      - name: Install Cursor CLI
-        if: steps.backlog.outputs.skip == 'false' && steps.detect.outputs.has_changes == 'true'
+      - name: Install AI agent CLI
+        if: steps.detect.outputs.has_changes == 'true'
         run: |
           curl https://cursor.com/install -fsS | bash
           echo "$HOME/.cursor/bin" >> "$GITHUB_PATH"
 
-      - name: Run Cursor on behavioral drift changes
-        if: steps.backlog.outputs.skip == 'false' && steps.detect.outputs.has_changes == 'true'
-        id: cursor
-        # Restricted autonomy: Cursor may only read anything and write verl_omni/*.py.
-        # All git/gh operations remain in explicit workflow steps below.
+      - name: Run AI agent on behavioral drift changes
+        if: steps.detect.outputs.has_changes == 'true'
+        id: ai
+        # Restricted autonomy: AI agent may read anything, write verl_omni/*.py, and
+        # write per-batch edit summary files. All git/gh ops remain in workflow steps.
         run: |
-          for f in behavioral_drift_cursor_prompt_batch*.md; do
+          for f in behavioral_drift_ai_prompt_batch*.md; do
             [ -f "$f" ] || continue
             cursor agent \
               -p "$(cat "$f")" \
               --allow "Read(**)" \
               --allow "Write(verl_omni/**/*.py)" \
+              --allow "Write(behavioral_edits_summary_batch*.md)" \
               --deny  "Shell(git)" \
               --deny  "Shell(gh)" \
               --deny  "Write(.github/**)" \
@@ -378,10 +340,10 @@ jobs:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
 
       # -----------------------------------------------------------------------
-      # 7. Sanity check Cursor's edits
+      # 6. Sanity check AI agent's edits
       # -----------------------------------------------------------------------
-      - name: Sanity check Cursor edits
-        if: steps.cursor.outcome == 'success'
+      - name: Sanity check AI agent edits
+        if: steps.ai.outcome == 'success'
         id: sanity
         continue-on-error: true
         run: |
@@ -392,16 +354,16 @@ jobs:
           pytest -s -x tests/special_sanity
 
       # -----------------------------------------------------------------------
-      # 8. Open auto-PR with Cursor's changes
+      # 7. Open auto-PR with AI agent's changes
       # -----------------------------------------------------------------------
       - name: Configure git identity
-        if: steps.cursor.outcome == 'success'
+        if: steps.ai.outcome == 'success'
         run: |
           git config user.name  "upstream-sync-bot"
           git config user.email "upstream-sync-bot@users.noreply.github.com"
 
       - name: Create branch and open PR
-        if: steps.cursor.outcome == 'success'
+        if: steps.ai.outcome == 'success'
         id: pr
         run: |
           BRANCH="bot/upstream-sync-behavioral-$(date -u +%Y%m%d)"
@@ -411,9 +373,9 @@ jobs:
             exit 0
           fi
 
-          # Only proceed if Cursor actually changed something
+          # Only proceed if the AI agent actually changed something
           if git diff --quiet; then
-            echo "::notice::Cursor made no file changes — no PR needed"
+            echo "::notice::AI agent made no file changes — no PR needed"
             exit 0
           fi
 
@@ -427,26 +389,31 @@ jobs:
             LABELS="$LABELS,sanity-failed"
           fi
 
-          # Build PR body from behavioral_changes.json
+          # Build PR body from behavioral_changes.json + AI edit summaries
           python3 - <<'PYEOF'
-          import json, pathlib, textwrap
+          import json, pathlib
           root = pathlib.Path(".")
           data = json.loads((root / "behavioral_changes.json").read_text())
           changes = data.get("changes", [])
           lines = [
               "## Upstream Sync — Behavioral Drift",
               "",
-              "_Auto-generated by the daily upstream-sync bot + Cursor agent._",
+              "_Auto-generated by the daily upstream-sync bot + AI agent._",
               "",
               "### Upstream changes analyzed",
           ]
           for c in changes:
               e = c["entry"]
               lines.append(f"- `{e['file']}` ({e['upstream_repo']}) — symbols: {e['symbols']}")
+          summaries = sorted(root.glob("behavioral_edits_summary_batch*.md"))
+          if summaries:
+              lines += ["", "### AI agent edit log"]
+              for s in summaries:
+                  lines.append(s.read_text())
           lines += [
               "",
               "### Review checklist",
-              "- [ ] Read all Cursor-generated edits line by line",
+              "- [ ] Read all AI-generated edits line by line",
               "- [ ] Run the full test suite on GPU if training-path code changed",
               "- [ ] Verify diffusion semantics are preserved (not just LLM logic copied)",
               "- [ ] Check `tests/special_sanity` passes",
@@ -463,9 +430,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # -----------------------------------------------------------------------
-      # 9. Update SHA variables to current upstream HEAD
+      # 8. Update SHA variables to current upstream HEAD
       #    Only update after a successful run (detect + no API errors).
-      #    If Cursor or PR creation fails, SHA is NOT updated so the next run
+      #    If the AI agent or PR creation fails, SHA is NOT updated so the next run
       #    re-processes the same upstream changes.
       # -----------------------------------------------------------------------
       - name: Update upstream SHA variables
@@ -509,10 +476,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # -----------------------------------------------------------------------
-      # 10. Clean up temp files
+      # 9. Clean up temp files
       # -----------------------------------------------------------------------
       - name: Clean up temp files
         if: always()
         run: |
-          rm -f behavioral_changes.json behavioral_drift_cursor_prompt_batch*.md \
+          rm -f behavioral_changes.json behavioral_drift_ai_prompt_batch*.md \
+                behavioral_edits_summary_batch*.md \
                 pr_body_behavioral_drift.md upstream_current_shas.json

@@ -13,15 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Generate Cursor prompt batches for behavioral-drift fixes.
+Generate AI agent prompt batches for behavioral-drift fixes.
 
 Reads behavioral_changes.json (produced by check_upstream_behavioral.py) and
-writes behavioral_drift_cursor_prompt_batch{N}.md files. Each batch contains
+writes behavioral_drift_ai_prompt_batch{N}.md files. Each batch contains
 at most BATCH_SIZE change sections.
 
 Key improvements over the previous behavioral prompt generator:
   - Reads ALL comma-separated verl_omni_file paths (not just the first)
-  - Injects per-criteria step-by-step procedures for Cursor to follow
+  - Injects per-criteria step-by-step procedures for the AI agent to follow
   - Batches into multiple files (max 3 per file)
   - Includes the upstream site-packages install path in the preamble
 
@@ -122,34 +122,11 @@ Step 3 — Edit or annotate. Make the minimal semantically equivalent change.
   If no change needed: write in your summary: "no change needed — <reason>"
 """
 
-REGISTRY_INJECTION_PROCEDURE = """### Procedure for `registry_injection`
-
-verl-omni injects entries into upstream registries at import time (in _patch.py).
-If the registry API changes, the patch fails silently at runtime with no error.
-
-Step 1 — Identify what changed in the registry from the diff:
-  - Did register() / __setitem__ / get() signature change?
-  - Was the registry object renamed or moved to a different module?
-  - Were new required parameters added to registry methods?
-
-Step 2 — Find the injection call in the listed verl-omni counterpart file(s).
-  Look for .register(), REWARD_MANAGER[...], or similar patterns.
-
-Step 3 — Update the call to match the new API if anything changed.
-  If the registry file changed but the public API did not:
-  write in your summary: "no change needed — registry API unchanged"
-"""
-
-
 def criteria_procedure(criteria: str) -> str:
     if criteria == "direct_inheritance":
         return DIRECT_INHERITANCE_PROCEDURE
     elif criteria == "structural_parallel":
         return STRUCTURAL_PARALLEL_PROCEDURE
-    elif criteria == "registry_injection":
-        return REGISTRY_INJECTION_PROCEDURE
-    elif criteria == "registry_injection+direct_inheritance":
-        return REGISTRY_INJECTION_PROCEDURE + "\n" + DIRECT_INHERITANCE_PROCEDURE
     else:
         return (
             "### Procedure\n"
@@ -182,13 +159,14 @@ You **may** use Read() on any file under those paths to look up implementations.
 """
 
 
-BEHAVIORAL_SUMMARY_FOOTER = """---
+def make_summary_footer(batch_n: int) -> str:
+    return f"""---
 ## Summary required
 
-After completing all sections, append:
+After completing all sections, write the following block to `behavioral_edits_summary_batch{batch_n}.md`:
 
 ```
-### Changes made
+### Changes made (batch {batch_n})
 - Change 1: <file> — <what you did> OR "no change needed — <reason>"
 - Change 2: ...
 ```
@@ -265,8 +243,8 @@ def main() -> int:
         sections = [build_preamble(upstream_path)]
         for i, ch in enumerate(batch, 1):
             sections.append(format_change(i, ch, upstream_path))
-        sections.append(BEHAVIORAL_SUMMARY_FOOTER)
-        out_path = REPO_ROOT / f"behavioral_drift_cursor_prompt_batch{n}.md"
+        sections.append(make_summary_footer(n))
+        out_path = REPO_ROOT / f"behavioral_drift_ai_prompt_batch{n}.md"
         out_path.write_text("\n".join(sections))
         written.append(out_path)
         print(f"  Wrote {out_path.name} ({len(batch)} change(s))")

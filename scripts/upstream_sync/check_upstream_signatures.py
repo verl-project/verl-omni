@@ -23,9 +23,9 @@ and writes:
 
 Change classifications:
   non_breaking_addition — new optional param; callers need no update
-  param_rename          — our snapshot suggests a rename; Cursor verifies and fixes
-  param_removal         — our snapshot suggests a removal; Cursor verifies and fixes
-  needs_ai_review       — structural change; Cursor verifies and fixes
+  param_rename          — one param renamed; same kind, required, and annotation — no AI needed
+  param_removal         — param removed; AI agent verifies and fixes
+  others                — structural/complex change; AI agent verifies and fixes
 
 Exit codes:
   0 — no drift detected
@@ -75,7 +75,7 @@ def _classify_param_change(method_name: str, old_params: dict, new_params: dict)
         return {
             "method": method_name,
             "type": "param_attrs_changed",
-            "classification": "needs_ai_review",
+            "classification": "others",
             "changed": sorted(changed),
         }
 
@@ -91,7 +91,7 @@ def _classify_param_change(method_name: str, old_params: dict, new_params: dict)
         return {
             "method": method_name,
             "type": "param_added_required",
-            "classification": "needs_ai_review",
+            "classification": "others",
             "added": sorted(added),
         }
 
@@ -105,11 +105,16 @@ def _classify_param_change(method_name: str, old_params: dict, new_params: dict)
 
     # Both added and removed
     if len(added) == 1 and len(removed) == 1:
-        # Single swap — heuristic for rename (same position/kind is a stronger signal,
-        # but name-count equality is a reasonable first-pass heuristic)
         old_p = old_params[next(iter(removed))]
         new_p = new_params[next(iter(added))]
-        if old_p.get("kind") == new_p.get("kind") and old_p.get("required") == new_p.get("required"):
+        # Classify as a mechanical rename only when kind, required, AND annotation
+        # all match — annotation equality rules out cases where the param was
+        # restructured and a coincidentally same-shaped param appeared.
+        if (
+            old_p.get("kind") == new_p.get("kind")
+            and old_p.get("required") == new_p.get("required")
+            and old_p.get("annotation") == new_p.get("annotation")
+        ):
             return {
                 "method": method_name,
                 "type": "param_renamed",
@@ -121,7 +126,7 @@ def _classify_param_change(method_name: str, old_params: dict, new_params: dict)
     return {
         "method": method_name,
         "type": "params_restructured",
-        "classification": "needs_ai_review",
+        "classification": "others",
         "added": sorted(added),
         "removed": sorted(removed),
     }
@@ -135,7 +140,7 @@ def _compare_info(key: str, old: dict, new: dict) -> list[dict]:
                 "key": key,
                 "method": None,
                 "type": "symbol_gone",
-                "classification": "needs_ai_review",
+                "classification": "others",
                 "detail": new["error"],
             }
         ]
@@ -162,7 +167,7 @@ def _compare_info(key: str, old: dict, new: dict) -> list[dict]:
                     "key": key,
                     "method": method,
                     "type": "method_removed",
-                    "classification": "needs_ai_review",
+                    "classification": "others",
                 }
             )
             continue
@@ -191,7 +196,7 @@ def _compare_info(key: str, old: dict, new: dict) -> list[dict]:
                 "key": key,
                 "method": None,
                 "type": "abstract_methods_changed",
-                "classification": "needs_ai_review",
+                "classification": "others",
                 "added": added_abs,
                 "removed": removed_abs,
             }
@@ -241,7 +246,7 @@ def diff_snapshots(old_snap: dict, new_snap: dict) -> list[dict]:
                     "key": key,
                     "method": None,
                     "type": "symbol_gone",
-                    "classification": "needs_ai_review",
+                    "classification": "others",
                     "detail": "symbol disappeared from snapshot",
                     "verl_omni_usages": find_importing_files(module_path, symbol),
                 }
@@ -257,9 +262,9 @@ def diff_snapshots(old_snap: dict, new_snap: dict) -> list[dict]:
         for change in changes:
             module_path, _, symbol = key.rpartition(".")
             change["verl_omni_usages"] = find_importing_files(module_path, symbol)
-            # Include old/new snapshot data for needs_ai_review changes so the Cursor
+            # Include old/new snapshot data for AI-bound changes so the AI agent
             # prompt can show a concrete before/after without re-loading the snapshot.
-            if change.get("classification") == "needs_ai_review":
+            if change.get("classification") in ("param_removal", "others"):
                 change["old_signature"] = old_info
                 change["new_signature"] = new_info
             all_changes.append(change)
@@ -318,21 +323,21 @@ def main() -> int:
         CHANGES_FILE.write_text(json.dumps({"has_changes": False, "changes": []}, indent=2) + "\n")
         return 0
 
-    non_ai = [c for c in changes if c["classification"] != "needs_ai_review"]
-    ai_review = [c for c in changes if c["classification"] == "needs_ai_review"]
+    ai_bound = [c for c in changes if c["classification"] in ("param_removal", "others")]
+    non_ai = [c for c in changes if c["classification"] not in ("param_removal", "others")]
 
     print(f"\nDrift detected: {len(changes)} change(s)")
-    print(f"  Non-breaking / param drift: {len(non_ai)}")
-    print(f"  Needs AI review:            {len(ai_review)}")
+    print(f"  Non-AI (info/rename):  {len(non_ai)}")
+    print(f"  AI-bound:              {len(ai_bound)}")
     for c in changes:
         print(f"  [{c['classification']:25s}] {c['key']} — {c['type']}")
 
     output = {
         "has_changes": True,
-        "summary": f"{len(changes)} change(s): {len(non_ai)} non-ai-review, {len(ai_review)} needs_ai_review",
+        "summary": f"{len(changes)} change(s): {len(non_ai)} non-ai, {len(ai_bound)} ai-bound",
         "changes": changes,
-        "non_ai_review": non_ai,
-        "needs_ai_review": ai_review,
+        "non_ai": non_ai,
+        "ai_bound": ai_bound,
     }
     CHANGES_FILE.write_text(json.dumps(output, indent=2) + "\n")
 

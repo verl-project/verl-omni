@@ -17,8 +17,7 @@ Bootstrap script: generate .github/upstream_sync/upstream_watch.yaml.
 
 Detects symbols in verl_omni that depend on upstream (verl / vllm_omni / vllm) via:
   1. Direct subclassing   -- auto-detected via AST class-inheritance analysis
-  2. Registry injection   -- hard-coded from _patch.py (cannot be auto-detected)
-  3. Structural parallel  -- hard-coded duck-typed mirrors (cannot be auto-detected)
+  2. Structural parallel  -- hard-coded duck-typed mirrors (cannot be auto-detected)
 
 Run once, review the output, then commit. Re-run when adding new upstream-dependent
 classes to verl_omni (or edit MANUAL_ENTRIES directly).
@@ -46,46 +45,12 @@ UPSTREAM_REPO_MAP = {
 
 # ---------------------------------------------------------------------------
 # Entries that static AST analysis cannot detect:
-#   - registry injection points (runtime dict/registry manipulation in _patch.py)
 #   - structural parallels (duck-typed mirrors with no formal inheritance)
 #
 # Format: one entry per upstream file. If multiple criteria apply to the same
 # file, list all symbols together — the bot fetches the file once.
 # ---------------------------------------------------------------------------
 MANUAL_ENTRIES = [
-    # --- Registry injection points (from _patch.py) -------------------------
-    # If the registry .register() API changes or the registry object is renamed,
-    # the patch silently fails at runtime.
-    {
-        "upstream_repo": "verl-project/verl",
-        "file": "verl/workers/rollout/replica.py",
-        "symbols": ["RolloutReplicaRegistry"],
-        "criteria": "registry_injection",
-        "verl_omni_file": "verl_omni/_patch.py",
-        "verl_omni_symbols": ["_patch_vllm_omni_replica"],
-        "note": (
-            "_patch_vllm_omni_replica calls RolloutReplicaRegistry.register('vllm_omni', ...); "
-            "API or rename breaks the patch"
-        ),
-    },
-    {
-        "upstream_repo": "verl-project/verl",
-        "file": "verl/workers/engine/base.py",
-        "symbols": ["EngineRegistry"],
-        "criteria": "registry_injection",
-        "verl_omni_file": "verl_omni/_patch.py",
-        "verl_omni_symbols": ["_patch_fsdp_diffusers_engine"],
-        "note": "_patch_fsdp_diffusers_engine pops 'diffusion_model' key and re-registers DiffusersFSDPEngine",
-    },
-    {
-        "upstream_repo": "verl-project/verl",
-        "file": "verl/experimental/reward_loop/reward_manager/registry.py",
-        "symbols": ["REWARD_MANAGER"],
-        "criteria": "registry_injection",
-        "verl_omni_file": "verl_omni/_patch.py",
-        "verl_omni_symbols": ["_patch_visual_reward_manager"],
-        "note": "_patch_visual_reward_manager replaces REWARD_MANAGER['visual'] with VisualRewardManager",
-    },
     # --- Structural parallels (duck-typed mirrors, no formal subclassing) ----
     # DiffusionAgentLoopWorker mirrors the LLM-side AgentLoopWorker contract.
     # Upstream behavioral additions (e.g. timing wrappers in _compute_score,
@@ -244,9 +209,6 @@ def merge_all(manual: list[dict], auto: list[dict]) -> list[dict]:
                 existing.setdefault("verl_omni_symbols", [])
                 if s not in existing["verl_omni_symbols"]:
                     existing["verl_omni_symbols"].append(s)
-            # upgrade criteria label if auto adds inheritance info to a manual entry
-            if existing["criteria"] == "registry_injection" and entry["criteria"] == "direct_inheritance":
-                existing["criteria"] = "registry_injection+direct_inheritance"
 
     return list(by_file.values())
 
@@ -262,8 +224,8 @@ def main() -> None:
     output = {
         "version": 1,
         "description": (
-            "Upstream symbols that verl-omni subclasses, injects into, or structurally mirrors. "
-            "Watched by the daily upstream-sync bot (behavioral-drift job). "
+            "Upstream symbols that verl-omni subclasses or structurally mirrors. "
+            "Watched by the weekly upstream-sync bot (behavioral-drift job). "
             "Auto-generated — edit MANUAL_ENTRIES in generate_upstream_watch.py to add/remove entries."
         ),
         "watch": all_entries,
