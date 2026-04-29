@@ -17,24 +17,10 @@ FSDP utilities for verl-omni
 
 from collections import OrderedDict
 
-from verl.utils.fsdp_utils import (  # noqa: F401
-    CPUOffloadPolicy,
-    FSDPModule,
-    MixedPrecisionPolicy,
-    apply_fsdp2,
-    fsdp2_clip_grad_norm_,
-    fsdp2_load_full_state_dict,
-    fsdp_version,
-    get_fsdp_wrap_policy,
-    get_init_weight_context_manager,
-    init_fn,
-    load_fsdp_model_to_gpu,
-    load_fsdp_optimizer,
-    offload_fsdp_model_to_cpu,
-    offload_fsdp_optimizer,
-    replace_lora_wrapper,
-)
 from verl.utils.fsdp_utils import collect_lora_params as _upstream_collect_lora_params
+from verl.utils.fsdp_utils import fsdp_version
+
+__all__ = ["collect_lora_params"]
 
 
 def _layered_summon_lora_params_diffusers(fsdp_module) -> OrderedDict:

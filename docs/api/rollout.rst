@@ -64,3 +64,6 @@ vLLM-Omni Utilities
 
 .. autoclass:: verl_omni.utils.vllm_omni.utils.VLLMOmniHijack
    :members:
+
+.. autoclass:: verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension
+   :members: update_weights_from_ipc
