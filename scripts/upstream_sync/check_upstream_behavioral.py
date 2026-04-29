@@ -212,8 +212,11 @@ def main() -> int:
         raw_sha = os.environ.get(config["sha_env"], "").strip()
         last_sha = raw_sha if re.match(r"^[0-9a-f]{40}$", raw_sha) else config.get("fallback_sha", "")
         if not last_sha:
-            print(f"  ERROR: {config['sha_env']} not set and no fallback_sha configured", file=sys.stderr)
-            return 2
+            # First-ever run for this repo: no base SHA to compare against.
+            # Skip comparison but let current_shas get written so the next run
+            # has a baseline (bootstrapping).
+            print(f"  No base SHA for {repo} — first run, bootstrapping to current HEAD")
+            continue
         if raw_sha and raw_sha != last_sha:
             print(f"  WARNING: {config['sha_env']} value is not a valid SHA — using fallback")
         print(f"  Base SHA: {last_sha[:12]}")
