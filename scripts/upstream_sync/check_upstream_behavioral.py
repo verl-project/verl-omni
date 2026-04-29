@@ -207,11 +207,15 @@ def main() -> int:
         current_shas[repo] = current_sha
         print(f"  Current HEAD: {current_sha[:12]}")
 
-        # Get last processed SHA
-        last_sha = os.environ.get(config["sha_env"], "").strip() or config.get("fallback_sha", "")
+        # Get last processed SHA; reject non-SHA values (e.g. JSON error bodies from
+        # a failed gh api call being captured into the env var by the workflow).
+        raw_sha = os.environ.get(config["sha_env"], "").strip()
+        last_sha = raw_sha if re.match(r"^[0-9a-f]{40}$", raw_sha) else config.get("fallback_sha", "")
         if not last_sha:
             print(f"  ERROR: {config['sha_env']} not set and no fallback_sha configured", file=sys.stderr)
             return 2
+        if raw_sha and raw_sha != last_sha:
+            print(f"  WARNING: {config['sha_env']} value is not a valid SHA — using fallback")
         print(f"  Base SHA: {last_sha[:12]}")
 
         if last_sha == current_sha:

@@ -273,10 +273,14 @@ jobs:
       - name: Read upstream SHAs
         id: shas
         run: |
-          VERL_SHA=$(gh api "repos/${{ github.repository }}/actions/variables/UPSTREAM_VERL_SHA" \
-            --jq '.value' 2>/dev/null || echo "")
-          VLLM_OMNI_SHA=$(gh api "repos/${{ github.repository }}/actions/variables/UPSTREAM_VLLM_OMNI_SHA" \
-            --jq '.value' 2>/dev/null || echo "")
+          # Use if/else so the else branch overwrites the variable even when gh api
+          # writes a JSON error body to stdout before exiting non-zero.
+          # The $(cmd || echo "") pattern does NOT work for this because it captures
+          # both the command's stdout AND the echo output.
+          if VERL_SHA=$(gh api "repos/${{ github.repository }}/actions/variables/UPSTREAM_VERL_SHA" \
+            --jq '.value' 2>/dev/null); then :; else VERL_SHA=""; fi
+          if VLLM_OMNI_SHA=$(gh api "repos/${{ github.repository }}/actions/variables/UPSTREAM_VLLM_OMNI_SHA" \
+            --jq '.value' 2>/dev/null); then :; else VLLM_OMNI_SHA=""; fi
           echo "UPSTREAM_VERL_SHA=$VERL_SHA"         >> "$GITHUB_ENV"
           echo "UPSTREAM_VLLM_OMNI_SHA=$VLLM_OMNI_SHA" >> "$GITHUB_ENV"
           echo "verl_sha=${VERL_SHA:0:12}"           >> "$GITHUB_OUTPUT"
