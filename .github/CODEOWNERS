@@ -1,0 +1,16 @@
+# CODEOWNERS for verl-project/verl-omni
+#
+# Syntax: <pattern> <owner1> [<owner2> ...]
+# - The LAST matching pattern for a given file wins.
+# - Owners must have write access to the repo.
+# - See https://docs.github.com/articles/about-code-owners
+
+# Default owner for everything in the repo
+*                @samithuang
+
+# Tests
+/tests/          @zhtmike
+
+# Documentation
+/docs/           @AndyZhou952
+*.md             @AndyZhou952
