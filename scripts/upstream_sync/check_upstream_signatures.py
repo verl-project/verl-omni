@@ -346,7 +346,7 @@ def main() -> int:
         with open(gha_output, "a") as f:
             f.write("has_changes=true\n")
             f.write(f"has_mechanical={'true' if non_ai else 'false'}\n")
-            f.write(f"has_complex={'true' if ai_review else 'false'}\n")
+            f.write(f"has_complex={'true' if ai_bound else 'false'}\n")
 
     return 1
 

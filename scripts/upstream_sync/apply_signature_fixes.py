@@ -102,13 +102,11 @@ def build_pr_body(
     if ai_queue:
         sections.append("\n### Changes requiring AI agent review\n")
         sections.append(
-            "The following changes were **not** auto-fixed. "
-            "The AI agent will handle them in the same PR:\n"
+            "The following changes were **not** auto-fixed. The AI agent will handle them in the same PR:\n"
         )
         for c in ai_queue:
             sections.append(
-                f"- `{c['key']}` (`{c.get('method', 'function')}`): "
-                f"`{c['classification']}` — {c.get('type', '')}\n"
+                f"- `{c['key']}` (`{c.get('method', 'function')}`): `{c['classification']}` — {c.get('type', '')}\n"
             )
 
     sections.append(

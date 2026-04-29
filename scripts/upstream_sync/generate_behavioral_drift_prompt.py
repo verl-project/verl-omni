@@ -122,6 +122,7 @@ Step 3 — Edit or annotate. Make the minimal semantically equivalent change.
   If no change needed: write in your summary: "no change needed — <reason>"
 """
 
+
 def criteria_procedure(criteria: str) -> str:
     if criteria == "direct_inheritance":
         return DIRECT_INHERITANCE_PROCEDURE
@@ -186,8 +187,7 @@ def format_change(idx: int, change: dict, upstream_path: str) -> str:
     parts = [
         "---",
         f"## Change {idx}: `{entry['file']}` ({entry['criteria']})",
-        f"**Upstream:** `{entry['upstream_repo']}` | "
-        f"**Symbols:** {', '.join(f'`{s}`' for s in entry['symbols'])}",
+        f"**Upstream:** `{entry['upstream_repo']}` | **Symbols:** {', '.join(f'`{s}`' for s in entry['symbols'])}",
         f"**verl-omni counterpart(s):** {file_labels}",
         f"**verl-omni symbols:** {', '.join(f'`{s}`' for s in entry.get('verl_omni_symbols', []))}",
     ]

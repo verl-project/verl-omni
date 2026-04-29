@@ -49,12 +49,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 OUTPUT_FILE = REPO_ROOT / ".github" / "upstream_sync" / "api_signatures.json"
 
-VERL_OMNI_DIR = Path(
-    os.environ.get("UPSTREAM_SYNC_VERL_OMNI_DIR", str(REPO_ROOT / "verl_omni"))
-)
-UPSTREAM_PREFIXES = tuple(
-    os.environ.get("UPSTREAM_SYNC_PREFIXES", "verl.,vllm_omni.,vllm.").split(",")
-)
+VERL_OMNI_DIR = Path(os.environ.get("UPSTREAM_SYNC_VERL_OMNI_DIR", str(REPO_ROOT / "verl_omni")))
+UPSTREAM_PREFIXES = tuple(os.environ.get("UPSTREAM_SYNC_PREFIXES", "verl.,vllm_omni.,vllm.").split(","))
 
 
 def collect_upstream_imports() -> dict[str, set[str]]:
@@ -88,9 +84,7 @@ def serialize_signature(sig: inspect.Signature) -> dict:
         if name == "self":
             continue
         annotation = (
-            inspect.formatannotation(param.annotation)
-            if param.annotation is not inspect.Parameter.empty
-            else None
+            inspect.formatannotation(param.annotation) if param.annotation is not inspect.Parameter.empty else None
         )
         params[name] = {
             "kind": param.kind.name,

@@ -60,15 +60,13 @@ def render_params(snapshot_info: dict) -> str:
     if sig:
         params = sig.get("params", {})
         param_str = ", ".join(
-            f"{n}" + ("?" if not v.get("required") else "") + f" [{v.get('kind', '')}]"
-            for n, v in params.items()
+            f"{n}" + ("?" if not v.get("required") else "") + f" [{v.get('kind', '')}]" for n, v in params.items()
         )
         lines.append(f"  (function)({param_str})")
     for method, minfo in sorted(methods.items()):
         params = minfo.get("params", {})
         param_str = ", ".join(
-            f"{n}" + ("?" if not v.get("required") else "") + f" [{v.get('kind', '')}]"
-            for n, v in params.items()
+            f"{n}" + ("?" if not v.get("required") else "") + f" [{v.get('kind', '')}]" for n, v in params.items()
         )
         lines.append(f"  .{method}({param_str})")
     return "\n".join(lines) if lines else "(no tracked methods)"
@@ -184,7 +182,7 @@ def format_change(idx: int, change: dict, upstream_path: str) -> str:
         "  (F) Symbol moved / renamed / deleted upstream → update import",
         "",
         "**Step 4 — Edit**",
-        "  (A) No edit needed → write in summary: \"no change — new optional param\"",
+        '  (A) No edit needed → write in summary: "no change — new optional param"',
         "  (B) Rename `old_name=` → `new_name=` at every keyword-arg call site.",
         "      Positional usage: add `# positional: maps to new_name (was old_name)`",
         "  (C) Remove the argument. If stored as an attribute, trace and remove dependents.",
