@@ -27,10 +27,8 @@ Multimodal generative RL training differs from text-only LLM RL not only in mode
 
 ### What we focus on
 
-- **Specialized rollout** via [`vLLM-Omni`](https://github.com/vllm-project/vllm-omni) for concurrent diffusion and multimodal generation.
-- **Efficient diffusion RL training** for non-autoregressive (flow / diffusion) models.
-- **Omni-modality training workflows** spanning text, image, video, audio, and unified generation.
-- **Flexible reward pipelines**: rule-based, model-based, and multimodal rewards.
+- **Specialized rollout** via [`vLLM-Omni`](https://github.com/vllm-project/vllm-omni) for high-throughput diffusion and multimodal generation.
+- **Flexible reward pipelines** spanning rule-based rewards, model-based rewards, and multimodal reward computation.
 - **Modular training backends** that plug into existing parallelism (FSDP, USP) and other optimizations rather than rebuilding the stack from scratch.
 - **End-to-end examples and benchmarks** validating co-located sync and fully-async RL on the model families above.
 - **High training throughput** — on our reference Qwen-Image FlowGRPO setup, `VeRL-Omni` achieves **~25% higher end-to-end throughput** than the diffusers-based [`flow_grpo`](https://github.com/yifan123/flow_grpo) implementation, driven by `vLLM-Omni` rollout, FSDP training, and overlapped reward computation (asynchronous).
