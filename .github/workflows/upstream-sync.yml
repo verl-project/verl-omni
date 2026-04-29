@@ -4,8 +4,6 @@ on:
   schedule:
     - cron: '0 2 * * 1'  # weekly Monday 2 AM UTC
   workflow_dispatch:      # manual trigger for testing / backfill
-  push:
-    branches: [gitaction]  # TEMP: remove before merging to main
 
 concurrency:
   group: upstream-sync
@@ -170,7 +168,21 @@ jobs:
           fi
 
           git commit -m "chore(upstream-sync): signature drift $(date -u +%Y-%m-%d)"
-          git push origin "$BRANCH"
+          # --force: safe because these branches are bot-owned; handles re-runs where the
+          # branch was already pushed but PR creation failed on a previous attempt.
+          git push --force origin "$BRANCH"
+
+          # Ensure labels exist (creates on first use; no-ops if already present).
+          gh label create "upstream-sync" --color "0075ca" --description "Automated upstream sync" --force
+          gh label create "ai-assisted"   --color "e4e669" --description "AI-assisted code changes" --force
+
+          # Idempotency guard: if an open PR already exists for this branch (re-run after
+          # a successful push but failed PR creation), skip to avoid duplicates.
+          EXISTING=$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')
+          if [ "${EXISTING:-0}" -gt 0 ]; then
+            echo "::notice::Open PR already exists for $BRANCH — skipping creation (re-run)"
+            exit 0
+          fi
 
           LABELS="upstream-sync"
           if [ "${{ steps.ai_sig.outcome }}" = "success" ]; then
@@ -373,7 +385,21 @@ jobs:
           git checkout -b "$BRANCH"
           git add verl_omni/
           git commit -m "chore(upstream-sync): behavioral drift $(date -u +%Y-%m-%d)"
-          git push origin "$BRANCH"
+          # --force: safe because these branches are bot-owned; handles re-runs where the
+          # branch was already pushed but PR creation failed on a previous attempt.
+          git push --force origin "$BRANCH"
+
+          # Ensure labels exist (creates on first use; no-ops if already present).
+          gh label create "upstream-sync" --color "0075ca" --description "Automated upstream sync" --force
+          gh label create "ai-assisted"   --color "e4e669" --description "AI-assisted code changes" --force
+
+          # Idempotency guard: if an open PR already exists for this branch (re-run after
+          # a successful push but failed PR creation), skip to avoid duplicates.
+          EXISTING=$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')
+          if [ "${EXISTING:-0}" -gt 0 ]; then
+            echo "::notice::Open PR already exists for $BRANCH — skipping creation (re-run)"
+            exit 0
+          fi
 
           LABELS="upstream-sync"
 
