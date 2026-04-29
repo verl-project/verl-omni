@@ -49,7 +49,7 @@ jobs:
         run: |
           pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.18.0/vllm-0.18.0+cpu-cp38-abi3-manylinux_2_35_x86_64.whl"
           pip install "vllm-omni==0.18.0"
-          pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@main"
+          pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@a512e90fddcefb64baaa6384e9cf8571b6bfab0b"
           pip install -r requirements.txt
           pip install -r requirements-test.txt
           pip install --no-deps -e .
