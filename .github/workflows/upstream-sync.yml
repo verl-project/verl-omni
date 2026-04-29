@@ -105,7 +105,7 @@ jobs:
           EOF
           for f in signature_drift_ai_prompt_batch*.md; do
             [ -f "$f" ] || continue
-            agent -p "$(cat "$f")"
+            agent --yolo -p "$(cat "$f")"
           done
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
@@ -338,7 +338,7 @@ jobs:
           EOF
           for f in behavioral_drift_ai_prompt_batch*.md; do
             [ -f "$f" ] || continue
-            agent -p "$(cat "$f")"
+            agent --yolo -p "$(cat "$f")"
           done
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
