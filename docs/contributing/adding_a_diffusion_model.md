@@ -14,7 +14,7 @@ code is the canonical reference.
 
 ## TL;DR
 
-A new model needs **four files in one new package** plus **two registry
+A new model needs **three files in one new package** plus **two registry
 hooks**:
 
 ```
@@ -238,7 +238,7 @@ class MyModelPipelineWithLogProb(MyModelPipeline):
 
 Your subclass must do four things:
 
-1. **Replace the upstream Euler scheduler** with
+1. **Replace the upstream scheduler** (typically Euler-based) with
    `FlowMatchSDEDiscreteScheduler`.
 2. **Override `encode_prompt`** to accept pre-tokenised `prompt_ids` and
    the tokenizer attention mask (the agent loop ships these — never raw
