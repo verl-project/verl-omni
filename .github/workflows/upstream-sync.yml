@@ -150,13 +150,7 @@ jobs:
         if: steps.fix.outputs.has_changes == 'true'
         id: pr
         run: |
-          BRANCH="bot/upstream-sync-sig-$(date -u +%Y%m%d)"
-
-          # Bail out if branch already exists (idempotency — same day re-run)
-          if git ls-remote --exit-code origin "refs/heads/$BRANCH" 2>/dev/null; then
-            echo "::notice::Branch $BRANCH already exists — skipping duplicate PR"
-            exit 0
-          fi
+          BRANCH="bot/upstream-sync-sig-$(date -u +%Y%m%d)-${{ github.run_number }}"
 
           git checkout -b "$BRANCH"
 
@@ -354,6 +348,7 @@ jobs:
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@main"
           pip install -r requirements.txt --no-deps
+          pip install -r requirements-test.txt
           pip install --no-deps -e .
           pytest -s -x tests/special_sanity
 
@@ -370,12 +365,7 @@ jobs:
         if: steps.ai.outcome == 'success'
         id: pr
         run: |
-          BRANCH="bot/upstream-sync-behavioral-$(date -u +%Y%m%d)"
-
-          if git ls-remote --exit-code origin "refs/heads/$BRANCH" 2>/dev/null; then
-            echo "::notice::Branch $BRANCH already exists — skipping"
-            exit 0
-          fi
+          BRANCH="bot/upstream-sync-behavioral-$(date -u +%Y%m%d)-${{ github.run_number }}"
 
           # Only proceed if the AI agent actually changed something
           if git diff --quiet; then
