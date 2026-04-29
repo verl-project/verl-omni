@@ -73,10 +73,11 @@ Open your browser at http://localhost:8000 to explore the docs.
 
 ## Model Integrations
 
-To add support for a new diffusion model (new `DiffusionModelBase` +
-`VllmOmniPipelineBase` pair), follow the step-by-step guide:
+To integrate a new diffusion model for FlowGRPO training (new
+`DiffusionModelBase` + `VllmOmniPipelineBase` pair), follow the step-by-step
+guide:
 
-- [How to Add a New Diffusion Model](docs/contributing/adding_a_diffusion_model.md)
+- [How to Integrate a New Diffusion Model for FlowGRPO Training](docs/contributing/integrating_a_diffusion_model.md)
 
 ## Pull Requests & Code Reviews
 

@@ -1,9 +1,12 @@
-# How to Add a New Diffusion Model
+# How to Integrate a New Diffusion Model for FlowGRPO Training
 
 Last updated: 04/29/2026.
 
-This guide walks you through everything required to plug a new diffusion
-model into VeRL-Omni so it can be trained end-to-end with FlowGRPO-style RL.
+This guide walks you through everything required to integrate a new diffusion
+model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
+algorithm. The contracts described below (registry hooks, adapter
+classmethods, scheduler choice, custom-output field names) are specific to
+the FlowGRPO trainer; other RL algorithms may impose different requirements.
 
 We use the **Qwen-Image** integration
 ([`verl_omni/pipelines/qwen_image_flow_grpo/`](../../verl_omni/pipelines/qwen_image_flow_grpo/__init__.py))
