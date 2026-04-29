@@ -26,7 +26,7 @@ def pil_image_to_base64(image: Image.Image) -> str:
     return base64_image
 
 
-def prepare_query_for_multi_modal(image_base64: str) -> list:
+def prepare_query_for_multi_modal(image_base64: str) -> list[dict[str, Any]]:
     query = [
         {
             "type": "image_url",
