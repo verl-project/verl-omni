@@ -176,9 +176,6 @@ jobs:
           if [ "${{ steps.ai_sig.outcome }}" = "success" ]; then
             LABELS="$LABELS,ai-assisted"
           fi
-          if [ "${{ steps.sanity.outcome }}" = "failure" ]; then
-            LABELS="$LABELS,sanity-failed"
-          fi
 
           gh pr create \
             --title "[bot][upstream-sync] Signature drift $(date -u +%Y-%m-%d)" \
@@ -378,10 +375,7 @@ jobs:
           git commit -m "chore(upstream-sync): behavioral drift $(date -u +%Y-%m-%d)"
           git push origin "$BRANCH"
 
-          LABELS="upstream-sync,upstream-sync-behavioral"
-          if [ "${{ steps.sanity.outcome }}" = "failure" ]; then
-            LABELS="$LABELS,sanity-failed"
-          fi
+          LABELS="upstream-sync"
 
           # Build PR body from behavioral_changes.json + AI edit summaries
           python3 - <<'PYEOF'
