@@ -81,6 +81,7 @@ ours.
 | Text encoder hidden state | `hidden_states[-1]` | `hidden_states[-2]` |
 | Prompt features | dense `(B, L, D)` + `mask` | per-sample list of `(L_i, D)` |
 | Transformer extras | `img_shapes`, `encoder_hidden_states_mask`, `guidance` | none |
+| `return_dict` kwarg | accepted (inherits `ModelMixin`) | **not** accepted — omit it |
 | Timestep transform | `t / 1000` | `(1000 - t) / 1000` |
 | Output sign | as-is | negate (`noise_pred = -noise_pred`) |
 | CFG formula | `apply_true_cfg` (norm-clipped true CFG) | `pos + s·(pos-neg)` + optional norm clip |
@@ -221,6 +222,14 @@ No code changes are needed beyond the package registration. At runtime:
 - `VllmOmniPipelineBase.get_class("ZImagePipeline")` resolves to the rollout
   adapter and is consumed by the vllm-omni rollout worker via
   `get_pipeline_path(...)`.
+
+Set these two environment variables at the top of every run script. They make
+log output easier to follow when debugging:
+
+```bash
+export PYTHONUNBUFFERED=1   # flush Python stdout/stderr immediately
+export RAY_DEDUP_LOGS=0     # show every Ray worker log line, not just the first
+```
 
 Provide a runnable example shell script so users can launch training without
 trial and error. For Z-Image we ship

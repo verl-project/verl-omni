@@ -295,11 +295,9 @@ class ZImagePipelineWithLogProb(ZImagePipeline):
 
             x = latents_to_transformer_input(latents.to(self.od_config.dtype))
 
-            noise_pred = stack_transformer_output(self.transformer(x, timestep, cap_feats, return_dict=False)[0])
+            noise_pred = stack_transformer_output(self.transformer(x, timestep, cap_feats)[0])
             if do_true_cfg:
-                neg_noise_pred = stack_transformer_output(
-                    self.transformer(x, timestep, neg_cap_feats, return_dict=False)[0]
-                )
+                neg_noise_pred = stack_transformer_output(self.transformer(x, timestep, neg_cap_feats)[0])
                 noise_pred = apply_z_image_cfg(noise_pred, neg_noise_pred, guidance_scale, cfg_normalization)
 
             latents, log_prob, _, _ = self.scheduler.step(
