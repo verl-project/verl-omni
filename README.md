@@ -1,8 +1,11 @@
 <div align="center">
 
 # VeRL-Omni
+[![Docs](https://img.shields.io/badge/docs-Read%20the%20Docs-8A2BE2)](https://verl-omni.readthedocs.io/en/latest/index.html)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE)
 
 ### Easy, fast, and stable RL training for diffusion and omni-modality models
+
 
 </div>
 
