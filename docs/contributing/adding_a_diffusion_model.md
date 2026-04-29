@@ -20,7 +20,6 @@ hooks**:
 ```
 verl_omni/pipelines/<model>_flow_grpo/
 ├── __init__.py                       # re-exports both adapters
-├── common.py                         # pure-Python tensor helpers
 ├── diffusers_training_adapter.py     # subclass of DiffusionModelBase
 └── vllm_omni_rollout_adapter.py      # subclass of VllmOmniPipelineBase
 ```
@@ -104,8 +103,8 @@ code — the answers determine every helper you need:
    must match exactly** so training-time and inference-time tokenisation
    agree.
 
-Anything model-specific belongs inside the model's own package
-(`pipelines/<model>_flow_grpo/common.py`); anything reusable belongs in
+Anything model-specific belongs inside the model's own package;
+anything reusable belongs in
 [`pipelines/utils.py`](../../verl_omni/pipelines/utils.py) or
 [`pipelines/model_base.py`](../../verl_omni/pipelines/model_base.py).
 
@@ -120,7 +119,6 @@ as a template:
 ```
 verl_omni/pipelines/<model>_flow_grpo/
 ├── __init__.py
-├── common.py
 ├── diffusers_training_adapter.py
 └── vllm_omni_rollout_adapter.py
 ```
@@ -153,20 +151,7 @@ __all__ += my_model_flow_grpo.__all__
 
 ---
 
-## Step 3 — Write `common.py` (Pure-Python Helpers)
-
-Put every helper that depends only on `torch` here. Typical contents:
-
-- A `<MODEL>_VAE_SCALE_FACTOR` constant.
-- Functions to convert verl-omni's batched representation into the
-  model's native format (and back).
-- The CFG combiner — see
-  [`apply_true_cfg`](../../verl_omni/pipelines/qwen_image_flow_grpo/common.py)
-  for an example.
-
----
-
-## Step 4 — Write `diffusers_training_adapter.py`
+## Step 3 — Write `diffusers_training_adapter.py`
 
 Subclass [`DiffusionModelBase`](../../verl_omni/pipelines/model_base.py),
 decorate it with the architecture string, and implement the four
@@ -193,7 +178,7 @@ class MyModel(DiffusionModelBase):
                                          scheduler_inputs, step): ...
 ```
 
-### 4.1 `build_scheduler` and `set_timesteps`
+### 3.1 `build_scheduler` and `set_timesteps`
 
 Reuse
 [`FlowMatchSDEDiscreteScheduler`](../../verl_omni/pipelines/schedulers/flow_match_sde.py)
@@ -204,7 +189,7 @@ Compute `image_seq_len` and `mu` exactly as the upstream diffusers
 pipeline does. If they drift, the training-time noise schedule will not
 match deployment.
 
-### 4.2 `prepare_model_inputs`
+### 3.2 `prepare_model_inputs`
 
 This method receives the **full** batched tensors for the entire
 denoising trajectory (`latents` of shape `(B, T, ...)`, `timesteps` of
@@ -225,11 +210,10 @@ inputs. The typical steps are:
 The dict keys must match the kwargs of the diffusers transformer
 class verbatim — the FSDP engine calls `module(**model_inputs)`.
 
-### 4.3 `forward_and_sample_previous_step`
+### 3.3 `forward_and_sample_previous_step`
 
 Call the transformer once for the positive prompt; if CFG is active,
-call it again for the negative prompt and combine using your
-`common.py` helper. Always finish with
+call it again for the negative prompt and combine them. Always finish with
 `scheduler.sample_previous_step(...)` and return the triple
 `(log_prob, prev_sample_mean, std_dev_t)` — that is what
 [`DiffusersFSDPEngine.prepare_model_outputs`](../../verl_omni/workers/engine/fsdp/diffusers_impl.py)
@@ -241,7 +225,7 @@ consumes.
 
 ---
 
-## Step 5 — Write `vllm_omni_rollout_adapter.py`
+## Step 4 — Write `vllm_omni_rollout_adapter.py`
 
 Subclass the upstream `<Name>Pipeline` from `vllm_omni.diffusion.models`
 and decorate with the same architecture string:
@@ -274,7 +258,7 @@ Your subclass must do four things:
 
 ---
 
-## Step 6 — Configure the Pipeline
+## Step 5 — Configure the Pipeline
 
 No code changes are required in the trainer launcher itself. At runtime:
 
@@ -285,7 +269,7 @@ No code changes are required in the trainer launcher itself. At runtime:
 - `VllmOmniPipelineBase.get_class("<arch>")` resolves to your rollout
   adapter and is consumed by the vllm-omni rollout worker.
 
-### 6.1 Pipeline Config Knobs
+### 5.1 Pipeline Config Knobs
 
 Pipeline sampling parameters live under `actor_rollout_ref.rollout.pipeline.*`
 (mapped to
@@ -314,7 +298,7 @@ RL exploration starts from a known-good operating point.
 >   — its `pipeline:` section, using
 >   `${oc.select:actor_rollout_ref.rollout.pipeline.<field>,<default>}`.
 
-### 6.2 Example Launch Script and Data Preprocessor
+### 5.2 Example Launch Script and Data Preprocessor
 
 Ship a runnable example so users can launch training without trial and
 error. Use
@@ -330,7 +314,7 @@ collapse.
 
 ---
 
-## Step 7 — Add a Smoke Test
+## Step 6 — Add a Smoke Test
 
 Add an end-to-end smoke test under `tests/special_e2e/` modelled on
 [`tests/special_e2e/run_flowgrpo_qwen_image.sh`](../../tests/special_e2e/run_flowgrpo_qwen_image.sh).
@@ -361,11 +345,10 @@ adapter, prefer one of:
   with a generic helper.
 - Adding a method to `DiffusionModelBase` or `VllmOmniPipelineBase` so
   future models do not re-discover the contract.
-- Promoting a helper from one model's `common.py` to a shared
-  module once a second model needs it.
+- Promoting a helper to a shared module once a second model needs it.
 
-Refactor opportunistically: keep model-specific quirks in the model's
-own `common.py` until a third model demands the same code, then unify.
+Refactor opportunistically: keep model-specific quirks local until a
+third model demands the same code, then unify.
 
 ---
 
@@ -374,8 +357,7 @@ own `common.py` until a third model demands the same code, then unify.
 Before opening the PR, confirm every box:
 
 - [ ] `verl_omni/pipelines/<model>_flow_grpo/` contains `__init__.py`,
-      `common.py`, `diffusers_training_adapter.py`, and
-      `vllm_omni_rollout_adapter.py`.
+      `diffusers_training_adapter.py`, and `vllm_omni_rollout_adapter.py`.
 - [ ] [`verl_omni/pipelines/__init__.py`](../../verl_omni/pipelines/__init__.py)
       imports the new package.
 - [ ] Architecture string on both `@register(...)` decorators matches
