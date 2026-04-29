@@ -304,13 +304,15 @@ RL exploration starts from a known-good operating point.
 | `pipeline.guidance_scale` | For pipelines whose upstream uses `guidance_scale`. Default `null` defers to the pipeline. |
 | `pipeline.max_sequence_length` | Must accommodate the templated prompt length your tokenizer produces. |
 
-> **Config hygiene.** Any new field added to
+> **Config hygiene.** Any new field on
 > [`DiffusionPipelineConfig`](../../verl_omni/workers/config/diffusion/rollout.py)
-> **must** also appear in
-> [`verl_omni/trainer/config/diffusion/rollout/diffusion_rollout.yaml`](../../verl_omni/trainer/config/diffusion/rollout/diffusion_rollout.yaml)
-> under the `pipeline:` section, with a matching default and a one-line
-> comment. This keeps the generated config docs in sync and makes Hydra
-> overrides discoverable.
+> must also be added to:
+>
+> - [`diffusion_rollout.yaml`](../../verl_omni/trainer/config/diffusion/rollout/diffusion_rollout.yaml)
+>   — both the top-level `pipeline:` section and `val_kwargs.pipeline:`.
+> - [`diffusion_model.yaml`](../../verl_omni/trainer/config/diffusion/model/diffusion_model.yaml)
+>   — its `pipeline:` section, using
+>   `${oc.select:actor_rollout_ref.rollout.pipeline.<field>,<default>}`.
 
 ### 6.2 Example Launch Script and Data Preprocessor
 
@@ -378,8 +380,10 @@ Before opening the PR, confirm every box:
       imports the new package.
 - [ ] Architecture string on both `@register(...)` decorators matches
       `model_index.json::_class_name`.
-- [ ] Any new `DiffusionPipelineConfig` field is mirrored in
-      [`diffusion_rollout.yaml`](../../verl_omni/trainer/config/diffusion/rollout/diffusion_rollout.yaml).
+- [ ] Any new `DiffusionPipelineConfig` field is mirrored in **both**
+      [`diffusion_rollout.yaml`](../../verl_omni/trainer/config/diffusion/rollout/diffusion_rollout.yaml)
+      and
+      [`diffusion_model.yaml`](../../verl_omni/trainer/config/diffusion/model/diffusion_model.yaml).
 - [ ] Example launch script in `examples/flowgrpo_trainer/` plus a
       matching data preprocessor under
       `examples/flowgrpo_trainer/data_process/`.
