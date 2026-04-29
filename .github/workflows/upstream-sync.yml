@@ -54,9 +54,10 @@ jobs:
       - name: Detect signature drift
         id: detect
         run: |
-          python scripts/upstream_sync/check_upstream_signatures.py
-          EXIT=$?
-          if [ $EXIT -eq 2 ]; then
+          # Use || to prevent set -e from aborting before EXIT is captured.
+          python scripts/upstream_sync/check_upstream_signatures.py || EXIT=$?
+          EXIT=${EXIT:-0}
+          if [ "$EXIT" -eq 2 ]; then
             echo "::error::Upstream packages not resolvable — check pip install step"
             exit 1
           fi
@@ -294,9 +295,10 @@ jobs:
       - name: Detect behavioral drift
         id: detect
         run: |
-          python scripts/upstream_sync/check_upstream_behavioral.py
-          EXIT=$?
-          if [ $EXIT -eq 2 ]; then
+          # Use || to prevent set -e from aborting before EXIT is captured.
+          python scripts/upstream_sync/check_upstream_behavioral.py || EXIT=$?
+          EXIT=${EXIT:-0}
+          if [ "$EXIT" -eq 2 ]; then
             echo "::error::GitHub API error in behavioral check"
             exit 1
           fi
