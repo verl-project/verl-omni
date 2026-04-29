@@ -45,6 +45,7 @@ api/utils.rst
 :caption: Contributing
 
 contributing/editing-agent-instructions.md
+contributing/adding_a_diffusion_model.md
 ```
 
 ## Contribution

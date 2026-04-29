@@ -71,6 +71,13 @@ python -m http.server -d _build/html/
 
 Open your browser at http://localhost:8000 to explore the docs.
 
+## Model Integrations
+
+To add support for a new diffusion model (new `DiffusionModelBase` +
+`VllmOmniPipelineBase` pair), follow the step-by-step guide:
+
+- [How to Add a New Diffusion Model](docs/contributing/adding_a_diffusion_model.md)
+
 ## Pull Requests & Code Reviews
 
 Thanks for submitting a PR! To streamline reviews:

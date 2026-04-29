@@ -14,4 +14,4 @@
 
 from .qwen_image_flow_grpo import *  # noqa: F401, F403
 
-__all__ = qwen_image_flow_grpo.__all__
+__all__ = list(qwen_image_flow_grpo.__all__)
