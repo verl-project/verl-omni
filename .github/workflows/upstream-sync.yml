@@ -87,14 +87,14 @@ jobs:
         run: |
           curl https://cursor.com/install -fsS -o /tmp/cursor_install.sh
           bash /tmp/cursor_install.sh
-          # Locate the installed binary and add its directory to PATH
-          CURSOR_BIN=$(command -v cursor 2>/dev/null || find "$HOME" -name cursor -type f 2>/dev/null | head -1)
-          if [ -z "$CURSOR_BIN" ]; then
-            echo "::error::cursor binary not found after install — check https://cursor.com/docs/cli/github-actions"
+          # The installer creates a binary named 'agent', not 'cursor'.
+          AGENT_BIN=$(command -v agent 2>/dev/null || find "$HOME" -name agent -type f 2>/dev/null | head -1)
+          if [ -z "$AGENT_BIN" ]; then
+            echo "::error::agent binary not found after install — check https://cursor.com/docs/cli/github-actions"
             exit 1
           fi
-          echo "cursor found at: $CURSOR_BIN"
-          echo "$(dirname "$CURSOR_BIN")" >> "$GITHUB_PATH"
+          echo "agent found at: $AGENT_BIN"
+          echo "$(dirname "$AGENT_BIN")" >> "$GITHUB_PATH"
 
       - name: Run AI agent on signature drift changes
         if: steps.fix.outputs.has_ai_work == 'true'
@@ -104,7 +104,7 @@ jobs:
         run: |
           for f in signature_drift_ai_prompt_batch*.md; do
             [ -f "$f" ] || continue
-            cursor agent \
+            agent \
               -p "$(cat "$f")" \
               --allow "Read(**)" \
               --allow "Write(verl_omni/**/*.py)" \
@@ -329,14 +329,14 @@ jobs:
         run: |
           curl https://cursor.com/install -fsS -o /tmp/cursor_install.sh
           bash /tmp/cursor_install.sh
-          # Locate the installed binary and add its directory to PATH
-          CURSOR_BIN=$(command -v cursor 2>/dev/null || find "$HOME" -name cursor -type f 2>/dev/null | head -1)
-          if [ -z "$CURSOR_BIN" ]; then
-            echo "::error::cursor binary not found after install — check https://cursor.com/docs/cli/github-actions"
+          # The installer creates a binary named 'agent', not 'cursor'.
+          AGENT_BIN=$(command -v agent 2>/dev/null || find "$HOME" -name agent -type f 2>/dev/null | head -1)
+          if [ -z "$AGENT_BIN" ]; then
+            echo "::error::agent binary not found after install — check https://cursor.com/docs/cli/github-actions"
             exit 1
           fi
-          echo "cursor found at: $CURSOR_BIN"
-          echo "$(dirname "$CURSOR_BIN")" >> "$GITHUB_PATH"
+          echo "agent found at: $AGENT_BIN"
+          echo "$(dirname "$AGENT_BIN")" >> "$GITHUB_PATH"
 
       - name: Run AI agent on behavioral drift changes
         if: steps.detect.outputs.has_changes == 'true'
@@ -346,7 +346,7 @@ jobs:
         run: |
           for f in behavioral_drift_ai_prompt_batch*.md; do
             [ -f "$f" ] || continue
-            cursor agent \
+            agent \
               -p "$(cat "$f")" \
               --allow "Read(**)" \
               --allow "Write(verl_omni/**/*.py)" \
