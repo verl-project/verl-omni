@@ -80,7 +80,7 @@ def _levenshtein_score(text: str, ground_truth: str) -> float:
 
 async def compute_score_ocr(
     data_source: str,
-    solution_image: Image.Image | np.ndarray | torch.Tensor,
+    solution_image: np.ndarray | torch.Tensor,
     ground_truth: str,
     extra_info: dict,
     reward_router_address: str,
