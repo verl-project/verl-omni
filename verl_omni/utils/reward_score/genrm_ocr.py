@@ -80,7 +80,7 @@ def _levenshtein_score(text: str, ground_truth: str) -> float:
 
 async def compute_score_ocr(
     data_source: str,
-    solution_image: Image.Image | np.ndarray | torch.Tensor,
+    solution_image: np.ndarray | torch.Tensor,
     ground_truth: str,
     extra_info: dict,
     reward_router_address: str,
@@ -109,8 +109,9 @@ async def compute_score_ocr(
     Returns:
         dict: ``{"score": float, "genrm_response": str}``.
     """
-    from verl.utils.experimental.reward_utils import pil_image_to_base64
     from verl.utils.ray_utils import get_event_loop
+
+    from verl_omni.utils.reward_score.reward_utils import pil_image_to_base64
 
     frame_interval = extra_info.get("frame_interval", 1)
     if solution_image.ndim == 3:  # image

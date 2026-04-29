@@ -92,7 +92,9 @@ def main():
         "verl_omni/trainer/diffusion/main_flowgrpo.py",
         "verl_omni/trainer/diffusion/ray_diffusion_trainer.py",
         "verl_omni/trainer/diffusion/diffusion_algos.py",
+        "verl_omni/trainer/diffusion/diffusion_metric_utils.py",
         "verl_omni/agent_loop/diffusion_agent_loop.py",
+        "verl_omni/agent_loop/single_turn_agent_loop.py",
     ]
 
     script_dir = os.path.dirname(os.path.abspath(__file__))

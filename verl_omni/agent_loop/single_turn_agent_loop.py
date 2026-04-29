@@ -30,6 +30,17 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
     """Agent loop for diffusion model serving."""
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> DiffusionAgentLoopOutput:
+        """Run one diffusion generation turn and package agent-loop output.
+
+        Args:
+            sampling_params: Generation parameters forwarded to the server manager.
+            **kwargs: Per-sample fields from the dataset, including ``raw_prompt``
+                and optional ``raw_negative_prompt``.
+
+        Returns:
+            DiffusionAgentLoopOutput: Prompt ids, generated diffusion output,
+            optional logprobs, runtime metrics, and extra fields.
+        """
         raw_prompt = kwargs["raw_prompt"]
         raw_negative_prompt = kwargs.get("raw_negative_prompt")
 
