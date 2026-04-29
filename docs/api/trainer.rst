@@ -1,7 +1,7 @@
 Trainer Interface
 ================================
 
-Last updated: 04/28/2026 (API docstrings are auto-generated).
+Last updated: |today| (API docstrings are auto-generated).
 
 VeRL-Omni provides Ray-based trainers for diffusion / multimodal RL. Today,
 :class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.RayFlowGRPOTrainer`

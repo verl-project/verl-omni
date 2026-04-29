@@ -1,7 +1,7 @@
 Reward Interface
 ================================
 
-Last updated: 04/28/2026 (API docstrings are auto-generated).
+Last updated: |today| (API docstrings are auto-generated).
 
 VeRL-Omni reward pipelines support both rule-based scoring (e.g. JPEG
 compressibility) and model-based generative reward models (e.g. OCR via a

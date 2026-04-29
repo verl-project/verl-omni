@@ -1,7 +1,7 @@
 Pipelines Interface
 ================================
 
-Last updated: 04/28/2026 (API docstrings are auto-generated).
+Last updated: |today| (API docstrings are auto-generated).
 
 A *pipeline* in VeRL-Omni packages everything needed to plug a particular
 diffusion model architecture into the training loop:

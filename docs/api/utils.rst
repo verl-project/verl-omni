@@ -1,7 +1,7 @@
 Utilities
 ============
 
-Last updated: 04/28/2026 (API docstrings are auto-generated).
+Last updated: |today| (API docstrings are auto-generated).
 
 This section documents the small set of cross-cutting utilities provided by
 VeRL-Omni. Most other utilities (e.g. tracking, FSDP helpers, dataset

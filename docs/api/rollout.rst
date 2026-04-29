@@ -1,7 +1,7 @@
 Rollout & Agent Loop
 ================================
 
-Last updated: 04/28/2026 (API docstrings are auto-generated).
+Last updated: |today| (API docstrings are auto-generated).
 
 VeRL-Omni rollout is built on top of `vLLM-Omni
 <https://github.com/vllm-project/vllm-omni>`_ for concurrent diffusion and
