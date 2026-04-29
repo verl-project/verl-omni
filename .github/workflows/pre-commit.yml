@@ -6,6 +6,7 @@ on:
   schedule:
     - cron: "0 0 * * 0"
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches:
       - main
@@ -19,6 +20,9 @@ permissions:
 
 jobs:
   pre-commit:
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:

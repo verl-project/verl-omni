@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - main
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - "**/*.py"
       - "docs/**"
@@ -21,6 +22,9 @@ permissions:
 
 jobs:
   doc:
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:

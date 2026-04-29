@@ -9,6 +9,7 @@ on:
     branches:
       - main
       - v0.*
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - "**/*.py"
       - .github/workflows/sanity.yml
@@ -23,6 +24,9 @@ permissions:
 
 jobs:
   sanity:
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     strategy:

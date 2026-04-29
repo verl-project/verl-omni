@@ -14,6 +14,7 @@ on:
     branches:
       - main
       - v0.*
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - "verl_omni/**"
       - "tests/**/*_on_cpu.py"
@@ -31,6 +32,9 @@ permissions:
 
 jobs:
   cpu_unit_tests:
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:

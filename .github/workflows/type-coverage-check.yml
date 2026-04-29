@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - v0.*
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - "**/*.py"
       - .github/workflows/type-coverage-check.yml
@@ -18,6 +19,7 @@ permissions:
 
 jobs:
   type_coverage_check:
+    if: contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
