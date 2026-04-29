@@ -85,36 +85,27 @@ jobs:
       - name: Install AI agent CLI
         if: steps.fix.outputs.has_ai_work == 'true'
         run: |
-          curl https://cursor.com/install -fsS -o /tmp/cursor_install.sh
-          bash /tmp/cursor_install.sh
-          # The installer creates a binary named 'agent', not 'cursor'.
-          AGENT_BIN=$(command -v agent 2>/dev/null || find "$HOME" -name agent -type f 2>/dev/null | head -1)
-          if [ -z "$AGENT_BIN" ]; then
-            echo "::error::agent binary not found after install — check https://cursor.com/docs/cli/github-actions"
-            exit 1
-          fi
-          echo "agent found at: $AGENT_BIN"
-          echo "$(dirname "$AGENT_BIN")" >> "$GITHUB_PATH"
+          curl https://cursor.com/install -fsS | bash
+          echo "$HOME/.cursor/bin" >> "$GITHUB_PATH"
 
       - name: Run AI agent on signature drift changes
         if: steps.fix.outputs.has_ai_work == 'true'
         id: ai_sig
-        # Restricted: AI agent may read anything, write verl_omni Python files, and
-        # write per-batch edit summary files. Git operations stay in workflow steps.
+        # Permissions are set via .cursor/cli.json, not CLI flags.
+        # Git/gh operations stay in workflow steps (denied here).
         run: |
+          mkdir -p .cursor
+          cat > .cursor/cli.json << 'EOF'
+          {
+            "permissions": {
+              "allow": ["Read(**)", "Write(verl_omni/**/*.py)", "Write(ai_edits_summary_batch*.md)"],
+              "deny":  ["Shell(git)", "Shell(gh)", "Write(.github/**)", "Write(scripts/**)", "Write(requirements*.txt)", "Write(setup.py)"]
+            }
+          }
+          EOF
           for f in signature_drift_ai_prompt_batch*.md; do
             [ -f "$f" ] || continue
-            agent \
-              -p "$(cat "$f")" \
-              --allow "Read(**)" \
-              --allow "Write(verl_omni/**/*.py)" \
-              --allow "Write(ai_edits_summary_batch*.md)" \
-              --deny  "Shell(git)" \
-              --deny  "Shell(gh)" \
-              --deny  "Write(.github/**)" \
-              --deny  "Write(scripts/**)" \
-              --deny  "Write(requirements*.txt)" \
-              --deny  "Write(setup.py)"
+            agent -p "$(cat "$f")"
           done
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
@@ -327,36 +318,27 @@ jobs:
       - name: Install AI agent CLI
         if: steps.detect.outputs.has_changes == 'true'
         run: |
-          curl https://cursor.com/install -fsS -o /tmp/cursor_install.sh
-          bash /tmp/cursor_install.sh
-          # The installer creates a binary named 'agent', not 'cursor'.
-          AGENT_BIN=$(command -v agent 2>/dev/null || find "$HOME" -name agent -type f 2>/dev/null | head -1)
-          if [ -z "$AGENT_BIN" ]; then
-            echo "::error::agent binary not found after install — check https://cursor.com/docs/cli/github-actions"
-            exit 1
-          fi
-          echo "agent found at: $AGENT_BIN"
-          echo "$(dirname "$AGENT_BIN")" >> "$GITHUB_PATH"
+          curl https://cursor.com/install -fsS | bash
+          echo "$HOME/.cursor/bin" >> "$GITHUB_PATH"
 
       - name: Run AI agent on behavioral drift changes
         if: steps.detect.outputs.has_changes == 'true'
         id: ai
-        # Restricted autonomy: AI agent may read anything, write verl_omni/*.py, and
-        # write per-batch edit summary files. All git/gh ops remain in workflow steps.
+        # Permissions are set via .cursor/cli.json, not CLI flags.
+        # Git/gh operations stay in workflow steps (denied here).
         run: |
+          mkdir -p .cursor
+          cat > .cursor/cli.json << 'EOF'
+          {
+            "permissions": {
+              "allow": ["Read(**)", "Write(verl_omni/**/*.py)", "Write(behavioral_edits_summary_batch*.md)"],
+              "deny":  ["Shell(git)", "Shell(gh)", "Write(.github/**)", "Write(scripts/**)", "Write(requirements*.txt)", "Write(setup.py)"]
+            }
+          }
+          EOF
           for f in behavioral_drift_ai_prompt_batch*.md; do
             [ -f "$f" ] || continue
-            agent \
-              -p "$(cat "$f")" \
-              --allow "Read(**)" \
-              --allow "Write(verl_omni/**/*.py)" \
-              --allow "Write(behavioral_edits_summary_batch*.md)" \
-              --deny  "Shell(git)" \
-              --deny  "Shell(gh)" \
-              --deny  "Write(.github/**)" \
-              --deny  "Write(scripts/**)" \
-              --deny  "Write(requirements*.txt)" \
-              --deny  "Write(setup.py)"
+            agent -p "$(cat "$f")"
           done
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
