@@ -13,7 +13,7 @@
 # limitations under the License.
 """Custom type annotation check tool.
 To inspect the type annotation for functions in the entire codebase, please run:
-find verl -type f -name "*.py" | xargs -n 1 python3 tests/special_sanity/type_coverage_check.py --all-lines
+find verl_omni -type f -name "*.py" | xargs -n 1 python3 tests/special_sanity/type_coverage_check.py --all-lines
 --debug --target-file
 """
 

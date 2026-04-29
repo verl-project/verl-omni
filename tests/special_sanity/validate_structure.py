@@ -24,7 +24,7 @@ python check_tests_structure.py
 
 # Custom layout and extra allowed folders
 python check_tests_structure.py \
-    --impl-root verl \
+    --impl-root verl_omni \
     --tests-root tests \
     --allow-dirs special_e2e special_sanity special_standalone special_distributed
 """
