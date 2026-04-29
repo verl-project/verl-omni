@@ -4,8 +4,7 @@
 [![Docs](https://img.shields.io/badge/docs-Read%20the%20Docs-8A2BE2)](https://verl-omni.readthedocs.io/en/latest/index.html)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE)
 
-### Easy, fast, and stable RL training for diffusion and omni-modality models
-
+### Easy, fast and stable RL training for diffusion and omni-modality models
 
 </div>
 
@@ -71,7 +70,7 @@ If you find the project helpful, please cite:
 
 ```bibtex
 @misc{verlomni_github,
-  title        = {VeRL-Omni: Fast and Stable RL Training for Diffusion and Omni-Modality Models},
+  title        = {VeRL-Omni: Easy, Fast and Stable RL Training for Diffusion and Omni-Modality Models},
   author       = {Yongxiang Huang and Cheung Kawai and Jingan Zhou and Yingshu Chen and {openYuanrong Team} and Xibin Wu},
   year         = {2026},
   howpublished = {\url{https://github.com/verl-project/verl-omni}},
