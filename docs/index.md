@@ -42,7 +42,7 @@ api/utils.rst
 
 ```{toctree}
 :maxdepth: 1
-:caption: Contributing
+:caption: Developer Guide
 
 contributing/editing-agent-instructions.md
 contributing/integrating_a_diffusion_model.md
