@@ -1,7 +1,7 @@
 Workers Interface
 ================================
 
-Last updated: 04/28/2026 (API docstrings are auto-generated).
+Last updated: |today| (API docstrings are auto-generated).
 
 VeRL-Omni workers wrap the Diffusers / FSDP training engine, the rollout
 engine (vLLM-Omni), and the optional reference policy. The single-controller
