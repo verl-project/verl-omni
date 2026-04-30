@@ -19,7 +19,7 @@ Below are reference benchmark results for VeRL-Omni training runs.
 ### Training Zero Standard Deviation Ratio and Reward Curve
 
 <div align="center">
-<img width="600" alt="image" src="https://github.com/user-attachments/assets/256cb424-5e2c-4ba5-8c24-3d1b86ac7860" />
+<img width="600" alt="FlowGRPO OCR training zero standard deviation ratio and reward curve" src="https://github.com/user-attachments/assets/256cb424-5e2c-4ba5-8c24-3d1b86ac7860" />
 </div>
 
 - `qwen_image_ocr_lora`: sync reward, 4 GPUs (`run_qwen_image_ocr_lora.sh`)
