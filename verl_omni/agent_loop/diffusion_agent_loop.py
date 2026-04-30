@@ -26,16 +26,15 @@ from tensordict import TensorDict
 from verl.base_config import BaseConfig
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopMetrics,
-    AsyncLLMServerManager,
     DictConfigWrap,
     _agent_loop_registry,
-    _get_rollout_and_model_config,
 )
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import get_dataset_class
 from verl.utils.profiler import simple_timer
+from verl.workers.rollout.llm_server import LLMServerClient
 
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 
@@ -87,33 +86,30 @@ class DiffusionAgentLoopWorker:
 
     Args:
         config (DictConfig): whole config for main entrypoint.
-        servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
-        load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
-        teacher_servers (list[tuple[str, ray.actor.ActorHandle]]): Not used.
-        teacher_load_balancer_handle (ray.actor.ActorHandle): Not used.
-        reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+        llm_client (LLMServerClient): Client for the LLM server replicas, produced by
+            ``LLMServerManager.get_client()`` in the trainer.
+        teacher_client (dict[str, LLMServerClient]): Not used by diffusion training; accepted to
+            keep the constructor signature compatible with verl's ``AgentLoopManager.create()``,
+            which positionally forwards a teacher client argument to each worker.
+        reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming
+            reward computation.
     """
 
     def __init__(
         self,
         config: DictConfig,
-        servers: list[tuple[str, ray.actor.ActorHandle]],
-        load_balancer_handle: ray.actor.ActorHandle,
-        teacher_servers: list[tuple[str, ray.actor.ActorHandle]] = None,
-        teacher_load_balancer_handle: ray.actor.ActorHandle = None,
+        llm_client: LLMServerClient,
+        teacher_client: dict[str, LLMServerClient] = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.config = config
-        rollout_config, model_config = _get_rollout_and_model_config(config)
+        rollout_config = config.actor_rollout_ref.rollout
+        model_config = config.actor_rollout_ref.model
         self.rollout_config: DiffusionRolloutConfig = omega_conf_to_dataclass(rollout_config)
         self.model_config: DiffusionModelConfig = omega_conf_to_dataclass(model_config)
 
         if not hasattr(self, "server_manager"):
-            self.server_manager = AsyncLLMServerManager(
-                config,
-                servers,
-                load_balancer_handle=load_balancer_handle,
-            )
+            self.server_manager = llm_client
 
         self.dataset_cls = get_dataset_class(config.data)
         self.reward_loop_worker_handles = reward_loop_worker_handles

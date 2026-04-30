@@ -48,6 +48,7 @@ from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import ValidationGenerationsLogger
+from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.trainer.config import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import DiffusionAdvantageEstimator, get_diffusion_adv_estimator_fn
@@ -634,10 +635,18 @@ class RayFlowGRPOTrainer:
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
         reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
-        self.async_rollout_manager = AgentLoopManager.create(
+
+        # Server lifecycle (replica launch, load balancer) is owned by LLMServerManager since
+        # verl-project/verl#6129; AgentLoopManager only consumes a client. Replicas are reused by
+        # CheckpointEngineManager for sleep/wake during weight sync.
+        self.llm_server_manager = LLMServerManager.create(
             config=self.config,
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
+        )
+        self.async_rollout_manager = AgentLoopManager.create(
+            config=self.config,
+            llm_client=self.llm_server_manager.get_client(),
             reward_loop_worker_handles=reward_loop_worker_handles,
         )
 
@@ -645,7 +654,7 @@ class RayFlowGRPOTrainer:
         self.checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config,
             trainer=self.actor_rollout_wg,
-            replicas=self.async_rollout_manager.rollout_replicas,
+            replicas=self.llm_server_manager.get_replicas(),
         )
 
         # sleep all replicas to load checkpoint
