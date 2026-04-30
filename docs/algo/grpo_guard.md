@@ -26,14 +26,14 @@ b_t = \frac{\lVert \mu_\theta - \mu_{\text{old}} \rVert_{\text{mean}}^2}
 $$
 
 $$
-\rho_t = \exp\!\big((\log p_\theta - \log p_{\text{old}} + b_t) \cdot
-                   (\sqrt{-dt}\, \sigma_t)\big)
+\rho_t = \exp\big((\log p_\theta - \log p_{\text{old}} + b_t) \cdot
+                  (\sqrt{-dt}\, \sigma_t)\big)
 $$
 
 $$
 \mathcal{L}^{\text{guard}}_t =
   \frac{1}{(\sqrt{-dt})^2}\;
-  \mathbb{E}\big[\max(-A_t \rho_t,\ -A_t \mathrm{clip}(\rho_t, 1\!-\!\epsilon, 1\!+\!\epsilon))\big]
+  \mathbb{E}\big[\max(-A_t \rho_t,\ -A_t \mathrm{clip}(\rho_t, 1-\epsilon, 1+\epsilon))\big]
 $$
 
 The squared-norm in $b_t$ is averaged over the channel and spatial dimensions
