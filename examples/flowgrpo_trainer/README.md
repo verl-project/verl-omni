@@ -93,6 +93,19 @@ For reward models that are expensive to evaluate (e.g., a VLM judge), the reward
 bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_async_reward.sh
 ```
 
+### GRPO-Guard
+
+[GRPO-Guard](../../docs/algo/grpo_guard.md) augments the Flow-GRPO importance
+ratio with a reverse-SDE proposal-mean drift correction (`ratio_mean_bias`)
+and rescales the per-step loss by `1 / (sqrt(-dt))^2`.
+
+A 4-card collocated training script reusing the same Qwen-Image OCR setup is
+provided:
+
+```bash
+bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_grpo_guard.sh
+```
+
 
 ## Performance
 

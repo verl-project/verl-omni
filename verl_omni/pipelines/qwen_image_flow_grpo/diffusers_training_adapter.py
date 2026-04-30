@@ -213,7 +213,7 @@ class QwenImage(DiffusionModelBase):
             step (int): Current denoising step index.
 
         Returns:
-            tuple: A 3-tuple of ``(log_prob, prev_sample_mean, std_dev_t)``.
+            tuple: A 4-tuple of ``(log_prob, prev_sample_mean, std_dev_t, sqrt_dt)``.
         """
         assert scheduler_inputs is not None
         latents = scheduler_inputs["all_latents"]
@@ -226,7 +226,7 @@ class QwenImage(DiffusionModelBase):
             neg_noise_pred = module(**negative_model_inputs)[0]
             noise_pred = apply_true_cfg(noise_pred, neg_noise_pred, true_cfg_scale)
 
-        _, log_prob, prev_sample_mean, std_dev_t = scheduler.sample_previous_step(
+        _, log_prob, prev_sample_mean, std_dev_t, sqrt_dt = scheduler.sample_previous_step(
             sample=latents[:, step].float(),
             model_output=noise_pred.float(),
             timestep=timesteps[:, step],
@@ -234,5 +234,6 @@ class QwenImage(DiffusionModelBase):
             prev_sample=latents[:, step + 1].float(),
             sde_type=model_config.algo.sde_type,
             return_logprobs=True,
+            return_sqrt_dt=True,
         )
-        return log_prob, prev_sample_mean, std_dev_t
+        return log_prob, prev_sample_mean, std_dev_t, sqrt_dt

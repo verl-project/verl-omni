@@ -243,6 +243,99 @@ def compute_diffusion_loss_flow_grpo(
     return pg_loss, pg_metrics
 
 
+@register_diffusion_loss("grpo_guard")
+def compute_diffusion_loss_grpo_guard(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    config: Optional[DictConfig | DiffusionActorConfig] = None,
+    *,
+    old_prev_sample_mean: Optional[torch.Tensor] = None,
+    prev_sample_mean: Optional[torch.Tensor] = None,
+    std_dev_t: Optional[torch.Tensor] = None,
+    sqrt_dt: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute the GRPO-Guard policy objective.
+
+    GRPO-Guard (https://arxiv.org/abs/2510.22319) augments the standard
+    Flow-GRPO importance ratio with a "ratio-mean bias" term that explicitly
+    penalises drift in the reverse-SDE proposal mean of the current policy
+    relative to the rollout policy. The mean drift is then projected onto the
+    same scale as ``log_prob - old_log_prob`` via the per-step diffusion
+    coefficient ``sqrt_dt * sigma_t``, and the final policy loss is rescaled
+    by ``1 / sqrt_dt**2`` so that gradients have a consistent magnitude across
+    timesteps.
+
+    Args:
+        old_log_prob (torch.Tensor): Log-probabilities under the old policy,
+            shape ``(B,)``.
+        log_prob (torch.Tensor): Log-probabilities under the current policy,
+            shape ``(B,)``.
+        advantages (torch.Tensor): Advantage estimates, shape ``(B,)``.
+        config: Actor configuration; ``diffusion_loss.clip_ratio`` and
+            ``diffusion_loss.adv_clip_max`` are read from it.
+        old_prev_sample_mean (torch.Tensor): Reverse-SDE mean from the rollout
+            policy, shape ``(B, ...)``.
+        prev_sample_mean (torch.Tensor): Reverse-SDE mean from the current
+            policy, shape ``(B, ...)``.
+        std_dev_t (torch.Tensor): Per-step SDE standard deviation, shape
+            ``(B, 1, 1, ...)`` or scalar.
+        sqrt_dt (torch.Tensor): ``sqrt(-dt)`` for the current denoising step,
+            shape ``(B,)`` or scalar.
+    """
+    assert config is not None
+    assert isinstance(config, DiffusionActorConfig)
+    assert old_prev_sample_mean is not None, "GRPO-Guard requires `old_prev_sample_mean`"
+    assert prev_sample_mean is not None, "GRPO-Guard requires `prev_sample_mean`"
+    assert std_dev_t is not None, "GRPO-Guard requires `std_dev_t`"
+    assert sqrt_dt is not None, "GRPO-Guard requires `sqrt_dt`"
+
+    loss_cfg = config.diffusion_loss
+    advantages = torch.clamp(
+        advantages,
+        -loss_cfg.adv_clip_max,
+        loss_cfg.adv_clip_max,
+    )
+
+    sigma_t = std_dev_t.mean()
+    sqrt_dt_mean = sqrt_dt.mean()
+    scale = sqrt_dt_mean * sigma_t  # shared per-step scalar
+
+    # mean over all non-batch dimensions: (B, ...) -> (B,)
+    mean_diff_sq = (prev_sample_mean - old_prev_sample_mean).pow(2)
+    if mean_diff_sq.ndim > 1:
+        mean_diff_sq = mean_diff_sq.mean(dim=tuple(range(1, mean_diff_sq.ndim)))
+    ratio_mean_bias = mean_diff_sq / (2 * scale**2)
+
+    log_ratio = log_prob - old_log_prob
+    ratio = torch.exp((log_ratio + ratio_mean_bias) * scale)
+
+    unclipped_loss = -advantages * ratio
+    clipped_loss = -advantages * torch.clamp(
+        ratio,
+        1.0 - loss_cfg.clip_ratio,
+        1.0 + loss_cfg.clip_ratio,
+    )
+    pg_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss)) / (sqrt_dt_mean**2)
+
+    with torch.no_grad():
+        ppo_kl = torch.mean(-log_ratio)
+        pg_clipfrac = torch.mean((torch.abs(ratio - 1.0) > loss_cfg.clip_ratio).float())
+        pg_clipfrac_higher = torch.mean((ratio - 1.0 > loss_cfg.clip_ratio).float())
+        pg_clipfrac_lower = torch.mean((1.0 - ratio > loss_cfg.clip_ratio).float())
+
+    pg_metrics = {
+        "actor/ppo_kl": ppo_kl.detach().item(),
+        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+        "actor/pg_clipfrac_higher": pg_clipfrac_higher.detach().item(),
+        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+        "actor/grpo_guard/ratio_mean_bias": ratio_mean_bias.detach().mean().item(),
+        "actor/grpo_guard/sqrt_dt": sqrt_dt_mean.detach().item(),
+        "actor/grpo_guard/sigma_t": sigma_t.detach().item(),
+    }
+    return pg_loss, pg_metrics
+
+
 def kl_penalty_image(
     prev_sample_mean: torch.Tensor, ref_prev_sample_mean: torch.Tensor, std_dev_t: torch.Tensor
 ) -> torch.Tensor:

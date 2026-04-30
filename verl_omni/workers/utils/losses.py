@@ -36,12 +36,22 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
     loss_mode = config.diffusion_loss.get("loss_mode", "flow_grpo")
 
     policy_loss_fn = get_diffusion_loss_fn(loss_mode)
-    pg_loss, pg_metrics = policy_loss_fn(
+    policy_loss_kwargs = dict(
         old_log_prob=old_log_prob,
         log_prob=log_prob,
         advantages=advantages,
         config=config,
     )
+    if loss_mode == "grpo_guard":
+        # GRPO-Guard requires the rollout-time SDE proposal mean and the per-step
+        # diffusion coefficient terms; pass them through alongside the standard inputs.
+        policy_loss_kwargs.update(
+            old_prev_sample_mean=data["old_prev_sample_mean"],
+            prev_sample_mean=model_output["prev_sample_mean"],
+            std_dev_t=model_output["std_dev_t"],
+            sqrt_dt=model_output["sqrt_dt"],
+        )
+    pg_loss, pg_metrics = policy_loss_fn(**policy_loss_kwargs)
 
     pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)
 

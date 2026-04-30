@@ -114,3 +114,58 @@ def test_compute_policy_loss_flow_grpo() -> None:
         assert "actor/pg_clipfrac" in pg_metrics
         assert "actor/pg_clipfrac_higher" in pg_metrics
         assert "actor/pg_clipfrac_lower" in pg_metrics
+
+
+def test_compute_policy_loss_grpo_guard() -> None:
+    from hydra import compose, initialize_config_dir
+    from verl.utils.config import omega_conf_to_dataclass
+
+    from verl_omni.workers.config.diffusion.actor import FSDPDiffusionActorConfig
+
+    batch_size = 4
+    rollout_log_probs = torch.randn((batch_size,), dtype=torch.float32)
+    current_log_probs = torch.randn((batch_size,), dtype=torch.float32)
+    advantages = torch.randn((batch_size,), dtype=torch.float32)
+    old_prev_sample_mean = torch.randn((batch_size, 16, 8, 8), dtype=torch.float32)
+    prev_sample_mean = old_prev_sample_mean + 0.01 * torch.randn_like(old_prev_sample_mean)
+    std_dev_t = torch.full((batch_size, 1, 1, 1), 0.5, dtype=torch.float32)
+    sqrt_dt = torch.full((batch_size,), 0.3, dtype=torch.float32)
+
+    with initialize_config_dir(
+        config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/actor"), version_base=None
+    ):
+        cfg = compose(
+            config_name="dp_diffusion_actor",
+            overrides=[
+                "strategy=fsdp",
+                "diffusion_loss.loss_mode=grpo_guard",
+                "diffusion_loss.clip_ratio=2e-6",
+                "diffusion_loss.adv_clip_max=5.0",
+                "ppo_micro_batch_size_per_gpu=8",
+            ],
+        )
+    actor_config: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
+
+    pg_loss, pg_metrics = diffusion_algos.compute_diffusion_loss_grpo_guard(
+        old_log_prob=rollout_log_probs,
+        log_prob=current_log_probs,
+        advantages=advantages,
+        config=actor_config,
+        old_prev_sample_mean=old_prev_sample_mean,
+        prev_sample_mean=prev_sample_mean,
+        std_dev_t=std_dev_t,
+        sqrt_dt=sqrt_dt,
+    )
+
+    assert pg_loss.shape == ()
+    assert isinstance(pg_loss.item(), float)
+    for key in (
+        "actor/ppo_kl",
+        "actor/pg_clipfrac",
+        "actor/pg_clipfrac_higher",
+        "actor/pg_clipfrac_lower",
+        "actor/grpo_guard/ratio_mean_bias",
+        "actor/grpo_guard/sqrt_dt",
+        "actor/grpo_guard/sigma_t",
+    ):
+        assert key in pg_metrics, key
