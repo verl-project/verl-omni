@@ -26,3 +26,5 @@ Evaluated with `trainer.val_before_train=True`:
 
 - `qwen_image_ocr_lora`: sync reward, 4 GPUs (`run_qwen_image_ocr_lora.sh`)
 - `qwen_image_ocr_lora_async_reward`: async reward on a dedicated 5th GPU (`run_qwen_image_ocr_lora_async_reward.sh`)
+
+> **Note:** Due to inherent randomness in the training process, your reward curve may differ from the reference above.

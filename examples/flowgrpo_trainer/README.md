@@ -114,3 +114,5 @@ qwen_image_ocr_lora: corresponding with the script `run_qwen_image_ocr_lora.sh`;
 <br>
 qwen_image_ocr_lora_async_reward: corresponding with the script `run_qwen_image_ocr_lora_async_reward.sh`.
 </div>
+
+> **Note:** Due to inherent randomness in the training process, your reward curve may differ from the reference above.
