@@ -110,9 +110,6 @@ def test_single_turn(init_config):
     )
     try:
         AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
-        # Match the new verl#6129 ownership: trainer creates the LLMServerManager and hands a
-        # client to AgentLoopManager. In standalone test mode there is no actor worker_group, so
-        # LLMServerManager spins up its own replicas using nnodes / n_gpus_per_node.
         llm_server_manager = LLMServerManager.create(config=init_config)
         agent_loop_manager = AgentLoopManager.create(
             config=init_config,

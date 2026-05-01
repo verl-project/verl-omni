@@ -636,9 +636,6 @@ class RayFlowGRPOTrainer:
         # to stream reward computation with actor rollout
         reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
 
-        # Server lifecycle (replica launch, load balancer) is owned by LLMServerManager since
-        # verl-project/verl#6129; AgentLoopManager only consumes a client. Replicas are reused by
-        # CheckpointEngineManager for sleep/wake during weight sync.
         self.llm_server_manager = LLMServerManager.create(
             config=self.config,
             worker_group=self.actor_rollout_wg,
