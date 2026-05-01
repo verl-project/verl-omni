@@ -99,7 +99,7 @@ class DiffusionAgentLoopWorker:
         self,
         config: DictConfig,
         llm_client: LLMServerClient,
-        teacher_client: dict[str, LLMServerClient] = None,
+        teacher_client: dict[str, LLMServerClient] | None = None,
         reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
         self.config = config
