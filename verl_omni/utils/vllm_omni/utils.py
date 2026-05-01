@@ -113,3 +113,11 @@ class VLLMOmniHijack:
             setattr(target_cls, target_method_name, hooking_method)
 
         do_hijack(DiffusionLoRAManager, "_load_adapter", hijack__load_adapter)
+
+        # Also patch the standard vLLM LoRA manager for AR (thinker-only) mode.
+        # The duck-typing patch in verl_omni.patches.qwen3_omni handles this,
+        # but we call it explicitly here to ensure it's applied when the
+        # worker extension is initialized.
+        from verl_omni.patches.qwen3_omni import _patch_vllm_lora_duck_typing
+
+        _patch_vllm_lora_duck_typing()

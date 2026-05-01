@@ -11,17 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
+"""
+Patches for upstream veRL to support Qwen3-Omni Thinker RL training.
 
-with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/version")) as f:
-    __version__ = f.read().strip()
+These patches should eventually be upstreamed to veRL. They are applied
+here so verl-omni can work without waiting for upstream merges.
+"""
 
+from verl_omni.patches.qwen3_omni import apply_all
 
-# Apply upstream veRL patches for Qwen3-Omni Thinker support
-import verl_omni.patches  # noqa: E402, F401
-
-# Import pipelines / rollout / reward loop / engines to auto-register them
-import verl_omni.pipelines  # noqa: E402, F401
-import verl_omni.reward_loop  # noqa: E402, F401
-import verl_omni.workers.engine  # noqa: E402, F401
-import verl_omni.workers.rollout  # noqa: E402, F401
+apply_all()
