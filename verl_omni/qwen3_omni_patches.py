@@ -1,25 +1,10 @@
-# Copyright 2026 Bytedance Ltd. and/or its affiliates
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 """
-Qwen3-Omni Thinker patches for upstream veRL.
+Monkey-patches for upstream veRL to support Qwen3-Omni Thinker RL training.
 
-Patches applied:
-1. Register Qwen3OmniMoe in AutoModelForCausalLM (verl/utils/model.py)
-2. Fix text_config lookup in apply_monkey_patch (verl/models/transformers/monkey_patch.py)
-3. Add _verl_strip_modules support to FSDPEngine (verl/workers/engine/fsdp/transformer_impl.py)
-4. Fix VLLMHijack duck-typing for OmniTensorLoRARequest (verl/utils/vllm/utils.py)
-5. Add ForConditionalGeneration → AutoModelForCausalLM mapping (verl/utils/model.py)
+verl-omni depends on veRL via pip, so we can't modify veRL's source directly.
+Instead, we override specific functions/classes at import time.
+
+These should eventually be upstreamed as PRs to veRL.
 """
 
 import logging
@@ -32,17 +17,21 @@ def apply_all():
     _patch_model_architecture_mapping()
     _patch_monkey_patch_text_config()
     _patch_fsdp_strip_modules()
+    _patch_fsdp_lora_thinker_prefixes()
     _patch_vllm_lora_duck_typing()
 
 
-def _register_qwen3_omni_model():
-    """Register Qwen3-Omni Thinker in AutoModelForCausalLM.
+# ---------------------------------------------------------------------------
+# 1. Register Qwen3OmniMoe in AutoModelForCausalLM
+#
+#    Qwen3OmniMoe uses "ForConditionalGeneration" suffix but the Thinker
+#    is a decoder-only causal LM.  We redirect forward/embeddings to the
+#    thinker sub-module, force tie_word_embeddings=False (so veRL uses
+#    meta-tensor loading to avoid OOM), and mark talker/code2wav/code_predictor
+#    for stripping.
+# ---------------------------------------------------------------------------
 
-    Qwen3OmniMoe uses "ForConditionalGeneration" suffix but the Thinker
-    is a decoder-only causal LM.  We redirect forward/embeddings to the
-    thinker sub-module and strip unused stages (talker, code2wav) to
-    avoid OOM during FSDP init.
-    """
+def _register_qwen3_omni_model():
     try:
         from transformers import AutoModelForCausalLM
         from transformers.models.qwen3_omni_moe import (
@@ -96,8 +85,6 @@ def _register_qwen3_omni_model():
             "code_predictor",
         ]
 
-        # Force tie_word_embeddings=False so veRL uses meta-tensor loading
-        # (avoids full CPU load + OOM during FSDP init).
         class _FalseTieDescriptor:
             def __get__(self, obj, objtype=None):
                 return False
@@ -112,8 +99,11 @@ def _register_qwen3_omni_model():
         pass
 
 
+# ---------------------------------------------------------------------------
+# 2. Add "ForConditionalGeneration" → AutoModelForCausalLM mapping
+# ---------------------------------------------------------------------------
+
 def _patch_model_architecture_mapping():
-    """Add 'ForConditionalGeneration' to veRL's architecture→AutoClass mapping."""
     try:
         from transformers import AutoModelForCausalLM
 
@@ -125,14 +115,14 @@ def _patch_model_architecture_mapping():
         pass
 
 
-def _patch_monkey_patch_text_config():
-    """Fix text_config lookup for multimodal models whose config lacks
-    num_attention_heads at the top level (e.g. Qwen3-Omni).
+# ---------------------------------------------------------------------------
+# 3. Fix text_config lookup in apply_monkey_patch
+#
+#    Upstream does model.config.text_config.num_attention_heads which fails
+#    when text_config is None.  We pre-populate it via get_text_config().
+# ---------------------------------------------------------------------------
 
-    The upstream code does ``model.config.text_config.num_attention_heads``
-    which fails when ``text_config`` is None.  We pre-populate it via
-    ``get_text_config()`` before the original function runs.
-    """
+def _patch_monkey_patch_text_config():
     try:
         import verl.models.transformers.monkey_patch as mp_mod
 
@@ -152,16 +142,14 @@ def _patch_monkey_patch_text_config():
         pass
 
 
+# ---------------------------------------------------------------------------
+# 4. Strip unused sub-modules after from_pretrained
+#
+#    Wraps from_pretrained on Qwen3OmniMoeForConditionalGeneration to delete
+#    talker/code2wav/code_predictor before FSDP wrapping — avoids OOM.
+# ---------------------------------------------------------------------------
+
 def _patch_fsdp_strip_modules():
-    """Add _verl_strip_modules support to FSDPEngine.
-
-    After the model is loaded via from_pretrained, delete sub-modules
-    listed in ``_verl_strip_modules`` (e.g. talker, code2wav) to free
-    memory before FSDP wrapping.
-
-    We wrap ``from_pretrained`` on Qwen3OmniMoeForConditionalGeneration
-    rather than patching FSDPEngine.__init__ (which would be fragile).
-    """
     try:
         from transformers.models.qwen3_omni_moe import (
             Qwen3OmniMoeForConditionalGeneration,
@@ -183,13 +171,95 @@ def _patch_fsdp_strip_modules():
         pass
 
 
-def _patch_vllm_lora_duck_typing():
-    """Fix VLLMHijack to accept OmniTensorLoRARequest via duck-typing.
+# ---------------------------------------------------------------------------
+# 5. Add Qwen3-Omni thinker prefixes to layered_summon_lora_params
+#
+#    Upstream only has prefixes for standard LLMs (model.layers.) and
+#    vision-language models (language_model.layers.).  Qwen3-Omni puts
+#    layers at thinker.model.layers. — without these prefixes, layered
+#    summon finds nothing and LoRA sync fails.
+# ---------------------------------------------------------------------------
 
-    Upstream VLLMHijack uses ``isinstance(req, TensorLoRARequest)`` which
-    fails for OmniTensorLoRARequest (different base class).  We re-apply
-    the hijack with duck-typing checks (``hasattr`` for peft_config/lora_tensors).
-    """
+def _patch_fsdp_lora_thinker_prefixes():
+    try:
+        import verl.utils.fsdp_utils as fsdp_mod
+
+        _original_layered_summon = fsdp_mod.layered_summon_lora_params
+
+        def _patched_layered_summon(fsdp_module, is_diffusers=False):
+            if not is_diffusers:
+                # Inject thinker prefixes by temporarily replacing the function
+                # with one that has the extended prefix list.
+                from collections import OrderedDict
+
+                from peft.utils.save_and_load import get_peft_model_state_dict
+                from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+                from verl.utils.device import get_torch_device
+
+                def _prefix_submodules(module, prefix):
+                    for name, submodule in module.named_modules():
+                        if name.startswith(prefix) and "." not in name[len(prefix):]:
+                            yield name, submodule
+
+                prefix_list = [
+                    # fsdp
+                    "_fsdp_wrapped_module.base_model.model.",
+                    "_fsdp_wrapped_module.base_model.model.model.",
+                    "_fsdp_wrapped_module.base_model.model.model.layers.",
+                    "_fsdp_wrapped_module.base_model.model.model.language_model.layers.",
+                    "_fsdp_wrapped_module.base_model.model.thinker.model.layers.",
+                    # fsdp2
+                    "base_model.model.",
+                    "base_model.model.model.",
+                    "base_model.model.model.layers.",
+                    "base_model.model.model.language_model.layers.",
+                    "base_model.model.thinker.model.layers.",
+                ]
+
+                lora_params = OrderedDict()
+                peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
+                for prefix in prefix_list:
+                    for name, submodule in _prefix_submodules(fsdp_module, prefix):
+                        key_prefix = name.replace(
+                            "_fsdp_wrapped_module.base_model.model.", "base_model.model."
+                        )
+                        if name.endswith(".model") or name.endswith(".layers"):
+                            continue
+                        if fsdp_mod.fsdp_version(submodule) > 0:
+                            with FSDP.summon_full_params(submodule, writeback=False):
+                                sub_lora_params = get_peft_model_state_dict(
+                                    peft_model, state_dict=submodule.state_dict()
+                                )
+                                sub_lora_params = {
+                                    f"{key_prefix}.{n}": (
+                                        p.full_tensor().detach().cpu()
+                                        if hasattr(p, "full_tensor")
+                                        else p.detach().cpu()
+                                    )
+                                    for n, p in sub_lora_params.items()
+                                }
+                                lora_params.update(sub_lora_params)
+                                submodule._is_root = False
+                            get_torch_device().empty_cache()
+                return lora_params
+
+            return _original_layered_summon(fsdp_module, is_diffusers=is_diffusers)
+
+        fsdp_mod.layered_summon_lora_params = _patched_layered_summon
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# 6. Fix VLLMHijack to accept OmniTensorLoRARequest via duck-typing
+#
+#    Upstream uses isinstance(req, TensorLoRARequest) which fails for
+#    OmniTensorLoRARequest (different base class).  We re-apply the hijack
+#    with hasattr checks for peft_config/lora_tensors.
+# ---------------------------------------------------------------------------
+
+def _patch_vllm_lora_duck_typing():
     try:
         from vllm.lora.peft_helper import PEFTHelper
         from vllm.lora.utils import get_adapter_absolute_path
@@ -272,3 +342,6 @@ def _patch_vllm_lora_duck_typing():
         LRUCacheWorkerLoRAManager._load_adapter = hijack__load_adapter
     except Exception:
         pass
+
+
+apply_all()

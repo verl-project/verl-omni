@@ -22,7 +22,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from verl.utils.device import get_torch_device
 from verl.utils.fsdp_utils import collect_lora_params as _upstream_collect_lora_params
-from verl.utils.fsdp_utils import fsdp_version, layered_summon_lora_params as _upstream_layered_summon
+from verl.utils.fsdp_utils import fsdp_version
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +78,7 @@ def collect_lora_params(
 
     Additions over upstream:
     - Diffusers-specific layered summon (transformer_blocks prefix).
-    - Fallback to full summon when layered summon returns empty (handles
-      Qwen3-Omni thinker whose prefix pattern may not be in upstream yet).
+    - Qwen3-Omni thinker prefixes are injected via patches.py (patch 5).
     """
     if is_diffusers and layered_summon and fsdp_version(module) > 0:
         if not base_sync_done:
@@ -89,26 +88,6 @@ def collect_lora_params(
             )
         return _layered_summon_lora_params_diffusers(module)
 
-    # Non-diffusers path: use upstream (which handles standard LLM prefixes).
-    lora_params = _upstream_collect_lora_params(
+    return _upstream_collect_lora_params(
         module, layered_summon=layered_summon, base_sync_done=base_sync_done
     )
-
-    # Fallback: if layered_summon returned empty (e.g. Qwen3-Omni thinker
-    # prefixes not yet in upstream), do a full summon instead.
-    if layered_summon and not lora_params and fsdp_version(module) > 0:
-        from peft.utils.save_and_load import get_peft_model_state_dict
-
-        logger.warning("layered_summon returned empty — falling back to full summon with offload_to_cpu")
-        peft_model = getattr(module, "_fsdp_wrapped_module", module)
-        with FSDP.summon_full_params(module, writeback=False, offload_to_cpu=True):
-            lora_params = get_peft_model_state_dict(peft_model)
-            lora_params = {
-                name: param.full_tensor().detach().cpu()
-                if hasattr(param, "full_tensor")
-                else param.detach().cpu()
-                for name, param in lora_params.items()
-            }
-        get_torch_device().empty_cache()
-
-    return lora_params

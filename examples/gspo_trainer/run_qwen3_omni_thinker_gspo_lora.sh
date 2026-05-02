@@ -18,6 +18,9 @@
 # =============================================================================
 set -x
 
+# ─── NCCL Diagnostics ───────────────────────────────────────────────────
+export TORCH_NCCL_TRACE_BUFFER_SIZE=1000
+
 # ─── Model ───────────────────────────────────────────────────────────────
 # Qwen3-Omni-30B-A3B is an MoE model (30B total, 3B active per token).
 # The actor loads the FULL model via transformers (Thinker+Talker+Code2Wav)
@@ -65,7 +68,7 @@ TRAIN_BATCH_SIZE=32       # Prompts per batch (reduced for 4×H100 memory)
 #
 # NOTE: For Thinker-only mode, we use the thinker-only stage config.
 # This avoids loading Talker/Code2Wav on the inference GPU.
-ROLLOUT_NAME="vllm_omni"  # Triggers vLLM-Omni server (not standard vLLM)
+ROLLOUT_NAME="vllm_omni_thinker"  # Thinker-only AR server (not diffusion)
 ROLLOUT_TP=4              # Tensor parallel for inference (4 GPU)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE_CONFIG="${SCRIPT_DIR}/qwen3_omni_thinker_only.yaml"
@@ -95,7 +98,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
     actor_rollout_ref.actor.optim.clip_grad=1.0 \
     actor_rollout_ref.actor.ppo_mini_batch_size=8 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -105,6 +108,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \
     actor_rollout_ref.actor.fsdp_config.use_orig_params=True \
+    actor_rollout_ref.actor.fsdp_config.wrap_policy.min_num_params=100000000 \
     \
     actor_rollout_ref.actor.policy_loss.loss_mode=${LOSS_MODE} \
     actor_rollout_ref.actor.clip_ratio_low=${CLIP_RATIO_LOW} \
@@ -123,14 +127,15 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
     ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.stage_configs_path="${STAGE_CONFIG}" \
     \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.ref.strategy=fsdp \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     actor_rollout_ref.ref.fsdp_config.model_dtype=bf16 \
     actor_rollout_ref.ref.fsdp_config.use_orig_params=True \
+    actor_rollout_ref.ref.fsdp_config.wrap_policy.min_num_params=100000000 \
     \
     algorithm.adv_estimator=${ADV_ESTIMATOR} \
     algorithm.use_kl_in_reward=False \

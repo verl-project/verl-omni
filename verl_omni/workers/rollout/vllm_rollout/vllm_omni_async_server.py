@@ -14,24 +14,14 @@
 import argparse
 import logging
 from dataclasses import asdict
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 import ray
+import torchvision.transforms as T
 import vllm_omni.entrypoints.cli.serve
-from vllm import SamplingParams
-from vllm.entrypoints.openai.api_server import build_app
-from vllm_omni.engine.arg_utils import OmniEngineArgs
-from vllm_omni.entrypoints import AsyncOmni
-from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
-from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
-from vllm_omni.lora.request import LoRARequest
-from vllm_omni.outputs import OmniRequestOutput
-
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import import_external_libs
 from verl.utils.tokenizer import normalize_token_ids
-from verl.workers.config import HFModelConfig, RolloutConfig
-from verl.workers.rollout.replica import TokenOutput
 from verl.workers.rollout.utils import run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
@@ -39,6 +29,13 @@ from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_PATH,
 )
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
+from vllm.entrypoints.openai.api_server import build_app
+from vllm_omni.engine.arg_utils import OmniEngineArgs
+from vllm_omni.entrypoints import AsyncOmni
+from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
+from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
+from vllm_omni.lora.request import LoRARequest
+from vllm_omni.outputs import OmniRequestOutput
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
@@ -49,12 +46,10 @@ logger.setLevel(logging.INFO)
 
 
 class vLLMOmniHttpServer(vLLMHttpServer):
-    """vLLM-Omni http server supporting both diffusion (image generation) and
-    AR (thinker-only token generation) modes.
-
-    Mode is auto-detected from model_config type:
-    - DiffusionModelConfig → diffusion mode (token-in, image-out)
-    - HFModelConfig → AR mode (token-in, token-out)
+    """vLLM-Omni http server in single node, this is equivalent to launch server with command line:
+    ```
+    vllm serve --tensor-parallel-size=8 ...
+    ```
     """
 
     # -----------------------------------------------------------------------
@@ -62,24 +57,16 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     def _init_model_config(self, model_config):
-        """Auto-detect: try DiffusionModelConfig first, fall back to HFModelConfig for AR models."""
-        try:
-            return omega_conf_to_dataclass(model_config, dataclass_type=DiffusionModelConfig)
-        except Exception:
-            return omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
+        """Use DiffusionModelConfig instead of HFModelConfig."""
+        return omega_conf_to_dataclass(model_config, dataclass_type=DiffusionModelConfig)
 
     def _validate_configs(self) -> None:
-        if isinstance(self.model_config, DiffusionModelConfig):
-            return
-        if self.config.max_model_len is None:
-            self.config.max_model_len = self.config.prompt_length + self.config.response_length
+        """No-op: diffusion models don't have max_position_embeddings."""
+        pass
 
     def _post_init(self, cuda_visible_devices: str) -> None:
-        import torchvision.transforms as T
-
-        self._is_diffusion = isinstance(self.model_config, DiffusionModelConfig)
-        if self._is_diffusion:
-            self._to_tensor = T.PILToTensor()
+        """Omni-specific post-init: create PIL→tensor converter, then log."""
+        self._to_tensor = T.PILToTensor()
         super()._post_init(cuda_visible_devices)
 
     # -----------------------------------------------------------------------
@@ -87,21 +74,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     def _get_override_generation_config(self) -> dict:
-        if self._is_diffusion:
-            return {}
-        return super()._get_override_generation_config()
+        """Diffusion models have no LLM sampling params; return empty dict."""
+        return {}
 
     def _get_engine_kwargs_key(self) -> str:
         return "vllm_omni"
-
-    def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
-        engine_kwargs.pop("custom_pipeline", None)
-        # vLLM-Omni CLI uses hyphens (--stage-configs-path) but Hydra config
-        # uses underscores.  Rename so build_cli_args_from_config produces the
-        # correct CLI flag.
-        for underscore_key in ("stage_configs_path", "deploy_config", "stage_overrides", "async_chunk"):
-            if underscore_key in engine_kwargs:
-                engine_kwargs[underscore_key.replace("_", "-")] = engine_kwargs.pop(underscore_key)
 
     def _get_worker_extension_cls(self) -> str:
         return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
@@ -120,19 +97,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
 
-        # asdict() serializes CompilationConfig into a dict with explicit None
-        # values for unset fields.  Pydantic rejects None where it expects a
-        # list (e.g. cudagraph_capture_sizes), so strip Nones and let the
-        # CompilationConfig defaults kick in on re-construction.
-        if isinstance(engine_args.get("compilation_config"), dict):
-            engine_args["compilation_config"] = {
-                k: v for k, v in engine_args["compilation_config"].items() if v is not None
-            }
-
         import_external_libs(self.config.external_lib)
-        pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
-            self.model_config.architecture if hasattr(self.model_config, "architecture") else None
-        )
+        pipeline_path = VllmOmniPipelineBase.get_pipeline_path(self.model_config.architecture)
+        # TODO (mike): read custom_pipeline from engine_args
         if pipeline_path is not None:
             engine_args["enable_dummy_pipeline"] = True
             engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
@@ -145,6 +112,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
 
     async def run_headless(self, args: argparse.Namespace):
+        """Run headless server in a separate thread."""
+        # TODO (mike): support multi node
         raise NotImplementedError("vLLM-Omni headless mode is not implemented yet.")
 
     # -----------------------------------------------------------------------
@@ -153,10 +122,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
     def _get_wake_up_tags(self) -> list[str]:
         return ["weights"]
-
-    # -----------------------------------------------------------------------
-    # Generation dispatch
-    # -----------------------------------------------------------------------
 
     async def generate(
         self,
@@ -167,128 +132,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         video_data: Optional[list[Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
         priority: int = 0,
-    ) -> Union[TokenOutput, DiffusionOutput]:
-        if self._is_diffusion:
-            return await self._generate_diffusion(
-                prompt_ids, sampling_params, request_id, image_data, video_data, negative_prompt_ids, priority
-            )
-        return await self._generate_tokens(prompt_ids, sampling_params, request_id, image_data, video_data, priority)
-
-    async def _get_lora_request(self) -> Optional[LoRARequest]:
-        if not self.lora_as_adapter:
-            return None
-        try:
-            lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
-        except TypeError:
-            lora_loaded = True
-        if lora_loaded:
-            return LoRARequest(lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH)
-        return None
-
-    # -----------------------------------------------------------------------
-    # AR (Thinker-only) token generation
-    # -----------------------------------------------------------------------
-
-    async def _generate_tokens(
-        self,
-        prompt_ids: list[int],
-        sampling_params: dict[str, Any],
-        request_id: str,
-        image_data: Optional[list[Any]] = None,
-        video_data: Optional[list[Any]] = None,
-        priority: int = 0,
-    ) -> TokenOutput:
-        prompt_ids = normalize_token_ids(prompt_ids)
-
-        max_possible_tokens = self.config.max_model_len - len(prompt_ids)
-        if max_possible_tokens < 0:
-            raise ValueError(
-                f"Prompt length ({len(prompt_ids)}) exceeds the model's maximum context length "
-                f"({self.config.max_model_len})."
-            )
-
-        if "max_tokens" in sampling_params:
-            max_tokens = sampling_params.pop("max_tokens")
-        elif "max_new_tokens" in sampling_params:
-            max_tokens = sampling_params.pop("max_new_tokens")
-        else:
-            max_tokens = min(
-                self.config.response_length, self.config.prompt_length + self.config.response_length - len(prompt_ids)
-            )
-        max_tokens = max(0, min(max_tokens, max_possible_tokens))
-
-        sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
-        sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
-        sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
-
-        multi_modal_data = {}
-        if image_data is not None:
-            multi_modal_data["image"] = image_data
-        if video_data is not None:
-            multi_modal_data["video"] = video_data
-
-        prompt = {"prompt_token_ids": prompt_ids}
-        if multi_modal_data:
-            prompt["multi_modal_data"] = multi_modal_data
-
-        lora_request = await self._get_lora_request()
-
-        generator = self.engine.generate(
-            prompt=prompt,
-            sampling_params=sampling_params,
-            request_id=request_id,
-            lora_request=lora_request,
-            priority=priority,
-        )
-
-        final_res: Optional[OmniRequestOutput] = None
-        async for output in generator:
-            final_res = output
-        assert final_res is not None
-
-        req_output = final_res.request_output
-        assert req_output is not None, "Thinker-only mode expects request_output with token IDs"
-
-        extra_fields = {"global_steps": self.global_steps}
-        token_ids = req_output.outputs[0].token_ids
-        log_probs = None
-        if sampling_params.logprobs is not None:
-            log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(req_output.outputs[0].logprobs)]
-
-        finish_reason = req_output.outputs[0].finish_reason
-        if finish_reason == "abort":
-            stop_reason = "aborted"
-        elif finish_reason in ("stop", "length"):
-            stop_reason = "completed"
-        else:
-            stop_reason = finish_reason
-
-        num_preempted = None
-        if hasattr(req_output.outputs[0], "num_preempted"):
-            num_preempted = req_output.outputs[0].num_preempted
-
-        return TokenOutput(
-            token_ids=token_ids,
-            log_probs=log_probs,
-            stop_reason=stop_reason,
-            num_preempted=num_preempted,
-            extra_fields=extra_fields,
-        )
-
-    # -----------------------------------------------------------------------
-    # Diffusion generation (token-in, image-out)
-    # -----------------------------------------------------------------------
-
-    async def _generate_diffusion(
-        self,
-        prompt_ids: list[int],
-        sampling_params: dict[str, Any],
-        request_id: str,
-        image_data: Optional[list[Any]] = None,
-        video_data: Optional[list[Any]] = None,
-        negative_prompt_ids: Optional[list[int]] = None,
-        priority: int = 0,
     ) -> DiffusionOutput:
+        """Generate sequence with token-in-image-out."""
         prompt_ids = normalize_token_ids(prompt_ids)
 
         multi_modal_data = {}
@@ -297,14 +142,24 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if video_data is not None:
             multi_modal_data["video"] = video_data
 
-        lora_request = await self._get_lora_request()
+        # Add lora request
+        lora_request = None
+        if self.lora_as_adapter:
+            # Make sure we also check that the lora is already loaded in the engine
+            lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
+            if lora_loaded:
+                lora_request = LoRARequest(
+                    lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
+                )
 
+        # Build OmniCustomPrompt with pre-tokenized IDs
         custom_prompt: OmniCustomPrompt = {"prompt_ids": prompt_ids}
         if negative_prompt_ids is not None:
             custom_prompt["negative_prompt_ids"] = negative_prompt_ids
         if multi_modal_data:
             custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
 
+        # Build OmniDiffusionSamplingParams from the incoming dict
         sampling_kwargs: dict[str, Any] = {}
         extra_args: dict[str, Any] = {}
         for k, v in sampling_params.items():
@@ -317,12 +172,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             sampling_kwargs["lora_request"] = lora_request
         diffusion_sampling_params = OmniDiffusionSamplingParams(**sampling_kwargs)
 
+        # Call AsyncOmni.generate() with the correct API
         generator = self.engine.generate(
             prompt=custom_prompt,
             request_id=request_id,
             sampling_params_list=[diffusion_sampling_params],
         )
 
+        # Get final response
         final_res: Optional[OmniRequestOutput] = None
         async for output in generator:
             final_res = output
@@ -330,6 +187,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         diffusion_output = self._to_tensor(final_res.images[0]).float() / 255.0
 
+        # Extract extra data from custom_output (populated by DiffusionEngine)
         mm_output = final_res.custom_output or {}
 
         if sampling_params.get("logprobs", False):
@@ -357,6 +215,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             "global_steps": self.global_steps,
         }
 
+        # Determine stop reason from finish_reason
         if final_res.request_output is not None and hasattr(final_res.request_output, "finish_reason"):
             finish_reason = final_res.request_output.finish_reason or "stop"
         else:
@@ -367,7 +226,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         elif finish_reason in ("stop", "length"):
             stop_reason = "completed"
         else:
-            stop_reason = finish_reason
+            stop_reason = finish_reason  # for more stop reason in the future
 
         num_preempted = None
         if final_res.request_output is not None and hasattr(final_res.request_output, "num_preempted"):
@@ -390,8 +249,8 @@ class vLLMOmniReplica(vLLMReplica):
     def __init__(
         self,
         replica_rank: int,
-        config: Union[RolloutConfig, DiffusionRolloutConfig],
-        model_config: Union[HFModelConfig, DiffusionModelConfig],
+        config: DiffusionRolloutConfig,
+        model_config: DiffusionModelConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
     ):
@@ -405,3 +264,186 @@ class vLLMOmniReplica(vLLMReplica):
 
     def _get_server_name_prefix(self) -> str:
         return "vllm_omni_"
+
+
+# ===========================================================================
+# Qwen3-Omni Thinker: AR (token-in, token-out) mode via vLLM-Omni
+# ===========================================================================
+
+from vllm import SamplingParams  # noqa: E402
+
+from verl.workers.config import HFModelConfig, RolloutConfig  # noqa: E402
+from verl.workers.rollout.replica import TokenOutput  # noqa: E402
+
+
+class vLLMOmniThinkerHttpServer(vLLMOmniHttpServer):
+    """Thinker-only AR server.  Inherits vLLM-Omni lifecycle from the
+    diffusion server but overrides config parsing and generation to
+    produce tokens instead of images."""
+
+    # -- config: use HFModelConfig instead of DiffusionModelConfig ----------
+
+    def _init_model_config(self, model_config):
+        return omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
+
+    def _validate_configs(self) -> None:
+        if self.config.max_model_len is None:
+            self.config.max_model_len = self.config.prompt_length + self.config.response_length
+
+    def _post_init(self, cuda_visible_devices: str) -> None:
+        # Skip PIL→tensor converter (no images), call grandparent directly
+        vLLMHttpServer._post_init(self, cuda_visible_devices)
+
+    def _get_override_generation_config(self) -> dict:
+        return vLLMHttpServer._get_override_generation_config(self)
+
+    # -- engine kwargs: convert underscore keys to hyphens for vLLM-Omni CLI -
+
+    def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
+        engine_kwargs.pop("custom_pipeline", None)
+        for underscore_key in ("stage_configs_path", "deploy_config", "stage_overrides", "async_chunk"):
+            if underscore_key in engine_kwargs:
+                engine_kwargs[underscore_key.replace("_", "-")] = engine_kwargs.pop(underscore_key)
+
+    # -- run_server: add CompilationConfig None-stripping -------------------
+
+    async def run_server(self, args: argparse.Namespace):
+        engine_args = OmniEngineArgs.from_cli_args(args)
+        engine_args = asdict(engine_args)
+
+        # asdict() serializes CompilationConfig into a dict with explicit None
+        # values for unset fields.  Pydantic rejects None where it expects a
+        # list (e.g. cudagraph_capture_sizes), so strip Nones and let the
+        # CompilationConfig defaults kick in on re-construction.
+        if isinstance(engine_args.get("compilation_config"), dict):
+            engine_args["compilation_config"] = {
+                k: v for k, v in engine_args["compilation_config"].items() if v is not None
+            }
+
+        import_external_libs(self.config.external_lib)
+
+        engine_client = AsyncOmni(**engine_args)
+        app = build_app(args)
+        await omni_init_app_state(engine_client, app.state, args)
+
+        self.engine = engine_client
+        self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
+
+    # -- generate: token-in, token-out --------------------------------------
+
+    async def generate(
+        self,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        request_id: str,
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+        negative_prompt_ids: Optional[list[int]] = None,
+        priority: int = 0,
+    ) -> TokenOutput:
+        prompt_ids = normalize_token_ids(prompt_ids)
+
+        max_possible_tokens = self.config.max_model_len - len(prompt_ids)
+        if max_possible_tokens < 0:
+            raise ValueError(
+                f"Prompt length ({len(prompt_ids)}) exceeds the model's maximum context length "
+                f"({self.config.max_model_len})."
+            )
+
+        if "max_tokens" in sampling_params:
+            max_tokens = sampling_params.pop("max_tokens")
+        elif "max_new_tokens" in sampling_params:
+            max_tokens = sampling_params.pop("max_new_tokens")
+        else:
+            max_tokens = min(
+                self.config.response_length,
+                self.config.prompt_length + self.config.response_length - len(prompt_ids),
+            )
+        max_tokens = max(0, min(max_tokens, max_possible_tokens))
+
+        sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
+        sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
+        sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
+
+        multi_modal_data = {}
+        if image_data is not None:
+            multi_modal_data["image"] = image_data
+        if video_data is not None:
+            multi_modal_data["video"] = video_data
+
+        prompt = {"prompt_token_ids": prompt_ids}
+        if multi_modal_data:
+            prompt["multi_modal_data"] = multi_modal_data
+
+        # Add lora request
+        lora_request = None
+        if self.lora_as_adapter:
+            try:
+                lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
+            except TypeError:
+                lora_loaded = True
+            if lora_loaded:
+                lora_request = LoRARequest(
+                    lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
+                )
+
+        generator = self.engine.generate(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+            lora_request=lora_request,
+            priority=priority,
+        )
+
+        final_res: Optional[OmniRequestOutput] = None
+        async for output in generator:
+            final_res = output
+        assert final_res is not None
+
+        req_output = final_res.request_output
+        assert req_output is not None, "Thinker-only mode expects request_output with token IDs"
+
+        extra_fields = {"global_steps": self.global_steps}
+        token_ids = req_output.outputs[0].token_ids
+        log_probs = None
+        if sampling_params.logprobs is not None:
+            log_probs = [
+                logprobs[token_ids[i]].logprob
+                for i, logprobs in enumerate(req_output.outputs[0].logprobs)
+            ]
+
+        finish_reason = req_output.outputs[0].finish_reason
+        if finish_reason == "abort":
+            stop_reason = "aborted"
+        elif finish_reason in ("stop", "length"):
+            stop_reason = "completed"
+        else:
+            stop_reason = finish_reason
+
+        num_preempted = None
+        if hasattr(req_output.outputs[0], "num_preempted"):
+            num_preempted = req_output.outputs[0].num_preempted
+
+        return TokenOutput(
+            token_ids=token_ids,
+            log_probs=log_probs,
+            stop_reason=stop_reason,
+            num_preempted=num_preempted,
+            extra_fields=extra_fields,
+        )
+
+
+class vLLMOmniThinkerReplica(vLLMOmniReplica):
+    def __init__(
+        self,
+        replica_rank: int,
+        config: RolloutConfig,
+        model_config: HFModelConfig,
+        gpus_per_node: int = 8,
+        is_reward_model: bool = False,
+    ):
+        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
+        self.server_class = ray.remote(vLLMOmniThinkerHttpServer)
+
+    def _get_server_name_prefix(self) -> str:
+        return "vllm_omni_thinker_"
