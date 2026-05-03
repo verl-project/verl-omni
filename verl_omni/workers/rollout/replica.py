@@ -38,11 +38,11 @@ def _load_vllm_omni():
     return vLLMOmniReplica
 
 
-def _load_vllm_omni_thinker():
-    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniThinkerReplica
+def _load_vllm_omni_ar():
+    from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniARReplica
 
-    return vLLMOmniThinkerReplica
+    return vLLMOmniARReplica
 
 
 RolloutReplicaRegistry.register("vllm_omni", _load_vllm_omni)
-RolloutReplicaRegistry.register("vllm_omni_thinker", _load_vllm_omni_thinker)
+RolloutReplicaRegistry.register("vllm_omni_ar", _load_vllm_omni_ar)

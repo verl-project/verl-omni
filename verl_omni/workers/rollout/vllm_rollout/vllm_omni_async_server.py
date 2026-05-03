@@ -267,7 +267,7 @@ class vLLMOmniReplica(vLLMReplica):
 
 
 # ===========================================================================
-# Qwen3-Omni Thinker: AR (token-in, token-out) mode via vLLM-Omni
+# AR (token-in, token-out) mode via vLLM-Omni
 # ===========================================================================
 
 from vllm import SamplingParams  # noqa: E402
@@ -276,8 +276,8 @@ from verl.workers.config import HFModelConfig, RolloutConfig  # noqa: E402
 from verl.workers.rollout.replica import TokenOutput  # noqa: E402
 
 
-class vLLMOmniThinkerHttpServer(vLLMOmniHttpServer):
-    """Thinker-only AR server.  Inherits vLLM-Omni lifecycle from the
+class vLLMOmniARHttpServer(vLLMOmniHttpServer):
+    """AR server.  Inherits vLLM-Omni lifecycle from the
     diffusion server but overrides config parsing and generation to
     produce tokens instead of images."""
 
@@ -433,7 +433,7 @@ class vLLMOmniThinkerHttpServer(vLLMOmniHttpServer):
         )
 
 
-class vLLMOmniThinkerReplica(vLLMOmniReplica):
+class vLLMOmniARReplica(vLLMOmniReplica):
     def __init__(
         self,
         replica_rank: int,
@@ -443,7 +443,7 @@ class vLLMOmniThinkerReplica(vLLMOmniReplica):
         is_reward_model: bool = False,
     ):
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
-        self.server_class = ray.remote(vLLMOmniThinkerHttpServer)
+        self.server_class = ray.remote(vLLMOmniARHttpServer)
 
     def _get_server_name_prefix(self) -> str:
-        return "vllm_omni_thinker_"
+        return "vllm_omni_ar_"

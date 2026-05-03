@@ -30,8 +30,8 @@ MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-Omni-30B-A3B-Instruct"}
 # ─── Data ────────────────────────────────────────────────────────────────
 # Start with GSM8K (text-only math) for simplest e2e validation.
 # Switch to AVQA later for multimodal (audio+image) training.
-TRAIN_FILE=${TRAIN_FILE:-"$HOME/data/gsm8k/train.parquet"}
-VAL_FILE=${VAL_FILE:-"$HOME/data/gsm8k/test.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"$HOME/data/gsm8k_nothink/train.parquet"}
+VAL_FILE=${VAL_FILE:-"$HOME/data/gsm8k_nothink/test.parquet"}
 
 # ─── Algorithm ───────────────────────────────────────────────────────────
 # GSPO = GRPO advantage estimation + sequence-level policy loss.
@@ -58,7 +58,7 @@ EXCLUDE_MODULES=".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_t
 # Generate N responses per prompt, compute group-relative advantage.
 N_RESP=8                  # 8 responses per prompt (matches Relax config)
 TEMPERATURE=0.8           # Exploration temperature (matches Relax)
-TRAIN_BATCH_SIZE=32       # Prompts per batch (reduced for 4×H100 memory)
+TRAIN_BATCH_SIZE=8        # Prompts per batch (small: response_length=8192 uses ~8× more memory)
 
 # ─── Rollout Engine ──────────────────────────────────────────────────────
 # Use vLLM-Omni for inference. The rollout engine will:
@@ -68,18 +68,18 @@ TRAIN_BATCH_SIZE=32       # Prompts per batch (reduced for 4×H100 memory)
 #
 # NOTE: For Thinker-only mode, we use the thinker-only stage config.
 # This avoids loading Talker/Code2Wav on the inference GPU.
-ROLLOUT_NAME="vllm_omni_thinker"  # Thinker-only AR server (not diffusion)
+ROLLOUT_NAME="vllm_omni_ar"  # AR server (token-in, token-out)
 ROLLOUT_TP=4              # Tensor parallel for inference (4 GPU)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE_CONFIG="${SCRIPT_DIR}/qwen3_omni_thinker_only.yaml"
 
-python3 -m verl.trainer.main_ppo \
+python3 -m verl_omni.trainer.omni.main_ppo \
     \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${VAL_FILE}" \
     data.train_batch_size=${TRAIN_BATCH_SIZE} \
     data.max_prompt_length=1024 \
-    data.max_response_length=1024 \
+    data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
     data.truncation='left' \
     \
@@ -122,7 +122,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.top_p=0.9 \
     actor_rollout_ref.rollout.top_k=-1 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.1 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     actor_rollout_ref.rollout.max_num_seqs=32 \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.load_format=safetensors \

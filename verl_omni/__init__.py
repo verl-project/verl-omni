@@ -17,9 +17,6 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/vers
     __version__ = f.read().strip()
 
 
-# Apply upstream veRL patches for Qwen3-Omni Thinker support
-import verl_omni.qwen3_omni_patches  # noqa: E402, F401
-
 # Import pipelines / rollout / reward loop / engines to auto-register them
 import verl_omni.pipelines  # noqa: E402, F401
 import verl_omni.reward_loop  # noqa: E402, F401
