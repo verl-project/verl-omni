@@ -320,8 +320,6 @@ class vLLMOmniARHttpServer(vLLMOmniHttpServer):
                 k: v for k, v in engine_args["compilation_config"].items() if v is not None
             }
 
-        import_external_libs(self.config.external_lib)
-
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
         await omni_init_app_state(engine_client, app.state, args)
