@@ -44,8 +44,8 @@ Multimodal generative RL training differs from text-only LLM RL not only in mode
 
 Visit our documentation to learn more.
 
-- [Installation](docs/start/install.md)
-- [Quickstart](docs/start/flowgrpo_quickstart.md)
+- [Installation](https://verl-omni.readthedocs.io/en/latest/start/install.html)
+- [Quickstart](https://verl-omni.readthedocs.io/en/latest/start/flowgrpo_quickstart.html)
 
 ## Model and Algorithm Support 🎨
 
