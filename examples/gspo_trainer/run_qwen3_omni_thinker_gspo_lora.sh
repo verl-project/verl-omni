@@ -25,8 +25,8 @@ export TORCH_NCCL_TRACE_BUFFER_SIZE=1000
 # Qwen3-Omni-30B-A3B is an MoE model (30B total, 3B active per token).
 # The actor loads the FULL model via transformers (Thinker+Talker+Code2Wav)
 # but LoRA only targets Thinker layers, so Talker/Code2Wav are frozen.
-MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-Omni-30B-A3B-Instruct"}
-
+# MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-Omni-30B-A3B-Instruct"}
+MODEL_PATH=/home/qa4/.cache/huggingface/hub/Qwen3-Omni-MoE-tiny
 # ─── Data ────────────────────────────────────────────────────────────────
 # Start with GSM8K (text-only math) for simplest e2e validation.
 # Switch to AVQA later for multimodal (audio+image) training.
@@ -79,9 +79,10 @@ python3 -m verl_omni.trainer.omni.main_ppo \
     data.val_files="${VAL_FILE}" \
     data.train_batch_size=${TRAIN_BATCH_SIZE} \
     data.max_prompt_length=1024 \
-    data.max_response_length=2048 \
+    data.max_response_length=4096 \
     data.filter_overlong_prompts=True \
     data.truncation='left' \
+    ++data.apply_chat_template_kwargs.enable_thinking=False \
     \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
