@@ -68,7 +68,7 @@ TRAIN_BATCH_SIZE=8        # Prompts per batch (small: response_length=8192 uses 
 #
 # NOTE: For Thinker-only mode, we use the thinker-only stage config.
 # This avoids loading Talker/Code2Wav on the inference GPU.
-ROLLOUT_NAME="vllm_omni_ar"  # AR server (token-in, token-out)
+ROLLOUT_NAME="vllm_omni"  # vLLM-Omni server (AR mode via output_mode=ar)
 ROLLOUT_TP=4              # Tensor parallel for inference (4 GPU)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE_CONFIG="${SCRIPT_DIR}/qwen3_omni_thinker_only.yaml"
@@ -130,6 +130,7 @@ python3 -m verl_omni.trainer.omni.main_ppo \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
     ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.stage_configs_path="${STAGE_CONFIG}" \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode=ar \
     \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.ref.strategy=fsdp \

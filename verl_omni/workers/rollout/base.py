@@ -14,4 +14,3 @@
 from verl.workers.rollout.base import _ROLLOUT_REGISTRY
 
 _ROLLOUT_REGISTRY[("vllm_omni", "async")] = "verl.workers.rollout.vllm_rollout.ServerAdapter"
-_ROLLOUT_REGISTRY[("vllm_omni_ar", "async")] = "verl.workers.rollout.vllm_rollout.ServerAdapter"
