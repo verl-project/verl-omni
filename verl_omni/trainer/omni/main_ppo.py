@@ -1,8 +1,7 @@
 """
-Entry point for PPO/GSPO training with verl-omni patches.
+Entry point for PPO/GSPO training with verl-omni.
 
-Importing verl_omni triggers all monkey-patches (Qwen3-Omni model support,
-FSDP fixes, reward scoring, rollout replica registration, etc.) before
+Importing verl_omni triggers rollout replica registration before
 handing off to the upstream verl trainer.
 
 Usage:

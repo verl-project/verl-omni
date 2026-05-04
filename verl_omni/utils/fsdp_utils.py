@@ -78,7 +78,6 @@ def collect_lora_params(
 
     Additions over upstream:
     - Diffusers-specific layered summon (transformer_blocks prefix).
-    - Qwen3-Omni thinker prefixes are injected via patches.py (patch 5).
     """
     if is_diffusers and layered_summon and fsdp_version(module) > 0:
         if not base_sync_done:

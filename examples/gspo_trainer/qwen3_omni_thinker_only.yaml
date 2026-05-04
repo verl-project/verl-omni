@@ -5,7 +5,6 @@
 # stage that uses ALL available GPUs for tensor parallelism.
 #
 # Adjust `devices` and `tensor_parallel_size` to match your GPU count.
-# Verified on 4× H100-80G.
 stage_args:
   - stage_id: 0
     runtime:

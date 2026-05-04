@@ -12,21 +12,16 @@
 # Reference:
 #   - Qwen3-Omni paper §4.1: Thinker post-training uses GSPO
 #   - VeRL example: run_qwen2_5-3b_gsm8k_grpo_lora.sh
-#   - Relax config: run-qwen3-30B-A3B-omni-16xgpu.sh
 #
-# Hardware: 2× H100 80GB (minimum for 30B-A3B MoE model)
+# Hardware: 2+ GPUs with ≥80GB VRAM (e.g. A100/H100)
 # =============================================================================
 set -x
-
-# ─── NCCL Diagnostics ───────────────────────────────────────────────────
-export TORCH_NCCL_TRACE_BUFFER_SIZE=1000
 
 # ─── Model ───────────────────────────────────────────────────────────────
 # Qwen3-Omni-30B-A3B is an MoE model (30B total, 3B active per token).
 # The actor loads the FULL model via transformers (Thinker+Talker+Code2Wav)
 # but LoRA only targets Thinker layers, so Talker/Code2Wav are frozen.
-# MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-Omni-30B-A3B-Instruct"}
-MODEL_PATH=/home/qa4/.cache/huggingface/hub/Qwen3-Omni-MoE-tiny
+MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-Omni-30B-A3B-Instruct"}
 # ─── Data ────────────────────────────────────────────────────────────────
 # Start with GSM8K (text-only math) for simplest e2e validation.
 # Switch to AVQA later for multimodal (audio+image) training.
@@ -35,7 +30,7 @@ VAL_FILE=${VAL_FILE:-"$HOME/data/gsm8k_nothink/test.parquet"}
 
 # ─── Algorithm ───────────────────────────────────────────────────────────
 # GSPO = GRPO advantage estimation + sequence-level policy loss.
-# Matching Qwen3-Omni paper and Relax's Qwen3-Omni training config.
+# Matching Qwen3-Omni paper §4.1.
 ADV_ESTIMATOR="grpo"       # Advantage: group-relative (no critic needed)
 LOSS_MODE="gspo"           # Loss: sequence-level importance ratio
 LOSS_AGG="seq-mean-token-mean"  # Aggregation: sequence mean first
@@ -56,8 +51,8 @@ EXCLUDE_MODULES=".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_t
 
 # ─── GRPO Sampling ───────────────────────────────────────────────────────
 # Generate N responses per prompt, compute group-relative advantage.
-N_RESP=8                  # 8 responses per prompt (matches Relax config)
-TEMPERATURE=0.8           # Exploration temperature (matches Relax)
+N_RESP=8                  # 8 responses per prompt
+TEMPERATURE=0.8           # Exploration temperature
 TRAIN_BATCH_SIZE=8        # Prompts per batch (small: response_length=8192 uses ~8× more memory)
 
 # ─── Rollout Engine ──────────────────────────────────────────────────────
