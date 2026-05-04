@@ -22,11 +22,12 @@ set -x
 # The actor loads the FULL model via transformers (Thinker+Talker+Code2Wav)
 # but LoRA only targets Thinker layers, so Talker/Code2Wav are frozen.
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-Omni-30B-A3B-Instruct"}
+# MODEL_PATH=/home/qa4/.cache/huggingface/hub/Qwen3-Omni-MoE-tiny
 # ─── Data ────────────────────────────────────────────────────────────────
 # Start with GSM8K (text-only math) for simplest e2e validation.
 # Switch to AVQA later for multimodal (audio+image) training.
-TRAIN_FILE=${TRAIN_FILE:-"$HOME/data/gsm8k_nothink/train.parquet"}
-VAL_FILE=${VAL_FILE:-"$HOME/data/gsm8k_nothink/test.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"$HOME/data/gsm8k/train.parquet"}
+VAL_FILE=${VAL_FILE:-"$HOME/data/gsm8k/test.parquet"}
 
 # ─── Algorithm ───────────────────────────────────────────────────────────
 # GSPO = GRPO advantage estimation + sequence-level policy loss.
@@ -77,7 +78,7 @@ python3 -m verl_omni.trainer.omni.main_ppo \
     data.max_response_length=4096 \
     data.filter_overlong_prompts=True \
     data.truncation='left' \
-    ++data.apply_chat_template_kwargs.enable_thinking=False \
+    # ++data.apply_chat_template_kwargs.enable_thinking=False \
     \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
