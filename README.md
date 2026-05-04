@@ -55,7 +55,7 @@ Visit our documentation to learn more.
 | Wan2.2             | Diffusion generator      | Text → Video       | DanceGRPO | WIP    |
 | BAGEL              | Unified understand + gen | Text + Image       | FlowGRPO  | WIP    |
 | HunyuanImage-3.0   | Unified understand + gen | Text + Image       | MixGRPO/SRPO       | Planned |
-| Qwen3-Omni-Thinker | Omni-modality            | Text / Image / Video / Audio | GRPO    | WIP    |
+| Qwen3-Omni-Thinker | Omni-modality            | Text / Image / Video / Audio | GSPO    | WIP    |
 
 ## Roadmap 🗺
 
