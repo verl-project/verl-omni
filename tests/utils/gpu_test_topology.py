@@ -30,7 +30,7 @@ def resolve_diffusion_agent_loop_gpu_topology(default_num_gpus: int = 4) -> tupl
     n = resolve_requested_num_gpus(default_num_gpus)
     tp = min(2, n)
     attention_heads = tp
-    return n, tp, attention_heads 
+    return n, tp, attention_heads
 
 
 def resolve_reward_loop_gpu_topology(default_num_gpus: int = 4) -> tuple[int, int]:
