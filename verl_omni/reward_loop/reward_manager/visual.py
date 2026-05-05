@@ -37,7 +37,8 @@ class VisualRewardManager(RewardManagerBase):
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
 
-    def assemble_rm_scores(self, data: DataProto, scores: list[float]) -> torch.Tensor:
+    @classmethod
+    def assemble_rm_scores(cls, data: DataProto, scores: list[float]) -> torch.Tensor:
         """Per-sample image rewards: ``rm_scores`` has shape ``(batch_size, 1)``."""
         return torch.tensor(scores, dtype=torch.float32).unsqueeze(-1)
 
