@@ -169,6 +169,16 @@ skip_test() {
     TEST_LOG_FILES+=("-")
 }
 
+# ── run_selected_test <id> <name> <cmd...> ────────────────────────────────────
+run_selected_test() {
+    local id="$1"; local name="$2"; shift 2
+    if [[ "${RUN_TEST[$id]}" == "1" ]]; then
+        run_test "${id}" "${name}" "$@"
+    else
+        skip_test "${id}" "${name}" "not selected"
+    fi
+}
+
 # ── Determine which tests to run ───────────────────────────────────────────────
 declare -A RUN_TEST=(
     [0]=1 [1]=1 [2]=1 [3]=1 [4]=1
@@ -204,69 +214,29 @@ echo ""
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Test 0: vllm-omni rollout ─────────────────────────────────────────────────
-if [[ "${RUN_TEST[0]}" == "1" ]]; then
-    if [[ "${NUM_GPUS}" -lt 1 ]]; then
-        skip_test 0 "vllm-omni rollout" "requires at least 1 GPU"
-    else
-        run_test 0 "vllm-omni rollout" \
-            env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
-            pytest -s tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py
-    fi
-else
-    skip_test 0 "vllm-omni rollout" "not selected"
-fi
+run_selected_test 0 "vllm-omni rollout" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    pytest -s tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py
 
 # ── Test 1: diffusion agent loop ──────────────────────────────────────────────
-if [[ "${RUN_TEST[1]}" == "1" ]]; then
-    if [[ "${NUM_GPUS}" -lt 1 ]]; then
-        skip_test 1 "diffusion agent loop" "requires at least 1 GPU"
-    else
-        run_test 1 "diffusion agent loop" \
-            env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
-            pytest -s tests/agent_loop/test_diffusion_agent_loop.py
-    fi
-else
-    skip_test 1 "diffusion agent loop" "not selected"
-fi
+run_selected_test 1 "diffusion agent loop" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    pytest -s tests/agent_loop/test_diffusion_agent_loop.py
 
 # ── Test 2: visual reward manager ─────────────────────────────────────────────
-if [[ "${RUN_TEST[2]}" == "1" ]]; then
-    if [[ "${NUM_GPUS}" -lt 1 ]]; then
-        skip_test 2 "visual reward manager" "requires at least 1 GPU"
-    else
-        run_test 2 "visual reward manager" \
-            env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
-            pytest -s tests/reward_loop/test_visual_reward_manager.py
-    fi
-else
-    skip_test 2 "visual reward manager" "not selected"
-fi
+run_selected_test 2 "visual reward manager" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    pytest -s tests/reward_loop/test_visual_reward_manager.py
 
 # ── Test 3: diffusers FSDP engine ─────────────────────────────────────────────
-if [[ "${RUN_TEST[3]}" == "1" ]]; then
-    if [[ "${NUM_GPUS}" -lt 1 ]]; then
-        skip_test 3 "diffusers FSDP engine" "requires at least 1 GPU"
-    else
-        run_test 3 "diffusers FSDP engine" \
-            env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
-            pytest -s tests/workers/test_diffusers_fsdp_engine.py
-    fi
-else
-    skip_test 3 "diffusers FSDP engine" "not selected"
-fi
+run_selected_test 3 "diffusers FSDP engine" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    pytest -s tests/workers/test_diffusers_fsdp_engine.py
 
 # ── Test 4: FlowGRPO trainer e2e (vllm_omni rollout) ─────────────────────────
-if [[ "${RUN_TEST[4]}" == "1" ]]; then
-    if [[ "${NUM_GPUS}" -lt 1 ]]; then
-        skip_test 4 "FlowGRPO trainer e2e" "requires at least 1 GPU"
-    else
-        run_test 4 "FlowGRPO trainer e2e" \
-            env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
-            bash tests/special_e2e/run_flowgrpo_qwen_image.sh
-    fi
-else
-    skip_test 4 "FlowGRPO trainer e2e" "not selected"
-fi
+run_selected_test 4 "FlowGRPO trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
+    bash tests/special_e2e/run_flowgrpo_qwen_image.sh
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SUMMARY
