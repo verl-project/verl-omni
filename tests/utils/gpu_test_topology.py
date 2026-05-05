@@ -20,7 +20,9 @@ def resolve_requested_num_gpus(default_num_gpus: int = 4) -> int:
     """Resolve GPU count from NUM_GPUS env var, clamped by visible CUDA devices."""
     n = int(os.getenv("NUM_GPUS", str(default_num_gpus)))
     available = torch.cuda.device_count()
-    return max(1, min(n, available) if available > 0 else n)
+    if available <= 0:
+        return 0
+    return max(1, min(n, available))
 
 
 def resolve_diffusion_agent_loop_gpu_topology(default_num_gpus: int = 4) -> tuple[int, int, int]:
