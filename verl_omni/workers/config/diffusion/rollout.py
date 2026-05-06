@@ -35,11 +35,45 @@ __all__ = [
 
 @dataclass
 class DiffusionRolloutAlgoConfig(BaseConfig):
-    # for SDE-based diffusion process
+    """Algorithm configuration for the SDE-based diffusion rollout.
+
+    Toggle :attr:`algo_type` to switch algorithms; MixGRPO-only knobs
+    (``sample_strategy``, ``iters_per_group``, ``seed``) are ignored when
+    ``algo_type == flow_grpo``.
+    """
+
+    # Fields consumed only by the trainer-side scheduler, NOT forwarded to
+    # the rollout backend.
+    _TRAINER_ONLY_FIELDS = frozenset({"algo_type", "sample_strategy", "iters_per_group", "sde_window_seed"})
+    _mutable_fields = {"algo_type", "sample_strategy"}
+
+    algo_type: str = "flow_grpo"
     noise_level: float = 1.0
     sde_type: str = "sde"
     sde_window_size: Optional[int] = None
-    sde_window_range: list[int] = field(default_factory=lambda: [0, 5])
+    sde_window_range: Optional[list[int]] = None
+
+    # MixGRPO-only knobs
+    sample_strategy: str = "random"
+    iters_per_group: int = 1
+    sde_window_seed: int = 0
+
+    def __post_init__(self):
+        if self.algo_type not in ("flow_grpo", "mix_grpo"):
+            raise ValueError(f"Unknown algo_type: {self.algo_type!r}")
+        if self.sample_strategy not in ("random", "progressive"):
+            raise ValueError(f"Unknown sample_strategy: {self.sample_strategy!r}")
+
+        if self.algo_type == "mix_grpo" and self.sde_window_size is None:
+            raise ValueError(
+                "MixGRPO requires `actor_rollout_ref.rollout.algo.sde_window_size` to be set."
+            )
+        if self.sample_strategy == "progressive" and self.iters_per_group <= 0:
+            raise ValueError("`iters_per_group` must be positive for the progressive strategy.")
+
+    def to_rollout_dict(self) -> dict:
+        """Return only the fields that should be forwarded to the rollout backend."""
+        return {k: v for k, v in self.items() if k not in self._TRAINER_ONLY_FIELDS and not k.startswith("_")}
 
 
 @dataclass

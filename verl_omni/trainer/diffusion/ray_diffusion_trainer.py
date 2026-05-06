@@ -57,6 +57,10 @@ from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
 )
+from verl_omni.trainer.diffusion.sde_window_scheduler import (
+    SDEWindowScheduler,
+    build_sde_window_scheduler,
+)
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 
@@ -180,6 +184,20 @@ class RayFlowGRPOTrainer:
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
         self.checkpoint_manager = None
+
+        # Trainer-side SDE-window scheduler. Defaults to FlowGRPO behaviour
+        self.sde_window_scheduler: SDEWindowScheduler = self._build_sde_window_scheduler()
+
+    def _build_sde_window_scheduler(self) -> SDEWindowScheduler:
+        """Construct the SDE-window scheduler from the rollout algo config."""
+        from verl_omni.workers.config.diffusion.rollout import DiffusionRolloutAlgoConfig
+
+        rollout_cfg = self.config.actor_rollout_ref.rollout
+        algo_dc = omega_conf_to_dataclass(rollout_cfg.algo, DiffusionRolloutAlgoConfig)
+        num_inference_steps = int(rollout_cfg.pipeline.num_inference_steps)
+        scheduler = build_sde_window_scheduler(algo_dc, num_inference_steps=num_inference_steps)
+        print(f"[diffusion-trainer] SDE-window scheduler: {type(scheduler).__name__}")
+        return scheduler
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -885,6 +903,11 @@ class RayFlowGRPOTrainer:
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
+
+                # Get SDE-window overrides for the current step (dynamic for MixGRPO, static pass-through for FlowGRPO)
+                if overrides := self.sde_window_scheduler.get_window(self.global_steps - 1):
+                    gen_batch.meta_info["sampling_overrides"] = overrides
+
                 gen_batch_output = gen_batch.repeat(
                     repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
                 )

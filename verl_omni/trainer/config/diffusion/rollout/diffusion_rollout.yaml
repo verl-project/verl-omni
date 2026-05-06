@@ -148,14 +148,17 @@ val_kwargs:
     # Number of consecutive denoising steps in the active SDE window; null = all steps
     sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
 
-    # [start, end) range for random window start-index sampling
-    sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,[0,5]}
+    # [lo, hi] envelope of valid window-start positions; null = entire trajectory
+    sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
 
-# Rollout Algorithm configuration,
+# Rollout Algorithm configuration
 algo:
 
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
+
+  # Algorithm: "flow_grpo" or "mix_grpo"
+  algo_type: flow_grpo
 
   # Magnitude of SDE noise injected inside the active window
   noise_level: 1.0
@@ -163,11 +166,27 @@ algo:
   # SDE variant: "sde" or "cps"
   sde_type: sde
 
-  # Number of consecutive denoising steps in the active SDE window; null = all steps
+  # Length of the active SDE window (a.k.a. MixGRPO "group size"); null = all steps
   sde_window_size: null
 
-  # [start, end) range for random window start-index sampling
-  sde_window_range: [0, 5]
+  # [lo, hi] envelope of valid window-start positions. For flow_grpo the rollout
+  # backend draws the start uniformly from [lo, hi - sde_window_size + 1). For
+  # mix_grpo this is the eligible range over which the trainer-side scheduler
+  # slides the window. null = entire trajectory.
+  sde_window_range: null
+
+  # ----- MixGRPO sliding-window scheduler (only used when algo_type=mix_grpo) ---
+
+  # Sliding strategy: "random" (default) draws a fresh window per step;
+  # "progressive" advances by sde_window_size every iters_per_group iterations.
+  sample_strategy: random
+
+  # Number of training iterations spent at each window position (progressive only).
+  iters_per_group: 1
+
+  # Base seed for the random window draws (random only). Distinct from the
+  # rollout generator seed (val_kwargs.seed) so the two streams stay decoupled.
+  sde_window_seed: 0
 
 # Pipeline configuration for diffusion model generation
 pipeline:

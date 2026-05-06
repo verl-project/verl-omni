@@ -137,18 +137,21 @@ actor_rollout_ref:
         guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
       algo:
         _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
+        algo_type: flow_grpo
         noise_level: 0.0
         sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
         sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
-        sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,[0,5]}
+        sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
     algo:
       _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
+      algo_type: flow_grpo
       noise_level: 1.0
       sde_type: sde
       sde_window_size: null
-      sde_window_range:
-      - 0
-      - 5
+      sde_window_range: null
+      sample_strategy: random
+      iters_per_group: 1
+      seed: 0
     pipeline:
       _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
       height: 512
@@ -206,10 +209,11 @@ actor_rollout_ref:
       guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
     algo:
       _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
+      algo_type: ${oc.select:actor_rollout_ref.rollout.algo.algo_type,flow_grpo}
       noise_level: ${oc.select:actor_rollout_ref.rollout.algo.noise_level,1.0}
       sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
       sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
-      sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,[0,5]}
+      sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
     model_type: diffusion_model
   hybrid_engine: true
   nccl_timeout: 600

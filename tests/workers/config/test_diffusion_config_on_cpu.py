@@ -77,10 +77,27 @@ class TestDiffusionRolloutAlgoConfig:
         assert cfg.noise_level == pytest.approx(1.0)
         assert cfg.sde_type == "sde"
         assert cfg.sde_window_size is None
+        assert cfg.sde_window_range is None
 
-    def test_sde_window_range_default(self):
-        cfg = DiffusionRolloutAlgoConfig()
-        assert cfg.sde_window_range == [0, 5]
+    def test_invalid_algo_type_raises(self):
+        with pytest.raises(ValueError):
+            DiffusionRolloutAlgoConfig(algo_type="bogus")
+
+    def test_mix_grpo_requires_window_size(self):
+        with pytest.raises(ValueError, match="sde_window_size"):
+            DiffusionRolloutAlgoConfig(algo_type="mix_grpo", sde_window_size=None)
+
+    def test_to_rollout_dict_excludes_trainer_fields(self):
+        cfg = DiffusionRolloutAlgoConfig(
+            algo_type="mix_grpo", sde_window_size=4, sample_strategy="random", sde_window_seed=42
+        )
+        d = cfg.to_rollout_dict()
+        assert "algo_type" not in d
+        assert "sample_strategy" not in d
+        assert "sde_window_seed" not in d
+        assert "iters_per_group" not in d
+        assert "noise_level" in d
+        assert "sde_type" in d
 
 
 class TestDiffusionSamplingConfig:

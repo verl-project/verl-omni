@@ -157,14 +157,21 @@ class DiffusionAgentLoopWorker:
             "logprobs": config.calculate_log_probs,
         }
 
-        # override sampling params for validation
-        if batch.meta_info.get("validate", False):
+        is_validate = batch.meta_info.get("validate", False)
+
+        if is_validate:
             sampling_params.update(_config_to_sampling_dict(config.val_kwargs.pipeline))
             sampling_params.update(_config_to_sampling_dict(config.val_kwargs.algo))
             sampling_params["seed"] = config.val_kwargs.seed
             sampling_params["logprobs"] = False
+        else:
+            # Apply any per-step dynamic sampling overrides provided by the trainer.
+            # This allows the trainer to manipulate rollout generation without coupling
+            # the agent loop to specific algorithm implementations (like SDE window sizes).
+            sampling_overrides = batch.meta_info.get("sampling_overrides")
+            if sampling_overrides:
+                sampling_params.update(sampling_overrides)
 
-        # by default, we assume it's a single turn agent
         if "agent_name" not in batch.non_tensor_batch:
             default_agent_loop = config.agent.default_agent_loop
             batch.non_tensor_batch["agent_name"] = np.array([default_agent_loop] * len(batch), dtype=object)

@@ -1,4 +1,10 @@
-# Qwen-Image lora RL, vllm_omni rollout
+# Qwen-Image LoRA RL with MixGRPO sliding-window SDE training (vllm_omni rollout)
+#
+# Reference: MixGRPO (Tencent-Hunyuan), https://arxiv.org/abs/2507.21802
+#            https://github.com/Tencent-Hunyuan/MixGRPO
+#
+# To switch back to FlowGRPO, override:
+#   actor_rollout_ref.rollout.algo.algo_type=flow_grpo
 set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME
@@ -18,6 +24,15 @@ REWARD_TP=4
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
+# ----- MixGRPO sliding-window scheduler -----
+# A 10-step trajectory with a window of 2 (group_size = 2).  The `random`
+# strategy draws a fresh window position each step.  This matches the
+# FlowGRPO baseline's inference budget while letting MixGRPO's ODE/SDE
+# split reduce gradient variance.
+#
+# To experiment with longer trajectories (higher quality but slower), try:
+#   num_inference_steps=50, sde_window_size=4, sample_strategy=progressive,
+#   iters_per_group=25
 
 python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     algorithm.adv_estimator=flow_grpo \
@@ -46,10 +61,13 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.pipeline.true_cfg_scale=4.0 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=256 \
+    actor_rollout_ref.rollout.algo.algo_type=mix_grpo \
+    actor_rollout_ref.rollout.algo.sample_strategy=random \
+    actor_rollout_ref.rollout.algo.sde_window_seed=42 \
+    actor_rollout_ref.rollout.algo.sde_window_size=2 \
+    'actor_rollout_ref.rollout.algo.sde_window_range=[0,5]' \
     actor_rollout_ref.rollout.algo.noise_level=1.2 \
     actor_rollout_ref.rollout.algo.sde_type="sde" \
-    actor_rollout_ref.rollout.algo.sde_window_size=2 \
-    actor_rollout_ref.rollout.algo.sde_window_range="[0,5]" \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=50 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
@@ -62,8 +80,8 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     reward.custom_reward_function.path=$reward_function_path \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.logger='["console", "wandb"]' \
-    trainer.project_name=flow_grpo \
-    trainer.experiment_name=qwen_image_ocr_lora \
+    trainer.project_name=mix_grpo \
+    trainer.experiment_name=qwen_image_ocr_lora_mixgrpo \
     trainer.log_val_generations=8 \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \

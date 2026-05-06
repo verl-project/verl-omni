@@ -88,6 +88,9 @@ algo:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
 
+  # Algorithm selector: see actor_rollout_ref.rollout.algo.algo_type for details.
+  algo_type: ${oc.select:actor_rollout_ref.rollout.algo.algo_type,flow_grpo}
+
   # Magnitude of SDE noise injected inside the active window
   noise_level: ${oc.select:actor_rollout_ref.rollout.algo.noise_level,1.0}
 
@@ -97,5 +100,5 @@ algo:
   # Number of consecutive denoising steps in the active SDE window; null = all steps
   sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
 
-  # [start, end) range for random window start-index sampling
-  sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,[0,5]}
+  # [lo, hi] envelope of valid window-start positions; null = entire trajectory
+  sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
