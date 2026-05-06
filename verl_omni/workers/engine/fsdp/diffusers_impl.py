@@ -559,6 +559,17 @@ class DiffusersFSDPEngine(BaseEngine):
         mask = torch.nested.to_padded_tensor(mask, padding=0, output_size=(batch_size, max_seq_len))
         return embeds, mask
 
+    @staticmethod
+    def _pad_embeds_for_sp(embeds: torch.Tensor, mask: torch.Tensor, sp_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pad sequence dimension of (embeds, mask) to a multiple of sp_size."""
+        seq_len = embeds.size(1)
+        aligned_seq_len = (seq_len + sp_size - 1) // sp_size * sp_size
+        if aligned_seq_len > seq_len:
+            pad_len = aligned_seq_len - seq_len
+            embeds = torch.nn.functional.pad(embeds, (0, 0, 0, pad_len))
+            mask = torch.nn.functional.pad(mask, (0, pad_len))
+        return embeds, mask
+
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
         """
         Extract and pre-process universal tensors, then delegate architecture-specific
@@ -579,12 +590,7 @@ class DiffusersFSDPEngine(BaseEngine):
             prompt_embeds, prompt_embeds_mask = self._unpad_nested_embeds(prompt_embeds, prompt_embeds_mask)
 
         if sp_size > 1:
-            seq_len = prompt_embeds.size(1)
-            aligned_seq_len = (seq_len + sp_size - 1) // sp_size * sp_size
-            if aligned_seq_len > seq_len:
-                pad_len = aligned_seq_len - seq_len
-                prompt_embeds = torch.nn.functional.pad(prompt_embeds, (0, 0, 0, pad_len))
-                prompt_embeds_mask = torch.nn.functional.pad(prompt_embeds_mask, (0, pad_len))
+            prompt_embeds, prompt_embeds_mask = self._pad_embeds_for_sp(prompt_embeds, prompt_embeds_mask, sp_size)
 
         if isinstance(negative_prompt_embeds, torch.Tensor) and negative_prompt_embeds.is_nested:
             negative_prompt_embeds, negative_prompt_embeds_mask = self._unpad_nested_embeds(
@@ -592,12 +598,9 @@ class DiffusersFSDPEngine(BaseEngine):
             )
 
         if isinstance(negative_prompt_embeds, torch.Tensor) and sp_size > 1:
-            seq_len = negative_prompt_embeds.size(1)
-            aligned_seq_len = (seq_len + sp_size - 1) // sp_size * sp_size
-            if aligned_seq_len > seq_len:
-                pad_len = aligned_seq_len - seq_len
-                negative_prompt_embeds = torch.nn.functional.pad(negative_prompt_embeds, (0, 0, 0, pad_len))
-                negative_prompt_embeds_mask = torch.nn.functional.pad(negative_prompt_embeds_mask, (0, pad_len))
+            negative_prompt_embeds, negative_prompt_embeds_mask = self._pad_embeds_for_sp(
+                negative_prompt_embeds, negative_prompt_embeds_mask, sp_size
+            )
 
         return prepare_model_inputs(
             module=self.module,
