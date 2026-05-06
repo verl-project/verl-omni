@@ -885,6 +885,12 @@ class RayFlowGRPOTrainer:
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
+
+                # Per-step rollout seed for reproducibility
+                data_seed = self.config.data.get("seed")
+                if data_seed is not None:
+                    gen_batch.meta_info["rollout_seed"] = int(data_seed) + self.global_steps - 1
+
                 gen_batch_output = gen_batch.repeat(
                     repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
                 )

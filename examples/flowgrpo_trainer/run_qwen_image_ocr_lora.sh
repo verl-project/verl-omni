@@ -25,6 +25,7 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     data.val_files=$ocr_test_path \
     data.train_batch_size=32 \
     data.max_prompt_length=256 \
+    data.seed=42 \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
