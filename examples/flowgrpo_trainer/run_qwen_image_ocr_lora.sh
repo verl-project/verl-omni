@@ -71,4 +71,4 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     trainer.save_freq=30 \
     trainer.test_freq=30 \
     trainer.total_epochs=15 \
-    trainer.total_training_steps=150 "$@"
+    trainer.total_training_steps=300 "$@"
