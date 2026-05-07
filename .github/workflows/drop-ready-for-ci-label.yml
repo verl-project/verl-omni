@@ -2,7 +2,7 @@ name: drop_ready_for_ci_label
 
 on:
   pull_request_target:
-    types: [synchronize, edited, reopened]
+    types: [synchronize, reopened]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
