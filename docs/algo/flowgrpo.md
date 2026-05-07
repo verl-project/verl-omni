@@ -236,7 +236,8 @@ bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh
 ### Rule-Based Reward Training: JPEG incompressibility
 
 FlowGRPO also supports rule-based rewards that score images directly without a
-VLM reward model, using the same `reward.reward_manager.name=visual` setup.
+VLM reward model, reusing the default `VisualRewardManager` from
+`verl_omni/trainer/config/reward/reward.yaml`.
 
 `verl_omni/utils/reward_score/jpeg_compressibility.py` rewards images that are
 harder to JPEG-compress (richer texture, more complex content). No extra
@@ -263,8 +264,8 @@ reward.custom_reward_function.path=...
 reward.custom_reward_function.name=...
 ```
 
-Keep `reward.reward_manager.name=visual` and all actor/rollout settings
-unchanged.
+Keep all actor/rollout settings unchanged; the visual reward manager is loaded
+from the default reward config.
 
 ### Async Reward
 
