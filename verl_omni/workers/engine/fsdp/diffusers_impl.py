@@ -54,7 +54,6 @@ from verl.utils.fsdp_utils import (
 )
 from verl.utils.model import convert_weight_keys
 from verl.utils.py_functional import append_to_dict, convert_to_regular_types
-from verl.utils.ulysses import get_ulysses_sequence_parallel_group, set_ulysses_sequence_parallel_group
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig
 from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.fsdp.utils import create_device_mesh, get_sharding_strategy
@@ -165,7 +164,6 @@ class DiffusersFSDPEngine(BaseEngine):
 
         self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=fsdp_size)
         self.ulysses_device_mesh = None
-        self.ulysses_parallel_group = None
         self.ulysses_sequence_parallel_size = self.engine_config.ulysses_sequence_parallel_size
         dp_size = self.get_data_parallel_size()
         if self.ulysses_sequence_parallel_size > 1:
@@ -185,7 +183,6 @@ class DiffusersFSDPEngine(BaseEngine):
                 mesh_shape=(dp_size, 1, self.ulysses_sequence_parallel_size),
                 mesh_dim_names=["dp", "ring", "ulysses"],
             )
-            self.ulysses_parallel_group = self.ulysses_device_mesh["ulysses"].get_group()
 
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
@@ -480,7 +477,6 @@ class DiffusersFSDPEngine(BaseEngine):
     ) -> list[TensorDict]:
         num_timesteps = data["all_timesteps"].shape[1]
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
-        tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
         tu.assign_non_tensor(data, use_dynamic_bsz=False)
 
         micro_batches, indices = prepare_micro_batches(
@@ -853,13 +849,10 @@ class EngineEvalModeCtx(BaseEngineCtx):
     def __enter__(self):
         assert isinstance(self.engine, DiffusersFSDPEngine)
         super().__enter__()
-        self.prev_sp_group = get_ulysses_sequence_parallel_group()
-        set_ulysses_sequence_parallel_group(self.engine.ulysses_parallel_group)
         self.engine.module.eval()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, DiffusersFSDPEngine)
-        set_ulysses_sequence_parallel_group(self.prev_sp_group)
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
@@ -879,12 +872,9 @@ class EngineTrainModeCtx(BaseEngineCtx):
     def __enter__(self):
         assert isinstance(self.engine, DiffusersFSDPEngine)
         super().__enter__()
-        self.prev_sp_group = get_ulysses_sequence_parallel_group()
-        set_ulysses_sequence_parallel_group(self.engine.ulysses_parallel_group)
         self.engine.module.train()
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, DiffusersFSDPEngine)
-        set_ulysses_sequence_parallel_group(self.prev_sp_group)
         self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)

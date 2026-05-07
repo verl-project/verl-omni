@@ -64,4 +64,8 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
     gradient_accumulation_steps = tu.get_non_tensor_data(data, "gradient_accumulation_steps", default=None)
     policy_loss = policy_loss / gradient_accumulation_steps
 
+    sp_size = tu.get_non_tensor_data(data, "sp_size", default=None)
+    if sp_size > 1:
+        policy_loss = policy_loss * sp_size
+
     return policy_loss, metrics
