@@ -61,7 +61,7 @@ actor_rollout_ref:
       # ----- MixGRPO sliding-window scheduler (mix_grpo only) -------------
       sample_strategy: random         # random | progressive
       iters_per_group: 1              # progressive only
-      seed: 0                         # random only
+      sde_window_seed: 0              # random only
 ```
 
 ### Field semantics
