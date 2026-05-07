@@ -190,7 +190,7 @@ class DiffusersFSDPEngine(BaseEngine):
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
     def _build_module(self):
-        from diffusers import AutoModel, ContextParallelConfig
+        from diffusers import AutoModel
         from verl.utils.torch_dtypes import PrecisionType
 
         torch_dtype = self.engine_config.model_dtype
@@ -213,12 +213,6 @@ class DiffusersFSDPEngine(BaseEngine):
                 subfolder="transformer",  # currently we support DiT with transformer backbone only.
             )
             module.set_attention_backend(self.model_config.attn_backend)
-
-            if self.use_ulysses_sp:
-                sp_size = self.ulysses_sequence_parallel_size
-                module.enable_parallelism(
-                    config=ContextParallelConfig(ulysses_degree=sp_size, mesh=self.ulysses_device_mesh)
-                )
 
             # some parameters may not in torch_dtype
             module.to(torch_dtype)
@@ -401,6 +395,7 @@ class DiffusersFSDPEngine(BaseEngine):
         return lr_scheduler
 
     def _build_model_optimizer(self):
+        from diffusers import ContextParallelConfig
         from verl.utils.model import print_model_size
 
         # Load base model with specified configuration and dtype
@@ -408,6 +403,12 @@ class DiffusersFSDPEngine(BaseEngine):
         # Apply LoRA adapters if low-rank adaptation is enabled
         if self._is_lora:
             module = self._build_lora_module(module)
+
+        if self.use_ulysses_sp:
+            sp_size = self.ulysses_sequence_parallel_size
+            module.enable_parallelism(
+                config=ContextParallelConfig(ulysses_degree=sp_size, mesh=self.ulysses_device_mesh)
+            )
 
         # Load diffusion scheduler
         scheduler = self._build_scheduler()
