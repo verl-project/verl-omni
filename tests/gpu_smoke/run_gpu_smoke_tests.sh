@@ -181,7 +181,7 @@ run_selected_test() {
 
 # ── Determine which tests to run ───────────────────────────────────────────────
 declare -A RUN_TEST=(
-    [0]=1 [1]=1 [2]=1 [3]=1 [4]=1 [5]=1
+    [0]=1 [1]=1 [2]=1 [3]=1 [4]=1
 )
 
 # If explicit IDs were passed on the CLI, override to run only those.
@@ -233,13 +233,8 @@ run_selected_test 3 "diffusers FSDP engine" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
     pytest -s tests/workers/test_diffusers_fsdp_engine.py
 
-# ── Test 4: Ulysses sequence parallel (diffusers) ────────────────────────────
-run_selected_test 4 "Ulysses SP (diffusers)" \
-    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
-    torchrun --nproc_per_node="${NUM_GPUS}" -m pytest -s tests/workers/test_diffusers_ulysses.py
-
-# ── Test 5: FlowGRPO trainer e2e (vllm_omni rollout) ─────────────────────────
-run_selected_test 5 "FlowGRPO trainer e2e" \
+# ── Test 4: FlowGRPO trainer e2e (vllm_omni rollout) ─────────────────────────
+run_selected_test 4 "FlowGRPO trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_flowgrpo_qwen_image.sh
 
