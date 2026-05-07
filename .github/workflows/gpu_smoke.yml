@@ -18,7 +18,7 @@ on:
     branches:
       - main
       - v0.*
-    types: [opened, synchronize, reopened, labeled]
+    types: [labeled]
     paths:
       - "verl_omni/**"
       - "tests/gpu_smoke/**"

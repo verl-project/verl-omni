@@ -2,7 +2,7 @@ name: check_pr_title
 
 on:
   pull_request:
-    types: [opened, edited, synchronize, labeled]
+    types: [labeled]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

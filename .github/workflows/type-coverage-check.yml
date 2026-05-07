@@ -5,7 +5,7 @@ on:
     branches:
       - main
       - v0.*
-    types: [opened, synchronize, reopened, labeled]
+    types: [labeled]
     paths:
       - "**/*.py"
       - .github/workflows/type-coverage-check.yml

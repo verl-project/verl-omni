@@ -1,0 +1,26 @@
+name: drop_ready_for_ci_label
+
+on:
+  pull_request:
+    types: [synchronize, edited, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  drop_label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Remove ready-for-ci label
+        run: |
+          gh api --method DELETE \
+            /repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels/ready-for-ci \
+            || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
