@@ -16,10 +16,11 @@ Unit tests for Ulysses Sequence Parallel (SP) support in Diffusers models.
 
 Run the distributed tests with ≥ 4 GPUs:
 
-    torchrun --nproc_per_node=4 tests/workers/test_diffusers_ulysses.py
+    torchrun --nproc_per_node=4 --local-ranks-filter=0 tests/workers/test_diffusers_ulysses.py
 """
 
 import os
+from datetime import timedelta
 
 import pytest
 import torch
@@ -27,9 +28,29 @@ import torch.distributed
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
-from verl.utils.device import get_device_name, get_torch_device
-from verl.utils.distributed import initialize_global_process_group
-from verl.utils.ulysses import set_ulysses_sequence_parallel_group
+
+
+def get_device_name() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
+def get_torch_device():
+    return getattr(torch, get_device_name(), torch.cuda)
+
+
+def initialize_global_process_group(timeout_second: int = 36000):
+    backend = "hccl" if get_device_name() == "npu" else "nccl"
+    torch.distributed.init_process_group(
+        backend,
+        timeout=timedelta(seconds=timeout_second),
+        init_method=os.environ.get("DIST_INIT_METHOD", None),
+    )
+    local_rank = int(os.environ["LOCAL_RANK"])
+    if torch.distributed.is_initialized():
+        get_torch_device().set_device(local_rank)
+
 
 _DEFAULT_MODEL_PATH = os.path.expanduser("~/models/tiny-random/Qwen-Image")
 
@@ -101,7 +122,6 @@ def _diffusers_ulysses_fwd(sp_size: int, dp_size: int, backend: str):
         mesh_shape=(dp_size, 1, sp_size),
         mesh_dim_names=("dp", "ring", "ulysses"),
     )
-    sp_group = ulysses_device_mesh["ulysses"].get_group()
 
     cfg = _load_config_for_sp(sp_size)
     latent_dim = cfg.get("in_channels", 64)
@@ -151,13 +171,11 @@ def _diffusers_ulysses_fwd(sp_size: int, dp_size: int, backend: str):
     )
 
     # 1. SP forward
-    set_ulysses_sequence_parallel_group(sp_group)
     module_sp.eval()
     with torch.no_grad():
         output_sp = module_sp(**model_inputs)[0]
 
     # 2. plain (non-SP) forward
-    set_ulysses_sequence_parallel_group(None)
     module_no_sp.eval()
     with torch.no_grad():
         output_no_sp = module_no_sp(**model_inputs)[0]
@@ -262,14 +280,12 @@ def _diffusers_ulysses_fwd_bwd(sp_size: int, dp_size: int, backend: str):
     )
 
     # 1. SP forward + backward
-    set_ulysses_sequence_parallel_group(sp_group)
     module_sp.train()
     output_sp = module_sp(**model_inputs)[0]
     loss_sp = output_sp.float().mean()
     loss_sp.backward()
 
     # 2. plain (non-SP) forward + backward
-    set_ulysses_sequence_parallel_group(None)
     module_no_sp.train()
     output_no_sp = module_no_sp(**model_inputs)[0]
     loss_no_sp = output_no_sp.float().mean()
@@ -364,7 +380,6 @@ def _diffusers_ulysses_fwd_bwd_fsdp(sp_size: int, dp_size: int, backend: str):
         mesh_shape=(dp_size, 1, sp_size),
         mesh_dim_names=("dp", "ring", "ulysses"),
     )
-    sp_group = ulysses_device_mesh["ulysses"].get_group()
 
     cfg = _load_config_for_sp(sp_size)
     latent_dim = cfg.get("in_channels", 64)
@@ -440,14 +455,12 @@ def _diffusers_ulysses_fwd_bwd_fsdp(sp_size: int, dp_size: int, backend: str):
     )
 
     # 1. FSDP-wrapped SP forward + backward
-    set_ulysses_sequence_parallel_group(sp_group)
     module_sp.train()
     output_sp = module_sp(**model_inputs)[0]
     loss_sp = output_sp.float().mean()
     loss_sp.backward()
 
     # 2. plain non-SP forward + backward
-    set_ulysses_sequence_parallel_group(None)
     module_no_sp.train()
     output_no_sp = module_no_sp(**model_inputs)[0]
     loss_no_sp = output_no_sp.float().mean()
