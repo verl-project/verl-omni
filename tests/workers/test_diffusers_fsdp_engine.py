@@ -30,13 +30,15 @@ from verl_omni.workers.engine_workers import TrainingWorker
 from verl_omni.workers.utils.losses import diffusion_loss
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
+from ..utils.gpu_test_topology import resolve_requested_num_gpus
+
 
 def create_training_config(model_type, strategy, device_count, model):
     if device_count == 1:
         cp = fsdp_size = 1
     else:
         cp = 1  # TODO (mike): diffusers backend does not support SP currently.
-        fsdp_size = 4
+        fsdp_size = device_count
     path = os.path.expanduser(model)
     tokenizer_path = os.path.join(path, "tokenizer")
     model_config = DiffusionModelConfig(path=path, tokenizer_path=tokenizer_path)
@@ -144,7 +146,8 @@ def create_data_samples(num_device: int, model_config: DiffusionModelConfig) -> 
 def test_diffusers_fsdp_engine(strategy):
     # Create configs
     ray.init()
-    device_count = torch.cuda.device_count()
+    visible_gpus = torch.cuda.device_count()
+    device_count = resolve_requested_num_gpus(default_num_gpus=max(1, visible_gpus))
     training_config, actor_config = create_training_config(
         model_type="diffusion_model",
         strategy=strategy,

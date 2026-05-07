@@ -44,8 +44,8 @@ Multimodal generative RL training differs from text-only LLM RL not only in mode
 
 Visit our documentation to learn more.
 
-- [Installation](docs/start/install.md)
-- [Quickstart](docs/start/flowgrpo_quickstart.md)
+- [Installation](https://verl-omni.readthedocs.io/en/latest/start/install.html)
+- [Quickstart](https://verl-omni.readthedocs.io/en/latest/start/flowgrpo_quickstart.html)
 
 ## Model and Algorithm Support 🎨
 
@@ -55,7 +55,7 @@ Visit our documentation to learn more.
 | Wan2.2             | Diffusion generator      | Text → Video       | DanceGRPO | WIP    |
 | BAGEL              | Unified understand + gen | Text + Image       | FlowGRPO  | WIP    |
 | HunyuanImage-3.0   | Unified understand + gen | Text + Image       | MixGRPO/SRPO       | Planned |
-| Qwen3-Omni-Thinker | Omni-modality            | Text / Image / Video / Audio | GRPO    | WIP    |
+| Qwen3-Omni-Thinker | Omni-modality            | Text / Image / Video / Audio | GSPO    | WIP    |
 
 ## Roadmap 🗺
 

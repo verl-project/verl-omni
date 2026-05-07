@@ -59,7 +59,6 @@ The script runs `python3 -m verl_omni.trainer.diffusion.main_flowgrpo` with:
 - `actor_rollout_ref.model.lora_rank=64`
 - `actor_rollout_ref.model.lora_alpha=128`
 - `actor_rollout_ref.rollout.name=vllm_omni`
-- `reward.reward_manager.name=visual`
 - `reward.custom_reward_function.name=compute_score_ocr`
 - `trainer.n_gpus_per_node=4`
 

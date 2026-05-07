@@ -260,12 +260,11 @@ reward:
     name: compute_score
   reward_manager:
     _target_: verl.workers.config.reward_model.RewardManagerConfig
-    source: register
-    name: naive
+    source: importlib
+    name: VisualRewardManager
     module:
       _target_: verl.trainer.config.config.ModuleConfig
-      path: null
-      name: custom_reward_manager
+      path: pkg://verl_omni.reward_loop.reward_manager
   reward_model:
     enable: false
     enable_resource_pool: false
