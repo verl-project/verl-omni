@@ -40,7 +40,7 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     actor_rollout_ref.actor.diffusion_loss.clip_ratio=2e-6 \
     actor_rollout_ref.actor.diffusion_loss.adv_clip_max=5.0 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.n=16 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \
@@ -56,11 +56,10 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     reward.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / REWARD_TP)) \
-    reward.reward_manager.name=visual \
     reward.reward_model.enable=True \
     reward.reward_model.model_path=$reward_model_name \
     reward.reward_model.rollout.name=$REWARD_ENGINE \
-    reward.reward_model.rollout.tensor_model_parallel_size=4 \
+    reward.reward_model.rollout.tensor_model_parallel_size=$REWARD_TP \
     reward.custom_reward_function.path=$reward_function_path \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.logger='["console", "wandb"]' \
