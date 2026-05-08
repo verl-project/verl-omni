@@ -74,7 +74,7 @@ In addition to the standard Flow-GRPO actor metrics, GRPO-Guard logs:
 A 4-card collocated training script is provided:
 
 ```bash
-bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_grpo_guard.sh
+bash examples/grpoguard_trainer/run_qwen_image_ocr_lora.sh
 ```
 
 It reuses the Flow-GRPO Qwen-Image OCR setup and only flips the actor loss
