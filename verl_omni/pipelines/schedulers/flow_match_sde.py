@@ -257,8 +257,6 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         # mean along all but batch dimension
         log_prob = log_prob.mean(dim=tuple(range(1, log_prob.ndim))) if log_prob is not None else None
         if return_sqrt_dt:
-            # `dt` is shape (B, 1, 1, ...) when `timestep` is provided (batched), or a scalar when `timestep`
-            # is None. Reduce to shape (B,) so it can be stacked across the time dimension downstream.
             sqrt_dt = torch.sqrt(-1 * dt)
             if sqrt_dt.ndim == 0:
                 sqrt_dt = sqrt_dt.expand(sample.shape[0]).clone()
