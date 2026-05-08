@@ -103,7 +103,6 @@ The provided example script launches `python3 -m verl_omni.trainer.diffusion.mai
 
 - `algorithm.adv_estimator=flow_grpo`
 - `actor_rollout_ref.rollout.name=vllm_omni`
-- `reward.reward_manager.name=visual`
 - `reward.custom_reward_function.name=compute_score_ocr`
 - LoRA fine-tuning on `Qwen-Image`
 - a single-node, `4`-GPU layout

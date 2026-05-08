@@ -11,16 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Score assemblers for verl-omni rollouts."""
-
-import torch
-from verl import DataProto
-
-
-def visual_score_assembler(data: DataProto, scores: list) -> torch.Tensor:
-    """Score assembler for image rollouts.
-
-    Visual rollouts emit one reward per generated image, so the resulting
-    ``rm_scores`` tensor has shape ``(batch_size, 1)``.
-    """
-    return torch.tensor(scores, dtype=torch.float32).unsqueeze(-1)

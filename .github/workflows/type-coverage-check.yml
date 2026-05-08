@@ -5,7 +5,7 @@ on:
     branches:
       - main
       - v0.*
-    types: [opened, synchronize, reopened, labeled]
+    types: [labeled]
     paths:
       - "**/*.py"
       - .github/workflows/type-coverage-check.yml
@@ -37,7 +37,7 @@ jobs:
         run: |
           pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.18.0/vllm-0.18.0+cpu-cp38-abi3-manylinux_2_35_x86_64.whl"
           pip install "vllm-omni==0.18.0"
-          pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@a4351480871347092436d17573ad3ccf75b24122"
+          pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@f81209acafef9b3d8b5023491951f4f114557c52"
           pip install -r requirements.txt
           pip install --no-deps -e .
       - name: Run type annotation coverage check

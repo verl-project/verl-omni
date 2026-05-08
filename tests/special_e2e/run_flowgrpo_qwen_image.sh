@@ -74,7 +74,6 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${micro_bsz_per_gpu} \
     reward.num_workers=1 \
-    reward.reward_manager.name=visual \
     reward.reward_model.enable=False \
     trainer.logger=console \
     trainer.project_name=verl-test \

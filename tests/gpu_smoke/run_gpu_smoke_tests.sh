@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
-# tests/gpu_smoke/run_gpu_smoke_tests.sh (offline version, to be dropped when online GPU test is available)
+# tests/gpu_smoke/run_gpu_smoke_tests.sh
 #
 # Offline GPU smoke-test suite for verl-omni.
 # Runs a curated set of GPU-dependent tests and produces a structured
 # pass/fail summary with per-test log capture.
 #
 # Usage:
-#   bash tests/gpu_smoke/run_gpu_smoke_tests.sh [TEST_IDs...]
+#   bash tests/gpu_smoke/run_gpu_smoke_tests.sh [--num-gpus N] [TEST_IDs...]
 #
 #   With no arguments, runs all enabled tests.
 #   Pass specific test IDs to run only those:
-#     bash tests/gpu_smoke/run_gpu_smoke_tests.sh 0 3 6
+#     bash tests/gpu_smoke/run_gpu_smoke_tests.sh 0 3 4
+#   Select GPU count (allowed: 1, 2, 4, 8):
+#     bash tests/gpu_smoke/run_gpu_smoke_tests.sh --num-gpus 2
 #
 # Optional environment overrides:
 #   LOG_DIR   Directory for per-test log files  (default: logs/gpu_smoke/<timestamp>)
-#   NUM_GPUS  Number of GPUs available          (default: auto-detected)
+#   NUM_GPUS  Number of GPUs to run with        (default: 4)
 
 set -euo pipefail
 
@@ -43,15 +45,75 @@ if [[ -n "${CONDA_PREFIX:-}" ]]; then
     export LD_LIBRARY_PATH="${CONDA_PREFIX}/cuda-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 fi
 
-# ── GPU detection ──────────────────────────────────────────────────────────────
-if [[ -z "${NUM_GPUS:-}" ]]; then
-    if command -v nvidia-smi &>/dev/null; then
-        NUM_GPUS="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)"
-    else
-        NUM_GPUS=0
+# ── GPU selection ──────────────────────────────────────────────────────────────
+REQUESTED_NUM_GPUS="${NUM_GPUS:-4}"
+declare -a CLI_TEST_IDS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -g|--num-gpus)
+            if [[ $# -lt 2 ]]; then
+                fail "Missing value for $1 (expected one of: 1, 2, 4, 8)"
+                exit 2
+            fi
+            REQUESTED_NUM_GPUS="$2"
+            shift 2
+            ;;
+        --num-gpus=*)
+            REQUESTED_NUM_GPUS="${1#*=}"
+            shift
+            ;;
+        -h|--help)
+            cat <<'EOF'
+Usage:
+  bash tests/gpu_smoke/run_gpu_smoke_tests.sh [--num-gpus N] [TEST_IDs...]
+
+Options:
+  -g, --num-gpus N    GPU count to run with (allowed: 1, 2, 4, 8)
+  -h, --help          Show this help message
+EOF
+            exit 0
+            ;;
+        *)
+            CLI_TEST_IDS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [[ -n "${REQUESTED_NUM_GPUS}" ]]; then
+    if ! [[ "${REQUESTED_NUM_GPUS}" =~ ^[0-9]+$ ]]; then
+        fail "Invalid --num-gpus value '${REQUESTED_NUM_GPUS}' (must be 1, 2, 4, or 8)"
+        exit 2
     fi
+    case "${REQUESTED_NUM_GPUS}" in
+        1|2|4|8) ;;
+        *)
+            fail "Unsupported --num-gpus value '${REQUESTED_NUM_GPUS}' (must be 1, 2, 4, or 8)"
+            exit 2
+            ;;
+    esac
+
+    NUM_GPUS="${REQUESTED_NUM_GPUS}"
 fi
+
 export NUM_GPUS
+
+build_cuda_device_list() {
+    local n="$1"
+    local devices=()
+    local i
+    for (( i=0; i<n; i++ )); do
+        devices+=("${i}")
+    done
+    local IFS=,
+    echo "${devices[*]}"
+}
+
+if [[ "${NUM_GPUS}" -gt 0 ]]; then
+    CUDA_DEVICE_LIST="$(build_cuda_device_list "${NUM_GPUS}")"
+else
+    CUDA_DEVICE_LIST=""
+fi
 
 # ── Internal result tracking ───────────────────────────────────────────────────
 declare -a TEST_NAMES=()
@@ -107,16 +169,26 @@ skip_test() {
     TEST_LOG_FILES+=("-")
 }
 
+# ── run_selected_test <id> <name> <cmd...> ────────────────────────────────────
+run_selected_test() {
+    local id="$1"; local name="$2"; shift 2
+    if [[ "${RUN_TEST[$id]}" == "1" ]]; then
+        run_test "${id}" "${name}" "$@"
+    else
+        skip_test "${id}" "${name}" "not selected"
+    fi
+}
+
 # ── Determine which tests to run ───────────────────────────────────────────────
 declare -A RUN_TEST=(
     [0]=1 [1]=1 [2]=1 [3]=1 [4]=1
 )
 
 # If explicit IDs were passed on the CLI, override to run only those.
-if [[ $# -gt 0 ]]; then
+if [[ "${#CLI_TEST_IDS[@]}" -gt 0 ]]; then
     for k in "${!RUN_TEST[@]}"; do RUN_TEST[$k]=0; done
-    for id in "$@"; do
-        if [[ -v RUN_TEST[$id] ]]; then
+    for id in "${CLI_TEST_IDS[@]}"; do
+        if [[ -n "${RUN_TEST[$id]+x}" ]]; then
             RUN_TEST[$id]=1
         else
             warn "Unknown test id '${id}' — ignored"
@@ -131,6 +203,9 @@ echo -e "  Date      : $(date '+%Y-%m-%d %H:%M:%S')"
 echo -e "  Repo root : ${REPO_ROOT}"
 echo -e "  Log dir   : ${LOG_DIR}"
 echo -e "  NUM_GPUS  : ${NUM_GPUS}"
+if [[ -n "${CUDA_DEVICE_LIST}" ]]; then
+    echo -e "  CUDA_VISIBLE_DEVICES : ${CUDA_DEVICE_LIST}"
+fi
 sep
 echo ""
 
@@ -139,57 +214,29 @@ echo ""
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Test 0: vllm-omni rollout ─────────────────────────────────────────────────
-if [[ "${RUN_TEST[0]}" == "1" ]]; then
-    if [[ "${NUM_GPUS}" -lt 1 ]]; then
-        skip_test 0 "vllm-omni rollout" "requires at least 1 GPU"
-    else
-        run_test 0 "vllm-omni rollout" \
-            pytest -s tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py
-    fi
-else
-    skip_test 0 "vllm-omni rollout" "not selected"
-fi
+run_selected_test 0 "vllm-omni rollout" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    pytest -s tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py
 
 # ── Test 1: diffusion agent loop ──────────────────────────────────────────────
-if [[ "${RUN_TEST[1]}" == "1" ]]; then
-    run_test 1 "diffusion agent loop" \
-        pytest -s tests/agent_loop/test_diffusion_agent_loop.py
-else
-    skip_test 1 "diffusion agent loop" "not selected"
-fi
+run_selected_test 1 "diffusion agent loop" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    pytest -s tests/agent_loop/test_diffusion_agent_loop.py
 
 # ── Test 2: visual reward manager ─────────────────────────────────────────────
-if [[ "${RUN_TEST[2]}" == "1" ]]; then
-    run_test 2 "visual reward manager" \
-        pytest -s tests/reward_loop/test_visual_reward_manager.py
-else
-    skip_test 2 "visual reward manager" "not selected"
-fi
+run_selected_test 2 "visual reward manager" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    pytest -s tests/reward_loop/test_visual_reward_manager.py
 
-# ── Test 3: diffusers FSDP engine (4 GPUs) ────────────────────────────────────
-if [[ "${RUN_TEST[3]}" == "1" ]]; then
-    if [[ "${NUM_GPUS}" -lt 4 ]]; then
-        skip_test 3 "diffusers FSDP engine" "requires 4 GPUs, only ${NUM_GPUS} available"
-    else
-        CUDA_VISIBLE_DEVICES=0,1,2,3 \
-        run_test 3 "diffusers FSDP engine" \
-            pytest -s tests/workers/test_diffusers_fsdp_engine.py
-    fi
-else
-    skip_test 3 "diffusers FSDP engine" "not selected"
-fi
+# ── Test 3: diffusers FSDP engine ─────────────────────────────────────────────
+run_selected_test 3 "diffusers FSDP engine" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    pytest -s tests/workers/test_diffusers_fsdp_engine.py
 
 # ── Test 4: FlowGRPO trainer e2e (vllm_omni rollout) ─────────────────────────
-if [[ "${RUN_TEST[4]}" == "1" ]]; then
-    if [[ "${NUM_GPUS}" -lt 4 ]]; then
-        skip_test 4 "FlowGRPO trainer e2e" "requires 4 GPUs, only ${NUM_GPUS} available"
-    else
-        run_test 4 "FlowGRPO trainer e2e" \
-            bash tests/special_e2e/run_flowgrpo_qwen_image.sh
-    fi
-else
-    skip_test 4 "FlowGRPO trainer e2e" "not selected"
-fi
+run_selected_test 4 "FlowGRPO trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
+    bash tests/special_e2e/run_flowgrpo_qwen_image.sh
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SUMMARY

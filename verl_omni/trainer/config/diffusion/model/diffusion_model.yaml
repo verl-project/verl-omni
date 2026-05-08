@@ -28,6 +28,9 @@ external_lib: null
 # whether to enable gradient checkpointing.
 enable_gradient_checkpointing: True
 
+# Diffusers attention backend. Supported: "native"
+attn_backend: native
+
 # Set to positive value to enable LoRA (e.g., 32)
 lora_rank: 0
 

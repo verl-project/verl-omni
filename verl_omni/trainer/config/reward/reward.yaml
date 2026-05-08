@@ -11,15 +11,14 @@ custom_reward_function:
   # The name of the reward function within the specified file. Default is 'compute_score'.
   name: compute_score
 
-# reward manager, see `verl_omni/trainer/config/reward_manager.yaml` for details.
+# reward manager configuration
 reward_manager:
   _target_: verl.workers.config.reward_model.RewardManagerConfig
-  source: register
-  name: naive
+  source: importlib
+  name: VisualRewardManager
   module:
     _target_: verl.trainer.config.config.ModuleConfig
-    path: null
-    name: custom_reward_manager
+    path: pkg://verl_omni.reward_loop.reward_manager
 
 # Inference config for reward models,
 # support both discriminative and generative models
