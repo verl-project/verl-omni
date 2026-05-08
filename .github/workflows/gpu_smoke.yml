@@ -85,7 +85,7 @@ jobs:
       - name: Run GPU smoke tests
         run: |
           ray stop --force
-          bash tests/gpu_smoke/run_gpu_smoke_tests.sh --num_gpus 8
+          bash tests/gpu_smoke/run_gpu_smoke_tests.sh --num-gpus 8
 
   cleanup:
     runs-on: ubuntu-latest
