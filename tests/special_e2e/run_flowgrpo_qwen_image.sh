@@ -19,18 +19,16 @@ TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-1}
 ENGINE=vllm_omni
 max_prompt_length=256
 
-if [ ! -f "${dummy_train_path}" ] || [ ! -f "${dummy_test_path}" ]; then
-    python3 tests/special_e2e/create_dummy_diffusion_data.py \
-        --local_save_dir "${DATA_DIR}" \
-        --train_size 8 \
-        --val_size 4
-fi
-
 n_resp_per_prompt=2
 micro_bsz_per_gpu=1
 micro_bsz=$((micro_bsz_per_gpu * NUM_GPUS))
 mini_bsz=${micro_bsz}
 train_batch_size=$((mini_bsz * n_resp_per_prompt))
+
+python3 tests/special_e2e/create_dummy_diffusion_data.py \
+    --local_save_dir "${DATA_DIR}" \
+    --train_size "${train_batch_size}" \
+    --val_size 4
 
 python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     algorithm.adv_estimator=flow_grpo \
