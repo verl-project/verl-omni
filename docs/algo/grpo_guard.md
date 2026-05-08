@@ -59,16 +59,6 @@ KL regularisation against a frozen reference policy still works the same way
 as Flow-GRPO (`actor_rollout_ref.actor.use_kl_loss=True`,
 `actor_rollout_ref.actor.kl_loss_coef=...`).
 
-## Logged metrics
-
-In addition to the standard Flow-GRPO actor metrics, GRPO-Guard logs:
-
-| Metric | Description |
-| --- | --- |
-| `actor/grpo_guard/ratio_mean_bias` | Mean of the per-sample bias term $b_t$. |
-| `actor/grpo_guard/sqrt_dt` | Per-step $\sqrt{-dt}$ used in the rescaling. |
-| `actor/grpo_guard/sigma_t` | Per-step SDE noise scale $\sigma_t$. |
-
 ## Example script
 
 A 4-card collocated training script is provided:

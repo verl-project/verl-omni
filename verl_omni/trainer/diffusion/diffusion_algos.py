@@ -233,12 +233,16 @@ def compute_diffusion_loss_flow_grpo(
         pg_clipfrac = torch.mean((torch.abs(ratio - 1.0) > loss_cfg.clip_ratio).float())
         pg_clipfrac_higher = torch.mean((ratio - 1.0 > loss_cfg.clip_ratio).float())
         pg_clipfrac_lower = torch.mean((1.0 - ratio > loss_cfg.clip_ratio).float())
+        ratio_mean = ratio.mean()
+        ratio_std = ratio.std()
 
     pg_metrics = {
         "actor/ppo_kl": ppo_kl.detach().item(),
         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
         "actor/pg_clipfrac_higher": pg_clipfrac_higher.detach().item(),
         "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+        "actor/ratio_mean": ratio_mean.detach().item(),
+        "actor/ratio_std": ratio_std.detach().item(),
     }
     return pg_loss, pg_metrics
 
@@ -323,15 +327,17 @@ def compute_diffusion_loss_grpo_guard(
         pg_clipfrac = torch.mean((torch.abs(ratio - 1.0) > loss_cfg.clip_ratio).float())
         pg_clipfrac_higher = torch.mean((ratio - 1.0 > loss_cfg.clip_ratio).float())
         pg_clipfrac_lower = torch.mean((1.0 - ratio > loss_cfg.clip_ratio).float())
+        ratio_mean = ratio.mean()
+        ratio_std = ratio.std()
 
     pg_metrics = {
         "actor/ppo_kl": ppo_kl.detach().item(),
         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
         "actor/pg_clipfrac_higher": pg_clipfrac_higher.detach().item(),
         "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
-        "actor/grpo_guard/ratio_mean_bias": ratio_mean_bias.detach().mean().item(),
-        "actor/grpo_guard/sqrt_dt": sqrt_dt_mean.detach().item(),
-        "actor/grpo_guard/sigma_t": sigma_t.detach().item(),
+        "actor/ratio_mean": ratio_mean.detach().item(),
+        "actor/ratio_std": ratio_std.detach().item(),
+        "actor/ratio_mean_bias": ratio_mean_bias.detach().mean().item(),
     }
     return pg_loss, pg_metrics
 
