@@ -40,7 +40,7 @@ permissions:
 
 env:
   IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm018.dev1"
-  DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
+  DYNAMIC_RUNNER_ENDPOINT: "https://sd7upeujs1b9g1a958pn0.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
   setup:
