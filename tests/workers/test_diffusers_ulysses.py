@@ -188,6 +188,7 @@ def _diffusers_ulysses_fwd(sp_size: int, dp_size: int, backend: str):
 
     assert output_sp.shape == output_no_sp.shape, f"Shape mismatch: SP {output_sp.shape} vs non-SP {output_no_sp.shape}"
 
+    # we need a strict tolerance here to show _patch is working
     torch.testing.assert_close(output_sp.float(), output_no_sp.float(), rtol=1e-2, atol=1e-2)
 
     if rank == 0:
