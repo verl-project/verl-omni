@@ -186,6 +186,7 @@ actor_rollout_ref:
     custom_chat_template: null
     external_lib: null
     enable_gradient_checkpointing: true
+    attn_backend: native
     lora_rank: 0
     lora_alpha: 64
     lora_init_weights: gaussian

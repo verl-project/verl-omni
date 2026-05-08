@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import os
+import shutil
+import tempfile
 from functools import partial
 
 import numpy as np
@@ -33,11 +35,41 @@ from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 from ..utils.gpu_test_topology import resolve_requested_num_gpus
 
 
+def _diffusers_sp_supported() -> bool:
+    """Return True if the installed diffusers version supports ContextParallelConfig (>= 0.38.0)."""
+    import diffusers
+    from packaging import version
+
+    return version.parse(diffusers.__version__) >= version.parse("0.38.0")
+
+
+def _create_sp_compatible_model(parent_dir, src_model_path, num_attention_heads=2):
+    """Create a temporary Qwen-Image model copy compatible with SP."""
+    from diffusers import QwenImageTransformer2DModel
+
+    dst = os.path.join(parent_dir, "Qwen-Image")
+    shutil.copytree(src_model_path, dst)
+
+    transformer = QwenImageTransformer2DModel(
+        num_attention_heads=num_attention_heads,
+        attention_head_dim=32,
+        num_layers=2,
+        in_channels=64,
+        out_channels=16,
+        patch_size=2,
+        joint_attention_dim=32,
+        axes_dims_rope=(8, 12, 12),
+        guidance_embeds=False,
+    )
+    transformer.save_pretrained(os.path.join(dst, "transformer"))
+    return dst
+
+
 def create_training_config(model_type, strategy, device_count, model):
     if device_count == 1:
         cp = fsdp_size = 1
     else:
-        cp = 1  # TODO (mike): diffusers backend does not support SP currently.
+        cp = 2 if _diffusers_sp_supported() else 1
         fsdp_size = device_count
     path = os.path.expanduser(model)
     tokenizer_path = os.path.join(path, "tokenizer")
@@ -146,59 +178,72 @@ def create_data_samples(num_device: int, model_config: DiffusionModelConfig) -> 
 def test_diffusers_fsdp_engine(strategy):
     # Create configs
     ray.init()
-    visible_gpus = torch.cuda.device_count()
-    device_count = resolve_requested_num_gpus(default_num_gpus=max(1, visible_gpus))
-    training_config, actor_config = create_training_config(
-        model_type="diffusion_model",
-        strategy=strategy,
-        device_count=device_count,
-        model="~/models/tiny-random/Qwen-Image",
-    )
-    # init model
-    ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(TrainingWorker), config=training_config)
-    resource_pool = RayResourcePool(process_on_nodes=[device_count])
-    wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init)  # TrainigWorker
-    wg.reset()
+    tmp_dir = tempfile.mkdtemp(prefix="qwen_image_sp_")
+    try:
+        visible_gpus = torch.cuda.device_count()
+        device_count = resolve_requested_num_gpus(default_num_gpus=max(1, visible_gpus))
+        if device_count > 1 and device_count % 2 != 0:
+            pytest.skip(f"Need even GPU count for cp=2/fsdp_size=device_count test, got {device_count}")
 
-    # forward only without loss function
-    data_td = create_data_samples(device_count, training_config.model_config).to_tensordict()
-    data_td = embeds_padding_2_no_padding(data_td)
-    tu.assign_non_tensor(
-        data_td,
-        compute_loss=False,
-        height=training_config.model_config.get("height", 512),
-        width=training_config.model_config.get("width", 512),
-        vae_scale_factor=training_config.model_config.get("vae_scale_factor", 8),
-    )
-    output = wg.infer_batch(data_td)
-    output_dict = output.get()
+        sp_enabled = device_count > 1 and _diffusers_sp_supported()
+        base_model_path = os.path.expanduser("~/models/tiny-random/Qwen-Image")
+        if sp_enabled:
+            # SP requires num_attention_heads divisible by sp_size (cp=2).
+            model_path = _create_sp_compatible_model(tmp_dir, base_model_path, num_attention_heads=2)
+        else:
+            model_path = base_model_path
+        training_config, actor_config = create_training_config(
+            model_type="diffusion_model",
+            strategy=strategy,
+            device_count=device_count,
+            model=model_path,
+        )
+        # init model
+        ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(TrainingWorker), config=training_config)
+        resource_pool = RayResourcePool(process_on_nodes=[device_count])
+        wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init)  # TrainigWorker
+        wg.reset()
 
-    for key in ["log_probs", "metrics"]:
-        assert key in output_dict
+        # forward only without loss function
+        data_td = create_data_samples(device_count, training_config.model_config).to_tensordict()
+        data_td = embeds_padding_2_no_padding(data_td)
+        tu.assign_non_tensor(
+            data_td,
+            compute_loss=False,
+            height=training_config.model_config.get("height", 512),
+            width=training_config.model_config.get("width", 512),
+            vae_scale_factor=training_config.model_config.get("vae_scale_factor", 8),
+        )
+        output = wg.infer_batch(data_td)
+        output_dict = output.get()
 
-    # forward and backward with loss function
-    # set loss function
-    loss_fn = partial(diffusion_loss, config=actor_config)
-    wg.set_loss_fn(loss_fn)
+        for key in ["log_probs", "metrics"]:
+            assert key in output_dict
 
-    # train batch
-    data_td = create_data_samples(device_count, training_config.model_config).to_tensordict()
-    data_td = embeds_padding_2_no_padding(data_td)
-    ppo_mini_batch_size = 4
-    ppo_epochs = actor_config.ppo_epochs
-    seed = 42
-    shuffle = actor_config.shuffle
-    tu.assign_non_tensor(
-        data_td,
-        global_batch_size=ppo_mini_batch_size * device_count,
-        mini_batch_size=ppo_mini_batch_size * device_count,
-        epochs=ppo_epochs,
-        seed=seed,
-        dataloader_kwargs={"shuffle": shuffle},
-    )
-    output = wg.train_mini_batch(data_td)
-    output_dict = output.get()
+        # forward and backward with loss function
+        # set loss function
+        loss_fn = partial(diffusion_loss, config=actor_config)
+        wg.set_loss_fn(loss_fn)
 
-    assert "metrics" in output_dict.keys()
+        # train batch
+        data_td = create_data_samples(device_count, training_config.model_config).to_tensordict()
+        data_td = embeds_padding_2_no_padding(data_td)
+        ppo_mini_batch_size = 4
+        ppo_epochs = actor_config.ppo_epochs
+        seed = 42
+        shuffle = actor_config.shuffle
+        tu.assign_non_tensor(
+            data_td,
+            global_batch_size=ppo_mini_batch_size * device_count,
+            mini_batch_size=ppo_mini_batch_size * device_count,
+            epochs=ppo_epochs,
+            seed=seed,
+            dataloader_kwargs={"shuffle": shuffle},
+        )
+        output = wg.train_mini_batch(data_td)
+        output_dict = output.get()
 
-    ray.shutdown()
+        assert "metrics" in output_dict.keys()
+    finally:
+        ray.shutdown()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
