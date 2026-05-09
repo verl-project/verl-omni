@@ -11,7 +11,7 @@ model_name=Qwen/Qwen-Image
 reward_model_name=Qwen/Qwen3-VL-8B-Instruct
 reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
 
-NUM_GPUS_ACTOR_ROLLOUT_REWARD=8
+NUM_GPUS_ACTOR_ROLLOUT_REWARD=4
 ROLLOUT_TP=1
 REWARD_TP=4
 
@@ -51,7 +51,6 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     reward.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / REWARD_TP)) \
-    reward.reward_manager.name=visual \
     reward.reward_model.enable=True \
     reward.reward_model.model_path=$reward_model_name \
     reward.reward_model.rollout.name=$REWARD_ENGINE \
