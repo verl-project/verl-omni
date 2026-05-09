@@ -186,7 +186,6 @@ class DiffusersFSDPEngine(BaseEngine):
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
     def _build_module(self):
-        from diffusers import AutoModel
         from verl.utils.torch_dtypes import PrecisionType
 
         torch_dtype = self.engine_config.model_dtype
@@ -196,6 +195,29 @@ class DiffusersFSDPEngine(BaseEngine):
             torch_dtype = torch.float32 if not self.engine_config.forward_only else torch.bfloat16
 
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
+
+        # Allow registered DiffusionModelBase subclass to provide custom loading
+        from verl_omni.pipelines.model_base import DiffusionModelBase
+
+        model_cls = DiffusionModelBase.get_class(self.model_config)
+        module = model_cls.build_module(self.model_config, torch_dtype)
+        if module is not None:
+            module.to(torch_dtype)
+            if self.model_config.enable_gradient_checkpointing:
+                enable_checkpointing = getattr(module, "enable_gradient_checkpointing", None)
+                if callable(enable_checkpointing):
+                    enable_checkpointing()
+                else:
+                    logger.warning(
+                        "Gradient checkpointing requested, but %s does not implement enable_gradient_checkpointing()",
+                        type(module).__name__,
+                    )
+            if not hasattr(module, "can_generate"):
+                module.can_generate = lambda: False
+            return module
+
+        # Default path: load via diffusers AutoModel
+        from diffusers import AutoModel
 
         init_context = get_init_weight_context_manager(use_meta_tensor=True, mesh=self.device_mesh)
 
@@ -576,16 +598,16 @@ class DiffusersFSDPEngine(BaseEngine):
         """
         latents = micro_batch["all_latents"]
         timesteps = micro_batch["all_timesteps"]
-        prompt_embeds = micro_batch["prompt_embeds"]
-        prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
-        negative_prompt_embeds = micro_batch["negative_prompt_embeds"]
-        negative_prompt_embeds_mask = micro_batch["negative_prompt_embeds_mask"]
+        prompt_embeds = micro_batch.get("prompt_embeds", None)
+        prompt_embeds_mask = micro_batch.get("prompt_embeds_mask", None)
+        negative_prompt_embeds = micro_batch.get("negative_prompt_embeds", None)
+        negative_prompt_embeds_mask = micro_batch.get("negative_prompt_embeds_mask", None)
         sp_size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
 
-        if prompt_embeds.is_nested:
+        if isinstance(prompt_embeds, torch.Tensor) and prompt_embeds.is_nested:
             prompt_embeds, prompt_embeds_mask = self._unpad_nested_embeds(prompt_embeds, prompt_embeds_mask)
 
-        if sp_size > 1:
+        if isinstance(prompt_embeds, torch.Tensor) and sp_size > 1:
             prompt_embeds, prompt_embeds_mask = self._pad_embeds_for_sp(prompt_embeds, prompt_embeds_mask, sp_size)
 
         if isinstance(negative_prompt_embeds, torch.Tensor) and negative_prompt_embeds.is_nested:

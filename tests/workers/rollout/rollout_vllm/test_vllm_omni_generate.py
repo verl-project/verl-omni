@@ -58,7 +58,7 @@ def _tokenize_prompt(text: str) -> list[int]:
     return token_ids
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def init_server():
     """Create and launch a vLLMOmniHttpServer Ray actor with Qwen/Qwen-Image."""
     model_path = MODEL_PATH
@@ -162,7 +162,7 @@ def test_generate(init_server):
     for i, prompt in enumerate(prompts):
         rid = f"test_{i}_{uuid4().hex[:8]}"
         ref = server.generate.remote(
-            prompt_ids=_tokenize_prompt(prompt),
+            prompt_token_ids=_tokenize_prompt(prompt),
             sampling_params={
                 "num_inference_steps": 10,
                 "true_cfg_scale": 4.0,

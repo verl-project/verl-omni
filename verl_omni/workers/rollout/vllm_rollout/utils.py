@@ -38,7 +38,8 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     """
 
     def __new__(cls, **kwargs):
-        set_death_signal()
+        if os.getenv("VERL_OMNI_ENABLE_WORKER_DEATH_SIGNAL") == "1":
+            set_death_signal()
 
         # 1. patch for Lora
         VLLMOmniHijack.hijack()

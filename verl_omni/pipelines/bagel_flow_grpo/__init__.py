@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import (
-    _patch,  # noqa: F401 — apply Ulysses mask fix
-    bagel_flow_grpo,
-    qwen_image_flow_grpo,
-)
-from .bagel_flow_grpo import *  # noqa: F401, F403
-from .qwen_image_flow_grpo import *  # noqa: F401, F403
+from .diffusers_training_adapter import BagelDiffusion
+from .vllm_omni_rollout_adapter import BagelPipelineWithLogProb
 
-__all__ = list(qwen_image_flow_grpo.__all__) + list(bagel_flow_grpo.__all__)
+__all__ = ["BagelDiffusion", "BagelPipelineWithLogProb"]
