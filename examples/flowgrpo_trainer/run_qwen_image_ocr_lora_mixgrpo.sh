@@ -24,15 +24,6 @@ REWARD_TP=4
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
-# ----- MixGRPO sliding-window scheduler -----
-# A 10-step trajectory with a window of 2 (group_size = 2).  The `random`
-# strategy draws a fresh window position each step.  This matches the
-# FlowGRPO baseline's inference budget while letting MixGRPO's ODE/SDE
-# split reduce gradient variance.
-#
-# To experiment with longer trajectories (higher quality but slower), try:
-#   num_inference_steps=50, sde_window_size=4, sample_strategy=progressive,
-#   iters_per_group=25
 
 python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     algorithm.adv_estimator=flow_grpo \
