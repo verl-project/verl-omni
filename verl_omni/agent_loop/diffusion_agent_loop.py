@@ -45,6 +45,15 @@ def _config_to_sampling_dict(config: Optional[BaseConfig]) -> dict:
     return {k: v for k, v in config.items() if not k.startswith("_")}
 
 
+_PER_ROLLOUT_SEED_STRIDE = 1_000_003
+_MAX_SEED = (1 << 63) - 1
+
+
+def _derive_rollout_seed(base_seed: int, rollout_index: int) -> int:
+    """Derive a unique per-rollout seed so group members see different noise."""
+    return (int(base_seed) * _PER_ROLLOUT_SEED_STRIDE + int(rollout_index)) % _MAX_SEED
+
+
 class DiffusionAgentLoopOutput(BaseModel):
     """Agent loop output."""
 
@@ -157,12 +166,18 @@ class DiffusionAgentLoopWorker:
             "logprobs": config.calculate_log_probs,
         }
 
-        # override sampling params for validation
-        if batch.meta_info.get("validate", False):
+        is_validate = batch.meta_info.get("validate", False)
+        base_train_seed: int | None = None
+
+        if is_validate:
             sampling_params.update(_config_to_sampling_dict(config.val_kwargs.pipeline))
             sampling_params.update(_config_to_sampling_dict(config.val_kwargs.algo))
             sampling_params["seed"] = config.val_kwargs.seed
             sampling_params["logprobs"] = False
+        else:
+            base_train_seed = batch.meta_info.get("rollout_seed")
+            if base_train_seed is not None:
+                base_train_seed = int(base_train_seed)
 
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch.non_tensor_batch:
@@ -172,7 +187,11 @@ class DiffusionAgentLoopWorker:
         tasks = []
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
-            tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, **kwargs)))
+            task_sampling_params = sampling_params
+            if base_train_seed is not None:
+                task_sampling_params = dict(sampling_params)
+                task_sampling_params["seed"] = _derive_rollout_seed(base_train_seed, i)
+            tasks.append(asyncio.create_task(self._run_agent_loop(task_sampling_params, **kwargs)))
         outputs = await asyncio.gather(*tasks)
 
         output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
