@@ -37,8 +37,6 @@ __all__ = [
 class DiffusionRolloutAlgoConfig(BaseConfig):
     """Algorithm configuration for the SDE-based diffusion rollout.
 
-    (``sample_strategy``, ``iters_per_group``, ``seed``) are ignored when
-    ``algo_type == flow_grpo``.
     """
 
     algo_type: str = "flow_grpo"

@@ -166,7 +166,7 @@ class DiffusionAgentLoopWorker:
             sampling_params["logprobs"] = False
         else:
             # Apply any per-step dynamic sampling overrides provided by the trainer.
-            sampling_overrides = batch.meta_info.get("sampling_overrides")
+            sampling_overrides: dict[str, Any] = batch.meta_info.get("sampling_overrides")
             if sampling_overrides:
                 sampling_params.update(sampling_overrides)
 

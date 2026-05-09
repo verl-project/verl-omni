@@ -31,14 +31,14 @@ support a contiguous SDE window and just consume per-step overrides.
 
 | Layer | What it does | Code |
 |---|---|---|
-| Algo config | `algo_type` selector (`flow_grpo` / `mix_grpo`) plus a small set of MixGRPO knobs. | `verl_omni/workers/config/diffusion/rollout.py` |
+| Algo config | `algo_type` selector (`flow_grpo` / `mix_grpo`) plus a small set of MixGRPO configs. | `verl_omni/workers/config/diffusion/rollout.py` |
 | Trainer | Builds an `SDEWindowScheduler` from the algo config and queries it every step to inject `sde_window_size` / `sde_window_range` overrides. | `verl_omni/trainer/diffusion/sde_window_scheduler.py`, `RayFlowGRPOTrainer.fit()` |
 | Agent loop | Merges the per-step overrides from `meta_info["algo_overrides"]` into the rollout sampling params. | `verl_omni/agent_loop/diffusion_agent_loop.py` |
 | Rollout | Already supports a contiguous SDE window (ODE outside / SDE inside) -- no changes needed. | `verl_omni/pipelines/qwen_image_flow_grpo/vllm_omni_rollout_adapter.py` |
 
 ## Configuration
 
-All knobs live under `actor_rollout_ref.rollout.algo`. Trainer-only fields
+All configs live under `actor_rollout_ref.rollout.algo`. Trainer-only fields
 (`algo_type`, `sample_strategy`, `iters_per_group`, `seed`) are stripped by
 the agent loop before reaching the rollout backend, so the rollout API stays
 unchanged.
@@ -52,7 +52,7 @@ actor_rollout_ref:
       # ----- Selector (both algorithms) ------------------------------------
       algo_type: flow_grpo            # flow_grpo | mix_grpo
 
-      # ----- Common SDE knobs ---------------------------------------------
+      # ----- Common SDE configs ---------------------------------------------
       noise_level: 1.0                # SDE noise magnitude
       sde_type: sde                   # sde | cps
       sde_window_size: null           # window length / "group size"
