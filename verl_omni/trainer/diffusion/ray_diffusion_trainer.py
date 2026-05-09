@@ -57,7 +57,7 @@ from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
 )
-from verl_omni.trainer.diffusion.sde_window_scheduler import SDEWindowScheduler
+from verl_omni.pipelines.schedulers.sde_window_scheduler import SDEWindowScheduler
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 

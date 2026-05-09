@@ -32,7 +32,7 @@ support a contiguous SDE window and just consume per-step overrides.
 | Layer | What it does | Code |
 |---|---|---|
 | Algo config | `algo_type` selector (`flow_grpo` / `mix_grpo`) plus a small set of MixGRPO configs. | `verl_omni/workers/config/diffusion/rollout.py` |
-| Trainer | Builds an `SDEWindowScheduler` from the algo config and queries it every step to inject `sde_window_size` / `sde_window_range` overrides. | `verl_omni/trainer/diffusion/sde_window_scheduler.py`, `RayFlowGRPOTrainer.fit()` |
+| Trainer | Builds an `SDEWindowScheduler` from the algo config and queries it every step to inject `sde_window_size` / `sde_window_range` overrides. | `verl_omni/pipelines/schedulers/sde_window_scheduler.py`, `RayFlowGRPOTrainer.fit()` |
 | Agent loop | Merges the per-step overrides from `meta_info["algo_overrides"]` into the rollout sampling params. | `verl_omni/agent_loop/diffusion_agent_loop.py` |
 | Rollout | Already supports a contiguous SDE window (ODE outside / SDE inside) -- no changes needed. | `verl_omni/pipelines/qwen_image_flow_grpo/vllm_omni_rollout_adapter.py` |
 

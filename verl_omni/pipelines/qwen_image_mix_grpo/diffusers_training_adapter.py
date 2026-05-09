@@ -45,7 +45,7 @@ class QwenImageMixGRPO(QwenImage):
         Returns:
             SDEWindowScheduler: A sliding-window scheduler (e.g., MixGRPORandomScheduler).
         """
-        from verl_omni.trainer.diffusion.sde_window_scheduler import build_sde_window_scheduler
+        from verl_omni.pipelines.schedulers.sde_window_scheduler import build_sde_window_scheduler
 
         num_inference_steps = int(model_config.pipeline.num_inference_steps)
         # Delegate to the algorithm scheduler factory

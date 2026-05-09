@@ -99,7 +99,7 @@ class DiffusionModelBase(ABC):
             model_config (DiffusionModelConfig): the configuration of the diffusion model.
         """
         # Default fallback: baseline FlowGRPO behaviour
-        from verl_omni.trainer.diffusion.sde_window_scheduler import FlowGRPOWindowScheduler
+        from verl_omni.pipelines.schedulers.sde_window_scheduler import FlowGRPOWindowScheduler
         algo = model_config.algo
         return FlowGRPOWindowScheduler(
             sde_window_size=algo.sde_window_size if algo else None,

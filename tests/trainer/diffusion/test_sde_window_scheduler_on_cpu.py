@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import pytest
 
-from verl_omni.trainer.diffusion.sde_window_scheduler import (
+from verl_omni.pipelines.schedulers.sde_window_scheduler import (
     FlowGRPOWindowScheduler,
     MixGRPOProgressiveScheduler,
     MixGRPORandomScheduler,
