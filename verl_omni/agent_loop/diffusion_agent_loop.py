@@ -166,8 +166,6 @@ class DiffusionAgentLoopWorker:
             sampling_params["logprobs"] = False
         else:
             # Apply any per-step dynamic sampling overrides provided by the trainer.
-            # This allows the trainer to manipulate rollout generation without coupling
-            # the agent loop to specific algorithm implementations (like SDE window sizes).
             sampling_overrides = batch.meta_info.get("sampling_overrides")
             if sampling_overrides:
                 sampling_params.update(sampling_overrides)
