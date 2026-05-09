@@ -29,6 +29,7 @@ from peft import LoraConfig
 from tensordict import TensorDict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
+from torch.distributed._shard.sharded_tensor import ShardedTensor
 from torch.distributed.tensor import DTensor
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
@@ -818,15 +819,14 @@ class DiffusersFSDPEngine(BaseEngine):
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
             # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
-            per_tensor_param = (
-                (
-                    name,
-                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
-                    if isinstance(param, DTensor)
-                    else param,
-                )
-                for name, param in params.items()
-            )
+            def materialize_distributed_param(param):
+                if isinstance(param, DTensor):
+                    return param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                if isinstance(param, ShardedTensor):
+                    return param.full_tensor().to(device, non_blocking=True).to(torch.bfloat16, non_blocking=True)
+                return param
+
+            per_tensor_param = ((name, materialize_distributed_param(param)) for name, param in params.items())
 
         # we need to add the prefix to make it compatible with rollout engine
         per_tensor_param = ((f"transformer.{name}", tensor) for name, tensor in per_tensor_param)
