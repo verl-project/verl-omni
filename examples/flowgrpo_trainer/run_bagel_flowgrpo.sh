@@ -43,6 +43,7 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     data.trust_remote_code=True \
     actor_rollout_ref.model.path=$BAGEL_MODEL_PATH \
     actor_rollout_ref.model.tokenizer_path=$BAGEL_MODEL_PATH \
+    actor_rollout_ref.model.architecture=OmniBagelForConditionalGeneration \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.model.pipeline.height=512 \
     actor_rollout_ref.model.pipeline.width=512 \
