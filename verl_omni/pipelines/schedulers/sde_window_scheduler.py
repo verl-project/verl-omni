@@ -239,7 +239,6 @@ def build_sde_window_scheduler(
 
 
 __all__ = [
-    "SDEWindowOverrides",
     "SDEWindowScheduler",
     "FlowGRPOWindowScheduler",
     "MixGRPORandomScheduler",
