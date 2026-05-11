@@ -14,15 +14,14 @@
 
 import inspect
 
+import torch
 from verl import DataProto
-from verl.experimental.reward_loop.reward_manager import register
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.reward_score import default_compute_score as _upstream_default_compute_score
 
 from verl_omni.utils.reward_score import default_compute_score_image
 
 
-@register("visual")
 class VisualRewardManager(RewardManagerBase):
     """The reward manager for visual response."""
 
@@ -37,6 +36,11 @@ class VisualRewardManager(RewardManagerBase):
         self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score)
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
+
+    @classmethod
+    def assemble_rm_scores(cls, data: DataProto, scores: list[float]) -> torch.Tensor:
+        """Per-sample image rewards: ``rm_scores`` has shape ``(batch_size, 1)``."""
+        return torch.tensor(scores, dtype=torch.float32).unsqueeze(-1)
 
     async def run_single(self, data: DataProto) -> dict:
         assert len(data) == 1, "Only support single data item"

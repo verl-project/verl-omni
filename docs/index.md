@@ -89,8 +89,17 @@ pre-commit run
 
 ### Adding CI tests
 
-If possible, please add CI test(s) for your new feature:
+If possible, please add CI test(s) for your new feature. Pick the most relevant workflow from [`.github/workflows/`](https://github.com/verl-project/verl-omni/tree/main/.github/workflows):
 
-1. Find the most relevant workflow yml file under [`.github/workflows/`](https://github.com/verl-project/verl-omni/tree/main/.github/workflows), which usually corresponds to a `hydra` trainer config (e.g. `flowgrpo_trainer`). For non-trainer changes, use `cpu_unit_tests.yml` or `sanity.yml`.
-2. Add related path patterns to the `paths` section if not already included.
-3. Minimize the workload of the test script(s) (see existing scripts for examples).
+| Workflow | When to use |
+|---|---|
+| `cpu_unit_tests.yml` | New tests that run without a GPU (file name must end with `_on_cpu.py`) |
+| `gpu_smoke.yml` | GPU-requiring tests for trainer, worker, rollout, or agent-loop changes |
+| `gpu_smoke_verl_latest.yml` | Same as above, but pinned against the latest `verl` main (for upstream compatibility) |
+| `sanity.yml` | Static / import-level checks under `tests/special_sanity/` |
+
+Steps:
+
+1. Place your test file in the appropriate directory under `tests/` (e.g. `tests/trainer/`, `tests/workers/`, `tests/agent_loop/`).
+2. Open the chosen workflow yml and add any missing path patterns to its `paths` section so the workflow triggers on your changes.
+3. Keep the test as lightweight as possible — use small models, reduced steps, and CPU where feasible (see existing `*_on_cpu.py` scripts for examples).

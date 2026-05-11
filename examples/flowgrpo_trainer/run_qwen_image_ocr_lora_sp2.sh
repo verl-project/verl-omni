@@ -1,4 +1,4 @@
-# Qwen-Image lora RL, vllm_omni rollout
+# Qwen-Image lora RL (SP=2), vllm_omni rollout
 set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME
@@ -12,6 +12,7 @@ reward_model_name=Qwen/Qwen3-VL-8B-Instruct
 reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=4
+ACTOR_SP=2
 ROLLOUT_TP=1
 REWARD_TP=4
 
@@ -36,6 +37,7 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
+    actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=$ACTOR_SP \
     actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_grpo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
@@ -62,7 +64,7 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=flow_grpo \
-    trainer.experiment_name=qwen_image_ocr_lora \
+    trainer.experiment_name=qwen_image_ocr_lora_sp2 \
     trainer.log_val_generations=8 \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
