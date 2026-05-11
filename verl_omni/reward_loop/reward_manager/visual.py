@@ -15,10 +15,10 @@
 import inspect
 
 import torch
-
 from verl import DataProto
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.reward_score import default_compute_score as _upstream_default_compute_score
+
 from verl_omni.utils.reward_score import default_compute_score_image
 
 

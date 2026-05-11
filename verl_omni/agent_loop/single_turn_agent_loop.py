@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, register
 from verl.utils.profiler import simple_timer
+
 from verl_omni.agent_loop.diffusion_agent_loop import DiffusionAgentLoopOutput
 
 logger = logging.getLogger(__file__)

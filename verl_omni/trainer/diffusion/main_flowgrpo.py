@@ -21,10 +21,10 @@ import socket
 import hydra
 import ray
 from omegaconf import OmegaConf
-
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
+
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import RayFlowGRPOTrainer
 
 
@@ -112,6 +112,7 @@ class TaskRunner:
         """Add actor rollout worker using the unified model engine implementation."""
         from verl.single_controller.ray import RayWorkerGroup
         from verl.trainer.ppo.ray_trainer import Role
+
         from verl_omni.workers.engine_workers import ActorRolloutRefWorker
 
         actor_rollout_cls = ActorRolloutRefWorker

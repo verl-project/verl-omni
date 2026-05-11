@@ -14,7 +14,6 @@
 """RLHF Dataset for diffusion model training."""
 
 from omegaconf import DictConfig
-
 from verl.trainer.main_ppo import create_rl_dataset as _upstream_create_rl_dataset
 from verl.trainer.main_ppo import create_rl_sampler
 from verl.utils.dataset.rl_dataset import RLHFDataset as _UpstreamRLHFDataset
