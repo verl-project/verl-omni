@@ -61,7 +61,7 @@ class DiffusionModelBase(ABC):
         algorithm = model_config.algorithm
         key = (architecture, algorithm)
 
-        if key not in cls._registry and getattr(model_config, "external_lib", None) is not None:
+        if key not in cls._registry and model_config.external_lib is not None:
             from verl.utils.import_utils import import_external_libs
 
             import_external_libs(model_config.external_lib)
