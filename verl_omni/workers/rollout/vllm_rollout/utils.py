@@ -68,7 +68,15 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
 
     def _update_weights(self, weights: list[tuple[str, torch.Tensor]], peft_config: dict, base_sync_done: bool):
         if peft_config and base_sync_done:
-            weights = dict(weights)
+            # Actor trains the full model (Qwen3OmniMoeForConditionalGeneration)
+            # where LoRA params have paths like "...thinker.model.layers.0...".
+            # The rollout engine loads the thinker-only model which expects
+            # "...model.layers.0...".  Strip the "thinker.model." prefix so
+            # names match the thinker-only model.
+            weights = {
+                name.replace(".thinker.model.", ".").replace("thinker.model.", "model."): tensor
+                for name, tensor in weights
+            }
             lora_request = OmniTensorLoRARequest(
                 lora_name=VLLM_LORA_NAME,
                 lora_int_id=VLLM_LORA_INT_ID,

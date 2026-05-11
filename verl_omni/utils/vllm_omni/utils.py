@@ -113,3 +113,8 @@ class VLLMOmniHijack:
             setattr(target_cls, target_method_name, hooking_method)
 
         do_hijack(DiffusionLoRAManager, "_load_adapter", hijack__load_adapter)
+
+        # Also patch the standard vLLM LoRA manager for AR (thinker-only) mode.
+        from verl.utils.vllm import VLLMHijack
+
+        VLLMHijack.hijack()
