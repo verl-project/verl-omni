@@ -30,7 +30,6 @@ from tensordict import TensorDict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 from torch.distributed.tensor import DTensor
-
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -59,6 +58,7 @@ from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig
 from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.fsdp.utils import create_device_mesh, get_sharding_strategy
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
+
 from verl_omni.pipelines.utils import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
 from verl_omni.utils.fsdp_utils import collect_lora_params
 from verl_omni.workers.config import DiffusionModelConfig
@@ -187,7 +187,6 @@ class DiffusersFSDPEngine(BaseEngine):
 
     def _build_module(self):
         from diffusers import AutoModel
-
         from verl.utils.torch_dtypes import PrecisionType
 
         torch_dtype = self.engine_config.model_dtype
@@ -256,7 +255,6 @@ class DiffusersFSDPEngine(BaseEngine):
     def _build_fsdp_module(self, module):
         # TODO(ziheng): need to improve
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
-
         from verl.utils.torch_dtypes import PrecisionType
 
         mixed_precision_config = self.engine_config.mixed_precision
@@ -394,7 +392,6 @@ class DiffusersFSDPEngine(BaseEngine):
 
     def _build_model_optimizer(self):
         from diffusers import ContextParallelConfig
-
         from verl.utils.model import print_model_size
 
         # Load base model with specified configuration and dtype

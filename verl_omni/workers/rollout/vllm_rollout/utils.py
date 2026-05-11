@@ -15,9 +15,9 @@ import logging
 import os
 
 import torch
+from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID, VLLM_LORA_NAME, VLLM_LORA_PATH, set_death_signal
 from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
 
-from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID, VLLM_LORA_NAME, VLLM_LORA_PATH, set_death_signal
 from verl_omni.utils.vllm_omni import OmniTensorLoRARequest, VLLMOmniHijack
 
 logger = logging.getLogger(__file__)
