@@ -130,18 +130,12 @@ The estimator receives `sample_level_rewards` (shape `(B,)`) and the
 group `index` (the prompt UID). Return the `(advantages, returns)` pair
 as full-batch tensors.
 
-If your new algorithm reuses an existing estimator verbatim, simply call
-the register decorator a second time without defining a new function:
-
-```python
-register_diffusion_adv_est(DiffusionAdvantageEstimator.MY_ALGO)(
-    compute_flow_grpo_outcome_advantage
-)
-```
+If your new algorithm reuses an existing estimator verbatim, just set
+`algorithm.adv_estimator=<existing_name>` in your launch script.
 
 If your estimator needs additional kwargs that are not already wired by
 [`compute_advantage`](../../verl_omni/trainer/diffusion/ray_diffusion_trainer.py),
-extend the `if adv_estimator in (...)` branch in
+extend the `if adv_estimator == DiffusionAdvantageEstimator.<NAME>:` branch in
 `ray_diffusion_trainer.compute_advantage` to forward them.
 
 ---
@@ -153,24 +147,15 @@ Still in `diffusion_algos.py`, register the per-step PPO-style loss:
 ```python
 @register_diffusion_loss("flow_grpo")
 def compute_diffusion_loss_flow_grpo(
-    log_prob: torch.Tensor,
     old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
     advantages: torch.Tensor,
-    response_mask: torch.Tensor,
-    cliprange_low: float,
-    cliprange_high: float,
-    loss_agg_mode: str = "token-mean",
-):
+    config: Optional[DictConfig | DiffusionActorConfig] = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
     """Clipped-PPO objective averaged across denoising steps."""
     ...
     return pg_loss, pg_metrics
 ```
-
-The signature is fixed by
-[`DataParallelDiffusionActor.update_policy`](../../verl_omni/workers/actor/dp_diffusion_actor.py).
-If you need extra inputs (e.g. a KL term computed differently), add them
-as keyword arguments with defaults — the actor forwards `**kwargs` into
-the loss for forward-compatibility.
 
 Finally, add the loss name to the validation list in
 [`DiffusionLossConfig.__post_init__`](../../verl_omni/workers/config/diffusion/actor.py):
