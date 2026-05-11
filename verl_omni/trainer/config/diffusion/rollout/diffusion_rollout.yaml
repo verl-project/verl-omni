@@ -1,3 +1,12 @@
+# defaults specify the default config from each component
+defaults:
+
+  # per-role profiler config, inheriting from trainer/config/profiler/profiler.yaml
+  - ../../profiler@profiler: profiler
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
 # Target class for this configuration
 _target_: verl_omni.workers.config.diffusion.DiffusionRolloutConfig
 
@@ -264,9 +273,6 @@ skip_tokenizer_init: True
 # Whether to enable rollout routing replay for MoE models
 # When enabled (True), the rollout will record the routing decisions.
 enable_rollout_routing_replay: False
-
-# profile the rollout model in `generate_sequence`
-profiler: null
 
 # prometheus configuration for vllm-omni server mode
 prometheus:

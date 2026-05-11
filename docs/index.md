@@ -39,6 +39,13 @@ algo/performance.md
 ```
 
 ```{toctree}
+:maxdepth: 1
+:caption: Performance
+
+perf/profiler.md
+```
+
+```{toctree}
 :maxdepth: 2
 :caption: API Reference
 
