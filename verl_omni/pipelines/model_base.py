@@ -56,7 +56,7 @@ class DiffusionModelBase(ABC):
     @classmethod
     def get_class(cls, model_config: DiffusionModelConfig) -> type["DiffusionModelBase"]:
         """Return the registered subclass for ``model_config.architecture``."""
-        registered_archs = [k[0] for k in cls._registry]
+        registered_archs = {k[0] for k in cls._registry}
         if model_config.architecture not in registered_archs and model_config.external_lib is not None:
             from verl.utils.import_utils import import_external_libs
 
