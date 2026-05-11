@@ -185,6 +185,34 @@ class DiffusersFSDPEngine(BaseEngine):
 
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
+    def _build_module_from_registry(self, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
+        """Build the model via a registered ``DiffusionModelBase`` subclass.
+
+        Returns ``None`` when the subclass does not provide a custom loader,
+        in which case the caller falls back to the default
+        ``diffusers.AutoModel`` path.
+        """
+        from verl_omni.pipelines.model_base import DiffusionModelBase
+
+        model_cls = DiffusionModelBase.get_class(self.model_config)
+        module = model_cls.build_module(self.model_config, torch_dtype)
+        if module is None:
+            return None
+
+        module.to(torch_dtype)
+        if self.model_config.enable_gradient_checkpointing:
+            enable_checkpointing = getattr(module, "enable_gradient_checkpointing", None)
+            if callable(enable_checkpointing):
+                enable_checkpointing()
+            else:
+                logger.warning(
+                    "Gradient checkpointing requested, but %s does not implement enable_gradient_checkpointing()",
+                    type(module).__name__,
+                )
+        if not hasattr(module, "can_generate"):
+            module.can_generate = lambda: False
+        return module
+
     def _build_module(self):
         from verl.utils.torch_dtypes import PrecisionType
 
@@ -196,24 +224,8 @@ class DiffusersFSDPEngine(BaseEngine):
 
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
-        # Allow registered DiffusionModelBase subclass to provide custom loading
-        from verl_omni.pipelines.model_base import DiffusionModelBase
-
-        model_cls = DiffusionModelBase.get_class(self.model_config)
-        module = model_cls.build_module(self.model_config, torch_dtype)
+        module = self._build_module_from_registry(torch_dtype)
         if module is not None:
-            module.to(torch_dtype)
-            if self.model_config.enable_gradient_checkpointing:
-                enable_checkpointing = getattr(module, "enable_gradient_checkpointing", None)
-                if callable(enable_checkpointing):
-                    enable_checkpointing()
-                else:
-                    logger.warning(
-                        "Gradient checkpointing requested, but %s does not implement enable_gradient_checkpointing()",
-                        type(module).__name__,
-                    )
-            if not hasattr(module, "can_generate"):
-                module.can_generate = lambda: False
             return module
 
         # Default path: load via diffusers AutoModel
