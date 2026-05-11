@@ -42,6 +42,28 @@ actor_rollout_ref:
       forward_only: false
       strategy: fsdp
       dtype: bfloat16
+    profiler:
+      _target_: verl.utils.profiler.ProfilerConfig
+      tool: torch
+      enable: false
+      all_ranks: false
+      ranks: []
+      save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      tool_config:
+        nsys:
+          _target_: verl.utils.profiler.config.NsightToolConfig
+          discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
+          name: nsight
+        torch:
+          _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+          contents: []
+          discrete: false
+          name: torch
+        torch_memory:
+          _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+          trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+          stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+          name: torch_memory
     _target_: verl_omni.workers.config.diffusion.FSDPDiffusionActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: fsdp
@@ -90,8 +112,52 @@ actor_rollout_ref:
       forward_only: true
       strategy: fsdp
       dtype: bfloat16
+    profiler:
+      _target_: verl.utils.profiler.ProfilerConfig
+      tool: torch
+      enable: false
+      all_ranks: false
+      ranks: []
+      save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      tool_config:
+        nsys:
+          _target_: verl.utils.profiler.config.NsightToolConfig
+          discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
+          name: nsight
+        torch:
+          _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+          contents: []
+          discrete: false
+          name: torch
+        torch_memory:
+          _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+          trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+          stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+          name: torch_memory
     _target_: verl_omni.workers.config.diffusion.FSDPDiffusionActorConfig
   rollout:
+    profiler:
+      _target_: verl.utils.profiler.ProfilerConfig
+      tool: torch
+      enable: false
+      all_ranks: false
+      ranks: []
+      save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      tool_config:
+        nsys:
+          _target_: verl.utils.profiler.config.NsightToolConfig
+          discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
+          name: nsight
+        torch:
+          _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+          contents: []
+          discrete: false
+          name: torch
+        torch_memory:
+          _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+          trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+          stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+          name: torch_memory
     _target_: verl_omni.workers.config.diffusion.DiffusionRolloutConfig
     name: ???
     mode: async
@@ -170,7 +236,6 @@ actor_rollout_ref:
       custom_backend_module: null
     skip_tokenizer_init: true
     enable_rollout_routing_replay: false
-    profiler: null
     prometheus:
       _target_: verl.workers.config.PrometheusConfig
       enable: false
@@ -332,6 +397,33 @@ trainer:
   max_actor_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
+global_profiler:
+  _target_: verl.utils.profiler.ProfilerConfig
+  tool: null
+  steps: null
+  profile_continuous_steps: false
+  save_path: outputs/profile
+  global_tool_config:
+    nsys:
+      _target_: verl.utils.profiler.config.NsightToolConfig
+      discrete: false
+      controller_nsight_options:
+        trace: cuda,nvtx,cublas,ucx
+        cuda-memory-usage: 'true'
+        cuda-graph-trace: graph
+      worker_nsight_options:
+        trace: cuda,nvtx,cublas,ucx
+        cuda-memory-usage: 'true'
+        cuda-graph-trace: graph
+        capture-range: cudaProfilerApi
+        capture-range-end: null
+        kill: none
+    torch_memory:
+      trace_alloc_max_entries: 100000
+      stack_depth: 32
+      context: all
+      stacks: all
+      kw_args: {}
 ray_kwargs:
   ray_init:
     num_cpus: null
