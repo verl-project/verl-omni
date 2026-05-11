@@ -128,7 +128,7 @@ class _BagelSchedulerAdapter:
         return _AdapterStepOutput(prev_sample=prev_sample, log_prob=log_prob)
 
 
-@VllmOmniPipelineBase.register("OmniBagelForConditionalGeneration")
+@VllmOmniPipelineBase.register("OmniBagelForConditionalGeneration", algorithm="flow_grpo")
 class BagelPipelineWithLogProb(BagelPipeline):
     """BAGEL pipeline variant for RL rollouts with verl-omni."""
 

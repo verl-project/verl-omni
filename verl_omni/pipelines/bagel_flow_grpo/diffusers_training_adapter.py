@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 TIMESTEP_SHIFT = 3.0  # must match BagelPipeline.forward() hardcoded value
 
 
-@DiffusionModelBase.register("OmniBagelForConditionalGeneration")
+@DiffusionModelBase.register("OmniBagelForConditionalGeneration", algorithm="flow_grpo")
 class BagelDiffusion(DiffusionModelBase):
     """DiffusionModelBase wrapper for ``BagelForTraining`` (MoT)."""
 
