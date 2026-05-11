@@ -32,9 +32,7 @@ verl_omni/pipelines/<model>_flow_grpo/
 Both adapters are picked up by string-based registries that dispatch on
 the pair `(model_index.json::_class_name, algorithm)`. By default the
 algorithm is read from `actor_rollout_ref.model.algorithm`, which is the
-source-of-truth in the current trainer wiring; `algorithm.adv_estimator`
-is derived from it (so setting a single config/CLI value keeps both the
-algorithm and its adapters aligned). Register the package by importing it
+source-of-truth in the current trainer wiring. Register the package by importing it
 from
 [`verl_omni/pipelines/__init__.py`](../../verl_omni/pipelines/__init__.py),
 add an example launch script, and add a smoke test.
