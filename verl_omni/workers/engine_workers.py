@@ -25,6 +25,7 @@ from codetiming import Timer
 from omegaconf import DictConfig, open_dict
 from tensordict import NonTensorData, TensorDict
 from torch.distributed.device_mesh import init_device_mesh
+
 from verl.checkpoint_engine import CheckpointEngineRegistry
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
@@ -51,7 +52,6 @@ from verl.workers.config import (
 )
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
-
 from verl_omni.workers.config import (
     DiffusionActorConfig,
     DiffusionModelConfig,

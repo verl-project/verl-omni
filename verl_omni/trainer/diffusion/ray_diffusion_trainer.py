@@ -31,6 +31,7 @@ from PIL import Image
 from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
+
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
@@ -49,7 +50,6 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
-
 from verl_omni.trainer.config import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import DiffusionAdvantageEstimator, get_diffusion_adv_estimator_fn
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
@@ -635,7 +635,6 @@ class RayFlowGRPOTrainer:
             AgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
         else:
             from verl.experimental.agent_loop import AgentLoopManager
-
             from verl_omni.agent_loop import DiffusionAgentLoopWorker
 
             AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
@@ -859,6 +858,7 @@ class RayFlowGRPOTrainer:
         The light-weight advantage computation is done on the driver process.
         """
         from omegaconf import OmegaConf
+
         from verl.utils.tracking import Tracking
 
         logger = Tracking(

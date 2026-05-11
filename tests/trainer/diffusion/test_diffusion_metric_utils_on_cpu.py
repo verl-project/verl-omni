@@ -16,8 +16,8 @@
 import numpy as np
 import pytest
 import torch
-from verl import DataProto
 
+from verl import DataProto
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
     compute_throughput_metrics_diffusion,
