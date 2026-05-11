@@ -35,12 +35,25 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
         replaced with jagged ``torch.nested`` tensors with padding stripped.
     """
 
-    def _to_nested(embeds: torch.Tensor, mask: torch.Tensor):
-        """Strip padding from (bs, seq_len, dim) embeds using the boolean mask and return nested tensors."""
+    def _coerce(item):
+        if isinstance(item, torch.Tensor):
+            return item
+        return torch.as_tensor(item)
+
+    def _to_nested(embeds, mask):
+        """Strip padding from (bs, seq_len, dim) embeds using the boolean mask and return nested tensors.
+
+        Both ``embeds`` and ``mask`` may arrive as torch tensors (uniform padding)
+        or as list-like containers of per-sample arrays/tensors (variable
+        padding, e.g. when stored in DataProto.non_tensor_batch and surfaced as
+        a ``tensordict.utils.LinkedList`` after ``to_tensordict()``).
+        """
+        bs = mask.shape[0] if isinstance(mask, torch.Tensor) else len(mask)
         embeds_list, mask_list = [], []
-        for i in range(mask.shape[0]):
-            curr_mask = mask[i].bool()
-            embeds_list.append(embeds[i, curr_mask, :])
+        for i in range(bs):
+            curr_mask = _coerce(mask[i]).bool()
+            curr_embeds = _coerce(embeds[i])
+            embeds_list.append(curr_embeds[curr_mask, :])
             mask_list.append(curr_mask[curr_mask])
         return (
             torch.nested.as_nested_tensor(embeds_list, layout=torch.jagged),
@@ -49,9 +62,10 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
 
     data["prompt_embeds"], data["prompt_embeds_mask"] = _to_nested(data["prompt_embeds"], data["prompt_embeds_mask"])
 
-    if isinstance(data.get("negative_prompt_embeds", None), torch.Tensor):
+    neg_embeds = data.get("negative_prompt_embeds", None)
+    if neg_embeds is not None:
         data["negative_prompt_embeds"], data["negative_prompt_embeds_mask"] = _to_nested(
-            data["negative_prompt_embeds"], data["negative_prompt_embeds_mask"]
+            neg_embeds, data["negative_prompt_embeds_mask"]
         )
 
     return data
