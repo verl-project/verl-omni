@@ -7,6 +7,9 @@ defaults:
   # fsdp engine config
   - ../engine@fsdp_config: diffusion_fsdp
 
+  # per-role profiler config, inheriting from trainer/config/profiler/profiler.yaml
+  - ../../profiler@profiler: profiler
+
   # load the reference default config, then apply the fields in the current yaml
   - _self_
 

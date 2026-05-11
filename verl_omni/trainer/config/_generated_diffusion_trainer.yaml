@@ -42,6 +42,28 @@ actor_rollout_ref:
       forward_only: false
       strategy: fsdp
       dtype: bfloat16
+    profiler:
+      _target_: verl.utils.profiler.ProfilerConfig
+      tool: torch
+      enable: false
+      all_ranks: false
+      ranks: []
+      save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      tool_config:
+        nsys:
+          _target_: verl.utils.profiler.config.NsightToolConfig
+          discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
+          name: nsight
+        torch:
+          _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+          contents: []
+          discrete: false
+          name: torch
+        torch_memory:
+          _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+          trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+          stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+          name: torch_memory
     _target_: verl_omni.workers.config.diffusion.FSDPDiffusionActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: fsdp
@@ -49,7 +71,7 @@ actor_rollout_ref:
     ppo_micro_batch_size_per_gpu: null
     diffusion_loss:
       _target_: verl_omni.workers.config.diffusion.DiffusionLossConfig
-      loss_mode: flow_grpo
+      loss_mode: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
       clip_ratio: 0.0001
       adv_clip_max: 5.0
     loss_scale_factor: null
@@ -90,8 +112,52 @@ actor_rollout_ref:
       forward_only: true
       strategy: fsdp
       dtype: bfloat16
+    profiler:
+      _target_: verl.utils.profiler.ProfilerConfig
+      tool: torch
+      enable: false
+      all_ranks: false
+      ranks: []
+      save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      tool_config:
+        nsys:
+          _target_: verl.utils.profiler.config.NsightToolConfig
+          discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
+          name: nsight
+        torch:
+          _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+          contents: []
+          discrete: false
+          name: torch
+        torch_memory:
+          _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+          trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+          stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+          name: torch_memory
     _target_: verl_omni.workers.config.diffusion.FSDPDiffusionActorConfig
   rollout:
+    profiler:
+      _target_: verl.utils.profiler.ProfilerConfig
+      tool: torch
+      enable: false
+      all_ranks: false
+      ranks: []
+      save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      tool_config:
+        nsys:
+          _target_: verl.utils.profiler.config.NsightToolConfig
+          discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
+          name: nsight
+        torch:
+          _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+          contents: []
+          discrete: false
+          name: torch
+        torch_memory:
+          _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+          trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+          stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+          name: torch_memory
     _target_: verl_omni.workers.config.diffusion.DiffusionRolloutConfig
     name: ???
     mode: async
@@ -140,15 +206,16 @@ actor_rollout_ref:
         noise_level: 0.0
         sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
         sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
-        sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,[0,5]}
+        sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
     algo:
       _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
       noise_level: 1.0
       sde_type: sde
       sde_window_size: null
-      sde_window_range:
-      - 0
-      - 5
+      sde_window_range: null
+      sample_strategy: random
+      iters_per_group: 1
+      sde_window_seed: 0
     pipeline:
       _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
       height: 512
@@ -170,7 +237,6 @@ actor_rollout_ref:
       custom_backend_module: null
     skip_tokenizer_init: true
     enable_rollout_routing_replay: false
-    profiler: null
     prometheus:
       _target_: verl.workers.config.PrometheusConfig
       enable: false
@@ -180,6 +246,7 @@ actor_rollout_ref:
   model:
     _target_: verl_omni.workers.config.diffusion.DiffusionModelConfig
     path: ~/models/Qwen/Qwen-Image
+    algorithm: flow_grpo
     tokenizer_path: null
     use_shm: false
     trust_remote_code: false
@@ -210,7 +277,7 @@ actor_rollout_ref:
       noise_level: ${oc.select:actor_rollout_ref.rollout.algo.noise_level,1.0}
       sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
       sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
-      sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,[0,5]}
+      sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
     model_type: diffusion_model
   hybrid_engine: true
   nccl_timeout: 600
@@ -301,7 +368,7 @@ reward:
     memory_limit_mb: 1024
 algorithm:
   _target_: verl_omni.trainer.config.DiffusionAlgoConfig
-  adv_estimator: flow_grpo
+  adv_estimator: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
   norm_adv_by_std_in_grpo: true
   bypass_mode: false
   global_std: true
@@ -331,6 +398,33 @@ trainer:
   max_actor_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
   device: cuda
+global_profiler:
+  _target_: verl.utils.profiler.ProfilerConfig
+  tool: null
+  steps: null
+  profile_continuous_steps: false
+  save_path: outputs/profile
+  global_tool_config:
+    nsys:
+      _target_: verl.utils.profiler.config.NsightToolConfig
+      discrete: false
+      controller_nsight_options:
+        trace: cuda,nvtx,cublas,ucx
+        cuda-memory-usage: 'true'
+        cuda-graph-trace: graph
+      worker_nsight_options:
+        trace: cuda,nvtx,cublas,ucx
+        cuda-memory-usage: 'true'
+        cuda-graph-trace: graph
+        capture-range: cudaProfilerApi
+        capture-range-end: null
+        kill: none
+    torch_memory:
+      trace_alloc_max_entries: 100000
+      stack_depth: 32
+      context: all
+      stacks: all
+      kw_args: {}
 ray_kwargs:
   ray_init:
     num_cpus: null

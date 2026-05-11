@@ -111,6 +111,7 @@ def init_server():
             "tokenizer_path": os.path.join(model_path, "tokenizer"),
             "trust_remote_code": True,
             "load_tokenizer": True,
+            "algorithm": "flow_grpo",
         }
     )
 

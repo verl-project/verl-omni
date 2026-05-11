@@ -31,11 +31,11 @@ python3 tests/special_e2e/create_dummy_diffusion_data.py \
     --val_size 4
 
 python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
-    algorithm.adv_estimator=flow_grpo \
     data.train_files=${dummy_train_path} \
     data.val_files=${dummy_test_path} \
     data.train_batch_size=${train_batch_size} \
     data.max_prompt_length=${max_prompt_length} \
+    actor_rollout_ref.model.algorithm=flow_grpo \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.model.tokenizer_path=${TOKENIZER_PATH} \
     actor_rollout_ref.model.lora_rank=8 \
@@ -48,7 +48,6 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-    actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_grpo \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.04 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${micro_bsz_per_gpu} \

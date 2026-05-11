@@ -14,8 +14,11 @@ diffusion model architecture into the training loop:
   :class:`~verl_omni.pipelines.model_base.VllmOmniPipelineBase` that hooks
   into vLLM-Omni's diffusion serving stack to expose log-probabilities.
 
-Adapters are auto-selected by matching ``DiffusionModelConfig.architecture``
-(read from the model's ``model_index.json``) against the registered name.
+Adapters are auto-selected by matching the pair
+``(DiffusionModelConfig.architecture, DiffusionModelConfig.algorithm)`` against the
+registered ``(architecture, algorithm)`` key. The architecture is read from the
+model's ``model_index.json``; the algorithm string is taken from the model config's
+``actor_rollout_ref.model.algorithm`` value.
 
 .. autosummary::
    :nosignatures:

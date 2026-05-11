@@ -570,6 +570,19 @@ class RayFlowGRPOTrainer:
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
+        # Forward profiling steps and (when nsys is selected) per-worker Nsight options to the
+        # Ray worker group so that workers can be launched under nsys with the right capture range.
+        if OmegaConf.select(self.config, "global_profiler.steps") is not None:
+            wg_kwargs["profile_steps"] = OmegaConf.select(self.config.global_profiler, "steps")
+            if OmegaConf.select(self.config.global_profiler, "tool") == "nsys":
+                worker_nsight_options = OmegaConf.select(
+                    self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options"
+                )
+                assert worker_nsight_options is not None, (
+                    "global_profiler.global_tool_config.nsys.worker_nsight_options must be set "
+                    "when using nsys with global_profiler.steps"
+                )
+                wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(worker_nsight_options)
         wg_kwargs["device_name"] = self.device_name
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
@@ -824,6 +837,20 @@ class RayFlowGRPOTrainer:
         actor_output = rename_dict(actor_output, "actor/")
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
+    def _start_profiling(self, do_profile: bool) -> None:
+        """Start profiling for all worker groups if profiling is enabled."""
+        if do_profile:
+            self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
+            if self.use_reference_policy and not self.ref_in_actor:
+                self.ref_policy_wg.start_profile(profile_step=self.global_steps)
+
+    def _stop_profiling(self, do_profile: bool) -> None:
+        """Stop profiling for all worker groups if profiling is enabled."""
+        if do_profile:
+            self.actor_rollout_wg.stop_profile()
+            if self.use_reference_policy and not self.ref_in_actor:
+                self.ref_policy_wg.stop_profile()
+
     def fit(self):
         """
         The training loop of FlowGRPO.
@@ -867,12 +894,28 @@ class RayFlowGRPOTrainer:
         last_val_metrics = None
         self.max_steps_duration = 0
 
+        # Profiler step state machine. Mirrors verl/trainer/ppo/ray_trainer.py.
+        prev_step_profile = False
+        curr_step_profile = (
+            self.global_steps in self.config.global_profiler.steps
+            if self.config.global_profiler.steps is not None
+            else False
+        )
+        next_step_profile = False
+
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
                 metrics = {}
                 timing_raw = {}
+
+                with marked_timer("start_profile", timing_raw):
+                    self._start_profiling(
+                        not prev_step_profile and curr_step_profile
+                        if self.config.global_profiler.profile_continuous_steps
+                        else curr_step_profile
+                    )
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
 
@@ -1002,6 +1045,20 @@ class RayFlowGRPOTrainer:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
 
+                with marked_timer("stop_profile", timing_raw):
+                    next_step_profile = (
+                        self.global_steps + 1 in self.config.global_profiler.steps
+                        if self.config.global_profiler.steps is not None
+                        else False
+                    )
+                    self._stop_profiling(
+                        curr_step_profile and not next_step_profile
+                        if self.config.global_profiler.profile_continuous_steps
+                        else curr_step_profile
+                    )
+                    prev_step_profile = curr_step_profile
+                    curr_step_profile = next_step_profile
+
                 steps_duration = timing_raw["step"]
                 self.max_steps_duration = max(self.max_steps_duration, steps_duration)
 
@@ -1030,14 +1087,6 @@ class RayFlowGRPOTrainer:
 
                 progress_bar.update(1)
                 self.global_steps += 1
-
-                if (
-                    hasattr(self.config.actor_rollout_ref.actor, "profiler")
-                    and self.config.actor_rollout_ref.actor.profiler.tool == "torch_memory"
-                ):
-                    self.actor_rollout_wg.dump_memory_snapshot(
-                        tag=f"post_update_step{self.global_steps}", sub_dir=f"step{self.global_steps}"
-                    )
 
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):

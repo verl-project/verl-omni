@@ -12,15 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import (
-    _patch,  # noqa: F401 — apply Ulysses mask fix
-    bagel_flow_grpo,
-    qwen_image_flow_grpo,
-)
-from .bagel_flow_grpo import *  # noqa: F401, F403
-from .qwen_image_flow_grpo import *  # noqa: F401, F403
-from .qwen_image_mix_grpo import *  # noqa: F401, F403
+"""
+Qwen-Image training-side adapter for MixGRPO algorithm.
+Inherits model-specific forward/sampling behavior from FlowGRPO but provides
+the sliding-window scheduler for MixGRPO.
+"""
 
-__all__ = list(qwen_image_flow_grpo.__all__)
-__all__ += list(qwen_image_mix_grpo.__all__)
-__all__ += list(bagel_flow_grpo.__all__)
+from verl_omni.pipelines.model_base import DiffusionModelBase
+from verl_omni.pipelines.qwen_image_flow_grpo.diffusers_training_adapter import QwenImage
+
+__all__ = ["QwenImageMixGRPO"]
+
+
+@DiffusionModelBase.register("QwenImagePipeline", algorithm="mix_grpo")
+class QwenImageMixGRPO(QwenImage):
+    """Training adapter for Qwen-Image with the MixGRPO algorithm."""

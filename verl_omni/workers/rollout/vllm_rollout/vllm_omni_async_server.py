@@ -102,7 +102,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_args = asdict(engine_args)
 
         import_external_libs(self.config.external_lib)
-        pipeline_path = VllmOmniPipelineBase.get_pipeline_path(self.model_config.architecture)
+        pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
+            architecture=self.model_config.architecture,
+            algorithm=self.model_config.algorithm,
+        )
         # TODO (mike): read custom_pipeline from engine_args
         if pipeline_path is not None:
             engine_args["enable_dummy_pipeline"] = True

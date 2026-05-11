@@ -35,11 +35,23 @@ __all__ = [
 
 @dataclass
 class DiffusionRolloutAlgoConfig(BaseConfig):
-    # for SDE-based diffusion process
+    """Algorithm configuration for the SDE-based diffusion rollout."""
+
     noise_level: float = 1.0
     sde_type: str = "sde"
     sde_window_size: Optional[int] = None
-    sde_window_range: list[int] = field(default_factory=lambda: [0, 5])
+    sde_window_range: Optional[list[int]] = None
+
+    # MixGRPO-only configs
+    sample_strategy: str = "random"
+    iters_per_group: int = 1
+    sde_window_seed: int = 0
+
+    def __post_init__(self):
+        if self.sample_strategy not in ("random", "progressive"):
+            raise ValueError(f"Unknown sample_strategy: {self.sample_strategy!r}")
+        if self.sample_strategy == "progressive" and self.iters_per_group <= 0:
+            raise ValueError(f"iters_per_group must be positive, got {self.iters_per_group}.")
 
 
 @dataclass

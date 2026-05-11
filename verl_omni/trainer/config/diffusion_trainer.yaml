@@ -54,8 +54,8 @@ algorithm:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl_omni.trainer.config.DiffusionAlgoConfig
 
-  # Advantage estimator type: "flow_grpo"
-  adv_estimator: flow_grpo
+  # Advantage estimator type: follows actor_rollout_ref.model.algorithm
+  adv_estimator: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
 
   # Whether to normalize advantages by std (specific to GRPO)
   norm_adv_by_std_in_grpo: True
@@ -144,6 +144,94 @@ trainer:
 
   # Device to run training on (e.g., "cuda", "cpu")
   device: cuda
+
+# Profiler configs (mirrors verl/trainer/config/ppo_trainer.yaml `global_profiler`).
+# verl-omni does not support NPU; only nsys, torch and torch_memory tools are supported.
+global_profiler:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.utils.profiler.ProfilerConfig
+
+  # Profiling tool: choose between nsys, torch, torch_memory
+  tool: null
+
+  # Steps at which profiling should be performed (e.g. [1, 2, 5]). null disables profiling.
+  steps: null
+
+  # Whether to combine continuous steps into one database.
+  # If True, worker.profiler.discrete must be False, [1,2] in one db, [5] in another.
+  # If False, [1] in one, [2] in another, [5] in another.
+  profile_continuous_steps: False
+
+  # Path to save profiling contents
+  save_path: "outputs/profile"
+
+  # Tool-specific global configurations.
+  # Override on the CLI via +global_profiler.global_tool_config.[tool].xxx=yyy
+  global_tool_config:
+
+    # NVIDIA Nsight Systems config
+    nsys:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl.utils.profiler.config.NsightToolConfig
+
+      # True for each task has its own database, False for all tasks in one training step share one database.
+      discrete: False
+
+      # Controller-side Nsight Systems options. Must be set when global_profiler.steps is not null
+      # and global_profiler.tool == "nsys".
+      # See https://docs.nvidia.com/nsight-systems/UserGuide/index.html
+      controller_nsight_options:
+
+        # Select the API(s) to be traced.
+        trace: "cuda,nvtx,cublas,ucx"
+
+        # Track GPU memory usage by CUDA kernels. Must be string "true" or "false".
+        cuda-memory-usage: "true"
+
+        # CUDA graphs will be traced as a whole.
+        cuda-graph-trace: "graph"
+
+      # Worker-side Nsight Systems options. Must be set when using nsys with profile steps.
+      worker_nsight_options:
+
+        # Select the API(s) to be traced.
+        trace: "cuda,nvtx,cublas,ucx"
+
+        # Track GPU memory usage by CUDA kernels. Must be string "true" or "false".
+        cuda-memory-usage: "true"
+
+        # CUDA graphs will be traced as a whole.
+        cuda-graph-trace: "graph"
+
+        # Profiling only in a range of torch.cuda.profiler.start and stop. Do not change.
+        capture-range: "cudaProfilerApi"
+
+        # Specify desired behavior when a capture range ends.
+        # Valid values: "repeat-shutdown:n" or null.
+        capture-range-end: null
+
+        # Send signal to the target application's process group. Let the program exit by itself.
+        kill: none
+
+    # Torch CUDA memory snapshot dumping
+    torch_memory:
+
+      # Maximum number of allocation entries to record
+      trace_alloc_max_entries: 100_000
+
+      # Depth of the call stack to capture for each allocation
+      stack_depth: 32
+
+      # 'alloc': allocations only | 'state': state changes only | 'all': both.
+      context: "all"
+
+      # 'python': Python stacks | 'cpp': C++ stacks | 'all': both.
+      stacks: "all"
+
+      # Extra keyword arguments forwarded to torch.cuda.memory._record_memory_history.
+      kw_args: {}
 
 # configs related to ray
 ray_kwargs:
