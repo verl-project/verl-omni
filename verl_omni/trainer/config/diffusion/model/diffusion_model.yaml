@@ -10,6 +10,9 @@ _target_: verl_omni.workers.config.diffusion.DiffusionModelConfig
 # path to the huggingface model
 path: ~/models/Qwen/Qwen-Image
 
+# RL algorithm name
+algorithm: flow_grpo
+
 # path to the huggingface tokenizer. In case it is not the same as path
 tokenizer_path: null
 

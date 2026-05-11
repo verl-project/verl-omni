@@ -73,7 +73,7 @@ def create_training_config(model_type, strategy, device_count, model):
         fsdp_size = device_count
     path = os.path.expanduser(model)
     tokenizer_path = os.path.join(path, "tokenizer")
-    model_config = DiffusionModelConfig(path=path, tokenizer_path=tokenizer_path)
+    model_config = DiffusionModelConfig(path=path, tokenizer_path=tokenizer_path, algorithm="flow_grpo")
 
     if strategy in ["fsdp", "fsdp2"]:
         from hydra import compose, initialize_config_dir

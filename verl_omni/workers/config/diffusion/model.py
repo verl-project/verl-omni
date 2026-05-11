@@ -46,6 +46,7 @@ class DiffusionModelConfig(BaseConfig):
 
     path: str = MISSING
     architecture: Optional[str] = None
+    algorithm: str = MISSING
     local_path: Optional[str] = None
     tokenizer_path: Optional[str] = None
     local_tokenizer_path: Optional[str] = None

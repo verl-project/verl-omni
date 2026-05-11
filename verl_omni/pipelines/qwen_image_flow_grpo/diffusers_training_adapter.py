@@ -63,7 +63,7 @@ def _configure_qwen_image_scheduler(
     scheduler.set_timesteps(num_inference_steps, device=device, sigmas=sigmas, mu=mu)
 
 
-@DiffusionModelBase.register("QwenImagePipeline", algo="flow_grpo")
+@DiffusionModelBase.register("QwenImagePipeline", algorithm="flow_grpo")
 class QwenImage(DiffusionModelBase):
     """Training adapter for the Qwen-Image diffusion model.
 

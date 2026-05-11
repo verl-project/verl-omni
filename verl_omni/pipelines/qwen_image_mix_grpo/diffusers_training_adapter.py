@@ -25,7 +25,7 @@ from verl_omni.workers.config import DiffusionModelConfig
 __all__ = ["QwenImageMixGRPO"]
 
 
-@DiffusionModelBase.register("QwenImagePipeline", algo="mix_grpo")
+@DiffusionModelBase.register("QwenImagePipeline", algorithm="mix_grpo")
 class QwenImageMixGRPO(QwenImage):
     """Training adapter for Qwen-Image with the MixGRPO algorithm.
 

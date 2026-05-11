@@ -23,11 +23,12 @@ from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
 # ---------------------------------------------------------------------------
 
 
-def _make_model_config(architecture: str, external_lib=None) -> DiffusionModelConfig:
+def _make_model_config(architecture: str, external_lib=None, algorithm: str = "flow_grpo") -> DiffusionModelConfig:
     """Build a minimal DiffusionModelConfig without hitting __post_init__ model loading."""
     cfg = object.__new__(DiffusionModelConfig)
     object.__setattr__(cfg, "architecture", architecture)
     object.__setattr__(cfg, "external_lib", external_lib)
+    object.__setattr__(cfg, "algorithm", algorithm)
     return cfg
 
 
@@ -38,7 +39,7 @@ def _make_model_config(architecture: str, external_lib=None) -> DiffusionModelCo
 
 class TestDiffusionModelBaseRegistry:
     def test_register_and_retrieve(self):
-        @DiffusionModelBase.register("_TestArch_CPU", algo="flow_grpo")
+        @DiffusionModelBase.register("_TestArch_CPU", algorithm="flow_grpo")
         class _Impl(DiffusionModelBase):
             @classmethod
             def build_scheduler(cls, model_config):
@@ -65,7 +66,7 @@ class TestDiffusionModelBaseRegistry:
             DiffusionModelBase.get_class(cfg)
 
     def test_register_decorator_returns_class_unchanged(self):
-        @DiffusionModelBase.register("_TestReturnArch_CPU", algo="flow_grpo")
+        @DiffusionModelBase.register("_TestReturnArch_CPU", algorithm="flow_grpo")
         class _Impl(DiffusionModelBase):
             @classmethod
             def build_scheduler(cls, model_config):
