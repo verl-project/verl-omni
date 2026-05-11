@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .diffusers_training_adapter import *  # noqa: F401, F403
+from .diffusers_training_adapter import QwenImageMixGRPO
+from .vllm_omni_rollout_adapter import QwenImageMixGRPOPipelineWithLogProb
 
-__all__ = list(diffusers_training_adapter.__all__)
+__all__ = ["QwenImageMixGRPO", "QwenImageMixGRPOPipelineWithLogProb"]

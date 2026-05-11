@@ -24,34 +24,26 @@ small SDE window per rollout.
 
 ## How verl-omni implements MixGRPO
 
-The integration is **fully decoupled from the model and rollout pipeline**.
-Switching algorithms only requires flipping a YAML field; the underlying
-`FlowMatchSDEDiscreteScheduler` and `vllm_omni_rollout_adapter` already
-support a contiguous SDE window and just consume per-step overrides.
+MixGRPO shares the SDE step formula, advantage estimator and loss with
+FlowGRPO, so only the `(architecture, algorithm)` adapter pair changes.
 
 | Layer | What it does | Code |
 |---|---|---|
-| Algo config | `algo_type` selector (`flow_grpo` / `mix_grpo`) plus a small set of MixGRPO configs. | `verl_omni/workers/config/diffusion/rollout.py` |
-| Trainer | Builds an `SDEWindowScheduler` from the algo config and queries it every step to inject `sde_window_size` / `sde_window_range` overrides. | `verl_omni/pipelines/schedulers/sde_window_scheduler.py`, `RayFlowGRPOTrainer.fit()` |
-| Agent loop | Merges the per-step overrides from `meta_info["algo_overrides"]` into the rollout sampling params. | `verl_omni/agent_loop/diffusion_agent_loop.py` |
+| Algo config | Two extra knobs (`sample_strategy`, `iters_per_group`) on the existing `DiffusionRolloutAlgoConfig`. | `verl_omni/workers/config/diffusion/rollout.py` |
+| Adapter pair | Subclasses of the FlowGRPO adapters re-registered under `algorithm="mix_grpo"`; the rollout adapter materialises the deterministic window for `progressive`. | `verl_omni/pipelines/qwen_image_mix_grpo/` |
 | Rollout | Already supports a contiguous SDE window (ODE outside / SDE inside) -- no changes needed. | `verl_omni/pipelines/qwen_image_flow_grpo/vllm_omni_rollout_adapter.py` |
 
 ## Configuration
 
-All configs live under `actor_rollout_ref.rollout.algo`. Trainer-only fields
-(`algo_type`, `sample_strategy`, `iters_per_group`, `seed`) are stripped by
-the agent loop before reaching the rollout backend, so the rollout API stays
-unchanged.
-
-The full surface is **8 fields**:
+Algorithm dispatch lives on `actor_rollout_ref.model.algorithm`; everything
+else is rollout configuration under `actor_rollout_ref.rollout.algo`:
 
 ```yaml
 actor_rollout_ref:
+  model:
+    algorithm: mix_grpo               # selects the (arch, algo) adapter pair
   rollout:
     algo:
-      # ----- Selector (both algorithms) ------------------------------------
-      algo_type: flow_grpo            # flow_grpo | mix_grpo
-
       # ----- Common SDE configs ---------------------------------------------
       noise_level: 1.0                # SDE noise magnitude
       sde_type: sde                   # sde | cps
@@ -66,9 +58,9 @@ actor_rollout_ref:
 
 ### Field semantics
 
-* **`algo_type`** -- `flow_grpo` (default) keeps the legacy rollout-side
-  random-window behaviour; `mix_grpo` enables the trainer-side sliding
-  scheduler.
+* **`actor_rollout_ref.model.algorithm`** -- selects the registered
+  `(architecture, algorithm)` adapter pair. `mix_grpo` routes to
+  [`verl_omni/pipelines/qwen_image_mix_grpo/`](../../verl_omni/pipelines/qwen_image_mix_grpo/__init__.py).
 * **`noise_level`** -- magnitude of injected SDE noise inside the window.
   Outside the window `noise_level` is forced to `0` so the step degenerates
   to a deterministic Euler ODE step.
@@ -79,10 +71,10 @@ actor_rollout_ref:
   legacy FlowGRPO setting).
 * **`sde_window_range`** -- a `[start, end]` envelope of valid window-start
   positions:
-  * For `flow_grpo`, the rollout backend draws the start uniformly from
+  * Under `random`, the rollout backend draws the start uniformly from
     `[start, end - sde_window_size + 1)`.
-  * For `mix_grpo`, this is the eligible range over which the trainer-side
-    scheduler slides the window.
+  * Under `progressive`, the same envelope clamps the deterministic
+    sliding window.
   * `null` defaults to the full trajectory `[0, num_inference_steps]`
     (minus the last ODE step where `sigma_prev = 0`).
 * **`sample_strategy`** -- *MixGRPO only*. `random` draws a fresh window per
@@ -97,8 +89,7 @@ actor_rollout_ref:
 ### Validation
 
 Validation always uses the deterministic ODE path with `noise_level=0`, so
-the MixGRPO-specific fields are irrelevant there. The default config keeps
-`actor_rollout_ref.rollout.val_kwargs.algo.algo_type=flow_grpo`.
+the sliding-window settings are irrelevant there.
 
 ## Reference recipe
 
@@ -108,7 +99,7 @@ config uses a **10-step trajectory with a 2-step window** (`random` strategy),
 matching the FlowGRPO baseline's inference budget:
 
 ```bash
-actor_rollout_ref.rollout.algo.algo_type=mix_grpo
+actor_rollout_ref.model.algorithm=mix_grpo
 actor_rollout_ref.rollout.algo.sample_strategy=random
 actor_rollout_ref.rollout.algo.sde_window_seed=42
 actor_rollout_ref.rollout.algo.sde_window_size=2
@@ -117,8 +108,6 @@ actor_rollout_ref.rollout.algo.noise_level=1.2
 actor_rollout_ref.rollout.algo.sde_type=sde
 ```
 
-To switch back to the FlowGRPO baseline keep everything else the same and
-override `actor_rollout_ref.rollout.algo.algo_type=flow_grpo`.
 
 ## Tuning guide
 
@@ -147,13 +136,6 @@ trajectory length) and **`sde_window_size`** (how many steps use SDE).
   `iters_per_group` for long trajectories to ensure systematic coverage.
 * **Validation** always uses the deterministic ODE path (`noise_level=0`)
   regardless of training settings.
-
-## Switching from FlowGRPO
-
-Existing FlowGRPO configs continue to work unchanged because
-`algo_type=flow_grpo` is the default and the FlowGRPO scheduler simply
-forwards the static `sde_window_size` / `sde_window_range` already used by
-the rollout backend.
 
 ## References
 

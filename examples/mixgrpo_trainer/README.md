@@ -53,7 +53,7 @@ bash examples/mixgrpo_trainer/run_qwen_image_ocr_lora.sh
 
 The default script uses the recommended "reference recipe" (10-step trajectory, 2-step SDE window, random strategy). To tune MixGRPO (e.g. for longer trajectories), adjust these variables in the script:
 
-- `actor_rollout_ref.rollout.algo.algo_type=mix_grpo`
+- `actor_rollout_ref.model.algorithm=mix_grpo`
 - `actor_rollout_ref.rollout.algo.sample_strategy=random` (or `progressive`)
 - `actor_rollout_ref.rollout.algo.sde_window_size=2`
 - `actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=50`

@@ -181,24 +181,6 @@ class RayFlowGRPOTrainer:
 
         self.checkpoint_manager = None
 
-        # Trainer-side SDE-window scheduler. Built dynamically based on the algorithm and model.
-        from verl_omni.pipelines.model_base import DiffusionModelBase
-        from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
-        from verl_omni.workers.config.diffusion.rollout import DiffusionPipelineConfig, DiffusionRolloutAlgoConfig
-
-        # Convert model config to dataclass to auto-detect architecture
-        model_cfg_dc = omega_conf_to_dataclass(self.config.actor_rollout_ref.model, DiffusionModelConfig)
-        # Inject the rollout's algorithm and pipeline config so the builder can see them
-        model_cfg_dc.algo = omega_conf_to_dataclass(
-            self.config.actor_rollout_ref.rollout.algo, DiffusionRolloutAlgoConfig
-        )
-        model_cfg_dc.pipeline = omega_conf_to_dataclass(
-            self.config.actor_rollout_ref.rollout.pipeline, DiffusionPipelineConfig
-        )
-
-        self.sde_window_scheduler = DiffusionModelBase.get_class(model_cfg_dc).build_algo_scheduler(model_cfg_dc)
-        print(f"[diffusion-trainer] SDE-window scheduler: {type(self.sde_window_scheduler).__name__}")
-
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
         Creates the train and validation dataloaders.
@@ -946,11 +928,6 @@ class RayFlowGRPOTrainer:
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
-
-                # Get SDE-window overrides for the current step (for MixGRPO only currently)
-                if overrides := self.sde_window_scheduler.get_window(self.global_steps - 1):
-                    gen_batch.meta_info["sampling_overrides"] = overrides
-
                 gen_batch_output = gen_batch.repeat(
                     repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
                 )

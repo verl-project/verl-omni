@@ -37,7 +37,6 @@ __all__ = [
 class DiffusionRolloutAlgoConfig(BaseConfig):
     """Algorithm configuration for the SDE-based diffusion rollout."""
 
-    algo_type: str = "flow_grpo"
     noise_level: float = 1.0
     sde_type: str = "sde"
     sde_window_size: Optional[int] = None
@@ -49,15 +48,10 @@ class DiffusionRolloutAlgoConfig(BaseConfig):
     sde_window_seed: int = 0
 
     def __post_init__(self):
-        if self.algo_type not in ("flow_grpo", "mix_grpo"):
-            raise ValueError(f"Unknown algo_type: {self.algo_type!r}")
         if self.sample_strategy not in ("random", "progressive"):
             raise ValueError(f"Unknown sample_strategy: {self.sample_strategy!r}")
-
-        if self.algo_type == "mix_grpo" and self.sde_window_size is None:
-            raise ValueError("MixGRPO requires `actor_rollout_ref.rollout.algo.sde_window_size` to be set.")
         if self.sample_strategy == "progressive" and self.iters_per_group <= 0:
-            raise ValueError("`iters_per_group` must be positive for the progressive strategy.")
+            raise ValueError(f"iters_per_group must be positive, got {self.iters_per_group}.")
 
 
 @dataclass

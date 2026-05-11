@@ -20,33 +20,10 @@ the sliding-window scheduler for MixGRPO.
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.qwen_image_flow_grpo.diffusers_training_adapter import QwenImage
-from verl_omni.workers.config import DiffusionModelConfig
 
 __all__ = ["QwenImageMixGRPO"]
 
 
 @DiffusionModelBase.register("QwenImagePipeline", algorithm="mix_grpo")
 class QwenImageMixGRPO(QwenImage):
-    """Training adapter for Qwen-Image with the MixGRPO algorithm.
-
-    Inherits from the baseline :class:`QwenImage` adapter (FlowGRPO) for all
-    diffusers model configurations, but overrides the algorithm scheduler
-    creation to provide MixGRPO's sliding window strategies.
-    """
-
-    @classmethod
-    def build_algo_scheduler(cls, model_config: DiffusionModelConfig):
-        """Build and configure the sliding-window scheduler for MixGRPO.
-
-        Args:
-            model_config (DiffusionModelConfig): Configuration for the diffusion model,
-                used to extract the MixGRPO algorithm configuration.
-
-        Returns:
-            SDEWindowScheduler: A sliding-window scheduler (e.g., MixGRPORandomScheduler).
-        """
-        from verl_omni.pipelines.schedulers.sde_window_scheduler import build_sde_window_scheduler
-
-        num_inference_steps = int(model_config.pipeline.num_inference_steps)
-        # Delegate to the algorithm scheduler factory
-        return build_sde_window_scheduler(model_config.algo, num_inference_steps=num_inference_steps)
+    """Training adapter for Qwen-Image with the MixGRPO algorithm."""

@@ -46,10 +46,6 @@ class TestDiffusionModelBaseRegistry:
                 pass
 
             @classmethod
-            def forward_and_sample_previous_step(cls, *args, **kwargs):
-                pass
-
-            @classmethod
             def set_timesteps(cls, scheduler, model_config, device):
                 pass
 
@@ -70,10 +66,6 @@ class TestDiffusionModelBaseRegistry:
         class _Impl(DiffusionModelBase):
             @classmethod
             def build_scheduler(cls, model_config):
-                pass
-
-            @classmethod
-            def forward_and_sample_previous_step(cls, *args, **kwargs):
                 pass
 
             @classmethod

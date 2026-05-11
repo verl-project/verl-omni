@@ -165,10 +165,7 @@ class DiffusionAgentLoopWorker:
             sampling_params["seed"] = config.val_kwargs.seed
             sampling_params["logprobs"] = False
         else:
-            # Apply any per-step dynamic sampling overrides provided by the trainer.
-            sampling_overrides: dict[str, Any] = batch.meta_info.get("sampling_overrides")
-            if sampling_overrides:
-                sampling_params.update(sampling_overrides)
+            sampling_params["global_steps"] = batch.meta_info["global_steps"]
 
         if "agent_name" not in batch.non_tensor_batch:
             default_agent_loop = config.agent.default_agent_loop

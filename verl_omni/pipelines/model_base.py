@@ -88,22 +88,6 @@ class DiffusionModelBase(ABC):
         pass
 
     @classmethod
-    def build_algo_scheduler(cls, model_config: DiffusionModelConfig):
-        """Build and configure the trainer-side algorithm scheduler (e.g. SDEWindowScheduler).
-
-        Args:
-            model_config (DiffusionModelConfig): the configuration of the diffusion model.
-        """
-        # Default fallback: baseline FlowGRPO behaviour
-        from verl_omni.pipelines.schedulers.sde_window_scheduler import FlowGRPOWindowScheduler
-
-        algo = model_config.algo
-        return FlowGRPOWindowScheduler(
-            sde_window_size=algo.sde_window_size if algo else None,
-            sde_window_range=algo.sde_window_range if algo else None,
-        )
-
-    @classmethod
     @abstractmethod
     def set_timesteps(cls, scheduler: SchedulerMixin, model_config: DiffusionModelConfig, device: str):
         """Set timesteps and sigmas on the scheduler and move them to *device*.

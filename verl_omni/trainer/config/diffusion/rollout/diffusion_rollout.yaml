@@ -166,9 +166,6 @@ algo:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
 
-  # Algorithm: "flow_grpo" or "mix_grpo"
-  algo_type: flow_grpo
-
   # Magnitude of SDE noise injected inside the active window
   noise_level: 1.0
 
@@ -178,13 +175,10 @@ algo:
   # Length of the active SDE window; null = all steps
   sde_window_size: null
 
-  # [start, end] envelope of valid window-start positions. For flow_grpo the rollout
-  # backend draws the start uniformly from [start, end - sde_window_size + 1). For
-  # mix_grpo this is the eligible range over which the trainer-side scheduler
-  # slides the window. null = entire trajectory.
+  # [start, end) range for random window start-index sampling
   sde_window_range: null
 
-# MixGRPO sliding-window scheduler configs
+  # MixGRPO sliding-window scheduler configs
 
   # Sliding strategy: "random" (default) draws a fresh window per step;
   # "progressive" advances by sde_window_size every iters_per_group iterations.
