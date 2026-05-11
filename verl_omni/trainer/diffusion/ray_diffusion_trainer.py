@@ -890,7 +890,6 @@ class RayFlowGRPOTrainer:
                 )
 
                 is_last_step = self.global_steps >= self.total_training_steps
-
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
