@@ -40,7 +40,6 @@ def _coalesce_not_none(value, default):
 
 
 @VllmOmniPipelineBase.register("QwenImagePipeline", algorithm="flow_grpo")
-@VllmOmniPipelineBase.register("QwenImagePipeline", algorithm="mix_grpo")
 class QwenImagePipelineWithLogProb(QwenImagePipeline):
     """Rollout pipeline for Qwen-Image that captures per-step log-probabilities.
 
