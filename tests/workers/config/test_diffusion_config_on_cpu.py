@@ -106,9 +106,9 @@ class TestFSDPDiffusionActorConfig:
         import os
 
         from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
 
         import verl_omni
-        from verl.utils.config import omega_conf_to_dataclass
 
         config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/diffusion/actor")
         with initialize_config_dir(config_dir=config_dir, version_base=None):
@@ -130,9 +130,9 @@ class TestFSDPDiffusionActorConfig:
         import os
 
         from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
 
         import verl_omni
-        from verl.utils.config import omega_conf_to_dataclass
 
         config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/diffusion/actor")
         with initialize_config_dir(config_dir=config_dir, version_base=None):
@@ -150,9 +150,9 @@ class TestFSDPDiffusionActorConfig:
         import os
 
         from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
 
         import verl_omni
-        from verl.utils.config import omega_conf_to_dataclass
 
         config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/diffusion/actor")
         with initialize_config_dir(config_dir=config_dir, version_base=None):

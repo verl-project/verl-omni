@@ -106,9 +106,9 @@ class TestDiffusionLossRegistry(unittest.TestCase):
         import os
 
         from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
 
         import verl_omni
-        from verl.utils.config import omega_conf_to_dataclass
         from verl_omni.workers.config.diffusion.actor import FSDPDiffusionActorConfig
 
         config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/diffusion/actor")
