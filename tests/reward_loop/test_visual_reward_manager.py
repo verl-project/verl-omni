@@ -17,9 +17,8 @@ import os
 import ray
 import torch
 from hydra import compose, initialize_config_dir
-from verl.protocol import DataProto
-
 from verl.experimental.reward_loop import RewardLoopManager
+from verl.protocol import DataProto
 from verl.utils import hf_tokenizer
 
 from ..utils.gpu_test_topology import resolve_reward_loop_gpu_topology
