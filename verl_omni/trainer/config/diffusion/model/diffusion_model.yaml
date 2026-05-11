@@ -103,5 +103,5 @@ algo:
   # Number of consecutive denoising steps in the active SDE window; null = all steps
   sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
 
-  # [start, end) range for random window start-index sampling
-  sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,[0,5]}
+  # [start, end] envelope of valid window-start positions; null = entire trajectory
+  sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}

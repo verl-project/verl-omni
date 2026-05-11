@@ -153,6 +153,7 @@ def test_single_turn(init_config):
         )
         n = init_config.actor_rollout_ref.rollout.n
         batch = batch.repeat(n)
+        batch.meta_info["global_steps"] = 0
         result = agent_loop_manager.generate_sequences(prompts=batch)
         assert len(result) == len(raw_prompts) * n
 
