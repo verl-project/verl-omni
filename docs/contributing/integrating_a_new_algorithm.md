@@ -45,22 +45,22 @@ runtime:
 
 ```text
    actor_rollout_ref.model.algorithm = "flow_grpo"    ← primary CLI flag
-                ↓ (OmegaConf template)
-   algorithm.adv_estimator = "flow_grpo"
-                ↓                              ↓
+                ↓ (OmegaConf template)               ↓ (OmegaConf template)
+   algorithm.adv_estimator = "flow_grpo"    actor_rollout_ref.actor.diffusion_loss.loss_mode = "flow_grpo"
+                ↓                              ↓                              ↓
    DiffusionModelBase.get_class(arch, algo)    VllmOmniPipelineBase.get_class(arch, algo)
                 ↓                              ↓
    QwenImage (training adapter)            QwenImagePipelineWithLogProb (rollout adapter)
 
-   actor_rollout_ref.actor.diffusion_loss.loss_mode = "flow_grpo"
+   loss_mode
                 ↓
    compute_diffusion_loss_flow_grpo
 ```
 
-The four registries (`DiffusionModelBase`, `VllmOmniPipelineBase`,
-`register_diffusion_adv_est`, `register_diffusion_loss`) are independent
-but their keys are conventionally aligned so a single CLI flag selects
-everything.
+All four registries (`DiffusionModelBase`, `VllmOmniPipelineBase`,
+`register_diffusion_adv_est`, `register_diffusion_loss`) are wired to
+`actor_rollout_ref.model.algorithm` via OmegaConf templates, so a single
+CLI flag selects everything.
 
 ---
 
@@ -235,13 +235,13 @@ pattern so a single CLI flag toggles both contexts.
 The algorithm dispatch is already wired. Setting
 `actor_rollout_ref.model.algorithm=<your_algo>` on the CLI:
 
-- selects the `(architecture, algorithm)` adapter pair (Step 4), and
-- propagates to `algorithm.adv_estimator` via the OmegaConf template
-  `${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}`.
+- selects the `(architecture, algorithm)` adapter pair (Step 4),
+- propagates to `algorithm.adv_estimator` via
+  `${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}`, and
+- propagates to `actor_rollout_ref.actor.diffusion_loss.loss_mode` via
+  the same pattern.
 
-You still need to set
-`actor_rollout_ref.actor.diffusion_loss.loss_mode=<your_algo>` explicitly
-(Step 3) — the loss is dispatched independently.
+All four dispatch points are covered by the single flag.
 
 ---
 
@@ -253,7 +253,6 @@ and update the algorithm dispatch flags:
 
 ```bash
 actor_rollout_ref.model.algorithm=<your_algo> \
-actor_rollout_ref.actor.diffusion_loss.loss_mode=<your_algo> \
 actor_rollout_ref.rollout.algo.sde_type=<your_sde_type> \
 actor_rollout_ref.rollout.algo.noise_level=<noise_level> \
 ```
