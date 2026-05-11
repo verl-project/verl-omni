@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from omegaconf import MISSING
+
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
 from verl.workers.config.model import MtpConfig
@@ -35,9 +36,7 @@ __all__ = [
 
 @dataclass
 class DiffusionRolloutAlgoConfig(BaseConfig):
-    """Algorithm configuration for the SDE-based diffusion rollout.
-
-    """
+    """Algorithm configuration for the SDE-based diffusion rollout."""
 
     algo_type: str = "flow_grpo"
     noise_level: float = 1.0
@@ -57,9 +56,7 @@ class DiffusionRolloutAlgoConfig(BaseConfig):
             raise ValueError(f"Unknown sample_strategy: {self.sample_strategy!r}")
 
         if self.algo_type == "mix_grpo" and self.sde_window_size is None:
-            raise ValueError(
-                "MixGRPO requires `actor_rollout_ref.rollout.algo.sde_window_size` to be set."
-            )
+            raise ValueError("MixGRPO requires `actor_rollout_ref.rollout.algo.sde_window_size` to be set.")
         if self.sample_strategy == "progressive" and self.iters_per_group <= 0:
             raise ValueError("`iters_per_group` must be positive for the progressive strategy.")
 

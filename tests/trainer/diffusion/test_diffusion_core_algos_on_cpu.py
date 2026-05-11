@@ -76,8 +76,8 @@ def test_flow_grpo_advantage_grouped_uids(norm_adv_by_std_in_grpo: bool, global_
 
 def test_compute_policy_loss_flow_grpo() -> None:
     from hydra import compose, initialize_config_dir
-    from verl.utils.config import omega_conf_to_dataclass
 
+    from verl.utils.config import omega_conf_to_dataclass
     from verl_omni.workers.config.diffusion.actor import FSDPDiffusionActorConfig
 
     batch_size = 8

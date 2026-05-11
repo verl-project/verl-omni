@@ -62,9 +62,11 @@ class DiffusionModelBase(ABC):
 
             import_external_libs(model_config.external_lib)
 
-        algo_type = getattr(model_config, "algo", None).algo_type if getattr(model_config, "algo", None) else "flow_grpo"
+        algo_type = (
+            getattr(model_config, "algo", None).algo_type if getattr(model_config, "algo", None) else "flow_grpo"
+        )
         key = (model_config.architecture, algo_type)
-        
+
         try:
             return cls._registry[key]
         except KeyError:
@@ -89,12 +91,13 @@ class DiffusionModelBase(ABC):
     @classmethod
     def build_algo_scheduler(cls, model_config: DiffusionModelConfig):
         """Build and configure the trainer-side algorithm scheduler (e.g. SDEWindowScheduler).
-        
+
         Args:
             model_config (DiffusionModelConfig): the configuration of the diffusion model.
         """
         # Default fallback: baseline FlowGRPO behaviour
         from verl_omni.pipelines.schedulers.sde_window_scheduler import FlowGRPOWindowScheduler
+
         algo = model_config.algo
         return FlowGRPOWindowScheduler(
             sde_window_size=algo.sde_window_size if algo else None,

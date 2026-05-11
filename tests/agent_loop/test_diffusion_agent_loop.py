@@ -19,10 +19,10 @@ import numpy as np
 import pytest
 import ray
 from omegaconf import DictConfig
+
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
 from verl.workers.rollout.llm_server import LLMServerManager
-
 from verl_omni.agent_loop import DiffusionAgentLoopWorker
 
 from ..utils.gpu_test_topology import resolve_diffusion_agent_loop_gpu_topology

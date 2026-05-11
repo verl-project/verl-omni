@@ -27,6 +27,7 @@ def _layered_summon_lora_params_diffusers(fsdp_module) -> OrderedDict:
     """Layered LoRA param collection for diffusers transformer-block models."""
     from peft.utils.save_and_load import get_peft_model_state_dict
     from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
     from verl.utils.device import get_torch_device
 
     def _prefix_submodules(module, prefix):

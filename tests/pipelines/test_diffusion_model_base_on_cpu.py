@@ -43,7 +43,7 @@ class TestDiffusionModelBaseRegistry:
             @classmethod
             def build_scheduler(cls, model_config):
                 pass
-            
+
             @classmethod
             def forward_and_sample_previous_step(cls, *args, **kwargs):
                 pass
@@ -70,7 +70,7 @@ class TestDiffusionModelBaseRegistry:
             @classmethod
             def build_scheduler(cls, model_config):
                 pass
-            
+
             @classmethod
             def forward_and_sample_previous_step(cls, *args, **kwargs):
                 pass

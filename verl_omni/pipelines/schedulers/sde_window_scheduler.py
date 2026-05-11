@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
 from typing import Any, Optional
+
 import numpy as np
 
 from verl_omni.workers.config.diffusion.rollout import DiffusionRolloutAlgoConfig
@@ -97,13 +97,10 @@ class _MixGRPOBase(SDEWindowScheduler):
     ) -> None:
         if group_size is None or group_size <= 0:
             raise ValueError(
-                "MixGRPO requires a positive group_size "
-                "(set actor_rollout_ref.rollout.algo.sde_window_size)."
+                "MixGRPO requires a positive group_size (set actor_rollout_ref.rollout.algo.sde_window_size)."
             )
         if max_timestep < init_timestep:
-            raise ValueError(
-                f"max_timestep ({max_timestep}) must be >= init_timestep ({init_timestep})."
-            )
+            raise ValueError(f"max_timestep ({max_timestep}) must be >= init_timestep ({init_timestep}).")
         if init_timestep + group_size > max_timestep + 1:
             raise ValueError(
                 f"Window [{init_timestep}, {init_timestep + group_size}) does not fit in "
@@ -202,9 +199,7 @@ def _resolve_envelope(
     if sde_window_range is None:
         return 0, max(0, int(num_inference_steps) - 2)
     if len(sde_window_range) != 2:
-        raise ValueError(
-            f"sde_window_range must be a list of two ints, got {sde_window_range!r}."
-        )
+        raise ValueError(f"sde_window_range must be a list of two ints, got {sde_window_range!r}.")
     start, end = int(sde_window_range[0]), int(sde_window_range[1])
     # ``end`` follows Python half-open convention in the rollout backend
     # (``[start, end)``); convert to the inclusive ``max_timestep`` we use here.

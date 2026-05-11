@@ -31,7 +31,6 @@ from verl_omni.pipelines.schedulers.sde_window_scheduler import (
 )
 from verl_omni.workers.config.diffusion.rollout import DiffusionRolloutAlgoConfig
 
-
 # ---------------------------------------------------------------------------
 # FlowGRPO baseline -- static overrides
 # ---------------------------------------------------------------------------
@@ -59,9 +58,7 @@ class TestFlowGRPOWindowScheduler:
 
 class TestMixGRPOProgressiveScheduler:
     def test_window_advances_every_iters_per_group(self):
-        sched = MixGRPOProgressiveScheduler(
-            group_size=4, init_timestep=0, max_timestep=14, iters_per_group=2
-        )
+        sched = MixGRPOProgressiveScheduler(group_size=4, init_timestep=0, max_timestep=14, iters_per_group=2)
         assert sched.get_window(0)["sde_window_range"] == [0, 4]
         assert sched.get_window(1)["sde_window_range"] == [0, 4]
         assert sched.get_window(2)["sde_window_range"] == [4, 8]
@@ -69,9 +66,7 @@ class TestMixGRPOProgressiveScheduler:
         assert sched.get_window(4)["sde_window_range"] == [8, 12]
 
     def test_window_clips_at_max(self):
-        sched = MixGRPOProgressiveScheduler(
-            group_size=4, init_timestep=0, max_timestep=14, iters_per_group=1
-        )
+        sched = MixGRPOProgressiveScheduler(group_size=4, init_timestep=0, max_timestep=14, iters_per_group=1)
         # With group_size=4 and max_timestep=14, max valid window_start = 11.
         assert sched.get_window(2)["sde_window_range"] == [8, 12]
         assert sched.get_window(3)["sde_window_range"] == [11, 15]
@@ -80,30 +75,22 @@ class TestMixGRPOProgressiveScheduler:
     def test_window_is_deterministic_at_rollout(self):
         # Rollout backend draws ``start`` from ``[start, end - size + 1)``.
         # We collapse ``end - start == size`` to make the draw deterministic.
-        sched = MixGRPOProgressiveScheduler(
-            group_size=3, init_timestep=0, max_timestep=10, iters_per_group=1
-        )
+        sched = MixGRPOProgressiveScheduler(group_size=3, init_timestep=0, max_timestep=10, iters_per_group=1)
         ovr = sched.get_window(1)
         start, end = ovr["sde_window_range"]
         assert end - start == ovr["sde_window_size"]
 
     def test_invalid_iters_per_group_raises(self):
         with pytest.raises(ValueError, match="iters_per_group"):
-            MixGRPOProgressiveScheduler(
-                group_size=2, init_timestep=0, max_timestep=4, iters_per_group=0
-            )
+            MixGRPOProgressiveScheduler(group_size=2, init_timestep=0, max_timestep=4, iters_per_group=0)
 
     def test_invalid_group_size_raises(self):
         with pytest.raises(ValueError, match="group_size"):
-            MixGRPOProgressiveScheduler(
-                group_size=0, init_timestep=0, max_timestep=4
-            )
+            MixGRPOProgressiveScheduler(group_size=0, init_timestep=0, max_timestep=4)
 
     def test_window_does_not_fit_raises(self):
         with pytest.raises(ValueError, match="does not fit"):
-            MixGRPOProgressiveScheduler(
-                group_size=10, init_timestep=0, max_timestep=4
-            )
+            MixGRPOProgressiveScheduler(group_size=10, init_timestep=0, max_timestep=4)
 
 
 # ---------------------------------------------------------------------------
@@ -113,17 +100,13 @@ class TestMixGRPOProgressiveScheduler:
 
 class TestMixGRPORandomScheduler:
     def test_window_size_constant(self):
-        sched = MixGRPORandomScheduler(
-            group_size=3, init_timestep=0, max_timestep=10, base_seed=7
-        )
+        sched = MixGRPORandomScheduler(group_size=3, init_timestep=0, max_timestep=10, base_seed=7)
         for step in range(5):
             ovr = sched.get_window(step)
             assert ovr["sde_window_size"] == 3
 
     def test_window_in_range(self):
-        sched = MixGRPORandomScheduler(
-            group_size=3, init_timestep=0, max_timestep=10, base_seed=7
-        )
+        sched = MixGRPORandomScheduler(group_size=3, init_timestep=0, max_timestep=10, base_seed=7)
         for step in range(50):
             start, end = sched.get_window(step)["sde_window_range"]
             assert 0 <= start <= 8  # max valid start = 10-3+1 = 8
@@ -138,10 +121,7 @@ class TestMixGRPORandomScheduler:
     def test_different_seeds_diverge(self):
         a = MixGRPORandomScheduler(group_size=3, init_timestep=0, max_timestep=10, base_seed=0)
         b = MixGRPORandomScheduler(group_size=3, init_timestep=0, max_timestep=10, base_seed=999)
-        diffs = sum(
-            a.get_window(s)["sde_window_range"] != b.get_window(s)["sde_window_range"]
-            for s in range(10)
-        )
+        diffs = sum(a.get_window(s)["sde_window_range"] != b.get_window(s)["sde_window_range"] for s in range(10))
         assert diffs > 0
 
 
@@ -255,5 +235,3 @@ class TestBuildSDEWindowScheduler:
                 sample_strategy="bogus",
                 sde_window_size=4,
             )
-
-
