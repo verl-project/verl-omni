@@ -102,7 +102,7 @@ with the same OCR reward. BAGEL is registered through the
 `verl_omni.pipelines.bagel_flow_grpo` adapter pair as the architecture
 `OmniBagelForConditionalGeneration`, and the rollout uses a
 single-stage vllm-omni pipeline whose schema is described in
-[`bagel_stage_config.yaml`](bagel_stage_config.yaml).
+[`bagel_deploy_config.yaml`](bagel_deploy_config.yaml).
 
 Prerequisites in addition to the Qwen-Image recipe:
 
@@ -129,8 +129,26 @@ Notable differences from the Qwen-Image recipe:
 - LoRA `target_modules` are the BAGEL MoT generation projections
   (`q_proj_moe_gen`, `k_proj_moe_gen`, `v_proj_moe_gen`,
   `o_proj_moe_gen`).
-- Passes the stage-config YAML to vllm-omni via
-  `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.stage_configs_path`.
+- Passes the deploy-config YAML to vllm-omni via
+  `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.deploy_config`. The
+  legacy `stage_configs_path` entrypoint is **not** supported: it routes
+  through vllm-omni 0.20's deprecated stage-args loader, which silently
+  kills the BAGEL `DiffusionWorker` subprocess after warmup. Always use
+  the `deploy_config` schema documented at
+  [`bagel_deploy_config.yaml`](bagel_deploy_config.yaml).
+- Defaults to `trainer.n_gpus_per_node=4` with
+  `actor_rollout_ref.rollout.tensor_model_parallel_size=1` (4 TP=1
+  rollout replicas), matching the Qwen-Image recipe. Be aware of a
+  TOCTOU race in vllm-omni's per-process `MASTER_PORT` picker
+  (`OmniDiffusionConfig.__post_init__` →`settle_port` in
+  [`vllm_omni/diffusion/data.py`](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/diffusion/data.py)):
+  every concurrent `vLLMOmniHttpServer` Ray actor independently calls
+  `is_port_available(p)` and may pick the same port before any of them
+  actually `bind`s. Birthday-paradox collision probability is roughly 4%
+  at 4 actors and 18% at 8 in the default 100-port window, and is
+  amplified further when retries land inside the prior run's TIME_WAIT
+  window (≈60s). If a launch dies during `init_distributed_environment`
+  with `EADDRINUSE` on a port in 30005–30105, wait ~60s and re-launch.
 
 
 ## Performance

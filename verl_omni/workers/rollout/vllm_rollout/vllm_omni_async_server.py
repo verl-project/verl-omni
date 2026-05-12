@@ -81,8 +81,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return "vllm_omni"
 
     def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
-        # stage_configs_path is consumed in run_server; not a vLLM CLI arg.
-        engine_kwargs.pop("stage_configs_path", None)
+        # ``deploy_config`` is forwarded to ``OmniEngineArgs`` directly in
+        # ``run_server``; it is not a vLLM CLI arg, so strip it before the
+        # parser runs.
+        engine_kwargs.pop("deploy_config", None)
 
     def _get_worker_extension_cls(self) -> str:
         return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
@@ -111,9 +113,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             engine_args["enable_dummy_pipeline"] = True
             engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
-        stage_configs_path = self.config.engine_kwargs.get("vllm_omni", {}).get("stage_configs_path")
-        if stage_configs_path is not None:
-            engine_args["stage_configs_path"] = stage_configs_path
+        deploy_config = self.config.engine_kwargs.get("vllm_omni", {}).get("deploy_config")
+        if deploy_config is not None:
+            engine_args["deploy_config"] = deploy_config
 
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)

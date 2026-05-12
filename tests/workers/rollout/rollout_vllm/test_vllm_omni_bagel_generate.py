@@ -40,8 +40,8 @@ from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
 MODEL_PATH = Path(os.path.expanduser("~/models/tiny-random/bagel"))
-DEFAULT_STAGE_CONFIG = Path(__file__).resolve().parents[4] / "examples/flowgrpo_trainer/bagel_stage_config.yaml"
-STAGE_CONFIG = Path(os.environ.get("BAGEL_STAGE_CONFIG", DEFAULT_STAGE_CONFIG))
+DEFAULT_DEPLOY_CONFIG = Path(__file__).resolve().parents[4] / "examples/flowgrpo_trainer/bagel_deploy_config.yaml"
+DEPLOY_CONFIG = Path(os.environ.get("BAGEL_DEPLOY_CONFIG", DEFAULT_DEPLOY_CONFIG))
 
 DEFAULT_PROMPT = (
     "a beautiful sunset over the ocean with vibrant orange and purple clouds reflecting on the calm water surface"
@@ -66,8 +66,8 @@ def _tokenize_prompt(text: str) -> list[int]:
 @pytest.fixture(scope="module")
 def init_server():
     """Create and launch a vLLMOmniHttpServer Ray actor with BAGEL."""
-    if not STAGE_CONFIG.exists():
-        pytest.skip(f"BAGEL stage config not found: {STAGE_CONFIG}")
+    if not DEPLOY_CONFIG.exists():
+        pytest.skip(f"BAGEL deploy config not found: {DEPLOY_CONFIG}")
 
     ray.init(
         runtime_env={
@@ -107,7 +107,7 @@ def init_server():
             },
             "engine_kwargs": {
                 "vllm_omni": {
-                    "stage_configs_path": str(STAGE_CONFIG),
+                    "deploy_config": str(DEPLOY_CONFIG),
                 }
             },
         }
