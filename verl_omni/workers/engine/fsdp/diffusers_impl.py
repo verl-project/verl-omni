@@ -250,6 +250,13 @@ class DiffusersFSDPEngine(BaseEngine):
             }
             module.add_adapter(LoraConfig(**lora_config))
 
+        # Convert LoRA parameters to fp32 for numerical stability during training.
+        for name, param in module.named_parameters():
+            if param.requires_grad:
+                orig_dtype = param.dtype
+                param.data = param.data.to(torch.float32)
+                logger.info("LoRA param %s: %s -> %s", name, orig_dtype, param.dtype)
+
         return module
 
     def _build_fsdp_module(self, module):
