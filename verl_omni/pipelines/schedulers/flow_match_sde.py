@@ -155,7 +155,37 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         prev_sample: Optional[torch.Tensor] = None,
         sde_type: Literal["cps", "sde"] = "sde",
         return_logprobs: bool = True,
+        return_sqrt_dt: bool = False,
     ):
+        """
+        Run a single SDE / CPS reverse step.
+
+        Args:
+            sample (`torch.FloatTensor`):
+                A current instance of a sample created by the diffusion process.
+            model_output (`torch.FloatTensor`):
+                The direct output from learned diffusion model.
+            timestep (`torch.FloatTensor`, *optional*):
+                The current discrete timestep in the diffusion chain. When `None`, the internal
+                `step_index` is used (sequential denoising loop).
+            generator (`torch.Generator`, *optional*):
+                A random number generator.
+            per_token_timesteps (`torch.Tensor`, *optional*):
+                The timesteps for each token in the sample. Currently not supported.
+            noise_level (`float`, *optional*, defaults to 0.7):
+                The noise level used in the SDE.
+            prev_sample (`torch.FloatTensor`, *optional*):
+                The sample from the previous timestep. If provided, it is used directly for
+                log-probability computation instead of being sampled.
+            sde_type (`str`, *optional*, defaults to "sde"):
+                The type of SDE to use. Choose between "sde" and "cps".
+            return_logprobs (`bool`, *optional*, defaults to True):
+                Whether to return log probabilities of the previous sample.
+            return_sqrt_dt (`bool`, *optional*, defaults to False):
+                Whether to additionally return `sqrt(-dt)` as a tensor of shape `(batch_size,)`.
+                Used by GRPO-Guard to compute the importance-ratio normalization
+                (see `compute_diffusion_loss_grpo_guard`).
+        """
         assert sde_type in ["sde", "cps"]
         assert sample.dtype == torch.float32
         if prev_sample is not None:
@@ -226,4 +256,11 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
 
         # mean along all but batch dimension
         log_prob = log_prob.mean(dim=tuple(range(1, log_prob.ndim))) if log_prob is not None else None
+        if return_sqrt_dt:
+            sqrt_dt = torch.sqrt(-1 * dt)
+            if sqrt_dt.ndim == 0:
+                sqrt_dt = sqrt_dt.expand(sample.shape[0]).clone()
+            else:
+                sqrt_dt = sqrt_dt.reshape(sqrt_dt.shape[0])
+            return prev_sample, log_prob, prev_sample_mean, std_dev_t, sqrt_dt
         return prev_sample, log_prob, prev_sample_mean, std_dev_t

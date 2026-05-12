@@ -34,6 +34,7 @@ start/metrics.md
 :caption: Algorithms
 
 algo/flowgrpo.md
+algo/grpo_guard.md
 algo/mixgrpo.md
 algo/performance.md
 ```
