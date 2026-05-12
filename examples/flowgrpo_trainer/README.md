@@ -115,4 +115,4 @@ qwen_image_ocr_lora: corresponding with the script `run_qwen_image_ocr_lora.sh`;
 qwen_image_ocr_lora_async_reward: corresponding with the script `run_qwen_image_ocr_lora_async_reward.sh`.
 </div>
 
-> **Note:** Due to inherent randomness in the training process, your reward curve may differ from the reference above.
+> **Note:** Reward curves may differ from the references above mainly due to rollout-side stochasticity: diffusion rollouts sample random latents/noise, and the example scripts do not fix the data seed, so prompt ordering can vary between runs.
