@@ -1,6 +1,9 @@
 # FlowGRPO Trainer
 
-This example shows how to post-train `Qwen-Image` with FlowGRPO on an OCR-style image generation task using `vllm-omni` rollout and a visual generative reward model (`Qwen3-VL-8B-Instruct` in this example).
+This example shows how to post-train `Qwen-Image` (and, in a separate
+recipe, `BAGEL-7B-MoT`) with FlowGRPO on an OCR-style image generation
+task using `vllm-omni` rollout and a visual generative reward model
+(`Qwen3-VL-8B-Instruct` in this example).
 
 For the full installation and quickstart guide, see `docs/start/flowgrpo_quickstart.md`. For algorithm details and rule-based reward training (e.g. JPEG incompressibility), see `docs/algo/flowgrpo.md`.
 
@@ -91,6 +94,43 @@ For reward models that are expensive to evaluate (e.g., a VLM judge), the reward
 ```bash
 bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_async_reward.sh
 ```
+
+## BAGEL recipe
+
+`run_bagel_flowgrpo.sh` post-trains `BAGEL-7B-MoT` (Mixture-of-Transformers)
+with the same OCR reward. BAGEL is registered through the
+`verl_omni.pipelines.bagel_flow_grpo` adapter pair as the architecture
+`OmniBagelForConditionalGeneration`, and the rollout uses a
+single-stage vllm-omni pipeline whose schema is described in
+[`bagel_stage_config.yaml`](bagel_stage_config.yaml).
+
+Prerequisites in addition to the Qwen-Image recipe:
+
+- A local copy of `BAGEL-7B-MoT` (HF repo `ByteDance-Seed/BAGEL-7B-MoT`).
+- The same `Qwen3-VL-8B-Instruct` reward model and OCR parquet files
+  produced above.
+
+Launch:
+
+```bash
+export BAGEL_MODEL_PATH=/path/to/BAGEL-7B-MoT
+export REWARD_MODEL_PATH=/path/to/Qwen3-VL-8B-Instruct
+export OCR_TRAIN_PATH=$WORKSPACE/data/ocr/train.parquet
+export OCR_TEST_PATH=$WORKSPACE/data/ocr/test.parquet
+
+bash examples/flowgrpo_trainer/run_bagel_flowgrpo.sh
+```
+
+Notable differences from the Qwen-Image recipe:
+
+- Uses `+actor_rollout_ref.model.architecture=OmniBagelForConditionalGeneration`
+  to bypass the `model_index.json` lookup (BAGEL ships as a single
+  custom checkpoint, not a `diffusers` pipeline).
+- LoRA `target_modules` are the BAGEL MoT generation projections
+  (`q_proj_moe_gen`, `k_proj_moe_gen`, `v_proj_moe_gen`,
+  `o_proj_moe_gen`).
+- Passes the stage-config YAML to vllm-omni via
+  `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.stage_configs_path`.
 
 
 ## Performance

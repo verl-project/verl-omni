@@ -158,70 +158,13 @@ def init_server():
 
 
 def test_generate(init_server):
-    """generate() returns a valid DiffusionOutput with CHW image in [0, 1]."""
+    """Concurrent BAGEL generations with SDE log_probs return valid DiffusionOutput.
+
+    Single combined check covering: image shape & pixel range, SDE log_probs
+    + RL artifacts (``all_latents`` / ``all_timesteps``), and concurrent
+    dispatch through the rollout server.
+    """
     server = init_server
-
-    request_id = f"test_{uuid4().hex[:8]}"
-    output = ray.get(
-        server.generate.remote(
-            prompt_ids=_tokenize_prompt(DEFAULT_PROMPT),
-            sampling_params={
-                "num_inference_steps": 10,
-            },
-            request_id=request_id,
-        ),
-        timeout=300,
-    )
-
-    assert isinstance(output, DiffusionOutput)
-    assert len(output.diffusion_output) == 3, f"Expected 3 channels (CHW), got {len(output.diffusion_output)}"
-    h, w = len(output.diffusion_output[0]), len(output.diffusion_output[0][0])
-    assert h > 0 and w > 0
-    assert output.stop_reason in ("completed", "aborted", None)
-
-    # spot-check pixel range
-    assert 0.0 <= output.diffusion_output[0][0][0] <= 1.0
-
-    print(f"image: C=3 H={h} W={w}  stop_reason={output.stop_reason}")
-
-
-def test_generate_with_logprobs(init_server):
-    """generate() with SDE scheduler returns non-empty log_probs and RL artifacts."""
-    server = init_server
-
-    request_id = f"test_lp_{uuid4().hex[:8]}"
-    output = ray.get(
-        server.generate.remote(
-            prompt_ids=_tokenize_prompt(DEFAULT_PROMPT),
-            sampling_params={
-                "num_inference_steps": 10,
-                "noise_level": 0.7,
-                "sde_type": "sde",
-                "logprobs": True,
-            },
-            request_id=request_id,
-        ),
-        timeout=300,
-    )
-
-    assert isinstance(output, DiffusionOutput)
-    assert len(output.diffusion_output) == 3
-
-    lp = output.log_probs
-    assert lp is not None, "log_probs should be present when logprobs=True"
-    print(f"log_probs: shape={getattr(lp, 'shape', len(lp))}")
-
-    extra = output.extra_fields
-    assert extra.get("all_latents") is not None, "all_latents should be present"
-    assert extra.get("all_timesteps") is not None, "all_timesteps should be present"
-    print(f"all_latents: shape={getattr(extra['all_latents'], 'shape', len(extra['all_latents']))}")
-    print(f"all_timesteps: shape={getattr(extra['all_timesteps'], 'shape', len(extra['all_timesteps']))}")
-
-
-def test_generate_concurrent(init_server):
-    """Multiple concurrent generate() calls all return valid DiffusionOutput."""
-    server = init_server
-    n_requests = 4
 
     prompts = [
         "a beautiful sunset over the ocean with vibrant orange and purple clouds "
@@ -234,24 +177,36 @@ def test_generate_concurrent(init_server):
         "skyscrapers and flying vehicles soaring between the buildings",
     ]
 
-    refs = []
-    for i in range(n_requests):
-        rid = f"concurrent_{i}_{uuid4().hex[:8]}"
-        ref = server.generate.remote(
-            prompt_ids=_tokenize_prompt(prompts[i]),
-            sampling_params={"num_inference_steps": 10},
-            request_id=rid,
+    refs = [
+        server.generate.remote(
+            prompt_ids=_tokenize_prompt(prompt),
+            sampling_params={
+                "num_inference_steps": 10,
+                "noise_level": 0.7,
+                "sde_type": "sde",
+                "logprobs": True,
+            },
+            request_id=f"concurrent_{i}_{uuid4().hex[:8]}",
         )
-        refs.append(ref)
+        for i, prompt in enumerate(prompts)
+    ]
 
     results = ray.get(refs, timeout=600)
 
-    for i, res in enumerate(results):
-        assert isinstance(res, DiffusionOutput), f"Request {i}: expected DiffusionOutput"
-        assert len(res.diffusion_output) == 3, f"Request {i}: expected 3 channels"
-        assert res.stop_reason in ("completed", "aborted", None)
+    for i, output in enumerate(results):
+        assert isinstance(output, DiffusionOutput), f"req {i}: expected DiffusionOutput"
+        assert len(output.diffusion_output) == 3, f"req {i}: expected 3 channels (CHW)"
+        h, w = len(output.diffusion_output[0]), len(output.diffusion_output[0][0])
+        assert h > 0 and w > 0, f"req {i}: empty image {h}x{w}"
+        assert 0.0 <= output.diffusion_output[0][0][0] <= 1.0, f"req {i}: pixel out of [0,1]"
+        assert output.stop_reason in ("completed", "aborted", None)
 
-    print(f"All {n_requests} concurrent requests returned valid DiffusionOutput")
+        assert output.log_probs is not None, f"req {i}: log_probs missing under logprobs=True"
+        extra = output.extra_fields
+        assert extra.get("all_latents") is not None, f"req {i}: all_latents missing"
+        assert extra.get("all_timesteps") is not None, f"req {i}: all_timesteps missing"
+
+    print(f"All {len(results)} concurrent SDE+logprobs requests returned valid DiffusionOutput")
 
 
 # ---------------------------------------------------------------------

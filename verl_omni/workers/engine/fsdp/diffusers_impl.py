@@ -191,6 +191,23 @@ class DiffusersFSDPEngine(BaseEngine):
         Returns ``None`` when the subclass does not provide a custom loader,
         in which case the caller falls back to the default
         ``diffusers.AutoModel`` path.
+
+        .. warning::
+           Custom loaders bypass the ``diffusers.AutoModel`` integration
+           path, which means hooks and instrumentation that this engine
+           applies to a standard ``diffusers`` model (e.g. attention
+           processors, gradient-checkpointing wrappers, LoRA adapters,
+           dtype upcast hooks) may be partially effective or have no
+           effect at all on the returned module — silently. The custom
+           module is responsible for honouring these contracts itself.
+
+        TODO: integrate the supported architectures into a first-class
+        training engine (``transformers`` / ``diffusers`` / ``veomni``)
+        so we can drop this registry escape hatch and stop maintaining
+        bespoke modelling code in this repository. New custom loaders
+        should be added here only as a stop-gap; once an upstream engine
+        gains support, the corresponding ``DiffusionModelBase.build_module``
+        override should return ``None`` and route through the default path.
         """
         from verl_omni.pipelines.model_base import DiffusionModelBase
 
@@ -198,6 +215,14 @@ class DiffusersFSDPEngine(BaseEngine):
         module = model_cls.build_module(self.model_config, torch_dtype)
         if module is None:
             return None
+
+        logger.warning(
+            "Built %s via DiffusionModelBase custom loader; engine-level hooks "
+            "(attention processors, gradient-checkpointing wrappers, LoRA, "
+            "dtype upcast) may be partially effective or silently inactive. "
+            "See the docstring of _build_module_from_registry.",
+            type(module).__name__,
+        )
 
         module.to(torch_dtype)
         if self.model_config.enable_gradient_checkpointing:

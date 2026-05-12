@@ -32,7 +32,7 @@ ocr_test_path=${OCR_TEST_PATH:-$HOME/data/ocr/test.parquet}
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
-reward_path=examples/flowgrpo_trainer/reward_fn.py
+reward_path=verl_omni/utils/reward_score/genrm_ocr.py
 
 python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     algorithm.adv_estimator=flow_grpo \
