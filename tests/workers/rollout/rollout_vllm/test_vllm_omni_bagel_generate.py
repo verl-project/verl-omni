@@ -164,7 +164,7 @@ def test_generate(init_server):
     request_id = f"test_{uuid4().hex[:8]}"
     output = ray.get(
         server.generate.remote(
-            prompt_token_ids=_tokenize_prompt(DEFAULT_PROMPT),
+            prompt_ids=_tokenize_prompt(DEFAULT_PROMPT),
             sampling_params={
                 "num_inference_steps": 10,
             },
@@ -192,7 +192,7 @@ def test_generate_with_logprobs(init_server):
     request_id = f"test_lp_{uuid4().hex[:8]}"
     output = ray.get(
         server.generate.remote(
-            prompt_token_ids=_tokenize_prompt(DEFAULT_PROMPT),
+            prompt_ids=_tokenize_prompt(DEFAULT_PROMPT),
             sampling_params={
                 "num_inference_steps": 10,
                 "noise_level": 0.7,
@@ -238,7 +238,7 @@ def test_generate_concurrent(init_server):
     for i in range(n_requests):
         rid = f"concurrent_{i}_{uuid4().hex[:8]}"
         ref = server.generate.remote(
-            prompt_token_ids=_tokenize_prompt(prompts[i]),
+            prompt_ids=_tokenize_prompt(prompts[i]),
             sampling_params={"num_inference_steps": 10},
             request_id=rid,
         )
@@ -299,7 +299,7 @@ def test_generate_with_lora(init_server):
         # 1) Baseline (no LoRA)
         baseline = ray.get(
             server.generate.remote(
-                prompt_token_ids=_tokenize_prompt(DEFAULT_PROMPT),
+                prompt_ids=_tokenize_prompt(DEFAULT_PROMPT),
                 sampling_params={"num_inference_steps": 10},
                 request_id=f"lora_base_{uuid4().hex[:8]}",
             ),
@@ -309,7 +309,7 @@ def test_generate_with_lora(init_server):
         # 2) With LoRA
         with_lora = ray.get(
             server.generate.remote(
-                prompt_token_ids=_tokenize_prompt(DEFAULT_PROMPT),
+                prompt_ids=_tokenize_prompt(DEFAULT_PROMPT),
                 sampling_params={"num_inference_steps": 10},
                 request_id=f"lora_on_{uuid4().hex[:8]}",
                 lora_request=lora_request,
@@ -321,7 +321,7 @@ def test_generate_with_lora(init_server):
         # 3) Deactivated (no LoRA again)
         restored = ray.get(
             server.generate.remote(
-                prompt_token_ids=_tokenize_prompt(DEFAULT_PROMPT),
+                prompt_ids=_tokenize_prompt(DEFAULT_PROMPT),
                 sampling_params={"num_inference_steps": 10},
                 request_id=f"lora_off_{uuid4().hex[:8]}",
             ),

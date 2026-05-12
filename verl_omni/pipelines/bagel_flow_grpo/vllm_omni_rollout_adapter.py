@@ -151,7 +151,7 @@ class BagelPipelineWithLogProb(BagelPipeline):
 
         custom_prompt = req.prompts[0]
         if not custom_prompt.get("prompt"):
-            prompt = self._decode_token_prompt(custom_prompt.get("prompt_token_ids", custom_prompt.get("prompt_ids")))
+            prompt = self._decode_token_prompt(custom_prompt.get("prompt_token_ids"))
             if prompt is not None:
                 custom_prompt["prompt"] = prompt
 
