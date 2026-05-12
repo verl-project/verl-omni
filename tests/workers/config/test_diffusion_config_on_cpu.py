@@ -79,13 +79,13 @@ class TestDiffusionRolloutAlgoConfig:
         assert cfg.sde_window_size is None
         assert cfg.sde_window_range is None
 
-    def test_invalid_algo_type_raises(self):
-        with pytest.raises(ValueError):
-            DiffusionRolloutAlgoConfig(algo_type="bogus")
+    def test_invalid_sample_strategy_raises(self):
+        with pytest.raises(ValueError, match="Unknown sample_strategy"):
+            DiffusionRolloutAlgoConfig(sample_strategy="bogus")
 
-    def test_mix_grpo_requires_window_size(self):
-        with pytest.raises(ValueError, match="sde_window_size"):
-            DiffusionRolloutAlgoConfig(algo_type="mix_grpo", sde_window_size=None)
+    def test_progressive_requires_positive_iters(self):
+        with pytest.raises(ValueError, match="iters_per_group.*positive"):
+            DiffusionRolloutAlgoConfig(sample_strategy="progressive", iters_per_group=0)
 
 
 class TestDiffusionSamplingConfig:
