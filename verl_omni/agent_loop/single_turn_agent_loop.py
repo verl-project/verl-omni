@@ -62,7 +62,7 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
         with simple_timer("generate_sequences", metrics):
             output = await self.server_manager.generate(
                 request_id=uuid4().hex,
-                prompt_token_ids=prompt_ids,
+                prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=images,
                 video_data=videos,
