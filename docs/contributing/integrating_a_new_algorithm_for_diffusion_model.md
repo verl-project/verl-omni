@@ -1,6 +1,6 @@
 # How to Integrate a New PPO-like Algorithm for Diffusion Model
 
-Last updated: 05/10/2026.
+Last updated: 05/12/2026.
 
 This guide explains how to add a new PPO-like RL algorithm to VeRL-Omni's
 diffusion trainer. The contracts described here are orthogonal to model
@@ -60,7 +60,12 @@ runtime:
 All four registries (`DiffusionModelBase`, `VllmOmniPipelineBase`,
 `register_diffusion_adv_est`, `register_diffusion_loss`) are wired to
 `actor_rollout_ref.model.algorithm` via OmegaConf templates, so a single
-CLI flag selects everything.
+CLI flag selects everything **provided every site recognises the new
+name**. If your algorithm reuses an existing estimator or loss without
+registering an alias, you must explicitly pin those sites back to the
+existing name on the CLI; see
+[Reusing an existing estimator or loss](#reusing-an-existing-estimator-or-loss)
+below.
 
 ---
 
@@ -241,7 +246,39 @@ The algorithm dispatch is already wired. Setting
 - propagates to `actor_rollout_ref.actor.diffusion_loss.loss_mode` via
   the same pattern.
 
-All four dispatch points are covered by the single flag.
+A single flag covers all four dispatch points **only when every site
+recognises the new name** — see the next subsection for the alternative.
+
+### Reusing an existing estimator or loss
+
+If your algorithm reuses an existing estimator and/or loss (for example,
+MixGRPO uses FlowGRPO's verbatim), the cascade above will propagate your
+new algorithm name to those sites, and the validators will reject it:
+
+* `DiffusionAdvantageEstimator` is a closed enum — `compute_advantage`
+  fails to look up an unknown name.
+* `DiffusionLossConfig.__post_init__` checks `loss_mode in valid_modes`
+  and raises `ValueError` for anything not in the allowlist.
+
+You have two ways out, pick whichever is cleaner for your algorithm:
+
+1. **Pin the cascaded fields back to the existing name.** Add explicit
+   overrides to your launch script and any documented YAML examples:
+
+   ```bash
+   algorithm.adv_estimator=<existing_estimator>
+   actor_rollout_ref.model.algorithm=<your_algo>
+   actor_rollout_ref.actor.diffusion_loss.loss_mode=<existing_loss>
+   ```
+
+   This is what
+   [`examples/mixgrpo_trainer/run_qwen_image_ocr_lora_mixgrpo.sh`](../../examples/mixgrpo_trainer/run_qwen_image_ocr_lora_mixgrpo.sh)
+   does.
+
+2. **Register your name as an alias** in `diffusion_algos.py` (decorate
+   the existing function with both names) and add `<your_algo>` to
+   `DiffusionLossConfig.valid_modes`. The cascade then "just works"
+   without per-launch overrides.
 
 ---
 

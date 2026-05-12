@@ -1,6 +1,6 @@
 # Mix-GRPO
 
-Last updated: 05/06/2026.
+Last updated: 05/12/2026.
 
 Mix-GRPO ([paper](https://arxiv.org/abs/2507.21802),
 [code](https://github.com/Tencent-Hunyuan/MixGRPO)) extends Flow-GRPO with a
@@ -36,12 +36,24 @@ FlowGRPO, so only the `(architecture, algorithm)` adapter pair changes.
 ## Configuration
 
 Algorithm dispatch lives on `actor_rollout_ref.model.algorithm`; everything
-else is rollout configuration under `actor_rollout_ref.rollout.algo`:
+else is rollout configuration under `actor_rollout_ref.rollout.algo`.
+
+Because MixGRPO reuses FlowGRPO's advantage estimator and PPO loss verbatim,
+you must also pin the two cascaded fields back to `flow_grpo` so they don't
+propagate the unknown `mix_grpo` token into the validator at
+[`DiffusionLossConfig.valid_modes`](../../verl_omni/workers/config/diffusion/actor.py)
+and the [`DiffusionAdvantageEstimator`](../../verl_omni/trainer/diffusion/diffusion_algos.py)
+enum (see [Caveat: cascade vs. validators](#caveat-cascade-vs-validators) below):
 
 ```yaml
+algorithm:
+  adv_estimator: flow_grpo            # MixGRPO reuses FlowGRPO's estimator
 actor_rollout_ref:
   model:
     algorithm: mix_grpo               # selects the (arch, algo) adapter pair
+  actor:
+    diffusion_loss:
+      loss_mode: flow_grpo            # MixGRPO reuses FlowGRPO's loss
   rollout:
     algo:
       # ----- Common SDE configs ---------------------------------------------
@@ -55,6 +67,32 @@ actor_rollout_ref:
       iters_per_group: 1              # progressive only
       sde_window_seed: 0              # random only
 ```
+
+### Caveat: cascade vs. validators
+
+`actor_rollout_ref.model.algorithm` is wired to *four* dispatch points via
+OmegaConf templates of the form
+`${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}`:
+
+1. The `(architecture, algorithm)` adapter pair lookups
+   (`DiffusionModelBase` and `VllmOmniPipelineBase`).
+2. `algorithm.adv_estimator`.
+3. `actor_rollout_ref.actor.diffusion_loss.loss_mode`.
+
+Setting `actor_rollout_ref.model.algorithm=mix_grpo` therefore propagates
+`mix_grpo` to all four sites. Adapter dispatch (1) is happy — both adapters
+are registered under `algorithm="mix_grpo"`. The other two points fail at
+runtime because:
+
+* `DiffusionAdvantageEstimator` only enumerates `flow_grpo`, so
+  `compute_advantage` raises when it tries to look up `mix_grpo`.
+* `DiffusionLossConfig.__post_init__` checks `loss_mode in ["flow_grpo"]`
+  and raises `ValueError: Invalid diffusion loss_mode: mix_grpo`.
+
+Pinning `algorithm.adv_estimator=flow_grpo` and
+`actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_grpo` keeps the
+adapter dispatch on `mix_grpo` while the estimator/loss stay on the
+existing FlowGRPO implementations.
 
 ### Field semantics
 
@@ -94,12 +132,14 @@ the sliding-window settings are irrelevant there.
 ## Reference recipe
 
 A ready-to-run script is provided at
-`examples/flowgrpo_trainer/run_qwen_image_ocr_lora_mixgrpo.sh`. The default
+`examples/mixgrpo_trainer/run_qwen_image_ocr_lora_mixgrpo.sh`. The default
 config uses a **10-step trajectory with a 2-step window** (`random` strategy),
 matching the FlowGRPO baseline's inference budget:
 
 ```bash
+algorithm.adv_estimator=flow_grpo
 actor_rollout_ref.model.algorithm=mix_grpo
+actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_grpo
 actor_rollout_ref.rollout.algo.sample_strategy=random
 actor_rollout_ref.rollout.algo.sde_window_seed=42
 actor_rollout_ref.rollout.algo.sde_window_size=2
@@ -107,6 +147,9 @@ actor_rollout_ref.rollout.algo.sde_window_range=[0,5]
 actor_rollout_ref.rollout.algo.noise_level=1.2
 actor_rollout_ref.rollout.algo.sde_type=sde
 ```
+
+The first and third lines pin the cascaded estimator/loss back to
+`flow_grpo`; see [Caveat: cascade vs. validators](#caveat-cascade-vs-validators).
 
 
 ## Tuning guide
