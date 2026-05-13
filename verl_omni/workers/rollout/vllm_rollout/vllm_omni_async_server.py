@@ -135,7 +135,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         weight syncs. Use level-1 sleep so those weights are offloaded and can
         be restored on wake-up instead of discarded by level-2 sleep.
         """
-        # TODO: make it more generic in the future when the trainer side incorperate the whole components of the model.
+        # TODO: make it more generic in the future when the
+        #  trainer side incorporates the whole components of the model.
         await self.engine.collective_rpc("sleep", kwargs={"level": 1})
         await self.engine.reset_encoder_cache()
 
