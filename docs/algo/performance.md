@@ -40,7 +40,7 @@ Evaluated with `trainer.val_before_train=True`:
 
 ## FlowGRPO: non-CFG Full Model Training on Qwen-Image OCR
 
-> Experiments used NVIDIA H200 GPUs, `ppo_micro_batch_size_per_gpu` 8, lr 1e-5, clip_ratio 1e-5, image resolution 384x384, optimizer buffer fp32. The other parameters are consistent with the LoRA setting.
+> Experiments used NVIDIA H200 GPUs, `ppo_micro_batch_size_per_gpu` 8, lr 1e-5, clip_ratio 1e-5, image resolution 384x384, optimizer state fp32. The other parameters are consistent with the LoRA setting.
 
 > Note that the initial reward is expected to be low for non-CFG full model training.
 
