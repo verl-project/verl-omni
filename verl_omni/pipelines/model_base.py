@@ -30,44 +30,49 @@ class DiffusionModelBase(ABC):
     model into the verl training loop.
 
     To register, decorate your subclass with
-    ``@DiffusionModelBase.register("name")``. The *name* must match the
+    ``@DiffusionModelBase.register("name", algorithm="...")``. The *name* must match the
     ``_class_name`` value in the pipeline's ``model_index.json`` (which is
-    auto-detected into ``DiffusionModelConfig.architecture``).
+    auto-detected into ``DiffusionModelConfig.architecture``). The *algorithm*
+    must match ``DiffusionModelConfig.algorithm``.
 
     Example::
 
-        @DiffusionModelBase.register("QwenImagePipeline")
+        @DiffusionModelBase.register("QwenImagePipeline", algorithm="flow_grpo")
         class QwenImage(DiffusionModelBase):
             ...
     """
 
-    _registry: dict[str, type["DiffusionModelBase"]] = {}
+    _registry: dict[tuple[str, str], type["DiffusionModelBase"]] = {}
 
     @classmethod
-    def register(cls, name: str):
-        """Class decorator that registers a subclass under *name*."""
+    def register(cls, architecture: str, algorithm: str):
+        """Class decorator that registers a subclass for ``(architecture, algorithm)``."""
 
         def decorator(subclass: type["DiffusionModelBase"]) -> type["DiffusionModelBase"]:
-            cls._registry[name] = subclass
+            cls._registry[(architecture, algorithm)] = subclass
             return subclass
 
         return decorator
 
     @classmethod
     def get_class(cls, model_config: DiffusionModelConfig) -> type["DiffusionModelBase"]:
-        """Return the registered subclass for ``model_config.architecture``."""
-        if model_config.architecture not in cls._registry and model_config.external_lib is not None:
+        """Return the registered subclass for ``(architecture, algorithm)``."""
+        architecture = model_config.architecture
+        algorithm = model_config.algorithm
+        key = (architecture, algorithm)
+
+        if key not in cls._registry and model_config.external_lib is not None:
             from verl.utils.import_utils import import_external_libs
 
             import_external_libs(model_config.external_lib)
 
         try:
-            return cls._registry[model_config.architecture]
+            return cls._registry[key]
         except KeyError:
-            registered = list(cls._registry)
+            registered = sorted(cls._registry.keys())
             raise NotImplementedError(
-                f"No diffusion model registered for architecture={model_config.architecture!r}. "
-                f"Registered: {registered}. "
+                f"No diffusion model registered for (architecture={architecture!r}, "
+                f"algorithm={algorithm!r}). Registered: {registered}. "
                 f"Set ``external_lib`` in DiffusionModelConfig to load your implementation."
             ) from None
 
@@ -152,6 +157,9 @@ class DiffusionModelBase(ABC):
             scheduler_inputs (Optional[TensorDict | dict[str, torch.Tensor]]): the extra inputs for the scheduler,
                 which may contain the latents and timesteps.
             step (int): the current step in the diffusion process.
+
+        Returns:
+            tuple: ``(log_prob, prev_sample_mean, std_dev_t, sqrt_dt)``
         """
         pass
 
@@ -160,38 +168,39 @@ class VllmOmniPipelineBase:
     """Registry base for vllm-omni custom diffusion pipeline classes.
 
     To register, decorate your custom pipeline class with
-    ``@VllmOmniPipelineBase.register("name")``. The *name* must match the
+    ``@VllmOmniPipelineBase.register("name", algorithm="...")``. The *name* must match the
     ``_class_name`` value in the pipeline's ``model_index.json`` (which is
-    auto-detected into ``DiffusionModelConfig.architecture``).
+    auto-detected into ``DiffusionModelConfig.architecture``). The *algorithm*
+    must match ``DiffusionModelConfig.algorithm``.
 
     Example::
 
-        @VllmOmniPipelineBase.register("QwenImagePipeline")
+        @VllmOmniPipelineBase.register("QwenImagePipeline", algorithm="flow_grpo")
         class QwenImagePipelineWithLogProb(QwenImagePipeline):
             ...
     """
 
-    _registry: dict[str, type] = {}
+    _registry: dict[tuple[str, str], type] = {}
 
     @classmethod
-    def register(cls, name: str):
-        """Class decorator that registers a pipeline subclass under *name*."""
+    def register(cls, architecture: str, algorithm: str):
+        """Class decorator that registers a pipeline for ``(architecture, algorithm)``."""
 
         def decorator(subclass: type) -> type:
-            cls._registry[name] = subclass
+            cls._registry[(architecture, algorithm)] = subclass
             return subclass
 
         return decorator
 
     @classmethod
-    def get_class(cls, architecture: str) -> type | None:
-        """Return the registered pipeline class for *architecture*, or ``None``."""
-        return cls._registry.get(architecture)
+    def get_class(cls, architecture: str, algorithm: str) -> type | None:
+        """Return the registered pipeline class for ``(architecture, algorithm)``, or ``None``."""
+        return cls._registry.get((architecture, algorithm))
 
     @classmethod
-    def get_pipeline_path(cls, architecture: str) -> str | None:
-        """Return the fully-qualified dotted import path for *architecture*, or ``None``."""
-        pipeline_cls = cls._registry.get(architecture)
+    def get_pipeline_path(cls, architecture: str, algorithm: str) -> str | None:
+        """Return the fully-qualified dotted import path for ``(architecture, algorithm)``, or ``None``."""
+        pipeline_cls = cls.get_class(architecture, algorithm)
         if pipeline_cls is None:
             return None
         return f"{pipeline_cls.__module__}.{pipeline_cls.__qualname__}"

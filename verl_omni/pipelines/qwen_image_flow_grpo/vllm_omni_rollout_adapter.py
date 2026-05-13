@@ -39,7 +39,7 @@ def _coalesce_not_none(value, default):
     return default if value is None else value
 
 
-@VllmOmniPipelineBase.register("QwenImagePipeline")
+@VllmOmniPipelineBase.register("QwenImagePipeline", algorithm="flow_grpo")
 class QwenImagePipelineWithLogProb(QwenImagePipeline):
     """Rollout pipeline for Qwen-Image that captures per-step log-probabilities.
 
