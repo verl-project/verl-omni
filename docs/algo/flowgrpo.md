@@ -252,6 +252,14 @@ For reward models that are expensive to evaluate (e.g., a VLM judge), the reward
 bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_async_reward.sh
 ```
 
+### Full Model Training
+
+We have provided a script to enable full-weight Qwen-Image OCR training. The example is runnable on 4 NVIDIA H200 GPUs with `true_cfg_scale=1.0`; enabling CFG with `true_cfg_scale > 1.0` requires more GPUs.
+
+```bash
+bash examples/flowgrpo_trainer/run_qwen_image_ocr.sh
+```
+
 
 ### Sequence parallelism (Ulysses SP)
 
