@@ -58,7 +58,7 @@ def _tokenize_prompt(text: str) -> list[int]:
     return token_ids
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def init_server():
     """Create and launch a vLLMOmniHttpServer Ray actor with Qwen/Qwen-Image."""
     model_path = MODEL_PATH
