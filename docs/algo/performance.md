@@ -50,6 +50,12 @@ Evaluated with `trainer.val_before_train=True`:
 <img width="600" alt="Full Model FlowGRPO OCR training zero standard deviation ratio and reward curve" src="https://github.com/user-attachments/assets/573c3ef3-2ab6-478f-b6f5-10a344628d13" />
 </div>
 
+### Training - Clip Fraction
+
+<div align="center">
+<img width="600" alt="Full Model FlowGRPO OCR training Clip Fraction" src="https://github.com/user-attachments/assets/0f4abef4-912f-4dfe-b1d3-4f0962df231c" />
+</div>
+
 ### Validation Reward Curve
 
 <div align="center">
