@@ -742,22 +742,8 @@ class BagelForTraining(nn.Module):
         if text_token_ids is not None and text_attention_mask is not None:
             text_attention_mask = text_attention_mask.to(device=text_token_ids.device, dtype=torch.bool)
             text_lengths = text_attention_mask.sum(dim=-1)
-            if text_lengths.numel() > 0 and int(text_lengths.min().item()) != int(text_lengths.max().item()):
-                outputs = []
-                for i, length_tensor in enumerate(text_lengths):
-                    length = int(length_tensor.item())
-                    sample_text_ids = text_token_ids[i : i + 1, :length] if length > 0 else None
-                    outputs.append(
-                        self(
-                            hidden_states=hidden_states[i : i + 1],
-                            timestep=timestep[i : i + 1],
-                            text_token_ids=sample_text_ids,
-                            latent_pos_ids=latent_pos_ids[i : i + 1],
-                        )[0]
-                    )
-                return (torch.cat(outputs, dim=0),)
             if text_lengths.numel() > 0:
-                text_length = int(text_lengths[0].item())
+                text_length = int(text_lengths.max().item())
                 text_token_ids = text_token_ids[:, :text_length] if text_length > 0 else None
 
         B = hidden_states.shape[0]
