@@ -15,6 +15,7 @@ NUM_GPUS_ACTOR_ROLLOUT_REWARD=4
 ACTOR_SP=2
 ROLLOUT_TP=1
 REWARD_TP=4
+IMAGE_RESOLUTION=384
 
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
@@ -29,7 +30,7 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.actor.optim.lr=3e-5 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=16 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=$ACTOR_SP \
@@ -43,7 +44,9 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
-    actor_rollout_ref.rollout.pipeline.true_cfg_scale=4.0 \
+    actor_rollout_ref.rollout.pipeline.true_cfg_scale=1.0 \
+    actor_rollout_ref.rollout.pipeline.height=$IMAGE_RESOLUTION \
+    actor_rollout_ref.rollout.pipeline.width=$IMAGE_RESOLUTION \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=256 \
     actor_rollout_ref.rollout.algo.noise_level=1.2 \
     actor_rollout_ref.rollout.algo.sde_type="sde" \
