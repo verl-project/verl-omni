@@ -34,9 +34,9 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-import numpy as np
 import torch
 from tensordict import TensorDict
+from verl.utils.device import get_device_name
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
@@ -60,19 +60,24 @@ class BagelDiffusion(DiffusionModelBase):
 
     @classmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig):
+        # Build on GPU so scheduler buffers are comparable with cuda timesteps in FSDP forward.
         scheduler = FlowMatchSDEDiscreteScheduler()
-        cls.set_timesteps(scheduler, model_config, "cpu")
+        cls.set_timesteps(scheduler, model_config, get_device_name())
         return scheduler
 
     @classmethod
     def set_timesteps(cls, scheduler: FlowMatchSDEDiscreteScheduler, model_config: DiffusionModelConfig, device: str):
         num_inference_steps = model_config.pipeline.num_inference_steps
-        t = np.linspace(1, 0, num_inference_steps)
+        # Use torch.float32 on ``device`` to be bit-exact with BAGEL rollout's
+        # ``torch.linspace`` schedule; otherwise ``index_for_timestep`` may miss.
+        t = torch.linspace(1, 0, num_inference_steps, dtype=torch.float32, device=device)
         t_shifted = TIMESTEP_SHIFT * t / (1 + (TIMESTEP_SHIFT - 1) * t)
         sigmas = t_shifted[:-1].tolist()
 
         scheduler.set_shift(1.0)  # identity — sigmas already shifted
-        scheduler.set_timesteps(sigmas=sigmas)
+        # Pass ``timesteps=sigmas`` to skip diffusers' default ``sigmas * 1000``
+        # conversion; BAGEL rollout records raw sigma values as timesteps.
+        scheduler.set_timesteps(sigmas=sigmas, timesteps=sigmas, device=device)
         scheduler.set_begin_index(0)
 
     @classmethod

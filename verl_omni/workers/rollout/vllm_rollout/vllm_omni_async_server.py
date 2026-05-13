@@ -81,10 +81,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return "vllm_omni"
 
     def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
-        # ``deploy_config`` is forwarded to ``OmniEngineArgs`` directly in
-        # ``run_server``; it is not a vLLM CLI arg, so strip it before the
-        # parser runs.
-        engine_kwargs.pop("deploy_config", None)
+        # No-op: ``deploy_config`` is a vllm-omni CLI flag and must reach the parser.
+        return
 
     def _get_worker_extension_cls(self) -> str:
         return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
@@ -103,6 +101,17 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
 
+        # ``deploy_config`` lives on ``OrchestratorArgs``, not ``OmniEngineArgs``,
+        # so ``from_cli_args`` drops it; forward it manually.
+        deploy_config = getattr(args, "deploy_config", None)
+        if deploy_config is not None:
+            engine_args["deploy_config"] = deploy_config
+
+        # Drop verl's injected ``compilation_config``: re-validation under
+        # pydantic-strict rejects ``CompilationConfig``'s default ``None`` fields.
+        # BAGEL's deploy YAML sets ``enforce_eager: true``, so this is a no-op.
+        engine_args.pop("compilation_config", None)
+
         import_external_libs(self.config.external_lib)
         pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
             architecture=self.model_config.architecture,
@@ -112,10 +121,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if pipeline_path is not None:
             engine_args["enable_dummy_pipeline"] = True
             engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
-
-        deploy_config = self.config.engine_kwargs.get("vllm_omni", {}).get("deploy_config")
-        if deploy_config is not None:
-            engine_args["deploy_config"] = deploy_config
 
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)

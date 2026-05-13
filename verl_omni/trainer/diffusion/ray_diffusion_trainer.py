@@ -28,6 +28,7 @@ import ray
 import torch
 from omegaconf import OmegaConf, open_dict
 from PIL import Image
+from tensordict import TensorDict
 from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
@@ -379,13 +380,46 @@ class RayFlowGRPOTrainer:
 
         return gen_batch
 
-    def _compute_reward_colocate(self, batch: DataProto) -> tuple[torch.Tensor, dict[str, Any]] | torch.Tensor:
-        """
-        compute reward use colocate reward model
+    def _compute_reward_colocate(self, batch: DataProto) -> DataProto:
+        """Compute per-sample diffusion reward via the colocated reward loop.
+
+        Bypasses ``RewardLoopManager.compute_rm_score`` (LLM-only: assumes
+        ``responses`` has a token axis and reads ``attention_mask``) and
+        assembles a ``[B, 1]`` ``rm_scores`` tensor directly.
         """
         assert self.reward_loop_manager is not None, "RewardLoopManager is None"
-        batch_reward = self.reward_loop_manager.compute_rm_score(batch)
-        return batch_reward
+        manager = self.reward_loop_manager
+
+        if manager.reward_model_manager is not None:
+            manager.reward_model_manager.wake_up()
+
+        chunks = batch.chunk(len(manager.reward_loop_workers))
+        outputs = ray.get(
+            [
+                worker.compute_score_batch.remote(chunk)
+                for worker, chunk in zip(manager.reward_loop_workers, chunks, strict=True)
+            ]
+        )
+        outputs_flat = [item for sublist in outputs for item in sublist]
+
+        scores = [item["reward_score"] for item in outputs_flat]
+        rm_scores = torch.tensor(scores, dtype=torch.float32).unsqueeze(-1)
+        reward_batch = TensorDict({"rm_scores": rm_scores}, batch_size=len(batch))
+
+        reward_extra_infos = [output.get("reward_extra_info", {}) for output in outputs_flat]
+        reward_extra_keys = list(reward_extra_infos[0].keys()) if reward_extra_infos else []
+        non_tensor_batch = {
+            key: np.array([info[key] for info in reward_extra_infos]) for key in reward_extra_keys
+        }
+
+        if manager.reward_model_manager is not None:
+            manager.reward_model_manager.sleep()
+
+        return DataProto(
+            batch=reward_batch,
+            non_tensor_batch=non_tensor_batch,
+            meta_info={"reward_extra_keys": reward_extra_keys},
+        )
 
     def _validate(self):
         data_source_lst = []
