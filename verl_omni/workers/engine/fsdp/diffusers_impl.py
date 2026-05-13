@@ -29,7 +29,6 @@ from peft import LoraConfig
 from tensordict import TensorDict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
-from torch.distributed._shard.sharded_tensor import ShardedTensor
 from torch.distributed.tensor import DTensor
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
