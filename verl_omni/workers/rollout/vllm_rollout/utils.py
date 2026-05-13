@@ -38,7 +38,8 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     """
 
     def __new__(cls, **kwargs):
-        set_death_signal()
+        # TODO: Fix this on vllm-omni
+        # set_death_signal()
 
         # 1. patch for Lora
         VLLMOmniHijack.hijack()
