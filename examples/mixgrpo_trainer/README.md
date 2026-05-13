@@ -46,7 +46,7 @@ This produces:
 Launch the example from the repository root:
 
 ```bash
-bash examples/mixgrpo_trainer/run_qwen_image_ocr_lora.sh
+bash examples/mixgrpo_trainer/run_qwen_image_ocr_lora_mixgrpo.sh
 ```
 
 ### MixGRPO Tuning
