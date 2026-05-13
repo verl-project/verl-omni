@@ -188,26 +188,13 @@ class DiffusersFSDPEngine(BaseEngine):
     def _build_module_from_registry(self, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
         """Build the model via a registered ``DiffusionModelBase`` subclass.
 
-        Returns ``None`` when the subclass does not provide a custom loader,
-        in which case the caller falls back to the default
-        ``diffusers.AutoModel`` path.
+        Returns ``None`` when the subclass does not provide a custom loader.
+        Custom loaders bypass ``diffusers.AutoModel``, so engine-level hooks
+        (attention processors, gradient checkpointing, LoRA, dtype upcast)
+        may be silently inactive on the returned module.
 
-        .. warning::
-           Custom loaders bypass the ``diffusers.AutoModel`` integration
-           path, which means hooks and instrumentation that this engine
-           applies to a standard ``diffusers`` model (e.g. attention
-           processors, gradient-checkpointing wrappers, LoRA adapters,
-           dtype upcast hooks) may be partially effective or have no
-           effect at all on the returned module — silently. The custom
-           module is responsible for honouring these contracts itself.
-
-        TODO: integrate the supported architectures into a first-class
-        training engine (``transformers`` / ``diffusers`` / ``veomni``)
-        so we can drop this registry escape hatch and stop maintaining
-        bespoke modelling code in this repository. New custom loaders
-        should be added here only as a stop-gap; once an upstream engine
-        gains support, the corresponding ``DiffusionModelBase.build_module``
-        override should return ``None`` and route through the default path.
+        TODO: drop this function once the model is integrated into a
+        first-class engine (``transformers`` / ``diffusers`` / ``veomni``).
         """
         from verl_omni.pipelines.model_base import DiffusionModelBase
 
