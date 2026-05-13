@@ -183,7 +183,7 @@ class BagelDiffusion(DiffusionModelBase):
             noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
             noise_pred = comb_pred * (cond_norm / noise_norm)
 
-        _, log_prob, prev_sample_mean, std_dev_t = scheduler.sample_previous_step(
+        _, log_prob, prev_sample_mean, std_dev_t, sqrt_dt = scheduler.sample_previous_step(
             sample=latents[:, step].float(),
             model_output=noise_pred.float(),
             timestep=timesteps[:, step],
@@ -191,5 +191,6 @@ class BagelDiffusion(DiffusionModelBase):
             prev_sample=latents[:, step + 1].float(),
             sde_type=model_config.algo.sde_type,
             return_logprobs=True,
+            return_sqrt_dt=True,
         )
-        return log_prob, prev_sample_mean, std_dev_t
+        return log_prob, prev_sample_mean, std_dev_t, sqrt_dt
