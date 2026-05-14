@@ -113,9 +113,7 @@ Visit our documentation to learn more.
 </table>
 
 
-
-
-## Ascend NPU Support
+## Ascend NPU Support 💠
 
 `VeRL-Omni` now supports Ascend NPU. For instructions on how to install and get started with FlowGRPO training on Ascend NPU, please refer to our [Ascend NPU Quickstart Guide](https://verl-omni.readthedocs.io/en/latest/start/flowgrpo_quickstart_npu.html).
 
