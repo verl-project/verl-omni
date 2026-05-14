@@ -69,7 +69,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
-@EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda"])
+@EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class DiffusersFSDPEngine(BaseEngine):
     """
     Concrete Diffusers Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
@@ -612,11 +612,12 @@ class DiffusersFSDPEngine(BaseEngine):
         )
 
     def prepare_model_outputs(self, output, micro_batch: TensorDict):
-        log_prob, prev_sample_mean, std_dev_t = output
+        log_prob, prev_sample_mean, std_dev_t, sqrt_dt = output
         return {
             "log_probs": log_prob,
             "prev_sample_mean": prev_sample_mean,
             "std_dev_t": std_dev_t,
+            "sqrt_dt": sqrt_dt,
         }
 
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
@@ -652,6 +653,9 @@ class DiffusersFSDPEngine(BaseEngine):
 
             if micro_batch.get("ref_prev_sample_mean", None) is not None:
                 data["ref_prev_sample_mean"] = micro_batch["ref_prev_sample_mean"][:, step]
+
+            if micro_batch.get("old_prev_sample_mean", None) is not None:
+                data["old_prev_sample_mean"] = micro_batch["old_prev_sample_mean"][:, step]
 
             loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
         else:

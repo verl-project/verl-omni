@@ -4,20 +4,46 @@ Last updated: 04/30/2026
 
 ## Requirements
 
+For NVIDIA GPU:
 - **Python**: Version >= 3.10
 - **CUDA**: Version >= 12.8
 
+For Ascend NPU:
+- **Python**: Version >= 3.10
+- **CANN**: Version == 9.0.0
+
 ## Install
 
-Install in the following order to avoid dependency conflicts:
+Follow the steps below in order to avoid dependency conflicts:
+
+1. Create a Python virtual environment:
 
 ```bash
 uv venv --python 3.12 --seed
 source .venv/bin/activate
+```
 
-# Install vllm, vllm-omni, then verl in order
+2. Install `vllm` followed by `vllm-omni`.
+
+For NVIDIA GPU:
+
+```bash
 uv pip install vllm==0.18.0
-uv pip install vllm-omni==0.18
+uv pip install vllm-omni==0.18.0
+```
+
+For Ascend NPU:
+
+```bash
+uv pip install vllm==0.18.0
+uv pip install vllm-ascend==0.18.0
+uv pip install vllm-omni==0.18.0
+```
+
+3. Install `verl` followed by `verl-omni` from source:
+
+``` bash 
+# Install verl
 uv pip install git+https://github.com/verl-project/verl.git@b1e4c6279fcd85d0ab44ddecd3d0d175c5212f52
 
 # Install verl-omni from source
@@ -26,19 +52,28 @@ cd verl-omni
 uv pip install -e .
 ```
 
-Note: Install vllm and vllm-omni first — they may override your existing PyTorch installation,
-so installing them before verl and verl-omni ensures a compatible CUDA-aware torch version.
+> Note:  Note: Install `vllm` and `vllm-omni` first, as they may override your existing PyTorch installation. Installing them before `verl` and `verl-omni` ensures a compatible, hardware-aware PyTorch version.
 
 ## Optional Dependencies
 
 | Extra | Install | When needed |
 |---|---|---|
-| OCR reward | `pip install Levenshtein` | FlowGRPO training with OCR-based reward |
+| OCR reward | `uv pip install Levenshtein` | FlowGRPO training with OCR-based reward |
 
 ## Post-Installation Verification
 
+For NVIDIA GPU:
+
 ```bash
 python -c "import torch; print('torch', torch.__version__, '| CUDA', torch.version.cuda)"
+python -c "import vllm; print('vllm', vllm.__version__)"
+python -c "import verl_omni; print('VeRL-Omni ready')"
+```
+
+For Ascend NPU:
+
+```bash
+python -c "import torch; import torch_npu; print('torch', torch.__version__, '| NPU', torch.npu.is_available())"
 python -c "import vllm; print('vllm', vllm.__version__)"
 python -c "import verl_omni; print('VeRL-Omni ready')"
 ```

@@ -157,6 +157,9 @@ class DiffusionModelBase(ABC):
             scheduler_inputs (Optional[TensorDict | dict[str, torch.Tensor]]): the extra inputs for the scheduler,
                 which may contain the latents and timesteps.
             step (int): the current step in the diffusion process.
+
+        Returns:
+            tuple: ``(log_prob, prev_sample_mean, std_dev_t, sqrt_dt)``
         """
         pass
 

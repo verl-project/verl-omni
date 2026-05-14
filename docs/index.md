@@ -26,6 +26,7 @@ VeRL-Omni targets RL post-training for three families of generative models:
 
 start/install.md
 start/flowgrpo_quickstart.md
+start/flowgrpo_quickstart_npu.md
 start/metrics.md
 ```
 
@@ -34,6 +35,7 @@ start/metrics.md
 :caption: Algorithms
 
 algo/flowgrpo.md
+algo/grpo_guard.md
 algo/mixgrpo.md
 algo/performance.md
 ```

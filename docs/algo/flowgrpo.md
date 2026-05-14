@@ -1,6 +1,6 @@
 # Flow-GRPO
 
-Last updated: 04/23/2026.
+Last updated: 05/13/2026.
 
 Flow-GRPO ([paper](https://arxiv.org/abs/2505.05470), [code](https://github.com/yifan123/flow_grpo)) is the first method to integrate online policy gradient reinforcement learning into **flow matching** generative models (e.g., Stable Diffusion 3, FLUX). It enables direct reward optimization for tasks such as compositional text-to-image generation, visual text rendering, and human preference alignment, without modifying the standard inference pipeline.
 
@@ -250,6 +250,14 @@ For reward models that are expensive to evaluate (e.g., a VLM judge), the reward
 
 ```bash
 bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_async_reward.sh
+```
+
+### Full Model Training
+
+We have provided a script to enable non-cfg full-weight Qwen-Image OCR training. The example is runnable on 4 NVIDIA H200 GPUs; enabling CFG requires more GPU resources.
+
+```bash
+bash examples/flowgrpo_trainer/run_qwen_image_ocr.sh
 ```
 
 
