@@ -97,6 +97,7 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     reward.reward_model.model_path=$REWARD_MODEL_PATH \
     reward.reward_model.rollout.name=$REWARD_ENGINE \
     reward.reward_model.rollout.tensor_model_parallel_size=4 \
+    +reward.reward_model.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0 \
     reward.custom_reward_function.path=$reward_path \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.logger='["console", "wandb"]' \
