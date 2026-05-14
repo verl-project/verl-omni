@@ -105,7 +105,7 @@ Visit our documentation to learn more.
   </tr>
   <tr>
     <td>SD3.5</td>
-    <td>Diffusion generation</td>
+    <td>Diffusion generator</td>
     <td>Text → Image</td>
     <td>DPO</td>
     <td>WIP</td>
