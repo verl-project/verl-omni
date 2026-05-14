@@ -151,6 +151,73 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         priority: int = 0,
     ) -> DiffusionOutput:
         """Generate sequence with token-in-image-out."""
+        outputs = await self._generate_engine_call(
+            prompt_ids=prompt_ids,
+            sampling_params=sampling_params,
+            request_id=request_id,
+            num_outputs_per_prompt=1,
+            image_data=image_data,
+            video_data=video_data,
+            negative_prompt_ids=negative_prompt_ids,
+        )
+        return outputs[0]
+
+    async def generate_batched(
+        self,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        request_id: str,
+        num_outputs_per_prompt: int,
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+        negative_prompt_ids: Optional[list[int]] = None,
+        priority: int = 0,
+    ) -> list[DiffusionOutput]:
+        """Submit one engine request that produces ``num_outputs_per_prompt`` samples
+        in a single B=N transformer forward pass.
+
+        This bypasses the orchestrator's per-request serialization
+        (``StageDiffusionClient`` runs each ``add_request_async`` through a
+        ``ThreadPoolExecutor(max_workers=1)``) by letting the underlying
+        ``QwenImagePipelineWithLogProb`` forward batch ``N`` latents together,
+        the same way ``diffusers.QwenImagePipeline`` does with
+        ``num_images_per_prompt=N``.
+
+        Returns:
+            list[DiffusionOutput]: One entry per generated sample. Each entry
+            has the same shape as a single :meth:`generate` call would return
+            (``diffusion_output`` is CHW, ``log_probs`` and ``extra_fields[...]``
+            are sliced per-sample).
+        """
+        if num_outputs_per_prompt < 1:
+            raise ValueError(f"num_outputs_per_prompt must be >= 1, got {num_outputs_per_prompt}")
+        return await self._generate_engine_call(
+            prompt_ids=prompt_ids,
+            sampling_params=sampling_params,
+            request_id=request_id,
+            num_outputs_per_prompt=num_outputs_per_prompt,
+            image_data=image_data,
+            video_data=video_data,
+            negative_prompt_ids=negative_prompt_ids,
+        )
+
+    async def _generate_engine_call(
+        self,
+        *,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        request_id: str,
+        num_outputs_per_prompt: int,
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+        negative_prompt_ids: Optional[list[int]] = None,
+    ) -> list[DiffusionOutput]:
+        """Shared implementation for :meth:`generate` and :meth:`generate_batched`.
+
+        Builds the ``OmniCustomPrompt`` + ``OmniDiffusionSamplingParams``, calls
+        the async engine once, then slices the resulting ``OmniRequestOutput``
+        into ``num_outputs_per_prompt`` per-sample ``DiffusionOutput`` objects.
+        """
         prompt_ids = normalize_token_ids(prompt_ids)
 
         multi_modal_data = {}
@@ -176,10 +243,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if multi_modal_data:
             custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
 
-        # Build OmniDiffusionSamplingParams from the incoming dict
+        # Build OmniDiffusionSamplingParams from the incoming dict, overriding
+        # num_outputs_per_prompt so the pipeline runs a B=N transformer forward.
+        effective_sp: dict[str, Any] = dict(sampling_params)
+        effective_sp["num_outputs_per_prompt"] = num_outputs_per_prompt
+
         sampling_kwargs: dict[str, Any] = {}
         extra_args: dict[str, Any] = {}
-        for k, v in sampling_params.items():
+        for k, v in effective_sp.items():
             if hasattr(OmniDiffusionSamplingParams, k):
                 sampling_kwargs[k] = v
             else:
@@ -202,16 +273,36 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             final_res = output
         assert final_res is not None
 
-        diffusion_output = self._to_tensor(final_res.images[0]).float() / 255.0
+        if len(final_res.images) < num_outputs_per_prompt:
+            raise RuntimeError(
+                f"Expected {num_outputs_per_prompt} images for request {request_id}, "
+                f"got {len(final_res.images)} from the engine."
+            )
 
-        # Extract extra data from custom_output (populated by DiffusionEngine)
+        return self._unpack_batched_result(
+            final_res=final_res,
+            sampling_params=sampling_params,
+            num_outputs_per_prompt=num_outputs_per_prompt,
+        )
+
+    def _unpack_batched_result(
+        self,
+        *,
+        final_res: OmniRequestOutput,
+        sampling_params: dict[str, Any],
+        num_outputs_per_prompt: int,
+    ) -> list[DiffusionOutput]:
+        """Slice a batched ``OmniRequestOutput`` into per-sample ``DiffusionOutput``s.
+
+        Per-sample tensors in ``custom_output`` are expected to have shape
+        ``(N, ...)`` where ``N == num_outputs_per_prompt``; index ``i`` is
+        used for the *i*-th returned ``DiffusionOutput``.
+        """
         mm_output = final_res.custom_output or {}
 
+        all_log_probs = None
         if sampling_params.get("logprobs", False):
             all_log_probs = mm_output.get("all_log_probs")
-            log_probs = all_log_probs[0] if all_log_probs is not None else None
-        else:
-            log_probs = None
 
         all_latents = mm_output.get("all_latents")
         all_timesteps = mm_output.get("all_timesteps")
@@ -220,19 +311,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         negative_prompt_embeds = mm_output.get("negative_prompt_embeds")
         negative_prompt_embeds_mask = mm_output.get("negative_prompt_embeds_mask")
 
-        extra_fields = {
-            "all_latents": all_latents[0] if all_latents is not None else None,
-            "all_timesteps": all_timesteps[0] if all_timesteps is not None else None,
-            "prompt_embeds": prompt_embeds[0] if prompt_embeds is not None else None,
-            "prompt_embeds_mask": prompt_embeds_mask[0] if prompt_embeds_mask is not None else None,
-            "negative_prompt_embeds": negative_prompt_embeds[0] if negative_prompt_embeds is not None else None,
-            "negative_prompt_embeds_mask": negative_prompt_embeds_mask[0]
-            if negative_prompt_embeds_mask is not None
-            else None,
-            "global_steps": self.global_steps,
-        }
-
-        # Determine stop reason from finish_reason
+        # Determine stop reason from finish_reason (shared across all samples
+        # in this batched request).
         if final_res.request_output is not None and hasattr(final_res.request_output, "finish_reason"):
             finish_reason = final_res.request_output.finish_reason or "stop"
         else:
@@ -249,13 +329,32 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if final_res.request_output is not None and hasattr(final_res.request_output, "num_preempted"):
             num_preempted = final_res.request_output.num_preempted
 
-        return DiffusionOutput(
-            diffusion_output=diffusion_output,
-            log_probs=log_probs,
-            stop_reason=stop_reason,
-            num_preempted=num_preempted,
-            extra_fields=extra_fields,
-        )
+        def _take(tensor, index):
+            return tensor[index] if tensor is not None else None
+
+        outputs: list[DiffusionOutput] = []
+        for i in range(num_outputs_per_prompt):
+            diffusion_output = self._to_tensor(final_res.images[i]).float() / 255.0
+            extra_fields = {
+                "all_latents": _take(all_latents, i),
+                "all_timesteps": _take(all_timesteps, i),
+                "prompt_embeds": _take(prompt_embeds, i),
+                "prompt_embeds_mask": _take(prompt_embeds_mask, i),
+                "negative_prompt_embeds": _take(negative_prompt_embeds, i),
+                "negative_prompt_embeds_mask": _take(negative_prompt_embeds_mask, i),
+                "global_steps": self.global_steps,
+            }
+            outputs.append(
+                DiffusionOutput(
+                    diffusion_output=diffusion_output,
+                    log_probs=_take(all_log_probs, i),
+                    stop_reason=stop_reason,
+                    num_preempted=num_preempted,
+                    extra_fields=extra_fields,
+                )
+            )
+
+        return outputs
 
     async def wait_for_requests_to_drain(self):
         # TODO (mike): implement this once DP is supported.

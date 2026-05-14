@@ -1,4 +1,13 @@
 # Qwen-Image lora RL, vllm_omni rollout
+#
+# Rollout batching:
+#   actor_rollout_ref.rollout.enable_batched_diffusion (default: True)
+#     When True and rollout.n > 1, the diffusion agent loop submits one
+#     vllm-omni request per prompt with num_outputs_per_prompt = rollout.n
+#     (single B = rollout.n transformer forward) instead of rollout.n
+#     concurrent B = 1 requests that the AsyncOmniDiffusion executor
+#     would otherwise serialize one-by-one. Set to False to fall back to
+#     the legacy per-sample fan-out (useful for A/B comparisons).
 set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME
@@ -40,6 +49,7 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.n=16 \
+    actor_rollout_ref.rollout.enable_batched_diffusion=True \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \

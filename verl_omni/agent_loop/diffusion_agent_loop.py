@@ -14,6 +14,7 @@
 import asyncio
 import random
 from typing import Any, Optional
+from uuid import uuid4
 
 import hydra
 import numpy as np
@@ -37,12 +38,48 @@ from verl.utils.profiler import simple_timer
 from verl.workers.rollout.llm_server import LLMServerClient
 
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
+from verl_omni.workers.rollout.replica import DiffusionOutput
 
 
 def _config_to_sampling_dict(config: Optional[BaseConfig]) -> dict:
     if config is None:
         return {}
     return {k: v for k, v in config.items() if not k.startswith("_")}
+
+
+async def _server_generate_batched(
+    server_manager: LLMServerClient,
+    *,
+    request_id: str,
+    prompt_ids: list[int],
+    sampling_params: dict[str, Any],
+    num_outputs_per_prompt: int,
+    image_data: Optional[list[Any]] = None,
+    video_data: Optional[list[Any]] = None,
+    negative_prompt_ids: Optional[list[int]] = None,
+) -> list[DiffusionOutput]:
+    """Invoke ``vLLMOmniHttpServer.generate_batched`` via the LLM server load balancer.
+
+    ``LLMServerClient`` in upstream ``verl`` only exposes ``generate``, so this
+    helper acquires a server handle via the existing load-balancer pair and
+    calls the new ``generate_batched`` method directly on the Ray actor. The
+    sticky-session behavior of ``LLMServerClient.generate`` is intentionally
+    bypassed here: each diffusion request is independent and benefits more
+    from least-loaded routing than prefix-cache stickiness.
+    """
+    server_id, server = await server_manager._acquire_server(request_id)
+    try:
+        return await server.generate_batched.remote(
+            request_id=request_id,
+            prompt_ids=prompt_ids,
+            sampling_params=sampling_params,
+            num_outputs_per_prompt=num_outputs_per_prompt,
+            image_data=image_data,
+            video_data=video_data,
+            negative_prompt_ids=negative_prompt_ids,
+        )
+    finally:
+        server_manager._release_server(server_id)
 
 
 class DiffusionAgentLoopOutput(BaseModel):
@@ -171,15 +208,76 @@ class DiffusionAgentLoopWorker:
             default_agent_loop = config.agent.default_agent_loop
             batch.non_tensor_batch["agent_name"] = np.array([default_agent_loop] * len(batch), dtype=object)
 
-        tasks = []
-        for i in range(len(batch)):
-            kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
-            tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, **kwargs)))
-        outputs = await asyncio.gather(*tasks)
+        rollout_n = self._effective_rollout_n(is_validate)
+        if self._can_use_batched_path(batch, rollout_n):
+            outputs = await self._run_agent_loops_batched(batch, sampling_params, rollout_n)
+        else:
+            tasks = []
+            for i in range(len(batch)):
+                kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
+                tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, **kwargs)))
+            outputs = await asyncio.gather(*tasks)
 
         output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
 
         return output
+
+    def _effective_rollout_n(self, is_validate: bool) -> int:
+        """Number of samples generated per prompt for the current call."""
+        if is_validate:
+            return int(getattr(self.rollout_config.val_kwargs, "n", 1) or 1)
+        return int(getattr(self.rollout_config, "n", 1) or 1)
+
+    def _can_use_batched_path(self, batch: DataProto, rollout_n: int) -> bool:
+        """Decide whether ``generate_sequences`` can dispatch via ``generate_batched``.
+
+        The trainer expands each prompt with ``DataProto.repeat(repeat_times=n,
+        interleave=True)`` before calling us, so consecutive groups of
+        ``rollout_n`` rows share the same prompt (and same ``agent_name``).
+        We only collapse a group when (a) the rollout server is ``vllm_omni``,
+        (b) the flag is enabled, (c) ``rollout_n > 1`` and divides the batch
+        cleanly, and (d) every row in the group uses the same ``agent_name``.
+        """
+        if not bool(getattr(self.rollout_config, "enable_batched_diffusion", False)):
+            return False
+        if rollout_n <= 1:
+            return False
+        if getattr(self.rollout_config, "name", None) != "vllm_omni":
+            return False
+        if len(batch) == 0 or len(batch) % rollout_n != 0:
+            return False
+        agent_names = batch.non_tensor_batch.get("agent_name")
+        if agent_names is None:
+            return False
+        for start in range(0, len(batch), rollout_n):
+            group = agent_names[start : start + rollout_n]
+            if not all(name == group[0] for name in group):
+                return False
+        return True
+
+    async def _run_agent_loops_batched(
+        self,
+        batch: DataProto,
+        sampling_params: dict[str, Any],
+        rollout_n: int,
+    ) -> list["_InternalDiffusionAgentLoopOutput"]:
+        """Dispatch one ``generate_batched`` call per prompt group and flatten the results.
+
+        Each group of ``rollout_n`` adjacent rows is collapsed into a single
+        engine request with ``num_outputs_per_prompt = rollout_n``. The
+        returned ``rollout_n`` per-sample :class:`DiffusionOutput` objects are
+        then unpacked into ``rollout_n`` independent agent-loop outputs whose
+        per-row ``kwargs`` (raw prompt, reward model spec, ...) are inherited
+        from the original batch row at the matching position.
+        """
+        tasks: list[asyncio.Task] = []
+        for group_start in range(0, len(batch), rollout_n):
+            row_kwargs_list = [
+                {k: v[group_start + offset] for k, v in batch.non_tensor_batch.items()} for offset in range(rollout_n)
+            ]
+            tasks.append(asyncio.create_task(self._run_agent_loop_batched(sampling_params, rollout_n, row_kwargs_list)))
+        groups = await asyncio.gather(*tasks)
+        return [out for group in groups for out in group]
 
     async def _run_agent_loop(
         self,
@@ -204,6 +302,92 @@ class DiffusionAgentLoopWorker:
         )
         output: DiffusionAgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
         return await self._agent_loop_postprocess(output, **kwargs)
+
+    async def _run_agent_loop_batched(
+        self,
+        sampling_params: dict[str, Any],
+        num_outputs_per_prompt: int,
+        row_kwargs_list: list[dict[str, Any]],
+    ) -> list[_InternalDiffusionAgentLoopOutput]:
+        """Run a single ``generate_batched`` engine call for one prompt group.
+
+        The first row in ``row_kwargs_list`` is used to tokenize the prompt
+        (all rows in the group are duplicates of the same prompt). The
+        resulting :class:`list[DiffusionOutput]` of length ``num_outputs_per_prompt``
+        is then post-processed per-row so reward / extra-field handling
+        matches the per-row code path.
+        """
+        assert len(row_kwargs_list) == num_outputs_per_prompt, (
+            f"row_kwargs_list size {len(row_kwargs_list)} != num_outputs_per_prompt {num_outputs_per_prompt}"
+        )
+        head_kwargs = row_kwargs_list[0]
+        agent_name = head_kwargs["agent_name"]
+        assert agent_name in _agent_loop_registry, (
+            f"Agent loop {agent_name} not registered, registered agent loops: {_agent_loop_registry.keys()}"
+        )
+
+        # Reuse the registered agent loop just for tokenization / vision-info
+        # extraction so the prompt-prep path stays identical to the per-row path.
+        agent_loop_config = _agent_loop_registry[agent_name]
+        agent_loop = hydra.utils.instantiate(
+            config=agent_loop_config,
+            trainer_config=DictConfigWrap(config=self.config),
+            server_manager=self.server_manager,
+            tokenizer=self.tokenizer,
+            processor=self.processor,
+            dataset_cls=self.dataset_cls,
+            data_config=DictConfigWrap(self.config.data),
+        )
+
+        raw_prompt = head_kwargs["raw_prompt"]
+        raw_negative_prompt = head_kwargs.get("raw_negative_prompt")
+        multi_modal_data = await agent_loop.process_vision_info(raw_prompt)
+        images = multi_modal_data.get("images")
+        videos = multi_modal_data.get("videos")
+        prompt_ids = await agent_loop.apply_chat_template(raw_prompt, images=images, videos=videos)
+        if raw_negative_prompt is not None:
+            negative_prompt_ids = await agent_loop.apply_chat_template(
+                raw_negative_prompt, images=images, videos=videos
+            )
+        else:
+            negative_prompt_ids = None
+
+        metrics: dict[str, Any] = {}
+        with simple_timer("generate_sequences", metrics):
+            diffusion_outputs = await _server_generate_batched(
+                self.server_manager,
+                request_id=uuid4().hex,
+                prompt_ids=prompt_ids,
+                sampling_params=sampling_params,
+                num_outputs_per_prompt=num_outputs_per_prompt,
+                image_data=images,
+                video_data=videos,
+                negative_prompt_ids=negative_prompt_ids,
+            )
+        if len(diffusion_outputs) != num_outputs_per_prompt:
+            raise RuntimeError(
+                f"generate_batched returned {len(diffusion_outputs)} samples, expected {num_outputs_per_prompt}"
+            )
+
+        results: list[_InternalDiffusionAgentLoopOutput] = []
+        for diffusion_output, row_kwargs in zip(diffusion_outputs, row_kwargs_list, strict=True):
+            # Each sample gets its own metrics dict so per-row timings don't alias
+            # the same underlying dict and so num_preempted is per-sample.
+            sample_metrics = dict(metrics)
+            if sample_metrics.get("num_preempted") is None:
+                sample_metrics["num_preempted"] = (
+                    diffusion_output.num_preempted if diffusion_output.num_preempted is not None else -1
+                )
+            agent_output = DiffusionAgentLoopOutput(
+                prompt_ids=prompt_ids,
+                response_diffusion_output=diffusion_output.diffusion_output,
+                response_logprobs=diffusion_output.log_probs,
+                num_turns=2,
+                metrics=sample_metrics,
+                extra_fields=diffusion_output.extra_fields,
+            )
+            results.append(await self._agent_loop_postprocess(agent_output, **row_kwargs))
+        return results
 
     async def _agent_loop_postprocess(self, output, **kwargs) -> _InternalDiffusionAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""

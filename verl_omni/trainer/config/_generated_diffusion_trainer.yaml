@@ -185,6 +185,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: null
     disable_log_stats: true
     'n': 1
+    enable_batched_diffusion: true
     multi_turn:
       _target_: verl.workers.config.MultiTurnConfig
       enable: false
