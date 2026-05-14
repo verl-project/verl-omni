@@ -228,6 +228,8 @@ class DiffusersFSDPEngine(BaseEngine):
         return module
 
     def _build_lora_module(self, module):
+        from peft.tuners.tuners_utils import BaseTunerLayer
+
         lora_adapter_path = getattr(self.model_config, "lora_adapter_path", None)
         if lora_adapter_path is not None:
             from verl.utils.fs import copy_to_local
@@ -249,6 +251,17 @@ class DiffusersFSDPEngine(BaseEngine):
                 "bias": "none",
             }
             module.add_adapter(LoraConfig(**lora_config))
+
+        # Convert LoRA parameters to fp32 for numerical stability during training.
+        for name, param in module.named_parameters():
+            if param.requires_grad:
+                orig_dtype = param.dtype
+                param.data = param.data.to(torch.float32)
+                logger.debug("LoRA param %s: %s -> %s", name, orig_dtype, param.dtype)
+
+        for submodule in module.modules():
+            if isinstance(submodule, BaseTunerLayer):
+                submodule.cast_input_dtype_enabled = False
 
         return module
 
