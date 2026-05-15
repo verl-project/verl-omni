@@ -13,6 +13,14 @@ trainer drives them through a unified RPC layer.
    verl_omni.workers.engine_workers.TrainingWorker
    verl_omni.workers.engine_workers.ActorRolloutRefWorker
    verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersFSDPEngine
+   verl_omni.workers.config.DiffusionModelConfig
+   verl_omni.workers.config.DiffusionActorConfig
+   verl_omni.workers.config.FSDPDiffusionActorConfig
+   verl_omni.workers.config.DiffusionLossConfig
+   verl_omni.workers.config.DiffusionRolloutConfig
+   verl_omni.workers.config.DiffusionRolloutAlgoConfig
+   verl_omni.workers.config.DiffusionPipelineConfig
+   verl_omni.workers.config.DiffusionSamplingConfig
 
 Engine Workers
 ~~~~~~~~~~~~~~~~~
@@ -79,10 +87,10 @@ by the engine workers. They are typically built from
 .. autoclass:: verl_omni.workers.config.DiffusionRolloutConfig
    :members:
 
-.. autoclass:: verl_omni.workers.config.DiffusionPipelineConfig
+.. autoclass:: verl_omni.workers.config.DiffusionRolloutAlgoConfig
    :members:
 
-.. autoclass:: verl_omni.workers.config.DiffusionRolloutAlgoConfig
+.. autoclass:: verl_omni.workers.config.DiffusionPipelineConfig
    :members:
 
 .. autoclass:: verl_omni.workers.config.DiffusionSamplingConfig

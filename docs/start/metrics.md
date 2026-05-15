@@ -1,7 +1,7 @@
 (metrics)=
-# Diffusion Training Metrics
+# Training Metrics
 
-Last updated: 05/08/2026
+Last updated: 05/15/2026
 
 The table below describes metrics specific to diffusion FlowGRPO / GRPO-Guard training, logged each step to your configured backend (console / W&B).
 
