@@ -12,20 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# NOTE: This file contains NPU (Ascend) specific overrides extracted from
-# verl_omni/workers/rollout/vllm_rollout/utils.py (commit f5c0cff9b8).
-# These changes should be integrated into verl-omni directly — either as
-# first-class NPU support inside vLLM-Omni's CustomPipelineWorkerExtension,
-# or via a dedicated NPU device plugin — so that downstream projects no
-# longer need to maintain this mixin separately.
-# See: https://github.com/verl-project/verl-omni
-
 import logging
 import os
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 
 import torch
 from vllm.utils.mem_utils import GiB_bytes
+
+__all__ = ["NPUColocateWorkerMixin"]
+
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
