@@ -13,6 +13,8 @@
 # limitations under the License.
 import argparse
 import logging
+import os
+import socket
 from dataclasses import asdict
 from typing import Any, Optional
 
@@ -43,6 +45,12 @@ from verl_omni.workers.rollout.replica import DiffusionOutput
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
+
+def _get_free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
 
 class vLLMOmniHttpServer(vLLMHttpServer):
@@ -106,6 +114,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if pipeline_path is not None:
             engine_args["enable_dummy_pipeline"] = True
             engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
+
+        # vLLM-Omni diffusion workers initialize torch.distributed via env://.
+        # Give each Ray actor its own rendezvous port to avoid local port reuse
+        # when multiple rollout/reward servers start on the same node.
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(_get_free_loopback_port())
+        logger.info("Using MASTER_PORT=%s for vLLM-Omni diffusion workers", os.environ["MASTER_PORT"])
 
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
