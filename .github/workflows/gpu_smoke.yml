@@ -78,7 +78,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip3 install --index-url https://download.pytorch.org/whl/cu129 torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0
-          pip3 install 'vllm==0.20.0' "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@c7178d89bb7a70817f239febc84c3b21a714dae7"
+          pip3 install 'vllm==0.20.2' "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@c7178d89bb7a70817f239febc84c3b21a714dae7"
           pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
           pip3 install -r requirements.txt
           pip3 install -r requirements-test.txt
