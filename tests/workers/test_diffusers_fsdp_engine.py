@@ -27,7 +27,7 @@ from verl.utils import tensordict_utils as tu
 from verl.workers.config import TrainingWorkerConfig
 
 from verl_omni.pipelines.utils import build_scheduler
-from verl_omni.workers.config import DiffusionModelConfig, FSDPDiffusionActorConfig
+from verl_omni.workers.config import DiffusionModelConfig, FSDPDiffusionActorConfig, VeOmniDiffusionActorConfig
 from verl_omni.workers.engine_workers import TrainingWorker
 from verl_omni.workers.utils.losses import diffusion_loss
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
@@ -66,7 +66,10 @@ def _create_sp_compatible_model(parent_dir, src_model_path, num_attention_heads=
 
 
 def create_training_config(model_type, strategy, device_count, model, policy_state_adapters=None):
-    if device_count == 1:
+    if strategy == "veomni":
+        cp = 1
+        fsdp_size = device_count
+    elif device_count == 1:
         cp = fsdp_size = 1
     else:
         cp = 2 if _diffusers_sp_supported() else 1
@@ -126,6 +129,49 @@ def create_training_config(model_type, strategy, device_count, model, policy_sta
         engine_config = actor_config.engine
         optimizer_config = actor_config.optim
         checkpoint_config = actor_config.checkpoint
+    elif strategy == "veomni":
+        from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
+
+        with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/model")):
+            cfg = compose(
+                config_name="diffusion_model",
+                overrides=[
+                    "path=" + path,
+                    "tokenizer_path=" + tokenizer_path,
+                    "lora_rank=0",
+                    "pipeline.true_cfg_scale=4.0",
+                    "algo.noise_level=1.2",
+                    "algo.sde_type=sde",
+                    "veomni_config_path=" + os.path.join(path, "transformer"),
+                ],
+            )
+        model_config: DiffusionModelConfig = omega_conf_to_dataclass(cfg)
+
+        with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/actor")):
+            cfg = compose(
+                config_name="veomni_diffusion_actor",
+                overrides=[
+                    "diffusion_loss.clip_ratio=0.0001",
+                    "diffusion_loss.adv_clip_max=5.0",
+                    "ppo_mini_batch_size=4",
+                    "ppo_micro_batch_size_per_gpu=4",
+                    "optim.lr=1e-4",
+                    "optim.weight_decay=0.0001",
+                    "veomni_config.param_offload=False",
+                    "veomni_config.optimizer_offload=False",
+                    "veomni_config.mixed_precision=True",
+                    "veomni_config.forward_only=False",
+                    "veomni_config.fsdp_size=" + str(fsdp_size),
+                    "veomni_config.ulysses_parallel_size=" + str(cp),
+                    "diffusion_loss.loss_mode='flow_grpo'",
+                ],
+            )
+        actor_config: VeOmniDiffusionActorConfig = omega_conf_to_dataclass(cfg)
+
+        engine_config = actor_config.engine
+        optimizer_config = actor_config.optim
+        checkpoint_config = actor_config.checkpoint
     else:
         raise NotImplementedError(f"strategy {strategy} is not supported")
 
@@ -179,7 +225,14 @@ def create_data_samples(num_device: int, model_config: DiffusionModelConfig) -> 
     return data
 
 
-@pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
+@pytest.mark.parametrize(
+    "strategy",
+    [
+        "fsdp",
+        "fsdp2",
+        "veomni",
+    ],
+)
 def test_diffusers_fsdp_engine(strategy):
     # Create configs
     ray.init()
@@ -190,7 +243,7 @@ def test_diffusers_fsdp_engine(strategy):
         if device_count > 1 and device_count % 2 != 0:
             pytest.skip(f"Need even GPU count for cp=2/fsdp_size=device_count test, got {device_count}")
 
-        sp_enabled = device_count > 1 and _diffusers_sp_supported()
+        sp_enabled = strategy != "veomni" and device_count > 1 and _diffusers_sp_supported()
         base_model_path = os.path.expanduser("~/models/tiny-random/Qwen-Image")
         if sp_enabled:
             # SP requires num_attention_heads divisible by sp_size (cp=2).

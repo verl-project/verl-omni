@@ -273,6 +273,8 @@ actor_rollout_ref:
     custom_chat_template: null
     external_lib: null
     enable_gradient_checkpointing: true
+    veomni_config_path: null
+    veomni_transformer_subfolder: transformer
     attn_backend: native
     lora_rank: 0
     lora_alpha: 64
