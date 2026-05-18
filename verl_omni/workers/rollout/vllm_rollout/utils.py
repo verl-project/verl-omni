@@ -19,12 +19,13 @@ from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID, VLLM_LORA_
 from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
 
 from verl_omni.utils.vllm_omni import OmniTensorLoRARequest, VLLMOmniHijack
+from verl_omni.workers.rollout.vllm_rollout.npu_utils import NPUColocateWorkerMixin
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
+class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWorkerExtension):
     """
     The class for vLLM-Omni's worker to inherit from, in the colocate setting.
     By defining an extension class, the code can work no matter what is
@@ -35,6 +36,7 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
 
     Feature support:
     1. LoRA
+    2. NPU (Ascend) memory-pool, sleep, and wake_up — via NPUColocateWorkerMixin
     """
 
     def __new__(cls, **kwargs):

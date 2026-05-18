@@ -39,7 +39,6 @@ Multimodal generative RL training differs from text-only LLM RL not only in mode
 </div>
 
 
-
 ## Getting Started  🚀
 
 Visit our documentation to learn more.
@@ -49,13 +48,75 @@ Visit our documentation to learn more.
 
 ## Model and Algorithm Support 🎨
 
-| Model              | Category                 | Modality           | Algorithm | Status |
-|--------------------|--------------------------|--------------------|-----------|--------|
-| Qwen-Image         | Diffusion generator      | Text → Image       | FlowGRPO  | ✅     |
-| Wan2.2             | Diffusion generator      | Text → Video       | DanceGRPO | WIP    |
-| BAGEL              | Unified understand + gen | Text + Image       | FlowGRPO  | WIP    |
-| HunyuanImage-3.0   | Unified understand + gen | Text + Image       | MixGRPO/SRPO       | Planned |
-| Qwen3-Omni-Thinker | Omni-modality            | Text / Image / Video / Audio | GSPO    | WIP    |
+<table>
+  <tr>
+    <th>Model</th>
+    <th>Category</th>
+    <th>Modality</th>
+    <th>Algorithm</th>
+    <th>Status</th>
+  </tr>
+  <tr>
+    <td rowspan="3">Qwen-Image</td>
+    <td rowspan="3">Diffusion generator</td>
+    <td rowspan="3">Text → Image</td>
+    <td>FlowGRPO</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>MixGRPO</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>GRPO-Guard</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>Wan2.2</td>
+    <td>Diffusion generator</td>
+    <td>Text → Video</td>
+    <td>DanceGRPO</td>
+    <td>WIP</td>
+  </tr>
+  <tr>
+    <td>BAGEL</td>
+    <td>Unified understand + gen</td>
+    <td>Text + Image</td>
+    <td>FlowGRPO</td>
+    <td>WIP</td>
+  </tr>
+  <tr>
+    <td rowspan="2">HunyuanImage-3.0</td>
+    <td rowspan="2">Unified understand + gen</td>
+    <td rowspan="2">Text + Image</td>
+    <td>MixGRPO</td>
+    <td>Planned</td>
+  </tr>
+  <tr>
+    <td>SRPO</td>
+    <td>Planned</td>
+  </tr>
+  <tr>
+    <td>Qwen3-Omni-Thinker</td>
+    <td>Omni-modality</td>
+    <td>Text / Image / Video / Audio</td>
+    <td>GSPO</td>
+    <td>WIP</td>
+  </tr>
+  <tr>
+    <td>SD3.5</td>
+    <td>Diffusion generator</td>
+    <td>Text → Image</td>
+    <td>DPO</td>
+    <td>WIP</td>
+  </tr>
+</table>
+
+
+## Ascend NPU Support 💠
+
+`VeRL-Omni` now supports Ascend NPU. For instructions on how to install and get started with FlowGRPO training on Ascend NPU, please refer to our [Ascend NPU Quickstart Guide](https://verl-omni.readthedocs.io/en/latest/start/flowgrpo_quickstart_npu.html).
+
 
 ## Roadmap 🗺
 

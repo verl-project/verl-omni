@@ -12,3 +12,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from .reward_manager import VisualRewardManager  # noqa: F401
+
+__all__ = ["VisualRewardManager"]
