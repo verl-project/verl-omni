@@ -107,6 +107,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             engine_args["enable_dummy_pipeline"] = True
             engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
+        engine_args["max_num_seqs"] = 256
+        engine_args["step_execution"] = True
+
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
         await omni_init_app_state(engine_client, app.state, args)
