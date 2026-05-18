@@ -115,9 +115,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             engine_args["enable_dummy_pipeline"] = True
             engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
-        # vLLM-Omni diffusion workers initialize torch.distributed via env://.
-        # Give each Ray actor its own rendezvous port to avoid local port reuse
-        # when multiple rollout/reward servers start on the same node.
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = str(_get_free_loopback_port())
         logger.info("Using MASTER_PORT=%s for vLLM-Omni diffusion workers", os.environ["MASTER_PORT"])
