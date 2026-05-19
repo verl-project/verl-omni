@@ -94,6 +94,14 @@ disable_log_stats: True
 # number of responses (i.e. num sample times). > 1 for grpo
 n: 1
 
+# When True and ``n > 1``, the diffusion agent loop submits one engine
+# request per *unique* prompt with ``num_outputs_per_prompt = n`` instead of
+# ``n`` concurrent B=1 requests. This lets the pipeline run a single B=n
+# transformer forward and skips ``AsyncOmniDiffusion``'s single-worker
+# request serialization. Only applies to ``vllm_omni`` rollouts.
+# Set to False to fall back to the legacy per-sample request fan-out.
+enable_batched_diffusion: True
+
 # Multi-turn interaction config for tools or chat.
 multi_turn:
 

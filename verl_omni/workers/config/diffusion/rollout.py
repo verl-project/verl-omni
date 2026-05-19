@@ -141,6 +141,16 @@ class DiffusionRolloutConfig(BaseConfig):
 
     enable_sleep_mode: bool = True
 
+    # When True and ``n > 1``, the diffusion agent loop fans out one engine
+    # request per *unique* prompt with ``num_outputs_per_prompt = n`` instead
+    # of ``n`` concurrent ``num_outputs_per_prompt = 1`` requests. This lets
+    # the pipeline run a single ``B = n`` transformer forward (same as
+    # ``diffusers.QwenImagePipeline(num_images_per_prompt = n)``) and skips
+    # ``AsyncOmniDiffusion``'s single-worker request serialization, which
+    # gives a sizeable throughput win for FlowGRPO-style rollouts (e.g.
+    # ``rollout.n = 16``). Only applies to ``vllm_omni`` diffusion rollouts.
+    enable_batched_diffusion: bool = True
+
     mtp: Optional[MtpConfig] = field(default_factory=MtpConfig)
 
     profiler: Optional[ProfilerConfig] = None
