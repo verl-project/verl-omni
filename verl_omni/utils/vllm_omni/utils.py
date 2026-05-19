@@ -153,9 +153,7 @@ class VLLMOmniHijack:
             # CPU offload + FP8: load weights on device for FP8 quantization
             if load_device == "cpu" and od_config.quantization_config is not None:
                 load_device = device.type
-                logger.info(
-                    f"Quantization enabled with CPU offload, using {load_device} for weight loading"
-                )
+                logger.info(f"Quantization enabled with CPU offload, using {load_device} for weight loading")
 
             target_device = torch.device(load_device)
             with set_default_torch_dtype(od_config.dtype):
@@ -180,9 +178,7 @@ class VLLMOmniHijack:
                             if load_format == "default":
                                 model = initialize_model(od_config)
                             elif load_format == "diffusers":
-                                model = DiffusersAdapterPipeline(
-                                    od_config=od_config, device=target_device
-                                )
+                                model = DiffusersAdapterPipeline(od_config=od_config, device=target_device)
                             else:
                                 raise ValueError(f"Unknown load_format: {load_format}")
                 logger.debug("Loading weights on %s ...", load_device)
