@@ -1,0 +1,365 @@
+# Offline DPO Training Configuration for SD3 (Stable Diffusion 3.x)
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. In-line comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Specify the default per-component configs.
+defaults:
+
+  # Model engine family.
+  - diffusion/model_engine: dp_diffusion
+
+  # FSDP actor config for diffusion training.
+  - diffusion/actor@actor_rollout_ref.actor: ${diffusion/model_engine}_actor
+
+  # Use the shared RLHF data schema, then enable the offline DPO dataset below.
+  - data@data: legacy_data
+
+  # Reference model config required by the DPO objective.
+  - diffusion/ref@actor_rollout_ref.ref: ${diffusion/model_engine}_ref
+
+  # Base rollout schema is kept only for dtype and SD3 pipeline materialization fields.
+  - diffusion/rollout@actor_rollout_ref.rollout: diffusion_rollout
+
+  # Diffusion model config.
+  - diffusion/model@actor_rollout_ref.model: diffusion_model
+
+  # Reward config is loaded for schema compatibility, then disabled below.
+  - reward@reward: reward
+
+  # Apply this file after component defaults.
+  - _self_
+
+# Actor, reference and model configuration.
+actor_rollout_ref:
+
+  # Whether it's a hybrid engine, currently only supports hybrid engine.
+  hybrid_engine: true
+
+  # Actor-side diffusion loss configuration.
+  actor:
+
+    diffusion_loss:
+
+      # Pairwise flow-matching DPO loss.
+      loss_mode: dpo
+
+      # DPO inverse temperature.
+      dpo_beta: 2000.0
+
+  # SD3.5 DPO model configuration.
+  model:
+
+    # Stable Diffusion 3.5 Medium checkpoint.
+    path: stabilityai/stable-diffusion-3.5-medium
+
+    # RL algorithm name.
+    algorithm: dpo
+
+    # Pipeline architecture name from model_index.json.
+    architecture: StableDiffusion3Pipeline
+
+    # Engine model type for diffusion DPO training.
+    model_type: diffusion_dpo_model
+
+    # User-role captions only.
+    custom_chat_template: "{% for message in messages %}{% if message['role'] == 'user' %}{{ message['content'] }}{% endif %}{% endfor %}"
+
+    # Import SD3 DPO training adapter registration.
+    external_lib: verl_omni.pipelines.sd3_dpo
+
+    # LoRA rank for SD3 DPO training.
+    lora_rank: 32
+
+  # Offline DPO does not launch rollout workers, but these fields drive materialization.
+  rollout:
+
+    # Rollout backend placeholder. No rollout server is started in offline mode.
+    name: vllm_omni
+
+    # Tensor dtype used by SD3 text encoders and VAE materialization.
+    dtype: bfloat16
+
+    # Offline DPO expands each logical pair to chosen/rejected samples.
+    n: 2
+
+    # DPO does not require rollout log probabilities.
+    calculate_log_probs: false
+
+    # Pipeline configuration used by offline materialization.
+    pipeline:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs.
+      _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
+
+      # Image height for materialization.
+      height: 512
+
+      # Image width for materialization.
+      width: 512
+
+      # SD3 inference steps metadata.
+      num_inference_steps: 40
+
+      # DPO materialization defaults to no true CFG.
+      true_cfg_scale: 1.0
+
+      # Maximum SD3 text encoder sequence length.
+      max_sequence_length: 256
+
+      # SD3 guidance scale.
+      guidance_scale: 1.0
+
+# Offline DPO keeps the DPO objective but consumes pre-ranked image pairs.
+algorithm:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs.
+  _target_: verl_omni.trainer.config.DiffusionAlgoConfig
+
+  # Advantage estimator type.
+  adv_estimator: dpo
+
+  # Whether to normalize advantages by std.
+  norm_adv_by_std_in_grpo: false
+
+  # Whether to use global std for advantage normalization.
+  global_std: false
+
+  # Whether to bypass old log-prob recomputation.
+  bypass_mode: true
+
+  # DPO data mode. "offline" skips training-time rollout, reward scoring and pair selection.
+  dpo_mode: offline
+
+# Offline pair data configuration.
+data:
+
+  # Enable the offline DPO dataset that expands each row into adjacent win/lose samples.
+  offline_dpo: true
+
+  # Use the generic custom dataset hook instead of branching in rl_dataset.py.
+  custom_cls:
+
+    # Module containing the offline DPO dataset class.
+    path: pkg://verl_omni.utils.dataset.offline_dpo_dataset
+
+    # Dataset class loaded by verl's standard dataset factory.
+    name: OfflineDPODataset
+
+    # Collate function loaded from the same module for offline DPO pair expansion.
+    collate_fn: offline_dpo_collate_fn
+
+  # Column containing the winning image path.
+  img_win_key: img_win
+
+  # Column containing the losing image path.
+  img_lose_key: img_lose
+
+  # Column containing the winning image score.
+  win_score_key: win_score
+
+  # Column containing the losing image score.
+  lose_score_key: lose_score
+
+  # Default negative prompt used when the data file does not provide one.
+  default_negative_prompt: " "
+
+  # Batch size counts logical prompt pairs before expansion to win/lose rows.
+  gen_batch_size: ${data.train_batch_size}
+
+  # Training data files.
+  train_files: dataset/offline_dpo/train.parquet
+
+  # Validation data files.
+  val_files: dataset/offline_dpo/test.parquet
+
+  # Training batch size before pair expansion.
+  train_batch_size: 4
+
+  # Data loader number of workers.
+  dataloader_num_workers: 0
+
+  # Maximum number of training samples.
+  train_max_samples: -1
+
+  # Maximum number of validation samples.
+  val_max_samples: 100
+
+# Offline training does not score rewards during training.
+reward:
+
+  # Disable reward workers for offline DPO training.
+  enable: false
+
+  # Reward model configuration.
+  reward_model:
+
+    # Disable reward model workers for offline DPO training.
+    enable: false
+
+    # Do not allocate a separate reward resource pool.
+    enable_resource_pool: false
+
+# Profiler configs.
+global_profiler:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs.
+  _target_: verl.utils.profiler.ProfilerConfig
+
+  # Profiling tool.
+  tool: null
+
+  # Steps at which profiling should be performed.
+  steps: null
+
+  # Whether to combine continuous steps into one database.
+  profile_continuous_steps: false
+
+  # Path to save profiling contents.
+  save_path: outputs/profile
+
+  # Tool-specific global configurations.
+  global_tool_config:
+
+    # NVIDIA Nsight Systems config.
+    nsys:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs.
+      _target_: verl.utils.profiler.config.NsightToolConfig
+
+      # True for each task has its own database.
+      discrete: false
+
+      # Controller-side Nsight Systems options.
+      controller_nsight_options:
+
+        # Select the APIs to trace.
+        trace: cuda,nvtx,cublas,ucx
+
+        # Track GPU memory usage by CUDA kernels.
+        cuda-memory-usage: "true"
+
+        # Trace CUDA graphs as a whole.
+        cuda-graph-trace: graph
+
+      # Worker-side Nsight Systems options.
+      worker_nsight_options:
+
+        # Select the APIs to trace.
+        trace: cuda,nvtx,cublas,ucx
+
+        # Track GPU memory usage by CUDA kernels.
+        cuda-memory-usage: "true"
+
+        # Trace CUDA graphs as a whole.
+        cuda-graph-trace: graph
+
+        # Profiling capture range.
+        capture-range: cudaProfilerApi
+
+        # Capture range end behavior.
+        capture-range-end: null
+
+        # Signal behavior when capture ends.
+        kill: none
+
+    # Torch CUDA memory snapshot dumping.
+    torch_memory:
+
+      # Maximum number of allocation entries to record.
+      trace_alloc_max_entries: 100_000
+
+      # Depth of the call stack to capture for each allocation.
+      stack_depth: 32
+
+      # Allocation recording context.
+      context: all
+
+      # Stack types to record.
+      stacks: all
+
+      # Extra keyword arguments for torch memory history.
+      kw_args: {}
+
+# Trainer behavior for offline DPO.
+trainer:
+
+  # Number of epochs in training.
+  total_epochs: 30
+
+  # Total training steps.
+  total_training_steps: null
+
+  # Validation generation still requires rollout; disable by default for pure offline training.
+  val_before_train: false
+
+  # Disable periodic validation by default for pure offline training.
+  test_freq: -1
+
+  # Project name for experiment tracking.
+  project_name: verl_offline_dpo_examples
+
+  # Experiment name for run identification.
+  experiment_name: sd3_offline_dpo
+
+  # Logging backends to use.
+  logger: ["console"]
+
+  # Number of generations to log during validation.
+  log_val_generations: 0
+
+  # Directory for logging rollout data.
+  rollout_data_dir: null
+
+  # Directory for logging validation data.
+  validation_data_dir: null
+
+  # Number of nodes used in training.
+  nnodes: 1
+
+  # Number of GPUs per node.
+  n_gpus_per_node: 1
+
+  # Save frequency by iteration.
+  save_freq: 10
+
+  # Extra safety window before Elastic Server Instance expiration.
+  esi_redundant_time: 0
+
+  # Resume mode.
+  resume_mode: auto
+
+  # Path to resume training from.
+  resume_from_path: null
+
+  # Whether to run validation only.
+  val_only: false
+
+  # Default distributed filesystem checkpoint directory.
+  default_hdfs_dir: null
+
+  # Whether to delete local checkpoints after loading.
+  del_local_ckpt_after_load: false
+
+  # Default local checkpoint directory.
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+
+  # Timeout for Ray worker registration.
+  ray_wait_register_center_timeout: 300
+
+  # Device to run training on.
+  device: cuda
+
+# Ray initialization configuration.
+ray_kwargs:
+
+  # Ray initialization kwargs.
+  ray_init:
+
+    # Number of CPUs for Ray.
+    num_cpus: null
+
+  # Path to save Ray timeline JSON.
+  timeline_json_file: null

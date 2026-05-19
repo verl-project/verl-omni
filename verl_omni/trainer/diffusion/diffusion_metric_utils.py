@@ -22,6 +22,17 @@ import torch
 from verl import DataProto
 
 
+def _compute_sequence_reward(batch: DataProto) -> torch.Tensor:
+    if "sample_level_rewards" in batch.batch:
+        rewards = batch.batch["sample_level_rewards"]
+    elif "sample_level_scores" in batch.batch:
+        rewards = batch.batch["sample_level_scores"]
+    else:
+        raise KeyError("Diffusion metrics require `sample_level_rewards` or `sample_level_scores`.")
+
+    return rewards.mean(dim=1) if rewards.ndim > 1 else rewards
+
+
 def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
     """
     Computes various metrics from a diffusion training batch.
@@ -30,8 +41,9 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
     indexed over denoising timesteps rather than output tokens.
 
     Args:
-        batch: A DataProto object containing diffusion batch data with
-            sample_level_rewards [B, T], advantages [B, T], returns [B, T].
+        batch: A DataProto object containing diffusion batch data. GRPO-style
+            batches include sample_level_rewards [B, T], advantages [B, T], and
+            returns [B, T]. DPO-style batches may only include sample_level_scores [B].
 
     Returns:
         A dictionary of metrics including:
@@ -39,14 +51,10 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
             - critic/rewards/zero_std_ratio: Fraction of prompt groups whose reward std is zero
             - critic/rewards/std_mean: Mean per-prompt reward standard deviation
             - critic/rewards/group_size: Average number of images sampled per unique prompt
-            - critic/advantages/mean, max, min: Element-wise advantage statistics over B*T
-            - critic/returns/mean, max, min: Element-wise return statistics over B*T
+            - critic/advantages/mean, max, min: Element-wise advantage statistics over B*T, when available
+            - critic/returns/mean, max, min: Element-wise return statistics over B*T, when available
     """
-    sequence_reward = batch.batch["sample_level_rewards"].mean(dim=1)  # [B]
-
-    # Flatten [B, T] tensors for aggregate statistics across timesteps
-    advantages = batch.batch["advantages"].flatten()  # [B*T]
-    returns = batch.batch["returns"].flatten()  # [B*T]
+    sequence_reward = _compute_sequence_reward(batch)  # [B]
 
     reward_mean = torch.mean(sequence_reward).detach().item()
     reward_max = torch.max(sequence_reward).detach().item()
@@ -57,15 +65,28 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
         "critic/rewards/mean": reward_mean,
         "critic/rewards/max": reward_max,
         "critic/rewards/min": reward_min,
-        # adv
-        "critic/advantages/mean": torch.mean(advantages).detach().item(),
-        "critic/advantages/max": torch.max(advantages).detach().item(),
-        "critic/advantages/min": torch.min(advantages).detach().item(),
-        # returns
-        "critic/returns/mean": torch.mean(returns).detach().item(),
-        "critic/returns/max": torch.max(returns).detach().item(),
-        "critic/returns/min": torch.min(returns).detach().item(),
     }
+
+    if "advantages" in batch.batch:
+        # Flatten [B, T] tensors for aggregate statistics across timesteps.
+        advantages = batch.batch["advantages"].flatten()  # [B*T]
+        metrics.update(
+            {
+                "critic/advantages/mean": torch.mean(advantages).detach().item(),
+                "critic/advantages/max": torch.max(advantages).detach().item(),
+                "critic/advantages/min": torch.min(advantages).detach().item(),
+            }
+        )
+
+    if "returns" in batch.batch:
+        returns = batch.batch["returns"].flatten()  # [B*T]
+        metrics.update(
+            {
+                "critic/returns/mean": torch.mean(returns).detach().item(),
+                "critic/returns/max": torch.max(returns).detach().item(),
+                "critic/returns/min": torch.min(returns).detach().item(),
+            }
+        )
 
     if "uid" in batch.non_tensor_batch:
         rewards_np = sequence_reward.cpu().float().numpy()
@@ -127,7 +148,10 @@ def compute_throughput_metrics_diffusion(batch: DataProto, timing_raw: dict[str,
             - perf/time_per_step: Time taken for the step in seconds
             - perf/throughput: Images generated per second per GPU
     """
-    batch_size = batch.batch["advantages"].shape[0]
+    if "advantages" in batch.batch:
+        batch_size = batch.batch["advantages"].shape[0]
+    else:
+        batch_size = batch.batch["sample_level_scores"].shape[0]
     time = timing_raw["step"]
     return {
         "perf/total_num_images": batch_size,

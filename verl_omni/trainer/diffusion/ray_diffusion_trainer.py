@@ -19,7 +19,6 @@ This trainer supports model-agnostic model initialization with Hugging Face.
 import json
 import os
 import uuid
-from abc import ABC, abstractmethod
 from collections import defaultdict
 from pprint import pprint
 from typing import Any, Optional
@@ -112,11 +111,12 @@ def compute_advantage(
     return data
 
 
-class BaseRayDiffusionTrainer(ABC):
-    """Common Ray trainer infrastructure for diffusion training.
+class RayFlowGRPOTrainer:
+    """Distributed Flow-GRPO trainer using Ray for scalable reinforcement learning.
 
-    Paradigm-specific trainers own the training loop while sharing worker
-    initialization, validation, checkpointing, and logging behavior.
+    This trainer orchestrates distributed PPO training across multiple nodes and GPUs,
+    managing actor rollouts and reward computation with Ray backend.
+    Supports various model architectures including FSDP, Megatron, vLLM, and SGLang integration.
     """
 
     def __init__(
@@ -157,13 +157,12 @@ class BaseRayDiffusionTrainer(ABC):
         self.config = config
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
-        if config.algorithm.sample_source == "online":
-            assert self.hybrid_engine, "Currently, only support hybrid engine"
+        assert self.hybrid_engine, "Currently, only support hybrid engine"
+
+        if self.hybrid_engine:
             assert Role.ActorRollout in role_worker_mapping or Role.ActorRolloutRef in role_worker_mapping, (
                 f"{role_worker_mapping.keys()=}"
             )
-        else:
-            assert Role.Actor in role_worker_mapping, f"{role_worker_mapping.keys()=}"
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
@@ -532,26 +531,19 @@ class BaseRayDiffusionTrainer(ABC):
         return metric_dict
 
     def init_workers(self):
-        """Initialize distributed training workers using Ray backend."""
-        actor_rollout_resource_pool = self._init_colocated_workers()
-        if self.config.algorithm.sample_source == "offline":
-            return
-        self._init_online_rollout_stack(actor_rollout_resource_pool)
+        """Initialize distributed training workers using Ray backend.
 
-    def _init_colocated_workers(self):
-        """Create Ray pools and colocated actor/ref worker groups (online and offline)."""
+        Creates:
+        1. Ray resource pools from configuration
+        2. Worker groups for each enabled role (actor/ref/reward)
+        """
         self.resource_pool_manager.create_resource_pool()
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
-        # create actor and rollout (offline uses Role.Actor only; online uses hybrid actor_rollout roles)
-        if Role.Actor in self.role_worker_mapping:
-            actor_role = Role.Actor
-        elif Role.ActorRolloutRef in self.role_worker_mapping:
-            actor_role = Role.ActorRolloutRef
-        else:
-            actor_role = Role.ActorRollout
-        if self.hybrid_engine or actor_role == Role.Actor:
+        # create actor and rollout
+        actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
+        if self.hybrid_engine:
             actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[actor_role],
@@ -624,10 +616,6 @@ class BaseRayDiffusionTrainer(ABC):
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
 
-        return actor_rollout_resource_pool
-
-    def _init_online_rollout_stack(self, actor_rollout_resource_pool):
-        """Initialize rollout, reward, and checkpoint engines (online sampling only)."""
         # create reward loop manager
         from verl.experimental.reward_loop import RewardLoopManager
 
@@ -784,58 +772,6 @@ class BaseRayDiffusionTrainer(ABC):
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
-    def _update_actor(self, batch: DataProto) -> DataProto:
-        rollout_config = self.config.actor_rollout_ref.rollout
-        batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
-        # update actor
-        batch_td = batch.to_tensordict()
-        # step 2: convert from padding to no-padding
-        batch_td = embeds_padding_2_no_padding(batch_td)
-        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
-        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
-        seed = self.config.actor_rollout_ref.actor.data_loader_seed
-        shuffle = self.config.actor_rollout_ref.actor.shuffle
-        tu.assign_non_tensor(
-            batch_td,
-            global_batch_size=ppo_mini_batch_size,
-            mini_batch_size=ppo_mini_batch_size,
-            epochs=ppo_epochs,
-            seed=seed,
-            dataloader_kwargs={"shuffle": shuffle},
-            height=self.config.actor_rollout_ref.model.pipeline.height,
-            width=self.config.actor_rollout_ref.model.pipeline.width,
-            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
-        )
-
-        actor_output = self.actor_rollout_wg.update_actor(batch_td)
-        actor_output = tu.get(actor_output, "metrics")
-        actor_output = rename_dict(actor_output, "actor/")
-        return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
-
-    def _start_profiling(self, do_profile: bool) -> None:
-        """Start profiling for all worker groups if profiling is enabled."""
-        if do_profile:
-            self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
-            if self.use_reference_policy and not self.ref_in_actor:
-                self.ref_policy_wg.start_profile(profile_step=self.global_steps)
-
-    def _stop_profiling(self, do_profile: bool) -> None:
-        """Stop profiling for all worker groups if profiling is enabled."""
-        if do_profile:
-            self.actor_rollout_wg.stop_profile()
-            if self.use_reference_policy and not self.ref_in_actor:
-                self.ref_policy_wg.stop_profile()
-
-    @abstractmethod
-    def fit(self):
-        """Run the trainer-type-specific training loop."""
-        pass
-
-
-class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
-    """Policy-gradient diffusion trainer for FlowGRPO, MixGRPO, DanceGRPO, GRPO-Guard, etc."""
-
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
         batch_td = batch.to_tensordict()
         batch_td = embeds_padding_2_no_padding(batch_td)
@@ -878,6 +814,49 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
             old_log_prob_dict["old_prev_sample_mean"] = prev_sample_mean.float()
         old_log_prob = tu.get_tensordict(old_log_prob_dict)
         return DataProto.from_tensordict(old_log_prob)
+
+    def _update_actor(self, batch: DataProto) -> DataProto:
+        rollout_config = self.config.actor_rollout_ref.rollout
+        batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
+        # update actor
+        batch_td = batch.to_tensordict()
+        # step 2: convert from padding to no-padding
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
+        seed = self.config.actor_rollout_ref.actor.data_loader_seed
+        shuffle = self.config.actor_rollout_ref.actor.shuffle
+        tu.assign_non_tensor(
+            batch_td,
+            global_batch_size=ppo_mini_batch_size,
+            mini_batch_size=ppo_mini_batch_size,
+            epochs=ppo_epochs,
+            seed=seed,
+            dataloader_kwargs={"shuffle": shuffle},
+            height=self.config.actor_rollout_ref.model.pipeline.height,
+            width=self.config.actor_rollout_ref.model.pipeline.width,
+            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        )
+
+        actor_output = self.actor_rollout_wg.update_actor(batch_td)
+        actor_output = tu.get(actor_output, "metrics")
+        actor_output = rename_dict(actor_output, "actor/")
+        return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
+
+    def _start_profiling(self, do_profile: bool) -> None:
+        """Start profiling for all worker groups if profiling is enabled."""
+        if do_profile:
+            self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
+            if self.use_reference_policy and not self.ref_in_actor:
+                self.ref_policy_wg.start_profile(profile_step=self.global_steps)
+
+    def _stop_profiling(self, do_profile: bool) -> None:
+        """Stop profiling for all worker groups if profiling is enabled."""
+        if do_profile:
+            self.actor_rollout_wg.stop_profile()
+            if self.use_reference_policy and not self.ref_in_actor:
+                self.ref_policy_wg.stop_profile()
 
     def fit(self):
         """
@@ -1143,14 +1122,3 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                 if hasattr(self.train_dataset, "on_batch_end"):
                     # The dataset may be changed after each training batch
                     self.train_dataset.on_batch_end(batch=batch)
-
-
-class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
-    """Direct-preference diffusion trainer for DPO, DiffusionNFT, AWM, etc."""
-
-    def fit(self):
-        """Run direct-preference diffusion training."""
-        raise NotImplementedError(
-            "Direct-preference diffusion training is not implemented yet. "
-            "Implement this loop for algorithms such as DiffusionNFT or DPO."
-        )

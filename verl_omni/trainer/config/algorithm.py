@@ -32,3 +32,4 @@ class DiffusionAlgoConfig(BaseConfig):
     norm_adv_by_std_in_grpo: bool = True
     global_std: bool = True
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
+    dpo_mode: str = "offline"

@@ -13,4 +13,4 @@
 # limitations under the License.
 from .fsdp import DiffusersFSDPEngine, PPODiffusersFSDPEngine  # noqa: F401
 
-__all__ = ["PPODiffusersFSDPEngine", "DiffusersFSDPEngine"]
+__all__ = ["PPODiffusersFSDPEngine", "DPODiffusersFSDPEngine", "DiffusersFSDPEngine"]

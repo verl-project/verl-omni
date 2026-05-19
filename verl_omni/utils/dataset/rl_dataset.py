@@ -25,7 +25,6 @@ from verl.utils.import_utils import load_extern_object
 
 logger = logging.getLogger(__name__)
 
-
 __all__ = [
     "RLHFDataset",
     "get_collate_fn",
@@ -33,6 +32,9 @@ __all__ = [
     "create_rl_dataset",
     "create_rl_sampler",
 ]
+
+
+
 
 
 class RLHFDataset(_UpstreamRLHFDataset):
@@ -62,8 +64,9 @@ class RLHFDataset(_UpstreamRLHFDataset):
         return row_dict
 
 
+
 def get_collate_fn(data_config: DictConfig):
-    """Get a custom collate function from data config, falling back to upstream default."""
+    """Get the collate function from custom data config or upstream default."""
     if "custom_cls" in data_config and data_config.custom_cls.get("path", None) is not None:
         collate_fn_name = data_config.custom_cls.get("collate_fn", None)
         if collate_fn_name is not None:
@@ -73,11 +76,9 @@ def get_collate_fn(data_config: DictConfig):
                     f"The custom collate function '{collate_fn_name}' from "
                     f"'{data_config.custom_cls.path}' must be callable"
                 )
-            logger.info("Using custom collate function: %s", collate_fn_name)
+            logger.info("Using custom collate function: %s", custom_collate_fn.__name__)
             return custom_collate_fn
-    logger.info("Using default collate function")
     return _upstream_collate_fn
-
 
 def get_dataset_class(data_config: DictConfig):
     """Get RLHF dataset class.

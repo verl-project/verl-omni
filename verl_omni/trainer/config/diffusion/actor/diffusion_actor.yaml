@@ -65,6 +65,9 @@ rollout_correction:
 
   # RS threshold spec: K1 modes use "lower_upper" string; K2/K3 use a single upper-bound float
   rollout_rs_threshold: ${oc.select:algorithm.rollout_correction.rollout_rs_threshold,null}
+  
+  # DPO inverse temperature for pairwise flow-matching preference loss
+  dpo_beta: 2000.0
 
 # loss scale factor for diffusion loss, if applicable. If set to null, it will not be applied.
 loss_scale_factor: null
