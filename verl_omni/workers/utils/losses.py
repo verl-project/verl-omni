@@ -35,6 +35,7 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
             raise KeyError("DPO loss requires `ref_noise_pred` from the reference diffusion model.")
         policy_loss_kwargs = dict(
             noise=model_output["noise"],
+            latent=model_output["latent"],
             model_noise_pred=model_output["noise_pred"],
             ref_noise_pred=ref_noise_pred,
             sample_level_scores=data["sample_level_scores"],

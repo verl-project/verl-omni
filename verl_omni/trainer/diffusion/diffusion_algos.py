@@ -386,6 +386,7 @@ def compute_diffusion_loss_grpo_guard(
 @register_diffusion_loss("dpo")
 def compute_diffusion_loss_dpo(
     noise: torch.Tensor,
+    latent: torch.Tensor,
     model_noise_pred: torch.Tensor,
     ref_noise_pred: torch.Tensor,
     sample_level_scores: torch.Tensor,
@@ -411,8 +412,9 @@ def compute_diffusion_loss_dpo(
         raise ValueError("DPO loss expects each chosen sample reward to be >= its rejected pair reward.")
 
     beta = config.diffusion_loss.dpo_beta
-    model_err = (model_noise_pred.float() - noise.float()).flatten(1).norm(dim=1).pow(2)
-    ref_err = (ref_noise_pred.float() - noise.float()).flatten(1).norm(dim=1).pow(2)
+    target = noise.float() - latent.float()
+    model_err = ((model_noise_pred.float() - target) ** 2).flatten(1).mean(dim=1)
+    ref_err = ((ref_noise_pred.float() - target) ** 2).flatten(1).mean(dim=1)
 
     model_w_err = model_err[0::2]
     model_l_err = model_err[1::2]
@@ -420,7 +422,7 @@ def compute_diffusion_loss_dpo(
     ref_l_err = ref_err[1::2]
     w_diff = model_w_err - ref_w_err
     l_diff = model_l_err - ref_l_err
-    inside_term = -1 * beta * (w_diff - l_diff)
+    inside_term = -0.5 * beta * (w_diff - l_diff)
     dpo_loss = -F.logsigmoid(inside_term).mean()
 
     with torch.no_grad():

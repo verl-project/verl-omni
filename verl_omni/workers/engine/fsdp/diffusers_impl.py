@@ -943,6 +943,7 @@ class DiffusersDPOFSDPEngine(DiffusersFSDPEngine):
             )
 
         noisy_latents, noise, timesteps = self._prepare_dpo_noisy_latents(micro_batch)
+        latent = micro_batch["image_latents"].to(device=noise.device, dtype=noise.dtype)
         prompt_embeds = micro_batch["prompt_embeds"]
         prompt_embeds_mask = micro_batch.get("prompt_embeds_mask", None)
         negative_prompt_embeds = micro_batch.get("negative_prompt_embeds", None)
@@ -968,7 +969,7 @@ class DiffusersDPOFSDPEngine(DiffusersFSDPEngine):
             micro_batch=micro_batch,
             step=0,
         )
-        return model_inputs, negative_model_inputs, {"noise": noise, "timesteps": timesteps}
+        return model_inputs, negative_model_inputs, {"noise": noise, "latent": latent, "timesteps": timesteps}
 
     def prepare_model_outputs(self, output, micro_batch: TensorDict):
         del micro_batch
@@ -978,6 +979,7 @@ class DiffusersDPOFSDPEngine(DiffusersFSDPEngine):
         return {
             "noise_pred": noise_pred,
             "noise": dpo_context["noise"],
+            "latent": dpo_context["latent"],
             "timesteps": dpo_context["timesteps"],
         }
 
