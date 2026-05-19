@@ -145,6 +145,7 @@ class VLLMOmniHijack:
             to the target device. The subsequent `.to(target_device)` issues `torch.empty(..., device=cuda)`
             + `copy_`, which goes through the caching allocator and is fully tracked by CuMemAllocator.
 
+            # TODO (long): drop this patch in vllm-omni next version upgrade.
             Ref: https://github.com/knlnguyen1802/vllm-omni/pull/25
             """
             if load_format is None:
