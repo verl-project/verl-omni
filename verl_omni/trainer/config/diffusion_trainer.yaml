@@ -60,11 +60,39 @@ algorithm:
   # Whether to normalize advantages by std (specific to GRPO)
   norm_adv_by_std_in_grpo: True
 
-  # Whether to bypass old log-prob recomputation by reusing rollout log-probs
-  bypass_mode: False
-
   # Whether to normalize advantages using global standard deviation
   global_std: True
+
+  # Rollout Correction (experimental).
+  # Field names and defaults mirror verl.trainer.config.algorithm.RolloutCorrectionConfig.
+  rollout_correction:
+
+    # Bypass actor old-log-prob recompute by reusing rollout_log_probs as old_log_probs
+    # (zero-cost substitution, matches verl bypass_mode).
+    bypass_mode: False
+
+    # Loss type in bypass mode (matches verl loss_type).
+    # - "ppo_clip" (default): PPO ratio handles IS; rollout_is controls metrics only.
+    # - "reinforce" (reserved): IS weights applied explicitly, no PPO clipping.
+    loss_type: ppo_clip
+
+    # IS weight aggregation: null (off), "token" (per SDE step), or "sequence" (product over
+    # the active denoising window). In bypass ppo_clip mode this controls metrics reporting
+    # only; IS weights are NOT applied to the loss (PPO ratio handles IS).
+    rollout_is: null
+
+    # Threshold for IS truncation. float -> TIS upper clamp. "lower_upper" string -> IcePop.
+    rollout_is_threshold: 2.0
+
+    # Batch-normalize IS weights to mean=1.0 (matches verl rollout_is_batch_normalize).
+    rollout_is_batch_normalize: false
+
+    # Rejection sampling mode(s); comma-separated (e.g. "seq_mean_k1"). See verl helper
+    # SUPPORTED_ROLLOUT_RS_OPTIONS for the full list.
+    rollout_rs: null
+
+    # Threshold spec for RS. K1 modes expect "lower_upper" strings; K2/K3 expect a single upper.
+    rollout_rs_threshold: null
 
 # config for the trainer
 trainer:

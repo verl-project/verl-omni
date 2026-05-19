@@ -42,6 +42,9 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
         advantages=advantages,
         config=config,
     )
+    if "rollout_is_weights" in data.keys():
+        policy_loss_kwargs["rollout_is_weights"] = data["rollout_is_weights"]
+
     if loss_mode == "grpo_guard":
         # GRPO-Guard requires the rollout-time SDE proposal mean and the per-step
         # diffusion coefficient terms; pass them through alongside the standard inputs.
