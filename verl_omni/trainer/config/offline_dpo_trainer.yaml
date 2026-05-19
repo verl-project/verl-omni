@@ -35,6 +35,9 @@ defaults:
 # Actor, reference and model configuration.
 actor_rollout_ref:
 
+  # Whether it's a hybrid engine, currently only supports hybrid engine.
+  hybrid_engine: true
+
   # Actor-side diffusion loss configuration.
   actor:
 
