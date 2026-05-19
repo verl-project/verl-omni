@@ -12,11 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import _patch  # noqa: F401 — apply Ulysses mask fix
-from .qwen_image_flow_grpo import *  # noqa: F401, F403
-from .qwen_image_mix_grpo import *  # noqa: F401, F403
-from .z_image_flow_grpo import *  # noqa: F401, F403
+from .diffusers_training_adapter import ZImage
+from .vllm_omni_rollout_adapter import ZImagePipelineWithLogProb
 
-__all__ = list(qwen_image_flow_grpo.__all__)
-__all__ += list(qwen_image_mix_grpo.__all__)
-__all__ += list(z_image_flow_grpo.__all__)
+__all__ = ["ZImage", "ZImagePipelineWithLogProb"]
