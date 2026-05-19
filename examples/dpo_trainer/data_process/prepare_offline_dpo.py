@@ -26,6 +26,7 @@ precomputed SD3 latents and text embeddings directly.
 import argparse
 import asyncio
 import importlib.util
+import io
 import os
 import shlex
 import subprocess
@@ -122,12 +123,10 @@ def _make_generator(seed: int, device: str) -> torch.Generator:
     return torch.Generator(device=generator_device).manual_seed(seed)
 
 
-def _tensor_to_list(tensor: torch.Tensor) -> list:
-    return tensor.detach().cpu().float().numpy().tolist()
-
-
-def _mask_to_list(mask: torch.Tensor) -> list:
-    return mask.detach().cpu().to(torch.int32).numpy().tolist()
+def _tensor_to_bytes(tensor: torch.Tensor) -> bytes:
+    buffer = io.BytesIO()
+    torch.save(tensor.detach().cpu(), buffer)
+    return buffer.getvalue()
 
 
 def _encode_image_latent(pipe, image: Image.Image, args: argparse.Namespace) -> torch.Tensor:
@@ -173,9 +172,9 @@ def _encode_prompt_tensors(pipe, prompt: str, negative_prompt: str, args: argpar
         device=prompt_embeds.device,
     )
     result = {
-        "prompt_embeds": _tensor_to_list(prompt_embeds[0]),
-        "prompt_embeds_mask": _mask_to_list(prompt_embeds_mask[0]),
-        "pooled_prompt_embeds": _tensor_to_list(pooled_prompt_embeds[0]),
+        "prompt_embeds": _tensor_to_bytes(prompt_embeds[0]),
+        "prompt_embeds_mask": _tensor_to_bytes(prompt_embeds_mask[0]),
+        "pooled_prompt_embeds": _tensor_to_bytes(pooled_prompt_embeds[0]),
         "negative_prompt_embeds": None,
         "negative_prompt_embeds_mask": None,
         "negative_pooled_prompt_embeds": None,
@@ -187,9 +186,9 @@ def _encode_prompt_tensors(pipe, prompt: str, negative_prompt: str, args: argpar
             dtype=torch.int32,
             device=negative_prompt_embeds.device,
         )
-        result["negative_prompt_embeds"] = _tensor_to_list(negative_prompt_embeds[0])
-        result["negative_prompt_embeds_mask"] = _mask_to_list(negative_prompt_embeds_mask[0])
-        result["negative_pooled_prompt_embeds"] = _tensor_to_list(negative_pooled_prompt_embeds[0])
+        result["negative_prompt_embeds"] = _tensor_to_bytes(negative_prompt_embeds[0])
+        result["negative_prompt_embeds_mask"] = _tensor_to_bytes(negative_prompt_embeds_mask[0])
+        result["negative_pooled_prompt_embeds"] = _tensor_to_bytes(negative_pooled_prompt_embeds[0])
     return result
 
 
@@ -306,7 +305,7 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
             candidates.append(
                 {
                     "path": str(image_path),
-                    "latents": _tensor_to_list(_encode_image_latent(pipe, image, args)),
+                    "latents": _tensor_to_bytes(_encode_image_latent(pipe, image, args)),
                     "score": score,
                     "seed": seed,
                 }

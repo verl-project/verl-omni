@@ -19,6 +19,7 @@ receives those pairs directly, so each parquet row is a logical pair and the
 collate step expands it to adjacent ``chosen, rejected`` samples.
 """
 
+import io
 import os
 import uuid
 from collections.abc import Sequence
@@ -175,14 +176,38 @@ def _is_missing(value: Any) -> bool:
         return False
 
 
+def _to_numeric_nested(value: Any) -> Any:
+    """Convert parquet object arrays back to plain nested numeric lists."""
+    if isinstance(value, torch.Tensor):
+        return value
+    if isinstance(value, np.ndarray):
+        return _to_numeric_nested(value.tolist())
+    if isinstance(value, (list, tuple)):
+        return [_to_numeric_nested(item) for item in value]
+    return value
+
+
+def _tensor_from_bytes(value: bytes | bytearray | memoryview, *, dtype: torch.dtype) -> torch.Tensor:
+    buffer = io.BytesIO(bytes(value))
+    try:
+        tensor = torch.load(buffer, map_location="cpu", weights_only=True)
+    except TypeError:
+        buffer.seek(0)
+        tensor = torch.load(buffer, map_location="cpu")
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"Expected serialized tensor bytes, got {type(tensor)} after torch.load.")
+    return tensor.to(dtype=dtype)
+
+
 def _tensor_from_column(value: Any, *, dtype: torch.dtype) -> torch.Tensor:
     if _is_missing(value):
         raise ValueError("Offline DPO parquet contains a missing tensor column value.")
     if isinstance(value, torch.Tensor):
         return value.to(dtype=dtype)
-    if isinstance(value, np.ndarray):
-        value = value.tolist()
-    return torch.as_tensor(np.asarray(value), dtype=dtype)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return _tensor_from_bytes(value, dtype=dtype)
+    value = _to_numeric_nested(value)
+    return torch.tensor(value, dtype=dtype)
 
 
 def _optional_tensor_from_row(row: dict[str, Any], key: str, *, dtype: torch.dtype) -> torch.Tensor | None:
