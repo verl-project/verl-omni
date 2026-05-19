@@ -12,20 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Debug OfflineDPOMaterializer without launching full Ray training.
+"""Validate precomputed offline DPO tensors without launching full Ray training.
 
 Loads offline DPO parquet rows, collates them like the trainer, runs
 ``OfflineDPOMaterializer.materialize()``, and prints the resulting tensor_dict
-(shapes, dtypes, and short stats).
+(shapes, dtypes, and short stats). The parquet is expected to already contain
+SD3 VAE latents and text-encoder embeddings written by ``prepare_offline_dpo``.
 
 Example:
     python examples/dpo_trainer/debug_offline_dpo_materialize.py \\
         --parquet data/offline_dpo/train.parquet \\
-        --model stabilityai/stable-diffusion-3.5-medium \\
-        --num-rows 1 \\
-        --device cuda:0
+        --num-rows 1
 
-    # ``--model`` is the SD3 diffusers checkpoint only. Do not pass it to AutoTokenizer.
     # For batch_decode(prompts) like the trainer logs, pass a real LLM tokenizer path:
     #   --tokenizer-path /path/to/your/rollout/tokenizer --decode-prompts
 """
@@ -62,12 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--parquet",
         required=True,
-        help="Offline DPO parquet with prompt/img_win/img_lose columns.",
-    )
-    parser.add_argument(
-        "--model",
-        default="stabilityai/stable-diffusion-3.5-medium",
-        help="SD3/SD3.5 diffusers model path (for materialize only). Not a tokenizer.",
+        help="Offline DPO parquet with prompt/img_win/img_lose plus precomputed SD3 tensors.",
     )
     parser.add_argument(
         "--tokenizer-path",
@@ -80,17 +73,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--num-rows", type=int, default=1, help="Logical DPO pairs to load (each expands to win+lose).")
     parser.add_argument("--row-index", type=int, default=0, help="Start row index inside the parquet.")
-    parser.add_argument("--device", default=None, help="e.g. cuda:0 or cpu. Default: cuda if available else cpu.")
-    parser.add_argument("--height", type=int, default=256)
-    parser.add_argument("--width", type=int, default=256)
-    parser.add_argument("--max-sequence-length", type=int, default=256)
-    parser.add_argument("--guidance-scale", type=float, default=4.0)
-    parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
     parser.add_argument("--max-prompt-length", type=int, default=256)
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Only print collated non_tensor_batch (raw_prompt, image_path). Skip SD3 load.",
+        help="Only print the collated batch. Skip materializer validation.",
     )
     parser.add_argument(
         "--decode-prompts",
@@ -124,20 +111,18 @@ class _CollateTokenizer:
         return {"input_ids": torch.tensor([token_ids], dtype=torch.long)}
 
 
-def resolve_tokenizer_path(model_path: str, tokenizer_path: str | None) -> str:
+def resolve_tokenizer_path(tokenizer_path: str | None) -> str:
     if tokenizer_path is not None:
         return os.path.expanduser(tokenizer_path)
-    local_path = os.path.expanduser(model_path)
-    nested = os.path.join(local_path, "tokenizer")
-    return nested if os.path.isdir(nested) else local_path
+    raise ValueError("tokenizer_path is required when resolving a real tokenizer path.")
 
 
 def load_collate_tokenizer(args: argparse.Namespace):
     if args.tokenizer_path is None:
-        print("Using built-in collate tokenizer stub (SD3 model path is not a HF tokenizer).")
+        print("Using built-in collate tokenizer stub.")
         return _CollateTokenizer(args.max_prompt_length), "stub"
 
-    path = resolve_tokenizer_path(args.model, args.tokenizer_path)
+    path = resolve_tokenizer_path(args.tokenizer_path)
     from verl.utils import hf_tokenizer
 
     print(f"Loading collate tokenizer from: {path}")
@@ -160,27 +145,8 @@ def build_data_config(args: argparse.Namespace):
 
 
 def build_materializer_config(args: argparse.Namespace):
-    device = args.device
-    if device is None:
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    return OmegaConf.create(
-        {
-            "materialize_device": device,
-            "trainer": {"device": device},
-            "actor_rollout_ref": {
-                "model": {"path": args.model, "local_path": None},
-                "rollout": {
-                    "dtype": args.dtype,
-                    "pipeline": {
-                        "height": args.height,
-                        "width": args.width,
-                        "max_sequence_length": args.max_sequence_length,
-                        "guidance_scale": args.guidance_scale,
-                    },
-                },
-            },
-        }
-    )
+    del args
+    return OmegaConf.create({})
 
 
 def _numpy_preview(value: Any, limit: int = 4) -> Any:
@@ -204,7 +170,7 @@ def print_collated_batch(batch_dict: dict[str, Any], tokenizer, decode_prompts: 
     if "raw_prompt" in batch_dict:
         raw = batch_dict["raw_prompt"]
         items = raw.tolist() if isinstance(raw, np.ndarray) else list(raw)
-        print("\n--- raw_prompt (fed to SD3 encode_prompt) ---")
+        print("\n--- raw_prompt (used when the parquet tensors were precomputed) ---")
         for i, text in enumerate(items):
             print(f"  [{i}] {text!r}")
 
@@ -288,7 +254,7 @@ def main() -> None:
     print(list(batch.non_tensor_batch.keys()))
 
     if args.dry_run:
-        print("\n(dry-run: skipped OfflineDPOMaterializer)")
+        print("\n(dry-run: skipped OfflineDPOMaterializer validation)")
         return
 
     materializer = OfflineDPOMaterializer(build_materializer_config(args))

@@ -25,6 +25,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import torch
 from omegaconf import DictConfig
@@ -165,8 +166,33 @@ def _resolve_path(path: Any, data_file: str | None = None) -> str:
     return os.path.normpath(os.path.join(os.path.dirname(os.path.expanduser(data_file)), path))
 
 
+def _is_missing(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _tensor_from_column(value: Any, *, dtype: torch.dtype) -> torch.Tensor:
+    if _is_missing(value):
+        raise ValueError("Offline DPO parquet contains a missing tensor column value.")
+    if isinstance(value, torch.Tensor):
+        return value.to(dtype=dtype)
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    return torch.as_tensor(np.asarray(value), dtype=dtype)
+
+
+def _optional_tensor_from_row(row: dict[str, Any], key: str, *, dtype: torch.dtype) -> torch.Tensor | None:
+    if key not in row or _is_missing(row[key]):
+        return None
+    return _tensor_from_column(row[key], dtype=dtype)
+
+
 class OfflineDPODataset(Dataset):
-    """Dataset for parquet/jsonl rows containing ``prompt``, ``img_win`` and ``img_lose``."""
+    """Dataset for rows containing offline DPO pairs plus precomputed SD3 tensors."""
 
     def __init__(self, data_files, tokenizer, processor=None, config: DictConfig | None = None, max_samples: int = -1):
         del processor
@@ -187,7 +213,16 @@ class OfflineDPODataset(Dataset):
         self.default_negative_prompt = config.get("default_negative_prompt", " ")
         self.data_source = config.get("data_source", "offline_dpo")
 
-        required = {self.prompt_key, self.win_key, self.lose_key}
+        required = {
+            self.prompt_key,
+            self.win_key,
+            self.lose_key,
+            "img_win_latents",
+            "img_lose_latents",
+            "prompt_embeds",
+            "prompt_embeds_mask",
+            "pooled_prompt_embeds",
+        }
         missing = required - set(self.dataframe.columns)
         if missing:
             raise ValueError(f"Offline DPO data is missing required columns: {sorted(missing)}")
@@ -228,6 +263,18 @@ class OfflineDPODataset(Dataset):
             "negative_prompt_text": raw_negative_prompt,
             "img_win": _resolve_path(row[self.win_key], data_file),
             "img_lose": _resolve_path(row[self.lose_key], data_file),
+            "img_win_latents": _tensor_from_column(row["img_win_latents"], dtype=torch.float32),
+            "img_lose_latents": _tensor_from_column(row["img_lose_latents"], dtype=torch.float32),
+            "prompt_embeds": _tensor_from_column(row["prompt_embeds"], dtype=torch.float32),
+            "prompt_embeds_mask": _tensor_from_column(row["prompt_embeds_mask"], dtype=torch.int32),
+            "pooled_prompt_embeds": _tensor_from_column(row["pooled_prompt_embeds"], dtype=torch.float32),
+            "negative_prompt_embeds": _optional_tensor_from_row(row, "negative_prompt_embeds", dtype=torch.float32),
+            "negative_prompt_embeds_mask": _optional_tensor_from_row(
+                row, "negative_prompt_embeds_mask", dtype=torch.int32
+            ),
+            "negative_pooled_prompt_embeds": _optional_tensor_from_row(
+                row, "negative_pooled_prompt_embeds", dtype=torch.float32
+            ),
             "win_score": win_score,
             "lose_score": lose_score,
             "data_source": row.get("data_source", self.data_source),
@@ -252,11 +299,18 @@ def expand_offline_dpo_features(features: list[dict[str, Any]]) -> list[dict[str
             "data_source": feature["data_source"],
             "reward_model": feature["reward_model"],
             "extra_info": feature["extra_info"],
+            "prompt_embeds": feature["prompt_embeds"],
+            "prompt_embeds_mask": feature["prompt_embeds_mask"],
+            "pooled_prompt_embeds": feature["pooled_prompt_embeds"],
         }
+        for key in ("negative_prompt_embeds", "negative_prompt_embeds_mask", "negative_pooled_prompt_embeds"):
+            if feature.get(key) is not None:
+                base[key] = feature[key]
         expanded.append(
             {
                 **base,
                 "image_path": feature["img_win"],
+                "image_latents": feature["img_win_latents"],
                 "sample_level_scores": torch.tensor([feature["win_score"]], dtype=torch.float32),
                 "is_chosen": True,
             }
@@ -265,6 +319,7 @@ def expand_offline_dpo_features(features: list[dict[str, Any]]) -> list[dict[str
             {
                 **base,
                 "image_path": feature["img_lose"],
+                "image_latents": feature["img_lose_latents"],
                 "sample_level_scores": torch.tensor([feature["lose_score"]], dtype=torch.float32),
                 "is_chosen": False,
             }

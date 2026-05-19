@@ -16,10 +16,11 @@
 
 The output schema is one logical preference pair per row:
 
-    {prompt, negative_prompt, img_win, img_lose, win_score, lose_score}
+    {prompt, negative_prompt, img_win, img_lose, win_score, lose_score,
+     img_win_latents, img_lose_latents, prompt_embeds, ...}
 
-Training expands each row to adjacent ``win, lose`` samples and re-encodes the
-prompt with the diffusion text encoder.
+Training expands each row to adjacent ``win, lose`` samples and consumes the
+precomputed SD3 latents and text embeddings directly.
 """
 
 import argparse
@@ -121,6 +122,77 @@ def _make_generator(seed: int, device: str) -> torch.Generator:
     return torch.Generator(device=generator_device).manual_seed(seed)
 
 
+def _tensor_to_list(tensor: torch.Tensor) -> list:
+    return tensor.detach().cpu().float().numpy().tolist()
+
+
+def _mask_to_list(mask: torch.Tensor) -> list:
+    return mask.detach().cpu().to(torch.int32).numpy().tolist()
+
+
+def _encode_image_latent(pipe, image: Image.Image, args: argparse.Namespace) -> torch.Tensor:
+    pixel_values = pipe.image_processor.preprocess([image], height=args.height, width=args.width)
+    pixel_values = pixel_values.to(device=args.device, dtype=pipe.vae.dtype)
+    with torch.no_grad():
+        latents = pipe.vae.encode(pixel_values).latent_dist.sample()
+    scaling_factor = getattr(pipe.vae.config, "scaling_factor", 1.0)
+    shift_factor = getattr(pipe.vae.config, "shift_factor", 0.0)
+    latents = (latents - shift_factor) * scaling_factor
+    return latents[0].detach().cpu()
+
+
+def _encode_prompt_tensors(pipe, prompt: str, negative_prompt: str, args: argparse.Namespace) -> dict[str, list | None]:
+    do_cfg = args.guidance_scale is not None and args.guidance_scale > 1.0
+    with torch.no_grad():
+        encoded = pipe.encode_prompt(
+            prompt=[prompt],
+            prompt_2=None,
+            prompt_3=None,
+            device=args.device,
+            num_images_per_prompt=1,
+            do_classifier_free_guidance=do_cfg,
+            negative_prompt=[negative_prompt] if do_cfg else None,
+            negative_prompt_2=None,
+            negative_prompt_3=None,
+            max_sequence_length=args.max_sequence_length,
+        )
+
+    if len(encoded) == 4:
+        prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = encoded
+    elif len(encoded) == 2:
+        prompt_embeds, pooled_prompt_embeds = encoded
+        negative_prompt_embeds = None
+        negative_pooled_prompt_embeds = None
+    else:
+        raise ValueError(f"Unexpected SD3 encode_prompt output length: {len(encoded)}")
+
+    prompt_embeds_mask = torch.ones(
+        prompt_embeds.shape[0],
+        prompt_embeds.shape[1],
+        dtype=torch.int32,
+        device=prompt_embeds.device,
+    )
+    result = {
+        "prompt_embeds": _tensor_to_list(prompt_embeds[0]),
+        "prompt_embeds_mask": _mask_to_list(prompt_embeds_mask[0]),
+        "pooled_prompt_embeds": _tensor_to_list(pooled_prompt_embeds[0]),
+        "negative_prompt_embeds": None,
+        "negative_prompt_embeds_mask": None,
+        "negative_pooled_prompt_embeds": None,
+    }
+    if negative_prompt_embeds is not None:
+        negative_prompt_embeds_mask = torch.ones(
+            negative_prompt_embeds.shape[0],
+            negative_prompt_embeds.shape[1],
+            dtype=torch.int32,
+            device=negative_prompt_embeds.device,
+        )
+        result["negative_prompt_embeds"] = _tensor_to_list(negative_prompt_embeds[0])
+        result["negative_prompt_embeds_mask"] = _mask_to_list(negative_prompt_embeds_mask[0])
+        result["negative_pooled_prompt_embeds"] = _tensor_to_list(negative_pooled_prompt_embeds[0])
+    return result
+
+
 def _router_url(host: str, port: int, path: str) -> str:
     return f"http://{host}:{port}{path}"
 
@@ -214,6 +286,7 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
 
     rows = []
     for prompt_idx, prompt in enumerate(prompts):
+        prompt_tensors = _encode_prompt_tensors(pipe, prompt, args.negative_prompt, args)
         candidates = []
         for sample_idx in range(args.num_images_per_prompt):
             seed = args.seed + prompt_idx * args.num_images_per_prompt + sample_idx
@@ -230,7 +303,14 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
             image_path = image_dir / f"{prompt_idx:06d}_{sample_idx:02d}.png"
             image.save(image_path)
             score = await _score_image(reward_fn, image, prompt, args)
-            candidates.append({"path": str(image_path), "score": score, "seed": seed})
+            candidates.append(
+                {
+                    "path": str(image_path),
+                    "latents": _tensor_to_list(_encode_image_latent(pipe, image, args)),
+                    "score": score,
+                    "seed": seed,
+                }
+            )
 
         candidates.sort(key=lambda item: item["score"], reverse=True)
         win = candidates[0]
@@ -242,6 +322,9 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
                 "negative_prompt": _build_messages(args.negative_prompt, args.system_prompt),
                 "img_win": os.path.relpath(win["path"], output_path.parent),
                 "img_lose": os.path.relpath(lose["path"], output_path.parent),
+                "img_win_latents": win["latents"],
+                "img_lose_latents": lose["latents"],
+                **prompt_tensors,
                 "win_score": win["score"],
                 "lose_score": lose["score"],
                 "reward_model": {"style": "model", "ground_truth": prompt},

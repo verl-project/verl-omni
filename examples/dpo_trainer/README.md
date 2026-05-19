@@ -14,6 +14,9 @@ The resulting parquet rows contain:
 - `negative_prompt`: optional negative prompt messages.
 - `img_win`: path to the highest-scoring generated image.
 - `img_lose`: path to the lowest-scoring generated image.
+- `img_win_latents` and `img_lose_latents`: precomputed SD3 VAE latents.
+- `prompt_embeds`, `prompt_embeds_mask`, and `pooled_prompt_embeds`: precomputed
+  SD3 text-encoder outputs.
 - `win_score` and `lose_score`: reward scores used to order the pair.
 - `extra_info.raw_prompt`: plain prompt text for traceability.
 
@@ -82,10 +85,11 @@ bash examples/dpo_trainer/run_sd35_medium_offline_dpo_lora.sh \
 
 During training, `offline_dpo_trainer.yaml` sets `algorithm.dpo_mode=offline`
 and `data.offline_dpo=true`. The dataset expands each row into adjacent
-`[win, lose]` samples with a shared `uid`, and the trainer materializes
-`image_latents` plus SD3 text-encoder prompt embeddings before calling the DPO
-loss. Offline DPO also disables rollout and reward workers, so validation
-generation is disabled by default.
+`[win, lose]` samples with a shared `uid`. The training loop consumes the
+precomputed `image_latents` plus SD3 prompt embeddings from parquet before
+calling the DPO loss, so it does not load the SD3 VAE or text encoders during
+actor updates. Offline DPO also disables rollout and reward workers, so
+validation generation is disabled by default.
 
 ## Reward Template
 
