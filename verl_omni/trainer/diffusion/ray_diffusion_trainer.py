@@ -57,6 +57,11 @@ from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
 )
+from verl_omni.trainer.diffusion.rollout_correction import (
+    apply_bypass_mode_to_diffusion_batch,
+    apply_rollout_correction_to_diffusion_batch,
+    rollout_correction_enabled,
+)
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 
@@ -836,6 +841,15 @@ class RayFlowGRPOTrainer:
             vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
         )
 
+        # Forward rollout_correction config to the engine so it can compute per-step IS / RS
+        # in bypass mode (verl-style: the config travels with the batch, not the actor config).
+        rollout_corr_cfg = self.config.algorithm.get("rollout_correction", None)
+        if rollout_corr_cfg and rollout_corr_cfg.get("bypass_mode", False):
+            tu.assign_non_tensor(
+                batch_td,
+                rollout_correction=OmegaConf.to_container(rollout_corr_cfg, resolve=True),
+            )
+
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
         actor_output = tu.get(actor_output, "metrics")
         actor_output = rename_dict(actor_output, "actor/")
@@ -959,15 +973,34 @@ class RayFlowGRPOTrainer:
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
 
-                    bypass_recomputing_logprobs = self.config.algorithm.get("bypass_mode", False)
+                    # Operating mode (verl-style; see verl.trainer.ppo.ray_trainer):
+                    #   - Bypass mode: old_log_probs := rollout_log_probs (2 policies). Per-step
+                    #     IS / RS is then computed inside the engine using
+                    #     (current_log_prob, rollout_log_prob) for each micro-batch / SDE step.
+                    #   - Decoupled mode: recompute old_log_probs as a stable proximal anchor
+                    #     (3 policies). The trainer-side correction then measures rollout-vs-
+                    #     recompute drift and stashes a single batch-level weight tensor.
+                    rollout_corr_cfg = self.config.algorithm.get("rollout_correction", None)
+                    bypass_recomputing_logprobs = bool(rollout_corr_cfg and rollout_corr_cfg.get("bypass_mode", False))
                     if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
-                        batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
+                        apply_bypass_mode_to_diffusion_batch(batch, rollout_corr_cfg)
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
                             old_log_prob = self._compute_old_log_prob(batch)
                             batch = batch.union(old_log_prob)
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
+
+                    # Trainer-side rollout correction is meaningful only in the decoupled path
+                    # (old vs rollout). In bypass mode old == rollout, so the correction is
+                    # instead applied per micro-batch / SDE step inside the engine using
+                    # (current_log_prob, rollout_log_prob).
+                    if not bypass_recomputing_logprobs and rollout_correction_enabled(rollout_corr_cfg):
+                        with marked_timer("rollout_corr", timing_raw, color="cyan"):
+                            batch, rollout_corr_metrics = apply_rollout_correction_to_diffusion_batch(
+                                batch, rollout_corr_cfg
+                            )
+                            metrics.update(rollout_corr_metrics)
 
                     if self.use_reference_policy:
                         # compute reference log_prob
