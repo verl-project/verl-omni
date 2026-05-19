@@ -19,6 +19,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from omegaconf import DictConfig
 
 from verl_omni.workers.config import DiffusionActorConfig
@@ -34,6 +35,36 @@ DiffusionLossFn = Callable[
 ]
 
 DIFFUSION_LOSS_REGISTRY: dict[str, DiffusionLossFn] = {}
+
+
+def _dpo_adjacent_pairs_share_prompt_uid(index: Any, n: int) -> bool:
+    """Return True iff each adjacent (chosen, rejected) pair shares the same prompt uid.
+
+    Avoids slicing or ``np.asarray`` on TensorDict / TensorClass handles (batch_dims==0), which
+    cannot be indexed like a plain tensor.
+    """
+    if isinstance(index, torch.Tensor):
+        flat = index.reshape(-1)[:n]
+        return bool(torch.all(flat[0::2] == flat[1::2]).item())
+    if isinstance(index, np.ndarray):
+        flat = np.asarray(index).reshape(-1)[:n]
+        return bool(np.all(flat[0::2] == flat[1::2]))
+    if isinstance(index, (list, tuple)):
+        flat = np.asarray(index, dtype=object).reshape(-1)[:n]
+        return bool(np.all(flat[0::2] == flat[1::2]))
+    tolist = getattr(index, "tolist", None)
+    if callable(tolist):
+        try:
+            raw = tolist()
+        except (RuntimeError, TypeError, ValueError):
+            raw = None
+        if raw is not None and not isinstance(raw, (str, bytes, bytearray)):
+            flat = np.asarray(raw, dtype=object).reshape(-1)[:n]
+            return bool(np.all(flat[0::2] == flat[1::2]))
+    raise TypeError(
+        f"DPO `index` (prompt uid) has unsupported type {type(index)}. "
+        "Use a torch.Tensor, numpy.ndarray, list, or tuple (or pass uids via non_tensor batch)."
+    )
 
 
 def register_diffusion_loss(name: str) -> Callable[[DiffusionLossFn], DiffusionLossFn]:
@@ -74,6 +105,7 @@ class DiffusionAdvantageEstimator(str, Enum):
     """Advantage estimators specific to diffusion-based training."""
 
     FLOW_GRPO = "flow_grpo"
+    DPO = "dpo"
 
 
 DIFFUSION_ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -186,6 +218,16 @@ def compute_flow_grpo_outcome_advantage(
                 scores[i] = scores[i] - id2mean[index[i]]
 
     return scores, scores
+
+
+@register_diffusion_adv_est(DiffusionAdvantageEstimator.DPO)
+def compute_dpo_noop_advantage(
+    sample_level_rewards: torch.Tensor,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """DPO does not use rollout advantages; return rewards unchanged for compatibility."""
+    del kwargs
+    return sample_level_rewards, sample_level_rewards
 
 
 @register_diffusion_loss("flow_grpo")
@@ -339,6 +381,54 @@ def compute_diffusion_loss_grpo_guard(
         "actor/ratio_std": ratio_std.detach().item(),
     }
     return pg_loss, pg_metrics
+
+
+@register_diffusion_loss("dpo")
+def compute_diffusion_loss_dpo(
+    noise: torch.Tensor,
+    model_noise_pred: torch.Tensor,
+    ref_noise_pred: torch.Tensor,
+    sample_level_scores: torch.Tensor,
+    config: Optional[DictConfig | DiffusionActorConfig] = None,
+    *,
+    index: Optional[np.ndarray | torch.Tensor | list[Any]] = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute DPO loss from adjacent ``chosen, rejected`` sample pairs."""
+    assert config is not None
+    assert isinstance(config, DiffusionActorConfig)
+
+    scores = sample_level_scores.squeeze(-1) if sample_level_scores.ndim > 1 else sample_level_scores
+    if scores.shape[0] < 2 or scores.shape[0] % 2 != 0:
+        raise ValueError("DPO loss expects an even batch of adjacent chosen/rejected pairs.")
+    if index is not None:
+        n = int(scores.shape[0])
+        if not _dpo_adjacent_pairs_share_prompt_uid(index, n):
+            raise ValueError("DPO loss expects each adjacent chosen/rejected pair to share the same prompt uid.")
+
+    chosen_scores = scores[0::2]
+    rejected_scores = scores[1::2]
+    if torch.any(chosen_scores < rejected_scores).item():
+        raise ValueError("DPO loss expects each chosen sample reward to be >= its rejected pair reward.")
+
+    beta = config.diffusion_loss.dpo_beta
+    model_err = (model_noise_pred.float() - noise.float()).flatten(1).norm(dim=1).pow(2)
+    ref_err = (ref_noise_pred.float() - noise.float()).flatten(1).norm(dim=1).pow(2)
+
+    model_w_err = model_err[0::2]
+    model_l_err = model_err[1::2]
+    ref_w_err = ref_err[0::2]
+    ref_l_err = ref_err[1::2]
+    w_diff = model_w_err - ref_w_err
+    l_diff = model_l_err - ref_l_err
+    inside_term = -1 * beta * (w_diff - l_diff)
+    dpo_loss = -F.logsigmoid(inside_term).mean()
+
+    with torch.no_grad():
+        metrics = {
+            "actor/dpo_loss": dpo_loss.detach().item(),
+            "actor/dpo_accuracy": (inside_term > 0).float().mean().detach().item(),
+        }
+    return dpo_loss, metrics
 
 
 def kl_penalty_image(

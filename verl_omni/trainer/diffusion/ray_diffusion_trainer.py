@@ -60,6 +60,16 @@ from verl_omni.trainer.diffusion.diffusion_metric_utils import (
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 
+class _NoOpCheckpointManager:
+    """Checkpoint-engine facade used when offline DPO does not start rollout replicas."""
+
+    def update_weights(self, *args, **kwargs):
+        del args, kwargs
+
+    def sleep_replicas(self):
+        return None
+
+
 def compute_advantage(
     data: DataProto,
     adv_estimator: str,
@@ -150,18 +160,28 @@ class RayFlowGRPOTrainer:
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
+        self.is_offline_dpo = (
+            config.algorithm.adv_estimator == DiffusionAdvantageEstimator.DPO.value
+            and config.algorithm.get("dpo_mode", "online") == "offline"
+        )
+        self.offline_dpo_materializer = None
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
 
         if self.hybrid_engine:
-            assert Role.ActorRollout in role_worker_mapping or Role.ActorRolloutRef in role_worker_mapping, (
-                f"{role_worker_mapping.keys()=}"
-            )
+            valid_actor_roles = {Role.ActorRollout, Role.ActorRolloutRef}
+            if hasattr(Role, "Actor"):
+                valid_actor_roles.add(Role.Actor)
+            assert valid_actor_roles & role_worker_mapping.keys(), f"{role_worker_mapping.keys()=}"
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
-        self.use_reference_policy = need_reference_policy(self.config)
+        # DPO needs reference noise predictions even when KL reward / KL loss are disabled; verl's
+        # need_reference_policy() only covers those KL paths.
+        self.use_reference_policy = need_reference_policy(self.config) or (
+            self.config.algorithm.adv_estimator == DiffusionAdvantageEstimator.DPO.value
+        )
 
         self.use_rm = need_reward_model(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
@@ -387,7 +407,19 @@ class RayFlowGRPOTrainer:
         batch_reward = self.reward_loop_manager.compute_rm_score(batch)
         return batch_reward
 
+    def _materialize_offline_dpo_batch(self, batch: DataProto) -> DataProto:
+        """Encode offline image paths and prompts into the tensors expected by DPO training."""
+        if self.offline_dpo_materializer is None:
+            from verl_omni.trainer.diffusion.offline_dpo_materializer import OfflineDPOMaterializer
+
+            self.offline_dpo_materializer = OfflineDPOMaterializer(self.config)
+        return self.offline_dpo_materializer.materialize(batch)
+
     def _validate(self):
+        if self.is_offline_dpo and not hasattr(self, "async_rollout_manager"):
+            print("Skipping validation generation because offline DPO rollout is disabled.")
+            return {"val/offline_dpo/skipped": 1.0}
+
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -539,7 +571,14 @@ class RayFlowGRPOTrainer:
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
         # create actor and rollout
-        actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
+        if Role.ActorRolloutRef in self.role_worker_mapping:
+            actor_role = Role.ActorRolloutRef
+        elif Role.ActorRollout in self.role_worker_mapping:
+            actor_role = Role.ActorRollout
+        elif hasattr(Role, "Actor"):
+            actor_role = Role.Actor
+        else:
+            raise ValueError(f"No supported actor role found in {self.role_worker_mapping.keys()=}")
         if self.hybrid_engine:
             actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
             actor_rollout_cls = RayClassWithInitArgs(
@@ -612,6 +651,12 @@ class RayFlowGRPOTrainer:
 
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
+
+        if self.is_offline_dpo:
+            self.reward_loop_manager = None
+            self.llm_server_manager = None
+            self.checkpoint_manager = _NoOpCheckpointManager()
+            return
 
         # create reward loop manager
         from verl.experimental.reward_loop import RewardLoopManager
@@ -812,6 +857,47 @@ class RayFlowGRPOTrainer:
         old_log_prob = tu.get_tensordict(old_log_prob_dict)
         return DataProto.from_tensordict(old_log_prob)
 
+    def _materialize_dpo_flow_batch(self, batch: DataProto) -> DataProto:
+        """Sample shared noise / timesteps / flow target for diffusion DPO (policy, ref, train use the same)."""
+        batch_td = batch.to_tensordict()
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        tu.assign_non_tensor(
+            batch_td,
+            height=self.config.actor_rollout_ref.model.pipeline.height,
+            width=self.config.actor_rollout_ref.model.pipeline.width,
+            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        )
+        out_td = self.actor_rollout_wg.materialize_dpo_flow_batch(batch_td)
+        if out_td is None:
+            return batch
+        required_keys = ("dpo_noise", "dpo_timesteps")
+        missing_keys = [key for key in required_keys if key not in out_td.keys()]
+        if missing_keys:
+            raise KeyError(f"materialize_dpo_flow_batch did not return required keys: {missing_keys}")
+        out_td = out_td.select(*required_keys)
+        return batch.union(DataProto.from_tensordict(out_td))
+
+    def _compute_dpo_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:
+        """Reference transformer output (e.g. flow-matching noise prediction)."""
+        batch_td = batch.to_tensordict()
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        metadata = {
+            "compute_loss": False,
+            "height": self.config.actor_rollout_ref.model.pipeline.height,
+            "width": self.config.actor_rollout_ref.model.pipeline.width,
+            "vae_scale_factor": self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        }
+        if self.ref_in_actor:
+            metadata["no_lora_adapter"] = True
+        tu.assign_non_tensor(batch_td, **metadata)
+        if self.ref_in_actor:
+            output = self.actor_rollout_wg.compute_dpo_ref_noise_pred_via_actor_base(batch_td)
+        else:
+            output = self.ref_policy_wg.compute_dpo_ref_noise_pred(batch_td)
+        if output is None:
+            return None
+        return DataProto.from_tensordict(output)
+
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
@@ -819,11 +905,13 @@ class RayFlowGRPOTrainer:
         batch_td = batch.to_tensordict()
         # step 2: convert from padding to no-padding
         batch_td = embeds_padding_2_no_padding(batch_td)
+        is_dpo = self.config.algorithm.adv_estimator == DiffusionAdvantageEstimator.DPO.value
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        rollout_multiplier = 2 if is_dpo else self.config.actor_rollout_ref.rollout.n
+        ppo_mini_batch_size = ppo_mini_batch_size * rollout_multiplier
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
         seed = self.config.actor_rollout_ref.actor.data_loader_seed
-        shuffle = self.config.actor_rollout_ref.actor.shuffle
+        shuffle = False if is_dpo else self.config.actor_rollout_ref.actor.shuffle
         tu.assign_non_tensor(
             batch_td,
             global_batch_size=ppo_mini_batch_size,
@@ -923,57 +1011,74 @@ class RayFlowGRPOTrainer:
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
 
+                is_dpo = self.config.algorithm.adv_estimator == DiffusionAdvantageEstimator.DPO.value
+                is_offline_dpo = self.is_offline_dpo
+                if is_offline_dpo and not is_dpo:
+                    raise ValueError("Offline DPO mode requires algorithm.adv_estimator=dpo.")
+                if is_dpo and not is_offline_dpo:
+                    raise ValueError("Diffusion DPO currently supports offline mode only. Set algorithm.dpo_mode=offline.")
+
                 # add uid to batch
-                batch.non_tensor_batch["uid"] = np.array(
-                    [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
-                )
+                if "uid" not in batch.non_tensor_batch:
+                    batch.non_tensor_batch["uid"] = np.array(
+                        [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
+                    )
 
-                gen_batch = self._get_gen_batch(batch)
+                if not is_offline_dpo:
+                    gen_batch = self._get_gen_batch(batch)
 
-                # pass global_steps to trace
-                gen_batch.meta_info["global_steps"] = self.global_steps
-                gen_batch_output = gen_batch.repeat(
-                    repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
-                )
+                    # pass global_steps to trace
+                    gen_batch.meta_info["global_steps"] = self.global_steps
+                    gen_batch_output = gen_batch.repeat(
+                        repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
+                    )
 
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
-                    # generate a batch
-                    with marked_timer("gen", timing_raw, color="red"):
-                        gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                        self.checkpoint_manager.sleep_replicas()
+                    reward_extra_infos_dict: dict[str, list] = {}
+                    if is_offline_dpo:
+                        with marked_timer("offline_materialize", timing_raw, color="red"):
+                            batch = self._materialize_offline_dpo_batch(batch)
+                        if "sample_level_scores" not in batch.batch:
+                            raise KeyError("Offline DPO batches must contain `sample_level_scores`.")
+                        reward_tensor = batch.batch["sample_level_scores"]
+                    else:
+                        # generate a batch
+                        with marked_timer("gen", timing_raw, color="red"):
+                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                            self.checkpoint_manager.sleep_replicas()
 
-                        timing_raw.update(gen_batch_output.meta_info["timing"])
-                        gen_batch_output.meta_info.pop("timing", None)
+                            timing_raw.update(gen_batch_output.meta_info["timing"])
+                            gen_batch_output.meta_info.pop("timing", None)
 
-                    # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    batch = batch.union(gen_batch_output)
+                        # repeat to align with repeated responses in rollout
+                        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                        batch = batch.union(gen_batch_output)
 
-                    with marked_timer("reward", timing_raw, color="yellow"):
-                        # compute reward model score
-                        if self.use_rm and "rm_scores" not in batch.batch.keys():
-                            batch_reward = self._compute_reward_colocate(batch)
-                            batch = batch.union(batch_reward)
+                        with marked_timer("reward", timing_raw, color="yellow"):
+                            # compute reward model score
+                            if self.use_rm and "rm_scores" not in batch.batch.keys():
+                                batch_reward = self._compute_reward_colocate(batch)
+                                batch = batch.union(batch_reward)
 
-                        # extract reward_tensor and reward_extra_infos_dict for training
-                        reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+                            # extract reward_tensor and reward_extra_infos_dict for training
+                            reward_tensor, reward_extra_infos_dict = extract_reward(batch)
 
-                    bypass_recomputing_logprobs = self.config.algorithm.get("bypass_mode", False)
-                    if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
-                        batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
-                    else:  # Recompute old_log_probs
-                        with marked_timer("old_log_prob", timing_raw, color="blue"):
-                            old_log_prob = self._compute_old_log_prob(batch)
-                            batch = batch.union(old_log_prob)
+                    if not is_dpo:
+                        bypass_recomputing_logprobs = self.config.algorithm.get("bypass_mode", False)
+                        if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
+                            batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
+                        else:  # Recompute old_log_probs
+                            with marked_timer("old_log_prob", timing_raw, color="blue"):
+                                old_log_prob = self._compute_old_log_prob(batch)
+                                batch = batch.union(old_log_prob)
 
-                    assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
+                        assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
 
-                    if self.use_reference_policy:
-                        # compute reference log_prob
-                        with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
-                            ref_log_prob = self._compute_ref_log_prob(batch)
-                            batch = batch.union(ref_log_prob)
+                        if self.use_reference_policy:
+                            with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
+                                ref_log_prob = self._compute_ref_log_prob(batch)
+                                batch = batch.union(ref_log_prob)
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm
@@ -983,23 +1088,32 @@ class RayFlowGRPOTrainer:
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
-                        num_timesteps = batch.batch["old_log_probs"].shape[1]
-                        batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"].expand(
-                            -1, num_timesteps
-                        )
+                        if not is_dpo:
+                            num_timesteps = batch.batch["old_log_probs"].shape[1]
+                            batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"].expand(
+                                -1, num_timesteps
+                            )
 
-                        # compute advantages, executed on the driver process
-                        norm_adv_by_std_in_grpo = self.config.algorithm.get(
-                            "norm_adv_by_std_in_grpo", True
-                        )  # GRPO adv normalization factor
+                            # compute advantages, executed on the driver process
+                            norm_adv_by_std_in_grpo = self.config.algorithm.get(
+                                "norm_adv_by_std_in_grpo", True
+                            )  # GRPO adv normalization factor
 
-                        batch = compute_advantage(
-                            batch,
-                            adv_estimator=self.config.algorithm.adv_estimator,
-                            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-                            global_std=self.config.algorithm.global_std,
-                            config=self.config.algorithm,
-                        )
+                            batch = compute_advantage(
+                                batch,
+                                adv_estimator=self.config.algorithm.adv_estimator,
+                                norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                                global_std=self.config.algorithm.global_std,
+                                config=self.config.algorithm,
+                            )
+
+                    if is_dpo:
+                        batch = self._materialize_dpo_flow_batch(batch)
+                        if self.use_reference_policy:
+                            with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
+                                ref_dpo = self._compute_dpo_ref_noise_pred(batch)
+                                if ref_dpo is not None:
+                                    batch = batch.union(ref_dpo)
 
                     # update actor
                     with marked_timer("update_actor", timing_raw, color="red"):
@@ -1076,12 +1190,16 @@ class RayFlowGRPOTrainer:
                 # collect metrics
                 metrics.update(compute_data_metrics_diffusion(batch=batch))
                 n_gpus = self.resource_pool_manager.get_n_gpus()
-                num_images = batch.batch["advantages"].shape[0]
+                if "advantages" in batch.batch:
+                    num_images = batch.batch["advantages"].shape[0]
+                else:
+                    num_images = batch.batch["sample_level_scores"].shape[0]
                 metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw, num_images=num_images))
                 metrics.update(compute_throughput_metrics_diffusion(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
                 # compute variance proxy metrics
                 gradient_norm = metrics.get("actor/grad_norm", None)
-                metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
+                if "advantages" in batch.batch:
+                    metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
 
                 # this is experimental and may be changed/removed in the future in favor of a general-purpose one
                 if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
