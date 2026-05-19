@@ -41,7 +41,7 @@ class DiffusionLossConfig(BaseConfig):
 
     def __post_init__(self):
         """Validate diffusion loss configuration."""
-        valid_modes = ["flow_grpo", "grpo_guard", "dpo"]
+        valid_modes = ["flow_grpo", "grpo_guard", "dpo", "dance_grpo"]
         if self.loss_mode not in valid_modes:
             raise ValueError(f"Invalid diffusion loss_mode: {self.loss_mode}. Must be one of {valid_modes}")
 
