@@ -13,6 +13,9 @@
 # limitations under the License.
 
 
+from typing import cast
+
+import torch
 from msgspec import field
 
 try:
@@ -22,7 +25,15 @@ except ImportError:
 
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import get_adapter_absolute_path
+from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.lora.manager import DiffusionLoRAManager, logger
+from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
+from vllm_omni.diffusion.models.diffusers_adapter.pipeline_diffusers_adapter import (
+    DiffusersAdapterPipeline,
+)
+from vllm_omni.diffusion.registry import initialize_model
 from vllm_omni.lora.request import LoRARequest as OmniLoRARequest
 
 
@@ -112,4 +123,79 @@ class VLLMOmniHijack:
         def do_hijack(target_cls, target_method_name, hooking_method):
             setattr(target_cls, target_method_name, hooking_method)
 
+        def hijack_load_model(
+            self,
+            od_config: OmniDiffusionConfig,
+            load_device: str,
+            load_format: str | None = "default",
+            custom_pipeline_name: str | None = None,
+            device: torch.device | None = None,
+        ):
+            """
+            based on vllm_omni.diffusion.model_loader.diffusers_loader.DiffusersPipelineLoader.load_model,
+            fix sleep on custom_pipeline.
+
+            Reason:
+            Custom pipelines call HuggingFace `from_pretrained(...).to(device)` internally. If we construct
+            them under `with target_device:` (CUDA), safetensors takes a direct-to-GPU fast path that calls
+            `cudaMalloc` via the driver API and BYPASSES PyTorch's caching allocator. That makes those bytes
+            invisible to CuMemAllocator, so `sleep()` cannot offload/unmap them and GPU memory stays pinned.
+
+            Fix: build the custom pipeline on CPU first (no default device context), then explicitly move it
+            to the target device. The subsequent `.to(target_device)` issues `torch.empty(..., device=cuda)`
+            + `copy_`, which goes through the caching allocator and is fully tracked by CuMemAllocator.
+
+            Ref: https://github.com/knlnguyen1802/vllm-omni/pull/25
+            """
+            if load_format is None:
+                load_format = "default"
+            self.od_config = od_config
+            # CPU offload + FP8: load weights on device for FP8 quantization
+            if load_device == "cpu" and od_config.quantization_config is not None:
+                load_device = device.type
+                logger.info(
+                    f"Quantization enabled with CPU offload, using {load_device} for weight loading"
+                )
+
+            target_device = torch.device(load_device)
+            with set_default_torch_dtype(od_config.dtype):
+                if od_config.parallel_config.use_hsdp:
+                    model = self._load_model_with_hsdp(
+                        od_config,
+                        target_device=device,
+                        load_format=load_format,
+                        custom_pipeline_name=custom_pipeline_name,
+                    )
+                else:
+                    if load_format == "custom_pipeline":
+                        from vllm_omni.diffusion.config import set_current_diffusion_config
+
+                        model_cls = resolve_obj_by_qualname(custom_pipeline_name)
+                        with set_current_diffusion_config(od_config):
+                            model = model_cls(od_config=od_config)
+                        if target_device.type != "cpu":
+                            model.to(target_device)
+                    else:
+                        with target_device:
+                            if load_format == "default":
+                                model = initialize_model(od_config)
+                            elif load_format == "diffusers":
+                                model = DiffusersAdapterPipeline(
+                                    od_config=od_config, device=target_device
+                                )
+                            else:
+                                raise ValueError(f"Unknown load_format: {load_format}")
+                logger.debug("Loading weights on %s ...", load_device)
+                if load_format == "diffusers":
+                    cast(DiffusersAdapterPipeline, model).load_weights()
+                elif self._is_gguf_quantization(od_config):
+                    self._load_weights_with_gguf(model, od_config)
+                else:
+                    self.load_weights(model)
+
+                self._process_weights_after_loading(model, target_device)
+
+            return model.eval()
+
         do_hijack(DiffusionLoRAManager, "_load_adapter", hijack__load_adapter)
+        do_hijack(DiffusersPipelineLoader, "load_model", hijack_load_model)
