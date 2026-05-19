@@ -423,12 +423,13 @@ def compute_diffusion_loss_dpo(
     w_diff = model_w_err - ref_w_err
     l_diff = model_l_err - ref_l_err
     inside_term = -0.5 * beta * (w_diff - l_diff)
+    implicit_acc = (inside_term > 0).sum().float() / inside_term.size(0)
     dpo_loss = -F.logsigmoid(inside_term).mean()
 
     with torch.no_grad():
         metrics = {
             "actor/dpo_loss": dpo_loss.detach().item(),
-            "actor/dpo_accuracy": (inside_term > 0).float().mean().detach().item(),
+            "actor/implicit_acc": implicit_acc.detach().item(),
         }
     return dpo_loss, metrics
 

@@ -45,8 +45,6 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
         pg_loss, pg_metrics = policy_loss_fn(**policy_loss_kwargs)
         pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)
         metrics.update(pg_metrics)
-        metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=AggregationType.MEAN)
-
         gradient_accumulation_steps = tu.get_non_tensor_data(data, "gradient_accumulation_steps", default=None)
         policy_loss = pg_loss / gradient_accumulation_steps
 
