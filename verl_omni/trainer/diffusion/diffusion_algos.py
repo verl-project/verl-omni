@@ -194,6 +194,8 @@ def compute_diffusion_loss_flow_grpo(
     log_prob: torch.Tensor,
     advantages: torch.Tensor,
     config: Optional[DictConfig | DiffusionActorConfig] = None,
+    *,
+    rollout_is_weights: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Compute the clipped policy objective and related metrics for FlowGRPO.
 
@@ -209,6 +211,11 @@ def compute_diffusion_loss_flow_grpo(
             Advantage estimates for each action, shape (batch_size,).
         config (verl_omni.workers.config.DiffusionActorConfig):
             Config for the actor.
+        rollout_is_weights (Optional[torch.Tensor]):
+            Optional Rollout Correction multiplier (same shape as ``log_prob``) combining
+            IS weights and RS rejection (rejected samples have weight 0). When provided,
+            the per-element policy loss is multiplied by these (detached) weights before
+            the mean reduction.
     """
     assert config is not None
     assert isinstance(config, DiffusionActorConfig)
@@ -226,7 +233,10 @@ def compute_diffusion_loss_flow_grpo(
         1.0 - loss_cfg.clip_ratio,
         1.0 + loss_cfg.clip_ratio,
     )
-    pg_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
+    per_elem_loss = torch.maximum(unclipped_loss, clipped_loss)
+    if rollout_is_weights is not None:
+        per_elem_loss = per_elem_loss * rollout_is_weights.detach()
+    pg_loss = torch.mean(per_elem_loss)
 
     with torch.no_grad():
         ppo_kl = torch.mean(-log_ratio)
@@ -258,6 +268,7 @@ def compute_diffusion_loss_grpo_guard(
     prev_sample_mean: Optional[torch.Tensor] = None,
     std_dev_t: Optional[torch.Tensor] = None,
     sqrt_dt: Optional[torch.Tensor] = None,
+    rollout_is_weights: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Compute the GRPO-Guard policy objective.
 
@@ -320,7 +331,10 @@ def compute_diffusion_loss_grpo_guard(
         1.0 - loss_cfg.clip_ratio,
         1.0 + loss_cfg.clip_ratio,
     )
-    pg_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss)) / (sqrt_dt_mean**2)
+    per_elem_loss = torch.maximum(unclipped_loss, clipped_loss)
+    if rollout_is_weights is not None:
+        per_elem_loss = per_elem_loss * rollout_is_weights.detach()
+    pg_loss = torch.mean(per_elem_loss) / (sqrt_dt_mean**2)
 
     with torch.no_grad():
         ppo_kl = torch.mean(-log_ratio)

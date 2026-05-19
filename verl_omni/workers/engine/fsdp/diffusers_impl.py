@@ -53,6 +53,7 @@ from verl.utils.fsdp_utils import (
     replace_lora_wrapper,
 )
 from verl.utils.memory_utils import aggressive_empty_cache
+from verl.utils.metric import AggregationType, Metric
 from verl.utils.model import convert_weight_keys
 from verl.utils.py_functional import append_to_dict, convert_to_regular_types
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig
@@ -61,6 +62,7 @@ from verl.workers.engine.fsdp.utils import create_device_mesh, get_sharding_stra
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
 
 from verl_omni.pipelines.utils import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
+from verl_omni.trainer.diffusion.rollout_correction import compute_per_step_rollout_correction
 from verl_omni.utils.fsdp_utils import collect_lora_params
 from verl_omni.workers.config import DiffusionModelConfig
 
@@ -658,7 +660,33 @@ class DiffusersFSDPEngine(BaseEngine):
             if micro_batch.get("old_prev_sample_mean", None) is not None:
                 data["old_prev_sample_mean"] = micro_batch["old_prev_sample_mean"][:, step]
 
+            if micro_batch.get("rollout_is_weights", None) is not None:
+                data["rollout_is_weights"] = micro_batch["rollout_is_weights"][:, step]
+
+            # Bypass-mode per-step rollout correction: when the trainer enabled
+            # rollout_correction.bypass_mode=True, it set old_log_probs := rollout_log_probs
+            # globally and forwarded the rollout_correction config via non-tensor metadata.
+            # Here we compute the per-step IS / RS weights from the *current* policy log-prob
+            # vs the recorded rollout log-prob (the only ratio that is non-trivial under
+            # bypass), and stash them so the loss multiplier picks them up.
+            rc_cfg = tu.get_non_tensor_data(micro_batch, "rollout_correction", default=None)
+            rc_metrics: dict[str, float] = {}
+            if rc_cfg is not None and "rollout_log_probs" in micro_batch.keys():
+                rollout_lp_step = micro_batch["rollout_log_probs"][:, step]
+                cur_lp_step = model_output["log_probs"]
+                rc_weights, rc_metrics = compute_per_step_rollout_correction(
+                    log_prob=cur_lp_step.detach(),
+                    rollout_log_prob=rollout_lp_step,
+                    rollout_corr_config=rc_cfg,
+                )
+                if rc_weights is not None:
+                    existing = data.get("rollout_is_weights", None)
+                    data["rollout_is_weights"] = rc_weights if existing is None else existing * rc_weights
+
             loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
+            if rc_metrics:
+                for k, v in rc_metrics.items():
+                    metrics[k] = Metric(value=float(v), aggregation=AggregationType.MEAN)
         else:
             assert forward_only, "forward_only must be True when loss_function is None"
             loss = torch.tensor(1.0, device=device_name)

@@ -370,8 +370,15 @@ algorithm:
   _target_: verl_omni.trainer.config.DiffusionAlgoConfig
   adv_estimator: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
   norm_adv_by_std_in_grpo: true
-  bypass_mode: false
   global_std: true
+  rollout_correction:
+    bypass_mode: false
+    loss_type: ppo_clip
+    rollout_is: null
+    rollout_is_threshold: 2.0
+    rollout_is_batch_normalize: false
+    rollout_rs: null
+    rollout_rs_threshold: null
 trainer:
   total_epochs: 30
   total_training_steps: null
