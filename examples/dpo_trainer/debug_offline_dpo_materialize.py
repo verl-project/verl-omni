@@ -23,16 +23,12 @@ Example:
     python examples/dpo_trainer/debug_offline_dpo_materialize.py \\
         --parquet data/offline_dpo/train.parquet \\
         --num-rows 1
-
-    # For batch_decode(prompts) like the trainer logs, pass a real LLM tokenizer path:
-    #   --tokenizer-path /path/to/your/rollout/tokenizer --decode-prompts
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 from typing import Any
 
 import numpy as np
@@ -62,15 +58,6 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Offline DPO parquet with prompt/img_win/img_lose plus precomputed SD3 tensors.",
     )
-    parser.add_argument(
-        "--tokenizer-path",
-        default=None,
-        help=(
-            "Tokenizer for dataset collate / decode-prompts (verl hf_tokenizer). "
-            "SD3 weights are not tokenizers; omit to use a built-in stub (recommended)."
-        ),
-    )
-    parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--num-rows", type=int, default=1, help="Logical DPO pairs to load (each expands to win+lose).")
     parser.add_argument("--row-index", type=int, default=0, help="Start row index inside the parquet.")
     parser.add_argument("--max-prompt-length", type=int, default=256)
@@ -78,11 +65,6 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Only print the collated batch. Skip materializer validation.",
-    )
-    parser.add_argument(
-        "--decode-prompts",
-        action="store_true",
-        help="Also batch_decode batch.batch['prompts'] for comparison with raw_prompt.",
     )
     return parser.parse_args()
 
@@ -111,22 +93,9 @@ class _CollateTokenizer:
         return {"input_ids": torch.tensor([token_ids], dtype=torch.long)}
 
 
-def resolve_tokenizer_path(tokenizer_path: str | None) -> str:
-    if tokenizer_path is not None:
-        return os.path.expanduser(tokenizer_path)
-    raise ValueError("tokenizer_path is required when resolving a real tokenizer path.")
-
-
 def load_collate_tokenizer(args: argparse.Namespace):
-    if args.tokenizer_path is None:
-        print("Using built-in collate tokenizer stub.")
-        return _CollateTokenizer(args.max_prompt_length), "stub"
-
-    path = resolve_tokenizer_path(args.tokenizer_path)
-    from verl.utils import hf_tokenizer
-
-    print(f"Loading collate tokenizer from: {path}")
-    return hf_tokenizer(path, trust_remote_code=args.trust_remote_code), path
+    print("Using built-in collate tokenizer stub.")
+    return _CollateTokenizer(args.max_prompt_length)
 
 
 def build_data_config(args: argparse.Namespace):
@@ -158,7 +127,7 @@ def _numpy_preview(value: Any, limit: int = 4) -> Any:
     return value
 
 
-def print_collated_batch(batch_dict: dict[str, Any], tokenizer, decode_prompts: bool) -> None:
+def print_collated_batch(batch_dict: dict[str, Any]) -> None:
     print("\n=== collated batch (trainer input) ===")
     for key in sorted(batch_dict.keys()):
         value = batch_dict[key]
@@ -173,16 +142,6 @@ def print_collated_batch(batch_dict: dict[str, Any], tokenizer, decode_prompts: 
         print("\n--- raw_prompt (used when the parquet tensors were precomputed) ---")
         for i, text in enumerate(items):
             print(f"  [{i}] {text!r}")
-
-    if decode_prompts and "prompts" in batch_dict and tokenizer is not None:
-        if not hasattr(tokenizer, "batch_decode"):
-            print("\n--- batch_decode(prompts): skipped (stub tokenizer; pass --tokenizer-path for real decode) ---")
-        else:
-            decoded = tokenizer.batch_decode(batch_dict["prompts"], skip_special_tokens=True)
-            print("\n--- batch_decode(prompts) (verl padding artifact, NOT SD3 input) ---")
-            for i, text in enumerate(decoded):
-                print(f"  [{i}] {text!r}")
-
 
 def describe_tensor(name: str, tensor: torch.Tensor) -> dict[str, Any]:
     info: dict[str, Any] = {
@@ -235,8 +194,7 @@ def main() -> None:
     args = parse_args()
     data_config = build_data_config(args)
 
-    tokenizer, tokenizer_source = load_collate_tokenizer(args)
-    print(f"Collate tokenizer source: {tokenizer_source}")
+    tokenizer = load_collate_tokenizer(args)
     dataset = OfflineDPODataset(args.parquet, tokenizer, config=data_config, max_samples=-1)
 
     features = []
@@ -247,7 +205,7 @@ def main() -> None:
         raise ValueError(f"No rows selected from parquet (row_index={args.row_index}, len={len(dataset)}).")
 
     batch_dict = collate_fn(features)
-    print_collated_batch(batch_dict, tokenizer, decode_prompts=args.decode_prompts)
+    print_collated_batch(batch_dict)
 
     batch = DataProto.from_single_dict(batch_dict)
     print("\n=== DataProto.non_tensor_batch keys ===")
