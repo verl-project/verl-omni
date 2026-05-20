@@ -217,6 +217,12 @@ pipeline:
 # support logging rollout prob for debugging purpose
 calculate_log_probs: False
 
+# Rollout data contract: trajectory for coupled RL, final_latent for decoupled forward-process RL
+collect_mode: trajectory
+
+# Named adapter used by rollout generation
+rollout_adapter: default
+
 # [Experimental] agent loop based rollout configs
 agent:
 

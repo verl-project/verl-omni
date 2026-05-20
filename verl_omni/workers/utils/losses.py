@@ -21,8 +21,8 @@ from verl_omni.trainer.diffusion.diffusion_algos import get_diffusion_loss_fn, k
 from verl_omni.workers.config import DiffusionActorConfig
 
 
-def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict, dp_group=None):
-    """Compute loss for diffusion model"""
+def diffusion_coupled_loss(config: DiffusionActorConfig, model_output, data: TensorDict, dp_group=None):
+    """Compute coupled reverse-trajectory diffusion loss."""
     log_prob = model_output["log_probs"]
 
     config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
@@ -79,3 +79,40 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
         policy_loss = policy_loss * sp_size
 
     return policy_loss, metrics
+
+
+def diffusion_decoupled_loss(config: DiffusionActorConfig, model_output, data: TensorDict, dp_group=None):
+    """Compute decoupled forward-process diffusion loss."""
+    config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
+    loss_mode = config.diffusion_loss.get("loss_mode", "flow_grpo")
+    policy_loss_fn = get_diffusion_loss_fn(loss_mode)
+    pg_loss, pg_metrics = policy_loss_fn(
+        forward_prediction=model_output["forward_prediction"],
+        old_prediction=model_output["old_prediction"],
+        ref_forward_prediction=model_output["ref_forward_prediction"],
+        x0=model_output["x0"],
+        xt=model_output["xt"],
+        t_expanded=model_output["t_expanded"],
+        reward_prob=data["reward_prob"],
+        config=config,
+    )
+
+    metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)
+    metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=AggregationType.MEAN)
+
+    gradient_accumulation_steps = tu.get_non_tensor_data(data, "gradient_accumulation_steps", default=None)
+    policy_loss = pg_loss / gradient_accumulation_steps
+
+    sp_size = tu.get_non_tensor_data(data, "sp_size", default=None)
+    if sp_size > 1:
+        policy_loss = policy_loss * sp_size
+
+    return policy_loss, metrics
+
+
+def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict, dp_group=None):
+    """Compute loss for diffusion model."""
+    loss_mode = config.diffusion_loss.get("loss_mode", "flow_grpo")
+    if loss_mode == "diffusion_nft":
+        return diffusion_decoupled_loss(config=config, model_output=model_output, data=data, dp_group=dp_group)
+    return diffusion_coupled_loss(config=config, model_output=model_output, data=data, dp_group=dp_group)

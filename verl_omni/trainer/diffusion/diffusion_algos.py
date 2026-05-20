@@ -23,15 +23,7 @@ from omegaconf import DictConfig
 
 from verl_omni.workers.config import DiffusionActorConfig
 
-DiffusionLossFn = Callable[
-    [
-        torch.Tensor,  # old_log_prob
-        torch.Tensor,  # log_prob
-        torch.Tensor,  # advantages
-        Optional[DictConfig | DiffusionActorConfig],  # config
-    ],
-    tuple[torch.Tensor, dict[str, Any]],
-]
+DiffusionLossFn = Callable[..., tuple[torch.Tensor, dict[str, Any]]]
 
 DIFFUSION_LOSS_REGISTRY: dict[str, DiffusionLossFn] = {}
 
@@ -339,6 +331,80 @@ def compute_diffusion_loss_grpo_guard(
         "actor/ratio_std": ratio_std.detach().item(),
     }
     return pg_loss, pg_metrics
+
+
+@register_diffusion_loss("diffusion_nft")
+def compute_diffusion_loss_diffusion_nft(
+    *,
+    forward_prediction: torch.Tensor,
+    old_prediction: torch.Tensor,
+    ref_forward_prediction: torch.Tensor,
+    x0: torch.Tensor,
+    xt: torch.Tensor,
+    t_expanded: torch.Tensor,
+    reward_prob: torch.Tensor,
+    config: Optional[DictConfig | DiffusionActorConfig] = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute the DiffusionNFT forward-process prediction-space objective.
+
+    DiffusionNFT compares old/current/reference velocity predictions on the same
+    forward-noised ``xt``. The old policy and reference predictions are treated
+    as frozen targets; gradients flow only through ``forward_prediction``.
+    """
+    assert config is not None
+    assert isinstance(config, DiffusionActorConfig)
+    loss_cfg = config.diffusion_loss.diffusion_nft
+    beta = loss_cfg.mix_beta
+
+    old_prediction = old_prediction.detach()
+    ref_forward_prediction = ref_forward_prediction.detach()
+    reward_weight = reward_prob
+    if reward_weight.ndim > 1:
+        reward_weight = reward_weight.flatten(1).mean(dim=1)
+    reward_weight = reward_weight.to(device=x0.device, dtype=x0.dtype)
+
+    reduce_dims = tuple(range(1, x0.ndim))
+    positive_prediction = beta * forward_prediction + (1.0 - beta) * old_prediction
+    implicit_negative_prediction = (1.0 + beta) * old_prediction - beta * forward_prediction
+
+    x0_prediction = xt - t_expanded * positive_prediction
+    negative_x0_prediction = xt - t_expanded * implicit_negative_prediction
+
+    with torch.no_grad():
+        positive_weight = (
+            torch.abs(x0_prediction.double() - x0.double())
+            .mean(dim=reduce_dims, keepdim=True)
+            .clip(min=loss_cfg.adaptive_weight_min)
+            .to(dtype=x0_prediction.dtype)
+        )
+        negative_weight = (
+            torch.abs(negative_x0_prediction.double() - x0.double())
+            .mean(dim=reduce_dims, keepdim=True)
+            .clip(min=loss_cfg.adaptive_weight_min)
+            .to(dtype=negative_x0_prediction.dtype)
+        )
+
+    positive_loss = ((x0_prediction - x0) ** 2 / positive_weight).mean(dim=reduce_dims)
+    negative_loss = ((negative_x0_prediction - x0) ** 2 / negative_weight).mean(dim=reduce_dims)
+    policy_loss_per_sample = (reward_weight * positive_loss / beta) + (
+        (1.0 - reward_weight) * negative_loss / beta
+    )
+    policy_loss = (policy_loss_per_sample * loss_cfg.adv_clip_max).mean()
+
+    ref_kl_loss = ((forward_prediction - ref_forward_prediction) ** 2).mean(dim=reduce_dims).mean()
+    loss = policy_loss + loss_cfg.ref_kl_coef * ref_kl_loss
+
+    with torch.no_grad():
+        metrics = {
+            "actor/policy_loss": policy_loss.detach().item(),
+            "actor/positive_loss": positive_loss.mean().detach().item(),
+            "actor/negative_loss": negative_loss.mean().detach().item(),
+            "actor/ref_kl_loss": ref_kl_loss.detach().item(),
+            "actor/old_deviate": ((forward_prediction - old_prediction) ** 2).mean().detach().item(),
+            "actor/reward_prob_mean": reward_weight.mean().detach().item(),
+            "actor/total_loss": loss.detach().item(),
+        }
+    return loss, metrics
 
 
 def kl_penalty_image(

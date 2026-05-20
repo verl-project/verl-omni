@@ -382,6 +382,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         )
         sde_type = _coalesce_not_none(sampling_params.extra_args.get("sde_type", None), sde_type)
         logprobs = _coalesce_not_none(sampling_params.extra_args.get("logprobs", None), logprobs)
+        collect_mode = _coalesce_not_none(sampling_params.extra_args.get("collect_mode", None), "trajectory")
 
         generator = sampling_params.generator or generator
         if generator is None and sampling_params.seed is not None:
@@ -497,6 +498,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         )
 
         self._current_timestep = None
+        latents_clean = latents
         if output_type == "latent":
             image = latents
         else:
@@ -513,15 +515,22 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             latents = latents / latents_std + latents_mean
             image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
 
+        custom_output = {
+            "all_latents": _maybe_to_cpu(all_latents),
+            "all_log_probs": _maybe_to_cpu(all_log_probs),
+            "all_timesteps": _maybe_to_cpu(all_timesteps),
+            "prompt_embeds": _maybe_to_cpu(prompt_embeds),
+            "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
+            "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds),
+            "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
+        }
+        if collect_mode == "final_latent":
+            custom_output["latents_clean"] = _maybe_to_cpu(latents_clean)
+            custom_output["train_timesteps"] = _maybe_to_cpu(
+                timesteps.unsqueeze(0).expand(latents_clean.shape[0], -1)
+            )
+
         return DiffusionOutput(
             output=_maybe_to_cpu(image),
-            custom_output={
-                "all_latents": _maybe_to_cpu(all_latents),
-                "all_log_probs": _maybe_to_cpu(all_log_probs),
-                "all_timesteps": _maybe_to_cpu(all_timesteps),
-                "prompt_embeds": _maybe_to_cpu(prompt_embeds),
-                "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
-                "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds),
-                "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
-            },
+            custom_output=custom_output,
         )

@@ -51,6 +51,9 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.trainer.config import DiffusionAlgoConfig
+from verl_omni.trainer.diffusion.decoupled_algos import (
+    get_decoupled_diffusion_algorithm,
+)
 from verl_omni.trainer.diffusion.diffusion_algos import DiffusionAdvantageEstimator, get_diffusion_adv_estimator_fn
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
@@ -106,12 +109,11 @@ def compute_advantage(
     return data
 
 
-class RayFlowGRPOTrainer:
-    """Distributed Flow-GRPO trainer using Ray for scalable reinforcement learning.
+class RayDiffusionRLTrainer:
+    """Common Ray trainer infrastructure for diffusion RL.
 
-    This trainer orchestrates distributed PPO training across multiple nodes and GPUs,
-    managing actor rollouts and reward computation with Ray backend.
-    Supports various model architectures including FSDP, Megatron, vLLM, and SGLang integration.
+    Paradigm-specific trainers should keep reverse-logprob and forward-process
+    assumptions out of this base class.
     """
 
     def __init__(
@@ -150,6 +152,7 @@ class RayFlowGRPOTrainer:
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
+        self._sync_and_validate_algorithm_config()
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
@@ -180,6 +183,27 @@ class RayFlowGRPOTrainer:
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
         self.checkpoint_manager = None
+
+    def _sync_and_validate_algorithm_config(self) -> None:
+        """Keep DiffusionNFT's trainer/actor/rollout config surfaces in sync."""
+        if self.config.algorithm.get("paradigm", "coupled") != "decoupled":
+            return
+        if self.config.algorithm.get("name", "flow_grpo") != "diffusion_nft":
+            return
+
+        nft_cfg = self.config.algorithm.diffusion_nft
+        rollout_options = get_decoupled_diffusion_algorithm("diffusion_nft", self.config.algorithm).rollout_options()
+        with open_dict(self.config):
+            self.config.actor_rollout_ref.model.algorithm = "diffusion_nft"
+            self.config.actor_rollout_ref.actor.diffusion_loss.loss_mode = "diffusion_nft"
+            self.config.actor_rollout_ref.rollout.collect_mode = rollout_options["collect_mode"]
+            self.config.actor_rollout_ref.rollout.rollout_adapter = rollout_options["rollout_adapter"]
+
+            loss_cfg = self.config.actor_rollout_ref.actor.diffusion_loss.diffusion_nft
+            loss_cfg.mix_beta = nft_cfg.mix_beta
+            loss_cfg.ref_kl_coef = nft_cfg.ref_kl_coef
+            loss_cfg.adv_clip_max = nft_cfg.adv_clip_max
+            loss_cfg.adaptive_weight_min = nft_cfg.adaptive_weight_min
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -769,6 +793,52 @@ class RayFlowGRPOTrainer:
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
+    def _update_actor(self, batch: DataProto) -> DataProto:
+        rollout_config = self.config.actor_rollout_ref.rollout
+        batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
+        batch_td = batch.to_tensordict()
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
+        seed = self.config.actor_rollout_ref.actor.data_loader_seed
+        shuffle = self.config.actor_rollout_ref.actor.shuffle
+        tu.assign_non_tensor(
+            batch_td,
+            global_batch_size=ppo_mini_batch_size,
+            mini_batch_size=ppo_mini_batch_size,
+            epochs=ppo_epochs,
+            seed=seed,
+            dataloader_kwargs={"shuffle": shuffle},
+            height=self.config.actor_rollout_ref.model.pipeline.height,
+            width=self.config.actor_rollout_ref.model.pipeline.width,
+            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+            training_paradigm=self.config.algorithm.get("paradigm", "coupled"),
+        )
+
+        actor_output = self.actor_rollout_wg.update_actor(batch_td)
+        actor_output = tu.get(actor_output, "metrics")
+        actor_output = rename_dict(actor_output, "actor/")
+        return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
+
+    def _start_profiling(self, do_profile: bool) -> None:
+        """Start profiling for all worker groups if profiling is enabled."""
+        if do_profile:
+            self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
+            if self.use_reference_policy and not self.ref_in_actor:
+                self.ref_policy_wg.start_profile(profile_step=self.global_steps)
+
+    def _stop_profiling(self, do_profile: bool) -> None:
+        """Stop profiling for all worker groups if profiling is enabled."""
+        if do_profile:
+            self.actor_rollout_wg.stop_profile()
+            if self.use_reference_policy and not self.ref_in_actor:
+                self.ref_policy_wg.stop_profile()
+
+
+class RayCoupledDiffusionTrainer(RayDiffusionRLTrainer):
+    """Reverse-trajectory/logprob diffusion trainer for FlowGRPO-style algorithms."""
+
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
         batch_td = batch.to_tensordict()
         batch_td = embeds_padding_2_no_padding(batch_td)
@@ -834,6 +904,7 @@ class RayFlowGRPOTrainer:
             height=self.config.actor_rollout_ref.model.pipeline.height,
             width=self.config.actor_rollout_ref.model.pipeline.width,
             vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+            training_paradigm=self.config.algorithm.get("paradigm", "coupled"),
         )
 
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
@@ -1103,4 +1174,156 @@ class RayFlowGRPOTrainer:
                 # in favor of a general-purpose data buffer pool
                 if hasattr(self.train_dataset, "on_batch_end"):
                     # The dataset may be changed after each training batch
+                    self.train_dataset.on_batch_end(batch=batch)
+
+
+RayFlowGRPOTrainer = RayCoupledDiffusionTrainer
+
+
+class RayDecoupledDiffusionTrainer(RayDiffusionRLTrainer):
+    """Decoupled forward-process trainer for algorithms such as DiffusionNFT."""
+
+    def _get_decoupled_algorithm(self):
+        return get_decoupled_diffusion_algorithm(self.config.algorithm.name, self.config.algorithm)
+
+    def _prepare_decoupled_actor_batch(self, batch: DataProto, reward_tensor: torch.Tensor) -> DataProto:
+        handler = self._get_decoupled_algorithm()
+        rewards = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
+        if "latents_clean" not in batch.batch:
+            raise ValueError("Decoupled diffusion training requires `latents_clean` from rollout custom_output.")
+
+        if "train_timesteps" not in batch.batch:
+            raise ValueError("DiffusionNFT requires final-latent rollout to return `train_timesteps`.")
+
+        rollout_batch = {key: batch.batch[key] for key in batch.batch.keys()}
+        rollout_batch["uid"] = batch.non_tensor_batch["uid"]
+        rollout_batch["timestep_shuffle_seed"] = int(
+            self.config.actor_rollout_ref.actor.data_loader_seed + getattr(self, "global_steps", 0)
+        )
+        actor_batch = handler.prepare_actor_batch(rollout_batch, rewards)
+        for key, value in actor_batch.items():
+            if isinstance(value, torch.Tensor):
+                batch.batch[key] = value
+        return batch
+
+    def _post_decoupled_actor_update(self, metrics: dict[str, Any] | None = None):
+        self._get_decoupled_algorithm().post_actor_update(self.actor_rollout_wg, self.global_steps, metrics=metrics)
+
+    def fit(self):
+        """Training loop for decoupled forward-process diffusion algorithms."""
+        from omegaconf import OmegaConf
+        from verl.utils.tracking import Tracking
+
+        logger = Tracking(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+            default_backend=self.config.trainer.logger,
+            config=OmegaConf.to_container(self.config, resolve=True),
+        )
+
+        self.global_steps = 0
+        self._load_checkpoint()
+        self.actor_rollout_wg.copy_adapter(source="default", target="old")
+        self.checkpoint_manager.update_weights(self.global_steps)
+
+        current_epoch = self.global_steps // len(self.train_dataloader)
+        if self.config.trainer.get("val_before_train", True):
+            val_metrics = self._validate()
+            assert val_metrics, f"{val_metrics=}"
+            pprint(f"Initial validation metrics: {val_metrics}")
+            logger.log(data=val_metrics, step=self.global_steps)
+            if self.config.trainer.get("val_only", False):
+                return
+
+        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
+        self.global_steps += 1
+        last_val_metrics = None
+        self.max_steps_duration = 0
+
+        for epoch in range(current_epoch, self.config.trainer.total_epochs):
+            for batch_dict in self.train_dataloader:
+                if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
+                    self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
+                metrics = {}
+                timing_raw = {}
+                batch: DataProto = DataProto.from_single_dict(batch_dict)
+                batch.non_tensor_batch["uid"] = np.array(
+                    [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
+                )
+                gen_batch = self._get_gen_batch(batch)
+                gen_batch.meta_info["global_steps"] = self.global_steps
+                gen_batch_output = gen_batch.repeat(
+                    repeat_times=self.config.actor_rollout_ref.rollout.n,
+                    interleave=True,
+                )
+
+                is_last_step = self.global_steps >= self.total_training_steps
+                with marked_timer("step", timing_raw):
+                    with marked_timer("gen", timing_raw, color="red"):
+                        gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                        self.checkpoint_manager.sleep_replicas()
+                        timing_raw.update(gen_batch_output.meta_info["timing"])
+                        gen_batch_output.meta_info.pop("timing", None)
+
+                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    batch = batch.union(gen_batch_output)
+
+                    with marked_timer("reward", timing_raw, color="yellow"):
+                        if self.use_rm and "rm_scores" not in batch.batch.keys():
+                            batch_reward = self._compute_reward_colocate(batch)
+                            batch = batch.union(batch_reward)
+                        reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+
+                    with marked_timer("prepare_decoupled_batch", timing_raw, color="brown"):
+                        batch.batch["sample_level_scores"] = reward_tensor
+                        if reward_extra_infos_dict:
+                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                        batch = self._prepare_decoupled_actor_batch(batch, reward_tensor)
+
+                    with marked_timer("update_actor", timing_raw, color="red"):
+                        actor_output = self._update_actor(batch)
+                        self._post_decoupled_actor_update(metrics)
+
+                    if self.config.trainer.save_freq > 0 and (
+                        is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                    ):
+                        with marked_timer("save_checkpoint", timing_raw, color="green"):
+                            self._save_checkpoint()
+
+                    with marked_timer("update_weights", timing_raw, color="red"):
+                        self.checkpoint_manager.update_weights(self.global_steps)
+
+                    metrics.update(reduce_metrics(actor_output.meta_info["metrics"]))
+
+                if self.config.trainer.test_freq > 0 and (
+                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
+                ):
+                    with marked_timer("testing", timing_raw, color="green"):
+                        val_metrics = self._validate()
+                        if is_last_step:
+                            last_val_metrics = val_metrics
+                    metrics.update(val_metrics)
+
+                steps_duration = timing_raw["step"]
+                self.max_steps_duration = max(self.max_steps_duration, steps_duration)
+                metrics.update({"training/global_step": self.global_steps, "training/epoch": epoch})
+                metrics.update(compute_data_metrics_diffusion(batch=batch))
+                n_gpus = self.resource_pool_manager.get_n_gpus()
+                num_images = batch.batch["advantages"].shape[0]
+                metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw, num_images=num_images))
+                metrics.update(compute_throughput_metrics_diffusion(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
+                gradient_norm = metrics.get("actor/grad_norm", None)
+                metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
+                logger.log(data=metrics, step=self.global_steps)
+
+                progress_bar.update(1)
+                self.global_steps += 1
+                if is_last_step:
+                    if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
+                        self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
+                    pprint(f"Final validation metrics: {last_val_metrics}")
+                    progress_bar.close()
+                    return
+
+                if hasattr(self.train_dataset, "on_batch_end"):
                     self.train_dataset.on_batch_end(batch=batch)

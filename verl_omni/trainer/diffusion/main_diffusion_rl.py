@@ -11,13 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Generic entrypoint for coupled and decoupled diffusion RL training."""
 
-from . import _patch  # noqa: F401 — apply Ulysses mask fix
-from . import qwen_image_diffusion_nft, qwen_image_flow_grpo, qwen_image_mix_grpo
-from .qwen_image_flow_grpo import *  # noqa: F401, F403
-from .qwen_image_diffusion_nft import *  # noqa: F401, F403
-from .qwen_image_mix_grpo import *  # noqa: F401, F403
+import hydra
+from verl.utils.device import auto_set_device
 
-__all__ = list(qwen_image_flow_grpo.__all__)
-__all__ += list(qwen_image_diffusion_nft.__all__)
-__all__ += list(qwen_image_mix_grpo.__all__)
+from verl_omni.trainer.diffusion.main_flowgrpo import run_flowgrpo
+
+
+@hydra.main(config_path="../config", config_name="diffusion_trainer", version_base=None)
+def main(config):
+    auto_set_device(config)
+    run_flowgrpo(config)
+
+
+if __name__ == "__main__":
+    main()

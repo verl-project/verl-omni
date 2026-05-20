@@ -155,6 +155,7 @@ class DiffusionAgentLoopWorker:
             **_config_to_sampling_dict(config.pipeline),
             **_config_to_sampling_dict(config.algo),
             "logprobs": config.calculate_log_probs,
+            "collect_mode": config.collect_mode,
         }
 
         is_validate = batch.meta_info.get("validate", False)

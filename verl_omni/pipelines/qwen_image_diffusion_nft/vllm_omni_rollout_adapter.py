@@ -11,13 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Qwen-Image rollout adapter registration for DiffusionNFT."""
 
-from . import _patch  # noqa: F401 — apply Ulysses mask fix
-from . import qwen_image_diffusion_nft, qwen_image_flow_grpo, qwen_image_mix_grpo
-from .qwen_image_flow_grpo import *  # noqa: F401, F403
-from .qwen_image_diffusion_nft import *  # noqa: F401, F403
-from .qwen_image_mix_grpo import *  # noqa: F401, F403
+from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
 
-__all__ = list(qwen_image_flow_grpo.__all__)
-__all__ += list(qwen_image_diffusion_nft.__all__)
-__all__ += list(qwen_image_mix_grpo.__all__)
+__all__ = ["QwenImageDiffusionNFTPipeline"]
+
+
+@VllmOmniPipelineBase.register("QwenImagePipeline", algorithm="diffusion_nft")
+class QwenImageDiffusionNFTPipeline(QwenImagePipelineWithLogProb):
+    """Qwen-Image rollout pipeline for DiffusionNFT final-latent collection."""

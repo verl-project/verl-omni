@@ -25,7 +25,7 @@ from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
 
-from verl_omni.trainer.diffusion.ray_diffusion_trainer import RayFlowGRPOTrainer
+from verl_omni.trainer.diffusion.ray_diffusion_trainer import RayDecoupledDiffusionTrainer, RayFlowGRPOTrainer
 
 
 @hydra.main(config_path="../config", config_name="diffusion_trainer", version_base=None)
@@ -244,8 +244,14 @@ class TaskRunner:
         )
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
-        # Initialize the FlowGRPO trainer.
-        trainer = RayFlowGRPOTrainer(
+        trainer_cls = (
+            RayDecoupledDiffusionTrainer
+            if config.algorithm.get("paradigm", "coupled") == "decoupled"
+            else RayFlowGRPOTrainer
+        )
+
+        # Initialize the diffusion RL trainer.
+        trainer = trainer_cls(
             config=config,
             tokenizer=tokenizer,
             processor=processor,

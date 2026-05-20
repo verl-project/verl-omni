@@ -163,6 +163,53 @@ class DiffusionModelBase(ABC):
         """
         pass
 
+    @classmethod
+    def prepare_forward_diffusion_inputs(
+        cls,
+        module: ModelMixin,
+        model_config: DiffusionModelConfig,
+        xt: torch.Tensor,
+        timestep: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        prompt_embeds_mask: torch.Tensor,
+        negative_prompt_embeds: Optional[torch.Tensor],
+        negative_prompt_embeds_mask: Optional[torch.Tensor],
+        micro_batch: TensorDict,
+        step: int,
+    ) -> tuple[dict, Optional[dict]]:
+        """Build inputs for forward-process losses such as DiffusionNFT.
+
+        Model-specific adapters can override this for architecture-specific
+        kwargs. The default matches common Diffusers transformer argument names.
+        """
+        model_inputs = {
+            "hidden_states": xt,
+            "timestep": timestep,
+            "encoder_hidden_states": prompt_embeds,
+            "encoder_attention_mask": prompt_embeds_mask,
+            "return_dict": False,
+        }
+        negative_model_inputs = None
+        if negative_prompt_embeds is not None:
+            negative_model_inputs = {
+                **model_inputs,
+                "encoder_hidden_states": negative_prompt_embeds,
+                "encoder_attention_mask": negative_prompt_embeds_mask,
+            }
+        return model_inputs, negative_model_inputs
+
+    @classmethod
+    def forward_velocity(
+        cls,
+        module: ModelMixin,
+        model_config: DiffusionModelConfig,
+        model_inputs: dict[str, torch.Tensor],
+        negative_model_inputs: Optional[dict[str, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        """Return a velocity/prediction tensor for forward-process objectives."""
+        del model_config, negative_model_inputs
+        return module(**model_inputs)[0]
+
 
 class VllmOmniPipelineBase:
     """Registry base for vllm-omni custom diffusion pipeline classes.
