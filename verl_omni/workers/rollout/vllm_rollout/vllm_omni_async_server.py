@@ -88,6 +88,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _get_engine_kwargs_key(self) -> str:
         return "vllm_omni"
 
+    def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
+        # No-op: ``deploy_config`` is a vllm-omni CLI flag and must reach the parser.
+        return
+
     def _get_worker_extension_cls(self) -> str:
         return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
 
@@ -104,6 +108,17 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     async def run_server(self, args: argparse.Namespace):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
+
+        # ``deploy_config`` lives on ``OrchestratorArgs``, not ``OmniEngineArgs``,
+        # so ``from_cli_args`` drops it; forward it manually.
+        deploy_config = getattr(args, "deploy_config", None)
+        if deploy_config is not None:
+            engine_args["deploy_config"] = deploy_config
+
+        # Drop verl's injected ``compilation_config``: re-validation under
+        # pydantic-strict rejects ``CompilationConfig``'s default ``None`` fields.
+        # BAGEL's deploy YAML sets ``enforce_eager: true``, so this is a no-op.
+        engine_args.pop("compilation_config", None)
 
         import_external_libs(self.config.external_lib)
         pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
@@ -161,9 +176,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         video_data: Optional[list[Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
         priority: int = 0,
+        lora_request: Optional[LoRARequest] = None,
+        lora_scale: float = 1.0,
     ) -> DiffusionOutput:
         """Generate sequence with token-in-image-out."""
         prompt_ids = normalize_token_ids(prompt_ids)
+        default_params_list = self.engine.default_sampling_params_list
 
         multi_modal_data = {}
         if image_data is not None:
@@ -171,9 +189,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if video_data is not None:
             multi_modal_data["video"] = video_data
 
-        # Add lora request
-        lora_request = None
-        if self.lora_as_adapter:
+        # Add lora request (caller-supplied takes precedence over lora_as_adapter)
+        if lora_request is None and self.lora_as_adapter:
             # Make sure we also check that the lora is already loaded in the engine
             lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
             if lora_loaded:
@@ -181,11 +198,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
 
-        # Build OmniCustomPrompt with pre-tokenized IDs
-        custom_prompt: OmniCustomPrompt = {"prompt_ids": prompt_ids}
+        # Build OmniCustomPrompt with pre-tokenized IDs (downstream pipelines read "prompt_token_ids")
+        custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_ids}
+        if len(default_params_list) > 1:
+            custom_prompt["modalities"] = ["image"]
         if negative_prompt_ids is not None:
             custom_prompt["negative_prompt_ids"] = negative_prompt_ids
         if multi_modal_data:
+            custom_prompt["multi_modal_data"] = multi_modal_data
             custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
 
         # Build OmniDiffusionSamplingParams from the incoming dict
@@ -199,13 +219,17 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         sampling_kwargs["extra_args"] = extra_args
         if lora_request is not None:
             sampling_kwargs["lora_request"] = lora_request
+            sampling_kwargs["lora_scale"] = lora_scale
         diffusion_sampling_params = OmniDiffusionSamplingParams(**sampling_kwargs)
+
+        # Build sampling params list: multi-stage models use defaults for non-diffusion stages
+        sampling_params_list = default_params_list[:-1] + [diffusion_sampling_params]
 
         # Call AsyncOmni.generate() with the correct API
         generator = self.engine.generate(
             prompt=custom_prompt,
             request_id=request_id,
-            sampling_params_list=[diffusion_sampling_params],
+            sampling_params_list=sampling_params_list,
         )
 
         # Get final response
@@ -220,27 +244,17 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         mm_output = final_res.custom_output or {}
 
         if sampling_params.get("logprobs", False):
-            all_log_probs = mm_output.get("all_log_probs")
-            log_probs = all_log_probs[0] if all_log_probs is not None else None
+            log_probs = mm_output.get("all_log_probs")
         else:
             log_probs = None
 
-        all_latents = mm_output.get("all_latents")
-        all_timesteps = mm_output.get("all_timesteps")
-        prompt_embeds = mm_output.get("prompt_embeds")
-        prompt_embeds_mask = mm_output.get("prompt_embeds_mask")
-        negative_prompt_embeds = mm_output.get("negative_prompt_embeds")
-        negative_prompt_embeds_mask = mm_output.get("negative_prompt_embeds_mask")
-
         extra_fields = {
-            "all_latents": all_latents[0] if all_latents is not None else None,
-            "all_timesteps": all_timesteps[0] if all_timesteps is not None else None,
-            "prompt_embeds": prompt_embeds[0] if prompt_embeds is not None else None,
-            "prompt_embeds_mask": prompt_embeds_mask[0] if prompt_embeds_mask is not None else None,
-            "negative_prompt_embeds": negative_prompt_embeds[0] if negative_prompt_embeds is not None else None,
-            "negative_prompt_embeds_mask": negative_prompt_embeds_mask[0]
-            if negative_prompt_embeds_mask is not None
-            else None,
+            "all_latents": mm_output.get("all_latents"),
+            "all_timesteps": mm_output.get("all_timesteps"),
+            "prompt_embeds": mm_output.get("prompt_embeds"),
+            "prompt_embeds_mask": mm_output.get("prompt_embeds_mask"),
+            "negative_prompt_embeds": mm_output.get("negative_prompt_embeds"),
+            "negative_prompt_embeds_mask": mm_output.get("negative_prompt_embeds_mask"),
             "global_steps": self.global_steps,
         }
 
