@@ -15,7 +15,7 @@
 Diffusers FSDP engine implementations.
 
 - :class:`DiffusersFSDPEngine`: abstract base (model build, checkpoint, optimizer).
-- :class:`DiffusersPPOFSDPEngine`: concrete engine registered for FlowGRPO / diffusion RL
+- :class:`DiffusersFSDPEnginePPO`: concrete engine registered for FlowGRPO / diffusion RL
   (``model_type=diffusion_model``).
 """
 
@@ -672,7 +672,7 @@ class DiffusersFSDPEngine(BaseEngine, ABC):
 
 
 @EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
-class DiffusersPPOFSDPEngine(DiffusersFSDPEngine):
+class DiffusersFSDPEnginePPO(DiffusersFSDPEngine):
     """Diffusers FSDP engine with PPO forward/backward and I/O preparation."""
 
     def forward_backward_batch(

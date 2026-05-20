@@ -344,7 +344,7 @@ def test_diffusers_ulysses_fwd_bwd_fsdp(sp_size, backend):
     FSDP-wrapped Ulysses SP backward must produce equivalent gradients to a
     plain non-SP backward pass.
 
-    Mirrors the production DiffusersPPOFSDPEngine (via DiffusersFSDPEngine): FSDP's reduce-scatter across
+    Mirrors the production DiffusersFSDPEnginePPO (via DiffusersFSDPEngine): FSDP's reduce-scatter across
     the SP process group automatically sums the partial gradients, so no
     explicit all-reduce is needed after backward.
     """
