@@ -44,6 +44,7 @@ __all__ = [
 ]
 
 _logger = logging.getLogger(__name__)
+_warned_experimental = False
 
 # ---------------------------------------------------------------------------
 # Config helpers
@@ -64,12 +65,19 @@ def rollout_correction_enabled(rollout_corr_config) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def apply_bypass_mode_to_diffusion_batch(batch: DataProto, rollout_corr_config) -> None:
+def apply_bypass_mode_to_diffusion_batch(batch: DataProto) -> None:
     """Set ``old_log_probs := rollout_log_probs`` (zero-cost substitution).
 
     Bypass-mode IS/RS is computed per SDE step inside ``diffusion_loss``,
     which reads ``config.rollout_correction`` from ``DiffusionActorConfig``.
     """
+    global _warned_experimental
+    if not _warned_experimental:
+        _warned_experimental = True
+        _logger.warning(
+            "[verl-omni] Rollout Correction for diffusion is an EXPERIMENTAL feature. "
+            "See docs/algo/rollout_correction.md for usage and caveats."
+        )
     if "rollout_log_probs" not in batch.batch:
         raise ValueError(
             "rollout_correction.bypass_mode=True requires `rollout_log_probs` in the batch. "
@@ -93,12 +101,13 @@ def apply_rollout_correction_to_diffusion_batch(
     RS keep-mask, then folds both into a single ``rollout_is_weights`` tensor.
     Called once per global batch; in bypass mode this is skipped (old == rollout).
     """
-    _logger.warning(
-        "[verl-omni] Rollout Correction for diffusion is an EXPERIMENTAL feature. "
-        "See docs/algo/rollout_correction.md for usage, supported presets, and caveats. "
-        "Treat reported metrics as diagnostics and tune thresholds for your model / "
-        "rollout precision before relying on it in production."
-    )
+    global _warned_experimental
+    if not _warned_experimental:
+        _warned_experimental = True
+        _logger.warning(
+            "[verl-omni] Rollout Correction for diffusion is an EXPERIMENTAL feature. "
+            "See docs/algo/rollout_correction.md for usage and caveats."
+        )
 
     if "old_log_probs" not in batch.batch or "rollout_log_probs" not in batch.batch:
         raise ValueError(
