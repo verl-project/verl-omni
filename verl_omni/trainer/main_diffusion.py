@@ -11,9 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Entrypoint for FlowGRPO / diffusion model training.
-"""
+"""Entrypoint for diffusion model RL training."""
 
 import os
 import socket
@@ -25,28 +23,31 @@ from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
 
-from verl_omni.trainer.diffusion.ray_diffusion_trainer import RayFlowGRPOTrainer
+from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
+    RayDiffusionOffPolicyTrainer,
+    RayDiffusionOnPolicyTrainer,
+)
 
 
-@hydra.main(config_path="../config", config_name="diffusion_trainer", version_base=None)
+@hydra.main(config_path="./config", config_name="diffusion_trainer", version_base=None)
 def main(config):
-    """Main entry point for FlowGRPO / diffusion model training with Hydra configuration management.
+    """Main entry point for diffusion model training with Hydra configuration management.
 
     Args:
         config: Hydra configuration dictionary containing training parameters.
     """
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
-    run_flowgrpo(config)
+    run_diffusion(config)
 
 
-def run_flowgrpo(config, task_runner_class=None) -> None:
-    """Initialize Ray cluster and run distributed FlowGRPO training process.
+def run_diffusion(config, task_runner_class=None) -> None:
+    """Initialize Ray and run distributed diffusion training.
 
     Args:
         config: Training configuration object containing all necessary parameters
-                for distributed FlowGRPO training including Ray initialization settings,
-                model paths, and training hyperparameters.
+                for distributed diffusion training including Ray initialization
+                settings, model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
     # Check if Ray is not initialized
@@ -93,8 +94,21 @@ def run_flowgrpo(config, task_runner_class=None) -> None:
         ray.timeline(filename=timeline_json_file)
 
 
+def _get_trainer_cls(config):
+    """Return the trainer class selected by ``algorithm.paradigm``."""
+    paradigm = config.algorithm.get("paradigm", "on_policy")
+    if paradigm == "on_policy":
+        return RayDiffusionOnPolicyTrainer
+    if paradigm == "off_policy":
+        return RayDiffusionOffPolicyTrainer
+    raise ValueError(
+        f"Unsupported diffusion algorithm paradigm {paradigm!r}. "
+        "Expected one of: 'on_policy', 'off_policy'."
+    )
+
+
 class TaskRunner:
-    """Ray remote class for executing distributed FlowGRPO training tasks.
+    """Ray remote class for executing distributed diffusion training tasks.
 
     This class encapsulates the main training logic and runs as a Ray remote actor
     to enable distributed execution across multiple nodes and GPUs.
@@ -174,11 +188,11 @@ class TaskRunner:
         return
 
     def run(self, config):
-        """Execute the main FlowGRPO training workflow.
+        """Execute the main diffusion training workflow.
 
         Args:
             config: Training configuration object containing all parameters needed
-                   for setting up and running the FlowGRPO training process.
+                   for setting up and running the diffusion training process.
         """
         # Print the initial configuration. `resolve=True` will evaluate symbolic values.
         from pprint import pprint
@@ -244,8 +258,8 @@ class TaskRunner:
         )
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
-        # Initialize the FlowGRPO trainer.
-        trainer = RayFlowGRPOTrainer(
+        trainer_cls = _get_trainer_cls(config)
+        trainer = trainer_cls(
             config=config,
             tokenizer=tokenizer,
             processor=processor,

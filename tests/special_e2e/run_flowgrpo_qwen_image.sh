@@ -39,7 +39,7 @@ python3 tests/special_e2e/create_dummy_diffusion_data.py \
     --val_size 4
 
 # ── Pass 1: no reward model (jpeg_compressibility rule reward) ─────────────────
-python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
+python3 -m verl_omni.trainer.main_diffusion \
     data.train_files=${dummy_train_path} \
     data.val_files=${dummy_test_path} \
     data.train_batch_size=${train_batch_size} \
@@ -95,7 +95,7 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     "$@"
 
 # ── Pass 2: vllm reward model (colocated, global pool) ────────────────────────
-python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
+python3 -m verl_omni.trainer.main_diffusion \
     data.train_files=${dummy_train_path} \
     data.val_files=${dummy_test_path} \
     data.train_batch_size=${train_batch_size} \

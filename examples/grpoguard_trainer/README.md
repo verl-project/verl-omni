@@ -47,7 +47,7 @@ Launch the example from the repository root:
 bash examples/grpoguard_trainer/run_qwen_image_ocr_lora.sh
 ```
 
-The script runs `python3 -m verl_omni.trainer.diffusion.main_flowgrpo` with:
+The script runs `python3 -m verl_omni.trainer.main_diffusion` with:
 
 - `algorithm.adv_estimator=flow_grpo`
 - `actor_rollout_ref.model.path=Qwen/Qwen-Image`

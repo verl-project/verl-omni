@@ -31,7 +31,7 @@ A new PPO-like algorithm needs **four pieces**:
    both decorated with `@register(architecture, algorithm="<name>")`.
 
 The trainer entrypoint
-([`main_flowgrpo.py`](../../verl_omni/trainer/diffusion/main_flowgrpo.py))
+([`main_diffusion.py`](../../verl_omni/trainer/main_diffusion.py))
 and the Ray driver
 ([`ray_diffusion_trainer.py`](../../verl_omni/trainer/diffusion/ray_diffusion_trainer.py))
 are algorithm-agnostic; they dispatch on the strings above.
@@ -301,7 +301,7 @@ Document any algorithm-specific knobs in the example's `README.md`.
 ## Step 7 — Smoke Test
 
 Add an end-to-end smoke test under `tests/special_e2e/` modelled on
-[`tests/special_e2e/run_flowgrpo_qwen_image.sh`](../../tests/special_e2e/run_flowgrpo_qwen_image.sh)
+[`tests/special_e2e/run_diffusion_qwen_image.sh`](../../tests/special_e2e/run_diffusion_qwen_image.sh)
 and register it in
 [`tests/gpu_smoke/run_gpu_smoke_tests.sh`](../../tests/gpu_smoke/run_gpu_smoke_tests.sh)
 as a new numbered test entry. The script must exercise the full

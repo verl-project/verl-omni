@@ -25,7 +25,7 @@ REWARD_TP=4
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
-python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
+python3 -m verl_omni.trainer.main_diffusion \
     trainer.device=npu \
     algorithm.adv_estimator=flow_grpo \
     data.train_files=$ocr_train_path \

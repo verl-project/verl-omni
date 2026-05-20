@@ -52,7 +52,7 @@ Optional KL loss tuning:
 - `actor_rollout_ref.actor.use_kl_loss=True`
 - `actor_rollout_ref.actor.kl_loss_coef=0.001`
 
-The script runs `python3 -m verl_omni.trainer.diffusion.main_flowgrpo` with:
+The script runs `python3 -m verl_omni.trainer.main_diffusion` with:
 
 - `algorithm.adv_estimator=flow_grpo`
 - `actor_rollout_ref.model.path=Qwen/Qwen-Image`

@@ -29,7 +29,7 @@ if [ ! -f "${dummy_train_path}" ] || [ ! -f "${dummy_test_path}" ]; then
         --val_size 4
 fi
 
-python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
+python3 -m verl_omni.trainer.main_diffusion \
     trainer.device=npu \
     algorithm.adv_estimator=flow_grpo \
     data.train_files=${dummy_train_path} \

@@ -4,20 +4,20 @@ Trainer Interface
 Last updated: |today| (API docstrings are auto-generated).
 
 VeRL-Omni provides Ray-based trainers for diffusion / multimodal RL. Today,
-:class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.RayFlowGRPOTrainer`
+:class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.RayDiffusionOnPolicyTrainer`
 is the primary entrypoint and orchestrates Flow-GRPO training across actor,
 rollout, reference policy, and reward workers.
 
 .. autosummary::
    :nosignatures:
 
-   verl_omni.trainer.diffusion.ray_diffusion_trainer.RayFlowGRPOTrainer
-   verl_omni.trainer.diffusion.main_flowgrpo.TaskRunner
+   verl_omni.trainer.diffusion.ray_diffusion_trainer.RayDiffusionOnPolicyTrainer
+   verl_omni.trainer.main_diffusion.TaskRunner
 
 Core Trainer
 ~~~~~~~~~~~~~~~~~
 
-.. autoclass:: verl_omni.trainer.diffusion.ray_diffusion_trainer.RayFlowGRPOTrainer
+.. autoclass:: verl_omni.trainer.diffusion.ray_diffusion_trainer.RayDiffusionOnPolicyTrainer
    :members: __init__, init_workers, fit
 
 .. autofunction:: verl_omni.trainer.diffusion.ray_diffusion_trainer.compute_advantage
@@ -25,8 +25,8 @@ Core Trainer
 Entry Point
 ~~~~~~~~~~~~~~~~~
 
-.. automodule:: verl_omni.trainer.diffusion.main_flowgrpo
-   :members: main, run_flowgrpo, TaskRunner
+.. automodule:: verl_omni.trainer.main_diffusion
+   :members: main, run_diffusion, TaskRunner
 
 Diffusion Algorithms
 ~~~~~~~~~~~~~~~~~~~~~

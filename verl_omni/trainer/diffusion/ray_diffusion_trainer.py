@@ -105,12 +105,11 @@ def compute_advantage(
     return data
 
 
-class RayFlowGRPOTrainer:
-    """Distributed Flow-GRPO trainer using Ray for scalable reinforcement learning.
+class RayDiffusionTrainer:
+    """Common Ray trainer infrastructure for diffusion training.
 
-    This trainer orchestrates distributed PPO training across multiple nodes and GPUs,
-    managing actor rollouts and reward computation with Ray backend.
-    Supports various model architectures including FSDP, Megatron, vLLM, and SGLang integration.
+    Paradigm-specific trainers own the training loop while sharing worker
+    initialization, validation, checkpointing, and logging behavior.
     """
 
     def __init__(
@@ -768,49 +767,6 @@ class RayFlowGRPOTrainer:
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
-    def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
-        batch_td = batch.to_tensordict()
-        batch_td = embeds_padding_2_no_padding(batch_td)
-        metadata = {
-            "compute_loss": False,
-            "height": self.config.actor_rollout_ref.model.pipeline.height,
-            "width": self.config.actor_rollout_ref.model.pipeline.width,
-            "vae_scale_factor": self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
-        }
-        if self.ref_in_actor:
-            metadata["no_lora_adapter"] = True
-        tu.assign_non_tensor(batch_td, **metadata)
-        if self.ref_in_actor:
-            output = self.actor_rollout_wg.compute_log_prob(batch_td)
-        else:
-            output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
-        # gather output
-        log_probs = tu.get(output, "log_probs")
-        prev_sample_mean = tu.get(output, "prev_sample_mean")
-        ref_log_prob = tu.get_tensordict(
-            {"ref_log_prob": log_probs.float(), "ref_prev_sample_mean": prev_sample_mean.float()}
-        )
-        return DataProto.from_tensordict(ref_log_prob)
-
-    def _compute_old_log_prob(self, batch: DataProto):
-        batch_td = batch.to_tensordict()
-        batch_td = embeds_padding_2_no_padding(batch_td)
-        tu.assign_non_tensor(
-            batch_td,
-            compute_loss=False,
-            height=self.config.actor_rollout_ref.model.pipeline.height,
-            width=self.config.actor_rollout_ref.model.pipeline.width,
-            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
-        )
-        output = self.actor_rollout_wg.compute_log_prob(batch_td)
-        log_probs = tu.get(output, "log_probs")
-        old_log_prob_dict = {"old_log_probs": log_probs.float()}
-        prev_sample_mean = tu.get(output, "prev_sample_mean")
-        if prev_sample_mean is not None:
-            old_log_prob_dict["old_prev_sample_mean"] = prev_sample_mean.float()
-        old_log_prob = tu.get_tensordict(old_log_prob_dict)
-        return DataProto.from_tensordict(old_log_prob)
-
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
@@ -853,6 +809,57 @@ class RayFlowGRPOTrainer:
             self.actor_rollout_wg.stop_profile()
             if self.use_reference_policy and not self.ref_in_actor:
                 self.ref_policy_wg.stop_profile()
+
+    def fit(self):
+        """Run the paradigm-specific training loop."""
+        raise NotImplementedError("Diffusion trainer subclasses must implement fit().")
+
+
+class RayDiffusionOnPolicyTrainer(RayDiffusionTrainer):
+    """On-policy diffusion trainer for FlowGRPO, MixGRPO, and related algorithms."""
+
+    def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
+        batch_td = batch.to_tensordict()
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        metadata = {
+            "compute_loss": False,
+            "height": self.config.actor_rollout_ref.model.pipeline.height,
+            "width": self.config.actor_rollout_ref.model.pipeline.width,
+            "vae_scale_factor": self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        }
+        if self.ref_in_actor:
+            metadata["no_lora_adapter"] = True
+        tu.assign_non_tensor(batch_td, **metadata)
+        if self.ref_in_actor:
+            output = self.actor_rollout_wg.compute_log_prob(batch_td)
+        else:
+            output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
+        # gather output
+        log_probs = tu.get(output, "log_probs")
+        prev_sample_mean = tu.get(output, "prev_sample_mean")
+        ref_log_prob = tu.get_tensordict(
+            {"ref_log_prob": log_probs.float(), "ref_prev_sample_mean": prev_sample_mean.float()}
+        )
+        return DataProto.from_tensordict(ref_log_prob)
+
+    def _compute_old_log_prob(self, batch: DataProto):
+        batch_td = batch.to_tensordict()
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        tu.assign_non_tensor(
+            batch_td,
+            compute_loss=False,
+            height=self.config.actor_rollout_ref.model.pipeline.height,
+            width=self.config.actor_rollout_ref.model.pipeline.width,
+            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        )
+        output = self.actor_rollout_wg.compute_log_prob(batch_td)
+        log_probs = tu.get(output, "log_probs")
+        old_log_prob_dict = {"old_log_probs": log_probs.float()}
+        prev_sample_mean = tu.get(output, "prev_sample_mean")
+        if prev_sample_mean is not None:
+            old_log_prob_dict["old_prev_sample_mean"] = prev_sample_mean.float()
+        old_log_prob = tu.get_tensordict(old_log_prob_dict)
+        return DataProto.from_tensordict(old_log_prob)
 
     def fit(self):
         """
@@ -1099,3 +1106,17 @@ class RayFlowGRPOTrainer:
                 if hasattr(self.train_dataset, "on_batch_end"):
                     # The dataset may be changed after each training batch
                     self.train_dataset.on_batch_end(batch=batch)
+
+
+class RayDiffusionOffPolicyTrainer(RayDiffusionTrainer):
+    """Off-policy diffusion trainer extension point for DiffusionNFT/DPO-style algorithms."""
+
+    def fit(self):
+        """Run off-policy diffusion training."""
+        raise NotImplementedError(
+            "Off-policy diffusion training is not implemented yet. "
+            "Implement this loop for algorithms such as DiffusionNFT or DPO."
+        )
+
+
+RayFlowGRPOTrainer = RayDiffusionOnPolicyTrainer

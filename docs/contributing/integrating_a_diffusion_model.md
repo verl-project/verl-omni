@@ -333,13 +333,13 @@ collapse.
 ## Step 6 — Add a Smoke Test
 
 Add an end-to-end smoke test under `tests/special_e2e/` modelled on
-[`tests/special_e2e/run_flowgrpo_qwen_image.sh`](../../tests/special_e2e/run_flowgrpo_qwen_image.sh).
+[`tests/special_e2e/run_diffusion_qwen_image.sh`](../../tests/special_e2e/run_diffusion_qwen_image.sh).
 The script must exercise the full pipeline against a `tiny-random/<ModelName>`
 checkpoint:
 
 1. Generate dummy parquet data via
    [`tests/special_e2e/create_dummy_diffusion_data.py`](../../tests/special_e2e/create_dummy_diffusion_data.py).
-2. Launch `verl_omni.trainer.diffusion.main_flowgrpo` with model-specific
+2. Launch `verl_omni.trainer.main_diffusion` with model-specific
    knobs (architecture, prompt template, CFG parameters, sequence
    lengths).
 3. Assert exit code `0`.
@@ -387,7 +387,7 @@ Before opening the PR, confirm every box:
 - [ ] Example launch script in `examples/flowgrpo_trainer/` plus a
       matching data preprocessor under
       `examples/flowgrpo_trainer/data_process/`.
-- [ ] Smoke test `tests/special_e2e/run_flowgrpo_<model>.sh` exists and
+- [ ] Smoke test `tests/special_e2e/run_diffusion_<model>.sh` exists and
       is wired into
       [`tests/gpu_smoke/run_gpu_smoke_tests.sh`](../../tests/gpu_smoke/run_gpu_smoke_tests.sh).
 - [ ] Docs updated (this guide if the contract changed; the relevant
