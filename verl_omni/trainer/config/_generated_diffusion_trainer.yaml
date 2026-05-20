@@ -74,6 +74,14 @@ actor_rollout_ref:
       loss_mode: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
       clip_ratio: 0.0001
       adv_clip_max: 5.0
+    rollout_correction:
+      bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
+      loss_type: ${oc.select:algorithm.rollout_correction.loss_type,ppo_clip}
+      rollout_is: ${oc.select:algorithm.rollout_correction.rollout_is,null}
+      rollout_is_threshold: ${oc.select:algorithm.rollout_correction.rollout_is_threshold,2.0}
+      rollout_is_batch_normalize: ${oc.select:algorithm.rollout_correction.rollout_is_batch_normalize,false}
+      rollout_rs: ${oc.select:algorithm.rollout_correction.rollout_rs,null}
+      rollout_rs_threshold: ${oc.select:algorithm.rollout_correction.rollout_rs_threshold,null}
     loss_scale_factor: null
     use_kl_loss: false
     kl_loss_coef: 0.001

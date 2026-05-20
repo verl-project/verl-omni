@@ -35,6 +35,18 @@ diffusion_loss:
   # Maximum value to clamp advantages before computing policy loss
   adv_clip_max: 5.0
 
+# Rollout Correction config.  Fields mirror RolloutCorrectionConfig.
+# rollout_is defaults to null (off); override for IS diagnostics.
+rollout_correction:
+
+  bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
+  loss_type: ${oc.select:algorithm.rollout_correction.loss_type,ppo_clip}
+  rollout_is: ${oc.select:algorithm.rollout_correction.rollout_is,null}
+  rollout_is_threshold: ${oc.select:algorithm.rollout_correction.rollout_is_threshold,2.0}
+  rollout_is_batch_normalize: ${oc.select:algorithm.rollout_correction.rollout_is_batch_normalize,false}
+  rollout_rs: ${oc.select:algorithm.rollout_correction.rollout_rs,null}
+  rollout_rs_threshold: ${oc.select:algorithm.rollout_correction.rollout_rs_threshold,null}
+
 # loss scale factor for diffusion loss, if applicable. If set to null, it will not be applied.
 loss_scale_factor: null
 

@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+import torch
 from tensordict import TensorDict
+from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_rejection_mask
 from verl.utils import tensordict_utils as tu
 from verl.utils.metric import AggregationType, Metric
 
@@ -29,10 +30,54 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
 
     metrics = {}
 
-    # compute policy loss
     old_log_prob = data["old_log_probs"]
     advantages = data["advantages"]
 
+    # Rollout Correction bypass mode
+    # In bypass mode old_log_prob == rollout_log_prob.  Compute per-step IS/RS
+    # from (current, rollout) and stash weights for the loss function.
+    rc_cfg = config.rollout_correction
+    if rc_cfg.bypass_mode:
+        # Diffusion log-probs are dense (no padding).
+        log_prob_2d = log_prob.unsqueeze(-1)  # (B,) -> (B, 1)
+        rollout_lp_2d = old_log_prob.unsqueeze(-1)  # (B,) -> (B, 1)
+        response_mask = torch.ones_like(log_prob_2d)
+
+        is_weights_proto, modified_mask, rc_metrics = compute_rollout_correction_and_rejection_mask(
+            old_log_prob=log_prob_2d,
+            rollout_log_prob=rollout_lp_2d,
+            response_mask=response_mask,
+            rollout_is=rc_cfg.rollout_is,
+            rollout_is_threshold=rc_cfg.rollout_is_threshold,
+            rollout_is_batch_normalize=rc_cfg.rollout_is_batch_normalize,
+            rollout_rs=rc_cfg.rollout_rs,
+            rollout_rs_threshold=rc_cfg.rollout_rs_threshold,
+        )
+
+        # ppo_clip: PPO ratio handles IS, only RS mask is applied.
+        # reinforce: IS weights applied explicitly (no PPO clipping).
+        ppo_clip = rc_cfg.loss_type == "ppo_clip"
+        weights: torch.Tensor | None = None
+
+        if is_weights_proto is not None and not ppo_clip:
+            weights = is_weights_proto.batch["rollout_is_weights"]  # (B, 1)
+
+        if rc_cfg.rollout_rs:
+            rs_mask = modified_mask  # (B, 1), 1=keep, 0=reject
+            weights = rs_mask if weights is None else weights * rs_mask
+
+        if weights is not None:
+            existing = data.get("rollout_is_weights", None)
+            data["rollout_is_weights"] = (
+                weights.squeeze(-1).to(dtype=log_prob.dtype)
+                if existing is None
+                else existing * weights.squeeze(-1).to(dtype=log_prob.dtype)
+            )
+
+        for k, v in rc_metrics.items():
+            metrics[k] = Metric(value=float(v), aggregation=AggregationType.MEAN)
+
+    # Standard loss dispatch
     loss_mode = config.diffusion_loss.get("loss_mode", "flow_grpo")
 
     policy_loss_fn = get_diffusion_loss_fn(loss_mode)
