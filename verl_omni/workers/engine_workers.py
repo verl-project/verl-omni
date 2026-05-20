@@ -429,6 +429,19 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         return final_output
 
+    def materialize_dpo_flow_batch(self, data: TensorDict) -> TensorDict | None:
+        """Populate ``dpo_*`` flow-matching tensors in-place for aligned policy/ref DPO."""
+        materializer = getattr(self.engine, "materialize_dpo_flow_batch", None)
+        if materializer is None:
+            raise NotImplementedError(
+                f"{type(self.engine).__name__} does not implement materialize_dpo_flow_batch; "
+                "use model_type=diffusion_dpo_model for DPO training."
+            )
+        materializer(data)
+        if self.engine.is_mp_src_rank_with_outputs():
+            return data.select("dpo_noise", "dpo_timesteps").cpu()
+        return None
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         return self.engine.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
@@ -498,7 +511,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         model_config: HFModelConfig | DiffusionModelConfig = omega_conf_to_dataclass(self.config.model)
-        is_diffusion = model_config.get("model_type", "language_model") == "diffusion_model"
+        is_diffusion = model_config.get("model_type", "language_model") in ("diffusion_model", "diffusion_dpo_model")
 
         # 1. build reference model
         if "ref" in self.role:
@@ -530,10 +543,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
             # assign engine configs
-            ref_training_config.engine_config.infer_micro_batch_size_per_gpu = (
-                self.config.ref.ppo_micro_batch_size_per_gpu
-            )
+            ref_infer_micro_bsz = self.config.ref.ppo_micro_batch_size_per_gpu
+            if ref_infer_micro_bsz is None and is_diffusion:
+                # prepare_micro_batches requires a finite micro-batch; align with actor training micro-batch.
+                ref_infer_micro_bsz = self.config.actor.ppo_micro_batch_size_per_gpu
+            ref_training_config.engine_config.infer_micro_batch_size_per_gpu = ref_infer_micro_bsz
             ref_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
+            if is_diffusion:
+                assert ref_training_config.engine_config.infer_micro_batch_size_per_gpu is not None, (
+                    "Diffusion ref infer_batch requires ref.log_prob_micro_batch_size_per_gpu or "
+                    "actor.ppo_micro_batch_size_per_gpu (used by prepare_micro_batches)."
+                )
             if not is_diffusion:
                 ref_training_config.engine_config.use_dynamic_bsz = self.config.ref.use_dynamic_bsz
                 ref_training_config.engine_config.infer_max_token_len_per_gpu = (
@@ -566,8 +586,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 actor_training_config.engine_config.micro_batch_size_per_gpu = (
                     self.config.actor.ppo_micro_batch_size_per_gpu
                 )
-                actor_training_config.engine_config.infer_micro_batch_size_per_gpu = self.config.rollout.get(
-                    "log_prob_micro_batch_size_per_gpu", None
+                actor_infer_micro_bsz = self.config.rollout.get("log_prob_micro_batch_size_per_gpu", None)
+                if actor_infer_micro_bsz is None:
+                    actor_infer_micro_bsz = self.config.actor.ppo_micro_batch_size_per_gpu
+                actor_training_config.engine_config.infer_micro_batch_size_per_gpu = actor_infer_micro_bsz
+                assert actor_training_config.engine_config.infer_micro_batch_size_per_gpu is not None, (
+                    "Diffusion infer_batch requires rollout.log_prob_micro_batch_size_per_gpu or "
+                    "actor.ppo_micro_batch_size_per_gpu (used by prepare_micro_batches)."
                 )
             else:
                 actor_use_dynamic_bsz = self.config.actor.get("use_dynamic_bsz", False)
@@ -600,7 +625,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.loss_fn = partial(
                     distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
                 )
-            elif model_config.get("model_type", "language_model") == "diffusion_model":
+            elif model_config.get("model_type", "language_model") in ("diffusion_model", "diffusion_dpo_model"):
                 self.loss_fn = partial(diffusion_loss, config=actor_config)
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
@@ -667,6 +692,36 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         output = self.actor.infer_batch(data)
 
         return output.cpu() if output is not None else None
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="blue", role="materialize_dpo_flow_batch")
+    @_with_routing_replay_flag(enabled=False)
+    def materialize_dpo_flow_batch(self, data: TensorDict) -> TensorDict:
+        return self.actor.materialize_dpo_flow_batch(data)
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
+    @DistProfiler.annotate(color="olive", role="dpo_ref_noise_pred")
+    @_with_routing_replay_flag(enabled=False)
+    def compute_dpo_ref_noise_pred(self, data: TensorDict) -> TensorDict:
+        output = self.ref.infer_batch(data=data)
+        if output is None:
+            return None
+        noise_pred = tu.get(output, "noise_pred")
+        if noise_pred.ndim >= 2 and noise_pred.shape[1] == 1:
+            noise_pred = noise_pred[:, 0]
+        return tu.get_tensordict({"ref_noise_pred": noise_pred.float()}).cpu()
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="olive", role="dpo_ref_noise_pred_actor_base")
+    @_with_routing_replay_flag(enabled=True)
+    def compute_dpo_ref_noise_pred_via_actor_base(self, data: TensorDict) -> TensorDict:
+        output = self.actor.infer_batch(data=data)
+        if output is None:
+            return None
+        noise_pred = tu.get(output, "noise_pred")
+        if noise_pred.ndim >= 2 and noise_pred.shape[1] == 1:
+            noise_pred = noise_pred[:, 0]
+        return tu.get_tensordict({"ref_noise_pred": noise_pred.float()}).cpu()
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")

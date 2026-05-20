@@ -17,8 +17,14 @@ from omegaconf import DictConfig
 from verl.trainer.main_ppo import create_rl_dataset as _upstream_create_rl_dataset
 from verl.trainer.main_ppo import create_rl_sampler
 from verl.utils.dataset.rl_dataset import RLHFDataset as _UpstreamRLHFDataset
-from verl.utils.dataset.rl_dataset import collate_fn
+from verl.utils.dataset.rl_dataset import collate_fn as _upstream_collate_fn
 from verl.utils.dataset.rl_dataset import get_dataset_class as _upstream_get_dataset_class
+
+from verl_omni.utils.dataset.offline_dpo_dataset import (
+    OFFLINE_DPO_PAIR_MARKER,
+    OfflineDPODataset,
+    expand_offline_dpo_features,
+)
 
 __all__ = [
     "collate_fn",
@@ -27,6 +33,13 @@ __all__ = [
     "create_rl_dataset",
     "create_rl_sampler",
 ]
+
+
+def collate_fn(features):
+    """Collate online RLHF rows or expand offline DPO pairs before collating."""
+    if features and isinstance(features[0], dict) and features[0].get(OFFLINE_DPO_PAIR_MARKER):
+        features = expand_offline_dpo_features(features)
+    return _upstream_collate_fn(features)
 
 
 class RLHFDataset(_UpstreamRLHFDataset):
@@ -68,6 +81,9 @@ def get_dataset_class(data_config: DictConfig):
 
     # Check if a custom dataset class is specified in the data configuration
     # and if the path to the custom class is provided
+    if data_config.get("offline_dpo", False):
+        print(f"Using dataset class: {OfflineDPODataset.__name__}")
+        return OfflineDPODataset
     if "custom_cls" in data_config and data_config.custom_cls.get("path", None) is not None:
         return _upstream_get_dataset_class(data_config)
     print(f"Using dataset class: {RLHFDataset.__name__}")
@@ -86,6 +102,14 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
     Returns:
         dataset (Dataset): The dataset.
     """
+    if data_config.get("offline_dpo", False):
+        return OfflineDPODataset(
+            data_files=data_paths,
+            tokenizer=tokenizer,
+            processor=processor,
+            config=data_config,
+            max_samples=max_samples,
+        )
     if "custom_cls" in data_config and data_config.custom_cls.get("path", None) is not None:
         return _upstream_create_rl_dataset(
             data_paths, data_config, tokenizer, processor, is_train=is_train, max_samples=max_samples

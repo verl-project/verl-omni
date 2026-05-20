@@ -23,17 +23,41 @@ from verl_omni.workers.config import DiffusionActorConfig
 
 def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict, dp_group=None):
     """Compute loss for diffusion model"""
-    log_prob = model_output["log_probs"]
-
     config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
 
     metrics = {}
+    loss_mode = config.diffusion_loss.get("loss_mode", "flow_grpo")
+
+    if loss_mode == "dpo":
+        policy_loss_fn = get_diffusion_loss_fn(loss_mode)
+        ref_noise_pred = data.get("ref_noise_pred", None)
+        if ref_noise_pred is None:
+            raise KeyError("DPO loss requires `ref_noise_pred` from the reference diffusion model.")
+        policy_loss_kwargs = dict(
+            noise=model_output["noise"],
+            latent=model_output["latent"],
+            model_noise_pred=model_output["noise_pred"],
+            ref_noise_pred=ref_noise_pred,
+            sample_level_scores=data["sample_level_scores"],
+            config=config,
+            index=tu.get_non_tensor_data(data, "uid", default=None),
+        )
+        pg_loss, pg_metrics = policy_loss_fn(**policy_loss_kwargs)
+        pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)
+        metrics.update(pg_metrics)
+        gradient_accumulation_steps = tu.get_non_tensor_data(data, "gradient_accumulation_steps", default=None)
+        policy_loss = pg_loss / gradient_accumulation_steps
+
+        sp_size = tu.get_non_tensor_data(data, "sp_size", default=None)
+        if sp_size > 1:
+            policy_loss = policy_loss * sp_size
+
+        return policy_loss, metrics
 
     # compute policy loss
+    log_prob = model_output["log_probs"]
     old_log_prob = data["old_log_probs"]
     advantages = data["advantages"]
-
-    loss_mode = config.diffusion_loss.get("loss_mode", "flow_grpo")
 
     policy_loss_fn = get_diffusion_loss_fn(loss_mode)
     policy_loss_kwargs = dict(
