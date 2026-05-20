@@ -19,6 +19,7 @@ This trainer supports model-agnostic model initialization with Hugging Face.
 import json
 import os
 import uuid
+from abc import ABC, abstractmethod
 from collections import defaultdict
 from pprint import pprint
 from typing import Any, Optional
@@ -105,7 +106,7 @@ def compute_advantage(
     return data
 
 
-class RayDiffusionTrainer:
+class RayDiffusionTrainer(ABC):
     """Common Ray trainer infrastructure for diffusion training.
 
     Paradigm-specific trainers own the training loop while sharing worker
@@ -810,9 +811,9 @@ class RayDiffusionTrainer:
             if self.use_reference_policy and not self.ref_in_actor:
                 self.ref_policy_wg.stop_profile()
 
+    @abstractmethod
     def fit(self):
         """Run the paradigm-specific training loop."""
-        raise NotImplementedError("Diffusion trainer subclasses must implement fit().")
 
 
 class RayDiffusionOnPolicyTrainer(RayDiffusionTrainer):
