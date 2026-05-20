@@ -649,6 +649,7 @@ class DiffusersFSDPEngine(BaseEngine):
                 sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
             )
 
+            # TODO (mike): refactor the data preparation logic here
             if micro_batch.get("ref_log_prob", None) is not None:
                 data["ref_log_prob"] = micro_batch["ref_log_prob"][:, step]
 
