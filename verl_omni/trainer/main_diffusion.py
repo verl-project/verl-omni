@@ -96,7 +96,7 @@ def run_diffusion(config, task_runner_class=None) -> None:
 
 def _get_trainer_cls(config):
     """Return the trainer class selected by ``algorithm.paradigm``."""
-    paradigm = config.algorithm.get("paradigm", "on_policy")
+    paradigm = config.algorithm.paradigm
     if paradigm == "on_policy":
         return RayDiffusionOnPolicyTrainer
     if paradigm == "off_policy":
