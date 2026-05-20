@@ -394,7 +394,9 @@ def compute_diffusion_loss_dpo(
     *,
     index: Optional[np.ndarray | torch.Tensor | list[Any]] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Compute DPO loss from adjacent ``chosen, rejected`` sample pairs."""
+    """Compute DPO loss from adjacent ``chosen, rejected`` sample pairs. 
+       Adapted from https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/dpo/loss.py
+    """
     assert config is not None
     assert isinstance(config, DiffusionActorConfig)
 
