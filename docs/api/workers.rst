@@ -12,7 +12,7 @@ trainer drives them through a unified RPC layer.
 
    verl_omni.workers.engine_workers.TrainingWorker
    verl_omni.workers.engine_workers.ActorRolloutRefWorker
-   verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersFSDPEngine
+   verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersPPOFSDPEngine
    verl_omni.workers.config.DiffusionModelConfig
    verl_omni.workers.config.DiffusionActorConfig
    verl_omni.workers.config.FSDPDiffusionActorConfig
@@ -35,15 +35,17 @@ Engine Workers
              compute_log_prob, compute_ref_log_prob, update_actor,
              update_weights, save_checkpoint, load_checkpoint
 
-Diffusers FSDP Engine
-~~~~~~~~~~~~~~~~~~~~~~
+Diffusers PPO FSDP Engine
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The Diffusers FSDP engine implements the
-:class:`verl.workers.engine.base.BaseEngine` interface for diffusion
-transformer backbones (e.g. Qwen-Image), including LoRA, mixed precision,
-and parameter / optimizer offloading.
+:class:`~verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersPPOFSDPEngine`
+is the concrete engine used by FlowGRPO / diffusion RL training. It extends
+the abstract :class:`~verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersFSDPEngine`
+base, which implements the :class:`verl.workers.engine.base.BaseEngine`
+interface for diffusion transformer backbones (e.g. Qwen-Image), including
+LoRA, mixed precision, and parameter / optimizer offloading.
 
-.. autoclass:: verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersFSDPEngine
+.. autoclass:: verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersPPOFSDPEngine
    :members: __init__, initialize,
              train_mode, eval_mode,
              forward_step, forward_backward_batch,
