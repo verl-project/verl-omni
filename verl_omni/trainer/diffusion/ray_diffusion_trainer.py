@@ -1117,6 +1117,3 @@ class RayDiffusionOffPolicyTrainer(RayDiffusionTrainer):
             "Off-policy diffusion training is not implemented yet. "
             "Implement this loop for algorithms such as DiffusionNFT or DPO."
         )
-
-
-RayFlowGRPOTrainer = RayDiffusionOnPolicyTrainer
