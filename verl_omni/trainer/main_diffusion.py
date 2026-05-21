@@ -138,11 +138,10 @@ class TaskRunner:
         ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
         if config.algorithm.sample_source == "offline":
-            role = Role.Actor
-            if need_reference_policy(config) and not ref_in_actor:
-                self.role_worker_mapping[Role.RefPolicy] = ray.remote(actor_rollout_cls)
-                self.mapping[Role.RefPolicy] = "global_pool"
-        elif need_reference_policy(config) and not ref_in_actor:
+            raise NotImplementedError(
+                "algorithm.sample_source=offline is not supported yet."
+            )
+        if need_reference_policy(config) and not ref_in_actor:
             role = Role.ActorRolloutRef
         else:
             role = Role.ActorRollout
