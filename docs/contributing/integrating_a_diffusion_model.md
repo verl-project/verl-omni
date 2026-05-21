@@ -387,7 +387,7 @@ Before opening the PR, confirm every box:
 - [ ] Example launch script in `examples/flowgrpo_trainer/` plus a
       matching data preprocessor under
       `examples/flowgrpo_trainer/data_process/`.
-- [ ] Smoke test `tests/special_e2e/run_diffusion_<model>.sh` exists and
+- [ ] Smoke test `tests/special_e2e/run_<algo>_<model>.sh` exists and
       is wired into
       [`tests/gpu_smoke/run_gpu_smoke_tests.sh`](../../tests/gpu_smoke/run_gpu_smoke_tests.sh).
 - [ ] Docs updated (this guide if the contract changed; the relevant
