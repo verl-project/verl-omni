@@ -141,7 +141,7 @@ class TaskRunner:
             raise NotImplementedError(
                 "algorithm.sample_source=offline is not supported yet."
             )
-        if need_reference_policy(config) and not ref_in_actor:
+        elif need_reference_policy(config) and not ref_in_actor:
             role = Role.ActorRolloutRef
         else:
             role = Role.ActorRollout
