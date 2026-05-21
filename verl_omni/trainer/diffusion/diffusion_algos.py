@@ -23,7 +23,6 @@ import numpy as np
 import torch
 from omegaconf import DictConfig
 from tensordict import TensorDict
-from verl.utils.metric import AggregationType, Metric
 
 from verl_omni.workers.config import DiffusionActorConfig
 
@@ -460,7 +459,8 @@ class KLLoss(DiffusionLossFn):
             std_dev_t: (torch.Tensor) shape is (bs, 1, 1)
         """
         kl_loss = ((prev_sample_mean - ref_prev_sample_mean) ** 2).mean(dim=(1, 2), keepdim=True) / (2 * std_dev_t**2)
-        return kl_loss.mean(), {}
+        metrics = {"actor/kl_loss": kl_loss.mean().detach().item()}
+        return kl_loss.mean(), metrics
 
     def __call__(
         self,
@@ -469,16 +469,9 @@ class KLLoss(DiffusionLossFn):
         model_output: dict[str, Any],
         data: TensorDict,
     ) -> DiffusionLossResult:
-        kl_loss, _ = self.compute_loss(
+        kl_loss, metrics = self.compute_loss(
             prev_sample_mean=model_output["prev_sample_mean"],
             ref_prev_sample_mean=data["ref_prev_sample_mean"],
             std_dev_t=model_output["std_dev_t"],
         )
-        return DiffusionLossResult(
-            loss=kl_loss,
-            metrics={
-                "kl_loss": Metric(value=kl_loss, aggregation=AggregationType.MEAN),
-                "kl_coef": config.kl_loss_coef,
-            },
-            add_loss_metric=False,
-        )
+        return DiffusionLossResult(loss=kl_loss, metrics=metrics)
