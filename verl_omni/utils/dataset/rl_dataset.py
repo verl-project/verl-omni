@@ -23,11 +23,9 @@ from verl.utils.dataset.rl_dataset import collate_fn as _upstream_collate_fn
 from verl.utils.dataset.rl_dataset import get_dataset_class as _upstream_get_dataset_class
 from verl.utils.import_utils import load_extern_object
 
-collate_fn = _upstream_collate_fn
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "collate_fn",
     "RLHFDataset",
     "get_collate_fn",
     "get_dataset_class",
