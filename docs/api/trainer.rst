@@ -4,10 +4,17 @@ Trainer Interface
 Last updated: |today| (API docstrings are auto-generated).
 
 VeRL-Omni provides Ray-based trainers for diffusion / multimodal RL.
-:class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.PolicyGradientRayTrainer`
-is the primary entrypoint for multi-timestep policy-gradient algorithms (FlowGRPO,
-MixGRPO, etc.) and orchestrates training across actor, rollout, reference policy,
-and reward workers when ``algorithm.sample_source=online``.
+:class:`~verl_omni.trainer.main_diffusion.TaskRunner` builds worker mappings and
+dispatches to a trainer subclass selected by ``algorithm.trainer_type``:
+
+- ``policy_gradient`` → :class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.PolicyGradientRayTrainer`
+  (FlowGRPO, MixGRPO, DanceGRPO, GRPO-Guard; multi-timestep reverse-process PG)
+- ``direct_preference`` → :class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.DirectPreferenceRayTrainer`
+  (DPO, DiffusionNFT, AWM; single forward-timestep preference updates)
+
+Both subclasses inherit shared worker init from
+:class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.BaseRayDiffusionTrainer`.
+Rollout and reward engines are initialized only when ``algorithm.sample_source=online``.
 
 .. autosummary::
    :nosignatures:
@@ -17,14 +24,35 @@ and reward workers when ``algorithm.sample_source=online``.
    verl_omni.trainer.diffusion.ray_diffusion_trainer.DirectPreferenceRayTrainer
    verl_omni.trainer.main_diffusion.TaskRunner
 
-Core Trainer
-~~~~~~~~~~~~~~~~~
+Base Ray Diffusion Trainer
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.BaseRayDiffusionTrainer`
+owns colocated actor/ref worker setup, dataloaders, validation helpers, and
+checkpointing. ``init_workers`` always builds actor/ref workers; rollout and
+reward engines are added only when ``algorithm.sample_source=online``.
 
 .. autoclass:: verl_omni.trainer.diffusion.ray_diffusion_trainer.BaseRayDiffusionTrainer
    :members: __init__, init_workers
 
+Policy Gradient Ray Trainer
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.PolicyGradientRayTrainer`
+implements the online training loop for FlowGRPO-style algorithms: rollout
+generation, reward scoring, advantage estimation over denoising timesteps, and
+actor updates.
+
 .. autoclass:: verl_omni.trainer.diffusion.ray_diffusion_trainer.PolicyGradientRayTrainer
    :members: fit
+
+Direct Preference Ray Trainer
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.DirectPreferenceRayTrainer`
+is the extension point for direct-preference algorithms (DPO, DiffusionNFT, AWM)
+that train with single forward-timestep updates rather than a full multi-step
+SDE trajectory. The ``fit`` implementation is not yet available in-tree.
 
 .. autoclass:: verl_omni.trainer.diffusion.ray_diffusion_trainer.DirectPreferenceRayTrainer
    :members: fit
