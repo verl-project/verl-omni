@@ -968,7 +968,7 @@ class RayFlowGRPOTrainer:
                     rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
                     if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
-                        apply_bypass_mode_to_diffusion_batch(batch, rollout_corr_config)
+                        apply_bypass_mode_to_diffusion_batch(batch)
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
                             old_log_prob = self._compute_old_log_prob(batch)

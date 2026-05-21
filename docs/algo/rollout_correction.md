@@ -69,16 +69,28 @@ Math is delegated to ``verl.trainer.ppo.rollout_corr_helper``.
 
 | Metric | Meaning |
 | --- | --- |
-| `rollout_corr/is_weights/{mean,max,min}` | Post-clip IS weight stats. |
-| `rollout_corr/rejected_ratio` | Fraction of samples rejected by RS. |
-| `rollout_corr/log_ratio/{mean,std,abs_max}` | Rollout vs training drift diagnostics. |
+| `rollout_corr/rollout_is_mean` / `rollout_is_max` / `rollout_is_min` | Post-clip IS weight stats. |
+| `rollout_corr/rollout_is_eff_sample_size` | Effective sample size of IS weights. |
+| `rollout_corr/rollout_rs_masked_fraction` | Token-level fraction of steps rejected by RS. |
+| `rollout_corr/rollout_rs_seq_masked_fraction` | Sequence-level fraction rejected by RS. |
+| `rollout_corr/kl` | KL(π_rollout ‖ π_old) — direct off-policy drift estimator. |
+| `rollout_corr/k3_kl` | K3 KL estimator (more stable for small KL). |
+| `rollout_corr/log_ppl_diff` | Mean per-sequence log-PPL difference (rollout − old). |
+| `rollout_corr/chi2_token` / `chi2_seq` | χ² divergence at token- and sequence-level. |
 
 In **bypass mode** metrics are computed per SDE step inside ``diffusion_loss``
 and appear under ``actor/rollout_corr/*``.  In **decoupled mode** they are
 emitted once per global batch under ``rollout_corr/*``.
 
-If `rollout_corr/rejected_ratio` is consistently above ~5 %, the rollout backend
-is drifting too far — tighten the RS band or fall back to `bypass_mode=False`.
+If `rollout_corr/rollout_rs_seq_masked_fraction` is consistently above ~5 %, the
+rollout backend is drifting too far — tighten the RS band or fall back to
+`bypass_mode=False`.
+
+> **Gradient dilution note:** RS rejection zeroes the per-element loss for
+> rejected samples but does **not** remove them from the `mean()` denominator.
+> At high sustained rejection rates the effective gradient magnitude decreases by
+> the factor `kept / total`.  Monitor `rollout_corr/rollout_rs_seq_masked_fraction`
+> and widen the RS band if it exceeds ~10 % over several steps.
 
 ## Hyperparameter notes
 
@@ -99,7 +111,7 @@ statistical behaviour of several RS modes:
 | **Bypass mode RS** | In bypass mode, IS/RS is computed per SDE step with shape ``(B, 1)``, so all RS modes (``token_k1``, ``seq_mean_k1``, etc.) are effectively equivalent — each step is evaluated independently.  ``seq_mean_*`` is recommended for consistency if you plan to switch between modes. |
 | **Token-level RS** (`token_k1`, etc.) | With only 2 tokens, token-level statistics have very low power — a single token cannot be rejected in isolation because the per-token stat is averaged from thousands of latent dims.  Prefer `seq_mean_*` or `seq_max_*` modes (decoupled) or any mode (bypass — all are per-step). |
 | **`rollout_is=sequence`** | The product of 2 per-step ratios.  With diffusion's low per-step variance this is usually well-behaved; the default threshold of 2.0 is generous. |
-| **First-run diagnostics** | Always inspect `rollout_corr/log_ratio/abs_max` and `rollout_corr/is_weights/max` for the first 50 steps of a new recipe.  If `abs_max > 1.0` or `is_weights/max` is pinned at the threshold, the rollout-training gap is larger than expected — consider lowering the rollout precision gap or falling back to `bypass_mode=False`. |
+| **First-run diagnostics** | Always inspect `rollout_corr/log_ppl_abs_diff` and `rollout_corr/rollout_is_max` for the first 50 steps of a new recipe.  If `log_ppl_abs_diff > 1.0` or `rollout_is_max` is pinned at the clamp threshold, the rollout-training gap is larger than expected — consider lowering the rollout precision gap or falling back to `bypass_mode=False`. |
 
 ### `loss_type` and when to use each
 

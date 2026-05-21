@@ -7,6 +7,12 @@
 #                    are NOT applied to the loss — the PPO ratio already handles IS.
 #   - rollout_rs:    RS rejection mask IS applied (rejected samples get weight 0).
 #   - bypass_mode:   skip actor old-log-prob recompute; save ~20% per-step time.
+#
+# RS threshold tuning (sde_window_size=2):
+#   seq_mean_k1 averages log-ratio over only 2 SDE steps; a single outlier step
+#   can push the mean outside the band and reject the whole sample.
+#   Monitor actor/rollout_corr/rollout_rs_seq_masked_fraction.
+#   If it exceeds ~5% at steady state, widen: e.g. "0.3_3.0" or "0.2_5.0".
 set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME
