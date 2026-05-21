@@ -22,17 +22,6 @@ import torch
 from verl import DataProto
 
 
-def _compute_sequence_reward(batch: DataProto) -> torch.Tensor:
-    if "sample_level_rewards" in batch.batch:
-        rewards = batch.batch["sample_level_rewards"]
-    elif "sample_level_scores" in batch.batch:
-        rewards = batch.batch["sample_level_scores"]
-    else:
-        raise KeyError("Diffusion metrics require `sample_level_rewards` or `sample_level_scores`.")
-
-    return rewards.mean(dim=1) if rewards.ndim > 1 else rewards
-
-
 def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
     """
     Computes various metrics from a diffusion training batch.
@@ -43,7 +32,7 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
     Args:
         batch: A DataProto object containing diffusion batch data. GRPO-style
             batches include sample_level_rewards [B, T], advantages [B, T], and
-            returns [B, T]. DPO-style batches may only include sample_level_scores [B].
+            returns [B, T]. DPO-style batches may only include sample_level_rewards [B].
 
     Returns:
         A dictionary of metrics including:
@@ -54,7 +43,11 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
             - critic/advantages/mean, max, min: Element-wise advantage statistics over B*T, when available
             - critic/returns/mean, max, min: Element-wise return statistics over B*T, when available
     """
-    sequence_reward = _compute_sequence_reward(batch)  # [B]
+    sample_level_rewards = batch.batch["sample_level_rewards"]
+    if sample_level_rewards.ndim > 1:
+        sequence_reward = sample_level_rewards.mean(dim=1)  # [B]
+    else:
+        sequence_reward = sample_level_rewards  # [B]
 
     reward_mean = torch.mean(sequence_reward).detach().item()
     reward_max = torch.max(sequence_reward).detach().item()
@@ -151,7 +144,7 @@ def compute_throughput_metrics_diffusion(batch: DataProto, timing_raw: dict[str,
     if "advantages" in batch.batch:
         batch_size = batch.batch["advantages"].shape[0]
     else:
-        batch_size = batch.batch["sample_level_scores"].shape[0]
+        batch_size = batch.batch["sample_level_rewards"].shape[0]
     time = timing_raw["step"]
     return {
         "perf/total_num_images": batch_size,
