@@ -177,19 +177,19 @@ class TaskRunner:
         return resource_pool_manager
 
     def add_reward_model_resource_pool(self, config):
-        """Add reward model worker if enabled."""
+        """Register reward-model GPU pool for online sampling (used by RewardLoopManager)."""
         from verl.trainer.ppo.ray_trainer import Role
 
-        if config.algorithm.sample_source == "offline":
+        if config.algorithm.sample_source == "online":
+            if config.reward.reward_model.enable:
+                # we do not use reward model workers, so we only register reward model in resource pool
+                # without continue to register reward model worker in role mapping
+                if config.reward.reward_model.enable_resource_pool:
+                    self.mapping[Role.RewardModel] = "reward_pool"
+                else:
+                    self.mapping[Role.RewardModel] = "global_pool"
+        elif config.algorithm.sample_source == "offline":
             return
-
-        if config.reward.reward_model.enable:
-            # we do not use reward model workers, so we only register reward model in resource pool
-            # without continue to register reward model worker in role mapping
-            if config.reward.reward_model.enable_resource_pool:
-                self.mapping[Role.RewardModel] = "reward_pool"
-            else:
-                self.mapping[Role.RewardModel] = "global_pool"
 
     def add_ref_policy_worker(self, config, ref_policy_cls):
         """Add reference policy worker if KL loss or KL reward is used."""
