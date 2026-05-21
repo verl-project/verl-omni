@@ -106,7 +106,7 @@ def compute_advantage(
     return data
 
 
-class RayDiffusionTrainer(ABC):
+class BaseRayDiffusionTrainer(ABC):
     """Common Ray trainer infrastructure for diffusion training.
 
     Paradigm-specific trainers own the training loop while sharing worker
@@ -151,12 +151,13 @@ class RayDiffusionTrainer(ABC):
         self.config = config
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
-        assert self.hybrid_engine, "Currently, only support hybrid engine"
-
-        if self.hybrid_engine:
+        if config.algorithm.sample_source == "online":
+            assert self.hybrid_engine, "Currently, only support hybrid engine"
             assert Role.ActorRollout in role_worker_mapping or Role.ActorRolloutRef in role_worker_mapping, (
                 f"{role_worker_mapping.keys()=}"
             )
+        else:
+            assert Role.Actor in role_worker_mapping, f"{role_worker_mapping.keys()=}"
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
@@ -525,19 +526,26 @@ class RayDiffusionTrainer(ABC):
         return metric_dict
 
     def init_workers(self):
-        """Initialize distributed training workers using Ray backend.
+        """Initialize distributed training workers using Ray backend."""
+        actor_rollout_resource_pool = self._init_colocated_workers()
+        if self.config.algorithm.sample_source == "offline":
+            return
+        self._init_online_rollout_stack(actor_rollout_resource_pool)
 
-        Creates:
-        1. Ray resource pools from configuration
-        2. Worker groups for each enabled role (actor/ref/reward)
-        """
+    def _init_colocated_workers(self):
+        """Create Ray pools and colocated actor/ref worker groups (online and offline)."""
         self.resource_pool_manager.create_resource_pool()
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
-        # create actor and rollout
-        actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
-        if self.hybrid_engine:
+        # create actor and rollout (offline uses Role.Actor only; online uses hybrid actor_rollout roles)
+        if Role.Actor in self.role_worker_mapping:
+            actor_role = Role.Actor
+        elif Role.ActorRolloutRef in self.role_worker_mapping:
+            actor_role = Role.ActorRolloutRef
+        else:
+            actor_role = Role.ActorRollout
+        if self.hybrid_engine or actor_role == Role.Actor:
             actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[actor_role],
@@ -610,6 +618,10 @@ class RayDiffusionTrainer(ABC):
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
 
+        return actor_rollout_resource_pool
+
+    def _init_online_rollout_stack(self, actor_rollout_resource_pool):
+        """Initialize rollout, reward, and checkpoint engines (online sampling only)."""
         # create reward loop manager
         from verl.experimental.reward_loop import RewardLoopManager
 
@@ -811,12 +823,12 @@ class RayDiffusionTrainer(ABC):
 
     @abstractmethod
     def fit(self):
-        """Run the paradigm-specific training loop."""
+        """Run the trainer-type-specific training loop."""
         pass
 
 
-class RayDiffusionOnPolicyTrainer(RayDiffusionTrainer):
-    """On-policy diffusion trainer for FlowGRPO, MixGRPO, and related algorithms."""
+class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
+    """Policy-gradient diffusion trainer for FlowGRPO, MixGRPO, DanceGRPO, GRPO-Guard, etc."""
 
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
         batch_td = batch.to_tensordict()
@@ -1108,12 +1120,12 @@ class RayDiffusionOnPolicyTrainer(RayDiffusionTrainer):
                     self.train_dataset.on_batch_end(batch=batch)
 
 
-class RayDiffusionOffPolicyTrainer(RayDiffusionTrainer):
-    """Off-policy diffusion trainer extension point for DiffusionNFT/DPO-style algorithms."""
+class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
+    """Direct-preference diffusion trainer for DPO, DiffusionNFT, AWM, etc."""
 
     def fit(self):
-        """Run off-policy diffusion training."""
+        """Run direct-preference diffusion training."""
         raise NotImplementedError(
-            "Off-policy diffusion training is not implemented yet. "
+            "Direct-preference diffusion training is not implemented yet. "
             "Implement this loop for algorithms such as DiffusionNFT or DPO."
         )

@@ -34,7 +34,13 @@ The trainer entrypoint
 ([`main_diffusion.py`](../../verl_omni/trainer/main_diffusion.py))
 and the Ray driver
 ([`ray_diffusion_trainer.py`](../../verl_omni/trainer/diffusion/ray_diffusion_trainer.py))
-are algorithm-agnostic; they dispatch on the strings above.
+dispatch on model/loss registry strings above, plus two orthogonal algorithm
+config fields:
+
+| Field | Values | Purpose |
+|-------|--------|---------|
+| `algorithm.trainer_type` | `policy_gradient`, `direct_preference` | Selects `PolicyGradientRayTrainer` (FlowGRPO, MixGRPO, …) vs `DirectPreferenceRayTrainer` (DPO, DiffusionNFT, AWM) |
+| `algorithm.sample_source` | `online`, `offline` | `BaseRayDiffusionTrainer.init_workers` skips rollout/reward engine init when `offline` |
 
 ---
 

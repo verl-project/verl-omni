@@ -393,7 +393,8 @@ reward:
     memory_limit_mb: 1024
 algorithm:
   _target_: verl_omni.trainer.config.DiffusionAlgoConfig
-  paradigm: on_policy
+  trainer_type: policy_gradient
+  sample_source: online
   adv_estimator: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
   norm_adv_by_std_in_grpo: true
   bypass_mode: false

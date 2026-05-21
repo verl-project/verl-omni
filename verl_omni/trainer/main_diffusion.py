@@ -24,8 +24,8 @@ from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
 
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
-    RayDiffusionOffPolicyTrainer,
-    RayDiffusionOnPolicyTrainer,
+    DirectPreferenceRayTrainer,
+    PolicyGradientRayTrainer,
 )
 
 
@@ -95,15 +95,15 @@ def run_diffusion(config, task_runner_class=None) -> None:
 
 
 def _get_trainer_cls(config):
-    """Return the trainer class selected by ``algorithm.paradigm``."""
-    paradigm = config.algorithm.paradigm
-    if paradigm == "on_policy":
-        return RayDiffusionOnPolicyTrainer
-    if paradigm == "off_policy":
-        return RayDiffusionOffPolicyTrainer
+    """Return the trainer class selected by ``algorithm.trainer_type``."""
+    trainer_type = config.algorithm.trainer_type
+    if trainer_type == "policy_gradient":
+        return PolicyGradientRayTrainer
+    if trainer_type == "direct_preference":
+        return DirectPreferenceRayTrainer
     raise ValueError(
-        f"Unsupported diffusion algorithm paradigm {paradigm!r}. "
-        "Expected one of: 'on_policy', 'off_policy'."
+        f"Unsupported diffusion trainer_type {trainer_type!r}. "
+        "Expected one of: 'policy_gradient', 'direct_preference'."
     )
 
 
@@ -123,7 +123,7 @@ class TaskRunner:
         self.mapping = {}
 
     def add_actor_rollout_worker(self, config):
-        """Add actor rollout worker using the unified model engine implementation."""
+        """Add actor (and optional rollout/ref) workers using the unified model engine."""
         from verl.single_controller.ray import RayWorkerGroup
         from verl.trainer.ppo.ray_trainer import Role
 
@@ -136,10 +136,17 @@ class TaskRunner:
         if lora_rank <= 0:
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
-        if need_reference_policy(config) and not ref_in_actor:
+
+        if config.algorithm.sample_source == "offline":
+            role = Role.Actor
+            if need_reference_policy(config) and not ref_in_actor:
+                self.role_worker_mapping[Role.RefPolicy] = ray.remote(actor_rollout_cls)
+                self.mapping[Role.RefPolicy] = "global_pool"
+        elif need_reference_policy(config) and not ref_in_actor:
             role = Role.ActorRolloutRef
         else:
             role = Role.ActorRollout
+
         self.role_worker_mapping[role] = ray.remote(actor_rollout_cls)
         self.mapping[role] = "global_pool"
         return actor_rollout_cls, ray_worker_group_cls
@@ -172,6 +179,9 @@ class TaskRunner:
     def add_reward_model_resource_pool(self, config):
         """Add reward model worker if enabled."""
         from verl.trainer.ppo.ray_trainer import Role
+
+        if config.algorithm.sample_source == "offline":
+            return
 
         if config.reward.reward_model.enable:
             # we do not use reward model workers, so we only register reward model in resource pool

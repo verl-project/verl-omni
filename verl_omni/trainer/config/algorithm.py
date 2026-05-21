@@ -25,7 +25,8 @@ __all__ = ["DiffusionAlgoConfig"]
 class DiffusionAlgoConfig(BaseConfig):
     """Diffusion-specific algorithm config."""
 
-    paradigm: str = "on_policy"
+    trainer_type: str = "policy_gradient"
+    sample_source: str = "online"
     adv_estimator: str = "flow_grpo"
     norm_adv_by_std_in_grpo: bool = True
     bypass_mode: bool = False

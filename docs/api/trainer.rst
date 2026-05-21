@@ -3,22 +3,31 @@ Trainer Interface
 
 Last updated: |today| (API docstrings are auto-generated).
 
-VeRL-Omni provides Ray-based trainers for diffusion / multimodal RL. Today,
-:class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.RayDiffusionOnPolicyTrainer`
-is the primary entrypoint and orchestrates Flow-GRPO training across actor,
-rollout, reference policy, and reward workers.
+VeRL-Omni provides Ray-based trainers for diffusion / multimodal RL.
+:class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.PolicyGradientRayTrainer`
+is the primary entrypoint for multi-timestep policy-gradient algorithms (FlowGRPO,
+MixGRPO, etc.) and orchestrates training across actor, rollout, reference policy,
+and reward workers when ``algorithm.sample_source=online``.
 
 .. autosummary::
    :nosignatures:
 
-   verl_omni.trainer.diffusion.ray_diffusion_trainer.RayDiffusionOnPolicyTrainer
+   verl_omni.trainer.diffusion.ray_diffusion_trainer.BaseRayDiffusionTrainer
+   verl_omni.trainer.diffusion.ray_diffusion_trainer.PolicyGradientRayTrainer
+   verl_omni.trainer.diffusion.ray_diffusion_trainer.DirectPreferenceRayTrainer
    verl_omni.trainer.main_diffusion.TaskRunner
 
 Core Trainer
 ~~~~~~~~~~~~~~~~~
 
-.. autoclass:: verl_omni.trainer.diffusion.ray_diffusion_trainer.RayDiffusionOnPolicyTrainer
-   :members: __init__, init_workers, fit
+.. autoclass:: verl_omni.trainer.diffusion.ray_diffusion_trainer.BaseRayDiffusionTrainer
+   :members: __init__, init_workers
+
+.. autoclass:: verl_omni.trainer.diffusion.ray_diffusion_trainer.PolicyGradientRayTrainer
+   :members: fit
+
+.. autoclass:: verl_omni.trainer.diffusion.ray_diffusion_trainer.DirectPreferenceRayTrainer
+   :members: fit
 
 .. autofunction:: verl_omni.trainer.diffusion.ray_diffusion_trainer.compute_advantage
 
