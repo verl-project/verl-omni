@@ -228,7 +228,7 @@ Call the transformer once for the positive prompt; if CFG is active,
 call it again for the negative prompt and combine them. Always finish with
 `scheduler.sample_previous_step(...)` and return the triple
 `(log_prob, prev_sample_mean, std_dev_t)` — that is what
-[`DiffusersFSDPEnginePPO.prepare_model_outputs`](../../verl_omni/workers/engine/fsdp/diffusers_impl.py)
+[`PPODiffusersFSDPEngine.prepare_model_outputs`](../../verl_omni/workers/engine/fsdp/diffusers_impl.py)
 consumes.
 
 > **Tip.** If your transformer returns a list (one element per sample),
