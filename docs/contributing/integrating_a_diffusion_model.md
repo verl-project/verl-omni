@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 05/10/2026.
+Last updated: 05/21/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -268,6 +268,13 @@ Your subclass must do four things:
      ([`diffusion_agent_loop.py`](../../verl_omni/agent_loop/diffusion_agent_loop.py))
      reads these field names verbatim — **do not rename them**.
 
+> **⚠️ Common pitfall.**  `FlowMatchSDEDiscreteScheduler.step()` casts the
+> returned latents to `model_output.dtype` (typically `bfloat16`) *after*
+> computing the log-prob at float32.  Your `diffuse()` must store latents
+> via `all_latents.append(latents.float())` — failing to do so creates a
+> systematic negative bias in log-probs.  See the full write-up in
+> **[Common Pitfalls](common_pitfalls.md#float32-precision-loss-in-stored-rollout-latents)**.
+
 ---
 
 ## Step 5 — Configure the Pipeline
@@ -380,6 +387,8 @@ Before opening the PR, confirm every box:
       `model_index.json::_class_name`; the `algorithm=` keyword matches
       the algorithm you are integrating against (e.g. `"flow_grpo"` for
       FlowGRPO).
+- [ ] `diffuse()` stores latents via `all_latents.append(latents.float())`
+      — see [Common Pitfalls](common_pitfalls.md#float32-precision-loss-in-stored-rollout-latents).
 - [ ] Any new `DiffusionPipelineConfig` field is mirrored in **both**
       [`diffusion_rollout.yaml`](../../verl_omni/trainer/config/diffusion/rollout/diffusion_rollout.yaml)
       and
