@@ -814,6 +814,7 @@ class RayDiffusionTrainer(ABC):
     @abstractmethod
     def fit(self):
         """Run the paradigm-specific training loop."""
+        pass
 
 
 class RayDiffusionOnPolicyTrainer(RayDiffusionTrainer):

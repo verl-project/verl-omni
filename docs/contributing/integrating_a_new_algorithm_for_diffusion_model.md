@@ -301,7 +301,7 @@ Document any algorithm-specific knobs in the example's `README.md`.
 ## Step 7 — Smoke Test
 
 Add an end-to-end smoke test under `tests/special_e2e/` modelled on
-[`tests/special_e2e/run_diffusion_qwen_image.sh`](../../tests/special_e2e/run_diffusion_qwen_image.sh)
+[`tests/special_e2e/run_flowgrpo_qwen_image.sh`](../../tests/special_e2e/run_flowgrpo_qwen_image.sh)
 and register it in
 [`tests/gpu_smoke/run_gpu_smoke_tests.sh`](../../tests/gpu_smoke/run_gpu_smoke_tests.sh)
 as a new numbered test entry. The script must exercise the full

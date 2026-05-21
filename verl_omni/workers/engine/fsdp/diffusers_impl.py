@@ -11,13 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Diffusers FSDP engine implementations.
-
-- :class:`DiffusersFSDPEngine`: abstract base (model build, checkpoint, optimizer).
-- :class:`DiffusersFSDPEnginePPO`: concrete engine registered for FlowGRPO / diffusion RL
-  (``model_type=diffusion_model``).
-"""
+"""FSDP engines for diffusion models."""
 
 import gc
 import json
@@ -76,8 +70,7 @@ device_name = get_device_name()
 
 
 class DiffusersFSDPEngine(BaseEngine, ABC):
-    """
-    Concrete Diffusers Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
+    """Base Diffusers engine using PyTorch FullyShardedDataParallel (FSDP).
 
     Supports model sharding, activation/optimizer offloading, LoRA, and sequence parallelism.
     """
@@ -481,18 +474,22 @@ class DiffusersFSDPEngine(BaseEngine, ABC):
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
     ) -> list[TensorDict]:
         """Run forward/backward over a batch; implemented by algorithm-specific subclasses."""
+        pass
 
     @abstractmethod
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
         """Build model inputs for one diffusion step; implemented by algorithm-specific subclasses."""
+        pass
 
     @abstractmethod
     def prepare_model_outputs(self, output, micro_batch: TensorDict):
         """Post-process raw model output; implemented by algorithm-specific subclasses."""
+        pass
 
     @abstractmethod
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
         """Run one diffusion step forward (and loss); implemented by algorithm-specific subclasses."""
+        pass
 
     def optimizer_zero_grad(self):
         """

@@ -333,7 +333,7 @@ collapse.
 ## Step 6 — Add a Smoke Test
 
 Add an end-to-end smoke test under `tests/special_e2e/` modelled on
-[`tests/special_e2e/run_diffusion_qwen_image.sh`](../../tests/special_e2e/run_diffusion_qwen_image.sh).
+[`tests/special_e2e/run_flowgrpo_qwen_image.sh`](../../tests/special_e2e/run_flowgrpo_qwen_image.sh).
 The script must exercise the full pipeline against a `tiny-random/<ModelName>`
 checkpoint:
 

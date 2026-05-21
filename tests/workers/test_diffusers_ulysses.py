@@ -364,9 +364,9 @@ def _diffusers_ulysses_fwd_bwd_fsdp(sp_size: int, dp_size: int, backend: str):
     FSDP-wrapped SP forward+backward test.
 
     The SP model is wrapped with FSDP using a device_mesh that covers all SP
-    ranks per DP group, matching what DiffusersFSDPEngine._build_fsdp_module  # base class helper
-    does in production.  FSDP's automatic reduce-scatter removes the need for
-    a manual all-reduce when comparing gradients.
+    ranks per DP group, matching DiffusersFSDPEngine._build_fsdp_module.
+    FSDP's automatic reduce-scatter removes the need for a manual all-reduce
+    when comparing gradients.
     """
     try:
         from diffusers import AutoModel, ContextParallelConfig
