@@ -100,8 +100,9 @@ def test_compute_policy_loss_flow_grpo() -> None:
         )
     actor_config: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
 
+    flow_grpo_loss = diffusion_algos.get_diffusion_loss_fn("flow_grpo")
     for step in range(steps):
-        pg_loss, pg_metrics = diffusion_algos.compute_diffusion_loss_flow_grpo(
+        pg_loss, pg_metrics = flow_grpo_loss.compute_loss(
             old_log_prob=rollout_log_probs[:, step],
             log_prob=current_log_probs[:, step],
             advantages=advantages[:, step],
@@ -146,7 +147,8 @@ def test_compute_policy_loss_grpo_guard() -> None:
         )
     actor_config: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
 
-    pg_loss, pg_metrics = diffusion_algos.compute_diffusion_loss_grpo_guard(
+    grpo_guard_loss = diffusion_algos.get_diffusion_loss_fn("grpo_guard")
+    pg_loss, pg_metrics = grpo_guard_loss.compute_loss(
         old_log_prob=rollout_log_probs,
         log_prob=current_log_probs,
         advantages=advantages,

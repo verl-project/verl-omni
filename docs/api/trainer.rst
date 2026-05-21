@@ -46,14 +46,16 @@ losses and advantage estimators can be registered via the decorators below.
 
 .. automodule:: verl_omni.trainer.diffusion.diffusion_algos
    :members: DiffusionAdvantageEstimator,
+             DiffusionLossFn,
+             DiffusionLossResult,
              register_diffusion_loss,
              get_diffusion_loss_fn,
              register_diffusion_adv_est,
              get_diffusion_adv_estimator_fn,
              compute_flow_grpo_outcome_advantage,
-             compute_diffusion_loss_flow_grpo,
-             compute_diffusion_loss_grpo_guard,
-             kl_penalty_image
+             FlowGRPOLoss,
+             GRPOGuardLoss,
+             KLLoss,
 
 Trainer Config
 ~~~~~~~~~~~~~~~~~
