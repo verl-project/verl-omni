@@ -14,7 +14,6 @@
 import argparse
 import logging
 import os
-import socket
 from dataclasses import asdict
 from typing import Any, Optional
 
@@ -23,6 +22,7 @@ import torchvision.transforms as T
 import vllm_omni.entrypoints.cli.serve
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import import_external_libs
+from verl.utils.net_utils import get_free_port
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.utils import run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
@@ -40,17 +40,12 @@ from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.utils.vllm_omni import VLLMOmniHijack
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
-
-
-def _get_free_loopback_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 class vLLMOmniHttpServer(vLLMHttpServer):
@@ -115,10 +110,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             engine_args["enable_dummy_pipeline"] = True
             engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
+        diffusion_master_port, diffusion_master_sock = get_free_port("127.0.0.1", with_alive_sock=True)
+        diffusion_master_sock.close()
+
         os.environ["MASTER_ADDR"] = "127.0.0.1"
-        os.environ["MASTER_PORT"] = str(_get_free_loopback_port())
+        os.environ["MASTER_PORT"] = str(diffusion_master_port)
         logger.info("Using MASTER_PORT=%s for vLLM-Omni diffusion workers", os.environ["MASTER_PORT"])
 
+        # Apply before AsyncOmni builds OmniDiffusionConfig in this process.
+        VLLMOmniHijack.hijack()
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
         await omni_init_app_state(engine_client, app.state, args)

@@ -316,6 +316,7 @@ data:
   custom_cls:
     path: null
     name: null
+    collate_fn: null
   return_multi_modal_inputs: true
   sampler:
     class_path: null

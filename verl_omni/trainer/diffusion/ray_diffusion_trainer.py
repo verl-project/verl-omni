@@ -185,7 +185,7 @@ class RayDiffusionTrainer(ABC):
         Creates the train and validation dataloaders.
         """
         # TODO: we have to make sure the batch size is divisible by the dp size
-        from verl_omni.utils.dataset.rl_dataset import create_rl_dataset, create_rl_sampler
+        from verl_omni.utils.dataset.rl_dataset import create_rl_dataset, create_rl_sampler, get_collate_fn
 
         if train_dataset is None:
             train_dataset = create_rl_dataset(
@@ -208,9 +208,7 @@ class RayDiffusionTrainer(ABC):
         if train_sampler is None:
             train_sampler = create_rl_sampler(self.config.data, self.train_dataset)
         if collate_fn is None:
-            from verl_omni.utils.dataset.rl_dataset import collate_fn as default_collate_fn
-
-            collate_fn = default_collate_fn
+            collate_fn = get_collate_fn(self.config.data)
 
         num_workers = self.config.data["dataloader_num_workers"]
 
