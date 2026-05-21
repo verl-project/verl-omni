@@ -44,7 +44,7 @@ uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@c7
 
 ``` bash 
 # Install verl
-uv pip install git+https://github.com/verl-project/verl.git@f81209acafef9b3d8b5023491951f4f114557c52
+uv pip install git+https://github.com/verl-project/verl.git@b1e4c6279fcd85d0ab44ddecd3d0d175c5212f52
 
 # Install verl-omni from source
 git clone https://github.com/verl-project/verl-omni.git
