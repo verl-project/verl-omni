@@ -66,6 +66,9 @@ algorithm:
   # Rollout Correction (experimental).  Fields mirror RolloutCorrectionConfig.
   rollout_correction:
 
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
+
     # Skip old-log-prob recompute by reusing rollout_log_probs (2 policies).
     bypass_mode: False
 

@@ -75,6 +75,7 @@ actor_rollout_ref:
       clip_ratio: 0.0001
       adv_clip_max: 5.0
     rollout_correction:
+      _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
       bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
       loss_type: ${oc.select:algorithm.rollout_correction.loss_type,ppo_clip}
       rollout_is: ${oc.select:algorithm.rollout_correction.rollout_is,null}
@@ -404,6 +405,7 @@ algorithm:
   norm_adv_by_std_in_grpo: true
   global_std: true
   rollout_correction:
+    _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
     bypass_mode: false
     loss_type: ppo_clip
     rollout_is: null
