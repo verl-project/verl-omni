@@ -19,6 +19,7 @@ This trainer supports model-agnostic model initialization with Hugging Face.
 import json
 import os
 import uuid
+from abc import ABC, abstractmethod
 from collections import defaultdict
 from pprint import pprint
 from typing import Any, Optional
@@ -33,7 +34,6 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -51,10 +51,12 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.trainer.config import DiffusionAlgoConfig
-from verl_omni.trainer.diffusion.decoupled_algos import (
-    get_decoupled_diffusion_algorithm,
+from verl_omni.trainer.diffusion.diffusion_algos import (
+    DiffusionAdvantageEstimator,
+    diffusion_nft_old_policy_decay,
+    get_diffusion_adv_estimator_fn,
+    prepare_diffusion_nft_actor_batch,
 )
-from verl_omni.trainer.diffusion.diffusion_algos import DiffusionAdvantageEstimator, get_diffusion_adv_estimator_fn
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
     compute_throughput_metrics_diffusion,
@@ -109,11 +111,11 @@ def compute_advantage(
     return data
 
 
-class RayDiffusionRLTrainer:
-    """Common Ray trainer infrastructure for diffusion RL.
+class BaseRayDiffusionTrainer(ABC):
+    """Common Ray trainer infrastructure for diffusion training.
 
-    Paradigm-specific trainers should keep reverse-logprob and forward-process
-    assumptions out of this base class.
+    Paradigm-specific trainers own the training loop while sharing worker
+    initialization, validation, checkpointing, and logging behavior.
     """
 
     def __init__(
@@ -152,15 +154,15 @@ class RayDiffusionRLTrainer:
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
-        self._sync_and_validate_algorithm_config()
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
-        assert self.hybrid_engine, "Currently, only support hybrid engine"
-
-        if self.hybrid_engine:
+        if config.algorithm.sample_source == "online":
+            assert self.hybrid_engine, "Currently, only support hybrid engine"
             assert Role.ActorRollout in role_worker_mapping or Role.ActorRolloutRef in role_worker_mapping, (
                 f"{role_worker_mapping.keys()=}"
             )
+        else:
+            assert Role.Actor in role_worker_mapping, f"{role_worker_mapping.keys()=}"
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
@@ -184,33 +186,12 @@ class RayDiffusionRLTrainer:
 
         self.checkpoint_manager = None
 
-    def _sync_and_validate_algorithm_config(self) -> None:
-        """Keep DiffusionNFT's trainer/actor/rollout config surfaces in sync."""
-        if self.config.algorithm.get("paradigm", "coupled") != "decoupled":
-            return
-        if self.config.algorithm.get("name", "flow_grpo") != "diffusion_nft":
-            return
-
-        nft_cfg = self.config.algorithm.diffusion_nft
-        rollout_options = get_decoupled_diffusion_algorithm("diffusion_nft", self.config.algorithm).rollout_options()
-        with open_dict(self.config):
-            self.config.actor_rollout_ref.model.algorithm = "diffusion_nft"
-            self.config.actor_rollout_ref.actor.diffusion_loss.loss_mode = "diffusion_nft"
-            self.config.actor_rollout_ref.rollout.collect_mode = rollout_options["collect_mode"]
-            self.config.actor_rollout_ref.rollout.rollout_adapter = rollout_options["rollout_adapter"]
-
-            loss_cfg = self.config.actor_rollout_ref.actor.diffusion_loss.diffusion_nft
-            loss_cfg.mix_beta = nft_cfg.mix_beta
-            loss_cfg.ref_kl_coef = nft_cfg.ref_kl_coef
-            loss_cfg.adv_clip_max = nft_cfg.adv_clip_max
-            loss_cfg.adaptive_weight_min = nft_cfg.adaptive_weight_min
-
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
         Creates the train and validation dataloaders.
         """
         # TODO: we have to make sure the batch size is divisible by the dp size
-        from verl_omni.utils.dataset.rl_dataset import create_rl_dataset, create_rl_sampler
+        from verl_omni.utils.dataset.rl_dataset import create_rl_dataset, create_rl_sampler, get_collate_fn
 
         if train_dataset is None:
             train_dataset = create_rl_dataset(
@@ -233,9 +214,7 @@ class RayDiffusionRLTrainer:
         if train_sampler is None:
             train_sampler = create_rl_sampler(self.config.data, self.train_dataset)
         if collate_fn is None:
-            from verl_omni.utils.dataset.rl_dataset import collate_fn as default_collate_fn
-
-            collate_fn = default_collate_fn
+            collate_fn = get_collate_fn(self.config.data)
 
         num_workers = self.config.data["dataloader_num_workers"]
 
@@ -552,19 +531,26 @@ class RayDiffusionRLTrainer:
         return metric_dict
 
     def init_workers(self):
-        """Initialize distributed training workers using Ray backend.
+        """Initialize distributed training workers using Ray backend."""
+        actor_rollout_resource_pool = self._init_colocated_workers()
+        if self.config.algorithm.sample_source == "offline":
+            return
+        self._init_online_rollout_stack(actor_rollout_resource_pool)
 
-        Creates:
-        1. Ray resource pools from configuration
-        2. Worker groups for each enabled role (actor/ref/reward)
-        """
+    def _init_colocated_workers(self):
+        """Create Ray pools and colocated actor/ref worker groups (online and offline)."""
         self.resource_pool_manager.create_resource_pool()
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
-        # create actor and rollout
-        actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
-        if self.hybrid_engine:
+        # create actor and rollout (offline uses Role.Actor only; online uses hybrid actor_rollout roles)
+        if Role.Actor in self.role_worker_mapping:
+            actor_role = Role.Actor
+        elif Role.ActorRolloutRef in self.role_worker_mapping:
+            actor_role = Role.ActorRolloutRef
+        else:
+            actor_role = Role.ActorRollout
+        if self.hybrid_engine or actor_role == Role.Actor:
             actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[actor_role],
@@ -637,6 +623,10 @@ class RayDiffusionRLTrainer:
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
 
+        return actor_rollout_resource_pool
+
+    def _init_online_rollout_stack(self, actor_rollout_resource_pool):
+        """Initialize rollout, reward, and checkpoint engines (online sampling only)."""
         # create reward loop manager
         from verl.experimental.reward_loop import RewardLoopManager
 
@@ -796,7 +786,9 @@ class RayDiffusionRLTrainer:
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
+        # update actor
         batch_td = batch.to_tensordict()
+        # step 2: convert from padding to no-padding
         batch_td = embeds_padding_2_no_padding(batch_td)
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
@@ -813,7 +805,6 @@ class RayDiffusionRLTrainer:
             height=self.config.actor_rollout_ref.model.pipeline.height,
             width=self.config.actor_rollout_ref.model.pipeline.width,
             vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
-            training_paradigm=self.config.algorithm.get("paradigm", "coupled"),
         )
 
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
@@ -835,9 +826,14 @@ class RayDiffusionRLTrainer:
             if self.use_reference_policy and not self.ref_in_actor:
                 self.ref_policy_wg.stop_profile()
 
+    @abstractmethod
+    def fit(self):
+        """Run the trainer-type-specific training loop."""
+        pass
 
-class RayCoupledDiffusionTrainer(RayDiffusionRLTrainer):
-    """Reverse-trajectory/logprob diffusion trainer for FlowGRPO-style algorithms."""
+
+class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
+    """Policy-gradient diffusion trainer for FlowGRPO, MixGRPO, DanceGRPO, GRPO-Guard, etc."""
 
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
         batch_td = batch.to_tensordict()
@@ -881,50 +877,6 @@ class RayCoupledDiffusionTrainer(RayDiffusionRLTrainer):
             old_log_prob_dict["old_prev_sample_mean"] = prev_sample_mean.float()
         old_log_prob = tu.get_tensordict(old_log_prob_dict)
         return DataProto.from_tensordict(old_log_prob)
-
-    def _update_actor(self, batch: DataProto) -> DataProto:
-        rollout_config = self.config.actor_rollout_ref.rollout
-        batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
-        # update actor
-        batch_td = batch.to_tensordict()
-        # step 2: convert from padding to no-padding
-        batch_td = embeds_padding_2_no_padding(batch_td)
-        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
-        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
-        seed = self.config.actor_rollout_ref.actor.data_loader_seed
-        shuffle = self.config.actor_rollout_ref.actor.shuffle
-        tu.assign_non_tensor(
-            batch_td,
-            global_batch_size=ppo_mini_batch_size,
-            mini_batch_size=ppo_mini_batch_size,
-            epochs=ppo_epochs,
-            seed=seed,
-            dataloader_kwargs={"shuffle": shuffle},
-            height=self.config.actor_rollout_ref.model.pipeline.height,
-            width=self.config.actor_rollout_ref.model.pipeline.width,
-            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
-            training_paradigm=self.config.algorithm.get("paradigm", "coupled"),
-        )
-
-        actor_output = self.actor_rollout_wg.update_actor(batch_td)
-        actor_output = tu.get(actor_output, "metrics")
-        actor_output = rename_dict(actor_output, "actor/")
-        return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
-
-    def _start_profiling(self, do_profile: bool) -> None:
-        """Start profiling for all worker groups if profiling is enabled."""
-        if do_profile:
-            self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
-            if self.use_reference_policy and not self.ref_in_actor:
-                self.ref_policy_wg.start_profile(profile_step=self.global_steps)
-
-    def _stop_profiling(self, do_profile: bool) -> None:
-        """Stop profiling for all worker groups if profiling is enabled."""
-        if do_profile:
-            self.actor_rollout_wg.stop_profile()
-            if self.use_reference_policy and not self.ref_in_actor:
-                self.ref_policy_wg.stop_profile()
 
     def fit(self):
         """
@@ -1154,10 +1106,6 @@ class RayCoupledDiffusionTrainer(RayDiffusionRLTrainer):
                 gradient_norm = metrics.get("actor/grad_norm", None)
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
 
-                # this is experimental and may be changed/removed in the future in favor of a general-purpose one
-                if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
-                    self.train_dataloader.sampler.update(batch=batch)
-
                 logger.log(data=metrics, step=self.global_steps)
 
                 progress_bar.update(1)
@@ -1177,40 +1125,58 @@ class RayCoupledDiffusionTrainer(RayDiffusionRLTrainer):
                     self.train_dataset.on_batch_end(batch=batch)
 
 
-RayFlowGRPOTrainer = RayCoupledDiffusionTrainer
+class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
+    """Direct-preference diffusion trainer for DPO, DiffusionNFT, AWM, etc."""
 
-
-class RayDecoupledDiffusionTrainer(RayDiffusionRLTrainer):
-    """Decoupled forward-process trainer for algorithms such as DiffusionNFT."""
-
-    def _get_decoupled_algorithm(self):
-        return get_decoupled_diffusion_algorithm(self.config.algorithm.name, self.config.algorithm)
-
-    def _prepare_decoupled_actor_batch(self, batch: DataProto, reward_tensor: torch.Tensor) -> DataProto:
-        handler = self._get_decoupled_algorithm()
+    def _prepare_direct_preference_actor_batch(self, batch: DataProto, reward_tensor: torch.Tensor) -> DataProto:
         rewards = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
-        if "latents_clean" not in batch.batch:
-            raise ValueError("Decoupled diffusion training requires `latents_clean` from rollout custom_output.")
-
-        if "train_timesteps" not in batch.batch:
-            raise ValueError("DiffusionNFT requires final-latent rollout to return `train_timesteps`.")
-
         rollout_batch = {key: batch.batch[key] for key in batch.batch.keys()}
         rollout_batch["uid"] = batch.non_tensor_batch["uid"]
-        rollout_batch["timestep_shuffle_seed"] = int(
-            self.config.actor_rollout_ref.actor.data_loader_seed + getattr(self, "global_steps", 0)
+        actor_batch = prepare_diffusion_nft_actor_batch(
+            rollout_batch=rollout_batch,
+            rewards=rewards,
+            config=self.config.algorithm,
+            timestep_shuffle_seed=int(
+                self.config.actor_rollout_ref.actor.data_loader_seed + getattr(self, "global_steps", 0)
+            ),
         )
-        actor_batch = handler.prepare_actor_batch(rollout_batch, rewards)
         for key, value in actor_batch.items():
             if isinstance(value, torch.Tensor):
                 batch.batch[key] = value
         return batch
 
-    def _post_decoupled_actor_update(self, metrics: dict[str, Any] | None = None):
-        self._get_decoupled_algorithm().post_actor_update(self.actor_rollout_wg, self.global_steps, metrics=metrics)
+    def _post_direct_preference_actor_update(self, metrics: dict[str, Any] | None = None) -> None:
+        nft_cfg = self.config.algorithm.diffusion_nft
+        if metrics is not None:
+            # These are control-plane metrics for the old LoRA adapter refresh, not loss terms.
+            metrics["old_policy/update_applied"] = 0.0
+            metrics["old_policy/copy_update"] = 0.0
+            metrics["old_policy/ema_update"] = 0.0
+            metrics["old_policy/decay"] = 0.0
+        if self.global_steps % nft_cfg.old_policy_update_interval != 0:
+            return
+
+        decay = nft_cfg.old_policy_decay
+        if decay is None:
+            decay = diffusion_nft_old_policy_decay(
+                step=self.global_steps,
+                decay_type=nft_cfg.old_policy_decay_type,
+            )
+
+        if metrics is not None:
+            metrics["old_policy/update_applied"] = 1.0
+            metrics["old_policy/decay"] = float(decay)
+        if decay == 0:
+            self.actor_rollout_wg.copy_adapter(source="default", target="old")
+            if metrics is not None:
+                metrics["old_policy/copy_update"] = 1.0
+        else:
+            self.actor_rollout_wg.ema_update_adapter(source="default", target="old", decay=decay)
+            if metrics is not None:
+                metrics["old_policy/ema_update"] = 1.0
 
     def fit(self):
-        """Training loop for decoupled forward-process diffusion algorithms."""
+        """Run online direct-preference diffusion training for DiffusionNFT-style objectives."""
         from omegaconf import OmegaConf
         from verl.utils.tracking import Tracking
 
@@ -1274,19 +1240,27 @@ class RayDecoupledDiffusionTrainer(RayDiffusionRLTrainer):
                             batch = batch.union(batch_reward)
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
 
-                    with marked_timer("prepare_decoupled_batch", timing_raw, color="brown"):
+                    with marked_timer("prepare_direct_preference_batch", timing_raw, color="brown"):
                         batch.batch["sample_level_scores"] = reward_tensor
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
-                        batch = self._prepare_decoupled_actor_batch(batch, reward_tensor)
+                        batch = self._prepare_direct_preference_actor_batch(batch, reward_tensor)
 
                     with marked_timer("update_actor", timing_raw, color="red"):
                         actor_output = self._update_actor(batch)
-                        self._post_decoupled_actor_update(metrics)
+                        self._post_direct_preference_actor_update(metrics)
 
+                    esi_close_to_expiration = should_save_ckpt_esi(
+                        max_steps_duration=self.max_steps_duration,
+                        redundant_time=self.config.trainer.esi_redundant_time,
+                    )
                     if self.config.trainer.save_freq > 0 and (
-                        is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                        is_last_step
+                        or self.global_steps % self.config.trainer.save_freq == 0
+                        or esi_close_to_expiration
                     ):
+                        if esi_close_to_expiration:
+                            print("Force saving checkpoint: ESI instance expiration approaching.")
                         with marked_timer("save_checkpoint", timing_raw, color="green"):
                             self._save_checkpoint()
 

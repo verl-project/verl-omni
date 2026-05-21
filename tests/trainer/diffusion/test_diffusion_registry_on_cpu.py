@@ -23,9 +23,10 @@ from verl_omni.trainer.diffusion.diffusion_algos import (
     DIFFUSION_ADV_ESTIMATOR_REGISTRY,
     DIFFUSION_LOSS_REGISTRY,
     DiffusionAdvantageEstimator,
+    DiffusionLossResult,
+    KLLoss,
     get_diffusion_adv_estimator_fn,
     get_diffusion_loss_fn,
-    kl_penalty_image,
     register_diffusion_adv_est,
     register_diffusion_loss,
 )
@@ -47,18 +48,25 @@ def test_qwen_image_diffusion_nft_adapters_registered():
     )
 
 # ---------------------------------------------------------------------------
-# kl_penalty_image
+# KLLoss.compute_loss
 # ---------------------------------------------------------------------------
 
 
-class TestKLPenaltyImage:
+class TestKLPenalty:
+    def setup_method(self):
+        self.kl_loss = KLLoss()
+
     @pytest.mark.parametrize("batch_size,seq_len,channels", [(4, 16, 3), (1, 64, 16), (8, 4, 8)])
     def test_output_is_scalar(self, batch_size, seq_len, channels):
         mean = torch.randn(batch_size, seq_len, channels)
         ref_mean = torch.randn(batch_size, seq_len, channels)
         std_dev_t = torch.rand(batch_size, 1, 1) + 0.1  # strictly positive
 
-        loss = kl_penalty_image(mean, ref_mean, std_dev_t)
+        loss, _ = self.kl_loss.compute_loss(
+            prev_sample_mean=mean,
+            ref_prev_sample_mean=ref_mean,
+            std_dev_t=std_dev_t,
+        )
 
         assert loss.shape == ()
         assert loss.item() >= 0.0
@@ -68,7 +76,11 @@ class TestKLPenaltyImage:
         mean = torch.randn(4, 16, 3)
         std_dev_t = torch.ones(4, 1, 1)
 
-        loss = kl_penalty_image(mean, mean.clone(), std_dev_t)
+        loss, _ = self.kl_loss.compute_loss(
+            prev_sample_mean=mean,
+            ref_prev_sample_mean=mean.clone(),
+            std_dev_t=std_dev_t,
+        )
 
         assert loss.item() == pytest.approx(0.0, abs=1e-6)
 
@@ -79,8 +91,18 @@ class TestKLPenaltyImage:
         large_ref = mean + 10.0
         std_dev_t = torch.ones(4, 1, 1)
 
-        loss_small = kl_penalty_image(mean, small_ref, std_dev_t).item()
-        loss_large = kl_penalty_image(mean, large_ref, std_dev_t).item()
+        loss_small, _ = self.kl_loss.compute_loss(
+            prev_sample_mean=mean,
+            ref_prev_sample_mean=small_ref,
+            std_dev_t=std_dev_t,
+        )
+        loss_large, _ = self.kl_loss.compute_loss(
+            prev_sample_mean=mean,
+            ref_prev_sample_mean=large_ref,
+            std_dev_t=std_dev_t,
+        )
+        loss_small = loss_small.item()
+        loss_large = loss_large.item()
 
         assert loss_large > loss_small
 
@@ -102,6 +124,9 @@ class TestDiffusionLossRegistry(unittest.TestCase):
     def test_builtin_flow_grpo_registered(self):
         assert "flow_grpo" in DIFFUSION_LOSS_REGISTRY
 
+    def test_builtin_kl_registered(self):
+        assert "kl" in DIFFUSION_LOSS_REGISTRY
+
     def test_get_existing_loss_fn(self):
         fn = get_diffusion_loss_fn("flow_grpo")
         assert callable(fn)
@@ -110,13 +135,47 @@ class TestDiffusionLossRegistry(unittest.TestCase):
         with self.assertRaises(ValueError):
             get_diffusion_loss_fn("nonexistent_loss")
 
+    def test_loss_input_validation_reports_missing_data_key(self):
+        fn = get_diffusion_loss_fn("flow_grpo")
+        with pytest.raises(KeyError) as exc_info:
+            fn.validate_inputs(
+                loss_name="flow_grpo",
+                model_output={"log_probs": torch.randn(4)},
+                data={"old_log_probs": torch.randn(4)},
+            )
+
+        message = str(exc_info.value)
+        assert "flow_grpo" in message
+        assert "Missing data keys" in message
+        assert "advantages" in message
+        assert "Available data keys" in message
+        assert "old_log_probs" in message
+
+    def test_loss_input_validation_reports_missing_model_output_key(self):
+        fn = get_diffusion_loss_fn("kl")
+        with pytest.raises(KeyError) as exc_info:
+            fn.validate_inputs(
+                loss_name="kl",
+                model_output={"prev_sample_mean": torch.randn(4, 16, 3)},
+                data={"ref_prev_sample_mean": torch.randn(4, 16, 3)},
+            )
+
+        message = str(exc_info.value)
+        assert "kl" in message
+        assert "Missing model_output keys" in message
+        assert "std_dev_t" in message
+        assert "Available model_output keys" in message
+        assert "prev_sample_mean" in message
+
     def test_register_and_retrieve_custom_fn(self):
         @register_diffusion_loss("test_loss_cpu")
-        def _my_loss(old_log_prob, log_prob, advantages, config=None):
-            return torch.tensor(0.0), {}
+        class MyLossFunc:
+            def __call__(self, *, config, model_output, data):
+                del config, model_output, data
+                return DiffusionLossResult(loss=torch.tensor(0.0), metrics={})
 
         fn = get_diffusion_loss_fn("test_loss_cpu")
-        assert fn is _my_loss
+        assert isinstance(fn, MyLossFunc)
 
     def test_registered_fn_is_callable_and_returns_correct_types(self):
         import os
@@ -136,12 +195,35 @@ class TestDiffusionLossRegistry(unittest.TestCase):
         actor_cfg: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
 
         fn = get_diffusion_loss_fn("flow_grpo")
-        old_lp = torch.randn(4)
-        lp = torch.randn(4)
-        adv = torch.randn(4)
-        loss, metrics = fn(old_lp, lp, adv, config=actor_cfg)
-        assert isinstance(loss, torch.Tensor)
-        assert isinstance(metrics, dict)
+        result = fn(
+            config=actor_cfg,
+            model_output={"log_probs": torch.randn(4)},
+            data={"old_log_probs": torch.randn(4), "advantages": torch.randn(4)},
+        )
+        assert isinstance(result.loss, torch.Tensor)
+        assert isinstance(result.metrics, dict)
+
+
+class TestKLLoss:
+    def test_computes_kl_loss_and_metrics(self):
+        class _Config:
+            kl_loss_coef = 0.1
+
+        mean = torch.randn(4, 16, 3)
+        ref_mean = torch.randn(4, 16, 3)
+        std_dev_t = torch.ones(4, 1, 1)
+        loss_func = get_diffusion_loss_fn("kl")
+
+        result = loss_func(
+            config=_Config(),
+            model_output={"prev_sample_mean": mean, "std_dev_t": std_dev_t},
+            data={"ref_prev_sample_mean": ref_mean},
+        )
+
+        assert isinstance(result.loss, torch.Tensor)
+        assert result.add_loss_metric is True
+        assert "actor/kl_loss" in result.metrics
+        assert result.metrics["actor/kl_loss"] == pytest.approx(result.loss.item())
 
 
 # ---------------------------------------------------------------------------

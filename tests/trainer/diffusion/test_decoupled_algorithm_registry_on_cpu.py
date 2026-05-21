@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU tests for decoupled diffusion algorithm handlers."""
+"""CPU tests for DiffusionNFT direct-preference helpers."""
 
 import numpy as np
 import pytest
@@ -19,37 +19,29 @@ import torch
 from verl import DataProto
 
 from verl_omni.trainer.config.algorithm import DiffusionAlgoConfig, DiffusionNFTAlgoConfig
-from verl_omni.trainer.diffusion.decoupled_algos import (
-    DiffusionNFTAlgorithm,
+from verl_omni.trainer.diffusion.diffusion_algos import (
     diffusion_nft_old_policy_decay,
-    get_decoupled_diffusion_algorithm,
+    prepare_diffusion_nft_actor_batch,
 )
 from verl_omni.trainer.diffusion.diffusion_metric_utils import compute_data_metrics_diffusion
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
-    RayCoupledDiffusionTrainer,
-    RayDecoupledDiffusionTrainer,
-    RayDiffusionRLTrainer,
-    RayFlowGRPOTrainer,
+    BaseRayDiffusionTrainer,
+    DirectPreferenceRayTrainer,
+    PolicyGradientRayTrainer,
 )
 
 
-def test_decoupled_registry_returns_diffusion_nft_handler() -> None:
-    config = DiffusionAlgoConfig(paradigm="decoupled", name="diffusion_nft")
-    handler = get_decoupled_diffusion_algorithm("diffusion_nft", config)
-
-    assert isinstance(handler, DiffusionNFTAlgorithm)
-    assert handler.loss_mode == "diffusion_nft"
-    assert handler.required_policy_states == ("default", "old", "reference")
-    assert handler.rollout_options() == {"rollout_adapter": "old", "collect_mode": "final_latent"}
+def test_diffusion_nft_helpers_are_in_diffusion_algos() -> None:
+    assert callable(prepare_diffusion_nft_actor_batch)
+    assert callable(diffusion_nft_old_policy_decay)
 
 
-def test_trainer_hierarchy_keeps_coupled_and_decoupled_paths_separate() -> None:
-    assert RayFlowGRPOTrainer is RayCoupledDiffusionTrainer
-    assert issubclass(RayCoupledDiffusionTrainer, RayDiffusionRLTrainer)
-    assert issubclass(RayDecoupledDiffusionTrainer, RayDiffusionRLTrainer)
-    assert not issubclass(RayDecoupledDiffusionTrainer, RayCoupledDiffusionTrainer)
-    assert hasattr(RayCoupledDiffusionTrainer, "_compute_old_log_prob")
-    assert "_compute_old_log_prob" not in RayDecoupledDiffusionTrainer.__dict__
+def test_trainer_hierarchy_keeps_policy_gradient_and_direct_preference_paths_separate() -> None:
+    assert issubclass(PolicyGradientRayTrainer, BaseRayDiffusionTrainer)
+    assert issubclass(DirectPreferenceRayTrainer, BaseRayDiffusionTrainer)
+    assert not issubclass(DirectPreferenceRayTrainer, PolicyGradientRayTrainer)
+    assert hasattr(PolicyGradientRayTrainer, "_compute_old_log_prob")
+    assert "_compute_old_log_prob" not in DirectPreferenceRayTrainer.__dict__
 
 
 @pytest.mark.parametrize(
@@ -69,12 +61,9 @@ def test_diffusion_nft_old_policy_decay(decay_type: int, step: int, expected: fl
 
 def test_diffusion_nft_prepare_actor_batch_maps_group_rewards_to_reward_prob() -> None:
     config = DiffusionAlgoConfig(
-        paradigm="decoupled",
-        name="diffusion_nft",
         norm_adv_by_std_in_grpo=False,
         diffusion_nft=DiffusionNFTAlgoConfig(adv_clip_max=2.0),
     )
-    handler = DiffusionNFTAlgorithm(config)
     rollout_batch = {
         "latents_clean": torch.randn(4, 3, 4, 4),
         "prompt_embeds": torch.randn(4, 5, 8),
@@ -84,7 +73,7 @@ def test_diffusion_nft_prepare_actor_batch_maps_group_rewards_to_reward_prob() -
     }
     rewards = torch.tensor([0.0, 4.0, 1.0, 3.0], dtype=torch.float32)
 
-    actor_batch = handler.prepare_actor_batch(rollout_batch, rewards)
+    actor_batch = prepare_diffusion_nft_actor_batch(rollout_batch=rollout_batch, rewards=rewards, config=config)
 
     assert actor_batch["reward_prob"].shape == (4, 2)
     torch.testing.assert_close(actor_batch["reward_prob"][0], torch.zeros(2))
@@ -96,12 +85,9 @@ def test_diffusion_nft_prepare_actor_batch_maps_group_rewards_to_reward_prob() -
 
 def test_diffusion_nft_prepare_actor_batch_applies_timestep_fraction_and_ignores_all_timesteps() -> None:
     config = DiffusionAlgoConfig(
-        paradigm="decoupled",
-        name="diffusion_nft",
         norm_adv_by_std_in_grpo=False,
         diffusion_nft=DiffusionNFTAlgoConfig(adv_clip_max=2.0, timestep_fraction=0.5),
     )
-    handler = DiffusionNFTAlgorithm(config)
     rollout_batch = {
         "latents_clean": torch.randn(2, 3, 4, 4),
         "prompt_embeds": torch.randn(2, 5, 8),
@@ -113,7 +99,12 @@ def test_diffusion_nft_prepare_actor_batch_applies_timestep_fraction_and_ignores
     }
     rewards = torch.tensor([0.0, 4.0], dtype=torch.float32)
 
-    actor_batch = handler.prepare_actor_batch(rollout_batch, rewards)
+    actor_batch = prepare_diffusion_nft_actor_batch(
+        rollout_batch=rollout_batch,
+        rewards=rewards,
+        config=config,
+        timestep_shuffle_seed=123,
+    )
 
     assert actor_batch["train_timesteps"].shape == (2, 2)
     assert not torch.isin(actor_batch["train_timesteps"], rollout_batch["all_timesteps"]).any()
@@ -122,7 +113,6 @@ def test_diffusion_nft_prepare_actor_batch_applies_timestep_fraction_and_ignores
 
 
 def test_diffusion_nft_prepare_actor_batch_requires_train_timesteps() -> None:
-    handler = DiffusionNFTAlgorithm(DiffusionAlgoConfig(paradigm="decoupled", name="diffusion_nft"))
     rollout_batch = {
         "latents_clean": torch.randn(2, 3, 4, 4),
         "prompt_embeds": torch.randn(2, 5, 8),
@@ -131,7 +121,11 @@ def test_diffusion_nft_prepare_actor_batch_requires_train_timesteps() -> None:
     }
 
     with pytest.raises(ValueError, match="train_timesteps"):
-        handler.prepare_actor_batch(rollout_batch, torch.tensor([0.0, 1.0]))
+        prepare_diffusion_nft_actor_batch(
+            rollout_batch=rollout_batch,
+            rewards=torch.tensor([0.0, 1.0]),
+            config=DiffusionAlgoConfig(),
+        )
 
 
 def test_diffusion_nft_post_actor_update_delegates_copy_and_ema() -> None:
@@ -145,16 +139,17 @@ def test_diffusion_nft_post_actor_update_delegates_copy_and_ema() -> None:
         def ema_update_adapter(self, source, target, decay):
             self.calls.append(("ema", source, target, decay))
 
-    copy_handler = DiffusionNFTAlgorithm(
-        DiffusionAlgoConfig(
-            paradigm="decoupled",
-            name="diffusion_nft",
-            diffusion_nft=DiffusionNFTAlgoConfig(old_policy_decay=0.0),
-        )
-    )
+    copy_handler = DirectPreferenceRayTrainer.__new__(DirectPreferenceRayTrainer)
+    copy_handler.config = type(
+        "Config",
+        (),
+        {"algorithm": DiffusionAlgoConfig(diffusion_nft=DiffusionNFTAlgoConfig(old_policy_decay=0.0))},
+    )()
+    copy_handler.global_steps = 1
     worker_group = FakeWorkerGroup()
+    copy_handler.actor_rollout_wg = worker_group
     metrics = {}
-    copy_handler.post_actor_update(worker_group, global_steps=1, metrics=metrics)
+    copy_handler._post_direct_preference_actor_update(metrics=metrics)
     assert worker_group.calls == [("copy", "default", "old")]
     assert metrics == {
         "old_policy/update_applied": 1.0,
@@ -163,16 +158,17 @@ def test_diffusion_nft_post_actor_update_delegates_copy_and_ema() -> None:
         "old_policy/decay": 0.0,
     }
 
-    ema_handler = DiffusionNFTAlgorithm(
-        DiffusionAlgoConfig(
-            paradigm="decoupled",
-            name="diffusion_nft",
-            diffusion_nft=DiffusionNFTAlgoConfig(old_policy_decay=0.25),
-        )
-    )
+    ema_handler = DirectPreferenceRayTrainer.__new__(DirectPreferenceRayTrainer)
+    ema_handler.config = type(
+        "Config",
+        (),
+        {"algorithm": DiffusionAlgoConfig(diffusion_nft=DiffusionNFTAlgoConfig(old_policy_decay=0.25))},
+    )()
+    ema_handler.global_steps = 1
     worker_group = FakeWorkerGroup()
+    ema_handler.actor_rollout_wg = worker_group
     metrics = {}
-    ema_handler.post_actor_update(worker_group, global_steps=1, metrics=metrics)
+    ema_handler._post_direct_preference_actor_update(metrics=metrics)
     assert worker_group.calls == [("ema", "default", "old", 0.25)]
     assert metrics == {
         "old_policy/update_applied": 1.0,
@@ -182,61 +178,13 @@ def test_diffusion_nft_post_actor_update_delegates_copy_and_ema() -> None:
     }
 
 
-def test_diffusion_nft_config_sync_copies_algorithm_values_to_actor_and_rollout() -> None:
-    trainer = RayDiffusionRLTrainer.__new__(RayDiffusionRLTrainer)
-    trainer.config = {
-        "algorithm": {
-            "paradigm": "decoupled",
-            "name": "diffusion_nft",
-            "diffusion_nft": {
-                "mix_beta": 0.75,
-                "ref_kl_coef": 0.2,
-                "adv_clip_max": 3.0,
-                "adaptive_weight_min": 1e-4,
-                "collect_mode": "final_latent",
-                "rollout_adapter": "old",
-            },
-        },
-        "actor_rollout_ref": {
-            "model": {"algorithm": "flow_grpo"},
-            "actor": {
-                "diffusion_loss": {
-                    "loss_mode": "flow_grpo",
-                    "diffusion_nft": {
-                        "mix_beta": 0.5,
-                        "ref_kl_coef": 0.0,
-                        "adv_clip_max": 5.0,
-                        "adaptive_weight_min": 1e-5,
-                    },
-                }
-            },
-            "rollout": {"collect_mode": "trajectory", "rollout_adapter": "default"},
-        },
-    }
-    from omegaconf import OmegaConf
-
-    trainer.config = OmegaConf.create(trainer.config)
-    trainer._sync_and_validate_algorithm_config()
-
-    assert trainer.config.actor_rollout_ref.model.algorithm == "diffusion_nft"
-    assert trainer.config.actor_rollout_ref.actor.diffusion_loss.loss_mode == "diffusion_nft"
-    assert trainer.config.actor_rollout_ref.actor.diffusion_loss.diffusion_nft.mix_beta == pytest.approx(0.75)
-    assert trainer.config.actor_rollout_ref.actor.diffusion_loss.diffusion_nft.ref_kl_coef == pytest.approx(0.2)
-    assert trainer.config.actor_rollout_ref.actor.diffusion_loss.diffusion_nft.adv_clip_max == pytest.approx(3.0)
-    assert trainer.config.actor_rollout_ref.actor.diffusion_loss.diffusion_nft.adaptive_weight_min == pytest.approx(1e-4)
-    assert trainer.config.actor_rollout_ref.rollout.collect_mode == "final_latent"
-    assert trainer.config.actor_rollout_ref.rollout.rollout_adapter == "old"
-
-
-def test_decoupled_trainer_prepares_metric_contract_fields() -> None:
-    trainer = RayDecoupledDiffusionTrainer.__new__(RayDecoupledDiffusionTrainer)
+def test_direct_preference_trainer_prepares_metric_contract_fields() -> None:
+    trainer = DirectPreferenceRayTrainer.__new__(DirectPreferenceRayTrainer)
     trainer.config = type(
         "Config",
         (),
         {
             "algorithm": DiffusionAlgoConfig(
-                paradigm="decoupled",
-                name="diffusion_nft",
                 global_std=False,
                 diffusion_nft=DiffusionNFTAlgoConfig(adv_clip_max=1.0),
             ),
@@ -259,7 +207,7 @@ def test_decoupled_trainer_prepares_metric_contract_fields() -> None:
     )
     rewards = torch.tensor([[1.0], [3.0], [2.0], [4.0]])
 
-    prepared = trainer._prepare_decoupled_actor_batch(batch, rewards)
+    prepared = trainer._prepare_direct_preference_actor_batch(batch, rewards)
 
     assert prepared.batch["sample_level_rewards"].shape == (4, steps)
     assert prepared.batch["returns"].shape == (4, steps)

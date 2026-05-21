@@ -19,7 +19,7 @@ import torch
 from tensordict import TensorDict
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
-from verl_omni.workers.engine.fsdp.diffusers_impl import DiffusersFSDPEngine
+from verl_omni.workers.engine.fsdp.diffusers_impl import DirectPreferenceDiffusersFSDPEngine, PPODiffusersFSDPEngine
 
 
 @DiffusionModelBase.register("FakeDecoupledPipeline", algorithm="diffusion_nft")
@@ -92,13 +92,24 @@ class FakeAdapterModule(torch.nn.Module):
         return (hidden_states * self.scale + offset,)
 
 
-def _engine() -> DiffusersFSDPEngine:
-    engine = object.__new__(DiffusersFSDPEngine)
+def _engine() -> DirectPreferenceDiffusersFSDPEngine:
+    engine = object.__new__(DirectPreferenceDiffusersFSDPEngine)
     engine.module = FakeAdapterModule()
     engine.model_config = SimpleNamespace(architecture="FakeDecoupledPipeline", algorithm="diffusion_nft")
     engine.use_ulysses_sp = False
     engine.ulysses_sequence_parallel_size = 1
     engine.get_data_parallel_group = lambda: None
+    return engine
+
+
+def _registered_engine() -> PPODiffusersFSDPEngine:
+    engine = object.__new__(PPODiffusersFSDPEngine)
+    engine.module = FakeAdapterModule()
+    engine.model_config = SimpleNamespace(architecture="FakeDecoupledPipeline", algorithm="diffusion_nft")
+    engine.use_ulysses_sp = False
+    engine.ulysses_sequence_parallel_size = 1
+    engine.get_data_parallel_group = lambda: None
+    engine.postprocess_batch_func = DirectPreferenceDiffusersFSDPEngine.postprocess_batch_func.__get__(engine)
     return engine
 
 
@@ -129,7 +140,7 @@ def test_forward_decoupled_step_reuses_same_xt_for_old_default_and_reference() -
         assert "old_log_probs" not in micro_batch
         return model_output["forward_prediction"].mean(), {}
 
-    loss, output = engine.forward_decoupled_step(
+    loss, output = engine.forward_step(
         micro_batch=micro_batch,
         loss_function=loss_function,
         forward_only=False,
@@ -162,7 +173,7 @@ def test_forward_decoupled_step_selects_step_noise_from_forward_noise_sequence()
     def loss_function(model_output, data, dp_group=None):
         return model_output["forward_prediction"].mean(), {}
 
-    _, output = engine.forward_decoupled_step(
+    _, output = engine.forward_step(
         micro_batch=micro_batch,
         loss_function=loss_function,
         forward_only=False,
@@ -172,3 +183,21 @@ def test_forward_decoupled_step_selects_step_noise_from_forward_noise_sequence()
     t = micro_batch["train_timesteps"][:, 1].float() / 1000.0
     expected_xt = t.view(-1, 1, 1, 1) * micro_batch["forward_noise"][:, 1]
     torch.testing.assert_close(output["model_output"]["xt"], expected_xt)
+
+
+def test_registered_ppo_engine_dispatches_direct_preference_batch_without_old_log_probs(monkeypatch) -> None:
+    engine = _registered_engine()
+    monkeypatch.setattr(
+        "verl_omni.workers.engine.fsdp.diffusers_impl.prepare_micro_batches",
+        lambda data, dp_group, same_micro_num_in_dp: ([data], None),
+    )
+
+    def loss_function(model_output, data, dp_group=None):
+        assert "reward_prob" in data
+        assert "old_log_probs" not in data
+        return model_output["forward_prediction"].mean(), {}
+
+    output = engine.forward_backward_batch(_batch(), loss_function=loss_function, forward_only=True)
+
+    assert output["model_output"]["forward_prediction"].shape[1] == 2
+    assert [call["adapter"] for call in engine.module.calls[:3]] == ["old", "default", "reference"]

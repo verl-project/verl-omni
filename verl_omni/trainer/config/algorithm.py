@@ -58,18 +58,10 @@ class DiffusionNFTAlgoConfig(BaseConfig):
 class DiffusionAlgoConfig(BaseConfig):
     """Diffusion-specific algorithm config."""
 
-    paradigm: str = "coupled"
-    name: str = "flow_grpo"
+    trainer_type: str = "policy_gradient"
+    sample_source: str = "online"
     adv_estimator: str = "flow_grpo"
     norm_adv_by_std_in_grpo: bool = True
     bypass_mode: bool = False
     global_std: bool = True
     diffusion_nft: DiffusionNFTAlgoConfig = field(default_factory=DiffusionNFTAlgoConfig)
-
-    def __post_init__(self):
-        valid_paradigms = {"coupled", "decoupled"}
-        if self.paradigm not in valid_paradigms:
-            raise ValueError(f"Invalid diffusion algorithm paradigm: {self.paradigm}. Must be one of {valid_paradigms}")
-        valid_names = {"flow_grpo", "mix_grpo", "grpo_guard", "diffusion_nft"}
-        if self.name not in valid_names:
-            raise ValueError(f"Invalid diffusion algorithm name: {self.name}. Must be one of {valid_names}")

@@ -3,6 +3,7 @@ set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME
 WORKSPACE=${WORKSPACE:-$HOME}
+export FLASHINFER_DISABLE_VERSION_CHECK=${FLASHINFER_DISABLE_VERSION_CHECK:-1}
 
 ocr_train_path=/mnt/andy/verl-omni/data/train.parquet
 ocr_test_path=/mnt/andy/verl-omni/data/test.parquet
@@ -20,7 +21,7 @@ ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
 
-python3 -m verl_omni.trainer.diffusion.main_diffusion_rl \
+python3 -m verl_omni.trainer.main_diffusion \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
     data.train_max_samples=7200 \
@@ -30,6 +31,7 @@ python3 -m verl_omni.trainer.diffusion.main_diffusion_rl \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
+    actor_rollout_ref.model.policy_state_adapters='["default","old"]' \
     actor_rollout_ref.model.target_modules="['to_q','to_k','to_v','to_out.0','add_q_proj','add_k_proj','add_v_proj','to_add_out','img_mlp.net.0.proj','img_mlp.net.2','txt_mlp.net.0.proj','txt_mlp.net.2']" \
     actor_rollout_ref.actor.optim.lr=3e-4 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
@@ -63,8 +65,8 @@ python3 -m verl_omni.trainer.diffusion.main_diffusion_rl \
     actor_rollout_ref.rollout.algo.sde_window_range=null \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=40 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
-    algorithm.paradigm=decoupled \
-    algorithm.name=diffusion_nft \
+    algorithm.trainer_type=direct_preference \
+    algorithm.sample_source=online \
     algorithm.diffusion_nft.mix_beta=0.1 \
     algorithm.diffusion_nft.ref_kl_coef=0.0001 \
     algorithm.diffusion_nft.timestep_fraction=1.0 \
@@ -83,7 +85,7 @@ python3 -m verl_omni.trainer.diffusion.main_diffusion_rl \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=diffusion_nft \
-    trainer.experiment_name=qwen_image_ocr_lora_new \
+    trainer.experiment_name=qwen_image_ocr_lora_n_24_v_20 \
     trainer.log_val_generations=8 \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \

@@ -3,12 +3,11 @@
 Last updated: 05/12/2026.
 
 This guide explains how to add a new diffusion RL algorithm to VeRL-Omni's
-diffusion trainer. The original flow of this document is still
-PPO-like/coupled-first because FlowGRPO is the reference implementation, but
-new algorithms must first decide whether they are coupled reverse-trajectory
-algorithms or decoupled forward-process algorithms. The contracts described
-here are orthogonal to model integration: a single algorithm can be extended
-to any number of model architectures by pairing it with the
+diffusion trainer. New algorithms must first decide whether they are
+policy-gradient reverse-trajectory algorithms or direct-preference
+forward-process algorithms. The contracts described here are orthogonal to
+model integration: a single algorithm can be extended to any number of model
+architectures by pairing it with the
 `DiffusionModelBase` / `VllmOmniPipelineBase` adapters described in
 [`integrating_a_diffusion_model.md`](integrating_a_diffusion_model.md).
 
@@ -34,14 +33,20 @@ A new PPO-like algorithm needs **four pieces**:
    both decorated with `@register(architecture, algorithm="<name>")`.
 
 The trainer entrypoint
-([`main_flowgrpo.py`](../../verl_omni/trainer/diffusion/main_flowgrpo.py))
+([`main_diffusion.py`](../../verl_omni/trainer/main_diffusion.py))
 and the Ray driver
 ([`ray_diffusion_trainer.py`](../../verl_omni/trainer/diffusion/ray_diffusion_trainer.py))
-are algorithm-agnostic; they dispatch on the strings above.
+dispatch on model/loss registry strings above, plus two orthogonal algorithm
+config fields:
 
-For decoupled algorithms such as DiffusionNFT, also add a handler in
-[`decoupled_algos.py`](../../verl_omni/trainer/diffusion/decoupled_algos.py)
-and set `algorithm.paradigm=decoupled`.
+| Field | Values | Purpose |
+|-------|--------|---------|
+| `algorithm.trainer_type` | `policy_gradient`, `direct_preference` | Selects `PolicyGradientRayTrainer` (FlowGRPO, MixGRPO, …) vs `DirectPreferenceRayTrainer` (DPO, DiffusionNFT, AWM) |
+| `algorithm.sample_source` | `online`, `offline` | `BaseRayDiffusionTrainer.init_workers` skips rollout/reward engine init when `offline` |
+
+Direct-preference algorithms keep algorithm math and worker-side key
+requirements in
+[`diffusion_algos.py`](../../verl_omni/trainer/diffusion/diffusion_algos.py).
 
 ---
 
@@ -61,7 +66,7 @@ runtime:
 
    loss_mode
                 ↓
-   compute_diffusion_loss_flow_grpo
+   FlowGRPOLoss
 ```
 
 All four registries (`DiffusionModelBase`, `VllmOmniPipelineBase`,
@@ -86,26 +91,14 @@ optional reference reverse logprobs. They use
 `forward_backward_batch()` / reverse `forward_step()` in the FSDP engine and
 their losses consume logprob-like tensors plus per-timestep advantages.
 
-**Decoupled algorithms** train from final samples or preferences and define a
+**Direct-preference algorithms** train from final samples or preferences and define a
 separate forward-process objective. Examples include DiffusionNFT,
 Diffusion-DPO, DGPO/GPO, and AWM. Their rollout batch should contain the final
 clean latent (`latents_clean`), sample-level rewards or preference pairs, and
 an explicit forward-training timestep tensor (`train_timesteps`). They use
-`forward_backward_decoupled_batch()` / `forward_decoupled_step()` in the FSDP
-engine, and their losses consume prediction-space tensors rather than
+`DirectPreferenceRayTrainer` and the direct-preference FSDP forward path, and
+their losses consume prediction-space tensors rather than
 reverse-step logprobs.
-
-DiffusionNFT-specific checklist:
-
-- Set `algorithm.paradigm=decoupled` and `algorithm.name=diffusion_nft`.
-- Set `actor_rollout_ref.model.algorithm=diffusion_nft`.
-- Use `actor_rollout_ref.actor.diffusion_loss.loss_mode=diffusion_nft`.
-- Use final-latent rollout: `actor_rollout_ref.rollout.collect_mode=final_latent`.
-- Roll out with the old adapter: `actor_rollout_ref.rollout.rollout_adapter=old`.
-- Return both `latents_clean` and scheduler-derived `train_timesteps` from rollout.
-- Compute old, current/default, and reference predictions on the same `xt`, timestep, and prompt tensors.
-- Manage policy states explicitly: train `default`, snapshot or EMA-update `old`, and use adapters-disabled base weights as the reference.
-- Do not reuse FlowGRPO's `kl_penalty_image()` for DiffusionNFT; DiffusionNFT uses prediction-space reference MSE on the same `xt`.
 
 ---
 
@@ -187,19 +180,39 @@ extend the `if adv_estimator == DiffusionAdvantageEstimator.<NAME>:` branch in
 
 ## Step 3 — Register the Loss
 
-Still in `diffusion_algos.py`, register the per-step PPO-style loss:
+Open
+[`verl_omni/trainer/diffusion/diffusion_algos.py`](../../verl_omni/trainer/diffusion/diffusion_algos.py)
+and add the pure loss function plus the registered worker-side adapter:
 
 ```python
 @register_diffusion_loss("flow_grpo")
-def compute_diffusion_loss_flow_grpo(
-    old_log_prob: torch.Tensor,
-    log_prob: torch.Tensor,
-    advantages: torch.Tensor,
-    config: Optional[DictConfig | DiffusionActorConfig] = None,
-) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Clipped-PPO objective averaged across denoising steps."""
-    ...
-    return pg_loss, pg_metrics
+class FlowGRPOLoss(DiffusionLossFn):
+    """Flow-GRPO clipped policy objective."""
+
+    required_model_output_keys = ("log_probs",)
+    required_data_keys = ("old_log_probs", "advantages")
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        old_log_prob: torch.Tensor,
+        log_prob: torch.Tensor,
+        advantages: torch.Tensor,
+        config: DiffusionActorConfig,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Clipped-PPO objective averaged across denoising steps."""
+        ...
+        return pg_loss, pg_metrics
+
+    def __call__(self, *, config, model_output, data) -> DiffusionLossResult:
+        pg_loss, pg_metrics = self.compute_loss(
+            old_log_prob=data["old_log_probs"],
+            log_prob=model_output["log_probs"],
+            advantages=data["advantages"],
+            config=config,
+        )
+        return DiffusionLossResult(loss=pg_loss, metrics=pg_metrics)
 ```
 
 Finally, add the loss name to the validation list in
@@ -289,18 +302,15 @@ The algorithm dispatch is already wired. Setting
 A single flag covers all four dispatch points **only when every site
 recognises the new name** — see the next subsection for the alternative.
 
-For decoupled algorithms, set the paradigm explicitly:
+For direct-preference algorithms, set the trainer type explicitly:
 
 ```bash
-algorithm.paradigm=decoupled \
-algorithm.name=<your_algo>
+algorithm.trainer_type=direct_preference
 ```
 
-If the algorithm owns rollout or worker-loss knobs, put the algorithm-level
-source of truth under `algorithm.<algo>` and make the trainer copy or validate
-the worker-facing mirrors before training. DiffusionNFT uses this pattern for
-`collect_mode`, `rollout_adapter`, `mix_beta`, `ref_kl_coef`,
-`adv_clip_max`, and `adaptive_weight_min`.
+Keep rollout data-contract knobs in the rollout config, worker-loss knobs in
+the actor loss config, and algorithm-level knobs under `algorithm.<algo>` only
+when they are consumed by the trainer loop itself.
 
 ### Reusing an existing estimator or loss
 
@@ -355,11 +365,19 @@ Document any algorithm-specific knobs in the example's `README.md`.
 
 Add an end-to-end smoke test under `tests/special_e2e/` modelled on
 [`tests/special_e2e/run_flowgrpo_qwen_image.sh`](../../tests/special_e2e/run_flowgrpo_qwen_image.sh)
-and register it in
+(coupled algorithms) or
+[`tests/special_e2e/run_diffusionnft_qwen_image.sh`](../../tests/special_e2e/run_diffusionnft_qwen_image.sh)
+(direct-preference algorithms).
+
+Name the script `run_<algo>_<model>.sh` (for example,
+`run_flowgrpo_qwen_image.sh` or `run_diffusionnft_qwen_image.sh`).
+
+Register the script in
 [`tests/gpu_smoke/run_gpu_smoke_tests.sh`](../../tests/gpu_smoke/run_gpu_smoke_tests.sh)
 as a new numbered test entry. The script must exercise the full
 algorithm dispatch chain (adv estimator + loss + adapter pair + SDE
-step) against a `tiny-random/<ModelName>` checkpoint.
+step, or the direct-preference forward-process contract) against a
+`tiny-random/<ModelName>` checkpoint.
 
 ---
 
@@ -383,13 +401,9 @@ step) against a `tiny-random/<ModelName>` checkpoint.
 - [ ] Example launch script under `examples/<algo>_trainer/`.
 - [ ] Smoke test under `tests/special_e2e/run_<algo>_<model>.sh` wired
       into `tests/gpu_smoke/run_gpu_smoke_tests.sh`.
-- [ ] For decoupled algorithms, add a handler in `decoupled_algos.py`,
-      use `algorithm.paradigm=decoupled`, and test the forward-process batch
-      contract (`latents_clean`, `train_timesteps`, sample-level rewards or
-      pairs/groups).
-- [ ] For algorithms with old/reference policy states, test adapter
-      copy/EMA, selected-adapter rollout sync, checkpoint/resume behavior, and
-      any same-input invariant such as DiffusionNFT's same-`xt` requirement.
+- [ ] For direct-preference algorithms, set `algorithm.trainer_type=direct_preference`
+      and document the forward-process batch contract (`latents_clean`,
+      `train_timesteps`, sample-level rewards or pairs/groups).
 - [ ] If the registry or adapter contract changed, update
       [`integrating_a_diffusion_model.md`](integrating_a_diffusion_model.md)
       to match.

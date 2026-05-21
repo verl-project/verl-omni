@@ -4,6 +4,7 @@
 # Requires: vllm-omni, diffusers>=0.37, and a tiny Qwen-Image checkpoint at
 #   ~/models/tiny-random/Qwen-Image
 set -xeuo pipefail
+export FLASHINFER_DISABLE_VERSION_CHECK=${FLASHINFER_DISABLE_VERSION_CHECK:-1}
 
 NUM_GPUS=${NUM_GPUS:-4}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/Qwen-Image}
@@ -30,7 +31,7 @@ python3 tests/special_e2e/create_dummy_diffusion_data.py \
     --train_size "${synthetic_train_size}" \
     --val_size 4
 
-python3 -m verl_omni.trainer.diffusion.main_diffusion_rl \
+python3 -m verl_omni.trainer.main_diffusion \
     data.train_files=${dummy_train_path} \
     data.val_files=${dummy_test_path} \
     data.train_batch_size=${train_batch_size} \
@@ -40,6 +41,7 @@ python3 -m verl_omni.trainer.diffusion.main_diffusion_rl \
     actor_rollout_ref.model.tokenizer_path=${TOKENIZER_PATH} \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \
+    actor_rollout_ref.model.policy_state_adapters='["default","old"]' \
     actor_rollout_ref.model.target_modules=all-linear \
     actor_rollout_ref.actor.optim.lr=1e-4 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
@@ -69,8 +71,8 @@ python3 -m verl_omni.trainer.diffusion.main_diffusion_rl \
     actor_rollout_ref.rollout.algo.sde_window_range=null \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=4 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${micro_bsz_per_gpu} \
-    algorithm.paradigm=decoupled \
-    algorithm.name=diffusion_nft \
+    algorithm.trainer_type=direct_preference \
+    algorithm.sample_source=online \
     algorithm.diffusion_nft.mix_beta=0.5 \
     algorithm.diffusion_nft.ref_kl_coef=0.001 \
     algorithm.diffusion_nft.timestep_fraction=1.0 \

@@ -184,7 +184,7 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             return_sqrt_dt (`bool`, *optional*, defaults to False):
                 Whether to additionally return `sqrt(-dt)` as a tensor of shape `(batch_size,)`.
                 Used by GRPO-Guard to compute the importance-ratio normalization
-                (see `compute_diffusion_loss_grpo_guard`).
+                (see `GRPOGuardLoss`).
         """
         assert sde_type in ["sde", "cps"]
         assert sample.dtype == torch.float32

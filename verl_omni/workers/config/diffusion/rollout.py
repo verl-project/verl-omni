@@ -25,6 +25,16 @@ from verl.workers.config.rollout import (
     PrometheusConfig,
 )
 
+try:
+    from verl.workers.config.disaggregation import DisaggregationConfig
+except ModuleNotFoundError:
+
+    @dataclass
+    class DisaggregationConfig(BaseConfig):
+        """Compatibility shim for older verl versions without disaggregation config."""
+
+        pass
+
 __all__ = [
     "DiffusionRolloutAlgoConfig",
     "DiffusionPipelineConfig",
@@ -148,6 +158,8 @@ class DiffusionRolloutConfig(BaseConfig):
     profiler: Optional[ProfilerConfig] = None
 
     algo: Optional[DiffusionRolloutAlgoConfig] = field(default_factory=DiffusionRolloutAlgoConfig)
+
+    disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
     external_lib: Optional[str] = None
 

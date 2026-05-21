@@ -3,30 +3,67 @@ Trainer Interface
 
 Last updated: |today| (API docstrings are auto-generated).
 
-VeRL-Omni provides Ray-based trainers for diffusion / multimodal RL. Today,
-:class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.RayFlowGRPOTrainer`
-is the primary entrypoint and orchestrates Flow-GRPO training across actor,
-rollout, reference policy, and reward workers.
+VeRL-Omni provides Ray-based trainers for diffusion / multimodal RL.
+:class:`~verl_omni.trainer.main_diffusion.TaskRunner` builds worker mappings and
+dispatches to a trainer subclass selected by ``algorithm.trainer_type``:
+
+- ``policy_gradient`` → :class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.PolicyGradientRayTrainer`
+  (FlowGRPO, MixGRPO, DanceGRPO, GRPO-Guard; multi-timestep reverse-process PG)
+- ``direct_preference`` → :class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.DirectPreferenceRayTrainer`
+  (DPO, DiffusionNFT, AWM; single forward-timestep preference updates)
+
+Both subclasses inherit shared worker init from
+:class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.BaseRayDiffusionTrainer`.
+Rollout and reward engines are initialized only when ``algorithm.sample_source=online``.
 
 .. autosummary::
    :nosignatures:
 
-   verl_omni.trainer.diffusion.ray_diffusion_trainer.RayFlowGRPOTrainer
-   verl_omni.trainer.diffusion.main_flowgrpo.TaskRunner
+   verl_omni.trainer.diffusion.ray_diffusion_trainer.BaseRayDiffusionTrainer
+   verl_omni.trainer.diffusion.ray_diffusion_trainer.PolicyGradientRayTrainer
+   verl_omni.trainer.diffusion.ray_diffusion_trainer.DirectPreferenceRayTrainer
+   verl_omni.trainer.main_diffusion.TaskRunner
 
-Core Trainer
-~~~~~~~~~~~~~~~~~
+Base Ray Diffusion Trainer
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. autoclass:: verl_omni.trainer.diffusion.ray_diffusion_trainer.RayFlowGRPOTrainer
-   :members: __init__, init_workers, fit
+:class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.BaseRayDiffusionTrainer`
+owns colocated actor/ref worker setup, dataloaders, validation helpers, and
+checkpointing. ``init_workers`` always builds actor/ref workers; rollout and
+reward engines are added only when ``algorithm.sample_source=online``.
+
+.. autoclass:: verl_omni.trainer.diffusion.ray_diffusion_trainer.BaseRayDiffusionTrainer
+   :members: __init__, init_workers
+
+Policy Gradient Ray Trainer
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.PolicyGradientRayTrainer`
+implements the online training loop for FlowGRPO-style algorithms: rollout
+generation, reward scoring, advantage estimation over denoising timesteps, and
+actor updates.
+
+.. autoclass:: verl_omni.trainer.diffusion.ray_diffusion_trainer.PolicyGradientRayTrainer
+   :members: fit
+
+Direct Preference Ray Trainer
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.DirectPreferenceRayTrainer`
+is the extension point for direct-preference algorithms (DPO, DiffusionNFT, AWM)
+that train with single forward-timestep updates rather than a full multi-step
+SDE trajectory. The ``fit`` implementation is not yet available in-tree.
+
+.. autoclass:: verl_omni.trainer.diffusion.ray_diffusion_trainer.DirectPreferenceRayTrainer
+   :members: fit
 
 .. autofunction:: verl_omni.trainer.diffusion.ray_diffusion_trainer.compute_advantage
 
 Entry Point
 ~~~~~~~~~~~~~~~~~
 
-.. automodule:: verl_omni.trainer.diffusion.main_flowgrpo
-   :members: main, run_flowgrpo, TaskRunner
+.. automodule:: verl_omni.trainer.main_diffusion
+   :members: main, run_diffusion, TaskRunner
 
 Diffusion Algorithms
 ~~~~~~~~~~~~~~~~~~~~~
@@ -37,14 +74,16 @@ losses and advantage estimators can be registered via the decorators below.
 
 .. automodule:: verl_omni.trainer.diffusion.diffusion_algos
    :members: DiffusionAdvantageEstimator,
+             DiffusionLossFn,
+             DiffusionLossResult,
              register_diffusion_loss,
              get_diffusion_loss_fn,
              register_diffusion_adv_est,
              get_diffusion_adv_estimator_fn,
              compute_flow_grpo_outcome_advantage,
-             compute_diffusion_loss_flow_grpo,
-             compute_diffusion_loss_grpo_guard,
-             kl_penalty_image
+             FlowGRPOLoss,
+             GRPOGuardLoss,
+             KLLoss,
 
 Trainer Config
 ~~~~~~~~~~~~~~~~~

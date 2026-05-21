@@ -11,15 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-The concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP)
-"""
+"""FSDP engines for diffusion models."""
 
 import gc
 import json
 import logging
 import os
 import warnings
+from abc import ABC, abstractmethod
 from contextlib import contextmanager, nullcontext
 from typing import Callable, Optional
 
@@ -76,10 +75,8 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
-@EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
-class DiffusersFSDPEngine(BaseEngine):
-    """
-    Concrete Diffusers Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
+class DiffusersFSDPEngine(BaseEngine, ABC):
+    """Base Diffusers engine using PyTorch FullyShardedDataParallel (FSDP).
 
     Supports model sharding, activation/optimizer offloading, LoRA, and sequence parallelism.
     """
@@ -236,6 +233,8 @@ class DiffusersFSDPEngine(BaseEngine):
 
     def _build_lora_module(self, module):
         lora_adapter_path = getattr(self.model_config, "lora_adapter_path", None)
+        policy_state_adapters = tuple(getattr(self.model_config, "policy_state_adapters", ("default",)))
+        extra_adapters = tuple(adapter for adapter in policy_state_adapters if adapter not in ("default", "reference"))
         if lora_adapter_path is not None:
             from verl.utils.fs import copy_to_local
 
@@ -244,10 +243,10 @@ class DiffusersFSDPEngine(BaseEngine):
             local_adapter_path = copy_to_local(lora_adapter_path, use_shm=self.model_config.use_shm)
 
             module.load_lora_adapter(local_adapter_path)
-            if self.model_config.algorithm == "diffusion_nft":
-                peft_config = getattr(module, "peft_config", {}).get("default", None)
-                if peft_config is not None:
-                    module.add_adapter(peft_config, adapter_name="old")
+            peft_config = getattr(module, "peft_config", {}).get("default", None)
+            for adapter_name in extra_adapters:
+                if peft_config is not None and adapter_name not in getattr(module, "peft_config", {}):
+                    module.add_adapter(peft_config, adapter_name=adapter_name)
         else:
             # Convert config to regular Python types before creating PEFT model
             lora_config = {
@@ -260,10 +259,10 @@ class DiffusersFSDPEngine(BaseEngine):
                 "bias": "none",
             }
             module.add_adapter(LoraConfig(**lora_config), adapter_name="default")
-            if self.model_config.algorithm == "diffusion_nft":
-                module.add_adapter(LoraConfig(**lora_config), adapter_name="old")
+            for adapter_name in extra_adapters:
+                module.add_adapter(LoraConfig(**lora_config), adapter_name=adapter_name)
 
-        if self.model_config.algorithm == "diffusion_nft":
+        if "default" in policy_state_adapters and hasattr(module, "set_adapter"):
             module.set_adapter("default")
 
         return module
@@ -487,499 +486,27 @@ class DiffusersFSDPEngine(BaseEngine):
     def get_context_parallel_group(self):
         raise NotImplementedError
 
+    @abstractmethod
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
     ) -> list[TensorDict]:
-        num_timesteps = data["all_timesteps"].shape[1]
-        tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
-        tu.assign_non_tensor(data, use_dynamic_bsz=False)
+        """Run forward/backward over a batch; implemented by algorithm-specific subclasses."""
+        pass
 
-        micro_batches, indices = prepare_micro_batches(
-            data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
-        )
-
-        gradient_accumulation_steps = len(micro_batches) * num_timesteps
-
-        output_lst = []
-
-        ctx = torch.no_grad() if forward_only else nullcontext()
-
-        for micro_batch in micro_batches:
-            micro_batch = micro_batch.to(get_device_id())
-            tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
-            meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
-            # Forward and backward for each timestep
-            with ctx:
-                for step in range(num_timesteps):
-                    loss, meta_info = self.forward_step(
-                        micro_batch, loss_function=loss_function, forward_only=forward_only, step=step
-                    )
-
-                    if not forward_only:
-                        loss.backward()
-
-                    for key, val in meta_info.items():
-                        meta_info_lst[key].append(val)
-
-            output_lst.append(meta_info_lst)
-
-        # postprocess and return
-        return self.postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
-
-    def postprocess_batch_func(self, output_lst, indices, data: TensorDict):
-        model_output = {}
-        losses = []
-        aggregated_metrics = {}
-
-        for output in output_lst:
-            # model output list
-            model_output_lst = {}
-            if "model_output" in output:
-                for model_output_dict in output["model_output"]:
-                    for key, val in model_output_dict.items():
-                        model_output_lst.setdefault(key, []).append(val)
-                for key, val in model_output_lst.items():
-                    model_output.setdefault(key, []).append(torch.stack(val, dim=1))  # (bsz, steps, ...)
-            # loss
-            if "loss" in output:
-                losses.append(output["loss"])
-
-            # metrics
-            if "metrics" in output:
-                for metrics in output["metrics"]:
-                    append_to_dict(aggregated_metrics, metrics)
-
-        # concat results from micro batches
-        for key, val in model_output.items():
-            model_output[key] = torch.concat(val, dim=0)  # (global_bsz, steps, ...)
-
-        output = {
-            "model_output": model_output,  # a dict of tensors in shape (global_bsz, steps, ...)
-            "loss": losses,  # micro-batch step-wise losses
-            "metrics": aggregated_metrics,
-        }
-
-        return output
-
-    def forward_backward_decoupled_batch(
-        self, data: TensorDict, loss_function: Callable, forward_only: bool = False
-    ) -> list[TensorDict]:
-        """Forward/backward path for decoupled forward-process diffusion algorithms."""
-        num_timesteps = data["train_timesteps"].shape[1]
-        tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
-        tu.assign_non_tensor(data, use_dynamic_bsz=False)
-
-        micro_batches, indices = prepare_micro_batches(
-            data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
-        )
-        gradient_accumulation_steps = len(micro_batches) * num_timesteps
-        output_lst = []
-        ctx = torch.no_grad() if forward_only else nullcontext()
-
-        for micro_batch in micro_batches:
-            micro_batch = micro_batch.to(get_device_id())
-            tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
-            meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
-            with ctx:
-                for step in range(num_timesteps):
-                    loss, meta_info = self.forward_decoupled_step(
-                        micro_batch, loss_function=loss_function, forward_only=forward_only, step=step
-                    )
-                    if not forward_only:
-                        loss.backward()
-                    for key, val in meta_info.items():
-                        meta_info_lst[key].append(val)
-            output_lst.append(meta_info_lst)
-
-        return self.postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
-
-    def train_batch(self, data: TensorDict, loss_function: Callable):
-        if tu.get_non_tensor_data(data, "training_paradigm", default=None) != "decoupled":
-            return super().train_batch(data=data, loss_function=loss_function)
-
-        self.optimizer_zero_grad()
-        outputs = self.forward_backward_decoupled_batch(data, loss_function, forward_only=False)
-        grad_norm = self.optimizer_step()
-        if self.is_mp_src_rank_with_outputs():
-            assert "grad_norm" not in outputs["metrics"]
-            outputs["metrics"]["grad_norm"] = grad_norm
-        return outputs
-
-    def infer_batch(self, data: TensorDict, loss_function: Optional[Callable] = None):
-        if tu.get_non_tensor_data(data, "training_paradigm", default=None) != "decoupled":
-            return super().infer_batch(data=data, loss_function=loss_function)
-
-        with torch.no_grad():
-            outputs = self.forward_backward_decoupled_batch(data, loss_function, forward_only=True)
-        return outputs
-
-    @staticmethod
-    def _unpad_nested_embeds(embeds: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Convert a jagged nested tensor pair (embeds, mask) to dense padded tensors."""
-        batch_size = embeds.size(0)
-        max_seq_len = max(embeds.offsets().diff())
-        embed_dim = embeds.size(-1)
-        embeds = torch.nested.to_padded_tensor(embeds, padding=0, output_size=(batch_size, max_seq_len, embed_dim))
-        mask = torch.nested.to_padded_tensor(mask, padding=0, output_size=(batch_size, max_seq_len))
-        return embeds, mask
-
-    @staticmethod
-    def _pad_embeds_for_sp(embeds: torch.Tensor, mask: torch.Tensor, sp_size: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Pad sequence dimension of (embeds, mask) to a multiple of sp_size."""
-        seq_len = embeds.size(1)
-        aligned_seq_len = (seq_len + sp_size - 1) // sp_size * sp_size
-        if aligned_seq_len > seq_len:
-            pad_len = aligned_seq_len - seq_len
-            embeds = torch.nn.functional.pad(embeds, (0, 0, 0, pad_len))
-            mask = torch.nn.functional.pad(mask, (0, pad_len))
-        return embeds, mask
-
+    @abstractmethod
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
-        """
-        Extract and pre-process universal tensors, then delegate architecture-specific
-        input construction to the registered DiffusionModelBase subclass.
+        """Build model inputs for one diffusion step; implemented by algorithm-specific subclasses."""
+        pass
 
-        Handles common tensor extraction and nested-embed unpadding here.
-        Architecture-specific input dict construction is delegated to the model registry.
-        """
-        latents = micro_batch["all_latents"]
-        timesteps = micro_batch["all_timesteps"]
-        prompt_embeds = micro_batch["prompt_embeds"]
-        prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
-        negative_prompt_embeds = micro_batch["negative_prompt_embeds"]
-        negative_prompt_embeds_mask = micro_batch["negative_prompt_embeds_mask"]
-        sp_size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
-
-        if prompt_embeds.is_nested:
-            prompt_embeds, prompt_embeds_mask = self._unpad_nested_embeds(prompt_embeds, prompt_embeds_mask)
-
-        if sp_size > 1:
-            prompt_embeds, prompt_embeds_mask = self._pad_embeds_for_sp(prompt_embeds, prompt_embeds_mask, sp_size)
-
-        if isinstance(negative_prompt_embeds, torch.Tensor) and negative_prompt_embeds.is_nested:
-            negative_prompt_embeds, negative_prompt_embeds_mask = self._unpad_nested_embeds(
-                negative_prompt_embeds, negative_prompt_embeds_mask
-            )
-
-        if isinstance(negative_prompt_embeds, torch.Tensor) and sp_size > 1:
-            negative_prompt_embeds, negative_prompt_embeds_mask = self._pad_embeds_for_sp(
-                negative_prompt_embeds, negative_prompt_embeds_mask, sp_size
-            )
-
-        return prepare_model_inputs(
-            module=self.module,
-            model_config=self.model_config,
-            latents=latents,
-            timesteps=timesteps,
-            prompt_embeds=prompt_embeds,
-            prompt_embeds_mask=prompt_embeds_mask,
-            negative_prompt_embeds=negative_prompt_embeds,
-            negative_prompt_embeds_mask=negative_prompt_embeds_mask,
-            micro_batch=micro_batch,
-            step=step,
-        )
-
-    def prepare_decoupled_model_inputs(self, micro_batch: TensorDict, xt: torch.Tensor, step: int):
-        """Prepare model inputs for forward-process decoupled objectives."""
-        timesteps = micro_batch["train_timesteps"]
-        timestep = timesteps[:, step]
-        prompt_embeds = micro_batch["prompt_embeds"]
-        prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
-        negative_prompt_embeds = micro_batch.get("negative_prompt_embeds", None)
-        negative_prompt_embeds_mask = micro_batch.get("negative_prompt_embeds_mask", None)
-        sp_size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
-
-        if prompt_embeds.is_nested:
-            prompt_embeds, prompt_embeds_mask = self._unpad_nested_embeds(prompt_embeds, prompt_embeds_mask)
-
-        if sp_size > 1:
-            prompt_embeds, prompt_embeds_mask = self._pad_embeds_for_sp(prompt_embeds, prompt_embeds_mask, sp_size)
-
-        if isinstance(negative_prompt_embeds, torch.Tensor) and negative_prompt_embeds.is_nested:
-            negative_prompt_embeds, negative_prompt_embeds_mask = self._unpad_nested_embeds(
-                negative_prompt_embeds, negative_prompt_embeds_mask
-            )
-
-        if isinstance(negative_prompt_embeds, torch.Tensor) and sp_size > 1:
-            negative_prompt_embeds, negative_prompt_embeds_mask = self._pad_embeds_for_sp(
-                negative_prompt_embeds, negative_prompt_embeds_mask, sp_size
-            )
-
-        return prepare_forward_diffusion_inputs(
-            module=self.module,
-            model_config=self.model_config,
-            xt=xt,
-            timestep=timestep,
-            prompt_embeds=prompt_embeds,
-            prompt_embeds_mask=prompt_embeds_mask,
-            negative_prompt_embeds=negative_prompt_embeds,
-            negative_prompt_embeds_mask=negative_prompt_embeds_mask,
-            micro_batch=micro_batch,
-            step=step,
-        )
-
+    @abstractmethod
     def prepare_model_outputs(self, output, micro_batch: TensorDict):
-        log_prob, prev_sample_mean, std_dev_t, sqrt_dt = output
-        return {
-            "log_probs": log_prob,
-            "prev_sample_mean": prev_sample_mean,
-            "std_dev_t": std_dev_t,
-            "sqrt_dt": sqrt_dt,
-        }
+        """Post-process raw model output; implemented by algorithm-specific subclasses."""
+        pass
 
+    @abstractmethod
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
-        model_inputs, negative_model_inputs = self.prepare_model_inputs(micro_batch=micro_batch, step=step)
-        raw_output = forward_and_sample_previous_step(
-            module=self.module,
-            scheduler=self.scheduler,
-            model_config=self.model_config,
-            model_inputs=model_inputs,
-            negative_model_inputs=negative_model_inputs,
-            scheduler_inputs=micro_batch,
-            step=step,
-        )
-        model_output = self.prepare_model_outputs(output=raw_output, micro_batch=micro_batch)
-
-        if loss_function is not None:
-            data = tu.get_tensordict(
-                {
-                    "old_log_probs": micro_batch["old_log_probs"][:, step],
-                    "advantages": micro_batch["advantages"][:, step],
-                },
-            )
-            tu.assign_non_tensor(
-                data,
-                gradient_accumulation_steps=tu.get_non_tensor_data(
-                    micro_batch, "gradient_accumulation_steps", default=None
-                ),
-                sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
-            )
-
-            if micro_batch.get("ref_log_prob", None) is not None:
-                data["ref_log_prob"] = micro_batch["ref_log_prob"][:, step]
-
-            if micro_batch.get("ref_prev_sample_mean", None) is not None:
-                data["ref_prev_sample_mean"] = micro_batch["ref_prev_sample_mean"][:, step]
-
-            if micro_batch.get("old_prev_sample_mean", None) is not None:
-                data["old_prev_sample_mean"] = micro_batch["old_prev_sample_mean"][:, step]
-
-            loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
-        else:
-            assert forward_only, "forward_only must be True when loss_function is None"
-            loss = torch.tensor(1.0, device=device_name)
-            metrics = {}
-
-        output = {
-            "model_output": model_output,
-            "loss": loss.detach().item(),
-            "metrics": metrics,
-        }
-
-        return loss, output
-
-    def _set_adapter(self, name: str):
-        module = getattr(self.module, "_fsdp_wrapped_module", self.module)
-        if hasattr(module, "set_adapter"):
-            module.set_adapter(name)
-        elif hasattr(self.module, "set_adapter"):
-            self.module.set_adapter(name)
-        else:
-            raise AttributeError(f"Module does not support set_adapter({name!r})")
-
-    @contextmanager
-    def use_adapter(self, name: str):
-        """Temporarily select a named adapter when the module supports adapters."""
-        self._set_adapter(name)
-        try:
-            yield
-        finally:
-            self._set_adapter("default")
-
-    def _named_parameters_for_adapter(self, adapter_name: str) -> dict[str, torch.nn.Parameter]:
-        module = getattr(self.module, "_fsdp_wrapped_module", self.module)
-        return {
-            name: param
-            for name, param in module.named_parameters()
-            if f".{adapter_name}." in name or name.endswith(f".{adapter_name}")
-        }
-
-    @staticmethod
-    def _adapter_object_parameters(adapter_object) -> dict[str, torch.nn.Parameter]:
-        if isinstance(adapter_object, torch.nn.Parameter):
-            return {"": adapter_object}
-        if hasattr(adapter_object, "named_parameters"):
-            return dict(adapter_object.named_parameters())
-        return {}
-
-    def _adapter_parameter_pairs(
-        self, source: str = "default", target: str = "old"
-    ) -> list[tuple[torch.nn.Parameter, torch.nn.Parameter]]:
-        module = getattr(self.module, "_fsdp_wrapped_module", self.module)
-        pairs = []
-        adapter_container_names = (
-            "lora_A",
-            "lora_B",
-            "lora_embedding_A",
-            "lora_embedding_B",
-            "lora_magnitude_vector",
-        )
-        for submodule in module.modules():
-            for container_name in adapter_container_names:
-                container = getattr(submodule, container_name, None)
-                if container is None or source not in container or target not in container:
-                    continue
-                source_params = self._adapter_object_parameters(container[source])
-                target_params = self._adapter_object_parameters(container[target])
-                for param_name, source_param in source_params.items():
-                    target_param = target_params.get(param_name)
-                    if target_param is not None:
-                        pairs.append((source_param, target_param))
-        return pairs
-
-    def _active_adapter_trainable_params(self, adapter_name: str) -> list[torch.nn.Parameter]:
-        peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
-        if not hasattr(peft_model, "set_adapter"):
-            raise AttributeError("Module does not support PEFT adapter selection.")
-        peft_model.set_adapter(adapter_name)
-        return list(filter(lambda param: param.requires_grad, peft_model.parameters()))
-
-    def copy_adapter(self, source: str = "default", target: str = "old") -> None:
-        """Copy LoRA state between adapters using PEFT's active-adapter view."""
-        is_fsdp_module = fsdp_version(self.module) == 1
-        is_offload_param = getattr(self, "_is_offload_param", False)
-        origin_module_device = next(self.module.parameters()).device.type
-        if is_fsdp_module and (is_offload_param or origin_module_device == "cpu"):
-            load_fsdp_model_to_gpu(self.module)
-        summon_ctx = (
-            FSDP.summon_full_params(self.module, writeback=True, recurse=True)
-            if is_fsdp_module
-            else nullcontext()
-        )
-
-        try:
-            with summon_ctx, torch.no_grad():
-                source_params = self._active_adapter_trainable_params(source)
-                target_params = self._active_adapter_trainable_params(target)
-                if len(source_params) != len(target_params) or not source_params:
-                    raise ValueError(
-                        f"Adapter copy {source!r} -> {target!r} found mismatched params: "
-                        f"{len(source_params)} vs {len(target_params)}"
-                    )
-                for source_param, target_param in zip(source_params, target_params, strict=True):
-                    target_param.data.copy_(source_param.detach().data)
-        finally:
-            self._set_adapter("default")
-            if is_offload_param:
-                offload_fsdp_model_to_cpu(self.module)
-                aggressive_empty_cache(force_sync=True)
-
-    def ema_update_adapter(self, source: str = "default", target: str = "old", decay: float = 0.0) -> None:
-        """EMA-update target adapter parameters from source adapter parameters."""
-        if not 0.0 <= decay <= 1.0:
-            raise ValueError(f"Adapter EMA decay must be in [0, 1], got {decay}.")
-        is_fsdp_module = fsdp_version(self.module) == 1
-        is_offload_param = getattr(self, "_is_offload_param", False)
-        origin_module_device = next(self.module.parameters()).device.type
-        if is_fsdp_module and (is_offload_param or origin_module_device == "cpu"):
-            load_fsdp_model_to_gpu(self.module)
-        summon_ctx = (
-            FSDP.summon_full_params(self.module, writeback=True, recurse=True)
-            if is_fsdp_module
-            else nullcontext()
-        )
-
-        try:
-            with summon_ctx, torch.no_grad():
-                source_params = self._active_adapter_trainable_params(source)
-                target_params = self._active_adapter_trainable_params(target)
-                if len(source_params) != len(target_params) or not source_params:
-                    raise ValueError(
-                        f"Adapter EMA {source!r} -> {target!r} found mismatched params: "
-                        f"{len(source_params)} vs {len(target_params)}"
-                    )
-                for source_param, target_param in zip(source_params, target_params, strict=True):
-                    target_param.data.copy_(
-                        target_param.detach().data * decay + source_param.detach().clone().data * (1.0 - decay)
-                    )
-        finally:
-            self._set_adapter("default")
-            if is_offload_param:
-                offload_fsdp_model_to_cpu(self.module)
-                aggressive_empty_cache(force_sync=True)
-
-    def forward_decoupled_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
-        x0 = micro_batch["latents_clean"]
-        timestep = micro_batch["train_timesteps"][:, step]
-        t = timestep.float() / 1000.0
-        t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
-
-        if micro_batch.get("forward_noise", None) is not None:
-            forward_noise = micro_batch["forward_noise"]
-            noise = forward_noise[:, step] if forward_noise.ndim == x0.ndim + 1 else forward_noise
-        else:
-            noise = torch.randn_like(x0.float())
-        xt = (1.0 - t_expanded) * x0 + t_expanded * noise
-
-        model_inputs, negative_model_inputs = self.prepare_decoupled_model_inputs(micro_batch=micro_batch, xt=xt, step=step)
-
-        self._set_adapter("old")
-        with torch.no_grad():
-            old_prediction = forward_velocity(
-                module=self.module,
-                model_config=self.model_config,
-                model_inputs=model_inputs,
-                negative_model_inputs=negative_model_inputs,
-            ).detach()
-
-        self._set_adapter("default")
-        forward_prediction = forward_velocity(
-            module=self.module,
-            model_config=self.model_config,
-            model_inputs=model_inputs,
-            negative_model_inputs=negative_model_inputs,
-        )
-
-        with torch.no_grad():
-            with self.disable_adapter():
-                ref_forward_prediction = forward_velocity(
-                    module=self.module,
-                    model_config=self.model_config,
-                    model_inputs=model_inputs,
-                    negative_model_inputs=negative_model_inputs,
-                ).detach()
-        self._set_adapter("default")
-
-        model_output = {
-            "old_prediction": old_prediction,
-            "forward_prediction": forward_prediction,
-            "ref_forward_prediction": ref_forward_prediction,
-            "x0": x0,
-            "xt": xt,
-            "t_expanded": t_expanded,
-        }
-
-        if loss_function is not None:
-            data = tu.get_tensordict({"reward_prob": micro_batch["reward_prob"][:, step]})
-            tu.assign_non_tensor(
-                data,
-                gradient_accumulation_steps=tu.get_non_tensor_data(
-                    micro_batch, "gradient_accumulation_steps", default=None
-                ),
-                sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
-            )
-            loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
-        else:
-            assert forward_only, "forward_only must be True when loss_function is None"
-            loss = torch.tensor(1.0, device=x0.device)
-            metrics = {}
-
-        output = {
-            "model_output": model_output,
-            "loss": loss.detach().item(),
-            "metrics": metrics,
-        }
-        return loss, output
+        """Run one diffusion step forward (and loss); implemented by algorithm-specific subclasses."""
+        pass
 
     def optimizer_zero_grad(self):
         """
@@ -1099,6 +626,95 @@ class DiffusersFSDPEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
+    def _set_adapter(self, name: str):
+        module = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        if hasattr(module, "set_adapter"):
+            module.set_adapter(name)
+        elif hasattr(self.module, "set_adapter"):
+            self.module.set_adapter(name)
+        else:
+            raise AttributeError(f"Module does not support set_adapter({name!r})")
+
+    @contextmanager
+    def use_adapter(self, name: str):
+        """Temporarily select a named PEFT adapter."""
+        self._set_adapter(name)
+        try:
+            yield
+        finally:
+            self._set_adapter("default")
+
+    def _active_adapter_trainable_params(self, adapter_name: str) -> list[torch.nn.Parameter]:
+        peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        if not hasattr(peft_model, "set_adapter"):
+            raise AttributeError("Module does not support PEFT adapter selection.")
+        peft_model.set_adapter(adapter_name)
+        return list(filter(lambda param: param.requires_grad, peft_model.parameters()))
+
+    def copy_adapter(self, source: str = "default", target: str = "old") -> None:
+        """Copy LoRA state between named policy adapters."""
+        is_fsdp_module = fsdp_version(self.module) == 1
+        is_offload_param = getattr(self, "_is_offload_param", False)
+        origin_module_device = next(self.module.parameters()).device.type
+        if is_fsdp_module and (is_offload_param or origin_module_device == "cpu"):
+            load_fsdp_model_to_gpu(self.module)
+        summon_ctx = (
+            FSDP.summon_full_params(self.module, writeback=True, recurse=True)
+            if is_fsdp_module
+            else nullcontext()
+        )
+
+        try:
+            with summon_ctx, torch.no_grad():
+                source_params = self._active_adapter_trainable_params(source)
+                target_params = self._active_adapter_trainable_params(target)
+                if len(source_params) != len(target_params) or not source_params:
+                    raise ValueError(
+                        f"Adapter copy {source!r} -> {target!r} found mismatched params: "
+                        f"{len(source_params)} vs {len(target_params)}"
+                    )
+                for source_param, target_param in zip(source_params, target_params, strict=True):
+                    target_param.data.copy_(source_param.detach().data)
+        finally:
+            self._set_adapter("default")
+            if is_offload_param:
+                offload_fsdp_model_to_cpu(self.module)
+                aggressive_empty_cache(force_sync=True)
+
+    def ema_update_adapter(self, source: str = "default", target: str = "old", decay: float = 0.0) -> None:
+        """EMA-update target adapter parameters from source adapter parameters."""
+        if not 0.0 <= decay <= 1.0:
+            raise ValueError(f"Adapter EMA decay must be in [0, 1], got {decay}.")
+        is_fsdp_module = fsdp_version(self.module) == 1
+        is_offload_param = getattr(self, "_is_offload_param", False)
+        origin_module_device = next(self.module.parameters()).device.type
+        if is_fsdp_module and (is_offload_param or origin_module_device == "cpu"):
+            load_fsdp_model_to_gpu(self.module)
+        summon_ctx = (
+            FSDP.summon_full_params(self.module, writeback=True, recurse=True)
+            if is_fsdp_module
+            else nullcontext()
+        )
+
+        try:
+            with summon_ctx, torch.no_grad():
+                source_params = self._active_adapter_trainable_params(source)
+                target_params = self._active_adapter_trainable_params(target)
+                if len(source_params) != len(target_params) or not source_params:
+                    raise ValueError(
+                        f"Adapter EMA {source!r} -> {target!r} found mismatched params: "
+                        f"{len(source_params)} vs {len(target_params)}"
+                    )
+                for source_param, target_param in zip(source_params, target_params, strict=True):
+                    target_param.data.copy_(
+                        target_param.detach().data * decay + source_param.detach().clone().data * (1.0 - decay)
+                    )
+        finally:
+            self._set_adapter("default")
+            if is_offload_param:
+                offload_fsdp_model_to_cpu(self.module)
+                aggressive_empty_cache(force_sync=True)
+
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, adapter_name: str | None = None, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
@@ -1159,6 +775,375 @@ class DiffusersFSDPEngine(BaseEngine):
             yield
         finally:
             self.module.enable_adapters()
+
+
+@EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
+    """Diffusers FSDP engine with PPO forward/backward and I/O preparation."""
+
+    def forward_backward_batch(
+        self, data: TensorDict, loss_function: Callable, forward_only: bool = False
+    ) -> list[TensorDict]:
+        if "train_timesteps" in data and "latents_clean" in data:
+            return DirectPreferenceDiffusersFSDPEngine.forward_backward_batch(
+                self, data=data, loss_function=loss_function, forward_only=forward_only
+            )
+
+        num_timesteps = data["all_timesteps"].shape[1]
+        tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
+        tu.assign_non_tensor(data, use_dynamic_bsz=False)
+
+        micro_batches, indices = prepare_micro_batches(
+            data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
+        )
+
+        gradient_accumulation_steps = len(micro_batches) * num_timesteps
+
+        output_lst = []
+
+        ctx = torch.no_grad() if forward_only else nullcontext()
+
+        for micro_batch in micro_batches:
+            micro_batch = micro_batch.to(get_device_id())
+            tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
+            meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
+            # Forward and backward for each timestep
+            with ctx:
+                for step in range(num_timesteps):
+                    loss, meta_info = self.forward_step(
+                        micro_batch, loss_function=loss_function, forward_only=forward_only, step=step
+                    )
+
+                    if not forward_only:
+                        loss.backward()
+
+                    for key, val in meta_info.items():
+                        meta_info_lst[key].append(val)
+
+            output_lst.append(meta_info_lst)
+
+        # postprocess and return
+        return self.postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+
+    def postprocess_batch_func(self, output_lst, indices, data: TensorDict):
+        model_output = {}
+        losses = []
+        aggregated_metrics = {}
+
+        for output in output_lst:
+            # model output list
+            model_output_lst = {}
+            if "model_output" in output:
+                for model_output_dict in output["model_output"]:
+                    for key, val in model_output_dict.items():
+                        model_output_lst.setdefault(key, []).append(val)
+                for key, val in model_output_lst.items():
+                    model_output.setdefault(key, []).append(torch.stack(val, dim=1))  # (bsz, steps, ...)
+            # loss
+            if "loss" in output:
+                losses.append(output["loss"])
+
+            # metrics
+            if "metrics" in output:
+                for metrics in output["metrics"]:
+                    append_to_dict(aggregated_metrics, metrics)
+
+        # concat results from micro batches
+        for key, val in model_output.items():
+            model_output[key] = torch.concat(val, dim=0)  # (global_bsz, steps, ...)
+
+        output = {
+            "model_output": model_output,  # a dict of tensors in shape (global_bsz, steps, ...)
+            "loss": losses,  # micro-batch step-wise losses
+            "metrics": aggregated_metrics,
+        }
+
+        return output
+
+    @staticmethod
+    def _unpad_nested_embeds(embeds: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert a jagged nested tensor pair (embeds, mask) to dense padded tensors."""
+        batch_size = embeds.size(0)
+        max_seq_len = max(embeds.offsets().diff())
+        embed_dim = embeds.size(-1)
+        embeds = torch.nested.to_padded_tensor(embeds, padding=0, output_size=(batch_size, max_seq_len, embed_dim))
+        mask = torch.nested.to_padded_tensor(mask, padding=0, output_size=(batch_size, max_seq_len))
+        return embeds, mask
+
+    @staticmethod
+    def _pad_embeds_for_sp(embeds: torch.Tensor, mask: torch.Tensor, sp_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pad sequence dimension of (embeds, mask) to a multiple of sp_size."""
+        seq_len = embeds.size(1)
+        aligned_seq_len = (seq_len + sp_size - 1) // sp_size * sp_size
+        if aligned_seq_len > seq_len:
+            pad_len = aligned_seq_len - seq_len
+            embeds = torch.nn.functional.pad(embeds, (0, 0, 0, pad_len))
+            mask = torch.nn.functional.pad(mask, (0, pad_len))
+        return embeds, mask
+
+    def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
+        """
+        Extract and pre-process universal tensors, then delegate architecture-specific
+        input construction to the registered DiffusionModelBase subclass.
+
+        Handles common tensor extraction and nested-embed unpadding here.
+        Architecture-specific input dict construction is delegated to the model registry.
+        """
+        latents = micro_batch["all_latents"]
+        timesteps = micro_batch["all_timesteps"]
+        prompt_embeds = micro_batch["prompt_embeds"]
+        prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
+        negative_prompt_embeds = micro_batch["negative_prompt_embeds"]
+        negative_prompt_embeds_mask = micro_batch["negative_prompt_embeds_mask"]
+        sp_size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
+
+        if prompt_embeds.is_nested:
+            prompt_embeds, prompt_embeds_mask = self._unpad_nested_embeds(prompt_embeds, prompt_embeds_mask)
+
+        if sp_size > 1:
+            prompt_embeds, prompt_embeds_mask = self._pad_embeds_for_sp(prompt_embeds, prompt_embeds_mask, sp_size)
+
+        if isinstance(negative_prompt_embeds, torch.Tensor) and negative_prompt_embeds.is_nested:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self._unpad_nested_embeds(
+                negative_prompt_embeds, negative_prompt_embeds_mask
+            )
+
+        if isinstance(negative_prompt_embeds, torch.Tensor) and sp_size > 1:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self._pad_embeds_for_sp(
+                negative_prompt_embeds, negative_prompt_embeds_mask, sp_size
+            )
+
+        return prepare_model_inputs(
+            module=self.module,
+            model_config=self.model_config,
+            latents=latents,
+            timesteps=timesteps,
+            prompt_embeds=prompt_embeds,
+            prompt_embeds_mask=prompt_embeds_mask,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+            micro_batch=micro_batch,
+            step=step,
+        )
+
+    def prepare_model_outputs(self, output, micro_batch: TensorDict):
+        log_prob, prev_sample_mean, std_dev_t, sqrt_dt = output
+        return {
+            "log_probs": log_prob,
+            "prev_sample_mean": prev_sample_mean,
+            "std_dev_t": std_dev_t,
+            "sqrt_dt": sqrt_dt,
+        }
+
+    def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
+        model_inputs, negative_model_inputs = self.prepare_model_inputs(micro_batch=micro_batch, step=step)
+        raw_output = forward_and_sample_previous_step(
+            module=self.module,
+            scheduler=self.scheduler,
+            model_config=self.model_config,
+            model_inputs=model_inputs,
+            negative_model_inputs=negative_model_inputs,
+            scheduler_inputs=micro_batch,
+            step=step,
+        )
+        model_output = self.prepare_model_outputs(output=raw_output, micro_batch=micro_batch)
+
+        if loss_function is not None:
+            data = tu.get_tensordict(
+                {
+                    "old_log_probs": micro_batch["old_log_probs"][:, step],
+                    "advantages": micro_batch["advantages"][:, step],
+                },
+            )
+            tu.assign_non_tensor(
+                data,
+                gradient_accumulation_steps=tu.get_non_tensor_data(
+                    micro_batch, "gradient_accumulation_steps", default=None
+                ),
+                sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
+            )
+
+            if micro_batch.get("ref_log_prob", None) is not None:
+                data["ref_log_prob"] = micro_batch["ref_log_prob"][:, step]
+
+            if micro_batch.get("ref_prev_sample_mean", None) is not None:
+                data["ref_prev_sample_mean"] = micro_batch["ref_prev_sample_mean"][:, step]
+
+            if micro_batch.get("old_prev_sample_mean", None) is not None:
+                data["old_prev_sample_mean"] = micro_batch["old_prev_sample_mean"][:, step]
+
+            loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
+        else:
+            assert forward_only, "forward_only must be True when loss_function is None"
+            loss = torch.tensor(1.0, device=device_name)
+            metrics = {}
+
+        output = {
+            "model_output": model_output,
+            "loss": loss.detach().item(),
+            "metrics": metrics,
+        }
+
+        return loss, output
+
+
+class DirectPreferenceDiffusersFSDPEngine(PPODiffusersFSDPEngine):
+    """Diffusers FSDP engine path for forward-process direct-preference objectives."""
+
+    def forward_backward_batch(
+        self, data: TensorDict, loss_function: Callable, forward_only: bool = False
+    ) -> list[TensorDict]:
+        num_timesteps = data["train_timesteps"].shape[1]
+        tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
+        tu.assign_non_tensor(data, use_dynamic_bsz=False)
+
+        micro_batches, indices = prepare_micro_batches(
+            data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
+        )
+        gradient_accumulation_steps = len(micro_batches) * num_timesteps
+        output_lst = []
+        ctx = torch.no_grad() if forward_only else nullcontext()
+
+        for micro_batch in micro_batches:
+            micro_batch = micro_batch.to(get_device_id())
+            tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
+            meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
+            with ctx:
+                for step in range(num_timesteps):
+                    loss, meta_info = DirectPreferenceDiffusersFSDPEngine.forward_step(
+                        self,
+                        micro_batch,
+                        loss_function=loss_function,
+                        forward_only=forward_only,
+                        step=step,
+                    )
+                    if not forward_only:
+                        loss.backward()
+                    for key, val in meta_info.items():
+                        meta_info_lst[key].append(val)
+            output_lst.append(meta_info_lst)
+
+        return self.postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+
+    def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
+        x0 = micro_batch["latents_clean"]
+        timestep = micro_batch["train_timesteps"][:, step]
+        t = timestep.float() / 1000.0
+        t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
+
+        if micro_batch.get("forward_noise", None) is not None:
+            forward_noise = micro_batch["forward_noise"]
+            noise = forward_noise[:, step] if forward_noise.ndim == x0.ndim + 1 else forward_noise
+        else:
+            noise = torch.randn_like(x0.float())
+        xt = (1.0 - t_expanded) * x0 + t_expanded * noise
+
+        prompt_embeds = micro_batch["prompt_embeds"]
+        prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
+        negative_prompt_embeds = micro_batch.get("negative_prompt_embeds", None)
+        negative_prompt_embeds_mask = micro_batch.get("negative_prompt_embeds_mask", None)
+        sp_size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
+
+        if prompt_embeds.is_nested:
+            prompt_embeds, prompt_embeds_mask = self._unpad_nested_embeds(prompt_embeds, prompt_embeds_mask)
+
+        if sp_size > 1:
+            prompt_embeds, prompt_embeds_mask = self._pad_embeds_for_sp(prompt_embeds, prompt_embeds_mask, sp_size)
+
+        if isinstance(negative_prompt_embeds, torch.Tensor) and negative_prompt_embeds.is_nested:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self._unpad_nested_embeds(
+                negative_prompt_embeds, negative_prompt_embeds_mask
+            )
+
+        if isinstance(negative_prompt_embeds, torch.Tensor) and sp_size > 1:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self._pad_embeds_for_sp(
+                negative_prompt_embeds, negative_prompt_embeds_mask, sp_size
+            )
+
+        model_inputs, negative_model_inputs = prepare_forward_diffusion_inputs(
+            module=self.module,
+            model_config=self.model_config,
+            xt=xt,
+            timestep=timestep,
+            prompt_embeds=prompt_embeds,
+            prompt_embeds_mask=prompt_embeds_mask,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+            micro_batch=micro_batch,
+            step=step,
+        )
+        return model_inputs, negative_model_inputs, x0, xt, t_expanded
+
+    def prepare_model_outputs(self, output, micro_batch: TensorDict):
+        old_prediction, forward_prediction, ref_forward_prediction, x0, xt, t_expanded = output
+        return {
+            "old_prediction": old_prediction,
+            "forward_prediction": forward_prediction,
+            "ref_forward_prediction": ref_forward_prediction,
+            "x0": x0,
+            "xt": xt,
+            "t_expanded": t_expanded,
+        }
+
+    def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
+        model_inputs, negative_model_inputs, x0, xt, t_expanded = DirectPreferenceDiffusersFSDPEngine.prepare_model_inputs(
+            self,
+            micro_batch=micro_batch,
+            step=step,
+        )
+
+        with self.use_adapter("old"), torch.no_grad():
+            old_prediction = forward_velocity(
+                module=self.module,
+                model_config=self.model_config,
+                model_inputs=model_inputs,
+                negative_model_inputs=negative_model_inputs,
+            ).detach()
+
+        forward_prediction = forward_velocity(
+            module=self.module,
+            model_config=self.model_config,
+            model_inputs=model_inputs,
+            negative_model_inputs=negative_model_inputs,
+        )
+
+        with torch.no_grad():
+            with self.disable_adapter():
+                ref_forward_prediction = forward_velocity(
+                    module=self.module,
+                    model_config=self.model_config,
+                    model_inputs=model_inputs,
+                    negative_model_inputs=negative_model_inputs,
+                ).detach()
+        self._set_adapter("default")
+
+        model_output = DirectPreferenceDiffusersFSDPEngine.prepare_model_outputs(
+            self,
+            output=(old_prediction, forward_prediction, ref_forward_prediction, x0, xt, t_expanded),
+            micro_batch=micro_batch,
+        )
+
+        if loss_function is not None:
+            data = tu.get_tensordict({"reward_prob": micro_batch["reward_prob"][:, step]})
+            tu.assign_non_tensor(
+                data,
+                gradient_accumulation_steps=tu.get_non_tensor_data(
+                    micro_batch, "gradient_accumulation_steps", default=None
+                ),
+                sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
+            )
+            loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
+        else:
+            assert forward_only, "forward_only must be True when loss_function is None"
+            loss = torch.tensor(1.0, device=x0.device)
+            metrics = {}
+
+        output = {
+            "model_output": model_output,
+            "loss": loss.detach().item(),
+            "metrics": metrics,
+        }
+        return loss, output
 
 
 class EngineEvalModeCtx(BaseEngineCtx):
