@@ -25,6 +25,7 @@ import torch.nn.functional as F
 from omegaconf import DictConfig
 from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
+
 from verl_omni.workers.config import DiffusionActorConfig
 
 
@@ -34,7 +35,7 @@ class DiffusionLossResult:
 
     loss: torch.Tensor
     metrics: dict[str, Any]
-    add_loss_metric: bool = True
+    add_loss_metric: bool = False
 
 
 def _format_available_keys(mapping: Any) -> str:
@@ -458,8 +459,10 @@ class GRPOGuardLoss(DiffusionLossFn):
         )
         return DiffusionLossResult(loss=loss, metrics=metrics)
 
+
 class DPOLoss(DiffusionLossFn):
     """DPO loss with win/reward optimization."""
+
     required_model_output_keys = ("noise", "latent", "noise_pred")
     required_data_keys = ("ref_noise_pred", "sample_level_rewards")
 
@@ -504,8 +507,8 @@ class DPOLoss(DiffusionLossFn):
         config: Optional[DictConfig | DiffusionActorConfig] = None,
         *,
         index: Optional[np.ndarray | torch.Tensor | list[Any]] = None,
-        ) -> tuple[torch.Tensor, dict[str, Any]]:
-        """Compute DPO loss from adjacent ``chosen, rejected`` sample pairs. 
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute DPO loss from adjacent ``chosen, rejected`` sample pairs.
         Adapted from https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/dpo/loss.py
         """
         assert config is not None
@@ -563,6 +566,7 @@ class DPOLoss(DiffusionLossFn):
             index=tu.get_non_tensor_data(data, "uid", default=None),
         )
         return DiffusionLossResult(loss=loss, metrics=metrics)
+
 
 @register_diffusion_loss("kl")
 class KLLoss(DiffusionLossFn):
