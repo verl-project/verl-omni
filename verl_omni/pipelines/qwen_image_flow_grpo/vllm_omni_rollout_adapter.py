@@ -213,7 +213,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
                 cur_noise_level = 0.0
             elif i == sde_window[0]:
                 cur_noise_level = noise_level
-                all_latents.append(latents)
+                all_latents.append(latents.float())
             elif i > sde_window[0] and i < sde_window[1]:
                 cur_noise_level = noise_level
             else:
@@ -264,7 +264,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             )
 
             if i >= sde_window[0] and i < sde_window[1]:
-                all_latents.append(latents)
+                all_latents.append(latents.float())
                 all_log_probs.append(log_prob)
                 all_timesteps.append(timestep_value)
 
