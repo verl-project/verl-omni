@@ -102,8 +102,7 @@ def _get_trainer_cls(config):
     if trainer_type == "direct_preference":
         return DirectPreferenceRayTrainer
     raise ValueError(
-        f"Unsupported diffusion trainer_type {trainer_type!r}. "
-        "Expected one of: 'policy_gradient', 'direct_preference'."
+        f"Unsupported diffusion trainer_type {trainer_type!r}. Expected one of: 'policy_gradient', 'direct_preference'."
     )
 
 
@@ -138,9 +137,7 @@ class TaskRunner:
         ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
         if config.algorithm.sample_source == "offline":
-            raise NotImplementedError(
-                "algorithm.sample_source=offline is not supported yet."
-            )
+            raise NotImplementedError("algorithm.sample_source=offline is not supported yet.")
         elif need_reference_policy(config) and not ref_in_actor:
             role = Role.ActorRolloutRef
         else:
