@@ -39,7 +39,8 @@ Diffusers PPO FSDP Engine
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :class:`~verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersFSDPEnginePPO`
-is the concrete engine used by FlowGRPO / diffusion RL training. It extends
+is the concrete engine used by FlowGRPO-style algorithms, such as FlowGRPO,
+MixGRPO, and GRPO-Guard. It extends
 the abstract :class:`~verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersFSDPEngine`
 base, which implements the :class:`verl.workers.engine.base.BaseEngine`
 interface for diffusion transformer backbones (e.g. Qwen-Image), including
