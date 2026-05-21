@@ -47,7 +47,14 @@ def _format_available_keys(mapping: Any) -> str:
 class DiffusionLossFn:
     """Base class for worker-side diffusion loss functions."""
 
+    # Keys that must be present in ``model_output`` (tensors from the actor
+    # forward pass, e.g. ``log_probs``). Subclasses override this so
+    # ``validate_inputs`` can fail fast with a clear error when a pipeline
+    # adapter does not populate everything the loss needs.
     required_model_output_keys: tuple[str, ...] = ()
+    # Keys that must be present in ``data`` (batch tensors from rollout /
+    # trainer, e.g. ``old_log_probs``, ``advantages``). Same early-check
+    # contract as ``required_model_output_keys`` for batch-side inputs.
     required_data_keys: tuple[str, ...] = ()
 
     def validate_inputs(
