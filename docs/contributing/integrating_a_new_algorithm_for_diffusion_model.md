@@ -54,7 +54,7 @@ runtime:
 
    loss_mode
                 ↓
-   FlowGRPOLossFunc
+   FlowGRPOLoss
 ```
 
 All four registries (`DiffusionModelBase`, `VllmOmniPipelineBase`,
@@ -163,7 +163,7 @@ def compute_diffusion_loss_flow_grpo(
     return pg_loss, pg_metrics
 
 @register_diffusion_loss("flow_grpo")
-class FlowGRPOLossFunc(DiffusionLossFn):
+class FlowGRPOLoss(DiffusionLossFn):
     """Build Flow-GRPO loss inputs from the worker batch."""
 
     required_model_output_keys = ("log_probs",)

@@ -47,9 +47,9 @@ losses and advantage estimators can be registered via the decorators below.
              compute_diffusion_loss_flow_grpo,
              compute_diffusion_loss_grpo_guard,
              kl_penalty,
-             FlowGRPOLossFunc,
-             GRPOGuardLossFunc,
-             KLLossFunc,
+             FlowGRPOLoss,
+             GRPOGuardLoss,
+             KLLoss,
 
 Trainer Config
 ~~~~~~~~~~~~~~~~~

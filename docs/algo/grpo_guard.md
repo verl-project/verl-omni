@@ -37,7 +37,7 @@ $$
 $$
 
 The squared-norm in $b_t$ is averaged over the channel and spatial dimensions
-of the latent (see `GRPOGuardLossFunc` in
+of the latent (see `GRPOGuardLoss` in
 [`verl_omni/trainer/diffusion/diffusion_algos.py`](../../verl_omni/trainer/diffusion/diffusion_algos.py)).
 
 ## Configuration

@@ -290,7 +290,7 @@ def compute_diffusion_loss_flow_grpo(
 
 
 @register_diffusion_loss("flow_grpo")
-class FlowGRPOLossFunc(DiffusionLossFn):
+class FlowGRPOLoss(DiffusionLossFn):
     """Build Flow-GRPO loss inputs from the worker batch."""
 
     required_model_output_keys = ("log_probs",)
@@ -406,7 +406,7 @@ def compute_diffusion_loss_grpo_guard(
 
 
 @register_diffusion_loss("grpo_guard")
-class GRPOGuardLossFunc(DiffusionLossFn):
+class GRPOGuardLoss(DiffusionLossFn):
     """Build GRPO-Guard loss inputs from the worker batch."""
 
     required_model_output_keys = ("log_probs", "prev_sample_mean", "std_dev_t", "sqrt_dt")
@@ -446,7 +446,7 @@ def kl_penalty(
 
 
 @register_diffusion_loss("kl")
-class KLLossFunc(DiffusionLossFn):
+class KLLoss(DiffusionLossFn):
     """Build diffusion KL regularization inputs from the worker batch."""
 
     required_model_output_keys = ("prev_sample_mean", "std_dev_t")

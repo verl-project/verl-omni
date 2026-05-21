@@ -167,7 +167,7 @@ class TestDiffusionLossRegistry(unittest.TestCase):
         assert isinstance(result.metrics, dict)
 
 
-class TestKLLossFunc:
+class TestKLLoss:
     def test_computes_kl_loss_and_metrics(self):
         class _Config:
             kl_loss_coef = 0.1
