@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
-import os
 
 import diffusers
 import torch
@@ -77,51 +76,4 @@ def _apply_qwen_image_ulysses_mask_fix() -> None:
     QwenImageTransformer2DModel.forward = _patched_forward
 
 
-def _apply_diffusion_master_port_env_fix() -> None:
-    """Honor MASTER_PORT set by verl-omni rollout servers for diffusion workers.
-
-    vllm-omni's OmniDiffusionConfig.__post_init__ picks a random port in a narrow
-    range (30005 + rand(0, 100)), which collides when multiple Ray vLLMOmniHttpServer
-    actors start in parallel. verl's vLLM reward path avoids this via get_free_port().
-
-    # TODO (long): drop this
-    """
-    try:
-        from vllm_omni.diffusion.data import OmniDiffusionConfig
-    except ImportError:
-        return
-
-    if getattr(OmniDiffusionConfig, "_verl_omni_master_port_patched", False):
-        return
-
-    _orig_post_init = OmniDiffusionConfig.__post_init__
-
-    def _patched_post_init(self) -> None:
-        env_port = os.environ.get("MASTER_PORT")
-        reserved_port: int | None = None
-        if env_port is not None:
-            try:
-                reserved_port = int(env_port)
-            except ValueError:
-                logger.warning("Ignoring invalid MASTER_PORT=%r for diffusion workers", env_port)
-
-        _orig_post_init(self)
-
-        if reserved_port is not None:
-            if not _patched_post_init._warned:
-                logger.warning(
-                    "verl_omni patch applied: OmniDiffusionConfig.__post_init__ now honors "
-                    "MASTER_PORT from the environment (set by vLLMOmniHttpServer) instead of "
-                    "vllm-omni's random port selection. Remove this patch once vllm-omni "
-                    "respects an explicit master_port without adding random jitter."
-                )
-                _patched_post_init._warned = True
-            self.master_port = reserved_port
-
-    _patched_post_init._warned = False
-    OmniDiffusionConfig.__post_init__ = _patched_post_init
-    OmniDiffusionConfig._verl_omni_master_port_patched = True
-
-
 _apply_qwen_image_ulysses_mask_fix()
-_apply_diffusion_master_port_env_fix()

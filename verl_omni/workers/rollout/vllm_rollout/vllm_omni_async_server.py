@@ -40,6 +40,7 @@ from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.utils.vllm_omni import VLLMOmniHijack
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
 
@@ -116,6 +117,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         os.environ["MASTER_PORT"] = str(diffusion_master_port)
         logger.info("Using MASTER_PORT=%s for vLLM-Omni diffusion workers", os.environ["MASTER_PORT"])
 
+        # Apply before AsyncOmni builds OmniDiffusionConfig in this process.
+        VLLMOmniHijack.hijack()
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
         await omni_init_app_state(engine_client, app.state, args)
