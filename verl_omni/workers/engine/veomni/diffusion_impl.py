@@ -17,28 +17,33 @@ import logging
 import os
 from contextlib import nullcontext
 from dataclasses import fields
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 import torch.distributed
+from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
 from verl.trainer.config import CheckpointConfig
+from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import convert_weight_keys
+from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_dtypes import PrecisionType
-from verl.workers.engine.base import EngineRegistry
+from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
+from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
 
+from verl_omni.pipelines.utils import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
 from verl_omni.workers.config import (
     DiffusionModelConfig,
     VeOmniDiffusionEngineConfig,
     VeOmniDiffusionOptimizerConfig,
 )
-from verl_omni.workers.engine.fsdp.diffusers_impl import DiffusersFSDPEngine
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+device_name = get_device_name()
 
 
 @torch.no_grad()
@@ -100,7 +105,7 @@ def _load_veomni_optimizer(optimizer, device):
 
 
 @EngineRegistry.register(model_type="diffusion_model", backend=["veomni"], device=["cuda"])
-class VeOmniDiffusionEngine(DiffusersFSDPEngine):
+class VeOmniDiffusionEngine(BaseEngine):
     """VeOmni-backed diffusion training engine for verl-omni RL loops."""
 
     def __init__(
@@ -115,12 +120,31 @@ class VeOmniDiffusionEngine(DiffusersFSDPEngine):
                 "VeOmni diffusion backend does not support LoRA training yet. "
                 "Use the existing fsdp/fsdp2 diffusion backend for LoRA runs."
             )
-        super().__init__(
-            model_config=model_config,
-            engine_config=engine_config,
-            optimizer_config=optimizer_config,
-            checkpoint_config=checkpoint_config,
-        )
+        super().__init__()
+
+        self.model_config = model_config
+        self.engine_config = engine_config
+        self.optimizer_config = optimizer_config
+        self.checkpoint_config = checkpoint_config
+        self.mode = None
+        self.rank = torch.distributed.get_rank()
+
+        self._init_device_mesh()
+
+        if self.engine_config.full_determinism:
+            enable_full_determinism(seed=self.engine_config.seed)
+
+        self._is_offload_param = self.engine_config.param_offload
+        self._is_offload_optimizer = self.engine_config.optimizer_offload
+        self._is_lora = False
+
+    @property
+    def is_param_offload_enabled(self) -> bool:
+        return self._is_offload_param
+
+    @property
+    def is_optimizer_offload_enabled(self) -> bool:
+        return self._is_offload_optimizer
 
     def _init_device_mesh(self):
         from veomni.distributed import parallel_state
@@ -217,6 +241,9 @@ class VeOmniDiffusionEngine(DiffusersFSDPEngine):
             lr_start=self.optimizer_config.lr_start,
         )
 
+    def _build_scheduler(self):
+        return build_scheduler(self.model_config)
+
     def _build_model_optimizer(self):
         from veomni.distributed.offloading import build_activation_offloading_context
         from veomni.distributed.torch_parallelize import build_parallelize_model
@@ -225,6 +252,9 @@ class VeOmniDiffusionEngine(DiffusersFSDPEngine):
         config_path, weights_path = self._get_veomni_model_paths()
         mixed_precision = self._build_mixed_precision_config()
 
+        # Keep this sequence aligned with VeOmni's DiTTrainer._build_model:
+        # build the foundation DiT first, then hand it to VeOmni's parallelizer,
+        # optimizer, scheduler, and training contexts.
         module = build_foundation_model(
             config_path=config_path,
             weights_path=weights_path,
@@ -280,6 +310,12 @@ class VeOmniDiffusionEngine(DiffusersFSDPEngine):
             grad=self._is_offload_param,
         )
 
+    def train_mode(self, **kwargs):
+        return EngineTrainModeCtx(self, **kwargs)
+
+    def eval_mode(self, **kwargs):
+        return EngineEvalModeCtx(self, **kwargs)
+
     def get_data_parallel_rank(self):
         from veomni.distributed import parallel_state
 
@@ -301,6 +337,191 @@ class VeOmniDiffusionEngine(DiffusersFSDPEngine):
         ps = parallel_state.get_parallel_state()
         return ps.sp_rank == 0 if ps.sp_enabled else True
 
+    @staticmethod
+    def _unpad_nested_embeds(embeds: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size = embeds.size(0)
+        max_seq_len = max(embeds.offsets().diff())
+        embed_dim = embeds.size(-1)
+        embeds = torch.nested.to_padded_tensor(embeds, padding=0, output_size=(batch_size, max_seq_len, embed_dim))
+        mask = torch.nested.to_padded_tensor(mask, padding=0, output_size=(batch_size, max_seq_len))
+        return embeds, mask
+
+    @staticmethod
+    def _pad_embeds_for_sp(embeds: torch.Tensor, mask: torch.Tensor, sp_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+        seq_len = embeds.size(1)
+        aligned_seq_len = (seq_len + sp_size - 1) // sp_size * sp_size
+        if aligned_seq_len > seq_len:
+            pad_len = aligned_seq_len - seq_len
+            embeds = torch.nn.functional.pad(embeds, (0, 0, 0, pad_len))
+            mask = torch.nn.functional.pad(mask, (0, pad_len))
+        return embeds, mask
+
+    def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
+        latents = micro_batch["all_latents"]
+        timesteps = micro_batch["all_timesteps"]
+        prompt_embeds = micro_batch["prompt_embeds"]
+        prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
+        negative_prompt_embeds = micro_batch["negative_prompt_embeds"]
+        negative_prompt_embeds_mask = micro_batch["negative_prompt_embeds_mask"]
+        sp_size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
+
+        if prompt_embeds.is_nested:
+            prompt_embeds, prompt_embeds_mask = self._unpad_nested_embeds(prompt_embeds, prompt_embeds_mask)
+
+        if sp_size > 1:
+            prompt_embeds, prompt_embeds_mask = self._pad_embeds_for_sp(prompt_embeds, prompt_embeds_mask, sp_size)
+
+        if isinstance(negative_prompt_embeds, torch.Tensor) and negative_prompt_embeds.is_nested:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self._unpad_nested_embeds(
+                negative_prompt_embeds, negative_prompt_embeds_mask
+            )
+
+        if isinstance(negative_prompt_embeds, torch.Tensor) and sp_size > 1:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self._pad_embeds_for_sp(
+                negative_prompt_embeds, negative_prompt_embeds_mask, sp_size
+            )
+
+        return prepare_model_inputs(
+            module=self.module,
+            model_config=self.model_config,
+            latents=latents,
+            timesteps=timesteps,
+            prompt_embeds=prompt_embeds,
+            prompt_embeds_mask=prompt_embeds_mask,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+            micro_batch=micro_batch,
+            step=step,
+        )
+
+    def prepare_model_outputs(self, output, micro_batch: TensorDict):
+        log_prob, prev_sample_mean, std_dev_t, sqrt_dt = output
+        return {
+            "log_probs": log_prob,
+            "prev_sample_mean": prev_sample_mean,
+            "std_dev_t": std_dev_t,
+            "sqrt_dt": sqrt_dt,
+        }
+
+    def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
+        model_inputs, negative_model_inputs = self.prepare_model_inputs(micro_batch=micro_batch, step=step)
+        raw_output = forward_and_sample_previous_step(
+            module=self.module,
+            scheduler=self.scheduler,
+            model_config=self.model_config,
+            model_inputs=model_inputs,
+            negative_model_inputs=negative_model_inputs,
+            scheduler_inputs=micro_batch,
+            step=step,
+        )
+        model_output = self.prepare_model_outputs(output=raw_output, micro_batch=micro_batch)
+
+        if loss_function is not None:
+            data = tu.get_tensordict(
+                {
+                    "old_log_probs": micro_batch["old_log_probs"][:, step],
+                    "advantages": micro_batch["advantages"][:, step],
+                },
+            )
+            tu.assign_non_tensor(
+                data,
+                gradient_accumulation_steps=tu.get_non_tensor_data(
+                    micro_batch, "gradient_accumulation_steps", default=None
+                ),
+                sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
+            )
+
+            if micro_batch.get("ref_log_prob", None) is not None:
+                data["ref_log_prob"] = micro_batch["ref_log_prob"][:, step]
+
+            if micro_batch.get("ref_prev_sample_mean", None) is not None:
+                data["ref_prev_sample_mean"] = micro_batch["ref_prev_sample_mean"][:, step]
+
+            if micro_batch.get("old_prev_sample_mean", None) is not None:
+                data["old_prev_sample_mean"] = micro_batch["old_prev_sample_mean"][:, step]
+
+            loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
+        else:
+            assert forward_only, "forward_only must be True when loss_function is None"
+            loss = torch.tensor(1.0, device=device_name)
+            metrics = {}
+
+        output = {
+            "model_output": model_output,
+            "loss": loss.detach().item(),
+            "metrics": metrics,
+        }
+
+        return loss, output
+
+    def forward_backward_batch(
+        self, data: TensorDict, loss_function: Callable, forward_only: bool = False
+    ) -> list[TensorDict]:
+        num_timesteps = data["all_timesteps"].shape[1]
+        tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
+        tu.assign_non_tensor(data, use_dynamic_bsz=False)
+
+        micro_batches, indices = prepare_micro_batches(
+            data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
+        )
+
+        gradient_accumulation_steps = len(micro_batches) * num_timesteps
+        output_lst = []
+        ctx = torch.no_grad() if forward_only else nullcontext()
+
+        for micro_batch in micro_batches:
+            micro_batch = micro_batch.to(get_device_id())
+            tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
+            meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
+            with ctx:
+                for step in range(num_timesteps):
+                    loss, meta_info = self.forward_step(
+                        micro_batch, loss_function=loss_function, forward_only=forward_only, step=step
+                    )
+
+                    if not forward_only:
+                        loss.backward()
+
+                    for key, val in meta_info.items():
+                        meta_info_lst[key].append(val)
+
+            output_lst.append(meta_info_lst)
+
+        return self.postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+
+    def postprocess_batch_func(self, output_lst, indices, data: TensorDict):
+        model_output = {}
+        losses = []
+        aggregated_metrics = {}
+
+        for output in output_lst:
+            model_output_lst = {}
+            if "model_output" in output:
+                for model_output_dict in output["model_output"]:
+                    for key, val in model_output_dict.items():
+                        model_output_lst.setdefault(key, []).append(val)
+                for key, val in model_output_lst.items():
+                    model_output.setdefault(key, []).append(torch.stack(val, dim=1))
+
+            if "loss" in output:
+                losses.append(output["loss"])
+
+            if "metrics" in output:
+                for metrics in output["metrics"]:
+                    append_to_dict(aggregated_metrics, metrics)
+
+        for key, val in model_output.items():
+            model_output[key] = torch.concat(val, dim=0)
+
+        return {
+            "model_output": model_output,
+            "loss": losses,
+            "metrics": aggregated_metrics,
+        }
+
+    def optimizer_zero_grad(self):
+        self.optimizer.zero_grad()
+
     def optimizer_step(self):
         assert self.optimizer_config.clip_grad is not None
 
@@ -319,8 +540,12 @@ class VeOmniDiffusionEngine(DiffusersFSDPEngine):
             self.optimizer.step()
         return grad_norm.item()
 
+    def lr_scheduler_step(self):
+        self.lr_scheduler.step()
+        return self.lr_scheduler.get_last_lr()[0]
+
     def to(self, device: str, model: bool = True, optimizer: bool = True, grad: bool = True):
-        super(DiffusersFSDPEngine, self).to(device=device, model=model, optimizer=optimizer, grad=grad)
+        super().to(device=device, model=model, optimizer=optimizer, grad=grad)
 
         device_name = get_device_name()
         assert device in (device_name, "cpu")
@@ -399,3 +624,34 @@ class VeOmniDiffusionEngine(DiffusersFSDPEngine):
 
     def disable_adapter(self):
         return nullcontext()
+
+
+class EngineEvalModeCtx(BaseEngineCtx):
+    def __init__(self, engine: VeOmniDiffusionEngine, **kwargs):
+        super().__init__(engine=engine, mode="eval", **kwargs)
+
+    def __enter__(self):
+        assert isinstance(self.engine, VeOmniDiffusionEngine)
+        super().__enter__()
+        self.engine.module.eval()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        assert isinstance(self.engine, VeOmniDiffusionEngine)
+        if self.engine.engine_config.fsdp_size > 1 and hasattr(self.engine.module, "reshard"):
+            self.engine.module.reshard()
+        super().__exit__(exc_type, exc_value, traceback)
+
+
+class EngineTrainModeCtx(BaseEngineCtx):
+    def __init__(self, engine: VeOmniDiffusionEngine, **kwargs):
+        super().__init__(engine=engine, mode="train", **kwargs)
+
+    def __enter__(self):
+        assert isinstance(self.engine, VeOmniDiffusionEngine)
+        super().__enter__()
+        self.engine.module.train()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        assert isinstance(self.engine, VeOmniDiffusionEngine)
+        self.engine.optimizer_zero_grad()
+        super().__exit__(exc_type, exc_value, traceback)
