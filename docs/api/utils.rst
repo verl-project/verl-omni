@@ -29,13 +29,14 @@ Dataset Utilities
 
 VeRL-Omni's RLHF dataset class is a thin subclass of
 :class:`verl.utils.dataset.rl_dataset.RLHFDataset` that adds an optional
-``negative_prompt`` channel for classifier-free guidance. The ``collate_fn``,
-``get_dataset_class``, ``create_rl_dataset`` and ``create_rl_sampler``
-helpers are re-exported from upstream so callers can keep importing from a
-single module.
+``negative_prompt`` channel for classifier-free guidance. The ``get_collate_fn``, 
+``get_dataset_class``, ``create_rl_dataset`` and ``create_rl_sampler`` helpers
+keep callers importing dataset utilities from a single module.
 
 .. autoclass:: verl_omni.utils.dataset.rl_dataset.RLHFDataset
    :members: __init__, __getitem__
+
+.. autofunction:: verl_omni.utils.dataset.rl_dataset.get_collate_fn
 
 .. autofunction:: verl_omni.utils.dataset.rl_dataset.get_dataset_class
 
