@@ -214,84 +214,141 @@ class VeOmniDiffusionEngine(BaseEngine):
         config_path = self.model_config.veomni_config_path or weights_path
         return config_path, weights_path
 
-    def _build_optimizer(self, module):
-        from veomni.optim import build_optimizer
-
-        return build_optimizer(
-            module,
-            lr=self.optimizer_config.lr,
-            betas=tuple(self.optimizer_config.betas),
-            eps=self.optimizer_config.eps,
-            weight_decay=self.optimizer_config.weight_decay,
-            fused=self.optimizer_config.fused,
-            optimizer_type=self.optimizer_config.optimizer,
-        )
-
-    def _build_lr_scheduler(self, optimizer):
-        from veomni.optim import build_lr_scheduler
-
-        return build_lr_scheduler(
-            optimizer,
-            train_steps=self.optimizer_config.total_training_steps,
-            lr=self.optimizer_config.lr,
-            lr_min=self.optimizer_config.lr_min,
-            lr_decay_style=self.optimizer_config.lr_scheduler_type,
-            lr_decay_ratio=self.optimizer_config.lr_decay_ratio,
-            lr_warmup_ratio=self.optimizer_config.lr_warmup_steps_ratio,
-            lr_start=self.optimizer_config.lr_start,
-        )
-
     def _build_scheduler(self):
         return build_scheduler(self.model_config)
 
-    def _build_model_optimizer(self):
-        from veomni.distributed.offloading import build_activation_offloading_context
-        from veomni.distributed.torch_parallelize import build_parallelize_model
-        from veomni.models.auto import build_foundation_model
+    def _build_veomni_dit_args(self):
+        from veomni.arguments import (
+            AcceleratorConfig,
+            FSDPConfig,
+            GradientCheckpointingConfig,
+            MixedPrecisionConfig,
+            OffloadConfig,
+            OptimizerConfig,
+        )
+        from veomni.trainer.dit_trainer import (
+            DiTDataArguments,
+            DiTModelArguments,
+            DiTTrainingArguments,
+            VeOmniDiTArguments,
+        )
 
         config_path, weights_path = self._get_veomni_model_paths()
-        mixed_precision = self._build_mixed_precision_config()
+        world_size = torch.distributed.get_world_size()
+        dp_size = world_size // self.engine_config.ulysses_parallel_size
+        fsdp_size = self.engine_config.fsdp_size
+        if fsdp_size < 0 or fsdp_size >= dp_size:
+            dp_replicate_size = 1
+            dp_shard_size = dp_size
+        else:
+            dp_replicate_size = dp_size // fsdp_size
+            dp_shard_size = fsdp_size
 
-        # Keep this sequence aligned with VeOmni's DiTTrainer._build_model:
-        # build the foundation DiT first, then hand it to VeOmni's parallelizer,
-        # optimizer, scheduler, and training contexts.
-        module = build_foundation_model(
-            config_path=config_path,
-            weights_path=weights_path,
-            torch_dtype=self._get_veomni_torch_dtype(),
-            init_device=self.engine_config.init_device,
-            ops_implementation=self._build_ops_config(),
+        mixed_precision = MixedPrecisionConfig(
+            enable=self.engine_config.mixed_precision,
+            param_dtype=self.engine_config.mixed_precision_param_dtype,
+            reduce_dtype=self.engine_config.mixed_precision_reduce_dtype,
+            output_dtype=self.engine_config.mixed_precision_output_dtype,
+            cast_forward_inputs=self.engine_config.mixed_precision_cast_forward_inputs,
         )
-
-        module = build_parallelize_model(
-            module,
-            init_device=self.engine_config.init_device,
-            weights_path=weights_path,
-            enable_reshard_after_forward=self.engine_config.reshard_after_forward,
+        fsdp_config = FSDPConfig(
+            fsdp_mode="fsdp2",
+            reshard_after_forward=self.engine_config.reshard_after_forward,
+            forward_prefetch=self.engine_config.forward_prefetch,
             mixed_precision=mixed_precision,
-            enable_gradient_checkpointing=self.model_config.enable_gradient_checkpointing,
-            basic_modules=list(set(getattr(module, "_no_split_modules", None) or [])),
-            enable_reentrant=self.engine_config.enable_reentrant,
-            enable_forward_prefetch=self.engine_config.forward_prefetch,
         )
+        accelerator = AcceleratorConfig(
+            dp_replicate_size=dp_replicate_size,
+            dp_shard_size=dp_shard_size,
+            ep_size=self.engine_config.expert_parallel_size,
+            ulysses_size=self.engine_config.ulysses_parallel_size,
+            fsdp_config=fsdp_config,
+            offload_config=OffloadConfig(
+                enable_activation=self.engine_config.enable_activation_offload,
+                activation_gpu_limit=self.engine_config.activation_gpu_limit,
+            ),
+        )
+        optimizer = OptimizerConfig(
+            type=self.optimizer_config.optimizer,
+            lr=self.optimizer_config.lr,
+            lr_min=self.optimizer_config.lr_min,
+            lr_start=self.optimizer_config.lr_start,
+            lr_warmup_ratio=self.optimizer_config.lr_warmup_steps_ratio,
+            lr_decay_style=self.optimizer_config.lr_scheduler_type,
+            lr_decay_ratio=self.optimizer_config.lr_decay_ratio,
+            weight_decay=self.optimizer_config.weight_decay,
+            max_grad_norm=self.optimizer_config.clip_grad,
+        )
+        train_args = DiTTrainingArguments(
+            dyn_bsz=False,
+            micro_batch_size=1,
+            global_batch_size=dp_size,
+            num_train_epochs=1,
+            init_device=self.engine_config.init_device,
+            broadcast_model_weights_from_rank0=True,
+            enable_full_determinism=self.engine_config.full_determinism,
+            seed=self.engine_config.seed,
+            optimizer=optimizer,
+            gradient_checkpointing=GradientCheckpointingConfig(
+                enable=self.model_config.enable_gradient_checkpointing,
+                enable_reentrant=self.engine_config.enable_reentrant,
+            ),
+            accelerator=accelerator,
+            training_task="offline_training",
+        )
+        train_args._train_steps = self.optimizer_config.total_training_steps
 
+        args = VeOmniDiTArguments(
+            model=DiTModelArguments(
+                config_path=config_path,
+                model_path=weights_path,
+                model_config={},
+                tokenizer_path=(
+                    self.model_config.local_tokenizer_path or self.model_config.tokenizer_path or config_path
+                ),
+                basic_modules=[],
+                lora_config={},
+                ops_implementation=self._build_ops_config(),
+            ),
+            data=DiTDataArguments(train_path=self.model_config.local_path, text_keys="messages"),
+            train=train_args,
+        )
+        args._train_steps = self.optimizer_config.total_training_steps
+        return args
+
+    def _build_veomni_dit_trainer(self):
+        from veomni.trainer.base import BaseTrainer
+        from veomni.trainer.dit_trainer import DiTTrainer
+
+        trainer = DiTTrainer.__new__(DiTTrainer)
+        trainer.base = BaseTrainer.__new__(BaseTrainer)
+        trainer.base.args = self._build_veomni_dit_args()
+        trainer.training_task = "offline_training"
+        trainer.base.device = torch.device(device_name)
+        return trainer
+
+    def _build_model_optimizer(self):
+        from veomni.trainer.base import BaseTrainer
+
+        self.veomni_trainer = self._build_veomni_dit_trainer()
+        veomni_base = self.veomni_trainer.base
+        BaseTrainer._build_model(veomni_base)
+        BaseTrainer._build_parallelized_model(veomni_base)
         scheduler = self._build_scheduler()
         if not self.engine_config.forward_only:
-            optimizer = self._build_optimizer(module)
-            lr_scheduler = self._build_lr_scheduler(optimizer)
+            BaseTrainer._build_optimizer(veomni_base)
+            BaseTrainer._build_lr_scheduler(veomni_base)
         else:
-            optimizer = None
-            lr_scheduler = None
+            veomni_base.optimizer = None
+            veomni_base.lr_scheduler = None
+        BaseTrainer._build_training_context(veomni_base)
 
-        self.module = module
+        self.module = veomni_base.model
         self.scheduler = scheduler
-        self.optimizer = optimizer
-        self.lr_scheduler = lr_scheduler
-        self.model_fwd_context, self.model_bwd_context = build_activation_offloading_context(
-            self.engine_config.enable_activation_offload,
-            self.model_config.enable_gradient_checkpointing,
-            self.engine_config.activation_gpu_limit,
-        )
+        self.optimizer = veomni_base.optimizer
+        self.lr_scheduler = veomni_base.lr_scheduler
+        self.model_fwd_context = veomni_base.model_fwd_context
+        self.model_bwd_context = veomni_base.model_bwd_context
 
     def initialize(self):
         self._build_model_optimizer()

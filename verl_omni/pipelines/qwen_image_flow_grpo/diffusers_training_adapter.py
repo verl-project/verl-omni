@@ -63,6 +63,17 @@ def _configure_qwen_image_scheduler(
     scheduler.set_timesteps(num_inference_steps, device=device, sigmas=sigmas, mu=mu)
 
 
+def _is_veomni_qwen_image_module(module: QwenImageTransformer2DModel) -> bool:
+    target_module = getattr(module, "_fsdp_wrapped_module", module)
+    return target_module.__class__.__module__.startswith("veomni.models.diffusers.qwen_image")
+
+
+def _forward_qwen_image_prediction(module: QwenImageTransformer2DModel, model_inputs: dict[str, torch.Tensor]):
+    if _is_veomni_qwen_image_module(module):
+        return module(**model_inputs, return_loss=False)[0]
+    return module(**model_inputs)[0]
+
+
 @DiffusionModelBase.register("QwenImagePipeline", algorithm="flow_grpo")
 class QwenImage(DiffusionModelBase):
     """Training adapter for the Qwen-Image diffusion model.
@@ -219,11 +230,11 @@ class QwenImage(DiffusionModelBase):
         latents = scheduler_inputs["all_latents"]
         timesteps = scheduler_inputs["all_timesteps"]
 
-        noise_pred = module(**model_inputs)[0]
+        noise_pred = _forward_qwen_image_prediction(module, model_inputs)
         true_cfg_scale = model_config.pipeline.true_cfg_scale
         if true_cfg_scale > 1.0:
             assert negative_model_inputs is not None
-            neg_noise_pred = module(**negative_model_inputs)[0]
+            neg_noise_pred = _forward_qwen_image_prediction(module, negative_model_inputs)
             noise_pred = apply_true_cfg(noise_pred, neg_noise_pred, true_cfg_scale)
 
         _, log_prob, prev_sample_mean, std_dev_t, sqrt_dt = scheduler.sample_previous_step(
