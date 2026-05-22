@@ -43,12 +43,12 @@ The training adapter is **unchanged** — it already uses fp32 correctly.
 cast noise_pred to fp32 for scheduler (precision), store latents in fp32:
 
 ```python
-x = latents.to(self.transformer.dtype)         # cast to bf16 for transformer
+x = latents.to(self.transformer.img_in.weight.dtype)  # bf16 for transformer
 noise_pred = self.transformer(hidden_states=x, ...)
 latents, log_prob, _, _ = self.scheduler.step(
-    noise_pred.float(), ...)                   # fp32 for scheduler
-all_latents.append(latents)                    # fp32 from scheduler
-all_latents.append(latents.float())            # initial latent: bf16 → fp32
+    noise_pred.float(), ...)                           # fp32 for scheduler
+all_latents.append(latents)                            # fp32 from scheduler
+all_latents.append(latents.float())                    # initial latent: bf16 → fp32
 ```
 
 ### Verification

@@ -224,7 +224,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             timestep = timestep_value.expand(latents.shape[0]).to(device=latents.device, dtype=latents.dtype)
 
             # Cast to model dtype for transformer forward (scheduler returns float32).
-            x = latents.to(self.transformer.dtype)
+            x = latents.to(self.transformer.img_in.weight.dtype)
 
             self.transformer.do_true_cfg = do_true_cfg
             # Forward pass for positive prompt (or unconditional if no CFG)
