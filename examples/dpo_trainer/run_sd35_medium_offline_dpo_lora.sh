@@ -40,5 +40,5 @@ python3 -m verl_omni.trainer.main_diffusion --config-name=offline_dpo_trainer \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR \
     trainer.nnodes=1 \
     trainer.save_freq=30 \
-    trainer.total_epochs=15 \
+    trainer.total_epochs=300 \
     trainer.total_training_steps=1000 "$@"
