@@ -61,6 +61,47 @@ from verl_omni.trainer.diffusion.diffusion_metric_utils import (
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 
+def _patch_reward_loop_workers_with_gpu() -> None:
+    """Let CLIP-based diffusion reward fns (e.g. PickScore) run on a GPU.
+
+    Upstream ``RewardLoopManager`` creates Ray actors with no GPU, which is
+    fine for text/LLM reward but kills throughput for CLIP-class image rewards.
+    Set ``VERL_OMNI_REWARD_WORKER_NUM_GPUS=<float>`` to claim that many GPUs
+    per reward worker.
+    """
+    from verl.experimental.reward_loop import reward_loop as _rl_mod
+
+    if getattr(_rl_mod.RewardLoopManager, "_diffusion_gpu_patched", False):
+        return
+
+    _orig = _rl_mod.RewardLoopManager._init_reward_loop_workers
+
+    def _init_with_gpu(self):
+        num_gpus = float(os.environ.get("VERL_OMNI_REWARD_WORKER_NUM_GPUS", "0"))
+        if num_gpus <= 0:
+            return _orig(self)
+        self.reward_loop_workers = []
+        n_workers = self.config.reward.num_workers
+        node_ids = [n["NodeID"] for n in ray.nodes() if n["Alive"] and n["Resources"].get("CPU", 0) > 0]
+        for i in range(n_workers):
+            node_id = node_ids[i % len(node_ids)]
+            self.reward_loop_workers.append(
+                self.reward_loop_workers_class.options(
+                    name=f"reward_loop_worker_{i}",
+                    num_gpus=num_gpus,
+                    scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+                        node_id=node_id, soft=True,
+                    ),
+                ).remote(self.config, self.reward_router_address)
+            )
+
+    _rl_mod.RewardLoopManager._init_reward_loop_workers = _init_with_gpu
+    _rl_mod.RewardLoopManager._diffusion_gpu_patched = True
+
+
+_patch_reward_loop_workers_with_gpu()
+
+
 def compute_advantage(
     data: DataProto,
     adv_estimator: str,
@@ -105,6 +146,25 @@ def compute_advantage(
     data.batch["advantages"] = advantages
     data.batch["returns"] = returns
     return data
+
+
+def compute_logprob_alignment_metrics(batch: DataProto) -> dict[str, float]:
+    """Compare rollout-time log-probs with trainer-recomputed old log-probs.
+
+    For Flow-GRPO the old-policy log-prob should match the log-prob recorded
+    during rollout before any actor update. A persistent offset here means the
+    rollout and training code paths are still not scoring the same trajectory.
+    """
+    if "rollout_log_probs" not in batch.batch or "old_log_probs" not in batch.batch:
+        return {}
+
+    diff = (batch.batch["old_log_probs"].float() - batch.batch["rollout_log_probs"].float()).detach()
+    return {
+        "debug/logprob_alignment/mean": diff.mean().item(),
+        "debug/logprob_alignment/mean_abs": diff.abs().mean().item(),
+        "debug/logprob_alignment/max_abs": diff.abs().max().item(),
+        "debug/logprob_alignment/std": diff.std().item(),
+    }
 
 
 class RayFlowGRPOTrainer:
@@ -1002,6 +1062,7 @@ class RayFlowGRPOTrainer:
                             batch = batch.union(old_log_prob)
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
+                    metrics.update(compute_logprob_alignment_metrics(batch))
 
                     if self.use_reference_policy:
                         # compute reference log_prob

@@ -24,9 +24,11 @@ Key differences from standard diffusion models (e.g. Qwen-Image):
   * ``prompt_embeds`` are not used.  Instead the raw prompt token IDs
     (available as ``micro_batch["prompts"]``) are passed directly to the
     model as ``text_token_ids``.
-  * CFG uses a 3-branch scheme during rollout, but for FSDP training
-    (computing log-probs of the rollout trajectory) only the conditional
-    forward is needed.
+  * CFG must match what the rollout pipeline applied, otherwise the
+    importance-sampling ratio is biased.  We implement BAGEL's 3-branch
+    CFG with global renormalization here (cfg_img branch == gen branch
+    for text2img, i.e. text-only 2-branch in practice), exactly mirroring
+    ``_combine_cfg`` in vllm-omni's ``bagel_transformer``.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.workers.config import DiffusionModelConfig
 
 from .bagel_model import BagelForTraining, get_flattened_position_ids
+from .vllm_omni_rollout_adapter import BAGEL_FLOWGRPO_CFG_DEFAULTS
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +159,88 @@ class BagelDiffusion(DiffusionModelBase):
 
         return model_inputs, negative_model_inputs
 
+    @staticmethod
+    def _get_cfg_params(model_config: DiffusionModelConfig) -> dict:
+        """Resolve CFG params for training, preferring values from
+        ``model_config.pipeline`` and falling back to flow_grpo BAGEL
+        defaults (same defaults the rollout adapter forces).
+
+        Override examples (Hydra/OmegaConf, both rollout *and* model side
+        must be set together if you change them):
+            +actor_rollout_ref.model.pipeline.cfg_text_scale=4.0
+            +actor_rollout_ref.model.pipeline.cfg_img_scale=1.0
+            +actor_rollout_ref.model.pipeline.cfg_renorm_type=global
+            +actor_rollout_ref.model.pipeline.cfg_renorm_min=0.0
+            +actor_rollout_ref.model.pipeline.cfg_interval=[0,1.0]
+        """
+        p = model_config.pipeline
+        cfg_interval = getattr(p, "cfg_interval", BAGEL_FLOWGRPO_CFG_DEFAULTS["cfg_interval"])
+        if isinstance(cfg_interval, (list, tuple)) and len(cfg_interval) == 2:
+            interval_low, interval_high = float(cfg_interval[0]), float(cfg_interval[1])
+        else:
+            interval_low, interval_high = 0.0, 1.0
+        return {
+            "cfg_text_scale": float(getattr(p, "cfg_text_scale", BAGEL_FLOWGRPO_CFG_DEFAULTS["cfg_text_scale"])),
+            "cfg_img_scale": float(getattr(p, "cfg_img_scale", BAGEL_FLOWGRPO_CFG_DEFAULTS["cfg_img_scale"])),
+            "cfg_renorm_type": str(getattr(p, "cfg_renorm_type", BAGEL_FLOWGRPO_CFG_DEFAULTS["cfg_renorm_type"])),
+            "cfg_renorm_min": float(getattr(p, "cfg_renorm_min", BAGEL_FLOWGRPO_CFG_DEFAULTS["cfg_renorm_min"])),
+            "cfg_interval_low": interval_low,
+            "cfg_interval_high": interval_high,
+        }
+
+    @staticmethod
+    def _combine_cfg(
+        v_t: torch.Tensor,
+        cfg_text_v_t: torch.Tensor,
+        cfg_img_v_t: Optional[torch.Tensor],
+        cfg_text_scale: float,
+        cfg_img_scale: float,
+        cfg_renorm_type: str,
+        cfg_renorm_min: float,
+    ) -> torch.Tensor:
+        """Byte-identical port of
+        ``vllm_omni.diffusion.models.bagel.bagel_transformer.BagelTransformer
+        ._combine_cfg`` so that training-time velocity matches what the
+        rollout actually used to generate the recorded trajectory.
+
+        For text2img there is no input image, so the rollout's cfg_img
+        branch is fed the same conditioning as the gen branch; callers
+        therefore pass ``cfg_img_v_t = v_t`` (or ``None`` to skip it
+        entirely when ``cfg_img_scale == 1.0``).
+        """
+        if cfg_renorm_type == "text_channel":
+            v_t_text_ = cfg_text_v_t + cfg_text_scale * (v_t - cfg_text_v_t)
+            norm_v_t = torch.norm(v_t, dim=-1, keepdim=True)
+            norm_v_t_text_ = torch.norm(v_t_text_, dim=-1, keepdim=True)
+            scale = (norm_v_t / (norm_v_t_text_ + 1e-8)).clamp(min=cfg_renorm_min, max=1.0)
+            v_t_text = v_t_text_ * scale
+            if cfg_img_scale > 1.0 and cfg_img_v_t is not None:
+                return cfg_img_v_t + cfg_img_scale * (v_t_text - cfg_img_v_t)
+            return v_t_text
+
+        v_t_text_ = cfg_text_v_t + cfg_text_scale * (v_t - cfg_text_v_t)
+        if cfg_img_scale > 1.0 and cfg_img_v_t is not None:
+            v_t_ = cfg_img_v_t + cfg_img_scale * (v_t_text_ - cfg_img_v_t)
+        else:
+            v_t_ = v_t_text_
+
+        if cfg_renorm_type == "global":
+            # vLLM-Omni/BAGEL rollout handles one image per request, so its
+            # "global" renorm is global over latent tokens/channels for each
+            # sample.  Training is batched; keep samples independent instead
+            # of mixing the whole micro-batch into one scalar norm.
+            norm_dims = tuple(range(1, v_t.ndim))
+            norm_v_t = torch.linalg.vector_norm(v_t, dim=norm_dims, keepdim=True)
+            norm_v_t_ = torch.linalg.vector_norm(v_t_, dim=norm_dims, keepdim=True)
+        elif cfg_renorm_type == "channel":
+            norm_v_t = torch.norm(v_t, dim=-1, keepdim=True)
+            norm_v_t_ = torch.norm(v_t_, dim=-1, keepdim=True)
+        else:
+            raise NotImplementedError(f"cfg_renorm_type={cfg_renorm_type!r} is not supported")
+
+        scale = (norm_v_t / (norm_v_t_ + 1e-8)).clamp(min=cfg_renorm_min, max=1.0)
+        return v_t_ * scale
+
     @classmethod
     def forward_and_sample_previous_step(
         cls,
@@ -171,17 +256,45 @@ class BagelDiffusion(DiffusionModelBase):
         latents = scheduler_inputs["all_latents"]
         timesteps = scheduler_inputs["all_timesteps"]
 
+        # Gen branch (text-conditional).
         noise_pred = module(**model_inputs)[0]
 
-        # CFG during training (if configured)
-        true_cfg_scale = model_config.pipeline.true_cfg_scale
-        if true_cfg_scale > 1.0:
-            assert negative_model_inputs is not None
-            neg_noise_pred = module(**negative_model_inputs)[0]
-            comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
-            cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
-            noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
-            noise_pred = comb_pred * (cond_norm / noise_norm)
+        # --------------------------------------------------------------- #
+        # Bug 2 fix:                                                       #
+        # Apply BAGEL CFG matching the rollout so the importance-sampling  #
+        # ratio in compute_diffusion_loss_flow_grpo is unbiased.  The     #
+        # previous implementation used a simple 2-branch CFG with per-token #
+        # renormalization gated by ``true_cfg_scale > 1.0`` (which is the  #
+        # default 1.0, so CFG was *off*).  The rollout, however, always    #
+        # ran with cfg_text_scale=4.0 + global renorm; the resulting      #
+        # mismatch silently biased the policy gradient.                    #
+        # --------------------------------------------------------------- #
+        cfg = cls._get_cfg_params(model_config)
+        # sigma at this denoising step (same for the entire batch in BAGEL)
+        sigma_now = float(timesteps[0, step].item())
+        in_cfg_interval = sigma_now > cfg["cfg_interval_low"] and sigma_now <= cfg["cfg_interval_high"]
+        apply_cfg = in_cfg_interval and cfg["cfg_text_scale"] > 1.0
+
+        if apply_cfg:
+            assert negative_model_inputs is not None, (
+                "BAGEL CFG requires negative_model_inputs (text-unconditional branch)."
+            )
+            # cfg_text branch: text_token_ids=None -> empty text context.
+            cfg_text_pred = module(**negative_model_inputs)[0]
+            # For text2img, no input image was supplied to drop, so the
+            # cfg_img branch is identical to the gen branch and we can
+            # reuse ``noise_pred`` instead of running a third forward.
+            cfg_img_pred = noise_pred if cfg["cfg_img_scale"] > 1.0 else None
+
+            noise_pred = cls._combine_cfg(
+                v_t=noise_pred,
+                cfg_text_v_t=cfg_text_pred,
+                cfg_img_v_t=cfg_img_pred,
+                cfg_text_scale=cfg["cfg_text_scale"],
+                cfg_img_scale=cfg["cfg_img_scale"],
+                cfg_renorm_type=cfg["cfg_renorm_type"],
+                cfg_renorm_min=cfg["cfg_renorm_min"],
+            )
 
         _, log_prob, prev_sample_mean, std_dev_t, sqrt_dt = scheduler.sample_previous_step(
             sample=latents[:, step].float(),

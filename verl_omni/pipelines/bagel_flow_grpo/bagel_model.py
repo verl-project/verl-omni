@@ -511,6 +511,7 @@ class BagelMoTAttention(nn.Module):
         text_mask: Tensor,
         latent_mask: Tensor,
         L_ctx: int = 0,
+        key_padding_mask: Optional[Tensor] = None,
     ) -> Tensor:
         B, L, _ = hidden_states.shape
         text_idx = text_mask.nonzero(as_tuple=True)
@@ -556,30 +557,54 @@ class BagelMoTAttention(nn.Module):
             k_normed = k_normed.unsqueeze(3).expand(-1, -1, -1, rep, -1).reshape(B, L, self.num_heads, self.head_dim)
             v = v.unsqueeze(3).expand(-1, -1, -1, rep, -1).reshape(B, L, self.num_heads, self.head_dim)
 
-        # Split attention: no boolean mask → SDPA uses flash backend
-        # Original vllm-omni uses flash_attn_varlen_func; matching that
-        # requires avoiding the "math" fallback that boolean masks trigger.
-        #   Text tokens: causal self-attention (only see prior text)
-        #   Image tokens (soi/latent/eoi): full attention to everything
+        # Split attention. The original (vllm-omni) BAGEL implementation packs
+        # ``[text, soi, latent, eoi]`` for each request into a single 1-D
+        # ``flash_attn_varlen`` segment with no padding, so all key positions
+        # are valid by construction. Here we run *padded* batched SDPA: when
+        # prompts within a micro-batch have different lengths, samples are
+        # right-padded with ``token_id=0`` up to ``max_text_len``. Image
+        # queries attending to those padding positions inject batch-grouping
+        # noise into the velocity prediction (the same sample produces
+        # different ``log_prob`` depending on which other prompts share its
+        # micro-batch), which under the FlowGRPO importance-sampling ratio
+        # shows up as a non-trivial ``ratio_std`` even at PPO step 1 with
+        # ``ppo_epochs=1``. Mask the padding key columns to recover the
+        # ``log_prob`` invariance that the rollout side already has.
+        #
+        # Note: text-causal block (rows ``:L_ctx``) does not need a key mask
+        # because real-text rows only attend to earlier real-text columns
+        # (padding is right-aligned). Padding *rows* still produce contaminated
+        # outputs, but those positions are never read out as latent velocity.
         q_normed = q_normed.transpose(1, 2)  # (B, H, L, D)
         k_normed = k_normed.transpose(1, 2)
         v = v.transpose(1, 2)
 
         if L_ctx > 0:
-            # Text self-attention (causal, flash backend)
             text_out = F.scaled_dot_product_attention(
                 q_normed[:, :, :L_ctx],
                 k_normed[:, :, :L_ctx],
                 v[:, :, :L_ctx],
                 is_causal=True,
             )
-            # Image attention to full sequence (no mask, flash backend)
-            img_out = F.scaled_dot_product_attention(
-                q_normed[:, :, L_ctx:],
-                k_normed,
-                v,
-                is_causal=False,
-            )
+            if key_padding_mask is not None and not key_padding_mask.all():
+                # ``key_padding_mask`` is True at valid (non-padding) keys.
+                # SDPA wants an additive/bool mask broadcastable to
+                # ``(B, H, L_q, L_k)``. We use ``(B, 1, 1, L)``.
+                img_attn_mask = key_padding_mask.view(B, 1, 1, L)
+                img_out = F.scaled_dot_product_attention(
+                    q_normed[:, :, L_ctx:],
+                    k_normed,
+                    v,
+                    attn_mask=img_attn_mask,
+                    is_causal=False,
+                )
+            else:
+                img_out = F.scaled_dot_product_attention(
+                    q_normed[:, :, L_ctx:],
+                    k_normed,
+                    v,
+                    is_causal=False,
+                )
             attn_out = torch.cat([text_out, img_out], dim=2)
         else:
             attn_out = F.scaled_dot_product_attention(
@@ -616,6 +641,7 @@ class BagelMoTLayer(nn.Module):
         text_mask: Tensor,
         latent_mask: Tensor,
         L_ctx: int = 0,
+        key_padding_mask: Optional[Tensor] = None,
     ) -> Tensor:
         text_idx = text_mask.nonzero(as_tuple=True)
         latent_idx = latent_mask.nonzero(as_tuple=True)
@@ -624,7 +650,15 @@ class BagelMoTLayer(nn.Module):
         normed[text_idx] = self.input_layernorm(hidden_states[text_idx])
         normed[latent_idx] = self.input_layernorm_moe_gen(hidden_states[latent_idx])
 
-        attn_out = self.self_attn(normed, cos, sin, text_mask, latent_mask, L_ctx)
+        attn_out = self.self_attn(
+            normed,
+            cos,
+            sin,
+            text_mask,
+            latent_mask,
+            L_ctx,
+            key_padding_mask=key_padding_mask,
+        )
         hidden_states = hidden_states + attn_out
 
         residual = hidden_states
@@ -744,7 +778,12 @@ class BagelForTraining(nn.Module):
             text_lengths = text_attention_mask.sum(dim=-1)
             if text_lengths.numel() > 0:
                 text_length = int(text_lengths.max().item())
-                text_token_ids = text_token_ids[:, :text_length] if text_length > 0 else None
+                if text_length > 0:
+                    text_token_ids = text_token_ids[:, :text_length]
+                    text_attention_mask = text_attention_mask[:, :text_length]
+                else:
+                    text_token_ids = None
+                    text_attention_mask = None
 
         B = hidden_states.shape[0]
         L_latent = hidden_states.shape[1]
@@ -756,6 +795,7 @@ class BagelForTraining(nn.Module):
             L_ctx = text_embeds.shape[1]
         else:
             L_ctx = 0
+            text_attention_mask = None
 
         # 2. SOI / EOI boundary tokens
         soi_ids = torch.full((B, 1), self.config.start_of_image_id, dtype=torch.long, device=dev)
@@ -793,13 +833,44 @@ class BagelForTraining(nn.Module):
             position_ids = torch.zeros(1, L_total, dtype=torch.long, device=dev).expand(B, -1)
         cos, sin = self.rotary_emb(position_ids)
 
+        # 6b. Build per-sequence key padding mask. Only the text segment can
+        # contain right-padded ``token_id=0`` slots when prompts in a
+        # micro-batch have different lengths; ``soi``/latent/``eoi`` are always
+        # valid keys. We pass ``None`` (and SDPA stays on flash backend) when
+        # there is no padding to mask, which matches the rollout configuration.
+        if (
+            L_ctx > 0
+            and text_attention_mask is not None
+            and not bool(text_attention_mask.all())
+        ):
+            key_padding_mask = text_attention_mask.new_ones(B, L_total, dtype=torch.bool)
+            key_padding_mask[:, :L_ctx] = text_attention_mask
+        else:
+            key_padding_mask = None
+
         # 7. Transformer layers (split attention: text causal + image full)
         for layer in self.layers:
             if self.gradient_checkpointing and self.training:
                 from torch.utils.checkpoint import checkpoint
 
-                def custom_forward(seq, cos_, sin_, text_mask_, latent_mask_, layer=layer):
-                    return layer(seq, cos_, sin_, text_mask_, latent_mask_, L_ctx)
+                def custom_forward(
+                    seq,
+                    cos_,
+                    sin_,
+                    text_mask_,
+                    latent_mask_,
+                    key_padding_mask_,
+                    layer=layer,
+                ):
+                    return layer(
+                        seq,
+                        cos_,
+                        sin_,
+                        text_mask_,
+                        latent_mask_,
+                        L_ctx,
+                        key_padding_mask=key_padding_mask_,
+                    )
 
                 sequence = checkpoint(
                     custom_forward,
@@ -808,10 +879,19 @@ class BagelForTraining(nn.Module):
                     sin,
                     text_mask,
                     latent_mask,
+                    key_padding_mask,
                     use_reentrant=False,
                 )
             else:
-                sequence = layer(sequence, cos, sin, text_mask, latent_mask, L_ctx)
+                sequence = layer(
+                    sequence,
+                    cos,
+                    sin,
+                    text_mask,
+                    latent_mask,
+                    L_ctx,
+                    key_padding_mask=key_padding_mask,
+                )
 
         # 8. Final norm with MoT routing
         normed = sequence.new_zeros(sequence.shape)
