@@ -62,7 +62,7 @@ actor_rollout_ref:
     architecture: StableDiffusion3Pipeline
 
     # Engine model type for diffusion DPO training.
-    model_type: diffusion_dpo_model
+    model_type: diffusion_dp_model
 
     # User-role captions only.
     custom_chat_template: "{% for message in messages %}{% if message['role'] == 'user' %}{{ message['content'] }}{% endif %}{% endfor %}"
