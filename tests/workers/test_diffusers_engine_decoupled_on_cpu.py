@@ -15,11 +15,18 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from tensordict import TensorDict
+from verl.workers.engine.base import EngineRegistry
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
-from verl_omni.workers.engine.fsdp.diffusers_impl import DirectPreferenceDiffusersFSDPEngine, PPODiffusersFSDPEngine
+from verl_omni.workers.engine.fsdp.diffusers_impl import (
+    DiffusersFSDPEngineRouter,
+    DiffusionFSDPEngineAlgorithmRegistry,
+    NFTDiffusersFSDPEngine,
+    PPODiffusersFSDPEngine,
+)
 
 
 @DiffusionModelBase.register("FakeDecoupledPipeline", algorithm="diffusion_nft")
@@ -92,8 +99,8 @@ class FakeAdapterModule(torch.nn.Module):
         return (hidden_states * self.scale + offset,)
 
 
-def _engine() -> DirectPreferenceDiffusersFSDPEngine:
-    engine = object.__new__(DirectPreferenceDiffusersFSDPEngine)
+def _engine() -> NFTDiffusersFSDPEngine:
+    engine = object.__new__(NFTDiffusersFSDPEngine)
     engine.module = FakeAdapterModule()
     engine.model_config = SimpleNamespace(architecture="FakeDecoupledPipeline", algorithm="diffusion_nft")
     engine.use_ulysses_sp = False
@@ -102,14 +109,13 @@ def _engine() -> DirectPreferenceDiffusersFSDPEngine:
     return engine
 
 
-def _registered_engine() -> PPODiffusersFSDPEngine:
-    engine = object.__new__(PPODiffusersFSDPEngine)
+def _registered_engine() -> NFTDiffusersFSDPEngine:
+    engine = object.__new__(NFTDiffusersFSDPEngine)
     engine.module = FakeAdapterModule()
     engine.model_config = SimpleNamespace(architecture="FakeDecoupledPipeline", algorithm="diffusion_nft")
     engine.use_ulysses_sp = False
     engine.ulysses_sequence_parallel_size = 1
     engine.get_data_parallel_group = lambda: None
-    engine.postprocess_batch_func = DirectPreferenceDiffusersFSDPEngine.postprocess_batch_func.__get__(engine)
     return engine
 
 
@@ -185,7 +191,30 @@ def test_forward_decoupled_step_selects_step_noise_from_forward_noise_sequence()
     torch.testing.assert_close(output["model_output"]["xt"], expected_xt)
 
 
-def test_registered_ppo_engine_dispatches_direct_preference_batch_without_old_log_probs(monkeypatch) -> None:
+def test_diffusion_fsdp_engine_registry_selects_by_algorithm() -> None:
+    assert DiffusionFSDPEngineAlgorithmRegistry.get_engine_cls(SimpleNamespace(algorithm="diffusion_nft")) is (
+        NFTDiffusersFSDPEngine
+    )
+    assert DiffusionFSDPEngineAlgorithmRegistry.get_engine_cls(SimpleNamespace(algorithm="flow_grpo")) is (
+        PPODiffusersFSDPEngine
+    )
+    assert DiffusionFSDPEngineAlgorithmRegistry.get_engine_cls(SimpleNamespace(algorithm="mix_grpo")) is (
+        PPODiffusersFSDPEngine
+    )
+    assert EngineRegistry._engines["diffusion_model"]["fsdp"]["cuda"] is DiffusersFSDPEngineRouter
+
+
+def test_diffusion_fsdp_engine_registry_requires_algorithm() -> None:
+    with pytest.raises(ValueError, match="algorithm must be set"):
+        DiffusionFSDPEngineAlgorithmRegistry.get_engine_cls(SimpleNamespace())
+
+
+def test_diffusion_fsdp_engine_registry_rejects_unknown_algorithm() -> None:
+    with pytest.raises(NotImplementedError, match="unknown_algo"):
+        DiffusionFSDPEngineAlgorithmRegistry.get_engine_cls(SimpleNamespace(algorithm="unknown_algo"))
+
+
+def test_nft_engine_forward_backward_batch_without_old_log_probs(monkeypatch) -> None:
     engine = _registered_engine()
     monkeypatch.setattr(
         "verl_omni.workers.engine.fsdp.diffusers_impl.prepare_micro_batches",

@@ -47,6 +47,7 @@ def test_qwen_image_diffusion_nft_adapters_registered():
         "QwenImageDiffusionNFTPipeline"
     )
 
+
 # ---------------------------------------------------------------------------
 # KLLoss.compute_loss
 # ---------------------------------------------------------------------------

@@ -35,6 +35,7 @@ except ModuleNotFoundError:
 
         pass
 
+
 __all__ = [
     "DiffusionRolloutAlgoConfig",
     "DiffusionPipelineConfig",
@@ -177,8 +178,7 @@ class DiffusionRolloutConfig(BaseConfig):
             )
         if self.rollout_adapter not in ("default", "old"):
             raise ValueError(
-                f"Invalid diffusion rollout rollout_adapter: {self.rollout_adapter}. "
-                "Must be one of ['default', 'old']."
+                f"Invalid diffusion rollout rollout_adapter: {self.rollout_adapter}. Must be one of ['default', 'old']."
             )
 
         if self.pipeline_model_parallel_size > 1:

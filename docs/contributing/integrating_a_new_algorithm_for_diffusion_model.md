@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion RL Algorithm
 
-Last updated: 05/12/2026.
+Last updated: 05/22/2026.
 
 This guide explains how to add a new diffusion RL algorithm to VeRL-Omni's
 diffusion trainer. New algorithms must first decide whether they are
@@ -21,7 +21,7 @@ repository and exercises every extension point.
 
 ## TL;DR
 
-A new PPO-like algorithm needs **four pieces**:
+A new PPO-like algorithm needs **five pieces**:
 
 1. **An SDE step formula** for the rollout — usually a new `sde_type` in
    [`FlowMatchSDEDiscreteScheduler`](../../verl_omni/pipelines/schedulers/flow_match_sde.py),
@@ -31,6 +31,10 @@ A new PPO-like algorithm needs **four pieces**:
 4. **One adapter pair per (architecture, algorithm) combination** — a
    `DiffusionModelBase` subclass and a `VllmOmniPipelineBase` subclass,
    both decorated with `@register(architecture, algorithm="<name>")`.
+5. **An FSDP training engine selection** registered with
+   `DiffusionFSDPEngineAlgorithmRegistry`. PPO-like algorithms usually reuse
+   `PPODiffusersFSDPEngine`; direct-preference / forward-process algorithms
+   usually need their own `DiffusersFSDPEngine` subclass.
 
 The trainer entrypoint
 ([`main_diffusion.py`](../../verl_omni/trainer/main_diffusion.py))
@@ -64,13 +68,18 @@ runtime:
                 ↓                              ↓
    QwenImage (training adapter)            QwenImagePipelineWithLogProb (rollout adapter)
 
+   DiffusionFSDPEngineAlgorithmRegistry.get_engine_cls(algo)
+                ↓
+   PPODiffusersFSDPEngine or an algorithm-specific DiffusersFSDPEngine subclass
+
    loss_mode
                 ↓
    FlowGRPOLoss
 ```
 
-All four registries (`DiffusionModelBase`, `VllmOmniPipelineBase`,
-`register_diffusion_adv_est`, `register_diffusion_loss`) are wired to
+All five registries (`DiffusionModelBase`, `VllmOmniPipelineBase`,
+`DiffusionFSDPEngineAlgorithmRegistry`, `register_diffusion_adv_est`,
+`register_diffusion_loss`) are wired to
 `actor_rollout_ref.model.algorithm` via OmegaConf templates, so a single
 CLI flag selects everything **provided every site recognises the new
 name**. If your algorithm reuses an existing estimator or loss without
@@ -88,17 +97,17 @@ policy-gradient likelihoods. Examples include FlowGRPO, MixGRPO, and
 GRPO-Guard. Their rollout batch contains trajectory tensors such as
 `all_latents`, `all_timesteps`, rollout or recomputed `old_log_probs`, and
 optional reference reverse logprobs. They use
-`forward_backward_batch()` / reverse `forward_step()` in the FSDP engine and
-their losses consume logprob-like tensors plus per-timestep advantages.
+`PPODiffusersFSDPEngine.forward_backward_batch()` / reverse `forward_step()`
+and their losses consume logprob-like tensors plus per-timestep advantages.
 
 **Direct-preference algorithms** train from final samples or preferences and define a
 separate forward-process objective. Examples include DiffusionNFT,
 Diffusion-DPO, DGPO/GPO, and AWM. Their rollout batch should contain the final
 clean latent (`latents_clean`), sample-level rewards or preference pairs, and
 an explicit forward-training timestep tensor (`train_timesteps`). They use
-`DirectPreferenceRayTrainer` and the direct-preference FSDP forward path, and
-their losses consume prediction-space tensors rather than
-reverse-step logprobs.
+`DirectPreferenceRayTrainer` and an algorithm-specific FSDP engine such as
+`NFTDiffusersFSDPEngine`, and their losses consume prediction-space tensors
+rather than reverse-step logprobs.
 
 ---
 
@@ -278,7 +287,66 @@ so the registries learn about your package on import.
 
 ---
 
-## Step 5 — Wire the Config Knobs
+## Step 5 — Register the FSDP Engine
+
+Open
+[`verl_omni/workers/engine/fsdp/diffusers_impl.py`](../../verl_omni/workers/engine/fsdp/diffusers_impl.py)
+and register the engine that should execute the actor forward/backward path
+for `actor_rollout_ref.model.algorithm=<your_algo>`.
+
+The top-level verl `EngineRegistry` only dispatches on `model_type`, backend,
+and device. For diffusion models, it instantiates
+`DiffusersFSDPEngineRouter`, which then delegates to
+`DiffusionFSDPEngineAlgorithmRegistry` using `model_config.algorithm`. This
+second registry is intentionally fail-closed: a missing or unknown algorithm
+raises during worker construction instead of silently falling back to PPO.
+
+If your algorithm is PPO-like and consumes reverse-trajectory logprob tensors
+(`all_latents`, `all_timesteps`, `old_log_probs`, `advantages`), register it
+to reuse `PPODiffusersFSDPEngine`:
+
+```python
+@DiffusionFSDPEngineAlgorithmRegistry.register(["flow_grpo", "mix_grpo", "<your_algo>"])
+class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
+    ...
+```
+
+Only add your name here if the existing PPO engine's batch contract is exactly
+right for your algorithm. If the forward/backward tensors differ, create a
+sibling engine:
+
+```python
+@DiffusionFSDPEngineAlgorithmRegistry.register("<your_algo>")
+class MyAlgoDiffusersFSDPEngine(DiffusersFSDPEngine):
+    """FSDP engine for <your_algo>."""
+
+    def forward_backward_batch(self, data, loss_function, forward_only=False):
+        ...
+
+    def prepare_model_inputs(self, micro_batch, step: int):
+        ...
+
+    def prepare_model_outputs(self, output, micro_batch):
+        ...
+
+    def forward_step(self, micro_batch, loss_function, forward_only, step):
+        ...
+```
+
+Direct-preference / forward-process algorithms usually need this second path.
+For example, DiffusionNFT registers `NFTDiffusersFSDPEngine` because its batch
+contains `latents_clean`, `train_timesteps`, and `reward_prob`, not PPO's
+reverse-step logprob tensors.
+
+Do **not** register a name just because it is a loss mode. For example,
+GRPO-Guard currently reuses the `flow_grpo` model algorithm and selects the
+guarded objective through `actor_rollout_ref.actor.diffusion_loss.loss_mode`;
+it does not need its own FSDP engine registration unless it also adds a
+distinct model algorithm and adapter pair.
+
+---
+
+## Step 6 — Wire the Config Knobs
 
 If your algorithm exposes new rollout knobs (e.g. an `sde_window_size`),
 add them to the `DiffusionAlgoConfig` block in
@@ -294,12 +362,13 @@ The algorithm dispatch is already wired. Setting
 `actor_rollout_ref.model.algorithm=<your_algo>` on the CLI:
 
 - selects the `(architecture, algorithm)` adapter pair (Step 4),
+- selects the FSDP engine registered for `<your_algo>` (Step 5),
 - propagates to `algorithm.adv_estimator` via
   `${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}`, and
 - propagates to `actor_rollout_ref.actor.diffusion_loss.loss_mode` via
   the same pattern.
 
-A single flag covers all four dispatch points **only when every site
+A single flag covers all five dispatch points **only when every site
 recognises the new name** — see the next subsection for the alternative.
 
 For direct-preference algorithms, set the trainer type explicitly:
@@ -316,12 +385,16 @@ when they are consumed by the trainer loop itself.
 
 If your algorithm reuses an existing estimator and/or loss (for example,
 MixGRPO uses FlowGRPO's verbatim), the cascade above will propagate your
-new algorithm name to those sites, and the validators will reject it:
+new algorithm name to those sites, and the validators will reject it unless
+you register or override the reused pieces:
 
 * `DiffusionAdvantageEstimator` is a closed enum — `compute_advantage`
   fails to look up an unknown name.
 * `DiffusionLossConfig.__post_init__` checks `loss_mode in valid_modes`
   and raises `ValueError` for anything not in the allowlist.
+* `DiffusionFSDPEngineAlgorithmRegistry` requires every
+  `actor_rollout_ref.model.algorithm` value to have an explicit engine
+  registration.
 
 You have two ways out, pick whichever is cleaner for your algorithm:
 
@@ -336,16 +409,18 @@ You have two ways out, pick whichever is cleaner for your algorithm:
 
    This is what
    [`examples/mixgrpo_trainer/run_qwen_image_ocr_lora_mixgrpo.sh`](../../examples/mixgrpo_trainer/run_qwen_image_ocr_lora_mixgrpo.sh)
-   does.
+   does for the estimator / loss. MixGRPO still registers its model algorithm
+   with `PPODiffusersFSDPEngine` because it uses the PPO engine contract.
 
 2. **Register your name as an alias** in `diffusion_algos.py` (decorate
    the existing function with both names) and add `<your_algo>` to
-   `DiffusionLossConfig.valid_modes`. The cascade then "just works"
-   without per-launch overrides.
+   `DiffusionLossConfig.valid_modes`. Register the same model algorithm with
+   the appropriate FSDP engine. The cascade then "just works" without
+   per-launch overrides.
 
 ---
 
-## Step 6 — Example Launch Script
+## Step 7 — Example Launch Script
 
 Add a runnable example under `examples/<algo>_trainer/`. Copy
 [`examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh`](../../examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh)
@@ -361,7 +436,7 @@ Document any algorithm-specific knobs in the example's `README.md`.
 
 ---
 
-## Step 7 — Smoke Test
+## Step 8 — Smoke Test
 
 Add an end-to-end smoke test under `tests/special_e2e/` modelled on
 [`tests/special_e2e/run_flowgrpo_qwen_image.sh`](../../tests/special_e2e/run_flowgrpo_qwen_image.sh)
@@ -375,8 +450,8 @@ Name the script `run_<algo>_<model>.sh` (for example,
 Register the script in
 [`tests/gpu_smoke/run_gpu_smoke_tests.sh`](../../tests/gpu_smoke/run_gpu_smoke_tests.sh)
 as a new numbered test entry. The script must exercise the full
-algorithm dispatch chain (adv estimator + loss + adapter pair + SDE
-step, or the direct-preference forward-process contract) against a
+algorithm dispatch chain (adv estimator + loss + adapter pair + FSDP engine
+and SDE step, or the direct-preference forward-process contract) against a
 `tiny-random/<ModelName>` checkpoint.
 
 ---
@@ -393,6 +468,9 @@ step, or the direct-preference forward-process contract) against a
       and added to `DiffusionLossConfig.valid_modes`.
 - [ ] One `(architecture, algorithm)` adapter pair per supported model,
       both decorated with `@register(architecture, algorithm="<name>")`.
+- [ ] `DiffusionFSDPEngineAlgorithmRegistry` maps `<name>` to either
+      `PPODiffusersFSDPEngine` or an algorithm-specific
+      `DiffusersFSDPEngine` subclass.
 - [ ] `verl_omni/pipelines/__init__.py` star-imports the new package.
 - [ ] Any new `DiffusionAlgoConfig` field is mirrored in both
       [`diffusion_rollout.yaml`](../../verl_omni/trainer/config/diffusion/rollout/diffusion_rollout.yaml)

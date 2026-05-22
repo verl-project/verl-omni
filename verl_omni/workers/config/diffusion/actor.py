@@ -47,9 +47,7 @@ class DiffusionNFTLossConfig(BaseConfig):
         if self.adv_clip_max <= 0:
             raise ValueError(f"DiffusionNFT adv_clip_max must be positive, got {self.adv_clip_max}.")
         if self.adaptive_weight_min <= 0:
-            raise ValueError(
-                f"DiffusionNFT adaptive_weight_min must be positive, got {self.adaptive_weight_min}."
-            )
+            raise ValueError(f"DiffusionNFT adaptive_weight_min must be positive, got {self.adaptive_weight_min}.")
 
 
 @dataclass

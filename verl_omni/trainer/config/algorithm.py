@@ -41,7 +41,9 @@ class DiffusionNFTAlgoConfig(BaseConfig):
     def __post_init__(self):
         valid_adv_modes = {"continuous", "positive_only", "negative_only", "one_only", "binary"}
         if self.adv_mode not in valid_adv_modes:
-            raise ValueError(f"Invalid DiffusionNFT adv_mode: {self.adv_mode}. Must be one of {sorted(valid_adv_modes)}")
+            raise ValueError(
+                f"Invalid DiffusionNFT adv_mode: {self.adv_mode}. Must be one of {sorted(valid_adv_modes)}"
+            )
         if self.mix_beta <= 0:
             raise ValueError(f"DiffusionNFT mix_beta must be positive, got {self.mix_beta}.")
         if self.adv_clip_max <= 0:

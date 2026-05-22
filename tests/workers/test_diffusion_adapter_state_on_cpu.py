@@ -16,7 +16,7 @@
 import torch
 
 import verl_omni.workers.engine.fsdp.diffusers_impl as diffusers_impl
-from verl_omni.workers.engine.fsdp.diffusers_impl import DirectPreferenceDiffusersFSDPEngine
+from verl_omni.workers.engine.fsdp.diffusers_impl import NFTDiffusersFSDPEngine
 
 
 class FakeAdapterLayer(torch.nn.Module):
@@ -52,8 +52,8 @@ class FakeAdapterModule(torch.nn.Module):
         return layer(x)
 
 
-def _engine() -> DirectPreferenceDiffusersFSDPEngine:
-    engine = object.__new__(DirectPreferenceDiffusersFSDPEngine)
+def _engine() -> NFTDiffusersFSDPEngine:
+    engine = object.__new__(NFTDiffusersFSDPEngine)
     engine.module = FakeAdapterModule()
     return engine
 

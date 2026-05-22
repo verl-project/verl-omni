@@ -604,6 +604,7 @@ class DiffusionNFTLoss(DiffusionLossFn):
         reward_prob: torch.Tensor,
         config: DiffusionActorConfig,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute the DiffusionNFT policy loss and auxiliary metrics."""
         loss_cfg = config.diffusion_loss.diffusion_nft
         beta = loss_cfg.mix_beta
 
@@ -637,9 +638,7 @@ class DiffusionNFTLoss(DiffusionLossFn):
 
         positive_loss = ((x0_prediction - x0) ** 2 / positive_weight).mean(dim=reduce_dims)
         negative_loss = ((negative_x0_prediction - x0) ** 2 / negative_weight).mean(dim=reduce_dims)
-        policy_loss_per_sample = (reward_weight * positive_loss / beta) + (
-            (1.0 - reward_weight) * negative_loss / beta
-        )
+        policy_loss_per_sample = (reward_weight * positive_loss / beta) + ((1.0 - reward_weight) * negative_loss / beta)
         policy_loss = (policy_loss_per_sample * loss_cfg.adv_clip_max).mean()
 
         ref_kl_loss = ((forward_prediction - ref_forward_prediction) ** 2).mean(dim=reduce_dims).mean()

@@ -659,9 +659,7 @@ class DiffusersFSDPEngine(BaseEngine, ABC):
         if is_fsdp_module and (is_offload_param or origin_module_device == "cpu"):
             load_fsdp_model_to_gpu(self.module)
         summon_ctx = (
-            FSDP.summon_full_params(self.module, writeback=True, recurse=True)
-            if is_fsdp_module
-            else nullcontext()
+            FSDP.summon_full_params(self.module, writeback=True, recurse=True) if is_fsdp_module else nullcontext()
         )
 
         try:
@@ -691,9 +689,7 @@ class DiffusersFSDPEngine(BaseEngine, ABC):
         if is_fsdp_module and (is_offload_param or origin_module_device == "cpu"):
             load_fsdp_model_to_gpu(self.module)
         summon_ctx = (
-            FSDP.summon_full_params(self.module, writeback=True, recurse=True)
-            if is_fsdp_module
-            else nullcontext()
+            FSDP.summon_full_params(self.module, writeback=True, recurse=True) if is_fsdp_module else nullcontext()
         )
 
         try:
@@ -715,7 +711,9 @@ class DiffusersFSDPEngine(BaseEngine, ABC):
                 offload_fsdp_model_to_cpu(self.module)
                 aggressive_empty_cache(force_sync=True)
 
-    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, adapter_name: str | None = None, **kwargs):
+    def get_per_tensor_param(
+        self, layered_summon=False, base_sync_done=False, adapter_name: str | None = None, **kwargs
+    ):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         load_fsdp_model_to_gpu(self.module)
@@ -768,98 +766,6 @@ class DiffusersFSDPEngine(BaseEngine, ABC):
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
         return per_tensor_param, peft_config_dict
 
-    @contextmanager
-    def disable_adapter(self):
-        try:
-            self.module.disable_adapters()
-            yield
-        finally:
-            self.module.enable_adapters()
-
-
-@EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
-class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
-    """Diffusers FSDP engine with PPO forward/backward and I/O preparation."""
-
-    def forward_backward_batch(
-        self, data: TensorDict, loss_function: Callable, forward_only: bool = False
-    ) -> list[TensorDict]:
-        if "train_timesteps" in data and "latents_clean" in data:
-            return DirectPreferenceDiffusersFSDPEngine.forward_backward_batch(
-                self, data=data, loss_function=loss_function, forward_only=forward_only
-            )
-
-        num_timesteps = data["all_timesteps"].shape[1]
-        tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
-        tu.assign_non_tensor(data, use_dynamic_bsz=False)
-
-        micro_batches, indices = prepare_micro_batches(
-            data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
-        )
-
-        gradient_accumulation_steps = len(micro_batches) * num_timesteps
-
-        output_lst = []
-
-        ctx = torch.no_grad() if forward_only else nullcontext()
-
-        for micro_batch in micro_batches:
-            micro_batch = micro_batch.to(get_device_id())
-            tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
-            meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
-            # Forward and backward for each timestep
-            with ctx:
-                for step in range(num_timesteps):
-                    loss, meta_info = self.forward_step(
-                        micro_batch, loss_function=loss_function, forward_only=forward_only, step=step
-                    )
-
-                    if not forward_only:
-                        loss.backward()
-
-                    for key, val in meta_info.items():
-                        meta_info_lst[key].append(val)
-
-            output_lst.append(meta_info_lst)
-
-        # postprocess and return
-        return self.postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
-
-    def postprocess_batch_func(self, output_lst, indices, data: TensorDict):
-        model_output = {}
-        losses = []
-        aggregated_metrics = {}
-
-        for output in output_lst:
-            # model output list
-            model_output_lst = {}
-            if "model_output" in output:
-                for model_output_dict in output["model_output"]:
-                    for key, val in model_output_dict.items():
-                        model_output_lst.setdefault(key, []).append(val)
-                for key, val in model_output_lst.items():
-                    model_output.setdefault(key, []).append(torch.stack(val, dim=1))  # (bsz, steps, ...)
-            # loss
-            if "loss" in output:
-                losses.append(output["loss"])
-
-            # metrics
-            if "metrics" in output:
-                for metrics in output["metrics"]:
-                    append_to_dict(aggregated_metrics, metrics)
-
-        # concat results from micro batches
-        for key, val in model_output.items():
-            model_output[key] = torch.concat(val, dim=0)  # (global_bsz, steps, ...)
-
-        output = {
-            "model_output": model_output,  # a dict of tensors in shape (global_bsz, steps, ...)
-            "loss": losses,  # micro-batch step-wise losses
-            "metrics": aggregated_metrics,
-        }
-
-        return output
-
     @staticmethod
     def _unpad_nested_embeds(embeds: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Convert a jagged nested tensor pair (embeds, mask) to dense padded tensors."""
@@ -880,6 +786,133 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
             embeds = torch.nn.functional.pad(embeds, (0, 0, 0, pad_len))
             mask = torch.nn.functional.pad(mask, (0, pad_len))
         return embeds, mask
+
+    @contextmanager
+    def disable_adapter(self):
+        try:
+            self.module.disable_adapters()
+            yield
+        finally:
+            self.module.enable_adapters()
+
+    def postprocess_batch_func(self, output_lst, indices, data: TensorDict):
+        model_output = {}
+        losses = []
+        aggregated_metrics = {}
+
+        for output in output_lst:
+            model_output_lst = {}
+            if "model_output" in output:
+                for model_output_dict in output["model_output"]:
+                    for key, val in model_output_dict.items():
+                        model_output_lst.setdefault(key, []).append(val)
+                for key, val in model_output_lst.items():
+                    model_output.setdefault(key, []).append(torch.stack(val, dim=1))  # (bsz, steps, ...)
+            if "loss" in output:
+                losses.append(output["loss"])
+            if "metrics" in output:
+                for metrics in output["metrics"]:
+                    append_to_dict(aggregated_metrics, metrics)
+
+        for key, val in model_output.items():
+            model_output[key] = torch.concat(val, dim=0)  # (global_bsz, steps, ...)
+
+        return {
+            "model_output": model_output,
+            "loss": losses,
+            "metrics": aggregated_metrics,
+        }
+
+    def _run_forward_backward_batch(
+        self,
+        data: TensorDict,
+        loss_function: Callable,
+        forward_only: bool,
+        *,
+        timesteps_key: str,
+    ) -> dict:
+        num_timesteps = data[timesteps_key].shape[1]
+        tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
+        tu.assign_non_tensor(data, use_dynamic_bsz=False)
+
+        micro_batches, indices = prepare_micro_batches(
+            data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
+        )
+
+        gradient_accumulation_steps = len(micro_batches) * num_timesteps
+        output_lst = []
+        ctx = torch.no_grad() if forward_only else nullcontext()
+
+        for micro_batch in micro_batches:
+            micro_batch = micro_batch.to(get_device_id())
+            tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
+            meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
+            # Forward and backward for each timestep
+            with ctx:
+                for step in range(num_timesteps):
+                    loss, meta_info = self.forward_step(
+                        micro_batch, loss_function=loss_function, forward_only=forward_only, step=step
+                    )
+                    if not forward_only:
+                        loss.backward()
+                    for key, val in meta_info.items():
+                        meta_info_lst[key].append(val)
+            output_lst.append(meta_info_lst)
+
+        # postprocess and return
+        return self.postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+
+
+class DiffusionFSDPEngineAlgorithmRegistry:
+    """Algorithm-aware registry for diffusion FSDP engine implementations."""
+
+    _registry: dict[str, type[DiffusersFSDPEngine]] = {}
+
+    @classmethod
+    def register(cls, algorithms: str | list[str]):
+        """Register an FSDP engine class for one or more diffusion algorithms."""
+        algorithm_names = [algorithms] if isinstance(algorithms, str) else algorithms
+
+        def decorator(engine_cls: type[DiffusersFSDPEngine]) -> type[DiffusersFSDPEngine]:
+            if not issubclass(engine_cls, DiffusersFSDPEngine):
+                raise TypeError(f"{engine_cls.__name__} must subclass DiffusersFSDPEngine.")
+            for algorithm in algorithm_names:
+                if not algorithm:
+                    raise ValueError("Diffusion FSDP engine algorithm names must be non-empty.")
+                if algorithm in cls._registry:
+                    registered_cls = cls._registry[algorithm]
+                    raise ValueError(
+                        f"Diffusion algorithm {algorithm!r} is already registered to {registered_cls.__name__}."
+                    )
+                cls._registry[algorithm] = engine_cls
+            return engine_cls
+
+        return decorator
+
+    @classmethod
+    def get_engine_cls(cls, model_config: DiffusionModelConfig) -> type[DiffusersFSDPEngine]:
+        """Return the FSDP engine class registered for ``model_config.algorithm``."""
+        algorithm = getattr(model_config, "algorithm", None)
+        if not algorithm:
+            raise ValueError("DiffusionModelConfig.algorithm must be set for diffusion FSDP engine selection.")
+
+        try:
+            return cls._registry[algorithm]
+        except KeyError:
+            registered = sorted(cls._registry)
+            raise NotImplementedError(
+                f"No diffusion FSDP engine registered for algorithm={algorithm!r}. Registered algorithms: {registered}."
+            ) from None
+
+
+@DiffusionFSDPEngineAlgorithmRegistry.register(["flow_grpo", "mix_grpo"])
+class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
+    """Diffusers FSDP engine with PPO forward/backward and I/O preparation."""
+
+    def forward_backward_batch(
+        self, data: TensorDict, loss_function: Callable, forward_only: bool = False
+    ) -> list[TensorDict]:
+        return self._run_forward_backward_batch(data, loss_function, forward_only, timesteps_key="all_timesteps")
 
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
         """
@@ -987,43 +1020,14 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
         return loss, output
 
 
-class DirectPreferenceDiffusersFSDPEngine(PPODiffusersFSDPEngine):
-    """Diffusers FSDP engine path for forward-process direct-preference objectives."""
+@DiffusionFSDPEngineAlgorithmRegistry.register("diffusion_nft")
+class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
+    """Diffusers FSDP engine for direct-preference / forward-process objectives (e.g. DiffusionNFT)."""
 
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
     ) -> list[TensorDict]:
-        num_timesteps = data["train_timesteps"].shape[1]
-        tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
-        tu.assign_non_tensor(data, use_dynamic_bsz=False)
-
-        micro_batches, indices = prepare_micro_batches(
-            data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
-        )
-        gradient_accumulation_steps = len(micro_batches) * num_timesteps
-        output_lst = []
-        ctx = torch.no_grad() if forward_only else nullcontext()
-
-        for micro_batch in micro_batches:
-            micro_batch = micro_batch.to(get_device_id())
-            tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
-            meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
-            with ctx:
-                for step in range(num_timesteps):
-                    loss, meta_info = DirectPreferenceDiffusersFSDPEngine.forward_step(
-                        self,
-                        micro_batch,
-                        loss_function=loss_function,
-                        forward_only=forward_only,
-                        step=step,
-                    )
-                    if not forward_only:
-                        loss.backward()
-                    for key, val in meta_info.items():
-                        meta_info_lst[key].append(val)
-            output_lst.append(meta_info_lst)
-
-        return self.postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+        return self._run_forward_backward_batch(data, loss_function, forward_only, timesteps_key="train_timesteps")
 
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
         x0 = micro_batch["latents_clean"]
@@ -1086,10 +1090,8 @@ class DirectPreferenceDiffusersFSDPEngine(PPODiffusersFSDPEngine):
         }
 
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
-        model_inputs, negative_model_inputs, x0, xt, t_expanded = DirectPreferenceDiffusersFSDPEngine.prepare_model_inputs(
-            self,
-            micro_batch=micro_batch,
-            step=step,
+        model_inputs, negative_model_inputs, x0, xt, t_expanded = self.prepare_model_inputs(
+            micro_batch=micro_batch, step=step
         )
 
         with self.use_adapter("old"), torch.no_grad():
@@ -1117,8 +1119,7 @@ class DirectPreferenceDiffusersFSDPEngine(PPODiffusersFSDPEngine):
                 ).detach()
         self._set_adapter("default")
 
-        model_output = DirectPreferenceDiffusersFSDPEngine.prepare_model_outputs(
-            self,
+        model_output = self.prepare_model_outputs(
             output=(old_prediction, forward_prediction, ref_forward_prediction, x0, xt, t_expanded),
             micro_batch=micro_batch,
         )
@@ -1144,6 +1145,26 @@ class DirectPreferenceDiffusersFSDPEngine(PPODiffusersFSDPEngine):
             "metrics": metrics,
         }
         return loss, output
+
+
+@EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+class DiffusersFSDPEngineRouter(BaseEngine):
+    """Registered diffusion FSDP entry point that selects the algorithm-specific engine."""
+
+    def __new__(
+        cls,
+        model_config: DiffusionModelConfig,
+        engine_config: FSDPEngineConfig,
+        optimizer_config: FSDPOptimizerConfig,
+        checkpoint_config: CheckpointConfig,
+    ) -> DiffusersFSDPEngine:
+        engine_cls = DiffusionFSDPEngineAlgorithmRegistry.get_engine_cls(model_config)
+        return engine_cls(
+            model_config=model_config,
+            engine_config=engine_config,
+            optimizer_config=optimizer_config,
+            checkpoint_config=checkpoint_config,
+        )
 
 
 class EngineEvalModeCtx(BaseEngineCtx):

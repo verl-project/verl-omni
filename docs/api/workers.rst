@@ -14,7 +14,7 @@ trainer drives them through a unified RPC layer.
    verl_omni.workers.engine_workers.ActorRolloutRefWorker
    verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersFSDPEngine
    verl_omni.workers.engine.fsdp.diffusers_impl.PPODiffusersFSDPEngine
-   verl_omni.workers.engine.fsdp.diffusers_impl.DirectPreferenceDiffusersFSDPEngine
+   verl_omni.workers.engine.fsdp.diffusers_impl.NFTDiffusersFSDPEngine
    verl_omni.workers.config.DiffusionModelConfig
    verl_omni.workers.config.DiffusionActorConfig
    verl_omni.workers.config.FSDPDiffusionActorConfig
@@ -58,10 +58,11 @@ Diffusers PPO FSDP Engine
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :class:`~verl_omni.workers.engine.fsdp.diffusers_impl.PPODiffusersFSDPEngine`
-is the concrete engine registered for FlowGRPO-style training (FlowGRPO,
-MixGRPO, GRPO-Guard). It subclasses
+implements the FlowGRPO-style training path (FlowGRPO, MixGRPO). It subclasses
 :class:`~verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersFSDPEngine`
-and adds PPO forward/backward and batch I/O helpers.
+and adds PPO forward/backward and batch I/O helpers. The registered diffusion
+FSDP router selects this engine for PPO-style algorithms registered with the
+algorithm registry.
 
 .. autoclass:: verl_omni.workers.engine.fsdp.diffusers_impl.PPODiffusersFSDPEngine
    :members: __init__, initialize,
@@ -73,14 +74,17 @@ and adds PPO forward/backward and batch I/O helpers.
              save_checkpoint, load_checkpoint, get_per_tensor_param,
              to, disable_adapter
 
-Direct-Preference Diffusers FSDP Engine
+NFT Diffusers FSDP Engine
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:class:`~verl_omni.workers.engine.fsdp.diffusers_impl.DirectPreferenceDiffusersFSDPEngine`
-contains the forward-process actor update path used by direct-preference
-algorithms such as DiffusionNFT.
+:class:`~verl_omni.workers.engine.fsdp.diffusers_impl.NFTDiffusersFSDPEngine`
+subclasses :class:`~verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersFSDPEngine`
+and implements the forward-process actor update path used by DiffusionNFT.
+The registered diffusion FSDP router selects it when ``model_config.algorithm``
+is ``diffusion_nft``. New algorithm-specific engines should register with
+``DiffusionFSDPEngineAlgorithmRegistry``.
 
-.. autoclass:: verl_omni.workers.engine.fsdp.diffusers_impl.DirectPreferenceDiffusersFSDPEngine
+.. autoclass:: verl_omni.workers.engine.fsdp.diffusers_impl.NFTDiffusersFSDPEngine
    :members: forward_step, forward_backward_batch,
              prepare_model_inputs, prepare_model_outputs
 

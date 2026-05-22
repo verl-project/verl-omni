@@ -11,6 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .diffusers_impl import DirectPreferenceDiffusersFSDPEngine, DiffusersFSDPEngine, PPODiffusersFSDPEngine  # noqa: F401
+from .diffusers_impl import DiffusersFSDPEngine, NFTDiffusersFSDPEngine, PPODiffusersFSDPEngine  # noqa: F401
 
-__all__ = ["PPODiffusersFSDPEngine", "DirectPreferenceDiffusersFSDPEngine", "DiffusersFSDPEngine"]
+__all__ = ["PPODiffusersFSDPEngine", "NFTDiffusersFSDPEngine", "DiffusersFSDPEngine"]

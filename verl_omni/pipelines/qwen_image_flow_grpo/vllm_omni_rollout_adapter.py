@@ -526,9 +526,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         }
         if collect_mode == "final_latent":
             custom_output["latents_clean"] = _maybe_to_cpu(latents_clean)
-            custom_output["train_timesteps"] = _maybe_to_cpu(
-                timesteps.unsqueeze(0).expand(latents_clean.shape[0], -1)
-            )
+            custom_output["train_timesteps"] = _maybe_to_cpu(timesteps.unsqueeze(0).expand(latents_clean.shape[0], -1))
 
         return DiffusionOutput(
             output=_maybe_to_cpu(image),
