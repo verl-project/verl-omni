@@ -39,14 +39,14 @@ the scheduler (precision), and all stored latents are in float32.
 
 ### Verification
 
-After applying the fixes, at step 1 the systematic bias from precision loss
-is eliminated.  Any remaining sub-1e-4 KL divergence is from the vLLM vs
-PyTorch attention kernel difference, which is unavoidable when using different
+The fix eliminates the systematic precision-loss bias from the scheduler.
+In non-bypass mode (no rollout correction) `ratio_mean ≈ 1.0` at step 1.
+In bypass mode a ~3×10⁻⁵ KL divergence remains due to the vLLM vs PyTorch
+attention kernel difference, which is unavoidable when using different
 inference backends.
 
-| Metric | Before fix | After fix |
-|---|---|---|
-| `actor/ratio_mean` | ~0.99996 | ~1.00000 |
-| `actor/ppo_kl` | ~3.5×10⁻⁵ | ≤1×10⁻⁵ |
-| `actor/pg_clipfrac` | ~10% | ≤5% |
-| `actor/pg_clipfrac_higher` | ~0% | roughly symmetric |
+| Metric | Before fix (bypass) | After fix (bypass) | No bypass |
+|---|---|---|---|
+| `actor/ratio_mean` | ~0.999964 | ~0.999967 | ~0.999999 |
+| `actor/ppo_kl` | ~3.6×10⁻⁵ | ~3.3×10⁻⁵ | ~1×10⁻⁶ |
+| `actor/pg_clipfrac` | ~12% | ~9% | ~1% |
