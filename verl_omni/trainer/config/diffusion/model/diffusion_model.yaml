@@ -31,11 +31,11 @@ external_lib: null
 # whether to enable gradient checkpointing.
 enable_gradient_checkpointing: True
 
-# Optional VeOmni model config path. If null, VeOmni backend uses <path>/transformer.
-veomni_config_path: null
+# Optional model config path. If null, backends use <path>/<transformer_subfolder>.
+config_path: null
 
-# Diffusion transformer subfolder for VeOmni backend.
-veomni_transformer_subfolder: transformer
+# Subfolder containing the diffusion transformer weights/config.
+transformer_subfolder: transformer
 
 # Diffusers attention backend. Supported: "native"
 attn_backend: native

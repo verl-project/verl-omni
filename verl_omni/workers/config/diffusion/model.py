@@ -104,12 +104,12 @@ class DiffusionModelConfig(BaseConfig):
 
     fsdp_layer_prefixes: list[str] = field(default_factory=lambda: ["transformer_blocks."])
 
-    # Optional VeOmni model config path. If unset, the backend uses
-    # ``<local_path>/<veomni_transformer_subfolder>``.
-    veomni_config_path: Optional[str] = None
+    # Optional model config path. If unset, the backend uses
+    # ``<local_path>/<transformer_subfolder>``.
+    config_path: Optional[str] = None
 
     # Subfolder containing the diffusion transformer weights/config.
-    veomni_transformer_subfolder: str = "transformer"
+    transformer_subfolder: str = "transformer"
 
     def __post_init__(self):
         import_external_libs(self.external_lib)

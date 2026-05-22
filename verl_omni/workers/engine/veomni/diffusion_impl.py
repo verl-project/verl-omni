@@ -210,8 +210,8 @@ class VeOmniDiffusionEngine(BaseEngine):
         raise ValueError(f"Unsupported VeOmni model dtype: {self.engine_config.model_dtype}")
 
     def _get_veomni_model_paths(self) -> tuple[str, str]:
-        weights_path = os.path.join(self.model_config.local_path, self.model_config.veomni_transformer_subfolder)
-        config_path = self.model_config.veomni_config_path or weights_path
+        weights_path = os.path.join(self.model_config.local_path, self.model_config.transformer_subfolder)
+        config_path = self.model_config.config_path or weights_path
         return config_path, weights_path
 
     def _build_scheduler(self):
@@ -591,7 +591,7 @@ class VeOmniDiffusionEngine(BaseEngine):
             grad_norm = grad_norm.full_tensor()
 
         if not torch.isfinite(grad_norm):
-            print(f"WARN: grad_norm is not finite: {grad_norm}")
+            logger.warning("grad_norm is not finite: %s", grad_norm)
             self.optimizer.zero_grad()
         else:
             self.optimizer.step()
@@ -668,13 +668,14 @@ class VeOmniDiffusionEngine(BaseEngine):
             _offload_veomni_model_to_cpu(self.module)
 
         device = get_device_id()
+        export_dtype = PrecisionType.to_dtype(self.engine_config.model_dtype)
 
         def param_generator():
             for name, param in params.items():
                 tensor = param.full_tensor() if isinstance(param, DTensor) else param
                 tensor = tensor.to(device, non_blocking=True)
-                if tensor.is_floating_point() and tensor.dtype == torch.float32:
-                    tensor = tensor.to(torch.bfloat16, non_blocking=True)
+                if tensor.is_floating_point() and tensor.dtype != export_dtype:
+                    tensor = tensor.to(export_dtype, non_blocking=True)
                 yield f"transformer.{name}", tensor
 
         return param_generator(), None
