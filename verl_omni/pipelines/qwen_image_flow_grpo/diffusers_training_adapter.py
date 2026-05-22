@@ -63,14 +63,11 @@ def _configure_qwen_image_scheduler(
     scheduler.set_timesteps(num_inference_steps, device=device, sigmas=sigmas, mu=mu)
 
 
-def _is_veomni_qwen_image_module(module: QwenImageTransformer2DModel) -> bool:
-    target_module = getattr(module, "_fsdp_wrapped_module", module)
-    return target_module.__class__.__module__.startswith("veomni.models.diffusers.qwen_image")
-
-
 def _forward_qwen_image_prediction(module: QwenImageTransformer2DModel, model_inputs: dict[str, torch.Tensor]):
-    if _is_veomni_qwen_image_module(module):
-        return module(**model_inputs, return_loss=False)[0]
+    # Go through ``module(...)`` so FSDP2 / parallelization forward hooks fire and
+    # unshard parameters before the linear layers run. VeOmni's wrapped model also
+    # implements this entrypoint: with ``training_target`` left unset it falls back to
+    # the diffusers base forward and returns the same ``(sample,)`` tuple shape.
     return module(**model_inputs)[0]
 
 
