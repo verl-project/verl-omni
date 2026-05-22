@@ -24,10 +24,6 @@ using the fp32 `prev_sample`, then **casts `prev_sample` back to
 `model_output.dtype` (bfloat16)** before returning.  The stored latents
 lose precision, creating a mismatch with the log-prob computation.
 
-Additionally, `sample_previous_step()` did not cast `model_output` to
-float32, unlike the [official flow_grpo implementation](https://github.com/yifan123/flow_grpo/blob/main/flow_grpo/diffusers_patch/sd3_sde_with_logprob.py)
-which casts all inputs to fp32 upfront.
-
 ### Fix
 
 Two changes in the scheduler, one in the rollout adapter.
