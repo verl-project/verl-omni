@@ -338,6 +338,11 @@ For example, DiffusionNFT registers `NFTDiffusersFSDPEngine` because its batch
 contains `latents_clean`, `train_timesteps`, and `reward_prob`, not PPO's
 reverse-step logprob tensors.
 
+If your algorithm needs multiple LoRA policy states (for example `default`
+and `old`), declare them with `actor_rollout_ref.model.policy_state_adapters`
+and reuse the shared `LoRAAdapterMixin` helpers for adapter selection, copy,
+and EMA updates instead of adding engine-specific adapter plumbing.
+
 Do **not** register a name just because it is a loss mode. For example,
 GRPO-Guard currently reuses the `flow_grpo` model algorithm and selects the
 guarded objective through `actor_rollout_ref.actor.diffusion_loss.loss_mode`;
