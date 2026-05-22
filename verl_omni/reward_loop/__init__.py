@@ -11,6 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from . import _patches  # noqa: F401  # applies monkey-patches over verl reward loop
 from .reward_manager import VisualRewardManager  # noqa: F401
-from .score_assembler import visual_score_assembler  # noqa: F401
+
+__all__ = ["VisualRewardManager"]

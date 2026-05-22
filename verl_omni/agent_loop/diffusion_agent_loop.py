@@ -175,11 +175,11 @@ class DiffusionAgentLoopWorker:
             sampling_params["seed"] = config.val_kwargs.seed
             sampling_params["logprobs"] = False
         else:
+            sampling_params["global_steps"] = batch.meta_info["global_steps"]
             base_train_seed = batch.meta_info.get("rollout_seed")
             if base_train_seed is not None:
                 base_train_seed = int(base_train_seed)
 
-        # by default, we assume it's a single turn agent
         if "agent_name" not in batch.non_tensor_batch:
             default_agent_loop = config.agent.default_agent_loop
             batch.non_tensor_batch["agent_name"] = np.array([default_agent_loop] * len(batch), dtype=object)

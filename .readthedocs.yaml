@@ -7,6 +7,14 @@ build:
   os: ubuntu-22.04
   tools:
     python: "3.11"
+  jobs:
+    # Install heavy deps before RTD's default python.install step runs,
+    # so that `pip install .` finds them already satisfied.
+    pre_install:
+      - pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.18.0/vllm-0.18.0+cpu-cp38-abi3-manylinux_2_35_x86_64.whl"
+      - pip install "vllm-omni==0.18.0"
+      - pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
+      - pip install -r requirements.txt
 
 sphinx:
   configuration: docs/conf.py

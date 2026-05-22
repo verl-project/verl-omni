@@ -14,8 +14,11 @@ diffusion model architecture into the training loop:
   :class:`~verl_omni.pipelines.model_base.VllmOmniPipelineBase` that hooks
   into vLLM-Omni's diffusion serving stack to expose log-probabilities.
 
-Adapters are auto-selected by matching ``DiffusionModelConfig.architecture``
-(read from the model's ``model_index.json``) against the registered name.
+Adapters are auto-selected by matching the pair
+``(DiffusionModelConfig.architecture, DiffusionModelConfig.algorithm)`` against the
+registered ``(architecture, algorithm)`` key. The architecture is read from the
+model's ``model_index.json``; the algorithm string is taken from the model config's
+``actor_rollout_ref.model.algorithm`` value.
 
 .. autosummary::
    :nosignatures:
@@ -23,6 +26,7 @@ Adapters are auto-selected by matching ``DiffusionModelConfig.architecture``
    verl_omni.pipelines.model_base.DiffusionModelBase
    verl_omni.pipelines.model_base.VllmOmniPipelineBase
    verl_omni.pipelines.qwen_image_flow_grpo.QwenImage
+   verl_omni.pipelines.qwen_image_mix_grpo.QwenImageMixGRPO
    verl_omni.pipelines.schedulers.flow_match_sde.FlowMatchSDEDiscreteScheduler
 
 Model Base
@@ -67,4 +71,14 @@ Qwen-Image (FlowGRPO)
              prepare_model_inputs, forward_and_sample_previous_step
 
 .. autoclass:: verl_omni.pipelines.qwen_image_flow_grpo.QwenImagePipelineWithLogProb
+   :members:
+
+Qwen-Image (MixGRPO)
+^^^^^^^^^^^^^^^^^^^^^
+
+.. autoclass:: verl_omni.pipelines.qwen_image_mix_grpo.QwenImageMixGRPO
+   :members: build_scheduler, set_timesteps,
+             prepare_model_inputs, forward_and_sample_previous_step
+
+.. autoclass:: verl_omni.pipelines.qwen_image_mix_grpo.QwenImageMixGRPOPipelineWithLogProb
    :members:

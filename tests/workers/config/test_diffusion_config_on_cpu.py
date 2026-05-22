@@ -77,10 +77,15 @@ class TestDiffusionRolloutAlgoConfig:
         assert cfg.noise_level == pytest.approx(1.0)
         assert cfg.sde_type == "sde"
         assert cfg.sde_window_size is None
+        assert cfg.sde_window_range is None
 
-    def test_sde_window_range_default(self):
-        cfg = DiffusionRolloutAlgoConfig()
-        assert cfg.sde_window_range == [0, 5]
+    def test_invalid_sample_strategy_raises(self):
+        with pytest.raises(ValueError, match="Unknown sample_strategy"):
+            DiffusionRolloutAlgoConfig(sample_strategy="bogus")
+
+    def test_progressive_requires_positive_iters(self):
+        with pytest.raises(ValueError, match="iters_per_group.*positive"):
+            DiffusionRolloutAlgoConfig(sample_strategy="progressive", iters_per_group=0)
 
 
 class TestDiffusionSamplingConfig:

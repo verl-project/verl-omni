@@ -1,6 +1,6 @@
 # Flow-GRPO
 
-Last updated: 04/23/2026.
+Last updated: 05/13/2026.
 
 Flow-GRPO ([paper](https://arxiv.org/abs/2505.05470), [code](https://github.com/yifan123/flow_grpo)) is the first method to integrate online policy gradient reinforcement learning into **flow matching** generative models (e.g., Stable Diffusion 3, FLUX). It enables direct reward optimization for tasks such as compositional text-to-image generation, visual text rendering, and human preference alignment, without modifying the standard inference pipeline.
 
@@ -212,7 +212,8 @@ bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh
 ### Rule-Based Reward Training: JPEG incompressibility
 
 FlowGRPO also supports rule-based rewards that score images directly without a
-VLM reward model, using the same `reward.reward_manager.name=visual` setup.
+VLM reward model, reusing the default `VisualRewardManager` from
+`verl_omni/trainer/config/reward/reward.yaml`.
 
 `verl_omni/utils/reward_score/jpeg_compressibility.py` rewards images that are
 harder to JPEG-compress (richer texture, more complex content). No extra
@@ -239,8 +240,8 @@ reward.custom_reward_function.path=...
 reward.custom_reward_function.name=...
 ```
 
-Keep `reward.reward_manager.name=visual` and all actor/rollout settings
-unchanged.
+Keep all actor/rollout settings unchanged; the visual reward manager is loaded
+from the default reward config.
 
 ### Async Reward
 
@@ -249,6 +250,38 @@ For reward models that are expensive to evaluate (e.g., a VLM judge), the reward
 
 ```bash
 bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_async_reward.sh
+```
+
+### Full Model Training
+
+We have provided a script to enable non-cfg full-weight Qwen-Image OCR training. The example is runnable on 4 NVIDIA H200 GPUs; enabling CFG requires more GPU resources.
+
+```bash
+bash examples/flowgrpo_trainer/run_qwen_image_ocr.sh
+```
+
+
+### Sequence parallelism (Ulysses SP)
+
+Ulysses SP is supported for diffusion model training and requires `diffusers` >= 0.38.0.
+It shards the sequence dimension across GPUs within a SP group,
+reducing per-GPU memory for long-sequence and high-resolution training.
+
+- `actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size`: Number
+  of GPUs in the SP group. Must be a divisor of the total GPU count. Set to `1`
+  (default) to disable SP. Common values: `2`, `4`, `8`.
+
+When SP is enabled, FSDP data parallelism is automatically reduced:
+```
+dp_size = total_gpus / ulysses_sequence_parallel_size
+```
+
+For SP training, `num_attention_heads` must be divisible by
+`ulysses_sequence_parallel_size`.
+
+A ready-to-use 4-GPU SP=2 example is provided:
+```bash
+bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_sp2.sh
 ```
 
 

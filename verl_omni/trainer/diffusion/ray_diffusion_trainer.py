@@ -19,6 +19,7 @@ This trainer supports model-agnostic model initialization with Hugging Face.
 import json
 import os
 import uuid
+from abc import ABC, abstractmethod
 from collections import defaultdict
 from pprint import pprint
 from typing import Any, Optional
@@ -33,7 +34,6 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -106,12 +106,11 @@ def compute_advantage(
     return data
 
 
-class RayFlowGRPOTrainer:
-    """Distributed Flow-GRPO trainer using Ray for scalable reinforcement learning.
+class BaseRayDiffusionTrainer(ABC):
+    """Common Ray trainer infrastructure for diffusion training.
 
-    This trainer orchestrates distributed PPO training across multiple nodes and GPUs,
-    managing actor rollouts and reward computation with Ray backend.
-    Supports various model architectures including FSDP, Megatron, vLLM, and SGLang integration.
+    Paradigm-specific trainers own the training loop while sharing worker
+    initialization, validation, checkpointing, and logging behavior.
     """
 
     def __init__(
@@ -152,12 +151,13 @@ class RayFlowGRPOTrainer:
         self.config = config
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
-        assert self.hybrid_engine, "Currently, only support hybrid engine"
-
-        if self.hybrid_engine:
+        if config.algorithm.sample_source == "online":
+            assert self.hybrid_engine, "Currently, only support hybrid engine"
             assert Role.ActorRollout in role_worker_mapping or Role.ActorRolloutRef in role_worker_mapping, (
                 f"{role_worker_mapping.keys()=}"
             )
+        else:
+            assert Role.Actor in role_worker_mapping, f"{role_worker_mapping.keys()=}"
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
@@ -186,7 +186,7 @@ class RayFlowGRPOTrainer:
         Creates the train and validation dataloaders.
         """
         # TODO: we have to make sure the batch size is divisible by the dp size
-        from verl_omni.utils.dataset.rl_dataset import create_rl_dataset, create_rl_sampler
+        from verl_omni.utils.dataset.rl_dataset import create_rl_dataset, create_rl_sampler, get_collate_fn
 
         if train_dataset is None:
             train_dataset = create_rl_dataset(
@@ -209,9 +209,7 @@ class RayFlowGRPOTrainer:
         if train_sampler is None:
             train_sampler = create_rl_sampler(self.config.data, self.train_dataset)
         if collate_fn is None:
-            from verl_omni.utils.dataset.rl_dataset import collate_fn as default_collate_fn
-
-            collate_fn = default_collate_fn
+            collate_fn = get_collate_fn(self.config.data)
 
         num_workers = self.config.data["dataloader_num_workers"]
 
@@ -528,19 +526,26 @@ class RayFlowGRPOTrainer:
         return metric_dict
 
     def init_workers(self):
-        """Initialize distributed training workers using Ray backend.
+        """Initialize distributed training workers using Ray backend."""
+        actor_rollout_resource_pool = self._init_colocated_workers()
+        if self.config.algorithm.sample_source == "offline":
+            return
+        self._init_online_rollout_stack(actor_rollout_resource_pool)
 
-        Creates:
-        1. Ray resource pools from configuration
-        2. Worker groups for each enabled role (actor/ref/reward)
-        """
+    def _init_colocated_workers(self):
+        """Create Ray pools and colocated actor/ref worker groups (online and offline)."""
         self.resource_pool_manager.create_resource_pool()
 
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
-        # create actor and rollout
-        actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
-        if self.hybrid_engine:
+        # create actor and rollout (offline uses Role.Actor only; online uses hybrid actor_rollout roles)
+        if Role.Actor in self.role_worker_mapping:
+            actor_role = Role.Actor
+        elif Role.ActorRolloutRef in self.role_worker_mapping:
+            actor_role = Role.ActorRolloutRef
+        else:
+            actor_role = Role.ActorRollout
+        if self.hybrid_engine or actor_role == Role.Actor:
             actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[actor_role],
@@ -570,6 +575,19 @@ class RayFlowGRPOTrainer:
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
+        # Forward profiling steps and (when nsys is selected) per-worker Nsight options to the
+        # Ray worker group so that workers can be launched under nsys with the right capture range.
+        if OmegaConf.select(self.config, "global_profiler.steps") is not None:
+            wg_kwargs["profile_steps"] = OmegaConf.select(self.config.global_profiler, "steps")
+            if OmegaConf.select(self.config.global_profiler, "tool") == "nsys":
+                worker_nsight_options = OmegaConf.select(
+                    self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options"
+                )
+                assert worker_nsight_options is not None, (
+                    "global_profiler.global_tool_config.nsys.worker_nsight_options must be set "
+                    "when using nsys with global_profiler.steps"
+                )
+                wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(worker_nsight_options)
         wg_kwargs["device_name"] = self.device_name
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
@@ -600,6 +618,10 @@ class RayFlowGRPOTrainer:
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
 
+        return actor_rollout_resource_pool
+
+    def _init_online_rollout_stack(self, actor_rollout_resource_pool):
+        """Initialize rollout, reward, and checkpoint engines (online sampling only)."""
         # create reward loop manager
         from verl.experimental.reward_loop import RewardLoopManager
 
@@ -756,6 +778,58 @@ class RayFlowGRPOTrainer:
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
+    def _update_actor(self, batch: DataProto) -> DataProto:
+        rollout_config = self.config.actor_rollout_ref.rollout
+        batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
+        # update actor
+        batch_td = batch.to_tensordict()
+        # step 2: convert from padding to no-padding
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
+        seed = self.config.actor_rollout_ref.actor.data_loader_seed
+        shuffle = self.config.actor_rollout_ref.actor.shuffle
+        tu.assign_non_tensor(
+            batch_td,
+            global_batch_size=ppo_mini_batch_size,
+            mini_batch_size=ppo_mini_batch_size,
+            epochs=ppo_epochs,
+            seed=seed,
+            dataloader_kwargs={"shuffle": shuffle},
+            height=self.config.actor_rollout_ref.model.pipeline.height,
+            width=self.config.actor_rollout_ref.model.pipeline.width,
+            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        )
+
+        actor_output = self.actor_rollout_wg.update_actor(batch_td)
+        actor_output = tu.get(actor_output, "metrics")
+        actor_output = rename_dict(actor_output, "actor/")
+        return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
+
+    def _start_profiling(self, do_profile: bool) -> None:
+        """Start profiling for all worker groups if profiling is enabled."""
+        if do_profile:
+            self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
+            if self.use_reference_policy and not self.ref_in_actor:
+                self.ref_policy_wg.start_profile(profile_step=self.global_steps)
+
+    def _stop_profiling(self, do_profile: bool) -> None:
+        """Stop profiling for all worker groups if profiling is enabled."""
+        if do_profile:
+            self.actor_rollout_wg.stop_profile()
+            if self.use_reference_policy and not self.ref_in_actor:
+                self.ref_policy_wg.stop_profile()
+
+    @abstractmethod
+    def fit(self):
+        """Run the trainer-type-specific training loop."""
+        pass
+
+
+class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
+    """Policy-gradient diffusion trainer for FlowGRPO, MixGRPO, DanceGRPO, GRPO-Guard, etc."""
+
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
         batch_td = batch.to_tensordict()
         batch_td = embeds_padding_2_no_padding(batch_td)
@@ -792,37 +866,12 @@ class RayFlowGRPOTrainer:
         )
         output = self.actor_rollout_wg.compute_log_prob(batch_td)
         log_probs = tu.get(output, "log_probs")
-        old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float()})
+        old_log_prob_dict = {"old_log_probs": log_probs.float()}
+        prev_sample_mean = tu.get(output, "prev_sample_mean")
+        if prev_sample_mean is not None:
+            old_log_prob_dict["old_prev_sample_mean"] = prev_sample_mean.float()
+        old_log_prob = tu.get_tensordict(old_log_prob_dict)
         return DataProto.from_tensordict(old_log_prob)
-
-    def _update_actor(self, batch: DataProto) -> DataProto:
-        rollout_config = self.config.actor_rollout_ref.rollout
-        batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
-        # update actor
-        batch_td = batch.to_tensordict()
-        # step 2: convert from padding to no-padding
-        batch_td = embeds_padding_2_no_padding(batch_td)
-        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
-        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
-        seed = self.config.actor_rollout_ref.actor.data_loader_seed
-        shuffle = self.config.actor_rollout_ref.actor.shuffle
-        tu.assign_non_tensor(
-            batch_td,
-            global_batch_size=ppo_mini_batch_size,
-            mini_batch_size=ppo_mini_batch_size,
-            epochs=ppo_epochs,
-            seed=seed,
-            dataloader_kwargs={"shuffle": shuffle},
-            height=self.config.actor_rollout_ref.model.pipeline.height,
-            width=self.config.actor_rollout_ref.model.pipeline.width,
-            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
-        )
-
-        actor_output = self.actor_rollout_wg.update_actor(batch_td)
-        actor_output = tu.get(actor_output, "metrics")
-        actor_output = rename_dict(actor_output, "actor/")
-        return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
     def fit(self):
         """
@@ -867,12 +916,28 @@ class RayFlowGRPOTrainer:
         last_val_metrics = None
         self.max_steps_duration = 0
 
+        # Profiler step state machine. Mirrors verl/trainer/ppo/ray_trainer.py.
+        prev_step_profile = False
+        curr_step_profile = (
+            self.global_steps in self.config.global_profiler.steps
+            if self.config.global_profiler.steps is not None
+            else False
+        )
+        next_step_profile = False
+
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
                 metrics = {}
                 timing_raw = {}
+
+                with marked_timer("start_profile", timing_raw):
+                    self._start_profiling(
+                        not prev_step_profile and curr_step_profile
+                        if self.config.global_profiler.profile_continuous_steps
+                        else curr_step_profile
+                    )
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
 
@@ -1008,6 +1073,20 @@ class RayFlowGRPOTrainer:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
 
+                with marked_timer("stop_profile", timing_raw):
+                    next_step_profile = (
+                        self.global_steps + 1 in self.config.global_profiler.steps
+                        if self.config.global_profiler.steps is not None
+                        else False
+                    )
+                    self._stop_profiling(
+                        curr_step_profile and not next_step_profile
+                        if self.config.global_profiler.profile_continuous_steps
+                        else curr_step_profile
+                    )
+                    prev_step_profile = curr_step_profile
+                    curr_step_profile = next_step_profile
+
                 steps_duration = timing_raw["step"]
                 self.max_steps_duration = max(self.max_steps_duration, steps_duration)
 
@@ -1028,22 +1107,10 @@ class RayFlowGRPOTrainer:
                 gradient_norm = metrics.get("actor/grad_norm", None)
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
 
-                # this is experimental and may be changed/removed in the future in favor of a general-purpose one
-                if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
-                    self.train_dataloader.sampler.update(batch=batch)
-
                 logger.log(data=metrics, step=self.global_steps)
 
                 progress_bar.update(1)
                 self.global_steps += 1
-
-                if (
-                    hasattr(self.config.actor_rollout_ref.actor, "profiler")
-                    and self.config.actor_rollout_ref.actor.profiler.tool == "torch_memory"
-                ):
-                    self.actor_rollout_wg.dump_memory_snapshot(
-                        tag=f"post_update_step{self.global_steps}", sub_dir=f"step{self.global_steps}"
-                    )
 
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
@@ -1057,3 +1124,14 @@ class RayFlowGRPOTrainer:
                 if hasattr(self.train_dataset, "on_batch_end"):
                     # The dataset may be changed after each training batch
                     self.train_dataset.on_batch_end(batch=batch)
+
+
+class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
+    """Direct-preference diffusion trainer for DPO, DiffusionNFT, AWM, etc."""
+
+    def fit(self):
+        """Run direct-preference diffusion training."""
+        raise NotImplementedError(
+            "Direct-preference diffusion training is not implemented yet. "
+            "Implement this loop for algorithms such as DiffusionNFT or DPO."
+        )

@@ -18,6 +18,7 @@ from typing import Optional
 from omegaconf import MISSING
 from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig
+from verl.utils.profiler import ProfilerConfig
 from verl.workers.config.engine import FSDPEngineConfig
 from verl.workers.config.optimizer import OptimizerConfig
 
@@ -38,7 +39,7 @@ class DiffusionLossConfig(BaseConfig):
 
     def __post_init__(self):
         """Validate diffusion loss configuration."""
-        valid_modes = ["flow_grpo"]
+        valid_modes = ["flow_grpo", "grpo_guard"]
         if self.loss_mode not in valid_modes:
             raise ValueError(f"Invalid diffusion loss_mode: {self.loss_mode}. Must be one of {valid_modes}")
 
@@ -68,6 +69,7 @@ class DiffusionActorConfig(BaseConfig):
     rollout_n: int = MISSING  # must be override by sampling config
     model_config: DiffusionModelConfig = field(default_factory=BaseConfig)
     log_prob_micro_batch_size_per_gpu: Optional[int] = None
+    profiler: Optional[ProfilerConfig] = None
 
     # Store global batch info for loss aggregation:
     # dp_size: data parallel size

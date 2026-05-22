@@ -1,0 +1,101 @@
+name: gpu_smoke
+
+on:
+  push:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "verl_omni/**"
+      - "tests/gpu_smoke/**"
+      - "tests/agent_loop/**"
+      - "tests/reward_loop/**"
+      - "tests/workers/**"
+      - "tests/special_e2e/**"
+      - "requirements*.txt"
+      - .github/workflows/gpu_smoke.yml
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    types: [labeled]
+    paths:
+      - "verl_omni/**"
+      - "tests/gpu_smoke/**"
+      - "tests/agent_loop/**"
+      - "tests/reward_loop/**"
+      - "tests/workers/**"
+      - "tests/special_e2e/**"
+      - "requirements*.txt"
+      - .github/workflows/gpu_smoke.yml
+
+# Cancel jobs on the same ref if a new one is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Declare permissions just read content.
+permissions:
+  contents: read
+
+env:
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm018.dev1"
+  DYNAMIC_RUNNER_ENDPOINT: "https://sd7upeujs1b9g1a958pn0.apigateway-cn-beijing.volceapi.com/runner"
+
+jobs:
+  setup:
+    if: >-
+      github.repository_owner == 'verl-project' && (
+        github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      runner-label: ${{ steps.create-runner.outputs.runner-label }}
+      mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: create-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "create"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-image: "${{ env.IMAGE }}"
+
+  gpu_smoke_tests:
+    needs: setup
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
+    timeout-minutes: 20
+    env:
+      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Install dependencies
+        run: |
+          pip3 install --index-url https://download.pytorch.org/whl/cu129 torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0
+          pip3 install "https://github.com/vllm-project/vllm/releases/download/v0.20.2/vllm-0.20.2%2Bcu129-cp38-abi3-manylinux_2_31_x86_64.whl" "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@c7178d89bb7a70817f239febc84c3b21a714dae7"
+          pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
+          pip3 install -r requirements.txt
+          pip3 install -r requirements-test.txt
+          pip3 install --no-deps -e .
+      - name: Run GPU smoke tests
+        run: |
+          ray stop --force
+          bash tests/gpu_smoke/run_gpu_smoke_tests.sh --num-gpus 8
+
+  cleanup:
+    runs-on: ubuntu-latest
+    needs: [setup, gpu_smoke_tests]
+    if: always()
+    steps:
+      - id: destroy-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "destroy"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-task-id: "${{ needs.setup.outputs.mlp-task-id }}"

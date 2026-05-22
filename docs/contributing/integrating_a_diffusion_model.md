@@ -1,12 +1,14 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 04/29/2026.
+Last updated: 05/10/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
 algorithm. The contracts described below (registry hooks, adapter
 classmethods, scheduler choice, custom-output field names) are specific to
-the FlowGRPO trainer; other RL algorithms may impose different requirements.
+the FlowGRPO trainer; other RL algorithms may impose different requirements
+(see [`integrating_a_new_algorithm_for_diffusion_model.md`](integrating_a_new_algorithm_for_diffusion_model.md) for
+how algorithm dispatch is layered on top of model dispatch).
 
 We use the **Qwen-Image** integration
 ([`verl_omni/pipelines/qwen_image_flow_grpo/`](../../verl_omni/pipelines/qwen_image_flow_grpo/__init__.py))
@@ -28,7 +30,10 @@ verl_omni/pipelines/<model>_flow_grpo/
 ```
 
 Both adapters are picked up by string-based registries that dispatch on
-`model_index.json::_class_name`. Register the package by importing it from
+the pair `(model_index.json::_class_name, algorithm)`. By default the
+algorithm is read from `actor_rollout_ref.model.algorithm`, which is the
+source-of-truth in the current trainer wiring. Register the package by importing it
+from
 [`verl_omni/pipelines/__init__.py`](../../verl_omni/pipelines/__init__.py),
 add an example launch script, and add a smoke test.
 
@@ -57,9 +62,13 @@ algorithm** (FlowGRPO) but use **different runtimes**:
 
 The two adapters must agree on:
 
-- **Architecture string** (the `@register("...")` argument). It must match
-  `model_index.json::_class_name` exactly. For Qwen-Image this is
+- **Architecture string** (the first `@register(...)` argument). It must
+  match `model_index.json::_class_name` exactly. For Qwen-Image this is
   `"QwenImagePipeline"`.
+- **Algorithm string** (the `algorithm=` keyword on `@register(...)`).
+  For this guide the value is always `"flow_grpo"`. When integrating a
+  different RL algorithm use the appropriate algorithm name — see
+  [`integrating_a_new_algorithm_for_diffusion_model.md`](integrating_a_new_algorithm_for_diffusion_model.md).
 - **Prompt-encoding format** of the embeddings shipped through the agent
   loop. The rollout always returns padded `(B, L, D)` + `(B, L)` mask;
   the training adapter is free to convert to whatever the transformer
@@ -161,7 +170,7 @@ decorate it with the architecture string, and implement the four
 classmethods:
 
 ```python
-@DiffusionModelBase.register("MyModelPipeline")
+@DiffusionModelBase.register("MyModelPipeline", algorithm="flow_grpo")
 class MyModel(DiffusionModelBase):
     @classmethod
     def build_scheduler(cls, model_config): ...
@@ -219,7 +228,7 @@ Call the transformer once for the positive prompt; if CFG is active,
 call it again for the negative prompt and combine them. Always finish with
 `scheduler.sample_previous_step(...)` and return the triple
 `(log_prob, prev_sample_mean, std_dev_t)` — that is what
-[`DiffusersFSDPEngine.prepare_model_outputs`](../../verl_omni/workers/engine/fsdp/diffusers_impl.py)
+[`PPODiffusersFSDPEngine.prepare_model_outputs`](../../verl_omni/workers/engine/fsdp/diffusers_impl.py)
 consumes.
 
 > **Tip.** If your transformer returns a list (one element per sample),
@@ -231,10 +240,10 @@ consumes.
 ## Step 4 — Write `vllm_omni_rollout_adapter.py`
 
 Subclass the upstream `<Name>Pipeline` from `vllm_omni.diffusion.models`
-and decorate with the same architecture string:
+and decorate with the same architecture/algorithm pair:
 
 ```python
-@VllmOmniPipelineBase.register("MyModelPipeline")
+@VllmOmniPipelineBase.register("MyModelPipeline", algorithm="flow_grpo")
 class MyModelPipelineWithLogProb(MyModelPipeline):
     ...
 ```
@@ -267,10 +276,14 @@ No code changes are required in the trainer launcher itself. At runtime:
 
 - `DiffusionModelConfig.architecture` is auto-detected from
   `model_index.json`.
-- `DiffusionModelBase.get_class(model_config)` resolves to your training
-  adapter.
-- `VllmOmniPipelineBase.get_class("<arch>")` resolves to your rollout
-  adapter and is consumed by the vllm-omni rollout worker.
+- `DiffusionModelConfig.algorithm` is set by
+  `actor_rollout_ref.model.algorithm` (default `flow_grpo` in
+  `diffusion_model.yaml`). `algorithm.adv_estimator` is templated to read
+  from this same value.
+- `DiffusionModelBase.get_class(model_config)` resolves to the training
+  adapter registered under `(architecture, algorithm)`.
+- `VllmOmniPipelineBase.get_class(architecture, algorithm)` resolves to
+  the rollout adapter and is consumed by the vllm-omni rollout worker.
 
 ### 5.1 Pipeline Config Knobs
 
@@ -326,7 +339,7 @@ checkpoint:
 
 1. Generate dummy parquet data via
    [`tests/special_e2e/create_dummy_diffusion_data.py`](../../tests/special_e2e/create_dummy_diffusion_data.py).
-2. Launch `verl_omni.trainer.diffusion.main_flowgrpo` with model-specific
+2. Launch `verl_omni.trainer.main_diffusion` with model-specific
    knobs (architecture, prompt template, CFG parameters, sequence
    lengths).
 3. Assert exit code `0`.
@@ -364,7 +377,9 @@ Before opening the PR, confirm every box:
 - [ ] [`verl_omni/pipelines/__init__.py`](../../verl_omni/pipelines/__init__.py)
       imports the new package.
 - [ ] Architecture string on both `@register(...)` decorators matches
-      `model_index.json::_class_name`.
+      `model_index.json::_class_name`; the `algorithm=` keyword matches
+      the algorithm you are integrating against (e.g. `"flow_grpo"` for
+      FlowGRPO).
 - [ ] Any new `DiffusionPipelineConfig` field is mirrored in **both**
       [`diffusion_rollout.yaml`](../../verl_omni/trainer/config/diffusion/rollout/diffusion_rollout.yaml)
       and
@@ -372,7 +387,7 @@ Before opening the PR, confirm every box:
 - [ ] Example launch script in `examples/flowgrpo_trainer/` plus a
       matching data preprocessor under
       `examples/flowgrpo_trainer/data_process/`.
-- [ ] Smoke test `tests/special_e2e/run_flowgrpo_<model>.sh` exists and
+- [ ] Smoke test `tests/special_e2e/run_<algo>_<model>.sh` exists and
       is wired into
       [`tests/gpu_smoke/run_gpu_smoke_tests.sh`](../../tests/gpu_smoke/run_gpu_smoke_tests.sh).
 - [ ] Docs updated (this guide if the contract changed; the relevant

@@ -44,6 +44,7 @@ class DiffusionModelConfig(BaseConfig):
 
     path: str = MISSING
     architecture: Optional[str] = None
+    algorithm: str = MISSING
     local_path: Optional[str] = None
     tokenizer_path: Optional[str] = None
     local_tokenizer_path: Optional[str] = None
@@ -66,6 +67,7 @@ class DiffusionModelConfig(BaseConfig):
     external_lib: Optional[str] = None
 
     enable_gradient_checkpointing: bool = True
+    attn_backend: str = "native"
 
     lora_rank: int = 0
     lora_alpha: int = 64
@@ -89,6 +91,11 @@ class DiffusionModelConfig(BaseConfig):
 
     def __post_init__(self):
         import_external_libs(self.external_lib)
+
+        valid_backends = {"native", "_native_npu"}
+        if self.attn_backend not in valid_backends:
+            raise ValueError(f"Invalid attn_backend: {self.attn_backend}. Must be one of {sorted(valid_backends)}")
+
         self.local_path = resolve_model_local_dir(self.path, use_shm=self.use_shm)
         if self.tokenizer_path is None:
             tokenizer_path = os.path.join(self.local_path, "tokenizer")

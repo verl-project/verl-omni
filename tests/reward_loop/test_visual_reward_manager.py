@@ -21,6 +21,8 @@ from verl.experimental.reward_loop import RewardLoopManager
 from verl.protocol import DataProto
 from verl.utils import hf_tokenizer
 
+from ..utils.gpu_test_topology import resolve_reward_loop_gpu_topology
+
 
 def create_data_samples(tokenizer, data_source="ocr") -> DataProto:
     prompts = ['a photo of displaying "OCR"'] * 3
@@ -69,21 +71,21 @@ def test_reward_model_genrm():
 
     rollout_model_name = os.path.expanduser("~/models/tiny-random/Qwen-Image")
     reward_model_name = os.path.expanduser("~/models/tiny-random/qwen3-vl")
+    reward_model_gpus, tp_size = resolve_reward_loop_gpu_topology()
 
     config.actor_rollout_ref.model.path = rollout_model_name
     config.actor_rollout_ref.model.tokenizer_path = os.path.join(rollout_model_name, "tokenizer")
     config.reward.custom_reward_function.path = "verl_omni/utils/reward_score/genrm_ocr.py"
     config.reward.custom_reward_function.name = "compute_score_ocr"
     config.reward.num_workers = 1
-    config.reward.reward_manager.name = "visual"
     config.reward.reward_model.enable = True
     config.reward.reward_model.enable_resource_pool = True
-    config.reward.reward_model.n_gpus_per_node = 2
+    config.reward.reward_model.n_gpus_per_node = reward_model_gpus
     config.reward.reward_model.nnodes = 1
     config.reward.reward_model.model_path = reward_model_name
     config.reward.reward_model.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
     config.reward.reward_model.rollout.gpu_memory_utilization = 0.9
-    config.reward.reward_model.rollout.tensor_model_parallel_size = 2
+    config.reward.reward_model.rollout.tensor_model_parallel_size = tp_size
     config.reward.reward_model.rollout.skip_tokenizer_init = False
     config.reward.reward_model.rollout.prompt_length = 2048
     config.reward.reward_model.rollout.response_length = 32
@@ -125,7 +127,6 @@ def test_rule_reward():
     config.actor_rollout_ref.model.path = rollout_model_name
     config.actor_rollout_ref.model.tokenizer_path = os.path.join(rollout_model_name, "tokenizer")
     config.reward.num_workers = 1
-    config.reward.reward_manager.name = "visual"
     config.reward.reward_model.enable = False
 
     # 1. init reward model manager

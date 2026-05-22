@@ -25,6 +25,8 @@ from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.agent_loop import DiffusionAgentLoopWorker
 
+from ..utils.gpu_test_topology import resolve_diffusion_agent_loop_gpu_topology
+
 
 def _create_tp_compatible_model(parent_dir, src_model_path, num_attention_heads=2):
     """Copy base model and recreate transformer on-the-fly with TP-compatible head count.
@@ -62,9 +64,10 @@ def init_config() -> DictConfig:
     with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config")):
         config = compose(config_name="diffusion_trainer")
 
+    requested_gpus, tp_size, attention_heads = resolve_diffusion_agent_loop_gpu_topology()
     base_model_path = os.path.expanduser("~/models/tiny-random/Qwen-Image")
     with tempfile.TemporaryDirectory() as tmp_dir:
-        model_path = _create_tp_compatible_model(tmp_dir, base_model_path, num_attention_heads=2)
+        model_path = _create_tp_compatible_model(tmp_dir, base_model_path, num_attention_heads=attention_heads)
         config.actor_rollout_ref.model.path = model_path
         config.actor_rollout_ref.model.tokenizer_path = os.path.join(model_path, "tokenizer")
         config.actor_rollout_ref.rollout.name = "vllm_omni"
@@ -73,7 +76,7 @@ def init_config() -> DictConfig:
         config.actor_rollout_ref.rollout.n = 4
         config.actor_rollout_ref.rollout.pipeline.num_inference_steps = 10
         config.actor_rollout_ref.rollout.calculate_log_probs = True
-        config.actor_rollout_ref.rollout.agent.num_workers = 2
+        config.actor_rollout_ref.rollout.agent.num_workers = min(2, requested_gpus)
         config.actor_rollout_ref.rollout.agent.default_agent_loop = "diffusion_single_turn_agent"
         tokenizer_max_length = 1024
         prompt_template_encode_start_idx = 34
@@ -88,12 +91,12 @@ def init_config() -> DictConfig:
         config.actor_rollout_ref.rollout.nnodes = 1
 
         config.reward.reward_manager.name = "image"
-        config.trainer.n_gpus_per_node = 4
+        config.trainer.n_gpus_per_node = requested_gpus
 
         config.data.max_prompt_length = max_length
         config.actor_rollout_ref.rollout.max_model_len = max_length
 
-        config.actor_rollout_ref.rollout.tensor_model_parallel_size = 2
+        config.actor_rollout_ref.rollout.tensor_model_parallel_size = tp_size
 
         yield config
 
@@ -150,6 +153,7 @@ def test_single_turn(init_config):
         )
         n = init_config.actor_rollout_ref.rollout.n
         batch = batch.repeat(n)
+        batch.meta_info["global_steps"] = 0
         result = agent_loop_manager.generate_sequences(prompts=batch)
         assert len(result) == len(raw_prompts) * n
 
