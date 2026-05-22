@@ -54,6 +54,26 @@ def _derive_rollout_seed(base_seed: int, rollout_index: int) -> int:
     return (int(base_seed) * _PER_ROLLOUT_SEED_STRIDE + int(rollout_index)) % _MAX_SEED
 
 
+def _maybe_per_rollout_seeds(meta_info: dict, batch_size: int) -> Optional[list[int]]:
+    """Resolve per-rollout seeds for a training batch.
+
+    Returns ``None`` when ``meta_info["rollout_seed"]`` is absent or ``None`` —
+    that signals seeding is disabled (``data.seed=null`` in the trainer
+    config) and the rollout should fall back to fully random noise. This is
+    the cross-check baseline that preserves the prior pre-fix behavior.
+
+    Otherwise returns a list of length ``batch_size`` where entry ``i`` is the
+    per-rollout seed for the ``i``-th global prompt in the batch (so every
+    group member of a GRPO rollout sees distinct noise, and different DP
+    ranks — which own disjoint index slices — see distinct noise too).
+    """
+    base = meta_info.get("rollout_seed")
+    if base is None:
+        return None
+    base = int(base)
+    return [_derive_rollout_seed(base, i) for i in range(batch_size)]
+
+
 class DiffusionAgentLoopOutput(BaseModel):
     """Agent loop output."""
 
@@ -167,7 +187,7 @@ class DiffusionAgentLoopWorker:
         }
 
         is_validate = batch.meta_info.get("validate", False)
-        base_train_seed: int | None = None
+        per_rollout_seeds: Optional[list[int]] = None
 
         if is_validate:
             sampling_params.update(_config_to_sampling_dict(config.val_kwargs.pipeline))
@@ -176,9 +196,7 @@ class DiffusionAgentLoopWorker:
             sampling_params["logprobs"] = False
         else:
             sampling_params["global_steps"] = batch.meta_info["global_steps"]
-            base_train_seed = batch.meta_info.get("rollout_seed")
-            if base_train_seed is not None:
-                base_train_seed = int(base_train_seed)
+            per_rollout_seeds = _maybe_per_rollout_seeds(batch.meta_info, len(batch))
 
         if "agent_name" not in batch.non_tensor_batch:
             default_agent_loop = config.agent.default_agent_loop
@@ -188,9 +206,9 @@ class DiffusionAgentLoopWorker:
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
             task_sampling_params = sampling_params
-            if base_train_seed is not None:
+            if per_rollout_seeds is not None:
                 task_sampling_params = dict(sampling_params)
-                task_sampling_params["seed"] = _derive_rollout_seed(base_train_seed, i)
+                task_sampling_params["seed"] = per_rollout_seeds[i]
             tasks.append(asyncio.create_task(self._run_agent_loop(task_sampling_params, **kwargs)))
         outputs = await asyncio.gather(*tasks)
 

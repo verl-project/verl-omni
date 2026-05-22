@@ -43,6 +43,7 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
     _MAX_SEED,
     _PER_ROLLOUT_SEED_STRIDE,
     _derive_rollout_seed,
+    _maybe_per_rollout_seeds,
 )
 
 # ---------------------------------------------------------------------------
@@ -227,3 +228,128 @@ def test_validation_seed_is_independent_of_training_seed():
     train_seed_step_2 = _derive_rollout_seed(_per_step_base_seed(data_seed, 2), 0)
     assert train_seed_step_1 != train_seed_step_2
     assert not torch.equal(_draw_initial_latent(train_seed_step_1), _draw_initial_latent(train_seed_step_2))
+
+
+# ---------------------------------------------------------------------------
+# Enable / disable contract: ``_maybe_per_rollout_seeds``.
+#
+# This is the helper the agent loop actually calls each training step to
+# decide whether to override ``sampling_params["seed"]`` per rollout. The
+# disable path (``data.seed=null`` in the trainer config) must be a no-op so
+# users can cross-check convergence and timing against the deterministic mode.
+# ---------------------------------------------------------------------------
+
+
+def test_disable_seed_returns_none_when_rollout_seed_absent():
+    """No ``rollout_seed`` in meta_info -> helper returns ``None`` -> agent
+    loop does NOT override the per-rollout seed -> rollout falls back to its
+    prior random behavior. This is the cross-check baseline."""
+    assert _maybe_per_rollout_seeds({}, batch_size=16) is None
+    assert _maybe_per_rollout_seeds({"global_steps": 5}, batch_size=16) is None
+
+
+def test_disable_seed_returns_none_when_rollout_seed_is_null():
+    """Explicit ``rollout_seed=None`` (the value the trainer would inject if
+    a user wrote ``data.seed=null``) must also disable per-rollout seeding."""
+    assert _maybe_per_rollout_seeds({"rollout_seed": None}, batch_size=16) is None
+
+
+def test_enable_seed_returns_unique_per_rollout_seeds():
+    """When ``rollout_seed`` is set, the helper returns a list of length
+    ``batch_size`` with pairwise-distinct seeds that match
+    ``_derive_rollout_seed`` directly."""
+    seeds = _maybe_per_rollout_seeds({"rollout_seed": 42}, batch_size=8)
+    assert seeds is not None
+    assert len(seeds) == 8
+    assert len(set(seeds)) == 8, "per-rollout seeds collided"
+    assert seeds == [_derive_rollout_seed(42, i) for i in range(8)]
+
+
+def test_enable_seed_accepts_numpy_int_like_base():
+    """The trainer stores ``rollout_seed`` as a plain ``int``, but
+    historically meta_info values can be ``numpy.int64`` or strings. The
+    helper must coerce them so the rollout adapter never receives a string."""
+    seeds = _maybe_per_rollout_seeds({"rollout_seed": "42"}, batch_size=4)
+    assert seeds == [_derive_rollout_seed(42, i) for i in range(4)]
+
+
+# ---------------------------------------------------------------------------
+# Parallelism invariants: how the seed must behave across TP and DP ranks.
+#
+# With a single rollout request fanned out across TP ranks, each rank reads
+# the same ``sampling_params.seed``, instantiates its own
+# ``torch.Generator(...).manual_seed(seed)`` and draws the initial latent.
+# For the latent to be replicated across the TP group (a hard requirement of
+# tensor-parallel diffusion training) every rank MUST draw bit-identical
+# noise from the same seed.
+#
+# Across DP ranks the opposite is required: each rank processes a disjoint
+# slice of the global batch (different rollout indices ``i``), so the per-
+# rollout seeds differ and the initial latents must be pairwise distinct.
+# ---------------------------------------------------------------------------
+
+
+def test_initial_latent_identical_across_tp_ranks():
+    """Same per-rollout seed -> bit-identical initial latent across TP ranks.
+
+    Each TP worker independently creates ``torch.Generator(device).manual_seed(seed)``
+    and draws the initial latent. The latent must be replicated across the TP
+    group, so the noise drawn from the same seed must be bit-identical across
+    ranks (we simulate the ranks as independent generators on CPU).
+    """
+    data_seed, step, i = 42, 5, 2
+    seed = _derive_rollout_seed(_per_step_base_seed(data_seed, step), i)
+
+    tp_size = 4
+    rank_latents = [_draw_initial_latent(seed) for _ in range(tp_size)]
+    for r in range(1, tp_size):
+        assert torch.equal(rank_latents[0], rank_latents[r]), (
+            f"TP rank 0 and rank {r} produced different initial latents from the same seed; "
+            "the latent will not be replicated across the TP group"
+        )
+
+    rank_trajectories = [_draw_sde_trajectory(seed, num_steps=4) for _ in range(tp_size)]
+    for t in range(4):
+        for r in range(1, tp_size):
+            assert torch.equal(rank_trajectories[0][t], rank_trajectories[r][t]), (
+                f"TP rank 0 and rank {r} produced different SDE noise at step {t} from the same seed"
+            )
+
+
+def test_initial_latent_different_across_dp_ranks():
+    """DP ranks own disjoint global-index slices, so their seeds differ and
+    the initial latents must be pairwise distinct across ranks (and within
+    each rank as well — DP does not re-share noise).
+    """
+    data_seed, step = 42, 1
+    base = _per_step_base_seed(data_seed, step)
+
+    dp_size = 4
+    local_batch = 4
+    rank_seeds = [
+        _maybe_per_rollout_seeds(
+            {"rollout_seed": base},
+            batch_size=dp_size * local_batch,
+        )[r * local_batch : (r + 1) * local_batch]
+        for r in range(dp_size)
+    ]
+
+    flat_seeds = [s for seeds in rank_seeds for s in seeds]
+    assert len(set(flat_seeds)) == len(flat_seeds), "DP ranks observed duplicated rollout seeds"
+
+    rank_latents = [[_draw_initial_latent(s) for s in seeds] for seeds in rank_seeds]
+    for r in range(dp_size):
+        for a in range(local_batch):
+            for b in range(a + 1, local_batch):
+                assert not torch.equal(rank_latents[r][a], rank_latents[r][b]), (
+                    f"within DP rank {r}, local rollouts {a} and {b} share an initial latent"
+                )
+
+    for r1 in range(dp_size):
+        for r2 in range(r1 + 1, dp_size):
+            for a in range(local_batch):
+                for b in range(local_batch):
+                    assert not torch.equal(rank_latents[r1][a], rank_latents[r2][b]), (
+                        f"DP rank {r1} (local idx {a}) and rank {r2} (local idx {b}) "
+                        "share an initial latent; DP ranks must see different noise"
+                    )
