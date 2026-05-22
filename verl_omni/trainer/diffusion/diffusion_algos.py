@@ -460,6 +460,7 @@ class GRPOGuardLoss(DiffusionLossFn):
         return DiffusionLossResult(loss=loss, metrics=metrics)
 
 
+@register_diffusion_loss("dpo")
 class DPOLoss(DiffusionLossFn):
     """DPO loss with win/reward optimization."""
 
@@ -497,7 +498,7 @@ class DPOLoss(DiffusionLossFn):
         )
 
     @classmethod
-    def comput_loss(
+    def compute_loss(
         cls,
         noise: torch.Tensor,
         latent: torch.Tensor,
