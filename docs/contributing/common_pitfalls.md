@@ -29,27 +29,13 @@ lose precision, creating a mismatch with the log-prob computation.
 Two changes in the scheduler, one in the rollout adapter.
 The training adapter is **unchanged** — it already uses fp32 correctly.
 
-**1. Scheduler** — stop truncating `prev_sample` and assert `model_output` is fp32:
+**1. Scheduler** — `step()` no longer truncates `prev_sample` to bfloat16,
+and `sample_previous_step()` asserts `model_output` is float32 so callers
+cannot accidentally pass lower precision.
 
-```python
-# In FlowMatchSDEDiscreteScheduler.step():
-# REMOVE: prev_sample = prev_sample.to(model_output.dtype)
-
-# In FlowMatchSDEDiscreteScheduler.sample_previous_step():
-# ADD: assert model_output.dtype == torch.float32
-```
-
-**2. Rollout adapter** — cast to model dtype for transformer forward (perf),
-cast noise_pred to fp32 for scheduler (precision), store latents in fp32:
-
-```python
-x = latents.to(self.transformer.img_in.weight.dtype)  # bf16 for transformer
-noise_pred = self.transformer(hidden_states=x, ...)
-latents, log_prob, _, _ = self.scheduler.step(
-    noise_pred.float(), ...)                           # fp32 for scheduler
-all_latents.append(latents)                            # fp32 from scheduler
-all_latents.append(latents.float())                    # initial latent: bf16 → fp32
-```
+**2. Rollout adapter** — latents are cast to the transformer's native dtype
+before the forward pass (performance), noise_pred is cast to float32 before
+the scheduler (precision), and all stored latents are in float32.
 
 ### Verification
 
