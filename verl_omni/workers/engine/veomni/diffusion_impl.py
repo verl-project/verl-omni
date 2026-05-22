@@ -23,6 +23,12 @@ import torch
 import torch.distributed
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
+from veomni.distributed.offloading import (
+    load_model_to_gpu,
+    load_optimizer,
+    offload_model_to_cpu,
+    offload_optimizer,
+)
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -44,64 +50,6 @@ from verl_omni.workers.config import (
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
-
-
-@torch.no_grad()
-def _offload_veomni_model_to_cpu(model, empty_cache: bool = True):
-    from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
-    from torch.distributed.fsdp._fully_shard._fsdp_state import _get_module_fsdp_state
-
-    for module in model.modules():
-        state = _get_module_fsdp_state(module)
-        if state is None or state._fsdp_param_group is None:
-            continue
-        state._fsdp_param_group._training_state = TrainingState.IDLE
-
-    model.reshard()
-    model.cpu()
-    if empty_cache:
-        torch.cuda.empty_cache()
-
-
-@torch.no_grad()
-def _load_veomni_model_to_gpu(model):
-    model.to(get_device_id())
-
-
-@torch.no_grad()
-def _iter_optimizers(optimizer):
-    if optimizer is None:
-        return
-    if hasattr(optimizer, "_is_multi_optimizer") and optimizer._is_multi_optimizer:
-        yield from optimizer.optimizers_dict.values()
-    else:
-        yield optimizer
-
-
-@torch.no_grad()
-def _offload_veomni_optimizer(optimizer):
-    for opt in _iter_optimizers(optimizer):
-        if not opt.state:
-            continue
-        for param_group in opt.param_groups:
-            for param in param_group["params"]:
-                state = opt.state[param]
-                for key, value in state.items():
-                    if isinstance(value, torch.Tensor):
-                        state[key] = value.to("cpu", non_blocking=True)
-
-
-@torch.no_grad()
-def _load_veomni_optimizer(optimizer, device):
-    for opt in _iter_optimizers(optimizer):
-        if not opt.state:
-            continue
-        for param_group in opt.param_groups:
-            for param in param_group["params"]:
-                state = opt.state[param]
-                for key, value in state.items():
-                    if isinstance(value, torch.Tensor):
-                        state[key] = value.to(device, non_blocking=True)
 
 
 @EngineRegistry.register(model_type="diffusion_model", backend=["veomni"], device=["cuda"])
@@ -608,15 +556,15 @@ class VeOmniDiffusionEngine(BaseEngine):
         assert device in (device_name, "cpu")
         if device == device_name:
             if model:
-                _load_veomni_model_to_gpu(self.module)
+                load_model_to_gpu(self.module, get_device_id())
             if optimizer and self.optimizer is not None:
-                _load_veomni_optimizer(self.optimizer, get_device_id())
+                load_optimizer(self.optimizer, get_device_id())
             gc.collect()
         elif device == "cpu":
             if model:
-                _offload_veomni_model_to_cpu(self.module)
+                offload_model_to_cpu(self.module)
             if optimizer and self.optimizer is not None:
-                _offload_veomni_optimizer(self.optimizer)
+                offload_optimizer(self.optimizer)
 
     def save_checkpoint(
         self,
@@ -628,7 +576,7 @@ class VeOmniDiffusionEngine(BaseEngine):
     ) -> None:
         origin_module_device = next(self.module.parameters()).device.type
         if self._is_offload_param or origin_module_device == "cpu":
-            _load_veomni_model_to_gpu(self.module)
+            load_model_to_gpu(self.module, get_device_id())
 
         self.checkpoint_manager.save_checkpoint(
             local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
@@ -636,7 +584,7 @@ class VeOmniDiffusionEngine(BaseEngine):
 
         torch.distributed.barrier()
         if self._is_offload_param:
-            _offload_veomni_model_to_cpu(self.module)
+            offload_model_to_cpu(self.module)
         gc.collect()
         aggressive_empty_cache(force_sync=True)
 
@@ -644,7 +592,7 @@ class VeOmniDiffusionEngine(BaseEngine):
         self, local_path: str, hdfs_path: Optional[str] = None, del_local_after_load: int = True, **kwargs
     ) -> None:
         if self._is_offload_param:
-            _load_veomni_model_to_gpu(self.module)
+            load_model_to_gpu(self.module, get_device_id())
 
         self.checkpoint_manager.load_checkpoint(
             local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
@@ -652,20 +600,20 @@ class VeOmniDiffusionEngine(BaseEngine):
 
         torch.distributed.barrier()
         if self._is_offload_param:
-            _offload_veomni_model_to_cpu(self.module)
+            offload_model_to_cpu(self.module)
         if self._is_offload_optimizer:
-            _offload_veomni_optimizer(self.optimizer)
+            offload_optimizer(self.optimizer)
 
     def get_per_tensor_param(self, **kwargs):
         if self.model_config.lora_rank > 0 or self.model_config.lora_adapter_path is not None:
             raise NotImplementedError("VeOmni diffusion backend does not support LoRA weight export yet.")
 
-        _load_veomni_model_to_gpu(self.module)
+        load_model_to_gpu(self.module, get_device_id())
         params = self.module.state_dict()
         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
 
         if self._is_offload_param:
-            _offload_veomni_model_to_cpu(self.module)
+            offload_model_to_cpu(self.module)
 
         device = get_device_id()
         export_dtype = PrecisionType.to_dtype(self.engine_config.model_dtype)
