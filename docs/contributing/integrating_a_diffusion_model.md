@@ -270,9 +270,11 @@ Your subclass must do four things:
 
 > **⚠️ Common pitfall.**  `FlowMatchSDEDiscreteScheduler.step()` casts the
 > returned latents to `model_output.dtype` (typically `bfloat16`) *after*
-> computing the log-prob at float32.  Your `diffuse()` must store latents
-> via `all_latents.append(latents.float())` — failing to do so creates a
-> systematic negative bias in log-probs.  See the full write-up in
+> computing the log-prob at float32.  The scheduler must return latents in
+> fp32 (remove the dtype cast in `step()`), and your `diffuse()` must cast
+> to the model dtype before the transformer forward pass.  Calling
+> `.float()` on the already-truncated output is **not** sufficient.
+> See the full write-up in
 > **[Common Pitfalls](common_pitfalls.md#float32-precision-loss-in-stored-rollout-latents)**.
 
 ---
@@ -387,7 +389,8 @@ Before opening the PR, confirm every box:
       `model_index.json::_class_name`; the `algorithm=` keyword matches
       the algorithm you are integrating against (e.g. `"flow_grpo"` for
       FlowGRPO).
-- [ ] `diffuse()` stores latents via `all_latents.append(latents.float())`
+- [ ] Scheduler returns latents in fp32 (no `model_output.dtype` cast in `step()`)
+      and `diffuse()` casts to model dtype before each transformer forward
       — see [Common Pitfalls](common_pitfalls.md#float32-precision-loss-in-stored-rollout-latents).
 - [ ] Any new `DiffusionPipelineConfig` field is mirrored in **both**
       [`diffusion_rollout.yaml`](../../verl_omni/trainer/config/diffusion/rollout/diffusion_rollout.yaml)

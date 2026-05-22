@@ -223,10 +223,13 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             # Broadcast timestep to match batch size
             timestep = timestep_value.expand(latents.shape[0]).to(device=latents.device, dtype=latents.dtype)
 
+            # Cast to model dtype for transformer forward (scheduler returns float32).
+            x = latents.to(self.transformer.dtype)
+
             self.transformer.do_true_cfg = do_true_cfg
             # Forward pass for positive prompt (or unconditional if no CFG)
             noise_pred = self.transformer(
-                hidden_states=latents,
+                hidden_states=x,
                 timestep=timestep / 1000,
                 guidance=guidance,
                 encoder_hidden_states_mask=prompt_embeds_mask,
@@ -239,7 +242,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             # Forward pass for negative prompt (CFG)
             if do_true_cfg:
                 neg_noise_pred = self.transformer(
-                    hidden_states=latents,
+                    hidden_states=x,
                     timestep=timestep / 1000,
                     guidance=guidance,
                     encoder_hidden_states_mask=negative_prompt_embeds_mask,
@@ -253,7 +256,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
 
             # compute the previous noisy sample x_t -> x_t-1
             latents, log_prob, _, _ = self.scheduler.step(
-                noise_pred,
+                noise_pred.float(),
                 timestep_value,
                 latents,
                 generator=generator,
@@ -264,7 +267,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             )
 
             if i >= sde_window[0] and i < sde_window[1]:
-                all_latents.append(latents.float())
+                all_latents.append(latents)
                 all_log_probs.append(log_prob)
                 all_timesteps.append(timestep_value)
 

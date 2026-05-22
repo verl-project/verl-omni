@@ -133,9 +133,6 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
 
         # upon completion increase step index by one
         self._step_index += 1
-        if per_token_timesteps is None:
-            # Cast sample back to model compatible dtype
-            prev_sample = prev_sample.to(model_output.dtype)
 
         if not return_dict:
             return (prev_sample, log_prob, prev_sample_mean, std_dev_t)
@@ -190,6 +187,7 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         assert sample.dtype == torch.float32
         if prev_sample is not None:
             assert prev_sample.dtype == torch.float32
+        assert model_output.dtype == torch.float32
 
         if per_token_timesteps is not None:
             raise NotImplementedError("per_token_timesteps is not supported yet for FlowMatchSDEDiscreteScheduler.")
