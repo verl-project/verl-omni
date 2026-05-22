@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""End-to-end tests for the VeOmni-backed diffusion FSDP2 actor engine.
+"""End-to-end tests for the VeOmni diffusion actor engine.
 
 Mirrors :mod:`tests.workers.test_diffusers_fsdp_engine` but exercises the
-``veomni`` strategy in isolation so that VeOmni-specific imports and config
+``veomni`` backend in isolation so that VeOmni-specific imports and config
 overrides do not bleed into the diffusers FSDP/FSDP2 test surface.
 """
 
@@ -137,7 +137,7 @@ def create_data_samples(num_device: int, model_config: DiffusionModelConfig) -> 
     return data
 
 
-def test_veomni_fsdp_engine():
+def test_diffusers_veomni_engine():
     ray.init()
     tmp_dir = tempfile.mkdtemp(prefix="qwen_image_veomni_")
     try:
