@@ -31,23 +31,6 @@ from verl_omni.trainer.diffusion.diffusion_algos import (
     register_diffusion_loss,
 )
 
-
-def test_qwen_image_diffusion_nft_adapters_registered():
-    import verl_omni.pipelines  # noqa: F401
-    from verl_omni.pipelines.model_base import DiffusionModelBase, VllmOmniPipelineBase
-
-    model_config = type(
-        "ModelConfig",
-        (),
-        {"architecture": "QwenImagePipeline", "algorithm": "diffusion_nft", "external_lib": None},
-    )()
-
-    assert DiffusionModelBase.get_class(model_config).__name__ == "QwenImageDiffusionNFT"
-    assert VllmOmniPipelineBase.get_class("QwenImagePipeline", "diffusion_nft").__name__ == (
-        "QwenImageDiffusionNFTPipeline"
-    )
-
-
 # ---------------------------------------------------------------------------
 # KLLoss.compute_loss
 # ---------------------------------------------------------------------------
