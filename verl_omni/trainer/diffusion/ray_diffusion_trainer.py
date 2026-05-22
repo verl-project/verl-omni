@@ -64,19 +64,10 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     apply_rollout_correction_to_diffusion_batch,
     rollout_correction_enabled,
 )
+from verl_omni.trainer.diffusion.diffusion_trainer_utils import NoOpCheckpointManager
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 sys_logger = logging.getLogger(__name__)
-
-
-class _NoOpCheckpointManager:
-    """Checkpoint-engine facade used when offline training does not start rollout replicas."""
-
-    def update_weights(self, *args, **kwargs):
-        del args, kwargs
-
-    def sleep_replicas(self):
-        return None
 
 
 def compute_advantage(
@@ -1180,7 +1171,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         if self.is_offline_dpo:
             self.reward_loop_manager = None
             self.llm_server_manager = None
-            self.checkpoint_manager = _NoOpCheckpointManager()  # no rollout replicas needed
+            self.checkpoint_manager = NoOpCheckpointManager()  # no rollout replicas needed
             return
         self._init_online_rollout_stack(actor_rollout_resource_pool)
 
@@ -1268,7 +1259,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
     def fit(self):
         """
-        The training loop of FlowGRPO.
+        The training loop of direct preference algorithms (DPO, DiffusionNFT, etc.).
         The driver process only need to call the compute functions of the worker group through RPC
         to construct the PPO dataflow.
         The light-weight advantage computation is done on the driver process.
