@@ -13,7 +13,7 @@
 # limitations under the License.
 """Reusable PEFT/LoRA adapter lifecycle helpers for training engines."""
 
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 
 import torch
 from peft import LoraConfig

@@ -88,15 +88,15 @@ existing name on the CLI; see
 [Reusing an existing estimator or loss](#reusing-an-existing-estimator-or-loss)
 below.
 
-## Coupled vs Decoupled Diffusion Algorithms
+## PPO-like vs Direct-preference Diffusion Algorithms
 
 Before adding files, classify the algorithm's training contract.
 
-**Coupled algorithms** operate on the reverse denoising trajectory and use
+**PPO-like algorithms** operate on the reverse denoising trajectory and use
 policy-gradient likelihoods. Examples include FlowGRPO, MixGRPO, and
 GRPO-Guard. Their rollout batch contains trajectory tensors such as
 `all_latents`, `all_timesteps`, rollout or recomputed `old_log_probs`, and
-optional reference reverse logprobs. They use
+optional reference reverse logprobs. They use `PolicyGradientRayTrainer`, 
 `PPODiffusersFSDPEngine.forward_backward_batch()` / reverse `forward_step()`
 and their losses consume logprob-like tensors plus per-timestep advantages.
 
@@ -376,9 +376,13 @@ The algorithm dispatch is already wired. Setting
 A single flag covers all five dispatch points **only when every site
 recognises the new name** — see the next subsection for the alternative.
 
-For direct-preference algorithms, set the trainer type explicitly:
+Set the trainer type explicitly for every algorithm:
 
 ```bash
+# PPO-style reverse-trajectory algorithms
+algorithm.trainer_type=policy_gradient
+
+# direct-preference / forward-process algorithms
 algorithm.trainer_type=direct_preference
 ```
 
@@ -445,7 +449,7 @@ Document any algorithm-specific knobs in the example's `README.md`.
 
 Add an end-to-end smoke test under `tests/special_e2e/` modelled on
 [`tests/special_e2e/run_flowgrpo_qwen_image.sh`](../../tests/special_e2e/run_flowgrpo_qwen_image.sh)
-(coupled algorithms) or
+(PPO-like algorithms) or
 [`tests/special_e2e/run_diffusionnft_qwen_image.sh`](../../tests/special_e2e/run_diffusionnft_qwen_image.sh)
 (direct-preference algorithms).
 
@@ -484,9 +488,11 @@ and SDE step, or the direct-preference forward-process contract) against a
 - [ ] Example launch script under `examples/<algo>_trainer/`.
 - [ ] Smoke test under `tests/special_e2e/run_<algo>_<model>.sh` wired
       into `tests/gpu_smoke/run_gpu_smoke_tests.sh`.
-- [ ] For direct-preference algorithms, set `algorithm.trainer_type=direct_preference`
-      and document the forward-process batch contract (`latents_clean`,
-      `train_timesteps`, sample-level rewards or pairs/groups).
+- [ ] Set `algorithm.trainer_type` explicitly (`policy_gradient` for
+      PPO-style algorithms, `direct_preference` for forward-process
+      algorithms). For direct-preference algorithms, document the
+      forward-process batch contract (`latents_clean`, `train_timesteps`,
+      sample-level rewards or pairs/groups).
 - [ ] If the registry or adapter contract changed, update
       [`integrating_a_diffusion_model.md`](integrating_a_diffusion_model.md)
       to match.

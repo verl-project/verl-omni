@@ -3,13 +3,12 @@ set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME
 WORKSPACE=${WORKSPACE:-$HOME}
-export FLASHINFER_DISABLE_VERSION_CHECK=${FLASHINFER_DISABLE_VERSION_CHECK:-1}
 
-ocr_train_path=/mnt/andy/verl-omni/data/train.parquet
-ocr_test_path=/mnt/andy/verl-omni/data/test.parquet
+ocr_train_path=$WORKSPACE/data/ocr/train.parquet
+ocr_test_path=$WORKSPACE/data/ocr/test.parquet
 
-model_name=/mnt/models/hub/Qwen-Image
-reward_model_name=/mnt/models/hub/Qwen3-VL-8B-Instruct
+model_name=Qwen/Qwen-Image
+reward_model_name=Qwen/Qwen3-VL-8B-Instruct
 reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=4
