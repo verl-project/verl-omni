@@ -211,6 +211,10 @@ class TaskRunner:
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
 
+        from verl_omni.reward_loop.config import resolve_multi_reward_config
+
+        resolve_multi_reward_config(config)
+
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
 
         self.add_reward_model_resource_pool(config)

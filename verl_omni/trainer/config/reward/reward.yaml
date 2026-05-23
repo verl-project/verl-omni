@@ -11,6 +11,14 @@ custom_reward_function:
   # The name of the reward function within the specified file. Default is 'compute_score'.
   name: compute_score
 
+# Multi-reward configuration (dict-based, mutually exclusive with custom_reward_function).
+# Keys are user-chosen names used for metric logging (e.g., "ocr", "jpeg").
+# Each entry: path (str), name (str), weight (float).
+reward_functions: {}
+
+# Aggregation method for multi-reward. Only "weighted_sum" is supported.
+aggregation: weighted_sum
+
 # reward manager configuration
 reward_manager:
   _target_: verl.workers.config.reward_model.RewardManagerConfig
@@ -37,7 +45,7 @@ reward_model:
     name: ???
     dtype: bfloat16
     gpu_memory_utilization: 0.5
-    enforce_eager: true
+    enforce_eager: false
     cudagraph_capture_sizes: null
     free_cache_engine: true
     data_parallel_size: 1
