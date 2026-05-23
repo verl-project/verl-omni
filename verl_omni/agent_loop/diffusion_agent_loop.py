@@ -74,6 +74,21 @@ def _maybe_per_rollout_seeds(meta_info: dict, batch_size: int) -> Optional[list[
     return [_derive_rollout_seed(base, i) for i in range(batch_size)]
 
 
+def _build_rollout_seed(data_seed, global_steps):
+    """Build the per-step base rollout seed from config and trainer state.
+
+    Returns ``None`` when ``data_seed`` is ``None`` — that signals seeding is
+    disabled (``data.seed=null`` in the trainer config).
+
+    Otherwise returns ``int(data_seed) + int(global_steps) - 1``, which mirrors
+    the trainer's 1-indexed step convention: step 1 uses base = data_seed,
+    step 2 uses base = data_seed + 1, etc.
+    """
+    if data_seed is None:
+        return None
+    return int(data_seed) + int(global_steps) - 1
+
+
 class DiffusionAgentLoopOutput(BaseModel):
     """Agent loop output."""
 

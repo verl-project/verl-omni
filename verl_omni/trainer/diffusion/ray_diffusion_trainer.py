@@ -646,6 +646,7 @@ class BaseRayDiffusionTrainer(ABC):
             from verl.experimental.agent_loop import AgentLoopManager
 
             from verl_omni.agent_loop import DiffusionAgentLoopWorker
+            from verl_omni.agent_loop.diffusion_agent_loop import _build_rollout_seed
 
             AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
 
@@ -952,9 +953,9 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                 gen_batch.meta_info["global_steps"] = self.global_steps
 
                 # Per-step rollout seed for reproducibility
-                data_seed = self.config.data.get("seed")
-                if data_seed is not None:
-                    gen_batch.meta_info["rollout_seed"] = int(data_seed) + self.global_steps - 1
+                rollout_seed = _build_rollout_seed(self.config.data.get("seed"), self.global_steps)
+                if rollout_seed is not None:
+                    gen_batch.meta_info["rollout_seed"] = rollout_seed
 
                 gen_batch_output = gen_batch.repeat(
                     repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
