@@ -409,8 +409,8 @@ algorithm:
   norm_adv_by_std_in_grpo: true
   bypass_mode: false
   global_std: true
-  diffusion_nft:
-    _target_: verl_omni.trainer.config.DiffusionNFTAlgoConfig
+  algo_config:
+    _target_: verl_omni.trainer.diffusion.algos.diffusion_nft.DiffusionNFTAlgoConfig
     old_policy_decay_type: 0
     old_policy_decay: null
     old_policy_update_interval: 1

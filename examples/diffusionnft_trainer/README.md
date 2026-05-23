@@ -78,10 +78,10 @@ The script runs `python3 -m verl_omni.trainer.main_diffusion` with DiffusionNFT-
 - `actor_rollout_ref.rollout.collect_mode=final_latent`
 - `actor_rollout_ref.rollout.rollout_adapter=old`
 - `actor_rollout_ref.rollout.n=24`
-- `algorithm.diffusion_nft.timestep_fraction=1.0`
-- `algorithm.diffusion_nft.old_policy_decay_type=2`
-- `algorithm.diffusion_nft.old_policy_update_interval=2`
-- `algorithm.diffusion_nft.adv_mode=continuous`
+- `algorithm.algo_config.timestep_fraction=1.0`
+- `algorithm.algo_config.old_policy_decay_type=2`
+- `algorithm.algo_config.old_policy_update_interval=2`
+- `algorithm.algo_config.adv_mode=continuous`
 - `actor_rollout_ref.actor.diffusion_loss.diffusion_nft.mix_beta=0.1`
 - `actor_rollout_ref.actor.diffusion_loss.diffusion_nft.ref_kl_coef=0.0001`
 - `trainer.n_gpus_per_node=4`

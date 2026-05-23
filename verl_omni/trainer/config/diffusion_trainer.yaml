@@ -72,11 +72,11 @@ algorithm:
   # Whether to normalize advantages using global standard deviation
   global_std: True
 
-  # DiffusionNFT-specific direct-preference controls
-  diffusion_nft:
+  # Algorithm-specific trainer-side extension payload. PPO-like algorithms can leave this empty.
+  algo_config:
 
     # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-    _target_: verl_omni.trainer.config.DiffusionNFTAlgoConfig
+    _target_: verl_omni.trainer.diffusion.algos.diffusion_nft.DiffusionNFTAlgoConfig
 
     # Reference old-policy decay schedule type
     old_policy_decay_type: 0

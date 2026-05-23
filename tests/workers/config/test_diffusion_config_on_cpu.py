@@ -59,6 +59,7 @@ class TestDiffusionAlgoConfig:
         assert cfg.norm_adv_by_std_in_grpo is True
         assert cfg.bypass_mode is False
         assert cfg.global_std is True
+        assert cfg.algo_config is not None
 
     def test_override(self):
         cfg = DiffusionAlgoConfig(norm_adv_by_std_in_grpo=False, global_std=False)

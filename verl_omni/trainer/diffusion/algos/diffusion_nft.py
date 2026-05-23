@@ -14,10 +14,36 @@
 """DiffusionNFT-specific trainer helpers."""
 
 from collections import defaultdict
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Optional
 
 import numpy as np
 import torch
+from verl.base_config import BaseConfig
+
+
+@dataclass
+class DiffusionNFTAlgoConfig(BaseConfig):
+    """DiffusionNFT-specific trainer-side controls."""
+
+    old_policy_decay_type: int = 0
+    old_policy_decay: Optional[float] = None
+    old_policy_update_interval: int = 1
+    timestep_fraction: float = 1.0
+    adv_mode: str = "continuous"
+
+    def __post_init__(self):
+        valid_adv_modes = {"continuous", "positive_only", "negative_only", "one_only", "binary"}
+        if self.adv_mode not in valid_adv_modes:
+            raise ValueError(
+                f"Invalid DiffusionNFT adv_mode: {self.adv_mode}. Must be one of {sorted(valid_adv_modes)}"
+            )
+        if self.old_policy_update_interval <= 0:
+            raise ValueError(
+                f"DiffusionNFT old_policy_update_interval must be positive, got {self.old_policy_update_interval}."
+            )
+        if not 0 < self.timestep_fraction <= 1:
+            raise ValueError(f"DiffusionNFT timestep_fraction must be in (0, 1], got {self.timestep_fraction}.")
 
 
 def diffusion_nft_old_policy_decay(step: int, decay_type: int) -> float:
@@ -130,7 +156,7 @@ def prepare_diffusion_nft_actor_batch(
     if "uid" not in rollout_batch:
         raise ValueError("DiffusionNFT direct-preference training requires non-tensor `uid` groups.")
 
-    nft_cfg = config.diffusion_nft
+    nft_cfg = config.algo_config
     advantages = compute_diffusion_nft_group_advantages(
         rewards=rewards,
         uid=rollout_batch["uid"],

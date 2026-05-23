@@ -120,7 +120,7 @@ class DiffusionNFTDirectPreferenceHandler(DirectPreferenceHandler):
         return batch
 
     def post_actor_update(self, *, trainer: Any, metrics: dict[str, Any] | None = None) -> None:
-        nft_cfg = trainer.config.algorithm.diffusion_nft
+        nft_cfg = trainer.config.algorithm.algo_config
         if metrics is not None:
             # These are control-plane metrics for the old LoRA adapter refresh, not loss terms.
             metrics["old_policy/update_applied"] = 0.0
