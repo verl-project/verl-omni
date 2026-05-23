@@ -335,6 +335,15 @@ For example, DiffusionNFT registers `NFTDiffusersFSDPEngine` because its batch
 contains `latents_clean`, `train_timesteps`, and `reward_prob`, not PPO's
 reverse-step logprob tensors.
 
+Direct-preference algorithms also need trainer-side hooks for their batch
+preparation, config validation, and any policy-state update after the actor
+optimizer step. Register those hooks in
+[`direct_preference_handlers.py`](../../verl_omni/trainer/diffusion/direct_preference_handlers.py)
+with `@register_direct_preference_handler("<your_algo>")`. Keep algorithm-only
+helper math in a focused module under
+`verl_omni/trainer/diffusion/algos/` instead of adding it to the generic
+loss/advantage registry module.
+
 If your algorithm needs multiple LoRA policy states (for example `default`
 and `old`), declare them with `actor_rollout_ref.model.policy_state_adapters`
 and reuse the shared `LoRAAdapterMixin` helpers for adapter selection, copy,
@@ -479,6 +488,8 @@ and SDE step, or the direct-preference forward-process contract) against a
 - [ ] `DiffusionFSDPEngineAlgorithmRegistry` maps `<name>` to either
       `PPODiffusersFSDPEngine` or an algorithm-specific
       `DiffusersFSDPEngine` subclass.
+- [ ] Direct-preference algorithms register trainer-side hooks with
+      `@register_direct_preference_handler("<name>")`.
 - [ ] `verl_omni/pipelines/__init__.py` star-imports the new package.
 - [ ] Any new rollout algorithm field is mirrored in both
       [`diffusion_rollout.yaml`](../../verl_omni/trainer/config/diffusion/rollout/diffusion_rollout.yaml)

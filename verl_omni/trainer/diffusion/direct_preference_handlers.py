@@ -11,43 +11,44 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Direct-preference algorithm hooks for diffusion trainers."""
+"""Direct-preference trainer hooks for diffusion algorithms."""
 
 from abc import ABC, abstractmethod
 from typing import Any
+
 import torch
 from verl import DataProto
 
-from verl_omni.trainer.diffusion.diffusion_algos import (
+from verl_omni.trainer.diffusion.algos.diffusion_nft import (
     diffusion_nft_old_policy_decay,
     prepare_diffusion_nft_actor_batch,
 )
 
 
-DIRECT_PREFERENCE_ALGO_REGISTRY: dict[str, "DirectPreferenceAlgorithm"] = {}
+DIRECT_PREFERENCE_HANDLER_REGISTRY: dict[str, "DirectPreferenceHandler"] = {}
 
 
-def register_direct_preference_algorithm(name: str):
+def register_direct_preference_handler(name: str):
     """Register direct-preference trainer hooks for an algorithm name."""
 
-    def decorator(cls: type["DirectPreferenceAlgorithm"]) -> type["DirectPreferenceAlgorithm"]:
-        DIRECT_PREFERENCE_ALGO_REGISTRY[name] = cls()
+    def decorator(cls: type["DirectPreferenceHandler"]) -> type["DirectPreferenceHandler"]:
+        DIRECT_PREFERENCE_HANDLER_REGISTRY[name] = cls()
         return cls
 
     return decorator
 
 
-def get_direct_preference_algorithm(name: str) -> "DirectPreferenceAlgorithm":
+def get_direct_preference_handler(name: str) -> "DirectPreferenceHandler":
     """Return registered direct-preference hooks for an algorithm name."""
-    if name not in DIRECT_PREFERENCE_ALGO_REGISTRY:
+    if name not in DIRECT_PREFERENCE_HANDLER_REGISTRY:
         raise ValueError(
             f"Unsupported direct-preference diffusion algorithm: {name}. "
-            f"Supported algorithms are: {list(DIRECT_PREFERENCE_ALGO_REGISTRY.keys())}"
+            f"Supported algorithms are: {list(DIRECT_PREFERENCE_HANDLER_REGISTRY.keys())}"
         )
-    return DIRECT_PREFERENCE_ALGO_REGISTRY[name]
+    return DIRECT_PREFERENCE_HANDLER_REGISTRY[name]
 
 
-class DirectPreferenceAlgorithm(ABC):
+class DirectPreferenceHandler(ABC):
     """Algorithm-specific hooks used by the generic direct-preference trainer loop."""
 
     def validate_config(self, config: Any) -> None:
@@ -69,8 +70,8 @@ class DirectPreferenceAlgorithm(ABC):
         """Run algorithm-specific state updates after the actor optimizer step."""
 
 
-@register_direct_preference_algorithm("diffusion_nft")
-class DiffusionNFTDirectPreferenceAlgorithm(DirectPreferenceAlgorithm):
+@register_direct_preference_handler("diffusion_nft")
+class DiffusionNFTDirectPreferenceHandler(DirectPreferenceHandler):
     """DiffusionNFT direct-preference hooks."""
 
     def validate_config(self, config: Any) -> None:

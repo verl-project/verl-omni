@@ -51,7 +51,7 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.trainer.config import DiffusionAlgoConfig
-from verl_omni.trainer.diffusion.direct_preference_algos import get_direct_preference_algorithm
+from verl_omni.trainer.diffusion.direct_preference_handlers import get_direct_preference_handler
 from verl_omni.trainer.diffusion.diffusion_algos import (
     DiffusionAdvantageEstimator,
     get_diffusion_adv_estimator_fn,
@@ -1130,11 +1130,11 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         algorithm_name = self.config.actor_rollout_ref.model.algorithm
-        self.direct_preference_algorithm = get_direct_preference_algorithm(algorithm_name)
-        self.direct_preference_algorithm.validate_config(self.config)
+        self.direct_preference_handler = get_direct_preference_handler(algorithm_name)
+        self.direct_preference_handler.validate_config(self.config)
 
     def _prepare_direct_preference_actor_batch(self, batch: DataProto, reward_tensor: torch.Tensor) -> DataProto:
-        return self.direct_preference_algorithm.prepare_actor_batch(
+        return self.direct_preference_handler.prepare_actor_batch(
             batch=batch,
             reward_tensor=reward_tensor,
             config=self.config,
@@ -1142,7 +1142,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         )
 
     def _post_direct_preference_actor_update(self, metrics: dict[str, Any] | None = None) -> None:
-        self.direct_preference_algorithm.post_actor_update(trainer=self, metrics=metrics)
+        self.direct_preference_handler.post_actor_update(trainer=self, metrics=metrics)
 
     def fit(self):
         """Run online direct-preference diffusion training."""
