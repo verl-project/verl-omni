@@ -46,9 +46,9 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${mini_bsz} \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${micro_bsz_per_gpu} \
-    actor_rollout_ref.actor.diffusion_loss.diffusion_nft.mix_beta=0.5 \
-    actor_rollout_ref.actor.diffusion_loss.diffusion_nft.ref_kl_coef=0.001 \
-    actor_rollout_ref.actor.diffusion_loss.diffusion_nft.adv_clip_max=5.0 \
+    actor_rollout_ref.actor.diffusion_loss.loss_config.mix_beta=0.5 \
+    actor_rollout_ref.actor.diffusion_loss.loss_config.ref_kl_coef=0.001 \
+    actor_rollout_ref.actor.diffusion_loss.loss_config.adv_clip_max=5.0 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \

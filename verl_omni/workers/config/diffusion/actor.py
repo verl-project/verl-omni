@@ -25,7 +25,6 @@ from verl.workers.config.optimizer import OptimizerConfig
 from .model import DiffusionModelConfig
 
 __all__ = [
-    "DiffusionNFTLossConfig",
     "DiffusionLossConfig",
     "DiffusionActorConfig",
     "FSDPDiffusionActorConfig",
@@ -33,29 +32,11 @@ __all__ = [
 
 
 @dataclass
-class DiffusionNFTLossConfig(BaseConfig):
-    """Worker-side knobs for the DiffusionNFT prediction-space loss."""
-
-    mix_beta: float = 0.5
-    ref_kl_coef: float = 0.0
-    adv_clip_max: float = 5.0
-    adaptive_weight_min: float = 1e-5
-
-    def __post_init__(self):
-        if self.mix_beta <= 0:
-            raise ValueError(f"DiffusionNFT mix_beta must be positive, got {self.mix_beta}.")
-        if self.adv_clip_max <= 0:
-            raise ValueError(f"DiffusionNFT adv_clip_max must be positive, got {self.adv_clip_max}.")
-        if self.adaptive_weight_min <= 0:
-            raise ValueError(f"DiffusionNFT adaptive_weight_min must be positive, got {self.adaptive_weight_min}.")
-
-
-@dataclass
 class DiffusionLossConfig(BaseConfig):
     loss_mode: str = "flow_grpo"
     clip_ratio: float = 0.0001
     adv_clip_max: float = 5.0
-    diffusion_nft: DiffusionNFTLossConfig = field(default_factory=DiffusionNFTLossConfig)
+    loss_config: BaseConfig = field(default_factory=BaseConfig)
 
     def __post_init__(self):
         """Validate diffusion loss configuration."""

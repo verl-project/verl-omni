@@ -35,11 +35,11 @@ diffusion_loss:
   # Maximum value to clamp advantages before computing policy loss
   adv_clip_max: 5.0
 
-  # DiffusionNFT prediction-space loss config
-  diffusion_nft:
+  # Loss-specific worker-side extension payload. PPO-like losses can leave this empty.
+  loss_config:
 
     # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-    _target_: verl_omni.workers.config.diffusion.DiffusionNFTLossConfig
+    _target_: verl_omni.trainer.diffusion.algos.diffusion_nft.DiffusionNFTLossConfig
 
     # Mixing coefficient for implicit positive/negative predictions
     mix_beta: 0.5

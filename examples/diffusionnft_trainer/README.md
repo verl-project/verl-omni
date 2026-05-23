@@ -82,8 +82,8 @@ The script runs `python3 -m verl_omni.trainer.main_diffusion` with DiffusionNFT-
 - `algorithm.algo_config.old_policy_decay_type=2`
 - `algorithm.algo_config.old_policy_update_interval=2`
 - `algorithm.algo_config.adv_mode=continuous`
-- `actor_rollout_ref.actor.diffusion_loss.diffusion_nft.mix_beta=0.1`
-- `actor_rollout_ref.actor.diffusion_loss.diffusion_nft.ref_kl_coef=0.0001`
+- `actor_rollout_ref.actor.diffusion_loss.loss_config.mix_beta=0.1`
+- `actor_rollout_ref.actor.diffusion_loss.loss_config.ref_kl_coef=0.0001`
 - `trainer.n_gpus_per_node=4`
 
 The policy LoRA uses:

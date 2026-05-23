@@ -36,6 +36,7 @@ class TestDiffusionLossConfig:
         assert cfg.loss_mode == "flow_grpo"
         assert cfg.clip_ratio == pytest.approx(0.0001)
         assert cfg.adv_clip_max == pytest.approx(5.0)
+        assert cfg.loss_config is not None
 
     def test_custom_values(self):
         cfg = DiffusionLossConfig(loss_mode="flow_grpo", clip_ratio=0.01, adv_clip_max=10.0)

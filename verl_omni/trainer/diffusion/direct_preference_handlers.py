@@ -106,7 +106,7 @@ class DiffusionNFTDirectPreferenceHandler(DirectPreferenceHandler):
         rollout_batch["uid"] = batch.non_tensor_batch["uid"]
 
         actor_cfg = config.actor_rollout_ref.actor
-        nft_loss_cfg = actor_cfg.diffusion_loss.diffusion_nft
+        nft_loss_cfg = actor_cfg.diffusion_loss.loss_config
         actor_batch = prepare_diffusion_nft_actor_batch(
             rollout_batch=rollout_batch,
             rewards=rewards,

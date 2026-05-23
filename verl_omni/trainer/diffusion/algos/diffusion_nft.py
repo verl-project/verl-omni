@@ -46,6 +46,24 @@ class DiffusionNFTAlgoConfig(BaseConfig):
             raise ValueError(f"DiffusionNFT timestep_fraction must be in (0, 1], got {self.timestep_fraction}.")
 
 
+@dataclass
+class DiffusionNFTLossConfig(BaseConfig):
+    """Worker-side knobs for the DiffusionNFT prediction-space loss."""
+
+    mix_beta: float = 0.5
+    ref_kl_coef: float = 0.0
+    adv_clip_max: float = 5.0
+    adaptive_weight_min: float = 1e-5
+
+    def __post_init__(self):
+        if self.mix_beta <= 0:
+            raise ValueError(f"DiffusionNFT mix_beta must be positive, got {self.mix_beta}.")
+        if self.adv_clip_max <= 0:
+            raise ValueError(f"DiffusionNFT adv_clip_max must be positive, got {self.adv_clip_max}.")
+        if self.adaptive_weight_min <= 0:
+            raise ValueError(f"DiffusionNFT adaptive_weight_min must be positive, got {self.adaptive_weight_min}.")
+
+
 def diffusion_nft_old_policy_decay(step: int, decay_type: int) -> float:
     """Reference DiffusionNFT old-policy LoRA adapter decay schedules."""
     if decay_type == 0:
