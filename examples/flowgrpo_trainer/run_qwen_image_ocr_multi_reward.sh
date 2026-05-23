@@ -95,7 +95,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
     trainer.nnodes=1 \
-    +trainer.ray_master_port_range="[45000,45100]" \
     trainer.save_freq=30 \
     trainer.test_freq=30 \
     trainer.total_epochs=15 \
