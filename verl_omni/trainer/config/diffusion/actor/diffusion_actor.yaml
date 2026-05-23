@@ -47,8 +47,8 @@ diffusion_loss:
     # Reference prediction-space MSE coefficient
     ref_kl_coef: 0.0
 
-    # Advantage clip scale used by the source DiffusionNFT policy loss
-    adv_clip_max: ${oc.select:algorithm.diffusion_nft.adv_clip_max,5.0}
+    # Advantage clip scale used by the DiffusionNFT policy loss and reward-probability mapping
+    adv_clip_max: 5.0
 
     # Minimum adaptive denominator for x0 reconstruction losses
     adaptive_weight_min: 1e-5

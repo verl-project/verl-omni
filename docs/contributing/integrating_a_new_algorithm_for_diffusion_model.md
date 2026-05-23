@@ -48,9 +48,6 @@ config fields:
 | `algorithm.trainer_type` | `policy_gradient`, `direct_preference` | Selects `PolicyGradientRayTrainer` (FlowGRPO, MixGRPO, …) vs `DirectPreferenceRayTrainer` (DPO, DiffusionNFT, AWM) |
 | `algorithm.sample_source` | `online`, `offline` | `BaseRayDiffusionTrainer.init_workers` skips rollout/reward engine init when `offline` |
 
-Direct-preference algorithms keep algorithm math and worker-side key
-requirements in
-[`diffusion_algos.py`](../../verl_omni/trainer/diffusion/diffusion_algos.py).
 
 ---
 
@@ -354,7 +351,7 @@ distinct model algorithm and adapter pair.
 ## Step 6 — Wire the Config Knobs
 
 If your algorithm exposes new rollout knobs (e.g. an `sde_window_size`),
-add them to the `DiffusionAlgoConfig` block in
+add them to the `DiffusionRolloutAlgoConfig` block in
 [`diffusion_rollout.yaml`](../../verl_omni/trainer/config/diffusion/rollout/diffusion_rollout.yaml)
 and to the matching dataclass in
 [`verl_omni/workers/config/diffusion/rollout.py`](../../verl_omni/workers/config/diffusion/rollout.py).
@@ -387,8 +384,10 @@ algorithm.trainer_type=direct_preference
 ```
 
 Keep rollout data-contract knobs in the rollout config, worker-loss knobs in
-the actor loss config, and algorithm-level knobs under `algorithm.<algo>` only
-when they are consumed by the trainer loop itself.
+the actor loss config, model state knobs in the model config, and
+algorithm-level knobs under `algorithm.<algo>` only when they are consumed by
+the trainer loop or the algorithm's direct-preference/policy-gradient batch
+preparation hook.
 
 ### Reusing an existing estimator or loss
 
@@ -481,7 +480,7 @@ and SDE step, or the direct-preference forward-process contract) against a
       `PPODiffusersFSDPEngine` or an algorithm-specific
       `DiffusersFSDPEngine` subclass.
 - [ ] `verl_omni/pipelines/__init__.py` star-imports the new package.
-- [ ] Any new `DiffusionAlgoConfig` field is mirrored in both
+- [ ] Any new rollout algorithm field is mirrored in both
       [`diffusion_rollout.yaml`](../../verl_omni/trainer/config/diffusion/rollout/diffusion_rollout.yaml)
       and
       [`diffusion_model.yaml`](../../verl_omni/trainer/config/diffusion/model/diffusion_model.yaml).

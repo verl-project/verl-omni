@@ -26,17 +26,11 @@ __all__ = ["DiffusionNFTAlgoConfig", "DiffusionAlgoConfig"]
 class DiffusionNFTAlgoConfig(BaseConfig):
     """DiffusionNFT-specific algorithm controls."""
 
-    mix_beta: float = 0.5
-    ref_kl_coef: float = 0.0
     old_policy_decay_type: int = 0
     old_policy_decay: Optional[float] = None
     old_policy_update_interval: int = 1
     timestep_fraction: float = 1.0
-    adv_clip_max: float = 5.0
     adv_mode: str = "continuous"
-    adaptive_weight_min: float = 1e-5
-    rollout_adapter: str = "old"
-    collect_mode: str = "final_latent"
 
     def __post_init__(self):
         valid_adv_modes = {"continuous", "positive_only", "negative_only", "one_only", "binary"}
@@ -44,10 +38,6 @@ class DiffusionNFTAlgoConfig(BaseConfig):
             raise ValueError(
                 f"Invalid DiffusionNFT adv_mode: {self.adv_mode}. Must be one of {sorted(valid_adv_modes)}"
             )
-        if self.mix_beta <= 0:
-            raise ValueError(f"DiffusionNFT mix_beta must be positive, got {self.mix_beta}.")
-        if self.adv_clip_max <= 0:
-            raise ValueError(f"DiffusionNFT adv_clip_max must be positive, got {self.adv_clip_max}.")
         if self.old_policy_update_interval <= 0:
             raise ValueError(
                 f"DiffusionNFT old_policy_update_interval must be positive, got {self.old_policy_update_interval}."

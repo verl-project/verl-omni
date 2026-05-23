@@ -51,11 +51,10 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.trainer.config import DiffusionAlgoConfig
+from verl_omni.trainer.diffusion.direct_preference_algos import get_direct_preference_algorithm
 from verl_omni.trainer.diffusion.diffusion_algos import (
     DiffusionAdvantageEstimator,
-    diffusion_nft_old_policy_decay,
     get_diffusion_adv_estimator_fn,
-    prepare_diffusion_nft_actor_batch,
 )
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
@@ -1128,55 +1127,25 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
     """Direct-preference diffusion trainer for DPO, DiffusionNFT, AWM, etc."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        algorithm_name = self.config.actor_rollout_ref.model.algorithm
+        self.direct_preference_algorithm = get_direct_preference_algorithm(algorithm_name)
+        self.direct_preference_algorithm.validate_config(self.config)
+
     def _prepare_direct_preference_actor_batch(self, batch: DataProto, reward_tensor: torch.Tensor) -> DataProto:
-        rewards = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
-        rollout_batch = {key: batch.batch[key] for key in batch.batch.keys()}
-        rollout_batch["uid"] = batch.non_tensor_batch["uid"]
-        actor_batch = prepare_diffusion_nft_actor_batch(
-            rollout_batch=rollout_batch,
-            rewards=rewards,
-            config=self.config.algorithm,
-            timestep_shuffle_seed=int(
-                self.config.actor_rollout_ref.actor.data_loader_seed + getattr(self, "global_steps", 0)
-            ),
+        return self.direct_preference_algorithm.prepare_actor_batch(
+            batch=batch,
+            reward_tensor=reward_tensor,
+            config=self.config,
+            global_steps=getattr(self, "global_steps", 0),
         )
-        for key, value in actor_batch.items():
-            if isinstance(value, torch.Tensor):
-                batch.batch[key] = value
-        return batch
 
     def _post_direct_preference_actor_update(self, metrics: dict[str, Any] | None = None) -> None:
-        nft_cfg = self.config.algorithm.diffusion_nft
-        if metrics is not None:
-            # These are control-plane metrics for the old LoRA adapter refresh, not loss terms.
-            metrics["old_policy/update_applied"] = 0.0
-            metrics["old_policy/copy_update"] = 0.0
-            metrics["old_policy/ema_update"] = 0.0
-            metrics["old_policy/decay"] = 0.0
-        if self.global_steps % nft_cfg.old_policy_update_interval != 0:
-            return
-
-        decay = nft_cfg.old_policy_decay
-        if decay is None:
-            decay = diffusion_nft_old_policy_decay(
-                step=self.global_steps,
-                decay_type=nft_cfg.old_policy_decay_type,
-            )
-
-        if metrics is not None:
-            metrics["old_policy/update_applied"] = 1.0
-            metrics["old_policy/decay"] = float(decay)
-        if decay == 0:
-            self.actor_rollout_wg.copy_adapter(source="default", target="old")
-            if metrics is not None:
-                metrics["old_policy/copy_update"] = 1.0
-        else:
-            self.actor_rollout_wg.ema_update_adapter(source="default", target="old", decay=decay)
-            if metrics is not None:
-                metrics["old_policy/ema_update"] = 1.0
+        self.direct_preference_algorithm.post_actor_update(trainer=self, metrics=metrics)
 
     def fit(self):
-        """Run online direct-preference diffusion training for DiffusionNFT-style objectives."""
+        """Run online direct-preference diffusion training."""
         from omegaconf import OmegaConf
         from verl.utils.tracking import Tracking
 

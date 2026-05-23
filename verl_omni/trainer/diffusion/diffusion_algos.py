@@ -537,6 +537,7 @@ def prepare_diffusion_nft_actor_batch(
     rollout_batch: dict[str, Any],
     rewards: torch.Tensor,
     config: Any,
+    adv_clip_max: float,
     timestep_shuffle_seed: int | None = None,
 ) -> dict[str, Any]:
     """Prepare final-latent rollout data for DiffusionNFT direct-preference updates."""
@@ -556,7 +557,7 @@ def prepare_diffusion_nft_actor_batch(
     )
     reward_prob = diffusion_nft_advantage_to_reward_prob(
         advantages,
-        adv_clip_max=nft_cfg.adv_clip_max,
+        adv_clip_max=adv_clip_max,
         adv_mode=nft_cfg.adv_mode,
     )
     train_timesteps = select_diffusion_nft_train_timesteps(

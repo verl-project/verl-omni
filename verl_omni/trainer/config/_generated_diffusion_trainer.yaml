@@ -78,7 +78,7 @@ actor_rollout_ref:
         _target_: verl_omni.workers.config.diffusion.DiffusionNFTLossConfig
         mix_beta: 0.5
         ref_kl_coef: 0.0
-        adv_clip_max: ${oc.select:algorithm.diffusion_nft.adv_clip_max,5.0}
+        adv_clip_max: 5.0
         adaptive_weight_min: 1.0e-05
     loss_scale_factor: null
     use_kl_loss: false
@@ -411,17 +411,11 @@ algorithm:
   global_std: true
   diffusion_nft:
     _target_: verl_omni.trainer.config.DiffusionNFTAlgoConfig
-    mix_beta: 0.5
-    ref_kl_coef: 0.0
     old_policy_decay_type: 0
     old_policy_decay: null
     old_policy_update_interval: 1
     timestep_fraction: 1.0
-    adv_clip_max: 5.0
     adv_mode: continuous
-    adaptive_weight_min: 1.0e-05
-    rollout_adapter: old
-    collect_mode: final_latent
 trainer:
   total_epochs: 30
   total_training_steps: null

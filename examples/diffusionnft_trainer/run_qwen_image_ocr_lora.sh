@@ -66,15 +66,10 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=online \
-    algorithm.diffusion_nft.mix_beta=0.1 \
-    algorithm.diffusion_nft.ref_kl_coef=0.0001 \
     algorithm.diffusion_nft.timestep_fraction=1.0 \
     algorithm.diffusion_nft.old_policy_decay_type=2 \
     algorithm.diffusion_nft.old_policy_update_interval=2 \
-    algorithm.diffusion_nft.adv_clip_max=5.0 \
     algorithm.diffusion_nft.adv_mode=continuous \
-    algorithm.diffusion_nft.rollout_adapter=old \
-    algorithm.diffusion_nft.collect_mode=final_latent \
     reward.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / REWARD_TP)) \
     reward.reward_model.enable=True \
     reward.reward_model.model_path=$reward_model_name \

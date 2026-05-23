@@ -78,12 +78,6 @@ algorithm:
     # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
     _target_: verl_omni.trainer.config.DiffusionNFTAlgoConfig
 
-    # Source config beta for implicit positive/negative prediction mixing
-    mix_beta: 0.5
-
-    # Prediction-space reference MSE coefficient
-    ref_kl_coef: 0.0
-
     # Reference old-policy decay schedule type
     old_policy_decay_type: 0
 
@@ -96,20 +90,8 @@ algorithm:
     # Fraction of rollout timesteps used as forward-process training timesteps
     timestep_fraction: 1.0
 
-    # Advantage clip scale before mapping to reward probability
-    adv_clip_max: 5.0
-
     # Advantage mapping mode: continuous, positive_only, negative_only, one_only, or binary
     adv_mode: continuous
-
-    # Minimum adaptive denominator for x0 reconstruction losses
-    adaptive_weight_min: 1e-5
-
-    # Adapter used for DiffusionNFT rollout
-    rollout_adapter: old
-
-    # Rollout collection contract for DiffusionNFT
-    collect_mode: final_latent
 
 # config for the trainer
 trainer:
