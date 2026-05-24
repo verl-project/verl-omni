@@ -82,7 +82,7 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
             logger.info(f"vLLM-Omni load weights, loaded_params: {len(weights)}")
         else:
             logger.info("Loading standard weights (async)")
-            self.load_weights(weights)
+            self.reload_weights(weights)
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.
