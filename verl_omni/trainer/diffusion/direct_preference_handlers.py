@@ -106,12 +106,11 @@ class DiffusionNFTDirectPreferenceHandler(DirectPreferenceHandler):
         rollout_batch["uid"] = batch.non_tensor_batch["uid"]
 
         actor_cfg = config.actor_rollout_ref.actor
-        nft_loss_cfg = actor_cfg.diffusion_loss.loss_config
         actor_batch = prepare_diffusion_nft_actor_batch(
             rollout_batch=rollout_batch,
             rewards=rewards,
             config=config.algorithm,
-            adv_clip_max=nft_loss_cfg.adv_clip_max,
+            adv_clip_max=actor_cfg.diffusion_loss.adv_clip_max,
             timestep_shuffle_seed=int(actor_cfg.data_loader_seed + global_steps),
         )
         for key, value in actor_batch.items():
@@ -120,21 +119,21 @@ class DiffusionNFTDirectPreferenceHandler(DirectPreferenceHandler):
         return batch
 
     def post_actor_update(self, *, trainer: Any, metrics: dict[str, Any] | None = None) -> None:
-        nft_cfg = trainer.config.algorithm.algo_config
+        algo_cfg = trainer.config.algorithm
         if metrics is not None:
             # These are control-plane metrics for the old LoRA adapter refresh, not loss terms.
             metrics["old_policy/update_applied"] = 0.0
             metrics["old_policy/copy_update"] = 0.0
             metrics["old_policy/ema_update"] = 0.0
             metrics["old_policy/decay"] = 0.0
-        if trainer.global_steps % nft_cfg.old_policy_update_interval != 0:
+        if trainer.global_steps % algo_cfg.old_policy_update_interval != 0:
             return
 
-        decay = nft_cfg.old_policy_decay
+        decay = algo_cfg.old_policy_decay
         if decay is None:
             decay = diffusion_nft_old_policy_decay(
                 step=trainer.global_steps,
-                decay_type=nft_cfg.old_policy_decay_type,
+                decay_type=algo_cfg.old_policy_decay_type,
             )
 
         if metrics is not None:

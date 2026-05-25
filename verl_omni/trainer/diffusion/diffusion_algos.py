@@ -466,7 +466,7 @@ class DiffusionNFTLoss(DiffusionLossFn):
         config: DiffusionActorConfig,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         """Compute the DiffusionNFT policy loss and auxiliary metrics."""
-        loss_cfg = config.diffusion_loss.loss_config
+        loss_cfg = config.diffusion_loss
         beta = loss_cfg.mix_beta
 
         old_prediction = old_prediction.detach()

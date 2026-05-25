@@ -14,54 +14,10 @@
 """DiffusionNFT-specific trainer helpers."""
 
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
-from verl.base_config import BaseConfig
-
-
-@dataclass
-class DiffusionNFTAlgoConfig(BaseConfig):
-    """DiffusionNFT-specific trainer-side controls."""
-
-    old_policy_decay_type: int = 0
-    old_policy_decay: Optional[float] = None
-    old_policy_update_interval: int = 1
-    timestep_fraction: float = 1.0
-    adv_mode: str = "continuous"
-
-    def __post_init__(self):
-        valid_adv_modes = {"continuous", "positive_only", "negative_only", "one_only", "binary"}
-        if self.adv_mode not in valid_adv_modes:
-            raise ValueError(
-                f"Invalid DiffusionNFT adv_mode: {self.adv_mode}. Must be one of {sorted(valid_adv_modes)}"
-            )
-        if self.old_policy_update_interval <= 0:
-            raise ValueError(
-                f"DiffusionNFT old_policy_update_interval must be positive, got {self.old_policy_update_interval}."
-            )
-        if not 0 < self.timestep_fraction <= 1:
-            raise ValueError(f"DiffusionNFT timestep_fraction must be in (0, 1], got {self.timestep_fraction}.")
-
-
-@dataclass
-class DiffusionNFTLossConfig(BaseConfig):
-    """Worker-side knobs for the DiffusionNFT prediction-space loss."""
-
-    mix_beta: float = 0.5
-    ref_kl_coef: float = 0.0
-    adv_clip_max: float = 5.0
-    adaptive_weight_min: float = 1e-5
-
-    def __post_init__(self):
-        if self.mix_beta <= 0:
-            raise ValueError(f"DiffusionNFT mix_beta must be positive, got {self.mix_beta}.")
-        if self.adv_clip_max <= 0:
-            raise ValueError(f"DiffusionNFT adv_clip_max must be positive, got {self.adv_clip_max}.")
-        if self.adaptive_weight_min <= 0:
-            raise ValueError(f"DiffusionNFT adaptive_weight_min must be positive, got {self.adaptive_weight_min}.")
 
 
 def diffusion_nft_old_policy_decay(step: int, decay_type: int) -> float:
@@ -174,7 +130,6 @@ def prepare_diffusion_nft_actor_batch(
     if "uid" not in rollout_batch:
         raise ValueError("DiffusionNFT direct-preference training requires non-tensor `uid` groups.")
 
-    nft_cfg = config.algo_config
     advantages = compute_diffusion_nft_group_advantages(
         rewards=rewards,
         uid=rollout_batch["uid"],
@@ -184,11 +139,11 @@ def prepare_diffusion_nft_actor_batch(
     reward_prob = diffusion_nft_advantage_to_reward_prob(
         advantages,
         adv_clip_max=adv_clip_max,
-        adv_mode=nft_cfg.adv_mode,
+        adv_mode=config.adv_mode,
     )
     train_timesteps = select_diffusion_nft_train_timesteps(
         train_timesteps=rollout_batch["train_timesteps"],
-        timestep_fraction=nft_cfg.timestep_fraction,
+        timestep_fraction=config.timestep_fraction,
         seed=timestep_shuffle_seed,
     )
 

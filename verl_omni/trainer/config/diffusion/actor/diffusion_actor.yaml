@@ -35,23 +35,14 @@ diffusion_loss:
   # Maximum value to clamp advantages before computing policy loss
   adv_clip_max: 5.0
 
-  # Loss-specific worker-side extension payload. PPO-like losses can leave this empty.
-  loss_config:
+  # DiffusionNFT beta for positive and implicit-negative prediction mixing
+  mix_beta: 0.5
 
-    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-    _target_: verl_omni.trainer.diffusion.algos.diffusion_nft.DiffusionNFTLossConfig
+  # DiffusionNFT prediction-space reference MSE coefficient
+  ref_kl_coef: 0.0
 
-    # Mixing coefficient for implicit positive/negative predictions
-    mix_beta: 0.5
-
-    # Reference prediction-space MSE coefficient
-    ref_kl_coef: 0.0
-
-    # Advantage clip scale used by the DiffusionNFT policy loss and reward-probability mapping
-    adv_clip_max: 5.0
-
-    # Minimum adaptive denominator for x0 reconstruction losses
-    adaptive_weight_min: 1e-5
+  # DiffusionNFT minimum adaptive denominator for x0 reconstruction losses
+  adaptive_weight_min: 1e-5
 
 # loss scale factor for diffusion loss, if applicable. If set to null, it will not be applied.
 loss_scale_factor: null

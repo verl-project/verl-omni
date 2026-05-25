@@ -46,9 +46,9 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${mini_bsz} \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${micro_bsz_per_gpu} \
-    actor_rollout_ref.actor.diffusion_loss.loss_config.mix_beta=0.5 \
-    actor_rollout_ref.actor.diffusion_loss.loss_config.ref_kl_coef=0.001 \
-    actor_rollout_ref.actor.diffusion_loss.loss_config.adv_clip_max=5.0 \
+    actor_rollout_ref.actor.diffusion_loss.mix_beta=0.5 \
+    actor_rollout_ref.actor.diffusion_loss.ref_kl_coef=0.001 \
+    actor_rollout_ref.actor.diffusion_loss.adv_clip_max=5.0 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
@@ -75,10 +75,10 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${micro_bsz_per_gpu} \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=online \
-    algorithm.algo_config.timestep_fraction=1.0 \
-    algorithm.algo_config.old_policy_decay_type=1 \
-    algorithm.algo_config.old_policy_update_interval=1 \
-    algorithm.algo_config.adv_mode=continuous \
+    algorithm.timestep_fraction=1.0 \
+    algorithm.old_policy_decay_type=1 \
+    algorithm.old_policy_update_interval=1 \
+    algorithm.adv_mode=continuous \
     reward.num_workers=1 \
     reward.reward_model.enable=False \
     trainer.logger=console \

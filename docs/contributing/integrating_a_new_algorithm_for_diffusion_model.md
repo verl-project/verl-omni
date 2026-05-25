@@ -395,9 +395,8 @@ algorithm.trainer_type=direct_preference
 Keep rollout data-contract knobs in the rollout config, worker-loss knobs in
 the actor loss config, model state knobs in the model config, and
 shared algorithm-level knobs under `algorithm`. Algorithm-specific
-trainer-side knobs belong under `algorithm.algo_config`, which may stay empty
-for algorithms that do not need a private trainer-side payload. Loss-specific
-worker-side knobs belong under `actor_rollout_ref.actor.diffusion_loss.loss_config`.
+trainer-side knobs belong under `algorithm`. Loss-specific worker-side knobs
+belong under `actor_rollout_ref.actor.diffusion_loss`.
 
 ### Reusing an existing estimator or loss
 

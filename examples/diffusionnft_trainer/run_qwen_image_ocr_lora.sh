@@ -24,7 +24,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
     data.train_max_samples=7200 \
-    data.train_batch_size=24 \
+    data.train_batch_size=16 \
     data.max_prompt_length=256 \
     actor_rollout_ref.model.algorithm=diffusion_nft \
     actor_rollout_ref.model.path=$model_name \
@@ -38,9 +38,9 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=12 \
     actor_rollout_ref.actor.diffusion_loss.loss_mode=diffusion_nft \
     actor_rollout_ref.actor.diffusion_loss.clip_ratio=1e-5 \
-    actor_rollout_ref.actor.diffusion_loss.loss_config.mix_beta=0.1 \
-    actor_rollout_ref.actor.diffusion_loss.loss_config.ref_kl_coef=0.0001 \
-    actor_rollout_ref.actor.diffusion_loss.loss_config.adv_clip_max=5.0 \
+    actor_rollout_ref.actor.diffusion_loss.mix_beta=0.1 \
+    actor_rollout_ref.actor.diffusion_loss.ref_kl_coef=0.0001 \
+    actor_rollout_ref.actor.diffusion_loss.adv_clip_max=5.0 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
@@ -66,10 +66,10 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=online \
-    algorithm.algo_config.timestep_fraction=1.0 \
-    algorithm.algo_config.old_policy_decay_type=2 \
-    algorithm.algo_config.old_policy_update_interval=2 \
-    algorithm.algo_config.adv_mode=continuous \
+    algorithm.timestep_fraction=1.0 \
+    algorithm.old_policy_decay_type=2 \
+    algorithm.old_policy_update_interval=2 \
+    algorithm.adv_mode=continuous \
     reward.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / REWARD_TP)) \
     reward.reward_model.enable=True \
     reward.reward_model.model_path=$reward_model_name \
@@ -79,7 +79,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=diffusion_nft \
-    trainer.experiment_name=qwen_image_ocr_lora_n_24_v_20 \
+    trainer.experiment_name=refactored_qwen_image_ocr_lora_n_16 \
     trainer.log_val_generations=8 \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \

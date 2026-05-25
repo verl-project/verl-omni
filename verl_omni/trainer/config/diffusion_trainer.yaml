@@ -72,26 +72,20 @@ algorithm:
   # Whether to normalize advantages using global standard deviation
   global_std: True
 
-  # Algorithm-specific trainer-side extension payload. PPO-like algorithms can leave this empty.
-  algo_config:
+  # DiffusionNFT old-policy EMA schedule type from the reference return_decay function
+  old_policy_decay_type: 0
 
-    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-    _target_: verl_omni.trainer.diffusion.algos.diffusion_nft.DiffusionNFTAlgoConfig
+  # DiffusionNFT fixed old-policy EMA decay; null uses old_policy_decay_type schedule
+  old_policy_decay: null
 
-    # Reference old-policy decay schedule type
-    old_policy_decay_type: 0
+  # DiffusionNFT optimizer steps between old-policy adapter refreshes
+  old_policy_update_interval: 1
 
-    # Optional fixed old-policy EMA decay; null uses old_policy_decay_type schedule
-    old_policy_decay: null
+  # DiffusionNFT fraction of rollout timesteps used for forward-process training
+  timestep_fraction: 1.0
 
-    # Number of optimizer updates between old-policy adapter updates
-    old_policy_update_interval: 1
-
-    # Fraction of rollout timesteps used as forward-process training timesteps
-    timestep_fraction: 1.0
-
-    # Advantage mapping mode: continuous, positive_only, negative_only, one_only, or binary
-    adv_mode: continuous
+  # DiffusionNFT advantage mapping mode before reward-probability scaling
+  adv_mode: continuous
 
 # config for the trainer
 trainer:
