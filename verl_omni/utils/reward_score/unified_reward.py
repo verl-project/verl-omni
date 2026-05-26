@@ -14,6 +14,7 @@
 
 """Human-preference scoring backed by UnifiedReward 2.0."""
 
+import asyncio
 import json
 import re
 from typing import Optional
@@ -34,11 +35,19 @@ UNIFIED_REWARD_SCORE_PATTERN = re.compile(
 )
 
 
-async def _chat_complete(router_address: str, chat_complete_request: dict) -> ChatCompletion:
+async def _chat_complete(
+    router_address: str,
+    chat_complete_request: dict,
+    session: aiohttp.ClientSession | None = None,
+) -> ChatCompletion:
     """POST a chat completion request to the reward router and parse the response."""
     url = f"http://{router_address}/v1/chat/completions"
-    timeout = aiohttp.ClientTimeout(total=None)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    if session is None:
+        timeout = aiohttp.ClientTimeout(total=None)
+        async with aiohttp.ClientSession(timeout=timeout) as owned_session:
+            async with owned_session.post(url, json=chat_complete_request) as resp:
+                output = await resp.text()
+    else:
         async with session.post(url, json=chat_complete_request) as resp:
             output = await resp.text()
     return ChatCompletion(**json.loads(output))
@@ -118,6 +127,44 @@ def _aggregate_unified_reward_scores(scores: dict[str, float]) -> tuple[float, f
     return normalized_score, raw_score
 
 
+async def _score_single_image(
+    image,
+    caption: str,
+    router_address: str,
+    model_name: str,
+    loop,
+    session: aiohttp.ClientSession,
+) -> tuple[float, float, str]:
+    """Score one image frame against ``caption`` via UnifiedReward."""
+    from verl_omni.utils.reward_score.reward_utils import pil_image_to_base64
+
+    pil_image = _to_pil(image)
+    image_base64 = await loop.run_in_executor(None, pil_image_to_base64, pil_image)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_base64}},
+                {"type": "text", "text": _build_unified_reward_prompt(caption)},
+            ],
+        },
+    ]
+    chat_complete_request = {
+        "messages": messages,
+        "model": model_name,
+        **DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS,
+    }
+    result = await _chat_complete(
+        router_address=router_address,
+        chat_complete_request=chat_complete_request,
+        session=session,
+    )
+    unified_reward_response = result.choices[0].message.content or ""
+    axis_scores = _parse_unified_reward_scores(unified_reward_response)
+    normalized_score, raw_score = _aggregate_unified_reward_scores(axis_scores)
+    return normalized_score, raw_score, unified_reward_response
+
+
 async def compute_score_unified_reward(
     data_source: str,
     solution_image: np.ndarray | torch.Tensor,
@@ -135,8 +182,6 @@ async def compute_score_unified_reward(
     """
     from verl.utils.ray_utils import get_event_loop
 
-    from verl_omni.utils.reward_score.reward_utils import pil_image_to_base64
-
     del data_source, reward_model_tokenizer
 
     extra_info = extra_info or {}
@@ -147,39 +192,26 @@ async def compute_score_unified_reward(
     model_name = model_name or DEFAULT_UNIFIED_REWARD_MODEL_PATH
     loop = get_event_loop()
 
-    unified_reward_response = ""
-    normalized_scores = []
-    raw_scores = []
-    all_axis_scores = []
-    for image in solution_image:
-        pil_image = _to_pil(image)
-        image_base64 = await loop.run_in_executor(None, pil_image_to_base64, pil_image)
-
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_base64}},
-                    {"type": "text", "text": _build_unified_reward_prompt(caption)},
-                ],
-            },
-        ]
-        chat_complete_request = {
-            "messages": messages,
-            "model": model_name,
-            **DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS,
-        }
-        result = await _chat_complete(
-            router_address=reward_router_address,
-            chat_complete_request=chat_complete_request,
+    timeout = aiohttp.ClientTimeout(total=None)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        frame_results = await asyncio.gather(
+            *[
+                _score_single_image(
+                    image=image,
+                    caption=caption,
+                    router_address=reward_router_address,
+                    model_name=model_name,
+                    loop=loop,
+                    session=session,
+                )
+                for image in solution_image
+            ]
         )
-        unified_reward_response = result.choices[0].message.content or ""
-        axis_scores = _parse_unified_reward_scores(unified_reward_response)
-        normalized_score, raw_score = _aggregate_unified_reward_scores(axis_scores)
-        normalized_scores.append(normalized_score)
-        raw_scores.append(raw_score)
-        all_axis_scores.append(axis_scores)
+
+    normalized_scores = [result[0] for result in frame_results]
+    raw_scores = [result[1] for result in frame_results]
+    unified_reward_response = frame_results[-1][2]
 
     score = sum(normalized_scores) / len(normalized_scores)
     raw_score = sum(raw_scores) / len(raw_scores)
-    return {"score": score, "response": unified_reward_response}
+    return {"score": score, "raw_score": raw_score, "response": unified_reward_response}
