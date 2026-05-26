@@ -20,7 +20,16 @@ from .fsdp import (  # noqa: F401
 
 try:
     from .veomni import VeOmniDiffusionEngine  # noqa: F401
-except ImportError:
+except ImportError as _veomni_import_err:
+    import warnings
+
+    warnings.warn(
+        f"verl_omni.workers.engine.veomni failed to import; "
+        f"`backend=veomni` will be unavailable. Root cause: "
+        f"{type(_veomni_import_err).__name__}: {_veomni_import_err}",
+        RuntimeWarning,
+        stacklevel=2,
+    )
     VeOmniDiffusionEngine = None
 
 __all__ = [
