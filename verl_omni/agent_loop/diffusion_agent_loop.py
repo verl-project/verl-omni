@@ -50,22 +50,50 @@ _MAX_SEED = (1 << 63) - 1
 
 
 def _derive_rollout_seed(base_seed: int, rollout_index: int) -> int:
-    """Derive a unique per-rollout seed so group members see different noise."""
+    """Derive a unique vLLM sampling seed for one expanded rollout row.
+
+    Args:
+        base_seed: Per-step base from the trainer (``rollout_seed`` in
+            ``meta_info``), typically ``rollout.seed + global_step - 1``.
+        rollout_index: Zero-based row index in the **post-repeat** rollout
+            batch (``0 .. num_prompts * rollout.n - 1``). Each GRPO repeat of
+            the same prompt gets a different index because
+            ``DataProto.repeat(..., interleave=True)`` expands the batch before
+            generation.
+
+    Returns:
+        Seed passed to ``sampling_params["seed"]`` for that row.
+    """
     return (int(base_seed) * _PER_ROLLOUT_SEED_STRIDE + int(rollout_index)) % _MAX_SEED
 
 
 def _maybe_per_rollout_seeds(meta_info: dict, batch_size: int) -> Optional[list[int]]:
-    """Resolve per-rollout seeds for a training batch.
+    """Build per-row rollout seeds for a training ``generate_sequences`` call.
 
-    Returns ``None`` when ``meta_info["rollout_seed"]`` is absent or ``None`` —
-    that signals seeding is disabled (``data.seed=null`` in the trainer
-    config) and the rollout should fall back to fully random noise. This is
-    the cross-check baseline that preserves the prior pre-fix behavior.
+    Call this **after** the trainer repeats the gen batch by ``rollout.n`` with
+    ``interleave=True``. At that point the agent loop sees
+    ``batch_size == len(batch) == num_prompts * rollout.n``, not the raw prompt
+    count from the dataloader.
 
-    Otherwise returns a list of length ``batch_size`` where entry ``i`` is the
-    per-rollout seed for the ``i``-th global prompt in the batch (so every
-    group member of a GRPO rollout sees distinct noise, and different DP
-    ranks — which own disjoint index slices — see distinct noise too).
+    For prompt index ``p`` (0-based) and GRPO repeat ``k`` in ``0 .. rollout.n-1``,
+    the corresponding expanded row index is ``p * rollout.n + k``, and that row
+    receives ``_derive_rollout_seed(base, p * rollout.n + k)``. Same prompt,
+    different repeats → different seeds.
+
+    Args:
+        meta_info: Batch metadata from the trainer. Uses
+            ``meta_info["rollout_seed"]`` as the per-step base when present.
+            When the key is missing or ``None`` (``data.seed=null`` /
+            ``rollout.seed=null``), seeding is disabled and this helper returns
+            ``None`` so rollouts keep their pre-fix random behavior.
+        batch_size: ``len(batch)`` passed into the agent loop — the number of
+            independent rollout tasks, i.e. **num_prompts * rollout.n** after
+            interleaved repeat. Entry ``i`` in the returned list maps to
+            ``sampling_params["seed"]`` for ``batch`` row ``i``.
+
+    Returns:
+        ``None`` if rollout seeding is disabled. Otherwise a list of length
+        ``batch_size`` with pairwise-distinct seeds (under normal batch sizes).
     """
     base = meta_info.get("rollout_seed")
     if base is None:
