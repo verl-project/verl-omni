@@ -58,11 +58,19 @@ class DiffusionRolloutAlgoConfig(BaseConfig):
     iters_per_group: int = 1
     sde_window_seed: int = 0
 
+    # Rollout data contract: trajectory for coupled RL, final_latent for decoupled forward-process RL
+    collect_mode: str = "trajectory"
+
     def __post_init__(self):
         if self.sample_strategy not in ("random", "progressive"):
             raise ValueError(f"Unknown sample_strategy: {self.sample_strategy!r}")
         if self.sample_strategy == "progressive" and self.iters_per_group <= 0:
             raise ValueError(f"iters_per_group must be positive, got {self.iters_per_group}.")
+        if self.collect_mode not in ("trajectory", "final_latent"):
+            raise ValueError(
+                f"Invalid diffusion rollout collect_mode: {self.collect_mode}. "
+                "Must be one of ['trajectory', 'final_latent']."
+            )
 
 
 @dataclass
@@ -125,7 +133,6 @@ class DiffusionRolloutConfig(BaseConfig):
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
 
     calculate_log_probs: bool = False
-    collect_mode: str = "trajectory"
     rollout_adapter: str = "default"
 
     agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
@@ -170,11 +177,6 @@ class DiffusionRolloutConfig(BaseConfig):
             raise ValueError(
                 "Rollout mode 'sync' has been removed. Please set "
                 "`actor_rollout_ref.rollout.mode=async` or remove the mode setting entirely."
-            )
-        if self.collect_mode not in ("trajectory", "final_latent"):
-            raise ValueError(
-                f"Invalid diffusion rollout collect_mode: {self.collect_mode}. "
-                "Must be one of ['trajectory', 'final_latent']."
             )
         if self.rollout_adapter not in ("default", "old"):
             raise ValueError(

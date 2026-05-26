@@ -135,6 +135,11 @@ class TestDiffusionRolloutAlgoConfig:
         assert cfg.sde_type == "sde"
         assert cfg.sde_window_size is None
         assert cfg.sde_window_range is None
+        assert cfg.collect_mode == "trajectory"
+
+    def test_invalid_collect_mode_raises(self):
+        with pytest.raises(ValueError, match="Invalid diffusion rollout collect_mode"):
+            DiffusionRolloutAlgoConfig(collect_mode="bogus")
 
     def test_invalid_sample_strategy_raises(self):
         with pytest.raises(ValueError, match="Unknown sample_strategy"):

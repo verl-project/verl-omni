@@ -24,7 +24,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
     data.train_max_samples=7200 \
-    data.train_batch_size=16 \
+    data.train_batch_size=24 \
     data.max_prompt_length=256 \
     actor_rollout_ref.model.algorithm=diffusion_nft \
     actor_rollout_ref.model.path=$model_name \
@@ -46,12 +46,12 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.name=$ENGINE \
-    actor_rollout_ref.rollout.n=24 \
+    actor_rollout_ref.rollout.n=16 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.calculate_log_probs=False \
-    actor_rollout_ref.rollout.collect_mode=final_latent \
+    actor_rollout_ref.rollout.algo.collect_mode=final_latent \
     actor_rollout_ref.rollout.rollout_adapter=old \
     actor_rollout_ref.rollout.pipeline.num_inference_steps=10 \
     actor_rollout_ref.rollout.pipeline.true_cfg_scale=1.0 \
@@ -79,7 +79,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=diffusion_nft \
-    trainer.experiment_name=refactored_qwen_image_ocr_lora_n_16 \
+    trainer.experiment_name=qwen_image_ocr_lora \
     trainer.log_val_generations=8 \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \

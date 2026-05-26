@@ -75,7 +75,7 @@ The script runs `python3 -m verl_omni.trainer.main_diffusion` with DiffusionNFT-
 - `actor_rollout_ref.actor.diffusion_loss.loss_mode=diffusion_nft`
 - `actor_rollout_ref.model.policy_state_adapters='["default","old"]'`
 - `actor_rollout_ref.rollout.calculate_log_probs=False`
-- `actor_rollout_ref.rollout.collect_mode=final_latent`
+- `actor_rollout_ref.rollout.algo.collect_mode=final_latent`
 - `actor_rollout_ref.rollout.rollout_adapter=old`
 - `actor_rollout_ref.rollout.n=24`
 - `algorithm.timestep_fraction=1.0`
