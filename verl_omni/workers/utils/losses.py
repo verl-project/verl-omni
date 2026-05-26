@@ -48,12 +48,8 @@ def _apply_bypass_rc(
     )
 
     # ppo_clip: PPO ratio handles IS, only RS mask is applied.
-    # reinforce: IS weights applied explicitly (no PPO clipping).
-    ppo_clip = rc_cfg.loss_type == "ppo_clip"
+    assert rc_cfg.loss_type == "ppo_clip", f"Only loss_type='ppo_clip' is supported, got {rc_cfg.loss_type!r}"
     weights: torch.Tensor | None = None
-
-    if is_weights_proto is not None and not ppo_clip:
-        weights = is_weights_proto.batch["rollout_is_weights"]
 
     if rc_cfg.rollout_rs:
         rs_mask = modified_mask

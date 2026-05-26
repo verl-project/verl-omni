@@ -72,7 +72,7 @@ algorithm:
     # Skip old-log-prob recompute by reusing rollout_log_probs (2 policies).
     bypass_mode: False
 
-    # Loss type in bypass mode: "ppo_clip" (IS via PPO ratio) or "reinforce".
+    # Loss type in bypass mode: "ppo_clip" (IS via PPO ratio).
     loss_type: ppo_clip
 
     # IS aggregation: null (off), "token", or "sequence".

@@ -45,7 +45,7 @@ rollout_correction:
   # Skip old-log-prob recompute by reusing rollout_log_probs (2 policies, no ref worker)
   bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
 
-  # Loss type in bypass mode: "ppo_clip" (IS via PPO ratio) or "reinforce" (explicit IS weights)
+  # Loss type in bypass mode: "ppo_clip" (IS via PPO ratio)
   loss_type: ${oc.select:algorithm.rollout_correction.loss_type,ppo_clip}
 
   # IS aggregation level: null (off), "token" (per-token), or "sequence" (per-sequence)

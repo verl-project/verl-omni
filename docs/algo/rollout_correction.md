@@ -56,7 +56,7 @@ recipes are unchanged.
 | Key | Default | Description |
 | --- | --- | --- |
 | `bypass_mode` | `false` | Skip old-log-prob recompute; reuse `rollout_log_probs`. |
-| `loss_type` | `"ppo_clip"` | Bypass loss type: ``"ppo_clip"`` (IS via PPO ratio) or ``"reinforce"``. |
+| `loss_type` | `"ppo_clip"` | Bypass loss type: ``"ppo_clip"`` (IS via PPO ratio). |
 | `rollout_is` | `null` | IS aggregation: `null`, `"token"`, `"sequence"`. In bypass ppo_clip mode controls metrics only. |
 | `rollout_is_threshold` | `2.0` | IS truncation: float → TIS upper clamp, `"lower_upper"` → IcePop. |
 | `rollout_is_batch_normalize` | `false` | Normalize IS weights to mean 1 across the batch. |
@@ -121,7 +121,7 @@ statistical behaviour of several RS modes:
 | --- | --- | --- | --- |
 | `ppo_clip` (default) | bypass | No (PPO ratio handles IS) | Standard bypass — fastest, PPO clipping provides IS. |
 | `ppo_clip` | decoupled | Yes (``old/rollout``) | Highest fidelity — 3 policies, IS corrects rollout→old drift. |
-| `reinforce` (reserved) | bypass | Yes (``current/rollout``) | Future: pure policy gradient without PPO clipping. |
+
 
 ## How it plugs in
 
