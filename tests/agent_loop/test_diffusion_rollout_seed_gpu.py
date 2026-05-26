@@ -135,7 +135,6 @@ def _build_seed_rollout_config(tmp_dir: str, *, default_num_gpus: int, num_worke
 
 @pytest.fixture
 def seed_rollout_config() -> DictConfig:
-    # Single worker avoids chunk-dispatch seed collisions (see xfailed test below).
     with tempfile.TemporaryDirectory() as tmp_dir:
         yield _build_seed_rollout_config(tmp_dir, default_num_gpus=1, num_workers=1)
 
@@ -178,6 +177,7 @@ def test_rollout_seed_reproducible_and_diverse_via_agent_loop(seed_rollout_confi
 
         n = seed_rollout_config.actor_rollout_ref.rollout.n
         batch = _make_prompt_batch(num_prompts=1).repeat(n)
+        batch.non_tensor_batch["_rollout_seed_global_idx"] = np.arange(len(batch), dtype=np.int64)
         batch.meta_info["global_steps"] = 1
         batch.meta_info["rollout_seed"] = 42
 
@@ -200,14 +200,6 @@ def test_rollout_seed_reproducible_and_diverse_via_agent_loop(seed_rollout_confi
         ray.shutdown()
 
 
-@pytest.mark.xfail(
-    reason=(
-        "AgentLoopManager chunks rollouts across workers; each worker derives per-row seeds from "
-        "local indices 0..chunk_size-1, so global rollout indices collide across chunks. "
-        "Fix in a follow-up PR via global rollout index dispatch."
-    ),
-    strict=True,
-)
 def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollout_config):
     """Every expanded rollout row must get a distinct seed when agent.num_workers > 1."""
     ray.init(
@@ -229,6 +221,7 @@ def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollou
 
         n = multi_worker_seed_rollout_config.actor_rollout_ref.rollout.n
         batch = _make_prompt_batch(num_prompts=1).repeat(n)
+        batch.non_tensor_batch["_rollout_seed_global_idx"] = np.arange(len(batch), dtype=np.int64)
         batch.meta_info["global_steps"] = 1
         batch.meta_info["rollout_seed"] = 42
 
@@ -236,8 +229,6 @@ def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollou
         latents = _initial_latents(result)
         assert latents.shape[0] == n
 
-        # With 2 workers each chunk uses local indices 0..1, so global rows 0 and 2
-        # (same prompt, rollout indices 0 and 2) incorrectly share a seed today.
         assert not torch.equal(latents[0], latents[2]), (
             "global rollout rows 0 and 2 must not share the same initial latent"
         )
