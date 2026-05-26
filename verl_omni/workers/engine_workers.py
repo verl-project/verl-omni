@@ -541,7 +541,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "Diffusion ref infer_batch requires ref.log_prob_micro_batch_size_per_gpu or "
                     "actor.ppo_micro_batch_size_per_gpu (used by prepare_micro_batches)."
                 )
-            if not is_diffusion:
+            else:
                 ref_training_config.engine_config.use_dynamic_bsz = self.config.ref.use_dynamic_bsz
                 ref_training_config.engine_config.infer_max_token_len_per_gpu = (
                     self.config.ref.ppo_max_token_len_per_gpu
