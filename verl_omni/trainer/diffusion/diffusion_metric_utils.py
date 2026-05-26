@@ -147,7 +147,7 @@ def compute_reward_extra_metrics_diffusion(reward_extra_infos_dict: dict) -> dic
                 continue
             metrics[f"critic/{key}/mean"] = float(values.mean())
         elif isinstance(values, list) and len(values) > 0:
-            if not isinstance(values[0], (int, float)):
+            if not isinstance(values[0], int | float):
                 continue
             metrics[f"critic/{key}/mean"] = float(np.mean(values))
     return metrics
