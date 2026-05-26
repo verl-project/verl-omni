@@ -13,7 +13,6 @@
 # limitations under the License.
 """CPU tests for MultiVisualRewardManager."""
 
-import asyncio
 import os
 
 import pytest
@@ -129,7 +128,7 @@ class TestMultiVisualRewardManagerRunSingle:
         manager = _build_manager(reward_fns)
         data = _make_single_data()
 
-        result = asyncio.run(manager.run_single(data))
+        result = manager.loop.run_until_complete(manager.run_single(data))
 
         # combined = 2.0 * 0.5 + 1.0 * 1.0 = 2.0
         assert result["reward_score"] == pytest.approx(2.0)
@@ -147,7 +146,7 @@ class TestMultiVisualRewardManagerRunSingle:
         manager = _build_manager(reward_fns)
         data = _make_single_data()
 
-        result = asyncio.run(manager.run_single(data))
+        result = manager.loop.run_until_complete(manager.run_single(data))
 
         # combined = 1.0 * 0.5 + 1.0 * 0.0 = 0.5
         assert result["reward_score"] == pytest.approx(0.5)
@@ -161,7 +160,7 @@ class TestMultiVisualRewardManagerRunSingle:
         manager = _build_manager(reward_fns)
         data = _make_single_data()
 
-        result = asyncio.run(manager.run_single(data))
+        result = manager.loop.run_until_complete(manager.run_single(data))
 
         assert result["reward_score"] == pytest.approx(0.8)
 
