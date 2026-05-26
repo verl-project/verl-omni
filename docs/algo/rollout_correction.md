@@ -64,6 +64,8 @@ recipes are unchanged.
 | `rollout_rs_threshold` | `null` | RS threshold. K1 modes: `"lower_upper"`; K2/K3: single upper. |
 
 Math is delegated to ``verl.trainer.ppo.rollout_corr_helper``.
+See the upstream `verl` documentation for the full mathematical formulation:
+`Rollout Correction Math <https://verl.readthedocs.io/en/latest/algo/rollout_corr_math.html>`_.
 
 ## Logged metrics
 

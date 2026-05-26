@@ -30,13 +30,15 @@ def _apply_bypass_rc(
     metrics: dict,  # modified in-place
 ) -> None:
     """Compute per-step IS/RS for bypass mode and stash weights into ``data``."""
-    log_prob_2d = log_prob.unsqueeze(-1)
-    rollout_lp_2d = old_log_prob.unsqueeze(-1)
+    log_prob_2d = log_prob.unsqueeze(-1)  # current policy log-prob (π_θ)
+    rollout_lp_2d = old_log_prob.unsqueeze(-1)  # rollout policy log-prob (π_rollout)
     response_mask = torch.ones_like(log_prob_2d)
 
+    # In bypass mode, RS checks current→rollout drift: pass current as old_log_prob, rollout as rollout_log_prob.
+    # This matches the mathematical intent: RS mask is applied to exp(log_prob - rollout_log_prob).
     is_weights_proto, modified_mask, rc_metrics = compute_rollout_correction_and_rejection_mask(
-        old_log_prob=log_prob_2d,
-        rollout_log_prob=rollout_lp_2d,
+        old_log_prob=log_prob_2d,  # current policy (π_θ)
+        rollout_log_prob=rollout_lp_2d,  # rollout policy (π_rollout)
         response_mask=response_mask,
         rollout_is=rc_cfg.rollout_is,
         rollout_is_threshold=rc_cfg.rollout_is_threshold,
