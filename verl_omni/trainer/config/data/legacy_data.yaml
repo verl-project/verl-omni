@@ -61,14 +61,10 @@ return_full_prompt: False
 # Whether to shuffle the data in the dataloader.
 shuffle: True
 
-# Seed used for both data shuffling and the per-step diffusion rollout RNG.
-#  - integer (e.g. 42): reproducible runs; the trainer derives a unique
-#    per-rollout seed `(seed + global_step - 1) * stride + i` for every prompt
-#    `i` so group members still see distinct noise and the starting latent
-#    varies across training steps.
-#  - null (default): seeding is disabled end-to-end; the rollout falls back
-#    to fully random noise. Use this for cross-checking convergence/timing
-#    against the deterministic mode.
+# Seed for train dataloader shuffling when data.shuffle=True.
+# Rollout RNG is controlled separately by actor_rollout_ref.rollout.seed.
+#  - integer (e.g. 42): reproducible dataloader order across restarts.
+#  - null (default): unseeded shuffle when data.shuffle=True.
 seed: null
 
 # num dataloader workers

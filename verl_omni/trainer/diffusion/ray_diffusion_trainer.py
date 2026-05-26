@@ -50,6 +50,7 @@ from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
+from verl_omni.agent_loop.diffusion_agent_loop import _build_rollout_seed
 from verl_omni.trainer.config import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import DiffusionAdvantageEstimator, get_diffusion_adv_estimator_fn
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
@@ -952,9 +953,13 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                 gen_batch.meta_info["global_steps"] = self.global_steps
 
                 # Per-step rollout seed for reproducibility
-                data_seed = self.config.data.get("seed")
-                if data_seed is not None:
-                    gen_batch.meta_info["rollout_seed"] = int(data_seed) + self.global_steps - 1
+                rollout_seed = _build_rollout_seed(
+                    self.config.actor_rollout_ref.rollout.get("seed"),
+                    self.global_steps,
+                    data_seed=self.config.data.get("seed"),
+                )
+                if rollout_seed is not None:
+                    gen_batch.meta_info["rollout_seed"] = rollout_seed
 
                 gen_batch_output = gen_batch.repeat(
                     repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True

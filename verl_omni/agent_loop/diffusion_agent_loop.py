@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import random
+import warnings
 from typing import Any, Optional
 
 import hydra
@@ -100,6 +101,34 @@ def _maybe_per_rollout_seeds(meta_info: dict, batch_size: int) -> Optional[list[
         return None
     base = int(base)
     return [_derive_rollout_seed(base, i) for i in range(batch_size)]
+
+
+def _build_rollout_seed(
+    rollout_seed,
+    global_steps: int,
+    *,
+    data_seed=None,
+) -> Optional[int]:
+    """Build the per-step rollout base seed from config and trainer state.
+
+    Prefers ``actor_rollout_ref.rollout.seed``. When only ``data.seed`` is set,
+    falls back with a deprecation warning for one release cycle.
+
+    Returns:
+        ``None`` when rollout seeding is disabled. Otherwise
+        ``int(rollout_seed) + int(global_steps) - 1``.
+    """
+    base = rollout_seed
+    if base is None and data_seed is not None:
+        warnings.warn(
+            "Using data.seed for rollout RNG is deprecated; set actor_rollout_ref.rollout.seed instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        base = data_seed
+    if base is None:
+        return None
+    return int(base) + int(global_steps) - 1
 
 
 class DiffusionAgentLoopOutput(BaseModel):
