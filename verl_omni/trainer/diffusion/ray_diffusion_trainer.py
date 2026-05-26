@@ -54,6 +54,7 @@ from verl_omni.trainer.config import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import DiffusionAdvantageEstimator, get_diffusion_adv_estimator_fn
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
+    compute_reward_extra_metrics_diffusion,
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
 )
@@ -1097,17 +1098,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                 num_images = batch.batch["advantages"].shape[0]
                 metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw, num_images=num_images))
                 metrics.update(compute_throughput_metrics_diffusion(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
-                # Log per-sub-reward means (e.g. reward/ocr, reward/jpeg) for multi-reward tracking
-                if reward_extra_infos_dict:
-                    for key, values in reward_extra_infos_dict.items():
-                        if isinstance(values, np.ndarray):
-                            if not np.issubdtype(values.dtype, np.number):
-                                continue
-                            metrics[f"critic/{key}/mean"] = float(values.mean())
-                        elif isinstance(values, list) and len(values) > 0:
-                            if not isinstance(values[0], (int, float)):
-                                continue
-                            metrics[f"critic/{key}/mean"] = float(np.mean(values))
+                metrics.update(compute_reward_extra_metrics_diffusion(reward_extra_infos_dict))
                 # compute variance proxy metrics
                 gradient_norm = metrics.get("actor/grad_norm", None)
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))

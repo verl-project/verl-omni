@@ -45,7 +45,7 @@ reward_model:
     name: ???
     dtype: bfloat16
     gpu_memory_utilization: 0.5
-    enforce_eager: false
+    enforce_eager: true
     cudagraph_capture_sizes: null
     free_cache_engine: true
     data_parallel_size: 1
