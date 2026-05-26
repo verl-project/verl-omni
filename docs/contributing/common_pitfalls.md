@@ -47,6 +47,5 @@ inference backends.
 
 | Metric | Before fix (bypass) | After fix (bypass) | No bypass |
 |---|---|---|---|
-| `actor/ratio_mean` | ~0.999964 | ~0.999967 | ~0.999999 |
 | `actor/ppo_kl` | ~3.6×10⁻⁵ | ~3.3×10⁻⁵ | ~1×10⁻⁶ |
 | `actor/pg_clipfrac` | ~12% | ~9% | ~1% |
