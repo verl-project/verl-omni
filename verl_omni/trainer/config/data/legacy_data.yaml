@@ -63,8 +63,6 @@ shuffle: True
 
 # Seed for train dataloader shuffling when data.shuffle=True.
 # Rollout RNG is controlled separately by actor_rollout_ref.rollout.seed.
-#  - integer (e.g. 42): reproducible dataloader order across restarts.
-#  - null (default): unseeded shuffle when data.shuffle=True.
 seed: null
 
 # num dataloader workers

@@ -13,7 +13,6 @@
 # limitations under the License.
 import asyncio
 import random
-import warnings
 from typing import Any, Optional
 
 import hydra
@@ -37,6 +36,7 @@ from verl.utils.dataset.rl_dataset import get_dataset_class
 from verl.utils.profiler import simple_timer
 from verl.workers.rollout.llm_server import LLMServerClient
 
+from verl_omni.agent_loop.utils import _maybe_per_rollout_seeds
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 
 
@@ -44,91 +44,6 @@ def _config_to_sampling_dict(config: Optional[BaseConfig]) -> dict:
     if config is None:
         return {}
     return {k: v for k, v in config.items() if not k.startswith("_")}
-
-
-_PER_ROLLOUT_SEED_STRIDE = 1_000_003
-_MAX_SEED = (1 << 63) - 1
-
-
-def _derive_rollout_seed(base_seed: int, rollout_index: int) -> int:
-    """Derive a unique vLLM sampling seed for one expanded rollout row.
-
-    Args:
-        base_seed: Per-step base from the trainer (``rollout_seed`` in
-            ``meta_info``), typically ``rollout.seed + global_step - 1``.
-        rollout_index: Zero-based row index in the **post-repeat** rollout
-            batch (``0 .. num_prompts * rollout.n - 1``). Each GRPO repeat of
-            the same prompt gets a different index because
-            ``DataProto.repeat(..., interleave=True)`` expands the batch before
-            generation.
-
-    Returns:
-        Seed passed to ``sampling_params["seed"]`` for that row.
-    """
-    return (int(base_seed) * _PER_ROLLOUT_SEED_STRIDE + int(rollout_index)) % _MAX_SEED
-
-
-def _maybe_per_rollout_seeds(meta_info: dict, batch_size: int) -> Optional[list[int]]:
-    """Build per-row rollout seeds for a training ``generate_sequences`` call.
-
-    Call this **after** the trainer repeats the gen batch by ``rollout.n`` with
-    ``interleave=True``. At that point the agent loop sees
-    ``batch_size == len(batch) == num_prompts * rollout.n``, not the raw prompt
-    count from the dataloader.
-
-    For prompt index ``p`` (0-based) and GRPO repeat ``k`` in ``0 .. rollout.n-1``,
-    the corresponding expanded row index is ``p * rollout.n + k``, and that row
-    receives ``_derive_rollout_seed(base, p * rollout.n + k)``. Same prompt,
-    different repeats → different seeds.
-
-    Args:
-        meta_info: Batch metadata from the trainer. Uses
-            ``meta_info["rollout_seed"]`` as the per-step base when present.
-            When the key is missing or ``None`` (``data.seed=null`` /
-            ``rollout.seed=null``), seeding is disabled and this helper returns
-            ``None`` so rollouts keep their pre-fix random behavior.
-        batch_size: ``len(batch)`` passed into the agent loop — the number of
-            independent rollout tasks, i.e. **num_prompts * rollout.n** after
-            interleaved repeat. Entry ``i`` in the returned list maps to
-            ``sampling_params["seed"]`` for ``batch`` row ``i``.
-
-    Returns:
-        ``None`` if rollout seeding is disabled. Otherwise a list of length
-        ``batch_size`` with pairwise-distinct seeds (under normal batch sizes).
-    """
-    base = meta_info.get("rollout_seed")
-    if base is None:
-        return None
-    base = int(base)
-    return [_derive_rollout_seed(base, i) for i in range(batch_size)]
-
-
-def _build_rollout_seed(
-    rollout_seed,
-    global_steps: int,
-    *,
-    data_seed=None,
-) -> Optional[int]:
-    """Build the per-step rollout base seed from config and trainer state.
-
-    Prefers ``actor_rollout_ref.rollout.seed``. When only ``data.seed`` is set,
-    falls back with a deprecation warning for one release cycle.
-
-    Returns:
-        ``None`` when rollout seeding is disabled. Otherwise
-        ``int(rollout_seed) + int(global_steps) - 1``.
-    """
-    base = rollout_seed
-    if base is None and data_seed is not None:
-        warnings.warn(
-            "Using data.seed for rollout RNG is deprecated; set actor_rollout_ref.rollout.seed instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        base = data_seed
-    if base is None:
-        return None
-    return int(base) + int(global_steps) - 1
 
 
 class DiffusionAgentLoopOutput(BaseModel):

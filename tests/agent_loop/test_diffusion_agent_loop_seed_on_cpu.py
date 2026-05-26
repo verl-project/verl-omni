@@ -17,25 +17,10 @@
 End-to-end rollout seed behavior is covered by GPU tests.
 """
 
-import warnings
-
-import pytest
-
-from verl_omni.agent_loop.diffusion_agent_loop import _build_rollout_seed
+from verl_omni.agent_loop.utils import _build_rollout_seed
 
 
 def test_build_rollout_seed_resolution():
     assert _build_rollout_seed(42, global_steps=1) == 42
     assert _build_rollout_seed(42, global_steps=3) == 44
-    assert _build_rollout_seed(7, global_steps=2, data_seed=99) == 8
-
     assert _build_rollout_seed(None, global_steps=1) is None
-    assert _build_rollout_seed(None, global_steps=1, data_seed=None) is None
-
-    with pytest.warns(DeprecationWarning, match="actor_rollout_ref.rollout.seed"):
-        assert _build_rollout_seed(None, global_steps=5, data_seed=42) == 46
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        assert _build_rollout_seed(42, global_steps=1, data_seed=99) == 42
-    assert not any(issubclass(w.category, DeprecationWarning) for w in caught)
