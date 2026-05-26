@@ -954,7 +954,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
                 gen_batch = self._get_gen_batch(batch)
 
-                # pass global_steps to trace
+                # Pass step metadata to rollout before expansion.
                 gen_batch.meta_info["global_steps"] = self.global_steps
 
                 # Per-step rollout seed for reproducibility
@@ -964,6 +964,9 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
                 gen_batch_output = gen_batch.repeat(
                     repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
+                )
+                gen_batch_output.non_tensor_batch["_rollout_seed_global_idx"] = np.arange(
+                    len(gen_batch_output), dtype=np.int64
                 )
 
                 is_last_step = self.global_steps >= self.total_training_steps
