@@ -1159,7 +1159,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         **kwargs,
     ):
         super().__init__(config=config, *args, **kwargs)
-        self.is_offline_dpo = config.algorithm.get("sample_source", "online") == "offline"
+        self.is_offline = config.algorithm.get("sample_source", "online") == "offline"
         # Direct-preference losses (e.g. DPO) need ref noise preds even when KL paths are disabled.
         self.use_reference_policy = need_reference_policy(self.config) or (
             config.algorithm.get("trainer_type") == "direct_preference"
@@ -1168,7 +1168,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
     def init_workers(self):
         """Initialize actor-only workers for offline DPO, or full stack for online preference training."""
         actor_rollout_resource_pool = self._init_colocated_workers()
-        if self.is_offline_dpo:
+        if self.is_offline:
             self.reward_loop_manager = None
             self.llm_server_manager = None
             self.checkpoint_manager = NoOpCheckpointManager()  # no rollout replicas needed
@@ -1176,7 +1176,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         self._init_online_rollout_stack(actor_rollout_resource_pool)
 
     def _validate(self):
-        if self.is_offline_dpo and not hasattr(self, "async_rollout_manager"):
+        if self.is_offline and not hasattr(self, "async_rollout_manager"):
             print("Skipping validation generation because offline DPO rollout is disabled.")
             return {"val/offline_dpo/skipped": 1.0}
         return super()._validate()
@@ -1323,12 +1323,12 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                     )
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
-                is_offline_dpo = self.is_offline_dpo
+                is_offline = self.is_offline
                 if "uid" not in batch.non_tensor_batch:
                     batch.non_tensor_batch["uid"] = np.array(
                         [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                     )
-                if not is_offline_dpo:
+                if not is_offline:
                     gen_batch = self._get_gen_batch(batch)
                     # pass global_steps to trace
                     gen_batch.meta_info["global_steps"] = self.global_steps
@@ -1338,7 +1338,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
                     reward_extra_infos_dict: dict[str, list] = {}
-                    if is_offline_dpo:
+                    if is_offline:
                         reward_tensor = batch.batch["sample_level_scores"]
                     else:
                         # generate a batch
