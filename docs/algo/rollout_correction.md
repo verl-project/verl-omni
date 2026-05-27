@@ -50,22 +50,13 @@ A runnable end-to-end example lives at
 
 ## Config reference
 
-All knobs sit under `algorithm.rollout_correction`.  Defaults are off so existing
-recipes are unchanged.
+All config keys live under `algorithm.rollout_correction` and mirror the upstream
+verl schema exactly. See the upstream documentation for the full reference:
 
-| Key | Default | Description |
-| --- | --- | --- |
-| `bypass_mode` | `false` | Skip old-log-prob recompute; reuse `rollout_log_probs`. |
-| `loss_type` | `"ppo_clip"` | Bypass loss type: ``"ppo_clip"`` (IS via PPO ratio). |
-| `rollout_is` | `null` | IS aggregation: `null`, `"token"`, `"sequence"`. In bypass ppo_clip mode controls metrics only. |
-| `rollout_is_threshold` | `2.0` | IS truncation: float → TIS upper clamp, `"lower_upper"` → IcePop. |
-| `rollout_is_batch_normalize` | `false` | Normalize IS weights to mean 1 across the batch. |
-| `rollout_rs` | `null` | RS mode(s): `seq_mean_k1`, `seq_mean_k2`, `token_k1`, etc. |
-| `rollout_rs_threshold` | `null` | RS threshold. K1 modes: `"lower_upper"`; K2/K3: single upper. |
+- **Config keys & usage:** [Rollout Correction](https://verl.readthedocs.io/en/latest/algo/rollout_corr.html)
+- **Mathematical formulation:** [Rollout Correction Math](https://verl.readthedocs.io/en/latest/algo/rollout_corr_math.html)
 
-Math is delegated to ``verl.trainer.ppo.rollout_corr_helper``.
-See the upstream `verl` documentation for the full mathematical formulation:
-`Rollout Correction Math <https://verl.readthedocs.io/en/latest/algo/rollout_corr_math.html>`_.
+The only diffusion-specific notes are in the [tuning guide](#diffusion-specific-tuning-guide) below.
 
 ## Logged metrics
 
@@ -114,14 +105,6 @@ statistical behaviour of several RS modes:
 | **Token-level RS** (`token_k1`, etc.) | With only 2 tokens, token-level statistics have very low power — a single token cannot be rejected in isolation because the per-token stat is averaged from thousands of latent dims.  Prefer `seq_mean_*` or `seq_max_*` modes (decoupled) or any mode (bypass — all are per-step). |
 | **`rollout_is=sequence`** | The product of 2 per-step ratios.  With diffusion's low per-step variance this is usually well-behaved; the default threshold of 2.0 is generous. |
 | **First-run diagnostics** | Always inspect `rollout_corr/log_ppl_abs_diff` and `rollout_corr/rollout_is_max` for the first 50 steps of a new recipe.  If `log_ppl_abs_diff > 1.0` or `rollout_is_max` is pinned at the clamp threshold, the rollout-training gap is larger than expected — consider lowering the rollout precision gap or falling back to `bypass_mode=False`. |
-
-### `loss_type` and when to use each
-
-| `loss_type` | Mode | IS applied? | When to use |
-| --- | --- | --- | --- |
-| `ppo_clip` (default) | bypass | No (PPO ratio handles IS) | Standard bypass — fastest, PPO clipping provides IS. |
-| `ppo_clip` | decoupled | Yes (``old/rollout``) | Highest fidelity — 3 policies, IS corrects rollout→old drift. |
-
 
 ## How it plugs in
 
