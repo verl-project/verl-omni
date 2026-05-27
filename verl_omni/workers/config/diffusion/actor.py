@@ -18,6 +18,7 @@ from typing import Optional
 from omegaconf import MISSING
 from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig
+from verl.trainer.config.algorithm import RolloutCorrectionConfig
 from verl.utils.profiler import ProfilerConfig
 from verl.workers.config.engine import FSDPEngineConfig
 from verl.workers.config.optimizer import OptimizerConfig
@@ -75,6 +76,10 @@ class DiffusionActorConfig(BaseConfig):
     # dp_size: data parallel size
     # global_batch_size: global batch size
     global_batch_info: dict = field(default_factory=dict)
+
+    # Rollout Correction config.
+    # When bypass_mode=True, ``diffusion_loss`` computes per-step RS from here.
+    rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
 
     def __post_init__(self):
         """Validate diffusion actor configuration parameters."""
