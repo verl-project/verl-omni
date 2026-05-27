@@ -19,7 +19,7 @@ ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
 
-python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
+python3 -m verl_omni.trainer.main_diffusion \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
     data.train_batch_size=32 \

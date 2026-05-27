@@ -57,7 +57,6 @@ class TestDiffusionAlgoConfig:
         cfg = DiffusionAlgoConfig()
         assert cfg.adv_estimator == "flow_grpo"
         assert cfg.norm_adv_by_std_in_grpo is True
-        assert cfg.bypass_mode is False
         assert cfg.global_std is True
 
     def test_override(self):

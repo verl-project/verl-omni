@@ -11,15 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-The concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP)
-"""
+"""FSDP engines for diffusion models."""
 
 import gc
 import json
 import logging
 import os
 import warnings
+from abc import ABC, abstractmethod
 from contextlib import contextmanager, nullcontext
 from typing import Callable, Optional
 
@@ -52,6 +51,7 @@ from verl.utils.fsdp_utils import (
     offload_fsdp_optimizer,
     replace_lora_wrapper,
 )
+from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import convert_weight_keys
 from verl.utils.py_functional import append_to_dict, convert_to_regular_types
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig
@@ -69,10 +69,8 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
-@EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda"])
-class DiffusersFSDPEngine(BaseEngine):
-    """
-    Concrete Diffusers Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
+class DiffusersFSDPEngine(BaseEngine, ABC):
+    """Base Diffusers engine using PyTorch FullyShardedDataParallel (FSDP).
 
     Supports model sharding, activation/optimizer offloading, LoRA, and sequence parallelism.
     """
@@ -471,6 +469,209 @@ class DiffusersFSDPEngine(BaseEngine):
     def get_context_parallel_group(self):
         raise NotImplementedError
 
+    @abstractmethod
+    def forward_backward_batch(
+        self, data: TensorDict, loss_function: Callable, forward_only: bool = False
+    ) -> list[TensorDict]:
+        """Run forward/backward over a batch; implemented by algorithm-specific subclasses."""
+        pass
+
+    @abstractmethod
+    def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
+        """Build model inputs for one diffusion step; implemented by algorithm-specific subclasses."""
+        pass
+
+    @abstractmethod
+    def prepare_model_outputs(self, output, micro_batch: TensorDict):
+        """Post-process raw model output; implemented by algorithm-specific subclasses."""
+        pass
+
+    @abstractmethod
+    def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
+        """Run one diffusion step forward (and loss); implemented by algorithm-specific subclasses."""
+        pass
+
+    def optimizer_zero_grad(self):
+        """
+        Zero gradients and enforce FSDP grad-clipping logic.
+        """
+        self.optimizer.zero_grad()
+
+    def optimizer_step(self):
+        """
+        Clip gradients, skip update if non-finite, and step optimizer.
+
+        Returns:
+            grad_norm (float): Norm of gradients before clipping.
+        """
+        assert self.optimizer_config.clip_grad is not None
+
+        if isinstance(self.module, FSDP):
+            grad_norm = self.module.clip_grad_norm_(self.optimizer_config.clip_grad)
+        elif isinstance(self.module, FSDPModule):
+            grad_norm = fsdp2_clip_grad_norm_(self.module.parameters(), max_norm=self.optimizer_config.clip_grad)
+        else:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.module.parameters(), max_norm=self.optimizer_config.clip_grad
+            )
+
+        if isinstance(grad_norm, DTensor):
+            grad_norm = grad_norm.full_tensor()
+
+        # if grad_norm is not finite, skip the update
+        if not torch.isfinite(grad_norm):
+            print(f"WARN: grad_norm is not finite: {grad_norm}")
+            self.optimizer.zero_grad()
+        else:
+            self.optimizer.step()
+        return grad_norm.item()
+
+    def lr_scheduler_step(self):
+        """
+        Advance FSDP scheduler and return updated learning rate.
+        """
+        self.lr_scheduler.step()
+        lr = self.lr_scheduler.get_last_lr()[0]  # only return the first group
+        return lr
+
+    def to(self, device: str, model: bool = True, optimizer: bool = True, grad: bool = True):
+        """
+        Move FSDP model and/or optimizer to CPU or GPU with offload support.
+        Note that this function executes irrespective of offload config. It serves as manual control
+        """
+        super().to(device=device, model=model, optimizer=optimizer, grad=grad)
+
+        if self.engine_config.forward_only:
+            # force cpu_offload
+            return
+
+        device_name = get_device_name()
+
+        assert device in (device_name, "cpu")
+        if device == device_name:
+            if model:
+                load_fsdp_model_to_gpu(self.module)
+            if optimizer and self.optimizer is not None:
+                load_fsdp_optimizer(self.optimizer, device)
+            gc.collect()
+        elif device == "cpu":
+            if model:
+                offload_fsdp_model_to_cpu(self.module)
+            if optimizer and self.optimizer is not None:
+                offload_fsdp_optimizer(self.optimizer)
+        else:
+            raise ValueError(f"Invalid device type: {device}")
+
+    def save_checkpoint(
+        self,
+        local_path: str,
+        hdfs_path: Optional[str] = None,
+        global_step: int = 0,
+        max_ckpt_to_keep: Optional[int] = None,
+        **kwargs,
+    ) -> None:
+        """
+        Save FSDP checkpoint, handling parameter offload as needed.
+        """
+        origin_module_device = next(self.module.parameters()).device.type
+        if self._is_offload_param or origin_module_device == "cpu":
+            load_fsdp_model_to_gpu(self.module)
+
+        self.checkpoint_manager.save_checkpoint(
+            local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
+        )
+
+        torch.distributed.barrier()
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.module)
+        gc.collect()
+        aggressive_empty_cache(force_sync=True)
+
+    def load_checkpoint(
+        self, local_path: str, hdfs_path: Optional[str] = None, del_local_after_load: int = True, **kwargs
+    ) -> None:
+        """
+        Load FSDP checkpoint, restoring parameters and optimizer state.
+        """
+        import torch
+
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.module)
+
+        self.checkpoint_manager.load_checkpoint(
+            local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
+        )
+
+        torch.distributed.barrier()
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.module)
+
+        if self._is_offload_optimizer:
+            offload_fsdp_optimizer(self.optimizer)
+
+    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
+        log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
+
+        load_fsdp_model_to_gpu(self.module)
+
+        log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
+
+        peft_config = None
+
+        peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        if hasattr(peft_model, "peft_config"):  # LoRA
+            peft_config = peft_model.peft_config.get("default", None)
+            params = collect_lora_params(
+                module=self.module,
+                layered_summon=layered_summon,
+                base_sync_done=base_sync_done,
+                is_diffusers=True,
+            )
+            if not base_sync_done:
+                params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
+        else:
+            params = self.module.state_dict()
+
+        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+
+        log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.module)
+        log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
+
+        if peft_config is not None and base_sync_done:
+            per_tensor_param = params.items()
+        else:
+            device = get_device_id()  # used when fsdp2 set cpu_offload_policy
+            # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
+            per_tensor_param = (
+                (
+                    name,
+                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                    if isinstance(param, DTensor)
+                    else param,
+                )
+                for name, param in params.items()
+            )
+
+        # we need to add the prefix to make it compatible with rollout engine
+        per_tensor_param = ((f"transformer.{name}", tensor) for name, tensor in per_tensor_param)
+        peft_config_dict = peft_config.to_dict() if peft_config is not None else None
+        return per_tensor_param, peft_config_dict
+
+    @contextmanager
+    def disable_adapter(self):
+        try:
+            self.module.disable_adapters()
+            yield
+        finally:
+            self.module.enable_adapters()
+
+
+@EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
+    """Diffusers FSDP engine with PPO forward/backward and I/O preparation."""
+
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
     ) -> list[TensorDict]:
@@ -648,6 +849,7 @@ class DiffusersFSDPEngine(BaseEngine):
                 sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
             )
 
+            # TODO (mike): refactor the data preparation logic here
             if micro_batch.get("ref_log_prob", None) is not None:
                 data["ref_log_prob"] = micro_batch["ref_log_prob"][:, step]
 
@@ -656,6 +858,9 @@ class DiffusersFSDPEngine(BaseEngine):
 
             if micro_batch.get("old_prev_sample_mean", None) is not None:
                 data["old_prev_sample_mean"] = micro_batch["old_prev_sample_mean"][:, step]
+
+            if micro_batch.get("rollout_is_weights", None) is not None:
+                data["rollout_is_weights"] = micro_batch["rollout_is_weights"][:, step]
 
             loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
         else:
@@ -670,180 +875,6 @@ class DiffusersFSDPEngine(BaseEngine):
         }
 
         return loss, output
-
-    def optimizer_zero_grad(self):
-        """
-        Zero gradients and enforce FSDP grad-clipping logic.
-        """
-        self.optimizer.zero_grad()
-
-    def optimizer_step(self):
-        """
-        Clip gradients, skip update if non-finite, and step optimizer.
-
-        Returns:
-            grad_norm (float): Norm of gradients before clipping.
-        """
-        assert self.optimizer_config.clip_grad is not None
-
-        if isinstance(self.module, FSDP):
-            grad_norm = self.module.clip_grad_norm_(self.optimizer_config.clip_grad)
-        elif isinstance(self.module, FSDPModule):
-            grad_norm = fsdp2_clip_grad_norm_(self.module.parameters(), max_norm=self.optimizer_config.clip_grad)
-        else:
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.module.parameters(), max_norm=self.optimizer_config.clip_grad
-            )
-
-        if isinstance(grad_norm, DTensor):
-            grad_norm = grad_norm.full_tensor()
-
-        # if grad_norm is not finite, skip the update
-        if not torch.isfinite(grad_norm):
-            print(f"WARN: grad_norm is not finite: {grad_norm}")
-            self.optimizer.zero_grad()
-        else:
-            self.optimizer.step()
-        return grad_norm.item()
-
-    def lr_scheduler_step(self):
-        """
-        Advance FSDP scheduler and return updated learning rate.
-        """
-        self.lr_scheduler.step()
-        lr = self.lr_scheduler.get_last_lr()[0]  # only return the first group
-        return lr
-
-    def to(self, device: str, model: bool = True, optimizer: bool = True, grad: bool = True):
-        """
-        Move FSDP model and/or optimizer to CPU or GPU with offload support.
-        Note that this function executes irrespective of offload config. It serves as manual control
-        """
-        super().to(device=device, model=model, optimizer=optimizer, grad=grad)
-
-        if self.engine_config.forward_only:
-            # force cpu_offload
-            return
-
-        device_name = get_device_name()
-
-        assert device in (device_name, "cpu")
-        if device == device_name:
-            if model:
-                load_fsdp_model_to_gpu(self.module)
-            if optimizer and self.optimizer is not None:
-                load_fsdp_optimizer(self.optimizer, device)
-            gc.collect()
-        elif device == "cpu":
-            if model:
-                offload_fsdp_model_to_cpu(self.module)
-            if optimizer and self.optimizer is not None:
-                offload_fsdp_optimizer(self.optimizer)
-        else:
-            raise ValueError(f"Invalid device type: {device}")
-
-    def save_checkpoint(
-        self,
-        local_path: str,
-        hdfs_path: Optional[str] = None,
-        global_step: int = 0,
-        max_ckpt_to_keep: Optional[int] = None,
-        **kwargs,
-    ) -> None:
-        """
-        Save FSDP checkpoint, handling parameter offload as needed.
-        """
-        origin_module_device = next(self.module.parameters()).device.type
-        if self._is_offload_param or origin_module_device == "cpu":
-            load_fsdp_model_to_gpu(self.module)
-
-        self.checkpoint_manager.save_checkpoint(
-            local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
-        )
-
-        torch.distributed.barrier()
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.module)
-
-    def load_checkpoint(
-        self, local_path: str, hdfs_path: Optional[str] = None, del_local_after_load: int = True, **kwargs
-    ) -> None:
-        """
-        Load FSDP checkpoint, restoring parameters and optimizer state.
-        """
-        import torch
-
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.module)
-
-        self.checkpoint_manager.load_checkpoint(
-            local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
-        )
-
-        torch.distributed.barrier()
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.module)
-
-        if self._is_offload_optimizer:
-            offload_fsdp_optimizer(self.optimizer)
-
-    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
-        log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
-
-        load_fsdp_model_to_gpu(self.module)
-
-        log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
-
-        peft_config = None
-
-        peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
-        if hasattr(peft_model, "peft_config"):  # LoRA
-            peft_config = peft_model.peft_config.get("default", None)
-            params = collect_lora_params(
-                module=self.module,
-                layered_summon=layered_summon,
-                base_sync_done=base_sync_done,
-                is_diffusers=True,
-            )
-            if not base_sync_done:
-                params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
-        else:
-            params = self.module.state_dict()
-
-        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
-
-        log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.module)
-        log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
-
-        if peft_config is not None and base_sync_done:
-            per_tensor_param = params.items()
-        else:
-            device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-            # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
-            per_tensor_param = (
-                (
-                    name,
-                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
-                    if isinstance(param, DTensor)
-                    else param,
-                )
-                for name, param in params.items()
-            )
-
-        # we need to add the prefix to make it compatible with rollout engine
-        per_tensor_param = ((f"transformer.{name}", tensor) for name, tensor in per_tensor_param)
-        peft_config_dict = peft_config.to_dict() if peft_config is not None else None
-        return per_tensor_param, peft_config_dict
-
-    @contextmanager
-    def disable_adapter(self):
-        try:
-            self.module.disable_adapters()
-            yield
-        finally:
-            self.module.enable_adapters()
 
 
 class EngineEvalModeCtx(BaseEngineCtx):
