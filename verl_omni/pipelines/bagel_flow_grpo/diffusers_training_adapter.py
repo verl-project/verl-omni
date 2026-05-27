@@ -36,7 +36,6 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-import numpy as np
 import torch
 from tensordict import TensorDict
 from verl.utils.device import get_device_name
@@ -101,10 +100,12 @@ class BagelDiffusion(DiffusionModelBase):
     @classmethod
     def set_timesteps(cls, scheduler: FlowMatchSDEDiscreteScheduler, model_config: DiffusionModelConfig, device: str):
         num_inference_steps = model_config.pipeline.num_inference_steps
-        # Use np.linspace (float64) to be bit-exact with BAGEL rollout's
-        # ``np.linspace`` schedule; otherwise ``index_for_timestep`` may miss
-        # due to float32 vs float64 precision mismatch.
-        t = np.linspace(1, 0, num_inference_steps)
+        # Use torch.float32 to be bit-exact with vllm-omni's BAGEL rollout
+        # (``BagelTransformer.generate_image`` uses ``torch.linspace`` which
+        # defaults to float32 on GPU).  ``index_for_timestep`` does exact
+        # float32 comparison; a float64 path (e.g. ``np.linspace``) produces
+        # subtly different float32-rounded values and causes IndexError.
+        t = torch.linspace(1, 0, num_inference_steps, dtype=torch.float32, device=device)
         t_shifted = TIMESTEP_SHIFT * t / (1 + (TIMESTEP_SHIFT - 1) * t)
         sigmas = t_shifted[:-1].tolist()
 
