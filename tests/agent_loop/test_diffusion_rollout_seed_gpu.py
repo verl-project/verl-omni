@@ -95,42 +95,57 @@ def _make_prompt_batch(num_prompts: int = 1) -> DataProto:
     )
 
 
-@pytest.fixture
-def seed_rollout_config() -> DictConfig:
+def _build_seed_rollout_config(tmp_dir: str, *, default_num_gpus: int, num_workers: int) -> DictConfig:
     from hydra import compose, initialize_config_dir
 
     with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config")):
         config = compose(config_name="diffusion_trainer")
 
-    requested_gpus, tp_size, attention_heads = resolve_diffusion_agent_loop_gpu_topology(default_num_gpus=1)
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        model_path = _create_tp_compatible_model(tmp_dir, MODEL_PATH, num_attention_heads=attention_heads)
-        config.actor_rollout_ref.model.path = model_path
-        config.actor_rollout_ref.model.tokenizer_path = os.path.join(model_path, "tokenizer")
-        config.actor_rollout_ref.rollout.name = "vllm_omni"
-        config.actor_rollout_ref.rollout.mode = "async"
-        config.actor_rollout_ref.rollout.enforce_eager = True
-        config.actor_rollout_ref.rollout.n = 4
-        config.actor_rollout_ref.rollout.pipeline.num_inference_steps = 10
-        config.actor_rollout_ref.rollout.calculate_log_probs = True
-        config.actor_rollout_ref.rollout.agent.num_workers = min(2, requested_gpus)
-        config.actor_rollout_ref.rollout.agent.default_agent_loop = "diffusion_single_turn_agent"
-        tokenizer_max_length = 1024
-        prompt_template_encode_start_idx = 34
-        max_length = tokenizer_max_length + prompt_template_encode_start_idx
+    requested_gpus, tp_size, attention_heads = resolve_diffusion_agent_loop_gpu_topology(
+        default_num_gpus=default_num_gpus
+    )
+    model_path = _create_tp_compatible_model(tmp_dir, MODEL_PATH, num_attention_heads=attention_heads)
+    config.actor_rollout_ref.model.path = model_path
+    config.actor_rollout_ref.model.tokenizer_path = os.path.join(model_path, "tokenizer")
+    config.actor_rollout_ref.rollout.name = "vllm_omni"
+    config.actor_rollout_ref.rollout.mode = "async"
+    config.actor_rollout_ref.rollout.enforce_eager = True
+    config.actor_rollout_ref.rollout.n = 4
+    config.actor_rollout_ref.rollout.pipeline.num_inference_steps = 10
+    config.actor_rollout_ref.rollout.calculate_log_probs = True
+    config.actor_rollout_ref.rollout.agent.num_workers = num_workers
+    config.actor_rollout_ref.rollout.agent.default_agent_loop = "diffusion_single_turn_agent"
+    tokenizer_max_length = 1024
+    prompt_template_encode_start_idx = 34
+    max_length = tokenizer_max_length + prompt_template_encode_start_idx
 
-        config.actor_rollout_ref.rollout.algo.noise_level = 1.0
-        config.actor_rollout_ref.rollout.algo.sde_window_size = 2
-        config.actor_rollout_ref.rollout.algo.sde_window_range = [0, 5]
-        config.actor_rollout_ref.rollout.pipeline.true_cfg_scale = 4.0
-        config.actor_rollout_ref.rollout.pipeline.max_sequence_length = max_length
-        config.actor_rollout_ref.rollout.nnodes = 1
-        config.reward.reward_manager.name = "image"
-        config.trainer.n_gpus_per_node = requested_gpus
-        config.data.max_prompt_length = max_length
-        config.actor_rollout_ref.rollout.max_model_len = max_length
-        config.actor_rollout_ref.rollout.tensor_model_parallel_size = tp_size
-        yield config
+    config.actor_rollout_ref.rollout.algo.noise_level = 1.0
+    config.actor_rollout_ref.rollout.algo.sde_window_size = 2
+    config.actor_rollout_ref.rollout.algo.sde_window_range = [0, 5]
+    config.actor_rollout_ref.rollout.pipeline.true_cfg_scale = 4.0
+    config.actor_rollout_ref.rollout.pipeline.max_sequence_length = max_length
+    config.actor_rollout_ref.rollout.nnodes = 1
+    config.reward.reward_manager.name = "image"
+    config.trainer.n_gpus_per_node = requested_gpus
+    config.data.max_prompt_length = max_length
+    config.actor_rollout_ref.rollout.max_model_len = max_length
+    config.actor_rollout_ref.rollout.tensor_model_parallel_size = tp_size
+    return config
+
+
+@pytest.fixture
+def seed_rollout_config() -> DictConfig:
+    # Single worker avoids chunk-dispatch seed collisions (see xfailed test below).
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        yield _build_seed_rollout_config(tmp_dir, default_num_gpus=1, num_workers=1)
+
+
+@pytest.fixture
+def multi_worker_seed_rollout_config() -> DictConfig:
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires >= 2 GPUs for multi-worker agent loop")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        yield _build_seed_rollout_config(tmp_dir, default_num_gpus=2, num_workers=2)
 
 
 def _initial_latents(result: DataProto) -> torch.Tensor:
@@ -181,5 +196,50 @@ def test_rollout_seed_reproducible_and_diverse_via_agent_loop(seed_rollout_confi
                 assert not torch.equal(latents_first[i], latents_first[j]), (
                     f"rollout indices {i} and {j} must not share the same initial latent"
                 )
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.xfail(
+    reason=(
+        "AgentLoopManager chunks rollouts across workers; each worker derives per-row seeds from "
+        "local indices 0..chunk_size-1, so global rollout indices collide across chunks. "
+        "Fix in a follow-up PR via global rollout index dispatch."
+    ),
+    strict=True,
+)
+def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollout_config):
+    """Every expanded rollout row must get a distinct seed when agent.num_workers > 1."""
+    ray.init(
+        runtime_env={
+            "env_vars": {
+                "TOKENIZERS_PARALLELISM": "true",
+                "NCCL_DEBUG": "WARN",
+                "VLLM_LOGGING_LEVEL": "INFO",
+            }
+        }
+    )
+    try:
+        AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
+        llm_server_manager = LLMServerManager.create(config=multi_worker_seed_rollout_config)
+        agent_loop_manager = AgentLoopManager.create(
+            config=multi_worker_seed_rollout_config,
+            llm_client=llm_server_manager.get_client(),
+        )
+
+        n = multi_worker_seed_rollout_config.actor_rollout_ref.rollout.n
+        batch = _make_prompt_batch(num_prompts=1).repeat(n)
+        batch.meta_info["global_steps"] = 1
+        batch.meta_info["rollout_seed"] = 42
+
+        result = agent_loop_manager.generate_sequences(prompts=batch)
+        latents = _initial_latents(result)
+        assert latents.shape[0] == n
+
+        # With 2 workers each chunk uses local indices 0..1, so global rows 0 and 2
+        # (same prompt, rollout indices 0 and 2) incorrectly share a seed today.
+        assert not torch.equal(latents[0], latents[2]), (
+            "global rollout rows 0 and 2 must not share the same initial latent"
+        )
     finally:
         ray.shutdown()

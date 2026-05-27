@@ -92,6 +92,22 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _get_cli_description(self) -> str:
         return "vLLM-Omni CLI"
 
+    async def launch_server(self, master_address: str = None, master_port: int = None, dp_rpc_port: int = None):
+        """Launch vLLM-Omni engine; coerce null ``rollout.seed`` for engine init only."""
+        original_get = self.config.get
+
+        def get_with_engine_seed_default(key: str, default: Any = None) -> Any:
+            if key == "seed":
+                value = original_get(key, default)
+                return 0 if value is None else value
+            return original_get(key, default)
+
+        self.config.get = get_with_engine_seed_default
+        try:
+            await super().launch_server(master_address, master_port, dp_rpc_port)
+        finally:
+            self.config.__dict__.pop("get", None)
+
     # -----------------------------------------------------------------------
     # Server lifecycle
     # -----------------------------------------------------------------------
