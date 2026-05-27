@@ -34,11 +34,11 @@
 set -x
 
 # --------------- Paths (override via environment) ---------------
-BAGEL_MODEL_PATH=${BAGEL_MODEL_PATH:-$HOME/models/BAGEL-7B-MoT}
+BAGEL_MODEL_PATH=${BAGEL_MODEL_PATH:-$HOME/models/ByteDance-Seed/BAGEL-7B-MoT}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BAGEL_DEPLOY_CONFIG=${BAGEL_DEPLOY_CONFIG:-$SCRIPT_DIR/bagel_deploy_config.yaml}
 
-REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-$HOME/models/Qwen3-VL-8B-Instruct}
+REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-$HOME/models/Qwen/Qwen3-VL-8B-Instruct}
 
 ocr_train_path=${OCR_TRAIN_PATH:-$HOME/data/ocr/train.parquet}
 ocr_test_path=${OCR_TEST_PATH:-$HOME/data/ocr/test.parquet}
@@ -75,7 +75,7 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_grpo \
-    actor_rollout_ref.actor.diffusion_loss.clip_ratio=1e-5 \
+    actor_rollout_ref.actor.diffusion_loss.clip_ratio=1e-4 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
@@ -85,10 +85,10 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.pipeline.num_inference_steps=15 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=256 \
-    actor_rollout_ref.rollout.algo.noise_level=1.3 \
+    actor_rollout_ref.rollout.algo.noise_level=0.7 \
     actor_rollout_ref.rollout.algo.sde_type="sde" \
     actor_rollout_ref.rollout.algo.sde_window_size=2 \
-    actor_rollout_ref.rollout.algo.sde_window_range="[0,7]" \
+    actor_rollout_ref.rollout.algo.sde_window_range="[0,10]" \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=15 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
@@ -102,7 +102,7 @@ python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
     +reward.reward_model.rollout.engine_kwargs.vllm.mm_processor_cache_gb=0 \
     reward.custom_reward_function.path=$reward_path \
     reward.custom_reward_function.name=compute_score_ocr \
-    algorithm.global_std=False \
+    algorithm.global_std=True \
     algorithm.bypass_mode=False \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=flow_grpo \

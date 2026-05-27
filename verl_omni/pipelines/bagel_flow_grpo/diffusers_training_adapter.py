@@ -36,6 +36,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import numpy as np
 import torch
 from tensordict import TensorDict
 from verl.utils.device import get_device_name
@@ -50,6 +51,35 @@ from .vllm_omni_rollout_adapter import BAGEL_FLOWGRPO_CFG_DEFAULTS
 logger = logging.getLogger(__name__)
 
 TIMESTEP_SHIFT = 3.0  # must match BagelPipeline.forward() hardcoded value
+
+# BAGEL chat markers (same as vllm_omni_rollout_adapter._CHAT_MARKERS)
+_CHAT_MARKERS = (
+    "<|vision_start|>",
+    "<|vision_end|>",
+    "<|image_pad|>",
+    "<|video_pad|>",
+)
+
+
+def _extract_user_text_from_chat(decoded: str) -> str:
+    """Extract the last user message content from a Qwen-style chat template.
+
+    Mirrors ``_extract_prompt_text`` in ``vllm_omni_rollout_adapter.py``
+    so that training-side tokenization matches rollout exactly.
+    """
+    if "<|im_start|>" in decoded:
+        user_chunks = []
+        for segment in decoded.split("<|im_start|>"):
+            if not segment.startswith("user"):
+                continue
+            content = segment[len("user") :].lstrip("\n")
+            content = content.split("<|im_end|>", 1)[0]
+            user_chunks.append(content)
+        if user_chunks:
+            decoded = user_chunks[-1]
+    for marker in _CHAT_MARKERS:
+        decoded = decoded.replace(marker, "")
+    return decoded.replace("<|im_start|>", "").replace("<|im_end|>", "").strip()
 
 
 @DiffusionModelBase.register("OmniBagelForConditionalGeneration", algorithm="flow_grpo")
@@ -71,9 +101,10 @@ class BagelDiffusion(DiffusionModelBase):
     @classmethod
     def set_timesteps(cls, scheduler: FlowMatchSDEDiscreteScheduler, model_config: DiffusionModelConfig, device: str):
         num_inference_steps = model_config.pipeline.num_inference_steps
-        # Use torch.float32 on ``device`` to be bit-exact with BAGEL rollout's
-        # ``torch.linspace`` schedule; otherwise ``index_for_timestep`` may miss.
-        t = torch.linspace(1, 0, num_inference_steps, dtype=torch.float32, device=device)
+        # Use np.linspace (float64) to be bit-exact with BAGEL rollout's
+        # ``np.linspace`` schedule; otherwise ``index_for_timestep`` may miss
+        # due to float32 vs float64 precision mismatch.
+        t = np.linspace(1, 0, num_inference_steps)
         t_shifted = TIMESTEP_SHIFT * t / (1 + (TIMESTEP_SHIFT - 1) * t)
         sigmas = t_shifted[:-1].tolist()
 
@@ -99,6 +130,78 @@ class BagelDiffusion(DiffusionModelBase):
         return pos_ids.to(device)
 
     @classmethod
+    def _get_bagel_tokenizer(cls, model_config: DiffusionModelConfig):
+        """Load the BAGEL tokenizer once and cache at class level.
+
+        BAGEL uses a Qwen2 tokenizer with ``<|im_start|>`` / ``<|im_end|>``
+        boundary tokens and requires ``trust_remote_code=True``.
+        """
+        if not hasattr(cls, "_cached_bagel_tokenizer"):
+            from transformers import AutoTokenizer
+
+            tok_path = model_config.tokenizer_path or model_config.local_path
+            cls._cached_bagel_tokenizer = AutoTokenizer.from_pretrained(tok_path, trust_remote_code=True)
+        return cls._cached_bagel_tokenizer
+
+    @classmethod
+    def _chat_tokens_to_bagel_format(
+        cls,
+        prompts: torch.Tensor,
+        attention_mask: torch.Tensor,
+        model_config: DiffusionModelConfig,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert chat-template token IDs to BAGEL's native format.
+
+        vllm-omni's BagelPipeline calls ``bagel.prepare_prompts()`` which
+        does **raw** ``tokenizer.encode(prompt)`` — no chat template, just
+        ``[<|im_start|>] + encode(user_text) + [<|im_end|>]``.
+
+        The verl-omni data pipeline produces chat-template-tokenized IDs
+        (system prompt + role markers + user text).  Passing those directly
+        to the training forward pass means the model sees a *different*
+        text context than what was used during rollout, biasing the
+        importance-sampling ratio and preventing convergence.
+
+        This method decodes the chat-template tokens, extracts the user
+        content (matching the rollout's ``_extract_prompt_text``), and
+        re-tokenizes in BAGEL format so both sides are identical.
+
+        Returns:
+            ``(text_token_ids, text_attention_mask)`` — padded tensors
+            of shape ``(B, max_len)`` ready for ``BagelForTraining.forward``.
+        """
+        tokenizer = cls._get_bagel_tokenizer(model_config)
+        bos_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
+        eos_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+
+        B = prompts.shape[0]
+        token_ids_list: list[torch.Tensor] = []
+
+        for i in range(B):
+            mask = attention_mask[i].bool()
+            chat_ids = prompts[i][mask]  # chat-template token IDs (no padding)
+
+            # Decode the full chat template back to text
+            decoded = tokenizer.decode(chat_ids.tolist(), skip_special_tokens=False)
+            # Extract user content (same logic as rollout)
+            user_text = _extract_user_text_from_chat(decoded)
+            # Re-tokenize in BAGEL format: raw encode + BOS/EOS
+            raw_ids = tokenizer.encode(user_text, add_special_tokens=False)
+            bagel_ids = [bos_id] + raw_ids + [eos_id]
+            token_ids_list.append(torch.tensor(bagel_ids, dtype=torch.long, device=device))
+
+        max_len = max(ids.shape[0] for ids in token_ids_list)
+        text_token_ids = torch.zeros(B, max_len, dtype=torch.long, device=device)
+        text_attention_mask = torch.zeros(B, max_len, dtype=torch.bool, device=device)
+        for i, ids in enumerate(token_ids_list):
+            n = ids.shape[0]
+            text_token_ids[i, :n] = ids
+            text_attention_mask[i, :n] = True
+
+        return text_token_ids, text_attention_mask
+
+    @classmethod
     def prepare_model_inputs(
         cls,
         module,
@@ -118,24 +221,15 @@ class BagelDiffusion(DiffusionModelBase):
         hidden_states = latents[:, step]
         timestep = timesteps[:, step]
 
-        # Extract text token IDs from prompt data
-        prompts = micro_batch["prompts"]  # (B, L_prompt) padded
-        attention_mask = micro_batch["attention_mask"]  # (B, L_prompt)
-
-        # Build per-sample text_token_ids (remove padding)
-        text_token_ids_list = []
-        for i in range(B):
-            mask = attention_mask[i].bool()
-            ids = prompts[i][mask]
-            text_token_ids_list.append(ids)
-
-        # Pad to same length within batch
-        max_text_len = max(ids.shape[0] for ids in text_token_ids_list)
-        text_token_ids = torch.zeros(B, max_text_len, dtype=torch.long, device=device)
-        text_attention_mask = torch.zeros(B, max_text_len, dtype=torch.bool, device=device)
-        for i, ids in enumerate(text_token_ids_list):
-            text_token_ids[i, : ids.shape[0]] = ids
-            text_attention_mask[i, : ids.shape[0]] = True
+        # Convert chat-template token IDs to BAGEL's native format
+        # ([<|im_start|>] + encode(user_text) + [<|im_end|>]) so that
+        # training-time text conditioning matches rollout exactly.
+        text_token_ids, text_attention_mask = cls._chat_tokens_to_bagel_format(
+            prompts=micro_batch["prompts"],
+            attention_mask=micro_batch["attention_mask"],
+            model_config=model_config,
+            device=device,
+        )
 
         # Compute latent position IDs
         latent_pos_ids = cls._get_latent_pos_ids(model_config, module, device)
@@ -175,7 +269,7 @@ class BagelDiffusion(DiffusionModelBase):
         """
         p = model_config.pipeline
         cfg_interval = getattr(p, "cfg_interval", BAGEL_FLOWGRPO_CFG_DEFAULTS["cfg_interval"])
-        if isinstance(cfg_interval, (list, tuple)) and len(cfg_interval) == 2:
+        if isinstance(cfg_interval, list | tuple) and len(cfg_interval) == 2:
             interval_low, interval_high = float(cfg_interval[0]), float(cfg_interval[1])
         else:
             interval_low, interval_high = 0.0, 1.0

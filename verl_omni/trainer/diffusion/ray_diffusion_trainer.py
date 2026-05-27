@@ -21,7 +21,7 @@ import os
 import uuid
 from collections import defaultdict
 from pprint import pprint
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 import ray
@@ -34,7 +34,6 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -90,7 +89,8 @@ def _patch_reward_loop_workers_with_gpu() -> None:
                     name=f"reward_loop_worker_{i}",
                     num_gpus=num_gpus,
                     scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                        node_id=node_id, soft=True,
+                        node_id=node_id,
+                        soft=True,
                     ),
                 ).remote(self.config, self.reward_router_address)
             )
@@ -468,9 +468,7 @@ class RayFlowGRPOTrainer:
 
         reward_extra_infos = [output.get("reward_extra_info", {}) for output in outputs_flat]
         reward_extra_keys = list(reward_extra_infos[0].keys()) if reward_extra_infos else []
-        non_tensor_batch = {
-            key: np.array([info[key] for info in reward_extra_infos]) for key in reward_extra_keys
-        }
+        non_tensor_batch = {key: np.array([info[key] for info in reward_extra_infos]) for key in reward_extra_keys}
 
         if manager.reward_model_manager is not None:
             manager.reward_model_manager.sleep()
@@ -1177,10 +1175,6 @@ class RayFlowGRPOTrainer:
                 # compute variance proxy metrics
                 gradient_norm = metrics.get("actor/grad_norm", None)
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
-
-                # this is experimental and may be changed/removed in the future in favor of a general-purpose one
-                if isinstance(self.train_dataloader.sampler, AbstractCurriculumSampler):
-                    self.train_dataloader.sampler.update(batch=batch)
 
                 logger.log(data=metrics, step=self.global_steps)
 

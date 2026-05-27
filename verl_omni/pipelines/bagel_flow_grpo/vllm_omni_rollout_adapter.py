@@ -365,9 +365,7 @@ class BagelPipelineWithLogProb(BagelPipeline):
         # overrides ``noise_level`` and ``return_logprobs`` per-step based
         # on whether the step is inside ``sde_window``; we still pass these
         # defaults so the no-window legacy path works.
-        self.scheduler_kwargs = {
-            k: extra_args[k] for k in ("noise_level", "sde_type", "generator") if k in extra_args
-        }
+        self.scheduler_kwargs = {k: extra_args[k] for k in ("noise_level", "sde_type", "generator") if k in extra_args}
         self.scheduler_kwargs["return_logprobs"] = logprobs
 
         # Per-request scheduler setup: compute BAGEL's shifted sigmas so
@@ -383,7 +381,12 @@ class BagelPipelineWithLogProb(BagelPipeline):
 
         inner = self.scheduler._inner
         inner.set_shift(1.0)  # identity — sigmas already shifted
-        inner.set_timesteps(sigmas=sigmas)
+        # Pass ``timesteps=sigmas`` explicitly so diffusers does NOT multiply
+        # sigmas by ``num_train_timesteps`` (1000).  While ``set_begin_index(0)``
+        # below bypasses ``index_for_timestep`` on the rollout path, keeping
+        # this explicit prevents a latent bug if the sequential-step-index
+        # behaviour is ever changed.
+        inner.set_timesteps(sigmas=sigmas, timesteps=sigmas)
         inner.set_begin_index(0)
 
         # Reset the stateful adapter for this request (must happen *after*

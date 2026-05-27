@@ -838,11 +838,7 @@ class BagelForTraining(nn.Module):
         # micro-batch have different lengths; ``soi``/latent/``eoi`` are always
         # valid keys. We pass ``None`` (and SDPA stays on flash backend) when
         # there is no padding to mask, which matches the rollout configuration.
-        if (
-            L_ctx > 0
-            and text_attention_mask is not None
-            and not bool(text_attention_mask.all())
-        ):
+        if L_ctx > 0 and text_attention_mask is not None and not bool(text_attention_mask.all()):
             key_padding_mask = text_attention_mask.new_ones(B, L_total, dtype=torch.bool)
             key_padding_mask[:, :L_ctx] = text_attention_mask
         else:
