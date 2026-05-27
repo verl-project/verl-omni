@@ -181,10 +181,14 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def copy_adapter(self, source: str = "default", target: str = "old"):
+        if not hasattr(self.engine, "copy_adapter"):
+            raise NotImplementedError(f"Engine {type(self.engine).__name__} does not support copy_adapter.")
         self.engine.copy_adapter(source=source, target=target)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def ema_update_adapter(self, source: str = "default", target: str = "old", decay: float = 0.0):
+        if not hasattr(self.engine, "ema_update_adapter"):
+            raise NotImplementedError(f"Engine {type(self.engine).__name__} does not support ema_update_adapter.")
         self.engine.ema_update_adapter(source=source, target=target, decay=decay)
 
     def _postprocess_output(self, output, *, global_token_num, delta_time, forward_only, images_seqlens):

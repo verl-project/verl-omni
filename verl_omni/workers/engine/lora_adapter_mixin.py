@@ -105,7 +105,7 @@ class LoRAAdapterMixin:
                     f"{len(source_params)} vs {len(target_params)}"
                 )
             for source_param, target_param in zip(source_params, target_params, strict=True):
-                target_param.data.copy_(source_param.detach().data)
+                target_param.copy_(source_param)
 
     def ema_update_adapter(self, source: str = "default", target: str = "old", decay: float = 0.0) -> None:
         """EMA-update target adapter parameters from source adapter parameters."""
@@ -120,9 +120,7 @@ class LoRAAdapterMixin:
                     f"{len(source_params)} vs {len(target_params)}"
                 )
             for source_param, target_param in zip(source_params, target_params, strict=True):
-                target_param.data.copy_(
-                    target_param.detach().data * decay + source_param.detach().clone().data * (1.0 - decay)
-                )
+                target_param.lerp_(source_param, 1.0 - decay)
 
     @contextmanager
     def disable_adapter(self):
