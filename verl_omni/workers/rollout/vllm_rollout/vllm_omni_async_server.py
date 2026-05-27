@@ -93,7 +93,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return "vLLM-Omni CLI"
 
     async def launch_server(self, master_address: str = None, master_port: int = None, dp_rpc_port: int = None):
-        """Launch vLLM-Omni engine; coerce null ``rollout.seed`` for engine init only."""
+        """Launch vLLM-Omni engine; coerce null ``rollout.seed`` for engine init only.
+
+        Upstream verl uses ``config.get("seed", 0)``, but Hydra ``seed: null`` sets the
+        attribute to None, so the default is not applied and launch crashes with
+        ``replica_rank + None``. Training rollout seeding stays unset via meta_info.
+        """
         original_get = self.config.get
 
         def get_with_engine_seed_default(key: str, default: Any = None) -> Any:
@@ -106,7 +111,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         try:
             await super().launch_server(master_address, master_port, dp_rpc_port)
         finally:
-            self.config.__dict__.pop("get", None)
+            self.config.get = original_get
 
     # -----------------------------------------------------------------------
     # Server lifecycle
