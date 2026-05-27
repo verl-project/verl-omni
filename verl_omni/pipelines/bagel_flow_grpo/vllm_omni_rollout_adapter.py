@@ -101,14 +101,11 @@ def _extract_prompt_text(decoded: str) -> str:
     return decoded.replace("<|im_start|>", "").replace("<|im_end|>", "").strip()
 
 
-def _to_cpu_tensor(v):
-    """Convert to a single CPU tensor, stacking a list of tensors if needed."""
-    if isinstance(v, torch.Tensor):
-        return v.detach().cpu()
-    if isinstance(v, list):
-        tensors = [x.detach().cpu() if isinstance(x, torch.Tensor) else torch.tensor(x) for x in v]
-        return torch.stack(tensors) if tensors else None
-    return v
+def _maybe_to_cpu(value):
+    """Move a single value to CPU if it is a ``torch.Tensor``; else return unchanged."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    return value
 
 
 @dataclass
@@ -204,7 +201,7 @@ class _BagelSchedulerAdapter:
         # else: pass caller kwargs through unchanged (legacy behavior).
 
         out = self._inner.step(
-            model_output=model_output,
+            model_output=model_output.float(),  # cast bf16→fp32 for scheduler precision
             timestep=sigma,
             sample=sample,
             return_dict=False,
@@ -421,13 +418,14 @@ class BagelPipelineWithLogProb(BagelPipeline):
             # traj_log_probs already has length (end - begin) thanks to
             # _BagelSchedulerAdapter gating; no slicing needed.
 
-        custom = output.custom_output or {}
-        if traj_latents is not None:
-            custom["all_latents"] = _to_cpu_tensor(traj_latents)
-        if traj_timesteps is not None:
-            custom["all_timesteps"] = _to_cpu_tensor(traj_timesteps)
-        if traj_log_probs is not None:
-            custom["all_log_probs"] = _to_cpu_tensor(traj_log_probs)
-        output.custom_output = custom
-
-        return output
+        return DiffusionOutput(
+            output=_maybe_to_cpu(output.output),
+            custom_output={
+                "all_latents": _maybe_to_cpu(traj_latents) if traj_latents is not None else None,
+                "all_timesteps": _maybe_to_cpu(traj_timesteps) if traj_timesteps is not None else None,
+                "all_log_probs": _maybe_to_cpu(traj_log_probs) if traj_log_probs is not None else None,
+            },
+            trajectory_latents=None,
+            trajectory_timesteps=None,
+            trajectory_log_probs=None,
+        )

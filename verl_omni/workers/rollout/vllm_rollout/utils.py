@@ -15,7 +15,7 @@ import logging
 import os
 
 import torch
-from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID, VLLM_LORA_NAME, VLLM_LORA_PATH
+from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID, VLLM_LORA_NAME, VLLM_LORA_PATH, set_death_signal
 from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
 
 from verl_omni.utils.vllm_omni import OmniTensorLoRARequest, VLLMOmniHijack
@@ -40,10 +40,8 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
     """
 
     def __new__(cls, **kwargs):
-        # Do NOT call verl's ``set_death_signal``: ``PR_SET_PDEATHSIG`` is
-        # thread-scoped, and vllm-omni spawns diffusion workers from a short-lived
-        # ``ThreadPoolExecutor`` thread, which would SIGKILL them on thread exit.
-        # ``DiffusionWorker`` already runs as ``daemon=True``.
+        set_death_signal()
+
         # 1. patch for Lora
         VLLMOmniHijack.hijack()
 

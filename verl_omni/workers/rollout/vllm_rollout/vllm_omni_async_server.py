@@ -107,7 +107,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # ``deploy_config`` lives on ``OrchestratorArgs``, not ``OmniEngineArgs``,
         # so ``from_cli_args`` drops it; forward it manually.
         deploy_config = getattr(args, "deploy_config", None)
-        if deploy_config is not None:
+        if deploy_config:
             engine_args["deploy_config"] = deploy_config
 
         # Drop verl's injected ``compilation_config``: re-validation under

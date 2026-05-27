@@ -730,12 +730,19 @@ class PositionEmbedding(nn.Module):
 class BagelForTraining(nn.Module):
     """Standalone Bagel MoT module for FlowGRPO FSDP training.
 
+    ``_no_split_modules`` tells verl's FSDP wrap policy to shard at MoT-layer
+    granularity (like Qwen-Image's ``QwenImageTransformerBlock``).  Without this,
+    LoRA training uses a per-leaf lambda wrap policy and ``layered_summon`` cannot
+    find FSDP-wrapped ``layers.N`` submodules, so rollout weight sync is empty.
+
     Forward signature:
         hidden_states:  (B, L_latent, patch_latent_dim) — noisy latent patches
         timestep:       (B,) — diffusion timestep scalars
         text_token_ids: (B, L_text) — tokenized prompt IDs (with bos/eos)
         latent_pos_ids: (B, L_latent) — 2-D position indices for latent patches
     """
+
+    _no_split_modules = ["BagelMoTLayer"]
 
     def __init__(self, config: BagelTrainingConfig):
         super().__init__()
@@ -910,6 +917,9 @@ class BagelForTraining(nn.Module):
         """Add a PEFT LoRA adapter (matches diffusers.ModelMixin API)."""
         from peft import inject_adapter_in_model
 
+        if not hasattr(self, "peft_config"):
+            self.peft_config = {}
+        self.peft_config[adapter_name] = adapter_config
         inject_adapter_in_model(adapter_config, self, adapter_name)
 
     def disable_adapters(self):

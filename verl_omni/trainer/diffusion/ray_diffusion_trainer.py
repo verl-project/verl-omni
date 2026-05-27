@@ -22,14 +22,13 @@ import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from pprint import pprint
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import ray
 import torch
 from omegaconf import OmegaConf, open_dict
 from PIL import Image
-from tensordict import TensorDict
 from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
@@ -65,48 +64,6 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     rollout_correction_enabled,
 )
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
-
-
-def _patch_reward_loop_workers_with_gpu() -> None:
-    """Let CLIP-based diffusion reward fns (e.g. PickScore) run on a GPU.
-
-    Upstream ``RewardLoopManager`` creates Ray actors with no GPU, which is
-    fine for text/LLM reward but kills throughput for CLIP-class image rewards.
-    Set ``VERL_OMNI_REWARD_WORKER_NUM_GPUS=<float>`` to claim that many GPUs
-    per reward worker.
-    """
-    from verl.experimental.reward_loop import reward_loop as _rl_mod
-
-    if getattr(_rl_mod.RewardLoopManager, "_diffusion_gpu_patched", False):
-        return
-
-    _orig = _rl_mod.RewardLoopManager._init_reward_loop_workers
-
-    def _init_with_gpu(self):
-        num_gpus = float(os.environ.get("VERL_OMNI_REWARD_WORKER_NUM_GPUS", "0"))
-        if num_gpus <= 0:
-            return _orig(self)
-        self.reward_loop_workers = []
-        n_workers = self.config.reward.num_workers
-        node_ids = [n["NodeID"] for n in ray.nodes() if n["Alive"] and n["Resources"].get("CPU", 0) > 0]
-        for i in range(n_workers):
-            node_id = node_ids[i % len(node_ids)]
-            self.reward_loop_workers.append(
-                self.reward_loop_workers_class.options(
-                    name=f"reward_loop_worker_{i}",
-                    num_gpus=num_gpus,
-                    scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                        node_id=node_id,
-                        soft=True,
-                    ),
-                ).remote(self.config, self.reward_router_address)
-            )
-
-    _rl_mod.RewardLoopManager._init_reward_loop_workers = _init_with_gpu
-    _rl_mod.RewardLoopManager._diffusion_gpu_patched = True
-
-
-_patch_reward_loop_workers_with_gpu()
 
 
 def compute_advantage(
@@ -426,44 +383,13 @@ class BaseRayDiffusionTrainer(ABC):
 
         return gen_batch
 
-    def _compute_reward_colocate(self, batch: DataProto) -> DataProto:
-        """Compute per-sample diffusion reward via the colocated reward loop.
-
-        Bypasses ``RewardLoopManager.compute_rm_score`` (LLM-only: assumes
-        ``responses`` has a token axis and reads ``attention_mask``) and
-        assembles a ``[B, 1]`` ``rm_scores`` tensor directly.
+    def _compute_reward_colocate(self, batch: DataProto) -> tuple[torch.Tensor, dict[str, Any]] | torch.Tensor:
+        """
+        compute reward use colocate reward model
         """
         assert self.reward_loop_manager is not None, "RewardLoopManager is None"
-        manager = self.reward_loop_manager
-
-        if manager.reward_model_manager is not None:
-            manager.reward_model_manager.wake_up()
-
-        chunks = batch.chunk(len(manager.reward_loop_workers))
-        outputs = ray.get(
-            [
-                worker.compute_score_batch.remote(chunk)
-                for worker, chunk in zip(manager.reward_loop_workers, chunks, strict=True)
-            ]
-        )
-        outputs_flat = [item for sublist in outputs for item in sublist]
-
-        scores = [item["reward_score"] for item in outputs_flat]
-        rm_scores = torch.tensor(scores, dtype=torch.float32).unsqueeze(-1)
-        reward_batch = TensorDict({"rm_scores": rm_scores}, batch_size=len(batch))
-
-        reward_extra_infos = [output.get("reward_extra_info", {}) for output in outputs_flat]
-        reward_extra_keys = list(reward_extra_infos[0].keys()) if reward_extra_infos else []
-        non_tensor_batch = {key: np.array([info[key] for info in reward_extra_infos]) for key in reward_extra_keys}
-
-        if manager.reward_model_manager is not None:
-            manager.reward_model_manager.sleep()
-
-        return DataProto(
-            batch=reward_batch,
-            non_tensor_batch=non_tensor_batch,
-            meta_info={"reward_extra_keys": reward_extra_keys},
-        )
+        batch_reward = self.reward_loop_manager.compute_rm_score(batch)
+        return batch_reward
 
     def _validate(self):
         data_source_lst = []
@@ -1069,7 +995,6 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                             batch = batch.union(old_log_prob)
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
-                    metrics.update(compute_logprob_alignment_metrics(batch))
 
                     # Decoupled-mode rollout correction (old vs rollout).
                     # In bypass mode old == rollout, so correction runs per-step in ``diffusion_loss``.
