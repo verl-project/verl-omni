@@ -35,7 +35,7 @@ bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_npu.sh
 The script executes:
 
 ```bash
-python3 -m verl_omni.trainer.diffusion.main_flowgrpo
+python3 -m verl_omni.trainer.main_diffusion
 ```
 
 Checkpoints are saved to:

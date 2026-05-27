@@ -18,7 +18,7 @@ from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_
 from verl.utils import tensordict_utils as tu
 from verl.utils.metric import AggregationType, Metric
 
-from verl_omni.trainer.diffusion.diffusion_algos import get_diffusion_loss_fn, kl_penalty_image
+from verl_omni.trainer.diffusion.diffusion_algos import get_diffusion_loss_fn
 from verl_omni.workers.config import DiffusionActorConfig
 
 
@@ -69,67 +69,50 @@ def _apply_bypass_rc(
 
 def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict, dp_group=None):
     """Compute loss for diffusion model"""
-    log_prob = model_output["log_probs"]
-
     config.global_batch_info["loss_scale_factor"] = config.loss_scale_factor
 
     metrics = {}
 
+    log_prob = model_output["log_probs"]
     old_log_prob = data["old_log_probs"]
-    advantages = data["advantages"]
 
-    # Rollout Correction bypass mode
+    # Rollout Correction bypass mode: compute IS/RS weights per-step and
+    # stash ``rollout_is_weights`` into ``data`` before loss dispatch.
     rc_cfg = config.rollout_correction
     if rc_cfg.bypass_mode:
         _apply_bypass_rc(log_prob, old_log_prob, rc_cfg, data, metrics)
 
-    # Standard loss dispatch
     loss_mode = config.diffusion_loss.get("loss_mode", "flow_grpo")
+    loss_func = get_diffusion_loss_fn(loss_mode)
+    loss_func.validate_inputs(loss_name=loss_mode, model_output=model_output, data=data)
+    loss_result = loss_func(config=config, model_output=model_output, data=data)
+    loss_value = loss_result.loss
+    metrics_values = loss_result.metrics
 
-    policy_loss_fn = get_diffusion_loss_fn(loss_mode)
-    policy_loss_kwargs = dict(
-        old_log_prob=old_log_prob,
-        log_prob=log_prob,
-        advantages=advantages,
-        config=config,
-    )
-    if "rollout_is_weights" in data.keys():
-        policy_loss_kwargs["rollout_is_weights"] = data["rollout_is_weights"]
+    metrics_values = Metric.from_dict(metrics_values, aggregation=AggregationType.MEAN)
 
-    if loss_mode == "grpo_guard":
-        # GRPO-Guard requires the rollout-time SDE proposal mean and the per-step
-        # diffusion coefficient terms; pass them through alongside the standard inputs.
-        policy_loss_kwargs.update(
-            old_prev_sample_mean=data["old_prev_sample_mean"],
-            prev_sample_mean=model_output["prev_sample_mean"],
-            std_dev_t=model_output["std_dev_t"],
-            sqrt_dt=model_output["sqrt_dt"],
-        )
-    pg_loss, pg_metrics = policy_loss_fn(**policy_loss_kwargs)
-
-    pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)
-
-    metrics.update(pg_metrics)
-    metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=AggregationType.MEAN)
-    policy_loss = pg_loss
+    metrics.update(metrics_values)
+    if loss_result.add_loss_metric:
+        metrics["actor/loss"] = Metric(value=loss_value, aggregation=AggregationType.MEAN)
 
     if config.use_kl_loss:
-        ref_prev_sample_mean = data["ref_prev_sample_mean"]
-        prev_sample_mean = model_output["prev_sample_mean"]
-        std_dev_t = model_output["std_dev_t"]
-        kl_loss = kl_penalty_image(
-            prev_sample_mean=prev_sample_mean, ref_prev_sample_mean=ref_prev_sample_mean, std_dev_t=std_dev_t
-        )
-
-        policy_loss += kl_loss * config.kl_loss_coef
-        metrics["kl_loss"] = Metric(value=kl_loss, aggregation=AggregationType.MEAN)
+        loss_func = get_diffusion_loss_fn("kl")
+        loss_func.validate_inputs(loss_name="kl", model_output=model_output, data=data)
+        kl_result = loss_func(config=config, model_output=model_output, data=data)
+        loss_value += kl_result.loss * config.kl_loss_coef
+        metrics.update(Metric.from_dict(kl_result.metrics, aggregation=AggregationType.MEAN))
         metrics["kl_coef"] = config.kl_loss_coef
+        if kl_result.add_loss_metric:
+            metrics["actor/weighted_kl_loss"] = Metric(
+                value=kl_result.loss * config.kl_loss_coef,
+                aggregation=AggregationType.MEAN,
+            )
 
     gradient_accumulation_steps = tu.get_non_tensor_data(data, "gradient_accumulation_steps", default=None)
-    policy_loss = policy_loss / gradient_accumulation_steps
+    loss_value = loss_value / gradient_accumulation_steps
 
     sp_size = tu.get_non_tensor_data(data, "sp_size", default=None)
     if sp_size > 1:
-        policy_loss = policy_loss * sp_size
+        loss_value = loss_value * sp_size
 
-    return policy_loss, metrics
+    return loss_value, metrics
