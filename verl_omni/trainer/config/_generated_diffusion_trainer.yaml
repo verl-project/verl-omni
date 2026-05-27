@@ -225,6 +225,7 @@ actor_rollout_ref:
       max_sequence_length: 512
       guidance_scale: null
     calculate_log_probs: false
+    rollout_adapter: default
     agent:
       _target_: verl.workers.config.AgentLoopConfig
       num_workers: 8
@@ -261,6 +262,8 @@ actor_rollout_ref:
     target_parameters: null
     exclude_modules: null
     lora_adapter_path: null
+    policy_state_adapters:
+    - default
     mtp:
       _target_: verl.workers.config.MtpConfig
       enable: false

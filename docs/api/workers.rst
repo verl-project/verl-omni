@@ -13,6 +13,7 @@ trainer drives them through a unified RPC layer.
    verl_omni.workers.engine_workers.TrainingWorker
    verl_omni.workers.engine_workers.ActorRolloutRefWorker
    verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersFSDPEngine
+   verl_omni.workers.engine.lora_adapter_mixin.LoRAAdapterMixin
 
 Engine Workers
 ~~~~~~~~~~~~~~~~~
@@ -20,12 +21,13 @@ Engine Workers
 .. autoclass:: verl_omni.workers.engine_workers.TrainingWorker
    :members: __init__, reset, set_loss_fn, to,
              train_mini_batch, train_batch, infer_batch,
-             save_checkpoint, load_checkpoint
+             save_checkpoint, load_checkpoint, copy_adapter, ema_update_adapter
 
 .. autoclass:: verl_omni.workers.engine_workers.ActorRolloutRefWorker
    :members: __init__, init_model,
              compute_log_prob, compute_ref_log_prob, update_actor,
-             update_weights, save_checkpoint, load_checkpoint
+             update_weights, save_checkpoint, load_checkpoint,
+             copy_adapter, ema_update_adapter
 
 Diffusers FSDP Engine
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -44,6 +46,15 @@ and parameter / optimizer offloading.
              get_data_parallel_rank, get_data_parallel_size, get_data_parallel_group,
              save_checkpoint, load_checkpoint, get_per_tensor_param,
              to, disable_adapter
+
+LoRA Adapter Mixin
+~~~~~~~~~~~~~~~~~~
+
+Reusable PEFT/LoRA helpers for named policy adapters (e.g. ``default`` and ``old``).
+Used by :class:`~verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersFSDPEngine`.
+
+.. autoclass:: verl_omni.workers.engine.lora_adapter_mixin.LoRAAdapterMixin
+   :members: copy_adapter, ema_update_adapter, use_adapter, disable_adapter
 
 Loss Functions
 ~~~~~~~~~~~~~~~~~

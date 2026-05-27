@@ -17,6 +17,7 @@ FSDP utilities for verl-omni
 
 from collections import OrderedDict
 
+from peft.utils.save_and_load import get_peft_model_state_dict
 from verl.utils.fsdp_utils import collect_lora_params as _upstream_collect_lora_params
 from verl.utils.fsdp_utils import fsdp_version
 
@@ -69,8 +70,57 @@ def collect_lora_params(
     layered_summon: bool,
     base_sync_done: bool,
     is_diffusers: bool = False,
+    adapter_name: str = "default",
 ) -> OrderedDict:
     """Extended version of ``verl.utils.fsdp_utils.collect_lora_params``."""
+    if is_diffusers and adapter_name != "default":
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        from verl.utils.device import get_device_name, get_torch_device
+
+        peft_model = getattr(module, "_fsdp_wrapped_module", module)
+        lora_params = OrderedDict()
+        if fsdp_version(module) > 0:
+            with FSDP.summon_full_params(module, writeback=False):
+                if base_sync_done:
+                    lora_params = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
+                    lora_params = OrderedDict(
+                        (
+                            name,
+                            param.full_tensor().detach().cpu()
+                            if hasattr(param, "full_tensor")
+                            else param.detach().cpu(),
+                        )
+                        for name, param in lora_params.items()
+                    )
+                else:
+                    model = peft_model.base_model.model
+                    orig_dev = "cpu" if "cpu" in str(next(model.parameters()).device) else get_device_name()
+                    model = model.to("cpu")
+                    for name, param in model.state_dict().items():
+                        if any(x in name for x in ["_flat_param", "lora_"]):
+                            continue
+                        name = name.replace("_fsdp_wrapped_module.", "").replace(".base_layer", "")
+                        lora_params[name] = (
+                            param.full_tensor().detach().cpu()
+                            if hasattr(param, "full_tensor")
+                            else param.detach().cpu()
+                        )
+                    model = model.to(orig_dev)
+                get_torch_device().empty_cache()
+        elif base_sync_done:
+            lora_params = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
+        else:
+            model = peft_model.base_model.model
+            orig_dev = "cpu" if "cpu" in str(next(model.parameters()).device) else get_device_name()
+            model = model.to("cpu")
+            for name, param in model.state_dict().items():
+                if any(x in name for x in ["_flat_param", "lora_"]):
+                    continue
+                name = name.replace("_fsdp_wrapped_module.", "").replace(".base_layer", "")
+                lora_params[name] = param.detach().cpu()
+            model = model.to(orig_dev)
+        return lora_params
+
     if is_diffusers and layered_summon and fsdp_version(module) > 0:
         if not base_sync_done:
             raise ValueError(

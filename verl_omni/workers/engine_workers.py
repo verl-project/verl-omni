@@ -179,6 +179,14 @@ class TrainingWorker(Worker, DistProfilerExtension):
         """
         self.engine.initialize()
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def copy_adapter(self, source: str = "default", target: str = "old"):
+        self.engine.copy_adapter(source=source, target=target)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def ema_update_adapter(self, source: str = "default", target: str = "old", decay: float = 0.0):
+        self.engine.ema_update_adapter(source=source, target=target, decay=decay)
+
     def _postprocess_output(self, output, *, global_token_num, delta_time, forward_only, images_seqlens):
         """
 
@@ -676,6 +684,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def copy_adapter(self, source: str = "default", target: str = "old"):
+        assert "actor" in self.role, "copy_adapter only supports actor role"
+        self.actor.copy_adapter(source=source, target=target)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def ema_update_adapter(self, source: str = "default", target: str = "old", decay: float = 0.0):
+        assert "actor" in self.role, "ema_update_adapter only supports actor role"
+        self.actor.ema_update_adapter(source=source, target=target, decay=decay)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         assert "actor" in self.role, "load_checkpoint only support actor role"
         self.actor.load_checkpoint(local_path, hdfs_path, del_local_after_load)
@@ -701,7 +719,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if self.config.rollout.checkpoint_engine.backend != "naive":
-            per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+            per_tensor_param, _ = self.actor.engine.get_per_tensor_param(
+                adapter_name=self.config.rollout.get("rollout_adapter", None)
+            )
             await self.checkpoint_engine.send_weights(per_tensor_param)
             return
 
@@ -715,7 +735,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 2. determine if we need a base weight sync (adapter path only)
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-            layered_summon=self.layered_summon, base_sync_done=True
+            layered_summon=self.layered_summon,
+            base_sync_done=True,
+            adapter_name=self.config.rollout.get("rollout_adapter", None),
         )
 
         do_lora_base_sync = False
@@ -726,7 +748,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # 3. sync weights: For SGLang, we need base first (when needed), then adapter/merged
         if do_lora_base_sync:
             per_tensor_param_base, peft_config = self.actor.engine.get_per_tensor_param(
-                layered_summon=self.layered_summon, base_sync_done=False
+                layered_summon=self.layered_summon,
+                base_sync_done=False,
+                adapter_name=self.config.rollout.get("rollout_adapter", None),
             )
             await self.rollout.update_weights(
                 per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps

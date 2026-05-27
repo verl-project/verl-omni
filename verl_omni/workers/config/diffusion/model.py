@@ -83,6 +83,9 @@ class DiffusionModelConfig(BaseConfig):
     # path to pre-trained LoRA adapter to load for continued training
     lora_adapter_path: Optional[str] = None
 
+    # Named LoRA policy states required by the algorithm. "reference" uses disabled adapters.
+    policy_state_adapters: tuple[str, ...] = ("default",)
+
     mtp: Optional[MtpConfig] = field(default_factory=MtpConfig)
 
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
@@ -92,7 +95,7 @@ class DiffusionModelConfig(BaseConfig):
     def __post_init__(self):
         import_external_libs(self.external_lib)
 
-        valid_backends = {"native"}
+        valid_backends = {"native", "_native_npu"}
         if self.attn_backend not in valid_backends:
             raise ValueError(f"Invalid attn_backend: {self.attn_backend}. Must be one of {sorted(valid_backends)}")
 
