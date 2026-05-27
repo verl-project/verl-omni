@@ -38,6 +38,7 @@ algo/flowgrpo.md
 algo/grpo_guard.md
 algo/mixgrpo.md
 algo/performance.md
+algo/rollout_correction.md
 ```
 
 ```{toctree}
