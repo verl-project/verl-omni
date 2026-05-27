@@ -38,6 +38,7 @@ algo/flowgrpo.md
 algo/grpo_guard.md
 algo/mixgrpo.md
 algo/performance.md
+algo/rollout_correction.md
 ```
 
 ```{toctree}
@@ -66,6 +67,7 @@ api/utils.rst
 contributing/editing-agent-instructions.md
 contributing/integrating_a_diffusion_model.md
 contributing/integrating_a_new_algorithm_for_diffusion_model.md
+contributing/common_pitfalls.md
 ```
 
 ## Contribution

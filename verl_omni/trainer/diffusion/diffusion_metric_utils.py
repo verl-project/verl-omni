@@ -134,3 +134,20 @@ def compute_throughput_metrics_diffusion(batch: DataProto, timing_raw: dict[str,
         "perf/time_per_step": time,
         "perf/throughput": batch_size / (time * n_gpus),
     }
+
+
+def compute_reward_extra_metrics_diffusion(reward_extra_infos_dict: dict) -> dict[str, Any]:
+    """Computes per-sub-reward mean metrics for multi-reward tracking."""
+    metrics = {}
+    if not reward_extra_infos_dict:
+        return metrics
+    for key, values in reward_extra_infos_dict.items():
+        if isinstance(values, np.ndarray):
+            if not np.issubdtype(values.dtype, np.number):
+                continue
+            metrics[f"critic/{key}/mean"] = float(values.mean())
+        elif isinstance(values, list) and len(values) > 0:
+            if not isinstance(values[0], int | float):
+                continue
+            metrics[f"critic/{key}/mean"] = float(np.mean(values))
+    return metrics

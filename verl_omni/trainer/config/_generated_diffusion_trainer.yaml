@@ -74,6 +74,15 @@ actor_rollout_ref:
       loss_mode: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
       clip_ratio: 0.0001
       adv_clip_max: 5.0
+    rollout_correction:
+      _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
+      bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
+      loss_type: ${oc.select:algorithm.rollout_correction.loss_type,ppo_clip}
+      rollout_is: ${oc.select:algorithm.rollout_correction.rollout_is,null}
+      rollout_is_threshold: ${oc.select:algorithm.rollout_correction.rollout_is_threshold,2.0}
+      rollout_is_batch_normalize: ${oc.select:algorithm.rollout_correction.rollout_is_batch_normalize,false}
+      rollout_rs: ${oc.select:algorithm.rollout_correction.rollout_rs,null}
+      rollout_rs_threshold: ${oc.select:algorithm.rollout_correction.rollout_rs_threshold,null}
     loss_scale_factor: null
     use_kl_loss: false
     kl_loss_coef: 0.001
@@ -330,6 +339,8 @@ reward:
   custom_reward_function:
     path: null
     name: compute_score
+  reward_functions: {}
+  aggregation: weighted_sum
   reward_manager:
     _target_: verl.workers.config.reward_model.RewardManagerConfig
     source: importlib
@@ -397,8 +408,16 @@ algorithm:
   sample_source: online
   adv_estimator: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
   norm_adv_by_std_in_grpo: true
-  bypass_mode: false
   global_std: true
+  rollout_correction:
+    _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
+    bypass_mode: false
+    loss_type: ppo_clip
+    rollout_is: null
+    rollout_is_threshold: 2.0
+    rollout_is_batch_normalize: false
+    rollout_rs: null
+    rollout_rs_threshold: null
 trainer:
   total_epochs: 30
   total_training_steps: null

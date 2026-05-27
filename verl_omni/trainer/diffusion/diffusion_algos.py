@@ -257,6 +257,7 @@ class FlowGRPOLoss(DiffusionLossFn):
         log_prob: torch.Tensor,
         advantages: torch.Tensor,
         config: DiffusionActorConfig,
+        rollout_is_weights: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         """Compute the clipped policy objective and related metrics for FlowGRPO.
 
@@ -272,6 +273,11 @@ class FlowGRPOLoss(DiffusionLossFn):
                 Advantage estimates for each action, shape (batch_size,).
             config (verl_omni.workers.config.DiffusionActorConfig):
                 Config for the actor.
+            rollout_is_weights (Optional[torch.Tensor]):
+                Optional Rollout Correction multiplier (same shape as ``log_prob``) combining
+                IS weights and RS rejection (rejected samples have weight 0). When provided,
+                the per-element policy loss is multiplied by these (detached) weights before
+                the mean reduction.
         """
         assert config is not None, "config is required for FlowGRPOLoss!"
         loss_cfg = config.diffusion_loss
@@ -288,7 +294,10 @@ class FlowGRPOLoss(DiffusionLossFn):
             1.0 - loss_cfg.clip_ratio,
             1.0 + loss_cfg.clip_ratio,
         )
-        pg_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
+        per_elem_loss = torch.maximum(unclipped_loss, clipped_loss)
+        if rollout_is_weights is not None:
+            per_elem_loss = per_elem_loss * rollout_is_weights.detach()
+        pg_loss = torch.mean(per_elem_loss)
 
         with torch.no_grad():
             ppo_kl = torch.mean(-log_ratio)
@@ -320,6 +329,7 @@ class FlowGRPOLoss(DiffusionLossFn):
             log_prob=model_output["log_probs"],
             advantages=data["advantages"],
             config=config,
+            rollout_is_weights=data.get("rollout_is_weights", None),
         )
         return DiffusionLossResult(loss=loss, metrics=metrics)
 
@@ -343,6 +353,7 @@ class GRPOGuardLoss(DiffusionLossFn):
         prev_sample_mean: torch.Tensor,
         std_dev_t: torch.Tensor,
         sqrt_dt: torch.Tensor,
+        rollout_is_weights: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         """Compute the GRPO-Guard policy objective.
 
@@ -371,6 +382,11 @@ class GRPOGuardLoss(DiffusionLossFn):
                 ``(B, 1, 1, ...)`` or scalar.
             sqrt_dt (torch.Tensor): ``sqrt(-dt)`` for the current denoising step,
                 shape ``(B,)`` or scalar.
+            rollout_is_weights (Optional[torch.Tensor]):
+                Optional Rollout Correction multiplier (same shape as ``log_prob``) combining
+                IS weights and RS rejection (rejected samples have weight 0). When provided,
+                the per-element policy loss is multiplied by these (detached) weights before
+                the mean reduction.
         """
         loss_cfg = config.diffusion_loss
         advantages = torch.clamp(
@@ -398,7 +414,10 @@ class GRPOGuardLoss(DiffusionLossFn):
             1.0 - loss_cfg.clip_ratio,
             1.0 + loss_cfg.clip_ratio,
         )
-        pg_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss)) / (sqrt_dt_mean**2)
+        per_elem_loss = torch.maximum(unclipped_loss, clipped_loss)
+        if rollout_is_weights is not None:
+            per_elem_loss = per_elem_loss * rollout_is_weights.detach()
+        pg_loss = torch.mean(per_elem_loss) / (sqrt_dt_mean**2)
 
         with torch.no_grad():
             ppo_kl = torch.mean(-log_ratio)
@@ -434,6 +453,7 @@ class GRPOGuardLoss(DiffusionLossFn):
             std_dev_t=model_output["std_dev_t"],
             sqrt_dt=model_output["sqrt_dt"],
             config=config,
+            rollout_is_weights=data.get("rollout_is_weights", None),
         )
         return DiffusionLossResult(loss=loss, metrics=metrics)
 
