@@ -62,6 +62,7 @@ def _make_qwen_engine(model_path: str):
     ).to("cuda")
     engine = _QwenLoRAEngine(model_config, transformer)
     module = engine._build_lora_module(transformer)
+    engine.module = module
     return engine, module
 
 
