@@ -591,9 +591,10 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
     @contextmanager
     def _adapter_state_context(self):
         is_fsdp_module = fsdp_version(self.module) == 1
+        is_fsdp2_module = fsdp_version(self.module) == 2
         is_offload_param = getattr(self, "_is_offload_param", False)
         origin_module_device = next(self.module.parameters()).device.type
-        if is_fsdp_module and (is_offload_param or origin_module_device == "cpu"):
+        if (is_fsdp_module or is_fsdp2_module) and (is_offload_param or origin_module_device == "cpu"):
             load_fsdp_model_to_gpu(self.module)
 
         ctx = FSDP.summon_full_params(self.module, writeback=True, recurse=True) if is_fsdp_module else nullcontext()
