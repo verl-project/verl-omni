@@ -339,6 +339,8 @@ reward:
   custom_reward_function:
     path: null
     name: compute_score
+  reward_functions: {}
+  aggregation: weighted_sum
   reward_manager:
     _target_: verl.workers.config.reward_model.RewardManagerConfig
     source: importlib

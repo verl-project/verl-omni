@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .multi import MultiVisualRewardManager
 from .visual import VisualRewardManager
 
-__all__ = ["VisualRewardManager"]
+__all__ = ["VisualRewardManager", "MultiVisualRewardManager"]
