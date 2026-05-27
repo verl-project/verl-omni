@@ -14,13 +14,9 @@
 
 """Rollout Correction for diffusion training (experimental).
 
-IS/RS math is delegated to ``verl.trainer.ppo.rollout_corr_helper``.
-
 Diffusion-specific notes:
-* No ``response_mask`` — log-probs are dense (no padding).  RS rejection is
+- No ``response_mask`` — log-probs are dense (no padding).  RS rejection is
   expressed as a 0-weight in ``rollout_is_weights`` instead of a mask.
-* Config is read from ``DiffusionActorConfig.rollout_correction`` at loss time.
-* ``loss_type=ppo_clip`` omits IS weights (PPO ratio handles IS).
 """
 
 from __future__ import annotations
