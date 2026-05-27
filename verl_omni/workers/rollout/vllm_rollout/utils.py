@@ -19,12 +19,13 @@ from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID, VLLM_LORA_
 from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
 
 from verl_omni.utils.vllm_omni import OmniTensorLoRARequest, VLLMOmniHijack
+from verl_omni.workers.rollout.vllm_rollout.npu_utils import NPUColocateWorkerMixin
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
+class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWorkerExtension):
     """
     The class for vLLM-Omni's worker to inherit from, in the colocate setting.
     By defining an extension class, the code can work no matter what is
@@ -35,6 +36,7 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
 
     Feature support:
     1. LoRA
+    2. NPU (Ascend) memory-pool, sleep, and wake_up — via NPUColocateWorkerMixin
     """
 
     def __new__(cls, **kwargs):
@@ -86,9 +88,13 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.
-        Uses replica_rank + local_rank to form handle so it matches the sender side
-        regardless of CUDA_VISIBLE_DEVICES differences, and avoids collisions
-        when multiple replicas share the same node.
+        Uses Ray job id + replica_rank + local_rank to form the handle so it
+        matches the sender side regardless of CUDA_VISIBLE_DEVICES differences,
+        avoids collisions when multiple replicas share the same node, and is
+        unique per Ray job to avoid cross-job collisions on shared hosts. The
+        job id is forwarded by the vLLMHttpServer actor as VERL_RAY_JOB_ID and
+        inherited by this vLLM worker subprocess.
         """
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
-        return f"ipc:///tmp/rl-colocate-zmq-replica-{replica_rank}-rank-{self.local_rank}.sock"
+        job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
+        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{self.local_rank}.sock"

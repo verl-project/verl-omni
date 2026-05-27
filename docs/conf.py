@@ -35,6 +35,8 @@ myst_enable_extensions = [
     "amsmath",
 ]
 
+myst_heading_anchors = 3
+
 napoleon_google_docstring = True
 napoleon_numpy_docstring = False
 
@@ -48,4 +50,11 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
 html_theme = "sphinx_rtd_theme"
 
+autosectionlabel_prefix_document = True
+
 suppress_warnings = ["ref.duplicate", "ref.myst"]
+
+autodoc_mock_imports = [
+    "verl.workers.rollout.vllm_rollout",
+    "vllm_omni.diffusion.worker",
+]

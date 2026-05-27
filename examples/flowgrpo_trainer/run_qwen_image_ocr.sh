@@ -15,23 +15,23 @@ NUM_GPUS_ACTOR_ROLLOUT_REWARD=4
 ACTOR_SP=2
 ROLLOUT_TP=1
 REWARD_TP=4
-IMAGE_RESOLUTION=384
+IMAGE_RESOLUTION=512
 
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
 
-python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
+python3 -m verl_omni.trainer.main_diffusion \
     algorithm.adv_estimator=flow_grpo \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
     data.train_batch_size=32 \
     data.max_prompt_length=256 \
     actor_rollout_ref.model.path=$model_name \
-    actor_rollout_ref.actor.optim.lr=1e-5 \
+    actor_rollout_ref.actor.optim.lr=3e-5 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=$ACTOR_SP \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \

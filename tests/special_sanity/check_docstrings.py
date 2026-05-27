@@ -89,7 +89,7 @@ def main():
     """Main function to check docstrings in specified files."""
 
     files_to_check = [
-        "verl_omni/trainer/diffusion/main_flowgrpo.py",
+        "verl_omni/trainer/main_diffusion.py",
         "verl_omni/trainer/diffusion/ray_diffusion_trainer.py",
         "verl_omni/trainer/diffusion/diffusion_algos.py",
         "verl_omni/trainer/diffusion/diffusion_metric_utils.py",
