@@ -30,11 +30,3 @@ def _maybe_per_rollout_seeds(meta_info: dict, batch_size: int) -> Optional[list[
         return None
     base = int(base)
     return [_derive_rollout_seed(base, i) for i in range(batch_size)]
-
-
-def _build_rollout_seed(rollout_seed, global_steps: int) -> Optional[int]:
-    """Resolve per-step rollout base from rollout.seed (+ global_step - 1).
-    Returns None when rollout.seed is unset."""
-    if rollout_seed is None:
-        return None
-    return int(rollout_seed) + int(global_steps) - 1
