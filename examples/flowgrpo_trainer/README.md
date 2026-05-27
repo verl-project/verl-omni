@@ -52,7 +52,7 @@ Optional KL loss tuning:
 - `actor_rollout_ref.actor.use_kl_loss=True`
 - `actor_rollout_ref.actor.kl_loss_coef=0.001`
 
-The script runs `python3 -m verl_omni.trainer.diffusion.main_flowgrpo` with:
+The script runs `python3 -m verl_omni.trainer.main_diffusion` with:
 
 - `algorithm.adv_estimator=flow_grpo`
 - `actor_rollout_ref.model.path=Qwen/Qwen-Image`
@@ -90,6 +90,18 @@ For reward models that are expensive to evaluate (e.g., a VLM judge), the reward
 
 ```bash
 bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_async_reward.sh
+```
+
+Ulysses sequence parallelism shards the sequence dimension across GPUs to reduce per-GPU memory. A ready-to-use 4-GPU SP=2 LoRA example is provided:
+
+```bash
+bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_sp2.sh
+```
+
+We have provided a script to enable non-cfg full-weight Qwen-Image OCR training. The example is runnable on 4 NVIDIA H200 GPUs; enabling CFG requires more GPU resources.
+
+```bash
+bash examples/flowgrpo_trainer/run_qwen_image_ocr.sh
 ```
 
 

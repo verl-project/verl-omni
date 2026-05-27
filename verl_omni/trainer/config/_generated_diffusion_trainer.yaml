@@ -244,6 +244,9 @@ actor_rollout_ref:
     quantization: null
     mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
     external_lib: null
+    disaggregation:
+      _target_: verl.workers.config.DisaggregationConfig
+      enabled: false
   model:
     _target_: verl_omni.workers.config.diffusion.DiffusionModelConfig
     path: ~/models/Qwen/Qwen-Image
@@ -316,6 +319,7 @@ data:
   custom_cls:
     path: null
     name: null
+    collate_fn: null
   return_multi_modal_inputs: true
   sampler:
     class_path: null
@@ -329,6 +333,8 @@ reward:
   custom_reward_function:
     path: null
     name: compute_score
+  reward_functions: {}
+  aggregation: weighted_sum
   reward_manager:
     _target_: verl.workers.config.reward_model.RewardManagerConfig
     source: importlib
@@ -353,24 +359,47 @@ reward:
       data_parallel_size: 1
       expert_parallel_size: 1
       tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 1
       max_num_batched_tokens: 8192
       max_model_len: null
       max_num_seqs: 1024
       load_format: auto
+      layered_summon: false
+      scheduling_policy: fcfs
+      multi_stage_wake_up: false
       engine_kwargs: {}
       limit_images: null
       enable_chunked_prefill: true
       enable_prefix_caching: true
       disable_log_stats: true
       skip_tokenizer_init: false
+      ignore_eos: false
+      temperature: 1.0
+      top_k: -1
+      top_p: 1
+      do_sample: true
+      'n': 1
       prompt_length: 2048
       response_length: 2048
+      quantization: null
+      quantization_config_file: null
+      mtp: null
+      disaggregation:
+        enabled: false
+        prefill_replicas: 1
+        decode_replicas: 1
+        decode_tensor_model_parallel_size: null
+        transfer_backend: nixl
+        bootstrap_port: null
+        ib_device: null
   sandbox_fusion:
     url: null
     max_concurrent: 64
     memory_limit_mb: 1024
 algorithm:
   _target_: verl_omni.trainer.config.DiffusionAlgoConfig
+  trainer_type: policy_gradient
+  sample_source: online
   adv_estimator: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
   norm_adv_by_std_in_grpo: true
   bypass_mode: false

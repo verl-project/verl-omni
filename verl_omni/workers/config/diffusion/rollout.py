@@ -17,6 +17,7 @@ from typing import Optional
 from omegaconf import MISSING
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
+from verl.workers.config.disaggregation import DisaggregationConfig
 from verl.workers.config.model import MtpConfig
 from verl.workers.config.rollout import (
     AgentLoopConfig,
@@ -147,6 +148,8 @@ class DiffusionRolloutConfig(BaseConfig):
     profiler: Optional[ProfilerConfig] = None
 
     algo: Optional[DiffusionRolloutAlgoConfig] = field(default_factory=DiffusionRolloutAlgoConfig)
+
+    disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
     external_lib: Optional[str] = None
 
