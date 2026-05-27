@@ -42,7 +42,9 @@ rollout_correction:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
 
-  # Skip old-log-prob recompute by reusing rollout_log_probs (2 policies, no ref worker)
+  # When True, skip old-log-prob recompute and use rollout_log_probs directly
+  # (2-policy bypass). When False, keep the recompute pass for 3-policy
+  # decoupled mode with IS correction from rollout to old.
   bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
 
   # Loss type in bypass mode: "ppo_clip" (IS via PPO ratio)
