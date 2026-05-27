@@ -64,7 +64,7 @@ class LoRAFSDPTestWorker(TrainingWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def fill_lora_adapter(self, adapter_name: str, base: float, step: float):
         with self.engine._adapter_state_context():
-            peft_model = self.engine._unwrap_adapter_module(self.engine.module)
+            peft_model = self.engine._peft_module
             peft_model.set_adapter(adapter_name)
             idx = 0
             for param in peft_model.parameters():

@@ -19,7 +19,7 @@ import logging
 import os
 import warnings
 from abc import ABC, abstractmethod
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from typing import Callable, Optional
 
 import torch
@@ -584,28 +584,6 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
-    def _unwrap_adapter_module(self, module):
-        return getattr(module, "_fsdp_wrapped_module", module)
-
-    @contextmanager
-    def _adapter_state_context(self):
-        is_fsdp_module = fsdp_version(self.module) == 1
-        is_fsdp2_module = fsdp_version(self.module) == 2
-        is_offload_param = getattr(self, "_is_offload_param", False)
-        origin_module_device = next(self.module.parameters()).device.type
-        if (is_fsdp_module or is_fsdp2_module) and (is_offload_param or origin_module_device == "cpu"):
-            load_fsdp_model_to_gpu(self.module)
-
-        ctx = FSDP.summon_full_params(self.module, writeback=True, recurse=True) if is_fsdp_module else nullcontext()
-        try:
-            with ctx:
-                yield
-        finally:
-            self._set_adapter("default")
-            if is_offload_param:
-                offload_fsdp_model_to_cpu(self.module)
-                aggressive_empty_cache(force_sync=True)
-
     def get_per_tensor_param(
         self, layered_summon=False, base_sync_done=False, adapter_name: str | None = None, **kwargs
     ):
@@ -617,7 +595,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         peft_config = None
 
-        peft_model = self._unwrap_adapter_module(self.module)
+        peft_model = self._peft_module
         if hasattr(peft_model, "peft_config"):  # LoRA
             peft_config = peft_model.peft_config.get("default", None)
             adapter_ctx = self.use_adapter(adapter_name) if adapter_name is not None else nullcontext()
@@ -634,7 +612,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         else:
             params = self.module.state_dict()
 
-        params = convert_weight_keys(params, self._unwrap_adapter_module(self.module))
+        params = convert_weight_keys(params, self._peft_module)
 
         log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
         if self._is_offload_param:

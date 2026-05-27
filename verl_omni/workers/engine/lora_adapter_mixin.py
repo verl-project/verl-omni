@@ -13,7 +13,7 @@
 # limitations under the License.
 """Reusable PEFT/LoRA adapter lifecycle helpers for training engines."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 import torch
 from peft import LoraConfig
@@ -57,26 +57,40 @@ class LoRAAdapterMixin:
 
         return module
 
-    def _unwrap_adapter_module(self, module):
-        """Return the module that owns PEFT adapter state for the current backend."""
-        return module
+    @property
+    def _peft_module(self):
+        """PEFT model that owns adapter state (unwraps FSDP when applicable)."""
+        return getattr(self.module, "_fsdp_wrapped_module", self.module)
 
     @contextmanager
     def _adapter_state_context(self):
-        """Open writable adapter parameter access for the current backend."""
+        """Open writable adapter parameter access (FSDP summon when applicable)."""
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        from verl.utils.fsdp_utils import fsdp_version, load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
+        from verl.utils.memory_utils import aggressive_empty_cache
+
+        is_fsdp_module = fsdp_version(self.module) == 1
+        is_fsdp2_module = fsdp_version(self.module) == 2
+        is_offload_param = getattr(self, "_is_offload_param", False)
+        origin_module_device = next(self.module.parameters()).device.type
+        if (is_fsdp_module or is_fsdp2_module) and (is_offload_param or origin_module_device == "cpu"):
+            load_fsdp_model_to_gpu(self.module)
+
+        ctx = FSDP.summon_full_params(self.module, writeback=True, recurse=True) if is_fsdp_module else nullcontext()
         try:
-            yield
+            with ctx:
+                yield
         finally:
             self._set_adapter("default")
+            if is_offload_param:
+                offload_fsdp_model_to_cpu(self.module)
+                aggressive_empty_cache(force_sync=True)
 
     def _set_adapter(self, name: str):
-        module = self._unwrap_adapter_module(self.module)
-        if hasattr(module, "set_adapter"):
-            module.set_adapter(name)
-        elif hasattr(self.module, "set_adapter"):
-            self.module.set_adapter(name)
-        else:
+        peft_module = self._peft_module
+        if not hasattr(peft_module, "set_adapter"):
             raise AttributeError(f"Module does not support set_adapter({name!r})")
+        peft_module.set_adapter(name)
 
     @contextmanager
     def use_adapter(self, name: str):
@@ -88,7 +102,7 @@ class LoRAAdapterMixin:
             self._set_adapter("default")
 
     def _active_adapter_trainable_params(self, adapter_name: str) -> list[torch.nn.Parameter]:
-        peft_model = self._unwrap_adapter_module(self.module)
+        peft_model = self._peft_module
         if not hasattr(peft_model, "set_adapter"):
             raise AttributeError("Module does not support PEFT adapter selection.")
         peft_model.set_adapter(adapter_name)
