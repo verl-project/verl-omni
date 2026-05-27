@@ -48,37 +48,6 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 
-class _VllmEngineLaunchConfigView:
-    """Expose rollout config to verl ``launch_server`` without mutating frozen BaseConfig.
-
-    Hydra ``seed: null`` must become ``0`` for vLLM engine init only; training rollout
-    seeding still uses the underlying config unchanged outside ``launch_server``.
-    """
-
-    __slots__ = ("_config",)
-
-    def __init__(self, config):
-        self._config = config
-
-    def get(self, key: str, default: Any = None) -> Any:
-        if key == "seed":
-            value = self._config.get(key, default)
-            return 0 if value is None else value
-        return self._config.get(key, default)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._config, name)
-
-    def __getitem__(self, key: str) -> Any:
-        return self._config[key]
-
-    def __iter__(self):
-        return iter(self._config)
-
-    def __len__(self) -> int:
-        return len(self._config)
-
-
 class vLLMOmniHttpServer(vLLMHttpServer):
     """vLLM-Omni http server in single node, this is equivalent to launch server with command line:
     ```
@@ -130,12 +99,20 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         attribute to None, so the default is not applied and launch crashes with
         ``replica_rank + None``. Training rollout seeding stays unset via meta_info.
         """
-        original_config = self.config
-        self.config = _VllmEngineLaunchConfigView(original_config)
+        original_get = self.config.get
+
+        def get_with_engine_seed_default(key: str, default: Any = None) -> Any:
+            if key == "seed":
+                value = original_get(key, default)
+                return 0 if value is None else value
+            return original_get(key, default)
+
+        self.config.get = get_with_engine_seed_default
         try:
             await super().launch_server(master_address, master_port, dp_rpc_port)
         finally:
-            self.config = original_config
+            # BaseConfig is frozen; pop the shadowed get instead of reassigning it.
+            self.config.__dict__.pop("get", None)
 
     # -----------------------------------------------------------------------
     # Server lifecycle
