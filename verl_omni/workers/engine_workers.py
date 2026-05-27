@@ -181,10 +181,14 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def copy_adapter(self, source: str = "default", target: str = "old"):
+        if not hasattr(self.engine, "copy_adapter"):
+            raise NotImplementedError(f"Engine {type(self.engine).__name__} does not support copy_adapter.")
         self.engine.copy_adapter(source=source, target=target)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def ema_update_adapter(self, source: str = "default", target: str = "old", decay: float = 0.0):
+        if not hasattr(self.engine, "ema_update_adapter"):
+            raise NotImplementedError(f"Engine {type(self.engine).__name__} does not support ema_update_adapter.")
         self.engine.ema_update_adapter(source=source, target=target, decay=decay)
 
     def _postprocess_output(self, output, *, global_token_num, delta_time, forward_only, images_seqlens):
@@ -720,7 +724,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if self.config.rollout.checkpoint_engine.backend != "naive":
             per_tensor_param, _ = self.actor.engine.get_per_tensor_param(
-                adapter_name=self.config.rollout.get("rollout_adapter", None)
+                adapter_name=self.config.rollout.rollout_adapter
             )
             await self.checkpoint_engine.send_weights(per_tensor_param)
             return
@@ -737,7 +741,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
             layered_summon=self.layered_summon,
             base_sync_done=True,
-            adapter_name=self.config.rollout.get("rollout_adapter", None),
+            adapter_name=self.config.rollout.rollout_adapter,
         )
 
         do_lora_base_sync = False
@@ -750,7 +754,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             per_tensor_param_base, peft_config = self.actor.engine.get_per_tensor_param(
                 layered_summon=self.layered_summon,
                 base_sync_done=False,
-                adapter_name=self.config.rollout.get("rollout_adapter", None),
+                adapter_name=self.config.rollout.rollout_adapter,
             )
             await self.rollout.update_weights(
                 per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps

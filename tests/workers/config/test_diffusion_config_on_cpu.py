@@ -20,8 +20,10 @@ from verl_omni.workers.config.diffusion.actor import (
     DiffusionLossConfig,
     FSDPDiffusionActorConfig,
 )
+from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
 from verl_omni.workers.config.diffusion.rollout import (
     DiffusionRolloutAlgoConfig,
+    DiffusionRolloutConfig,
     DiffusionSamplingConfig,
 )
 
@@ -156,6 +158,43 @@ class TestDiffusionSamplingConfig:
         assert cfg.pipeline.num_inference_steps == 10
         assert cfg.seed == 42
         assert isinstance(cfg.algo, DiffusionRolloutAlgoConfig)
+
+
+class TestDiffusionRolloutConfig:
+    def test_invalid_rollout_adapter_raises(self):
+        with pytest.raises(ValueError, match="Invalid diffusion rollout rollout_adapter"):
+            DiffusionRolloutConfig(name="vllm_omni", rollout_adapter="bogus")
+
+
+class TestDiffusionModelConfigPolicyAdapters:
+    def test_policy_state_adapters_via_hydra(self, tmp_path):
+        import json
+        import os
+        from unittest.mock import patch
+
+        from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
+
+        import verl_omni
+
+        model_dir = tmp_path / "dummy-model"
+        model_dir.mkdir()
+        (model_dir / "model_index.json").write_text(json.dumps({"_class_name": "QwenImagePipeline"}))
+
+        config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/diffusion/model")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            cfg = compose(
+                config_name="diffusion_model",
+                overrides=[
+                    f"path={model_dir}",
+                    f"tokenizer_path={model_dir}",
+                    "+load_tokenizer=false",
+                    'policy_state_adapters=["default","old"]',
+                ],
+            )
+        with patch("verl_omni.workers.config.diffusion.model.resolve_model_local_dir", return_value=str(model_dir)):
+            model_cfg: DiffusionModelConfig = omega_conf_to_dataclass(cfg)
+        assert tuple(model_cfg.policy_state_adapters) == ("default", "old")
 
 
 # ---------------------------------------------------------------------------

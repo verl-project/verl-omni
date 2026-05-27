@@ -13,8 +13,8 @@ trainer drives them through a unified RPC layer.
    verl_omni.workers.engine_workers.TrainingWorker
    verl_omni.workers.engine_workers.ActorRolloutRefWorker
    verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersFSDPEngine
+   verl_omni.workers.engine.lora_adapter_mixin.LoRAAdapterMixin
    verl_omni.workers.engine.fsdp.diffusers_impl.PPODiffusersFSDPEngine
-   verl_omni.workers.engine.fsdp.diffusers_impl.NFTDiffusersFSDPEngine
    verl_omni.workers.config.DiffusionModelConfig
    verl_omni.workers.config.DiffusionActorConfig
    verl_omni.workers.config.FSDPDiffusionActorConfig
@@ -30,12 +30,13 @@ Engine Workers
 .. autoclass:: verl_omni.workers.engine_workers.TrainingWorker
    :members: __init__, reset, set_loss_fn, to,
              train_mini_batch, train_batch, infer_batch,
-             save_checkpoint, load_checkpoint
+             save_checkpoint, load_checkpoint, copy_adapter, ema_update_adapter
 
 .. autoclass:: verl_omni.workers.engine_workers.ActorRolloutRefWorker
    :members: __init__, init_model,
              compute_log_prob, compute_ref_log_prob, update_actor,
-             update_weights, save_checkpoint, load_checkpoint
+             update_weights, save_checkpoint, load_checkpoint,
+             copy_adapter, ema_update_adapter
 
 Diffusers FSDP Engine
 ~~~~~~~~~~~~~~~~~~~~~
@@ -58,11 +59,10 @@ Diffusers PPO FSDP Engine
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :class:`~verl_omni.workers.engine.fsdp.diffusers_impl.PPODiffusersFSDPEngine`
-implements the FlowGRPO-style training path (FlowGRPO, MixGRPO). It subclasses
+is the concrete engine registered for FlowGRPO-style training (FlowGRPO,
+MixGRPO, GRPO-Guard). It subclasses
 :class:`~verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersFSDPEngine`
-and adds PPO forward/backward and batch I/O helpers. The registered diffusion
-FSDP router selects this engine for PPO-style algorithms registered with the
-algorithm registry.
+and adds PPO forward/backward and batch I/O helpers.
 
 .. autoclass:: verl_omni.workers.engine.fsdp.diffusers_impl.PPODiffusersFSDPEngine
    :members: __init__, initialize,
@@ -74,19 +74,14 @@ algorithm registry.
              save_checkpoint, load_checkpoint, get_per_tensor_param,
              to, disable_adapter
 
-NFT Diffusers FSDP Engine
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+LoRA Adapter Mixin
+~~~~~~~~~~~~~~~~~~
 
-:class:`~verl_omni.workers.engine.fsdp.diffusers_impl.NFTDiffusersFSDPEngine`
-subclasses :class:`~verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersFSDPEngine`
-and implements the forward-process actor update path used by DiffusionNFT.
-The registered diffusion FSDP router selects it when ``model_config.algorithm``
-is ``diffusion_nft``. New algorithm-specific engines should register with
-``DiffusionFSDPEngineAlgorithmRegistry``.
+Reusable PEFT/LoRA helpers for named policy adapters (e.g. ``default`` and ``old``).
+Used by :class:`~verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersFSDPEngine`.
 
-.. autoclass:: verl_omni.workers.engine.fsdp.diffusers_impl.NFTDiffusersFSDPEngine
-   :members: forward_step, forward_backward_batch,
-             prepare_model_inputs, prepare_model_outputs
+.. autoclass:: verl_omni.workers.engine.lora_adapter_mixin.LoRAAdapterMixin
+   :members: copy_adapter, ema_update_adapter, use_adapter, disable_adapter
 
 Loss Functions
 ~~~~~~~~~~~~~~~~~
