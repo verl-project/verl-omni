@@ -82,7 +82,7 @@ def test_use_adapter_switches_active_adapter():
     model_path = _require_model_path()
     engine, module = _make_qwen_engine(model_path)
 
-    assert module.active_adapter == "default"
+    assert list(module.active_adapters) == ["default"]
     with engine.use_adapter("old"):
-        assert module.active_adapter == "old"
-    assert module.active_adapter == "default"
+        assert list(module.active_adapters) == ["old"]
+    assert list(module.active_adapters) == ["default"]
