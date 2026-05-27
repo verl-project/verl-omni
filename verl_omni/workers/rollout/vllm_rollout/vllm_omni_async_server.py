@@ -92,6 +92,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _get_cli_description(self) -> str:
         return "vLLM-Omni CLI"
 
+    # TODO: drop it after updating verl pin (at least 5ff595ac9fcb4)
     async def launch_server(self, master_address: str = None, master_port: int = None, dp_rpc_port: int = None):
         """Launch vLLM-Omni engine; coerce null ``rollout.seed`` for engine init only.
 
