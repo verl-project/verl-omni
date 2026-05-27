@@ -268,16 +268,6 @@ Your subclass must do four things:
      ([`diffusion_agent_loop.py`](../../verl_omni/agent_loop/diffusion_agent_loop.py))
      reads these field names verbatim — **do not rename them**.
 
-> **⚠️ Common pitfall.**  `FlowMatchSDEDiscreteScheduler.step()` casts the
-> returned latents to `model_output.dtype` (typically `bfloat16`) *after*
-> computing the log-prob at float32.  The scheduler must return latents in
-> fp32 (remove the dtype cast in `step()`), `diffuse()` must cast latents
-> to the model dtype before the transformer forward and cast noise_pred to
-> float32 before `scheduler.step()`.  Calling `.float()` on the
-> already-truncated output is **not** sufficient.
-> See the full write-up in
-> **[Common Pitfalls](common_pitfalls.md#float32-precision-loss-in-stored-rollout-latents)**.
-
 ---
 
 ## Step 5 — Configure the Pipeline
