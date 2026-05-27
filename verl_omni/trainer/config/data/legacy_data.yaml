@@ -61,8 +61,7 @@ return_full_prompt: False
 # Whether to shuffle the data in the dataloader.
 shuffle: True
 
-# Seed for train dataloader shuffling when data.shuffle=True.
-# Rollout RNG is controlled separately by actor_rollout_ref.rollout.seed.
+# Seed to use when shuffling the data
 seed: null
 
 # num dataloader workers

@@ -179,7 +179,7 @@ class DiffusionAgentLoopWorker:
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
             task_sampling_params = sampling_params
             if per_rollout_seeds is not None:
-                task_sampling_params = dict(sampling_params)
+                task_sampling_params = sampling_params.copy()
                 task_sampling_params["seed"] = per_rollout_seeds[i]
             tasks.append(asyncio.create_task(self._run_agent_loop(task_sampling_params, **kwargs)))
         outputs = await asyncio.gather(*tasks)
