@@ -2,7 +2,7 @@
 #
 # Treat the feature as EXPERIMENTAL; see docs/algo/rollout_correction.md for details.
 #
-# Bypass-mode IS/RS semantics (matching verl's loss_type: ppo_clip contract):
+# Bypass-mode IS/RS semantics:
 #   - rollout_is:   IS metrics are logged under actor/rollout_corr/*, but IS weights
 #                    are NOT applied to the loss — the PPO ratio already handles IS.
 #   - rollout_rs:    RS rejection mask IS applied (rejected samples get weight 0).
@@ -33,7 +33,7 @@ ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
 
-python3 -m verl_omni.trainer.diffusion.main_flowgrpo \
+python3 -m verl_omni.trainer.main_diffusion \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
     data.train_batch_size=32 \
