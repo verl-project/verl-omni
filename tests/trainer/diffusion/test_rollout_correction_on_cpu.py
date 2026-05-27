@@ -150,9 +150,13 @@ class TestBypassRC:
         log_prob = torch.randn(batch_size)
         rollout_log_prob = log_prob.clone()
 
-        rc_cfg = _make_rc_cfg()
-        # Override loss_type to an unsupported value
-        rc_cfg.loss_type = "reinforce"
+        # RolloutCorrectionConfig is frozen — construct with invalid loss_type directly
+        rc_cfg = RolloutCorrectionConfig(
+            bypass_mode=True,
+            loss_type="reinforce",  # invalid
+            rollout_is="sequence",
+            rollout_is_threshold=2.0,
+        )
 
         with pytest.raises(AssertionError, match="ppo_clip"):
             _apply_bypass_rc(log_prob, rollout_log_prob, rc_cfg, {}, {})

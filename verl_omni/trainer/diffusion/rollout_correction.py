@@ -73,7 +73,7 @@ def apply_bypass_mode_to_diffusion_batch(batch: DataProto) -> None:
             "[verl-omni] Rollout Correction for diffusion is an EXPERIMENTAL feature. "
             "See docs/algo/rollout_correction.md for usage and caveats."
         )
-    if "rollout_log_probs" not in batch.batch:
+    if batch.batch is None or "rollout_log_probs" not in batch.batch:
         raise ValueError(
             "rollout_correction.bypass_mode=True requires `rollout_log_probs` in the batch. "
             "Ensure the rollout backend records log probs (calculate_log_probs=true)."
