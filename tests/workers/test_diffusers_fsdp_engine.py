@@ -65,7 +65,7 @@ def _create_sp_compatible_model(parent_dir, src_model_path, num_attention_heads=
     return dst
 
 
-def create_training_config(model_type, strategy, device_count, model, policy_state_adapters=None):
+def create_training_config(model_type, strategy, device_count, model):
     if device_count == 1:
         cp = fsdp_size = 1
     else:
@@ -79,23 +79,18 @@ def create_training_config(model_type, strategy, device_count, model, policy_sta
         from hydra import compose, initialize_config_dir
         from verl.utils.config import omega_conf_to_dataclass
 
-        model_overrides = [
-            "path=" + path,
-            "tokenizer_path=" + tokenizer_path,
-            "lora_rank=8",
-            "lora_alpha=16",
-            "pipeline.true_cfg_scale=4.0",
-            "algo.noise_level=1.2",
-            "algo.sde_type=sde",
-        ]
-        if policy_state_adapters is not None:
-            adapters = ",".join(f'"{adapter}"' for adapter in policy_state_adapters)
-            model_overrides.append(f"policy_state_adapters=[{adapters}]")
-
         with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/model")):
             cfg = compose(
                 config_name="diffusion_model",
-                overrides=model_overrides,
+                overrides=[
+                    "path=" + path,
+                    "tokenizer_path=" + tokenizer_path,
+                    "lora_rank=8",
+                    "lora_alpha=16",
+                    "pipeline.true_cfg_scale=4.0",
+                    "algo.noise_level=1.2",
+                    "algo.sde_type=sde",
+                ],
             )
         model_config: DiffusionModelConfig = omega_conf_to_dataclass(cfg)
 

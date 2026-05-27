@@ -78,18 +78,6 @@ def _rank0_params(worker_outputs) -> dict[str, torch.Tensor]:
     return worker_outputs[0]
 
 
-def _lora_params_close(
-    left: dict[str, torch.Tensor],
-    right: dict[str, torch.Tensor],
-    *,
-    rtol: float = _LORA_RTOL,
-    atol: float = _LORA_ATOL,
-) -> None:
-    assert left.keys() == right.keys()
-    for name in sorted(left.keys()):
-        assert torch.allclose(left[name].float(), right[name].float(), rtol=rtol, atol=atol), name
-
-
 def _lora_params_differ(
     left: dict[str, torch.Tensor],
     right: dict[str, torch.Tensor],
@@ -101,18 +89,6 @@ def _lora_params_differ(
     assert any(
         not torch.allclose(left[name].float(), right[name].float(), rtol=rtol, atol=atol) for name in left.keys()
     )
-
-
-def _assert_ema_blend(
-    target: dict[str, torch.Tensor],
-    old: dict[str, torch.Tensor],
-    source: dict[str, torch.Tensor],
-    decay: float,
-) -> None:
-    assert target.keys() == old.keys() == source.keys()
-    for name in sorted(target.keys()):
-        expected = old[name].float() * decay + source[name].float() * (1.0 - decay)
-        assert torch.allclose(target[name].float(), expected, rtol=_LORA_RTOL, atol=_LORA_ATOL), name
 
 
 @pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
@@ -140,8 +116,8 @@ def test_diffusers_fsdp_lora_adapter_switch(strategy):
             strategy=strategy,
             device_count=device_count,
             model=model_path,
-            policy_state_adapters=("default", "old"),
         )
+        training_config.model_config.policy_state_adapters = ("default", "old")
 
         ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(LoRAFSDPTestWorker), config=training_config)
         resource_pool = RayResourcePool(process_on_nodes=[device_count])
@@ -153,10 +129,6 @@ def test_diffusers_fsdp_lora_adapter_switch(strategy):
         assert default_0
         assert old_0.keys() == default_0.keys()
         _lora_params_differ(default_0, old_0)
-
-        wg.copy_adapter(source="default", target="old")
-        old_1 = _rank0_params(wg.collect_lora_params("old"))
-        _lora_params_close(old_1, default_0)
 
         loss_fn = partial(diffusion_loss, config=actor_config)
         wg.set_loss_fn(loss_fn)
@@ -179,13 +151,9 @@ def test_diffusers_fsdp_lora_adapter_switch(strategy):
         assert filled[0] > 0
 
         default_1 = _rank0_params(wg.collect_lora_params("default"))
-        old_2 = _rank0_params(wg.collect_lora_params("old"))
+        old_1 = _rank0_params(wg.collect_lora_params("old"))
         _lora_params_differ(default_1, default_0)
-        _lora_params_close(old_2, old_1)
-
-        wg.ema_update_adapter(source="default", target="old", decay=0.9)
-        old_3 = _rank0_params(wg.collect_lora_params("old"))
-        _assert_ema_blend(old_3, old_2, default_1, decay=0.9)
+        _lora_params_differ(default_1, old_1)
     finally:
         ray.shutdown()
         shutil.rmtree(tmp_dir, ignore_errors=True)

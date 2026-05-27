@@ -15,7 +15,6 @@
 
 from contextlib import contextmanager, nullcontext
 
-import torch
 from peft import LoraConfig
 from verl.utils.py_functional import convert_to_regular_types
 
@@ -100,41 +99,6 @@ class LoRAAdapterMixin:
             yield
         finally:
             self._set_adapter("default")
-
-    def _active_adapter_trainable_params(self, adapter_name: str) -> list[torch.nn.Parameter]:
-        peft_model = self._peft_module
-        if not hasattr(peft_model, "set_adapter"):
-            raise AttributeError("Module does not support PEFT adapter selection.")
-        peft_model.set_adapter(adapter_name)
-        return list(filter(lambda param: param.requires_grad, peft_model.parameters()))
-
-    def copy_adapter(self, source: str = "default", target: str = "old") -> None:
-        """Copy LoRA state between named policy adapters."""
-        with self._adapter_state_context(), torch.no_grad():
-            source_params = self._active_adapter_trainable_params(source)
-            target_params = self._active_adapter_trainable_params(target)
-            if len(source_params) != len(target_params) or not source_params:
-                raise ValueError(
-                    f"Adapter copy {source!r} -> {target!r} found mismatched params: "
-                    f"{len(source_params)} vs {len(target_params)}"
-                )
-            for source_param, target_param in zip(source_params, target_params, strict=True):
-                target_param.copy_(source_param)
-
-    def ema_update_adapter(self, source: str = "default", target: str = "old", decay: float = 0.0) -> None:
-        """EMA-update target adapter parameters from source adapter parameters."""
-        if not 0.0 <= decay <= 1.0:
-            raise ValueError(f"Adapter EMA decay must be in [0, 1], got {decay}.")
-        with self._adapter_state_context(), torch.no_grad():
-            source_params = self._active_adapter_trainable_params(source)
-            target_params = self._active_adapter_trainable_params(target)
-            if len(source_params) != len(target_params) or not source_params:
-                raise ValueError(
-                    f"Adapter EMA {source!r} -> {target!r} found mismatched params: "
-                    f"{len(source_params)} vs {len(target_params)}"
-                )
-            for source_param, target_param in zip(source_params, target_params, strict=True):
-                target_param.lerp_(source_param, 1.0 - decay)
 
     @contextmanager
     def disable_adapter(self):

@@ -30,13 +30,12 @@ Engine Workers
 .. autoclass:: verl_omni.workers.engine_workers.TrainingWorker
    :members: __init__, reset, set_loss_fn, to,
              train_mini_batch, train_batch, infer_batch,
-             save_checkpoint, load_checkpoint, copy_adapter, ema_update_adapter
+             save_checkpoint, load_checkpoint
 
 .. autoclass:: verl_omni.workers.engine_workers.ActorRolloutRefWorker
    :members: __init__, init_model,
              compute_log_prob, compute_ref_log_prob, update_actor,
-             update_weights, save_checkpoint, load_checkpoint,
-             copy_adapter, ema_update_adapter
+             update_weights, save_checkpoint, load_checkpoint
 
 Diffusers FSDP Engine
 ~~~~~~~~~~~~~~~~~~~~~
@@ -81,7 +80,7 @@ Reusable PEFT/LoRA helpers for named policy adapters (e.g. ``default`` and ``old
 Used by :class:`~verl_omni.workers.engine.fsdp.diffusers_impl.DiffusersFSDPEngine`.
 
 .. autoclass:: verl_omni.workers.engine.lora_adapter_mixin.LoRAAdapterMixin
-   :members: copy_adapter, ema_update_adapter, use_adapter, disable_adapter
+   :members: use_adapter, disable_adapter
 
 Loss Functions
 ~~~~~~~~~~~~~~~~~
