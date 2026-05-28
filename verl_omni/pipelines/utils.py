@@ -16,6 +16,7 @@ from typing import Optional
 
 import torch
 from diffusers import ModelMixin, SchedulerMixin
+from diffusers.training_utils import compute_density_for_timestep_sampling
 from tensordict import TensorDict
 from verl.utils.device import get_device_name
 
@@ -97,13 +98,19 @@ def sample_noise_and_timesteps(
 
     pair_count = batch_size // 2
     pair_noise = torch.randn_like(latents[:pair_count])
-    timestep_indices = torch.randint(
-        0,
-        len(scheduler.timesteps),
-        (pair_count,),
-        device=latents.device,
+
+    # Sample a random timestep for each image
+    # for weighting schemes where we sample timesteps non-uniformly
+    u = compute_density_for_timestep_sampling(
+        weighting_scheme="logit_normal",
+        batch_size=pair_count,
+        logit_mean=0,
+        logit_std=1,
+        mode_scale=1.29,
     )
-    pair_timesteps = scheduler.timesteps.to(device=latents.device)[timestep_indices]
+    indices = (u * scheduler.config.num_train_timesteps).long()
+    pair_timesteps = scheduler.timesteps[indices].to(device=latents.device)
+
     noise = pair_noise.repeat_interleave(2, dim=0)
     timesteps = pair_timesteps.repeat_interleave(2, dim=0)
     return noise, timesteps
@@ -114,6 +121,18 @@ def _validate_adjacent_pair_values(values: torch.Tensor, name: str) -> None:
         raise ValueError(f"DPO flow training expects `{name}` to have an even batch dimension.")
     if not torch.allclose(values[0::2], values[1::2]):
         raise ValueError(f"DPO flow training expects adjacent chosen/rejected samples to share `{name}`.")
+
+
+def get_sigmas(noise_scheduler, timesteps, device, n_dim=4, dtype=torch.float32):
+    sigmas = noise_scheduler.sigmas.to(device=device, dtype=dtype)
+    schedule_timesteps = noise_scheduler.timesteps.to(device)
+    timesteps = timesteps.to(device)
+    step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
+
+    sigma = sigmas[step_indices].flatten()
+    while len(sigma.shape) < n_dim:
+        sigma = sigma.unsqueeze(-1)
+    return sigma
 
 
 def prepare_noisy_latents(
@@ -137,10 +156,7 @@ def prepare_noisy_latents(
     if hasattr(scheduler, "scale_noise"):
         noisy_latents = scheduler.scale_noise(latents, timesteps, noise)
     else:
-        scheduler_timesteps = scheduler.timesteps.to(device=latents.device)
-        timestep_indices = (scheduler_timesteps[None, :] - timesteps[:, None]).abs().argmin(dim=1)
-        sigmas = scheduler.sigmas.to(device=latents.device, dtype=latents.dtype)[timestep_indices]
-        sigmas = sigmas.view(-1, *([1] * (latents.ndim - 1)))
+        sigmas = get_sigmas(scheduler, timesteps, latents.device, n_dim=latents.ndim, dtype=latents.dtype)
         noisy_latents = (1.0 - sigmas) * latents + sigmas * noise
 
     return noisy_latents, noise, timesteps
