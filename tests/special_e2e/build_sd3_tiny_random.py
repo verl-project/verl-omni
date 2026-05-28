@@ -165,14 +165,16 @@ def get_dummy_sd3_components(*, hidden_size: int = 8, seed: int = 42) -> dict[st
     )
 
     torch.manual_seed(seed + 4)
+    vae_channels = hidden_size * 2
     vae = AutoencoderKL(
         sample_size=256,
         in_channels=3,
         out_channels=3,
-        block_out_channels=(hidden_size, hidden_size * 2),
+        # Keep every down/up block at the same width to avoid GroupNorm channel mismatches.
+        block_out_channels=(vae_channels, vae_channels, vae_channels, vae_channels),
         layers_per_block=1,
         latent_channels=16,
-        norm_num_groups=2,
+        norm_num_groups=4,
         use_quant_conv=True,
         use_post_quant_conv=True,
         shift_factor=0.0609,
