@@ -21,6 +21,7 @@ rewards_services/api_services/ that accept the standard payload format:
     Response: pickle-serialized {"scores": List[float]}
 """
 
+import asyncio
 import io
 import logging
 import pickle
@@ -51,6 +52,12 @@ def _serialize_image(pil_image: Image.Image) -> bytes:
     return buf.getvalue()
 
 
+def _prepare_image_bytes(image: torch.Tensor) -> bytes:
+    """Convert image tensor to JPEG bytes (CPU-heavy, run in thread pool)."""
+    pil_image = _tensor_to_pil(image)
+    return _serialize_image(pil_image)
+
+
 async def compute_score(
     solution_image: torch.Tensor,
     ground_truth: str,
@@ -67,8 +74,8 @@ async def compute_score(
     Returns:
         dict with "score" key.
     """
-    pil_image = _tensor_to_pil(solution_image)
-    image_bytes = _serialize_image(pil_image)
+    loop = asyncio.get_event_loop()
+    image_bytes = await loop.run_in_executor(None, _prepare_image_bytes, solution_image)
 
     payload = pickle.dumps(
         {
