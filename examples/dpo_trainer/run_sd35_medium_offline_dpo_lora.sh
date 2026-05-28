@@ -27,7 +27,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.algorithm=dpo \
     actor_rollout_ref.model.architecture=StableDiffusion3Pipeline \
     actor_rollout_ref.model.model_type=diffusion_dp_model \
-    actor_rollout_ref.model.custom_chat_template="$custom_chat_template" \
+    actor_rollout_ref.model.custom_chat_template="\"$custom_chat_template\"" \
     actor_rollout_ref.model.external_lib=verl_omni.pipelines.sd3_dpo \
     actor_rollout_ref.model.lora_rank=32 \
     actor_rollout_ref.model.lora_alpha=64 \
