@@ -104,6 +104,22 @@ We have provided a script to enable non-cfg full-weight Qwen-Image OCR training.
 bash examples/flowgrpo_trainer/run_qwen_image_ocr.sh
 ```
 
+### Multi-node training (replica-level load balancing)
+
+For scaling Flow-GRPO beyond a single node, a multi-node reference script is provided that follows the design in [RFC #117](https://github.com/verl-project/verl-omni/issues/117): rollout `tensor_model_parallel_size=1` / `data_parallel_size=1` so each GPU becomes an independent `vLLMOmniReplica`, with verl's `GlobalRequestLoadBalancer` dispatching prompts via least-connection routing. Weight sync stays strictly intra-node via ZMQ IPC.
+
+```bash
+# On head node:
+ray start --head --port=6379 --num-gpus=8 \
+    --node-ip-address=$HEAD_IP --dashboard-host=0.0.0.0
+# On each worker node:
+ray start --address=$HEAD_IP:6379 --num-gpus=8
+# Then on the head node:
+NNODES=2 GPUS_PER_NODE=8 bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_multinode.sh
+```
+
+The script is parameterized via `NNODES` and `GPUS_PER_NODE`, defaulting to `2 x 8 = 16` GPUs. Batch sizes are scaled linearly from the 4-GPU baseline. For NCCL cross-node setup (`NCCL_SOCKET_IFNAME`, IB/RoCE), see the script header.
+
 
 ## Performance
 
