@@ -73,11 +73,18 @@ class VisualRewardManager(RewardManagerBase):
         extra_info["num_turns"] = num_turns
         extra_info["rollout_reward_scores"] = rollout_reward_scores
 
+        rm_rollout = self.config.reward.reward_model.rollout
+        # Only forward max_tokens and the determinism seed; keep the scorer's own sampling defaults.
+        sampling_params = {"max_tokens": getattr(rm_rollout, "response_length", None) or 4096}
+        if rm_rollout.get("full_determinism", False):
+            sampling_params["seed"] = rm_rollout.get("seed", 42)
+
         extra_reward_kwargs = (
             {
                 "reward_router_address": self.reward_router_address,
                 "reward_model_tokenizer": self.reward_model_tokenizer,
                 "model_name": self.config.reward.reward_model.model_path,
+                "sampling_params": sampling_params,
             }
             if self.reward_router_address is not None
             else {}
