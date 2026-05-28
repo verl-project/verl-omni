@@ -706,14 +706,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         Args:
             global_steps: Current global training step count, passed to rollout for
                 logging/tracking.
-            mode: Weight update strategy. Supported values:
-                - ``"auto"``: Resolve from
-                  ``config.rollout.checkpoint_engine.backend`` (default).
-                - ``"naive"``: Direct in-process weight sync between colocated trainer
-                  and rollout. Rollout must be in sleep mode before this call.
-                - Any other value: Delegate to
-                  :meth:`checkpoint_engine.send_weights` for asynchronous weight
-                  transfer via checkpoint engine.
+            mode: Weight update strategy. ``"auto"`` resolves from
+                ``config.rollout.checkpoint_engine.backend``; ``"naive"`` uses direct
+                colocated sync; any other value delegates to
+                ``checkpoint_engine.send_weights``.
         """
 
         # Resolve mode: "auto" falls back to config, explicit values take precedence
