@@ -5,7 +5,7 @@
 #       DirectPreferenceRayTrainer -> FSDP LoRA on actor-only workers (no rollout/reward).
 #
 # Requires: diffusers
-# Builds a tiny local SD3 checkpoint from config (random weights, no HF weight download)
+# Builds a tiny local SD3 checkpoint fully offline (random weights, no Hub access)
 # at ~/models/tiny-random/stable-diffusion-3-tiny-random unless MODEL_PATH is overridden.
 #
 # Override via env: NUM_GPUS, MODEL_PATH, DATA_DIR, DATA_FILE, TOTAL_TRAIN_STEPS, NUM_PAIRS
