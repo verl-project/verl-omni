@@ -4,17 +4,21 @@
 # Flow: construct parquet (precomputed latents/embeddings) -> offline DPO dataset ->
 #       DirectPreferenceRayTrainer -> FSDP LoRA on actor-only workers (no rollout/reward).
 #
-# Requires: diffusers, yujiepan/stable-diffusion-3-tiny-random (or MODEL_PATH override)
+# Requires: diffusers
+# Builds a tiny local SD3 checkpoint from config (random weights, no HF weight download)
+# at ~/models/tiny-random/stable-diffusion-3-tiny-random unless MODEL_PATH is overridden.
 #
 # Override via env: NUM_GPUS, MODEL_PATH, DATA_DIR, DATA_FILE, TOTAL_TRAIN_STEPS, NUM_PAIRS
 set -xeuo pipefail
 
 NUM_GPUS=${NUM_GPUS:-1}
-MODEL_PATH=${MODEL_PATH:-yujiepan/stable-diffusion-3-tiny-random}
+MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/stable-diffusion-3-tiny-random}
 DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_offline_dpo}
 DATA_FILE=${DATA_FILE:-${DATA_DIR}/smoke.parquet}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-1}
 NUM_PAIRS=${NUM_PAIRS:-2}
+
+python3 tests/special_e2e/build_sd3_tiny_random.py --output-dir "${MODEL_PATH}"
 
 train_batch_size=${NUM_PAIRS}
 # Each parquet row expands to [win, lose]; collated batch size is 2 * NUM_PAIRS.

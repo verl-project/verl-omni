@@ -27,7 +27,7 @@ import torch
 from PIL import Image
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful image generation assistant."
-DEFAULT_MODEL_PATH = "yujiepan/stable-diffusion-3-tiny-random"
+DEFAULT_MODEL_PATH = os.path.expanduser("~/models/tiny-random/stable-diffusion-3-tiny-random")
 
 USER_PROMPTS = [
     "A red circle on a white background",
@@ -218,7 +218,16 @@ def main():
     from diffusers import StableDiffusion3Pipeline
 
     dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[args.dtype]
-    pipe = StableDiffusion3Pipeline.from_pretrained(args.model_path, torch_dtype=dtype)
+    if not os.path.isdir(args.model_path):
+        raise FileNotFoundError(
+            f"SD3 smoke model not found at {args.model_path!r}. "
+            "Run tests/special_e2e/build_sd3_tiny_random.py first or pass --model_path."
+        )
+    pipe = StableDiffusion3Pipeline.from_pretrained(
+        args.model_path,
+        torch_dtype=dtype,
+        local_files_only=True,
+    )
     pipe.to(device)
 
     rows = build_rows(
