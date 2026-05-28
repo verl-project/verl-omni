@@ -5,8 +5,8 @@ set -x
 WORKSPACE=${WORKSPACE:-$HOME}
 export RAY_DEDUP_LOGS=0
 
-ocr_train_path=$WORKSPACE/data/ocr/train.parquet
-ocr_test_path=$WORKSPACE/data/ocr/test.parquet
+ocr_train_path=$WORKSPACE/data/ocr/qwen_image/train.parquet
+ocr_test_path=$WORKSPACE/data/ocr/qwen_image/test.parquet
 
 model_name=${MODEL_PATH:-$HOME/huggingface/Qwen-Image}
 reward_model_name=${REWARD_MODEL_PATH:-$HOME/huggingface/Qwen3-VL-8B-Instruct}

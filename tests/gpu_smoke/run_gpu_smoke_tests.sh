@@ -221,7 +221,8 @@ run_selected_test 0 "vllm-omni rollout" \
 # ── Test 1: diffusion agent loop ──────────────────────────────────────────────
 run_selected_test 1 "diffusion agent loop" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
-    pytest -s tests/agent_loop/test_diffusion_agent_loop.py
+    pytest -s tests/agent_loop/test_diffusion_agent_loop.py \
+        tests/agent_loop/test_diffusion_rollout_seed_gpu.py
 
 # ── Test 2: visual reward manager ─────────────────────────────────────────────
 run_selected_test 2 "visual reward manager" \
