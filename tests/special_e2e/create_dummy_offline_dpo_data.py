@@ -60,6 +60,16 @@ def _encode_image_latent(pipe, image: Image.Image, height: int, width: int, devi
     return latents[0].detach().cpu()
 
 
+def _normalize_sd3_tokenizer_limits(pipe) -> None:
+    """Ensure CLIP tokenizers expose a sane max length for diffusers encode_prompt."""
+    clip_max_length = 77
+    for name in ("tokenizer", "tokenizer_2"):
+        tokenizer = getattr(pipe, name, None)
+        if tokenizer is not None:
+            tokenizer.model_max_length = clip_max_length
+    pipe.tokenizer_max_length = clip_max_length
+
+
 def _encode_prompt_tensors(
     pipe,
     prompt: str,
@@ -229,6 +239,7 @@ def main():
         local_files_only=True,
     )
     pipe.to(device)
+    _normalize_sd3_tokenizer_limits(pipe)
 
     rows = build_rows(
         num_pairs=args.num_pairs,

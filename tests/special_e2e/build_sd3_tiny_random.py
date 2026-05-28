@@ -87,6 +87,8 @@ def _build_tiny_clip_tokenizer() -> CLIPTokenizerFast:
         tokenizer_object=tokenizer,
         bos_token="<|startoftext|>",
         eos_token="<|endoftext|>",
+        pad_token="<|endoftext|>",
+        model_max_length=77,
     )
 
 
@@ -121,6 +123,7 @@ def get_dummy_sd3_components(*, hidden_size: int = 8, seed: int = 42) -> dict[st
         vocab_size=1000,
         hidden_act="gelu",
         projection_dim=hidden_size,
+        max_position_embeddings=77,
     )
 
     torch.manual_seed(seed)
