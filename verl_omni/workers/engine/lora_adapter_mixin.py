@@ -56,11 +56,6 @@ class LoRAAdapterMixin:
 
         return module
 
-    @property
-    def _peft_module(self):
-        """PEFT model that owns adapter state (unwraps FSDP when applicable)."""
-        return getattr(self.module, "_fsdp_wrapped_module", self.module)
-
     @contextmanager
     def _adapter_state_context(self):
         """Open writable adapter parameter access (FSDP summon when applicable)."""
@@ -86,10 +81,9 @@ class LoRAAdapterMixin:
                 aggressive_empty_cache(force_sync=True)
 
     def _set_adapter(self, name: str):
-        peft_module = self._peft_module
-        if not hasattr(peft_module, "set_adapter"):
+        if not hasattr(self.module, "set_adapter"):
             raise AttributeError(f"Module does not support set_adapter({name!r})")
-        peft_module.set_adapter(name)
+        self.module.set_adapter(name)
 
     @contextmanager
     def use_adapter(self, name: str):

@@ -584,6 +584,17 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
+    @property
+    def _peft_module(self):
+        """PEFT model that owns adapter state (unwraps FSDP when applicable)."""
+        return getattr(self.module, "_fsdp_wrapped_module", self.module)
+
+    def _set_adapter(self, name: str):
+        peft_module = self._peft_module
+        if not hasattr(peft_module, "set_adapter"):
+            raise AttributeError(f"Module does not support set_adapter({name!r})")
+        peft_module.set_adapter(name)
+
     def get_per_tensor_param(
         self, layered_summon=False, base_sync_done=False, adapter_name: str | None = None, **kwargs
     ):
