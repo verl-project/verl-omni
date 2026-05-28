@@ -632,6 +632,78 @@ class BaseRayDiffusionTrainer(ABC):
 
     def _init_online_rollout_stack(self, actor_rollout_resource_pool):
         """Initialize rollout, reward, and checkpoint engines (online sampling only)."""
+        # Deterministic reward model inference when `deterministic=true`
+        from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
+
+        class _DeterministicRMHttpServer(vLLMHttpServer):
+            """vLLMHttpServer subclass that applies full determinism in _post_init for RM actors."""
+
+            def _post_init(self, cuda_visible_devices: str) -> None:
+                seed = int(os.environ.get("VERL_OMNI_RM_SEED", "42"))
+                from verl.workers.engine.utils import enable_full_determinism
+
+                enable_full_determinism(seed)
+                super()._post_init(cuda_visible_devices)
+
+        deterministic = self.config.reward.reward_model.get("deterministic", False)
+        seed = self.config.reward.reward_model.get("seed", 42)
+        if deterministic and self.use_rm:
+            # Monkey-patch vLLMReplica to inject deterministic env vars into RM actor
+            # runtime_env and swap server_class. The is_reward_model guard ensures
+            # rollout actors are unaffected.
+            if not hasattr(vLLMReplica, "_reward_deterministic"):
+                vLLMReplica._reward_deterministic = False
+                _original_launch_servers = vLLMReplica.launch_servers
+
+                async def _deterministic_launch_servers(self):
+                    if self.is_reward_model and self._reward_deterministic:
+                        original_server_class = self.server_class
+
+                        class _DeterministicServerProxy:
+                            """Inject PYTHONHASHSEED + seed signal into runtime_env and swap to deterministic server."""
+
+                            def __init__(self, deterministic_server_class, rm_seed):
+                                self.original = deterministic_server_class
+                                self._rm_seed = rm_seed
+
+                            def options(self, **kwargs):
+                                runtime_env = kwargs.setdefault("runtime_env", {})
+                                env_vars = runtime_env.setdefault("env_vars", {})
+                                env_vars["PYTHONHASHSEED"] = str(self._rm_seed)
+                                env_vars["VERL_OMNI_RM_SEED"] = str(self._rm_seed)
+                                return self.original.options(**kwargs)
+
+                            def __getattr__(self, name):
+                                return getattr(self.original, name)
+
+                        self.server_class = _DeterministicServerProxy(
+                            ray.remote(_DeterministicRMHttpServer), self._rm_seed
+                        )
+                        try:
+                            await _original_launch_servers(self)
+                        finally:
+                            self.server_class = original_server_class
+                    else:
+                        await _original_launch_servers(self)
+
+                vLLMReplica.launch_servers = _deterministic_launch_servers
+
+            vLLMReplica._reward_deterministic = True
+            vLLMReplica._rm_seed = seed
+        else:
+            if hasattr(vLLMReplica, "_reward_deterministic"):
+                vLLMReplica._reward_deterministic = False
+
+        # Auto-set VLM scoring function when RM enabled + no custom_reward_function provided
+        if self.use_rm:
+            custom_fn_cfg = self.config.reward.custom_reward_function
+            if custom_fn_cfg.path is None:
+                from omegaconf import OmegaConf
+
+                with OmegaConf.open_dict(custom_fn_cfg):
+                    custom_fn_cfg.path = "verl_omni/utils/reward_score/genrm_ocr.py"
+                    custom_fn_cfg.name = "compute_score_ocr"
+
         # create reward loop manager
         from verl.experimental.reward_loop import RewardLoopManager
 
