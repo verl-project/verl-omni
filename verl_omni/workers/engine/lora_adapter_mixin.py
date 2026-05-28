@@ -81,9 +81,10 @@ class LoRAAdapterMixin:
                 aggressive_empty_cache(force_sync=True)
 
     def _set_adapter(self, name: str):
-        if not hasattr(self.module, "set_adapter"):
+        module = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        if not hasattr(module, "set_adapter"):
             raise AttributeError(f"Module does not support set_adapter({name!r})")
-        self.module.set_adapter(name)
+        module.set_adapter(name)
 
     @contextmanager
     def use_adapter(self, name: str):

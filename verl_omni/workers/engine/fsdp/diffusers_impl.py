@@ -584,17 +584,6 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
-    @property
-    def _peft_module(self):
-        """PEFT model that owns adapter state (unwraps FSDP when applicable)."""
-        return getattr(self.module, "_fsdp_wrapped_module", self.module)
-
-    def _set_adapter(self, name: str):
-        peft_module = self._peft_module
-        if not hasattr(peft_module, "set_adapter"):
-            raise AttributeError(f"Module does not support set_adapter({name!r})")
-        peft_module.set_adapter(name)
-
     def get_per_tensor_param(
         self, layered_summon=False, base_sync_done=False, adapter_name: str | None = None, **kwargs
     ):
@@ -606,7 +595,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         peft_config = None
 
-        peft_model = self._peft_module
+        peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
         if hasattr(peft_model, "peft_config"):  # LoRA
             peft_config = peft_model.peft_config.get("default", None)
             adapter_ctx = self.use_adapter(adapter_name) if adapter_name is not None else nullcontext()
@@ -623,7 +612,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         else:
             params = self.module.state_dict()
 
-        params = convert_weight_keys(params, self._peft_module)
+        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
 
         log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
         if self._is_offload_param:
