@@ -821,6 +821,7 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
                 sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
             )
 
+            # TODO (mike): refactor the data preparation logic here
             if micro_batch.get("ref_log_prob", None) is not None:
                 data["ref_log_prob"] = micro_batch["ref_log_prob"][:, step]
 
@@ -829,6 +830,9 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
 
             if micro_batch.get("old_prev_sample_mean", None) is not None:
                 data["old_prev_sample_mean"] = micro_batch["old_prev_sample_mean"][:, step]
+
+            if micro_batch.get("rollout_is_weights", None) is not None:
+                data["rollout_is_weights"] = micro_batch["rollout_is_weights"][:, step]
 
             loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
         else:
