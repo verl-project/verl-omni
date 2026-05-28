@@ -73,9 +73,11 @@ class LoRAAdapterMixin:
         ctx = fsdp_summon_full_params(self.module, writeback=True) if is_fsdp_module else nullcontext()
         try:
             with ctx:
-                yield
+                try:
+                    yield
+                finally:
+                    self._set_adapter("default")
         finally:
-            self._set_adapter("default")
             if is_offload_param:
                 offload_fsdp_model_to_cpu(self.module)
                 aggressive_empty_cache(force_sync=True)
