@@ -90,16 +90,30 @@ def sample_noise_and_timesteps(
     latents: torch.Tensor,
     scheduler: SchedulerMixin,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Sample shared flow-matching noise and timesteps for a latent batch."""
-    noise = torch.randn_like(latents)
+    """Sample pairwise flow-matching noise and timesteps for adjacent DPO pairs."""
+    batch_size = latents.shape[0]
+    if batch_size % 2 != 0:
+        raise ValueError("DPO flow training expects an even batch laid out as [chosen0, rejected0, ...].")
+
+    pair_count = batch_size // 2
+    pair_noise = torch.randn_like(latents[:pair_count])
     timestep_indices = torch.randint(
         0,
         len(scheduler.timesteps),
-        (latents.shape[0],),
+        (pair_count,),
         device=latents.device,
     )
-    timesteps = scheduler.timesteps.to(device=latents.device)[timestep_indices]
+    pair_timesteps = scheduler.timesteps.to(device=latents.device)[timestep_indices]
+    noise = torch.cat([pair_noise, pair_noise], dim=0)
+    timesteps = torch.cat([pair_timesteps, pair_timesteps], dim=0)
     return noise, timesteps
+
+
+def _validate_adjacent_pair_values(values: torch.Tensor, name: str) -> None:
+    if values.shape[0] % 2 != 0:
+        raise ValueError(f"DPO flow training expects `{name}` to have an even batch dimension.")
+    if not torch.allclose(values[0::2], values[1::2]):
+        raise ValueError(f"DPO flow training expects adjacent chosen/rejected samples to share `{name}`.")
 
 
 def prepare_noisy_latents(
@@ -108,7 +122,7 @@ def prepare_noisy_latents(
     noise: torch.Tensor | None = None,
     timesteps: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build noisy latents and return the aligned noise/timesteps tensors."""
+    """Build noisy latents with shared noise/timesteps for adjacent DPO pairs."""
     if (noise is None) != (timesteps is None):
         raise KeyError("Diffusion flow training requires `noise` and `timesteps` to be provided together.")
 
@@ -117,6 +131,8 @@ def prepare_noisy_latents(
     else:
         noise = noise.to(device=latents.device, dtype=latents.dtype)
         timesteps = timesteps.to(device=latents.device)
+        _validate_adjacent_pair_values(noise, "noise")
+        _validate_adjacent_pair_values(timesteps, "timesteps")
 
     if hasattr(scheduler, "scale_noise"):
         noisy_latents = scheduler.scale_noise(latents, timesteps, noise)
