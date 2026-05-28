@@ -68,11 +68,15 @@ class MultiVisualRewardManager(VisualRewardManager):
 
         self._sub_rewards = []
         total_weight = 0.0
+        _reserved_keys = {"path", "name", "weight"}
         for key, entry in reward_functions_cfg.items():
             path = entry["path"]
             name = entry["name"]
             weight = float(entry.get("weight", 1.0))
             total_weight += weight
+
+            # Collect extra config fields (beyond path/name/weight) to pass to compute_score
+            extra_args = {k: v for k, v in entry.items() if k not in _reserved_keys}
 
             fn = load_extern_object(path, name)
             sig = inspect.signature(fn)
@@ -85,6 +89,7 @@ class MultiVisualRewardManager(VisualRewardManager):
                     "weight": weight,
                     "sig": sig,
                     "is_async": is_async,
+                    "extra_args": extra_args,
                 }
             )
             logger.info(f"Loaded sub-reward '{key}': {path}:{name} (weight={weight}, async={is_async})")
@@ -139,8 +144,11 @@ class MultiVisualRewardManager(VisualRewardManager):
             weight = sub["weight"]
             sig = sub["sig"]
             is_async = sub["is_async"]
+            extra_args = sub["extra_args"]
 
-            filtered_kwargs = _filter_kwargs(all_kwargs, sig)
+            # Merge per-reward extra config fields into kwargs
+            sub_kwargs = {**all_kwargs, **extra_args}
+            filtered_kwargs = _filter_kwargs(sub_kwargs, sig)
 
             try:
                 if is_async:

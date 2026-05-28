@@ -1,0 +1,82 @@
+"""Generic HTTP reward client for external scorer services.
+
+Sends generated images to an external HTTP scorer service using pickle protocol
+and returns the score. Compatible with all scorer services under
+rewards_services/api_services/ that accept the standard payload format:
+    POST with pickle-serialized {"images": List[bytes], "prompts": List[str], "metadata": dict}
+    Response: pickle-serialized {"scores": List[float]}
+"""
+
+import io
+import logging
+import pickle
+
+import aiohttp
+import numpy as np
+import torch
+from PIL import Image
+
+logger = logging.getLogger(__name__)
+
+
+def _tensor_to_pil(image: torch.Tensor) -> Image.Image:
+    """Convert a CHW float tensor in [0, 1] to a uint8 RGB PIL image."""
+    if image.ndim == 4:
+        image = image[0]
+    image = image.float().permute(1, 2, 0).cpu().numpy()
+    image = (image * 255).round().clip(0, 255).astype(np.uint8)
+    return Image.fromarray(image)
+
+
+def _serialize_image(pil_image: Image.Image) -> bytes:
+    """Serialize a PIL image to JPEG bytes."""
+    if pil_image.mode != "RGB":
+        pil_image = pil_image.convert("RGB")
+    buf = io.BytesIO()
+    pil_image.save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+async def compute_score(
+    solution_image: torch.Tensor,
+    ground_truth: str,
+    server_url: str,
+    **kwargs,
+) -> dict:
+    """Compute reward by calling an external HTTP scorer service.
+
+    Args:
+        solution_image: Generated image tensor (C, H, W) or (N, C, H, W).
+        ground_truth: Prompt string passed directly to the scorer service.
+        server_url: Full URL of the scorer service (e.g., "http://localhost:19082").
+
+    Returns:
+        dict with "score" key.
+    """
+    pil_image = _tensor_to_pil(solution_image)
+    image_bytes = _serialize_image(pil_image)
+
+    payload = pickle.dumps(
+        {
+            "images": [image_bytes],
+            "prompts": [ground_truth],
+            "metadata": {},
+        }
+    )
+
+    timeout = aiohttp.ClientTimeout(total=120)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(server_url, data=payload) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                logger.error(f"Scorer server returned {resp.status}: {error_text}")
+                return {"score": 0.0}
+            response_data = pickle.loads(await resp.read())
+
+    if "error" in response_data:
+        logger.error(f"Scorer server error: {response_data['error']}")
+        return {"score": 0.0}
+
+    scores = response_data["scores"]
+    score = float(scores[0]) if scores else 0.0
+    return {"score": score}
