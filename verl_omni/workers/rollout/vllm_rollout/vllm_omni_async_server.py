@@ -138,6 +138,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
     def _post_init(self, cuda_visible_devices: str) -> None:
         """Diffusion needs a PIL→tensor converter; AR does not."""
+        if getattr(self.config, "full_determinism", False):
+            from verl.workers.engine.utils import enable_full_determinism
+
+            rollout_seed = getattr(self.config, "seed", 42)
+            enable_full_determinism(seed=rollout_seed)
+            os.environ["VERL_SEED"] = str(rollout_seed)
+            os.environ["VLLM_BATCH_INVARIANT"] = "1"
         if not self._ar_mode:
             self._to_tensor = T.PILToTensor()
         self._lora_request_cache: LoRARequest | None | object = _LORA_REQUEST_CACHE_MISS
@@ -569,6 +576,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             else:
                 sampling_params["logprobs"] = None
             sampling_params.setdefault("repetition_penalty", getattr(self.config, "repetition_penalty", 1.0))
+            if getattr(self.config, "full_determinism", False):
+                sampling_params.setdefault("seed", getattr(self.config, "seed", 42))
             params = SamplingParams(max_tokens=max_tokens, **sampling_params)
 
             prompt = {"prompt_token_ids": prompt_ids}

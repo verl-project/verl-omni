@@ -66,6 +66,29 @@ def main(config):
     run_diffusion(config)
 
 
+def _determinism_requested(config) -> bool:
+    """Whether full determinism is requested.
+
+    Currently only reward inference determinism is supported, gated on
+    ``reward.reward_model.full_determinism``. Future work will add a single
+    top-level switch covering both rollout and reward; only this function
+    will change then.
+    """
+    return bool(config.reward.reward_model.get("full_determinism", False))
+
+
+def _export_full_determinism_env(config) -> None:
+    """Set determinism switch env vars before ray.init() so actors inherit them.
+
+    Only switch flags (VERL_FULL_DETERMINISM, VLLM_BATCH_INVARIANT, PYTHONHASHSEED);
+    floating-point vars are set in each actor's enable_full_determinism(), as in verl.
+    """
+    rm_cfg = config.reward.reward_model
+    os.environ["VERL_FULL_DETERMINISM"] = "1"
+    os.environ["VLLM_BATCH_INVARIANT"] = "1"
+    os.environ["PYTHONHASHSEED"] = str(rm_cfg.get("seed", 42))
+
+
 def run_diffusion(config, task_runner_class=None) -> None:
     """Initialize Ray and run distributed diffusion training.
 
@@ -75,6 +98,10 @@ def run_diffusion(config, task_runner_class=None) -> None:
                 settings, model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    # Before ray.init() so actors inherit these via runtime_env.
+    if _determinism_requested(config):
+        _export_full_determinism_env(config)
+
     # Check if Ray is not initialized
     if not ray.is_initialized():
         # Initialize Ray with a local cluster configuration
