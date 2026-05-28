@@ -78,14 +78,17 @@ async def compute_score(
         }
     )
 
-    timeout = aiohttp.ClientTimeout(total=120)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(server_url, data=payload) as resp:
-            if resp.status != 200:
-                error_text = await resp.text()
-                logger.error(f"Scorer server returned {resp.status}: {error_text}")
-                return {"score": 0.0}
-            response_data = pickle.loads(await resp.read())
+    if not hasattr(compute_score, "_session") or compute_score._session.closed:
+        timeout = aiohttp.ClientTimeout(total=120)
+        compute_score._session = aiohttp.ClientSession(timeout=timeout)
+
+    session = compute_score._session
+    async with session.post(server_url, data=payload) as resp:
+        if resp.status != 200:
+            error_text = await resp.text()
+            logger.error(f"Scorer server returned {resp.status}: {error_text}")
+            return {"score": 0.0}
+        response_data = pickle.loads(await resp.read())
 
     if "error" in response_data:
         logger.error(f"Scorer server error: {response_data['error']}")
