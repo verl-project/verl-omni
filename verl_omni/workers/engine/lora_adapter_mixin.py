@@ -88,12 +88,20 @@ class LoRAAdapterMixin:
 
     @contextmanager
     def use_adapter(self, name: str):
-        """Temporarily select a named PEFT adapter."""
-        self._set_adapter(name)
-        try:
-            yield
-        finally:
-            self._set_adapter("default")
+        """Temporarily select a named PEFT adapter.
+
+        ``"reference"`` is a logical policy state (see ``policy_state_adapters``)
+        that runs with all LoRA adapters disabled, not a registered PEFT adapter.
+        """
+        if name == "reference":
+            with self.disable_adapter():
+                yield
+        else:
+            self._set_adapter(name)
+            try:
+                yield
+            finally:
+                self._set_adapter("default")
 
     @contextmanager
     def disable_adapter(self):
