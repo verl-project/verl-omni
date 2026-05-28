@@ -130,3 +130,9 @@ logs
 log
 outputs
 .history
+
+# editor / assistant workspace artifacts
+.cursor/
+.cursorindexingignore
+.specstory/
+.run_logs/
