@@ -59,18 +59,18 @@ class LoRAAdapterMixin:
     @contextmanager
     def _adapter_state_context(self):
         """Open writable adapter parameter access (FSDP summon when applicable)."""
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
         from verl.utils.fsdp_utils import fsdp_version, load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
         from verl.utils.memory_utils import aggressive_empty_cache
 
-        is_fsdp_module = fsdp_version(self.module) == 1
-        is_fsdp2_module = fsdp_version(self.module) == 2
+        from verl_omni.utils.fsdp_utils import fsdp_summon_full_params
+
+        is_fsdp_module = fsdp_version(self.module) in (1, 2)
         is_offload_param = getattr(self, "_is_offload_param", False)
         origin_module_device = next(self.module.parameters()).device.type
-        if (is_fsdp_module or is_fsdp2_module) and (is_offload_param or origin_module_device == "cpu"):
+        if is_fsdp_module and (is_offload_param or origin_module_device == "cpu"):
             load_fsdp_model_to_gpu(self.module)
 
-        ctx = FSDP.summon_full_params(self.module, writeback=True, recurse=True) if is_fsdp_module else nullcontext()
+        ctx = fsdp_summon_full_params(self.module, writeback=True) if is_fsdp_module else nullcontext()
         try:
             with ctx:
                 yield
