@@ -1177,8 +1177,8 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
     def _validate(self):
         if self.is_offline and not hasattr(self, "async_rollout_manager"):
-            print("Skipping validation generation because offline DPO rollout is disabled.")
-            return {"val/offline_dpo/skipped": 1.0}
+            print("Skipping validation generation because offline rollout is disabled.")
+            return {"val/offline/skipped": 1.0}
         return super()._validate()
 
     def _update_actor(self, batch: DataProto) -> DataProto:
