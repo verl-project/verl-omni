@@ -16,7 +16,8 @@
 
 Sends generated images to an external HTTP scorer service using pickle protocol
 and returns the score. Compatible with all scorer services under
-rewards_services/api_services/ that accept the standard payload format:
+rewards_services/api_services/ that accept the standard payload format::
+
     POST with pickle-serialized {"images": List[bytes], "prompts": List[str], "metadata": dict}
     Response: pickle-serialized {"scores": List[float]}
 """
