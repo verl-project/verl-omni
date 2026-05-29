@@ -16,6 +16,7 @@ plugs into the standard :class:`verl.experimental.reward_loop.RewardLoopManager`
    verl_omni.reward_loop.reward_manager.VisualRewardManager
    verl_omni.utils.reward_score.default_compute_score_image
    verl_omni.utils.reward_score.http_scorer_client.compute_score
+   verl_omni.utils.reward_score.unified_reward.compute_score_unified_reward
 
 Reward Manager
 ~~~~~~~~~~~~~~~~~
