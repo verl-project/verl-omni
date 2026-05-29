@@ -498,7 +498,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         model_config: HFModelConfig | DiffusionModelConfig = omega_conf_to_dataclass(self.config.model)
-        is_diffusion = model_config.get("model_type", "language_model") == "diffusion_model"
+        is_diffusion = model_config.get("model_type", "language_model") in ("diffusion_model", "diffusion_dp_model")
 
         # 1. build reference model
         if "ref" in self.role:
@@ -530,11 +530,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
             # assign engine configs
-            ref_training_config.engine_config.infer_micro_batch_size_per_gpu = (
-                self.config.ref.ppo_micro_batch_size_per_gpu
-            )
+            ref_infer_micro_bsz = self.config.ref.ppo_micro_batch_size_per_gpu
+            if ref_infer_micro_bsz is None and is_diffusion:
+                # prepare_micro_batches requires a finite micro-batch; align with actor training micro-batch.
+                ref_infer_micro_bsz = self.config.actor.ppo_micro_batch_size_per_gpu
+            ref_training_config.engine_config.infer_micro_batch_size_per_gpu = ref_infer_micro_bsz
             ref_training_config.engine_config.use_remove_padding = model_config.get("use_remove_padding", False)
-            if not is_diffusion:
+            if is_diffusion:
+                assert ref_training_config.engine_config.infer_micro_batch_size_per_gpu is not None, (
+                    "Diffusion ref infer_batch requires ref.log_prob_micro_batch_size_per_gpu or "
+                    "actor.ppo_micro_batch_size_per_gpu (used by prepare_micro_batches)."
+                )
+            else:
                 ref_training_config.engine_config.use_dynamic_bsz = self.config.ref.use_dynamic_bsz
                 ref_training_config.engine_config.infer_max_token_len_per_gpu = (
                     self.config.ref.ppo_max_token_len_per_gpu
@@ -566,8 +573,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 actor_training_config.engine_config.micro_batch_size_per_gpu = (
                     self.config.actor.ppo_micro_batch_size_per_gpu
                 )
-                actor_training_config.engine_config.infer_micro_batch_size_per_gpu = self.config.rollout.get(
-                    "log_prob_micro_batch_size_per_gpu", None
+                actor_infer_micro_bsz = self.config.rollout.get("log_prob_micro_batch_size_per_gpu", None)
+                if actor_infer_micro_bsz is None:
+                    actor_infer_micro_bsz = self.config.actor.ppo_micro_batch_size_per_gpu
+                actor_training_config.engine_config.infer_micro_batch_size_per_gpu = actor_infer_micro_bsz
+                assert actor_training_config.engine_config.infer_micro_batch_size_per_gpu is not None, (
+                    "Diffusion infer_batch requires rollout.log_prob_micro_batch_size_per_gpu or "
+                    "actor.ppo_micro_batch_size_per_gpu (used by prepare_micro_batches)."
                 )
             else:
                 actor_use_dynamic_bsz = self.config.actor.get("use_dynamic_bsz", False)
@@ -600,7 +612,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.loss_fn = partial(
                     distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
                 )
-            elif model_config.get("model_type", "language_model") == "diffusion_model":
+            elif model_config.get("model_type", "language_model") in ("diffusion_model", "diffusion_dp_model"):
                 self.loss_fn = partial(diffusion_loss, config=actor_config)
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
@@ -654,16 +666,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         aggressive_empty_cache(force_sync=True)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
-    @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
+    @DistProfiler.annotate(color="olive", role="infer_ref_batch")
     @_with_routing_replay_flag(enabled=False)
-    def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
+    def infer_ref_batch(self, data: TensorDict) -> TensorDict:
         output = self.ref.infer_batch(data=data)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
-    @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
+    @DistProfiler.annotate(color="blue", role="infer_actor_batch")
     @_with_routing_replay_flag(enabled=True)
-    def compute_log_prob(self, data: TensorDict) -> TensorDict:
+    def infer_actor_batch(self, data: TensorDict) -> TensorDict:
         output = self.actor.infer_batch(data)
 
         return output.cpu() if output is not None else None

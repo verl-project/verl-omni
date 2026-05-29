@@ -133,6 +133,16 @@ class TestComputeDataMetricsDiffusion:
         metrics = compute_data_metrics_diffusion(batch)
         assert "critic/rewards/mean" in metrics
 
+    def test_dpo_batch_without_advantages_or_returns(self):
+        """Direct-preference batches only carry scalar sample_level_rewards."""
+        tensors = {"sample_level_rewards": torch.tensor([1.0, 0.0, 1.0, 0.0])}
+        non_tensors = {"uid": np.array(["p0", "p0", "p1", "p1"], dtype=object)}
+        batch = DataProto.from_dict(tensors=tensors, non_tensors=non_tensors)
+        metrics = compute_data_metrics_diffusion(batch)
+        assert "critic/rewards/mean" in metrics
+        assert "critic/advantages/mean" not in metrics
+        assert "critic/returns/mean" not in metrics
+
 
 # ---------------------------------------------------------------------------
 # compute_timing_metrics_diffusion
@@ -183,6 +193,12 @@ class TestComputeThroughputMetricsDiffusion:
         timing_raw = {"step": 1.0}
         metrics = compute_throughput_metrics_diffusion(batch, timing_raw, n_gpus=1)
         assert metrics["perf/total_num_images"] == 12
+
+    def test_throughput_uses_rewards_when_advantages_missing(self):
+        tensors = {"sample_level_rewards": torch.zeros(6)}
+        batch = DataProto.from_dict(tensors=tensors, non_tensors={})
+        metrics = compute_throughput_metrics_diffusion(batch, {"step": 2.0}, n_gpus=1)
+        assert metrics["perf/total_num_images"] == 6
 
     def test_throughput_value(self):
         batch_size = 8

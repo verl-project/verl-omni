@@ -11,12 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Shared helpers for diffusion Ray trainers."""
 
-from . import _patch  # noqa: F401 — apply Ulysses mask fix
-from .qwen_image_flow_grpo import *  # noqa: F401, F403
-from .qwen_image_mix_grpo import *  # noqa: F401, F403
-from .sd3_dpo import *  # noqa: F401, F403
+from typing import Any
 
-__all__ = list(qwen_image_flow_grpo.__all__)
-__all__ += list(qwen_image_mix_grpo.__all__)
-__all__ += list(sd3_dpo.__all__)
+
+class NoOpCheckpointManager:
+    """Checkpoint-engine facade used when training does not start rollout replicas."""
+
+    def update_weights(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def sleep_replicas(self) -> None:
+        return None
