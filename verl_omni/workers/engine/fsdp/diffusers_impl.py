@@ -252,16 +252,21 @@ class DiffusersFSDPEngine(BaseEngine):
             }
             module.add_adapter(LoraConfig(**lora_config))
 
-        # Convert LoRA parameters to fp32 for numerical stability during training.
-        for name, param in module.named_parameters():
-            if param.requires_grad:
-                orig_dtype = param.dtype
-                param.data = param.data.to(torch.float32)
-                logger.debug("LoRA param %s: %s -> %s", name, orig_dtype, param.dtype)
+        # Optionally convert LoRA parameters to a target dtype (e.g., fp32).
+        lora_dtype = getattr(self.model_config, "lora_dtype", None)
+        if lora_dtype is not None:
+            from verl.utils.torch_dtypes import PrecisionType
 
-        for submodule in module.modules():
-            if isinstance(submodule, BaseTunerLayer):
-                submodule.cast_input_dtype_enabled = False
+            target_dtype = PrecisionType.to_dtype(lora_dtype)
+            for name, param in module.named_parameters():
+                if param.requires_grad:
+                    orig_dtype = param.dtype
+                    param.data = param.data.to(target_dtype)
+                    logger.debug("LoRA param %s: %s -> %s", name, orig_dtype, param.dtype)
+
+            for submodule in module.modules():
+                if isinstance(submodule, BaseTunerLayer):
+                    submodule.cast_input_dtype_enabled = False
 
         return module
 

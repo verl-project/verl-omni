@@ -55,6 +55,10 @@ exclude_modules: null
 # Path to pre-trained LoRA adapter to load for continued training
 lora_adapter_path: null
 
+# Convert LoRA parameters to a target dtype for numerical stability (e.g., "fp32", "bf16").
+# Default null means no conversion.
+lora_dtype: null
+
 # MTP
 mtp: 
 
