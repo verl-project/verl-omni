@@ -83,6 +83,9 @@ class DiffusionModelConfig(BaseConfig):
     # path to pre-trained LoRA adapter to load for continued training
     lora_adapter_path: Optional[str] = None
 
+    # dtype to convert LoRA parameters to (e.g., "fp32", "bf16"). Default None means no conversion.
+    lora_dtype: Optional[str] = None
+
     mtp: Optional[MtpConfig] = field(default_factory=MtpConfig)
 
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)

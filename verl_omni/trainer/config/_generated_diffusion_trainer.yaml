@@ -275,6 +275,7 @@ actor_rollout_ref:
     target_parameters: null
     exclude_modules: null
     lora_adapter_path: null
+    lora_dtype: null
     mtp:
       _target_: verl.workers.config.MtpConfig
       enable: false
