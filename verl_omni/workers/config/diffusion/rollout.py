@@ -17,6 +17,7 @@ from typing import Optional
 from omegaconf import MISSING
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
+from verl.workers.config.disaggregation import DisaggregationConfig
 from verl.workers.config.model import MtpConfig
 from verl.workers.config.rollout import (
     AgentLoopConfig,
@@ -84,6 +85,10 @@ class DiffusionRolloutConfig(BaseConfig):
     n_gpus_per_node: int = 8
     n: int = 1
 
+    # Base seed for deterministic training rollout RNG. Per-step base is
+    # ``seed + global_step - 1``. null disables rollout seeding.
+    seed: Optional[int] = None
+
     prompt_length: int = 512
 
     dtype: str = "bfloat16"
@@ -146,6 +151,8 @@ class DiffusionRolloutConfig(BaseConfig):
     profiler: Optional[ProfilerConfig] = None
 
     algo: Optional[DiffusionRolloutAlgoConfig] = field(default_factory=DiffusionRolloutAlgoConfig)
+
+    disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
     external_lib: Optional[str] = None
 

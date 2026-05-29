@@ -13,6 +13,7 @@
 # limitations under the License.
 import argparse
 import logging
+import os
 from dataclasses import asdict
 from typing import Any, Optional
 
@@ -21,6 +22,7 @@ import torchvision.transforms as T
 import vllm_omni.entrypoints.cli.serve
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import import_external_libs
+from verl.utils.net_utils import get_free_port
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.utils import run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
@@ -38,6 +40,7 @@ from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.utils.vllm_omni import VLLMOmniHijack
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
 
@@ -89,6 +92,29 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _get_cli_description(self) -> str:
         return "vLLM-Omni CLI"
 
+    # TODO: drop it after updating verl pin (at least 5ff595ac9fcb4)
+    async def launch_server(self, master_address: str = None, master_port: int = None, dp_rpc_port: int = None):
+        """Launch vLLM-Omni engine; coerce null ``rollout.seed`` for engine init only.
+
+        Upstream verl uses ``config.get("seed", 0)``, but Hydra ``seed: null`` sets the
+        attribute to None, so the default is not applied and launch crashes with
+        ``replica_rank + None``. Training rollout seeding stays unset via meta_info.
+        """
+        original_get = self.config.get
+
+        def get_with_engine_seed_default(key: str, default: Any = None) -> Any:
+            if key == "seed":
+                value = original_get(key, default)
+                return 0 if value is None else value
+            return original_get(key, default)
+
+        self.config.get = get_with_engine_seed_default
+        try:
+            await super().launch_server(master_address, master_port, dp_rpc_port)
+        finally:
+            # BaseConfig is frozen; pop the shadowed get instead of reassigning it.
+            self.config.__dict__.pop("get", None)
+
     # -----------------------------------------------------------------------
     # Server lifecycle
     # -----------------------------------------------------------------------
@@ -107,6 +133,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             engine_args["enable_dummy_pipeline"] = True
             engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
+        diffusion_master_port, diffusion_master_sock = get_free_port("127.0.0.1", with_alive_sock=True)
+        diffusion_master_sock.close()
+
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(diffusion_master_port)
+        logger.info("Using MASTER_PORT=%s for vLLM-Omni diffusion workers", os.environ["MASTER_PORT"])
+
+        # Apply before AsyncOmni builds OmniDiffusionConfig in this process.
+        VLLMOmniHijack.hijack()
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
         await omni_init_app_state(engine_client, app.state, args)
@@ -125,6 +160,20 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
     def _get_wake_up_tags(self) -> list[str]:
         return ["weights"]
+
+    async def _sleep_hybrid(self):
+        """Preserve non-actor pipeline weights during hybrid training sleep.
+
+        vLLM-Omni diffusion pipelines include components such as the text
+        encoder and VAE that are loaded by the rollout server, but are not part
+        of the trainable actor and therefore are not included in full-model
+        weight syncs. Use level-1 sleep so those weights are offloaded and can
+        be restored on wake-up instead of discarded by level-2 sleep.
+        """
+        # TODO (andy): use `sleep_level=2` in the future when the
+        #  trainer side incorporates the whole components of the model.
+        await self.engine.collective_rpc("sleep", kwargs={"level": 1})
+        await self.engine.reset_encoder_cache()
 
     async def generate(
         self,

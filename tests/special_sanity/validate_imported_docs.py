@@ -33,8 +33,8 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Verify that imported functions/classes have docstrings.")
     p.add_argument(
         "--target-file",
-        default="verl_omni/trainer/diffusion/main_flowgrpo.py",
-        help="Path to the Python source file to analyse (e.g. verl_omni/trainer/diffusion/main_flowgrpo.py)",
+        default="verl_omni/trainer/main_diffusion.py",
+        help="Path to the Python source file to analyse (e.g. verl_omni/trainer/main_diffusion.py)",
     )
     p.add_argument(
         "--allow-list",

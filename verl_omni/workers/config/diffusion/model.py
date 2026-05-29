@@ -95,7 +95,7 @@ class DiffusionModelConfig(BaseConfig):
     def __post_init__(self):
         import_external_libs(self.external_lib)
 
-        valid_backends = {"native"}
+        valid_backends = {"native", "_native_npu"}
         if self.attn_backend not in valid_backends:
             raise ValueError(f"Invalid attn_backend: {self.attn_backend}. Must be one of {sorted(valid_backends)}")
 

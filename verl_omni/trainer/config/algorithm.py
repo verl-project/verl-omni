@@ -14,18 +14,21 @@
 
 """Diffusion-specific algorithm config additions for verl_omni."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from verl.base_config import BaseConfig
+from verl.trainer.config.algorithm import RolloutCorrectionConfig
 
-__all__ = ["DiffusionAlgoConfig"]
+__all__ = ["DiffusionAlgoConfig", "RolloutCorrectionConfig"]
 
 
 @dataclass
 class DiffusionAlgoConfig(BaseConfig):
     """Diffusion-specific algorithm config."""
 
+    trainer_type: str = "policy_gradient"
+    sample_source: str = "online"
     adv_estimator: str = "flow_grpo"
     norm_adv_by_std_in_grpo: bool = True
-    bypass_mode: bool = False
     global_std: bool = True
+    rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)

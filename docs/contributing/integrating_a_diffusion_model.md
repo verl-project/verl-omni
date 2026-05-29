@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 05/10/2026.
+Last updated: 05/21/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -228,7 +228,7 @@ Call the transformer once for the positive prompt; if CFG is active,
 call it again for the negative prompt and combine them. Always finish with
 `scheduler.sample_previous_step(...)` and return the triple
 `(log_prob, prev_sample_mean, std_dev_t)` — that is what
-[`DiffusersFSDPEngine.prepare_model_outputs`](../../verl_omni/workers/engine/fsdp/diffusers_impl.py)
+[`PPODiffusersFSDPEngine.prepare_model_outputs`](../../verl_omni/workers/engine/fsdp/diffusers_impl.py)
 consumes.
 
 > **Tip.** If your transformer returns a list (one element per sample),
@@ -339,7 +339,7 @@ checkpoint:
 
 1. Generate dummy parquet data via
    [`tests/special_e2e/create_dummy_diffusion_data.py`](../../tests/special_e2e/create_dummy_diffusion_data.py).
-2. Launch `verl_omni.trainer.diffusion.main_flowgrpo` with model-specific
+2. Launch `verl_omni.trainer.main_diffusion` with model-specific
    knobs (architecture, prompt template, CFG parameters, sequence
    lengths).
 3. Assert exit code `0`.
@@ -380,6 +380,10 @@ Before opening the PR, confirm every box:
       `model_index.json::_class_name`; the `algorithm=` keyword matches
       the algorithm you are integrating against (e.g. `"flow_grpo"` for
       FlowGRPO).
+- [ ] Scheduler returns latents in fp32 (no `model_output.dtype` cast in `step()`),
+      `diffuse()` casts to model dtype before transformer forward and casts
+      noise_pred to float32 before `scheduler.step()`
+      — see [Common Pitfalls](common_pitfalls.md#float32-precision-loss-in-stored-rollout-latents).
 - [ ] Any new `DiffusionPipelineConfig` field is mirrored in **both**
       [`diffusion_rollout.yaml`](../../verl_omni/trainer/config/diffusion/rollout/diffusion_rollout.yaml)
       and
@@ -387,7 +391,7 @@ Before opening the PR, confirm every box:
 - [ ] Example launch script in `examples/flowgrpo_trainer/` plus a
       matching data preprocessor under
       `examples/flowgrpo_trainer/data_process/`.
-- [ ] Smoke test `tests/special_e2e/run_flowgrpo_<model>.sh` exists and
+- [ ] Smoke test `tests/special_e2e/run_<algo>_<model>.sh` exists and
       is wired into
       [`tests/gpu_smoke/run_gpu_smoke_tests.sh`](../../tests/gpu_smoke/run_gpu_smoke_tests.sh).
 - [ ] Docs updated (this guide if the contract changed; the relevant
