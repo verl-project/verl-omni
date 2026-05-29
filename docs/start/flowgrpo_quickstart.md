@@ -54,13 +54,13 @@ Obtain the raw OCR dataset from the original Flow-GRPO repository and place it u
 ```bash
 python3 examples/flowgrpo_trainer/data_process/qwenimage_ocr.py \
   --input_dir $WORKSPACE/data/ocr \
-  --output_dir $WORKSPACE/data/ocr
+  --output_dir $WORKSPACE/data/ocr/qwen_image
 ```
 
 The command above writes:
 
-- `$WORKSPACE/data/ocr/train.parquet`
-- `$WORKSPACE/data/ocr/test.parquet`
+- `$WORKSPACE/data/ocr/qwen_image/train.parquet`
+- `$WORKSPACE/data/ocr/qwen_image/test.parquet`
 
 These parquet files are the inputs consumed by the FlowGRPO training script.
 
@@ -78,7 +78,7 @@ Place the files in `$WORKSPACE/data/ocr/` (or any directory you prefer) and run 
 ```bash
 python3 examples/flowgrpo_trainer/data_process/qwenimage_ocr.py \
   --input_dir $WORKSPACE/data/ocr \
-  --output_dir $WORKSPACE/data/ocr
+  --output_dir $WORKSPACE/data/ocr/qwen_image
 ```
 
 For datasets with a different ground-truth extraction scheme (e.g. a CSV with an explicit label column), modify `extract_solution` and the `process_fn` function in `examples/flowgrpo_trainer/data_process/qwenimage_ocr.py` to match your format, then re-run the script to regenerate the parquet files.
@@ -99,7 +99,7 @@ WORKSPACE              # base directory for data (default: $HOME)
 
 ## Step 3: Perform FlowGRPO training
 
-The provided example script launches `python3 -m verl_omni.trainer.diffusion.main_flowgrpo` with the FlowGRPO-specific config needed for this OCR task:
+The provided example script launches `python3 -m verl_omni.trainer.main_diffusion` with the FlowGRPO-specific config needed for this OCR task:
 
 - `algorithm.adv_estimator=flow_grpo`
 - `actor_rollout_ref.rollout.name=vllm_omni`

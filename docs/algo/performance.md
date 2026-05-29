@@ -44,13 +44,13 @@ Evaluated with `trainer.val_before_train=True`:
 
 > Note that the initial reward is expected to be low for non-CFG full model training.
 
-### Experiment Settings and Throughput
+### Full-Model Experiment Settings and Throughput
 
 | Script | # GPUs | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | Images per Prompt | LR | Throughput (images/GPU/s) | Time per Step (s) |
 |--------|--------|------------------|--------------------|-------------------------|------------|-------------------|----|-----------------------|-------------------|
 | `run_qwen_image_ocr.sh` | 4 | 4 | 4 | 0 (sync) | 32 | 16 | 3e-5 | 0.510 | 250 |
 
-### Training - Zero Standard Deviation Ratio and Reward Curve
+### Full-Model Training - Zero Standard Deviation Ratio and Reward Curve
 
 <div align="center">
 <img width="600" alt="Full Model FlowGRPO OCR training zero standard deviation ratio and reward curve" src="https://github.com/user-attachments/assets/ee5db957-f3b0-44e4-8054-b80ddac02bcb" />
@@ -62,7 +62,7 @@ Evaluated with `trainer.val_before_train=True`:
 <img width="600" alt="Full Model FlowGRPO OCR training Clip Fraction" src="https://github.com/user-attachments/assets/b5d27aae-337b-43bf-8228-1678e71673a5" />
 </div>
 
-### Validation Reward Curve
+### Full-Model Validation Reward Curve
 
 <div align="center">
 <img width="600" alt="Full Model FlowGRPO OCR validation reward curve" src="https://github.com/user-attachments/assets/5ed8fd76-6f1b-4c80-aa43-af905e58d722" />

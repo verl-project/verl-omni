@@ -133,9 +133,6 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
 
         # upon completion increase step index by one
         self._step_index += 1
-        if per_token_timesteps is None:
-            # Cast sample back to model compatible dtype
-            prev_sample = prev_sample.to(model_output.dtype)
 
         if not return_dict:
             return (prev_sample, log_prob, prev_sample_mean, std_dev_t)
@@ -184,12 +181,13 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             return_sqrt_dt (`bool`, *optional*, defaults to False):
                 Whether to additionally return `sqrt(-dt)` as a tensor of shape `(batch_size,)`.
                 Used by GRPO-Guard to compute the importance-ratio normalization
-                (see `compute_diffusion_loss_grpo_guard`).
+                (see `GRPOGuardLoss`).
         """
         assert sde_type in ["sde", "cps"]
         assert sample.dtype == torch.float32
         if prev_sample is not None:
             assert prev_sample.dtype == torch.float32
+        assert model_output.dtype == torch.float32
 
         if per_token_timesteps is not None:
             raise NotImplementedError("per_token_timesteps is not supported yet for FlowMatchSDEDiscreteScheduler.")

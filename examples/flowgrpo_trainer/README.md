@@ -25,13 +25,13 @@ Place the raw dataset under `$WORKSPACE/data/ocr` (where `WORKSPACE` defaults to
 ```bash
 python3 examples/flowgrpo_trainer/data_process/qwenimage_ocr.py \
   --input_dir $WORKSPACE/data/ocr \
-  --output_dir $WORKSPACE/data/ocr
+  --output_dir $WORKSPACE/data/ocr/qwen_image
 ```
 
 This produces:
 
-- `$WORKSPACE/data/ocr/train.parquet`
-- `$WORKSPACE/data/ocr/test.parquet`
+- `$WORKSPACE/data/ocr/qwen_image/train.parquet`
+- `$WORKSPACE/data/ocr/qwen_image/test.parquet`
 
 ## Prepare the models
 
@@ -52,7 +52,7 @@ Optional KL loss tuning:
 - `actor_rollout_ref.actor.use_kl_loss=True`
 - `actor_rollout_ref.actor.kl_loss_coef=0.001`
 
-The script runs `python3 -m verl_omni.trainer.diffusion.main_flowgrpo` with:
+The script runs `python3 -m verl_omni.trainer.main_diffusion` with:
 
 - `algorithm.adv_estimator=flow_grpo`
 - `actor_rollout_ref.model.path=Qwen/Qwen-Image`
