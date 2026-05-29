@@ -55,7 +55,7 @@ UnifiedReward Scorer
 ^^^^^^^^^^^^^^^^^^^^^
 
 .. automodule:: verl_omni.utils.reward_score.unified_reward
-   :members:
+   :members: compute_score_unified_reward
 
 Reward Utilities
 ^^^^^^^^^^^^^^^^^^
