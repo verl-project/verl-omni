@@ -689,9 +689,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     async def update_weights(self, global_steps: int = None, mode: str = "auto"):
         """Update weights from trainer to rollout.
 
-        The ``mode`` argument selects the sync path. When ``mode`` is ``"auto"``, it
-        resolves to ``config.rollout.checkpoint_engine.backend``.
-
         1. For sync training with colocated trainer and rollout (``mode="naive"``),
            update rollout directly from the model engine.
            - before update_weights: rollout should be in sleep mode.
