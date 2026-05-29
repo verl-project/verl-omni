@@ -104,7 +104,7 @@ def main() -> None:
     violations = find_violations(args.tests_root, allowed, args.allow_files)
 
     if violations:
-        print("❌  Test layout violations found:\n", file=sys.stderr)
+        print("[FAIL] Test layout violations found:\n", file=sys.stderr)
         for err in violations:
             print("  -", err, file=sys.stderr)
 
@@ -113,9 +113,9 @@ def main() -> None:
             f"one of the top-level packages inside '{args.impl_root}', or is explicitly listed via --allow-dirs.\n",
             file=sys.stderr,
         )
-        raise Exception("❌  Test layout violations found.")
+        raise Exception("[FAIL] Test layout violations found.")
 
-    print("✅  Tests folder structure looks good.")
+    print("[OK] Tests folder structure looks good.")
 
 
 if __name__ == "__main__":

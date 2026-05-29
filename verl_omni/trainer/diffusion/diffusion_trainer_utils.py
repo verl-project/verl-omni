@@ -11,10 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .fsdp import (  # noqa: F401
-    DiffusersFSDPEngine,
-    DPODiffusersFSDPEngine,
-    PPODiffusersFSDPEngine,
-)
+"""Shared helpers for diffusion Ray trainers."""
 
-__all__ = ["PPODiffusersFSDPEngine", "DPODiffusersFSDPEngine", "DiffusersFSDPEngine"]
+from typing import Any
+
+
+class NoOpCheckpointManager:
+    """Checkpoint-engine facade used when training does not start rollout replicas."""
+
+    def update_weights(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def sleep_replicas(self) -> None:
+        return None

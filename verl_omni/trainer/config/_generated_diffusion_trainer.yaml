@@ -74,6 +74,7 @@ actor_rollout_ref:
       loss_mode: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
       clip_ratio: 0.0001
       adv_clip_max: 5.0
+      dpo_beta: 2000.0
     rollout_correction:
       _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
       bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
@@ -194,6 +195,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: null
     disable_log_stats: true
     'n': 1
+    seed: null
     multi_turn:
       _target_: verl.workers.config.MultiTurnConfig
       enable: false

@@ -18,8 +18,8 @@ set -x
 # Set WORKSPACE to any writable directory; defaults to $HOME
 WORKSPACE=${WORKSPACE:-$HOME}
 
-ocr_train_path=$WORKSPACE/data/ocr/train.parquet
-ocr_test_path=$WORKSPACE/data/ocr/test.parquet
+ocr_train_path=$WORKSPACE/data/ocr/qwen_image/train.parquet
+ocr_test_path=$WORKSPACE/data/ocr/qwen_image/test.parquet
 
 model_name=Qwen/Qwen-Image
 reward_model_name=Qwen/Qwen3-VL-8B-Instruct

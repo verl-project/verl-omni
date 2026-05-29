@@ -28,13 +28,13 @@ Place the raw dataset under `$WORKSPACE/data/ocr` (where `WORKSPACE` defaults to
 ```bash
 python3 examples/flowgrpo_trainer/data_process/qwenimage_ocr.py \
   --input_dir $WORKSPACE/data/ocr \
-  --output_dir $WORKSPACE/data/ocr
+  --output_dir $WORKSPACE/data/ocr/qwen_image
 ```
 
 This produces:
 
-- `$WORKSPACE/data/ocr/train.parquet`
-- `$WORKSPACE/data/ocr/test.parquet`
+- `$WORKSPACE/data/ocr/qwen_image/train.parquet`
+- `$WORKSPACE/data/ocr/qwen_image/test.parquet`
 
 ## Prepare the models
 

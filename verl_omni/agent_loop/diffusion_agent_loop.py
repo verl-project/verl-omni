@@ -36,6 +36,7 @@ from verl.utils.dataset.rl_dataset import get_dataset_class
 from verl.utils.profiler import simple_timer
 from verl.workers.rollout.llm_server import LLMServerClient
 
+from verl_omni.agent_loop.utils import _maybe_per_rollout_seeds
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 
 
@@ -158,6 +159,7 @@ class DiffusionAgentLoopWorker:
         }
 
         is_validate = batch.meta_info.get("validate", False)
+        per_rollout_seeds: Optional[list[int]] = None
 
         if is_validate:
             sampling_params.update(_config_to_sampling_dict(config.val_kwargs.pipeline))
@@ -166,6 +168,7 @@ class DiffusionAgentLoopWorker:
             sampling_params["logprobs"] = False
         else:
             sampling_params["global_steps"] = batch.meta_info["global_steps"]
+            per_rollout_seeds = _maybe_per_rollout_seeds(batch.meta_info, len(batch))
 
         if "agent_name" not in batch.non_tensor_batch:
             default_agent_loop = config.agent.default_agent_loop
@@ -174,7 +177,11 @@ class DiffusionAgentLoopWorker:
         tasks = []
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
-            tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, **kwargs)))
+            task_sampling_params = sampling_params
+            if per_rollout_seeds is not None:
+                task_sampling_params = sampling_params.copy()
+                task_sampling_params["seed"] = per_rollout_seeds[i]
+            tasks.append(asyncio.create_task(self._run_agent_loop(task_sampling_params, **kwargs)))
         outputs = await asyncio.gather(*tasks)
 
         output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
