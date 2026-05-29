@@ -42,6 +42,11 @@ class TestDiffusionLossConfig:
         assert cfg.clip_ratio == pytest.approx(0.01)
         assert cfg.adv_clip_max == pytest.approx(10.0)
 
+    def test_grpo_guard_loss_mode_accepted(self):
+        cfg = DiffusionLossConfig(loss_mode="grpo_guard", clip_ratio=2e-6)
+        assert cfg.loss_mode == "grpo_guard"
+        assert cfg.clip_ratio == pytest.approx(2e-6)
+
     def test_invalid_loss_mode_raises(self):
         with pytest.raises(ValueError, match="Invalid diffusion loss_mode"):
             DiffusionLossConfig(loss_mode="not_a_valid_mode")

@@ -353,6 +353,118 @@ class TestLossIntegration:
             assert key in metrics, f"Missing metric: {key}"
 
 
+def _grpo_guard_tensors(batch_size: int) -> dict:
+    old_prev_sample_mean = torch.randn((batch_size, 4, 4, 4), dtype=torch.float32)
+    return {
+        "old_prev_sample_mean": old_prev_sample_mean,
+        "prev_sample_mean": old_prev_sample_mean + 0.01 * torch.randn_like(old_prev_sample_mean),
+        "std_dev_t": torch.full((batch_size, 1, 1, 1), 0.5, dtype=torch.float32),
+        "sqrt_dt": torch.full((batch_size,), 0.3, dtype=torch.float32),
+    }
+
+
+class TestGRPOGuardLossIntegration:
+    """Tests that rollout_is_weights affect the grpo_guard loss correctly."""
+
+    @pytest.fixture(scope="class")
+    def actor_config(self):
+        from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
+
+        config_dir = os.path.abspath("verl_omni/trainer/config/diffusion/actor")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            cfg = compose(
+                config_name="dp_diffusion_actor",
+                overrides=[
+                    "strategy=fsdp",
+                    "diffusion_loss.loss_mode=grpo_guard",
+                    "diffusion_loss.clip_ratio=2e-6",
+                    "diffusion_loss.adv_clip_max=5.0",
+                ],
+            )
+        return omega_conf_to_dataclass(cfg)
+
+    def test_rollout_is_weights_rejected_samples_zero_loss(self, actor_config):
+        batch_size = 8
+        old_log_prob = torch.randn(batch_size)
+        log_prob = torch.randn(batch_size)
+        advantages = torch.ones(batch_size)
+        rollout_is_weights = torch.cat(
+            [
+                torch.zeros(batch_size // 2),
+                torch.ones(batch_size // 2),
+            ]
+        )
+        guard_tensors = _grpo_guard_tensors(batch_size)
+
+        loss_fn = diffusion_algos.get_diffusion_loss_fn("grpo_guard")
+        loss, _ = loss_fn.compute_loss(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            config=actor_config,
+            rollout_is_weights=rollout_is_weights,
+            **guard_tensors,
+        )
+        loss_no_weights, _ = loss_fn.compute_loss(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            config=actor_config,
+            rollout_is_weights=None,
+            **guard_tensors,
+        )
+
+        assert loss.shape == ()
+        assert isinstance(loss.item(), float)
+        assert not torch.allclose(loss, loss_no_weights)
+
+    def test_all_rejected_gives_zero_loss(self, actor_config):
+        batch_size = 4
+        old_log_prob = torch.randn(batch_size)
+        log_prob = torch.randn(batch_size)
+        advantages = torch.ones(batch_size)
+        rollout_is_weights = torch.zeros(batch_size)
+        guard_tensors = _grpo_guard_tensors(batch_size)
+
+        loss_fn = diffusion_algos.get_diffusion_loss_fn("grpo_guard")
+        loss, _ = loss_fn.compute_loss(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            config=actor_config,
+            rollout_is_weights=rollout_is_weights,
+            **guard_tensors,
+        )
+
+        assert loss.item() == 0.0
+
+    def test_pg_metrics_present(self, actor_config):
+        batch_size = 8
+        old_log_prob = torch.randn(batch_size)
+        log_prob = torch.randn(batch_size)
+        advantages = torch.randn(batch_size)
+        guard_tensors = _grpo_guard_tensors(batch_size)
+
+        loss_fn = diffusion_algos.get_diffusion_loss_fn("grpo_guard")
+        _, metrics = loss_fn.compute_loss(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            config=actor_config,
+            rollout_is_weights=torch.ones(batch_size),
+            **guard_tensors,
+        )
+
+        for key in (
+            "actor/ppo_kl",
+            "actor/pg_clipfrac",
+            "actor/ratio_mean",
+            "actor/ratio_std",
+        ):
+            assert key in metrics, f"Missing metric: {key}"
+
+
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
