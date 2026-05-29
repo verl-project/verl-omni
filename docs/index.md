@@ -1,6 +1,6 @@
 # Welcome to VeRL-Omni's documentation!
 
-Last updated: 05/15/2026
+Last updated: 05/29/2026
 
 [VeRL-Omni](https://github.com/verl-project/verl-omni) is a general RL training framework focused on multimodal generative models, built on top of [verl](https://github.com/verl-project/verl). It originated from the multi-modal generation RL effort in `verl`, and now has a dedicated home so it can evolve in a more focused way.
 
@@ -19,6 +19,7 @@ VeRL-Omni targets RL post-training for three families of generative models:
 - **Modular training backends** that plug into existing parallelism (FSDP, USP) and other optimizations rather than rebuilding the stack from scratch.
 - **End-to-end examples and benchmarks** validating co-located sync and fully-async RL on the model families above.
 - **High training throughput** — on our reference Qwen-Image FlowGRPO setup, VeRL-Omni achieves **up to ~25% higher end-to-end throughput** than the diffusers-based [`flow_grpo`](https://github.com/yifan123/flow_grpo) reference implementation, driven by vLLM-Omni rollout, FSDP/USP training, and asynchronous reward computation on a dedicated GPU pool.
+- **Advanced features** such as [rollout correction](algo/rollout_correction) (importance/rejection sampling to reduce off-policy bias) and [async reward via external HTTP scorer](start/http_scorer) for decoupled reward computation on dedicated GPU pools.
 
 ```{toctree}
 :maxdepth: 2
@@ -26,9 +27,15 @@ VeRL-Omni targets RL post-training for three families of generative models:
 
 start/install.md
 start/flowgrpo_quickstart.md
-start/flowgrpo_quickstart_npu.md
-start/http_scorer.md
 start/metrics.md
+```
+
+```{toctree}
+:maxdepth: 1
+:caption: Advanced Features
+
+algo/rollout_correction.md
+start/http_scorer.md
 ```
 
 ```{toctree}
@@ -39,14 +46,20 @@ algo/flowgrpo.md
 algo/grpo_guard.md
 algo/mixgrpo.md
 algo/performance.md
-algo/rollout_correction.md
 ```
 
 ```{toctree}
 :maxdepth: 1
-:caption: Performance
+:caption: Performance Tuning Guide
 
 perf/profiler.md
+```
+
+```{toctree}
+:maxdepth: 1
+:caption: Hardware Support
+
+start/flowgrpo_quickstart_npu.md
 ```
 
 ```{toctree}

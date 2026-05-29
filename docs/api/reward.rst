@@ -15,6 +15,7 @@ plugs into the standard :class:`verl.experimental.reward_loop.RewardLoopManager`
 
    verl_omni.reward_loop.reward_manager.VisualRewardManager
    verl_omni.utils.reward_score.default_compute_score_image
+   verl_omni.utils.reward_score.http_scorer_client.compute_score
 
 Reward Manager
 ~~~~~~~~~~~~~~~~~
@@ -42,3 +43,21 @@ GRM-based OCR Reward
 
 .. automodule:: verl_omni.utils.reward_score.genrm_ocr
    :members: compute_score_ocr
+
+HTTP Scorer Client
+^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: verl_omni.utils.reward_score.http_scorer_client
+   :members: compute_score
+
+UnifiedReward Scorer
+^^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: verl_omni.utils.reward_score.unified_reward
+   :members:
+
+Reward Utilities
+^^^^^^^^^^^^^^^^^^
+
+.. automodule:: verl_omni.utils.reward_score.reward_utils
+   :members: pil_image_to_base64
