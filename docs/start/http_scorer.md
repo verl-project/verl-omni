@@ -8,8 +8,8 @@ VeRL-Omni ships a generic HTTP reward client (`verl_omni.utils.reward_score.http
 ## How it works
 
 ```text
-┌──────────────┐        pickle payload        ┌──────────────────┐
-│  VeRL-Omni   │  ──── POST (bytes) ────────► │  Scorer Service  │
+┌──────────────┐        pickle payload         ┌──────────────────┐
+│  VeRL-Omni   │  ──── POST (bytes) ────────►  │  Scorer Service  │
 │  (training)  │                               │  (Flask/Gunicorn)│
 │              │  ◄─── pickle response ──────  │                  │
 └──────────────┘                               └──────────────────┘
