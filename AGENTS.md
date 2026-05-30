@@ -44,7 +44,7 @@ If work is duplicate/trivial busywork, **do not proceed**. Return a short explan
 ```bash
 # Install vLLM and vLLM-Omni rollout backend first
 pip install "vllm==0.20.2" \
-    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@c7178d89bb7a70817f239febc84c3b21a714dae7"
+    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@5eac50f22c1f4a77f3e9660b73b24d106f14f8bf"
 
 # Install verl (latest main)
 pip install git+https://github.com/verl-project/verl.git@main
