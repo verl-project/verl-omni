@@ -13,11 +13,14 @@
 # limitations under the License.
 """Reusable PEFT/LoRA adapter lifecycle helpers for training engines."""
 
+import logging
 from contextlib import contextmanager, nullcontext
 
 import torch
 from peft import LoraConfig
 from verl.utils.py_functional import convert_to_regular_types
+
+logger = logging.getLogger(__name__)
 
 
 class LoRAAdapterMixin:
@@ -63,7 +66,10 @@ class LoRAAdapterMixin:
             target_dtype = PrecisionType.to_dtype(lora_dtype)
             for name, param in module.named_parameters():
                 if param.requires_grad:
+                    orig_dtype = param.dtype
                     param.data = param.data.to(target_dtype)
+                    logger.debug("LoRA param %s: %s -> %s", name, orig_dtype, param.dtype)
+
             for submodule in module.modules():
                 if isinstance(submodule, BaseTunerLayer):
                     submodule.cast_input_dtype_enabled = False
@@ -78,23 +84,25 @@ class LoRAAdapterMixin:
     @contextmanager
     def _adapter_state_context(self):
         """Open writable adapter parameter access (FSDP summon when applicable)."""
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
         from verl.utils.fsdp_utils import fsdp_version, load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
         from verl.utils.memory_utils import aggressive_empty_cache
 
-        is_fsdp_module = fsdp_version(self.module) == 1
-        is_fsdp2_module = fsdp_version(self.module) == 2
+        from verl_omni.utils.fsdp_utils import fsdp_summon_full_params
+
+        is_fsdp_module = fsdp_version(self.module) in (1, 2)
         is_offload_param = getattr(self, "_is_offload_param", False)
         origin_module_device = next(self.module.parameters()).device.type
-        if (is_fsdp_module or is_fsdp2_module) and (is_offload_param or origin_module_device == "cpu"):
+        if is_fsdp_module and (is_offload_param or origin_module_device == "cpu"):
             load_fsdp_model_to_gpu(self.module)
 
-        ctx = FSDP.summon_full_params(self.module, writeback=True, recurse=True) if is_fsdp_module else nullcontext()
+        ctx = fsdp_summon_full_params(self.module, writeback=True) if is_fsdp_module else nullcontext()
         try:
             with ctx:
-                yield
+                try:
+                    yield
+                finally:
+                    self._set_adapter("default")
         finally:
-            self._set_adapter("default")
             if is_offload_param:
                 offload_fsdp_model_to_cpu(self.module)
                 aggressive_empty_cache(force_sync=True)
@@ -107,12 +115,20 @@ class LoRAAdapterMixin:
 
     @contextmanager
     def use_adapter(self, name: str):
-        """Temporarily select a named PEFT adapter."""
-        self._set_adapter(name)
-        try:
-            yield
-        finally:
-            self._set_adapter("default")
+        """Temporarily select a named PEFT adapter.
+
+        ``"reference"`` is a logical policy state (see ``policy_state_adapters``)
+        that runs with all LoRA adapters disabled, not a registered PEFT adapter.
+        """
+        if name == "reference":
+            with self.disable_adapter():
+                yield
+        else:
+            self._set_adapter(name)
+            try:
+                yield
+            finally:
+                self._set_adapter("default")
 
     def _active_adapter_trainable_params(self, adapter_name: str) -> list[torch.nn.Parameter]:
         peft_model = self._peft_module

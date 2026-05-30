@@ -17,6 +17,7 @@ from typing import Optional
 from omegaconf import MISSING
 from verl.base_config import BaseConfig
 from verl.utils.profiler import ProfilerConfig
+from verl.workers.config.disaggregation import DisaggregationConfig
 from verl.workers.config.model import MtpConfig
 from verl.workers.config.rollout import (
     AgentLoopConfig,
@@ -24,16 +25,6 @@ from verl.workers.config.rollout import (
     MultiTurnConfig,
     PrometheusConfig,
 )
-
-try:
-    from verl.workers.config.disaggregation import DisaggregationConfig
-except ModuleNotFoundError:
-
-    @dataclass
-    class DisaggregationConfig(BaseConfig):
-        """Compatibility shim for older verl versions without disaggregation config."""
-
-        pass
 
 
 __all__ = [
