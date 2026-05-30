@@ -13,7 +13,6 @@
 # limitations under the License.
 
 
-import os
 from typing import cast
 
 import torch
@@ -195,47 +194,5 @@ class VLLMOmniHijack:
 
             return model.eval()
 
-        def hijack_omni_diffusion_config_post_init(self) -> None:
-            """
-            based on vllm_omni.diffusion.data.OmniDiffusionConfig.__post_init__,
-            honor MASTER_PORT reserved by vLLMOmniHttpServer.
-
-            Reason:
-            OmniDiffusionConfig picks master_port via 30005 + random.randint(0, 100)
-            and settle_port(). Multiple Ray vLLMOmniHttpServer actors starting in
-            parallel often collide on the same port, causing torch.distributed
-            init_process_group to fail with EADDRINUSE. verl's vLLM reward rollout
-            avoids this with get_free_port() per actor; diffusion workers need the
-            same via MASTER_PORT in the environment.
-
-            # TODO (long): drop this patch once vllm-omni respects an explicit
-            master_port without adding random jitter.
-            """
-            env_port = os.environ.get("MASTER_PORT")
-            reserved_port: int | None = None
-            if env_port is not None:
-                try:
-                    reserved_port = int(env_port)
-                except ValueError:
-                    logger.warning("Ignoring invalid MASTER_PORT=%r for diffusion workers", env_port)
-
-            _orig_omni_diffusion_config_post_init(self)
-
-            if reserved_port is not None:
-                if not hijack_omni_diffusion_config_post_init._warned:
-                    logger.warning(
-                        "verl_omni hijack applied: OmniDiffusionConfig.__post_init__ honors "
-                        "MASTER_PORT from the environment instead of vllm-omni random port "
-                        "selection. Remove once vllm-omni respects explicit master_port."
-                    )
-                    hijack_omni_diffusion_config_post_init._warned = True
-                self.master_port = reserved_port
-
-        _orig_omni_diffusion_config_post_init = OmniDiffusionConfig.__post_init__
-        hijack_omni_diffusion_config_post_init._warned = False
-
         do_hijack(DiffusionLoRAManager, "_load_adapter", hijack__load_adapter)
         do_hijack(DiffusersPipelineLoader, "load_model", hijack_load_model)
-        if not getattr(OmniDiffusionConfig, "_verl_omni_master_port_hijacked", False):
-            do_hijack(OmniDiffusionConfig, "__post_init__", hijack_omni_diffusion_config_post_init)
-            OmniDiffusionConfig._verl_omni_master_port_hijacked = True
