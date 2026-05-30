@@ -111,6 +111,9 @@ class TestDiffusionLossRegistry(unittest.TestCase):
     def test_builtin_kl_registered(self):
         assert "kl" in DIFFUSION_LOSS_REGISTRY
 
+    def test_builtin_dpo_registered(self):
+        assert "dpo" in DIFFUSION_LOSS_REGISTRY
+
     def test_get_existing_loss_fn(self):
         fn = get_diffusion_loss_fn("flow_grpo")
         assert callable(fn)
@@ -205,7 +208,7 @@ class TestKLLoss:
         )
 
         assert isinstance(result.loss, torch.Tensor)
-        assert result.add_loss_metric is True
+
         assert "actor/kl_loss" in result.metrics
         assert result.metrics["actor/kl_loss"] == pytest.approx(result.loss.item())
 

@@ -11,24 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Shared helpers for diffusion Ray trainers."""
 
-import base64
-from io import BytesIO
-
-from PIL import Image
+from typing import Any
 
 
-def pil_image_to_base64(image: Image.Image) -> str:
-    """Convert a PIL Image to a base64-encoded data URI string.
+class NoOpCheckpointManager:
+    """Checkpoint-engine facade used when training does not start rollout replicas."""
 
-    Args:
-        image: The PIL Image to convert.
+    def update_weights(self, *args: Any, **kwargs: Any) -> None:
+        pass
 
-    Returns:
-        A base64-encoded PNG data URI string (e.g. ``data:image/png;base64,...``).
-    """
-    buffered = BytesIO()
-    image.save(buffered, format="PNG")
-    encoded_image_text = base64.b64encode(buffered.getvalue()).decode("utf-8")
-    base64_image = f"data:image/png;base64,{encoded_image_text}"
-    return base64_image
+    def sleep_replicas(self) -> None:
+        return None

@@ -13,10 +13,13 @@
 # limitations under the License.
 """Reusable PEFT/LoRA adapter lifecycle helpers for training engines."""
 
+import logging
 from contextlib import contextmanager, nullcontext
 
 from peft import LoraConfig
 from verl.utils.py_functional import convert_to_regular_types
+
+logger = logging.getLogger(__name__)
 
 
 class LoRAAdapterMixin:
@@ -53,6 +56,22 @@ class LoRAAdapterMixin:
 
         if "default" in policy_state_adapters and hasattr(module, "set_adapter"):
             module.set_adapter("default")
+
+        lora_dtype = getattr(self.model_config, "lora_dtype", None)
+        if lora_dtype is not None:
+            from peft.tuners.tuners_utils import BaseTunerLayer
+            from verl.utils.torch_dtypes import PrecisionType
+
+            target_dtype = PrecisionType.to_dtype(lora_dtype)
+            for name, param in module.named_parameters():
+                if param.requires_grad:
+                    orig_dtype = param.dtype
+                    param.data = param.data.to(target_dtype)
+                    logger.debug("LoRA param %s: %s -> %s", name, orig_dtype, param.dtype)
+
+            for submodule in module.modules():
+                if isinstance(submodule, BaseTunerLayer):
+                    submodule.cast_input_dtype_enabled = False
 
         return module
 

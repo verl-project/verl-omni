@@ -12,23 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import base64
-from io import BytesIO
+from .diffusers_training_adapter import StableDiffusion3DPO
 
-from PIL import Image
-
-
-def pil_image_to_base64(image: Image.Image) -> str:
-    """Convert a PIL Image to a base64-encoded data URI string.
-
-    Args:
-        image: The PIL Image to convert.
-
-    Returns:
-        A base64-encoded PNG data URI string (e.g. ``data:image/png;base64,...``).
-    """
-    buffered = BytesIO()
-    image.save(buffered, format="PNG")
-    encoded_image_text = base64.b64encode(buffered.getvalue()).decode("utf-8")
-    base64_image = f"data:image/png;base64,{encoded_image_text}"
-    return base64_image
+__all__ = ["StableDiffusion3DPO"]

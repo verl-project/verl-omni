@@ -35,6 +35,9 @@ diffusion_loss:
   # Maximum value to clamp advantages before computing policy loss
   adv_clip_max: 5.0
 
+  # DPO inverse temperature for pairwise flow-matching preference loss
+  dpo_beta: 2000.0
+
 # Rollout Correction config.  Fields mirror RolloutCorrectionConfig.
 # rollout_is defaults to null (off); override for IS diagnostics.
 rollout_correction:
