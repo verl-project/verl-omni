@@ -14,12 +14,13 @@
 
 """Diffusion-specific algorithm config additions for verl_omni."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from verl.base_config import BaseConfig
+from verl.trainer.config.algorithm import RolloutCorrectionConfig
 
-__all__ = ["DiffusionAlgoConfig"]
+__all__ = ["DiffusionAlgoConfig", "RolloutCorrectionConfig"]
 
 
 @dataclass
@@ -30,13 +31,13 @@ class DiffusionAlgoConfig(BaseConfig):
     sample_source: str = "online"
     adv_estimator: str = "flow_grpo"
     norm_adv_by_std_in_grpo: bool = True
-    bypass_mode: bool = False
     global_std: bool = True
     old_policy_decay_type: int = 0
     old_policy_decay: Optional[float] = None
     old_policy_update_interval: int = 1
     timestep_fraction: float = 1.0
     adv_mode: str = "continuous"
+    rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
 
     def __post_init__(self):
         valid_adv_modes = {"continuous", "positive_only", "negative_only", "one_only", "binary"}

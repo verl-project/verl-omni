@@ -94,6 +94,10 @@ disable_log_stats: True
 # number of responses (i.e. num sample times). > 1 for grpo
 n: 1
 
+# Base seed for deterministic training rollout RNG.
+# Per-step base is ``seed + global_step - 1``. null disables rollout seeding.
+seed: null
+
 # Multi-turn interaction config for tools or chat.
 multi_turn:
 

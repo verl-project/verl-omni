@@ -17,6 +17,7 @@ This trainer supports model-agnostic model initialization with Hugging Face.
 """
 
 import json
+import logging
 import os
 import uuid
 from abc import ABC, abstractmethod
@@ -51,7 +52,11 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.trainer.config import DiffusionAlgoConfig
-from verl_omni.trainer.diffusion.direct_preference_handlers import get_direct_preference_handler
+from verl_omni.trainer.diffusion.direct_preference_handlers import (
+    DIRECT_PREFERENCE_HANDLER_REGISTRY,
+    get_direct_preference_handler,
+)
+from verl_omni.trainer.diffusion.diffusion_trainer_utils import NoOpCheckpointManager
 from verl_omni.trainer.diffusion.diffusion_algos import (
     DiffusionAdvantageEstimator,
     get_diffusion_adv_estimator_fn,
@@ -62,6 +67,8 @@ from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_timing_metrics_diffusion,
 )
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
+
+sys_logger = logging.getLogger(__name__)
 
 
 def compute_advantage(
@@ -1127,11 +1134,109 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
     """Direct-preference diffusion trainer for DPO, DiffusionNFT, AWM, etc."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, config, *args, **kwargs):
+        super().__init__(config, *args, **kwargs)
+        self.is_offline = config.algorithm.get("sample_source", "online") == "offline"
         algorithm_name = self.config.actor_rollout_ref.model.algorithm
-        self.direct_preference_handler = get_direct_preference_handler(algorithm_name)
-        self.direct_preference_handler.validate_config(self.config)
+        self.direct_preference_handler = None
+        if algorithm_name in DIRECT_PREFERENCE_HANDLER_REGISTRY:
+            self.direct_preference_handler = get_direct_preference_handler(algorithm_name)
+            self.direct_preference_handler.validate_config(self.config)
+        self.use_reference_policy = need_reference_policy(self.config) or (
+            config.algorithm.get("trainer_type") == "direct_preference"
+        )
+
+    def init_workers(self):
+        """Initialize actor-only workers for offline DPO, or full stack for online preference training."""
+        actor_rollout_resource_pool = self._init_colocated_workers()
+        if self.is_offline:
+            self.reward_loop_manager = None
+            self.llm_server_manager = None
+            self.checkpoint_manager = NoOpCheckpointManager()
+            return
+        self._init_online_rollout_stack(actor_rollout_resource_pool)
+
+    def _validate(self):
+        if self.is_offline and not hasattr(self, "async_rollout_manager"):
+            print("Skipping validation generation because offline rollout is disabled.")
+            return {"val/offline/skipped": 1.0}
+        return super()._validate()
+
+    def _update_actor(self, batch: DataProto) -> DataProto:
+        if not self.is_offline:
+            return super()._update_actor(batch)
+
+        rollout_config = self.config.actor_rollout_ref.rollout
+        batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
+        batch_td = batch.to_tensordict()
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        ppo_mini_batch_size = (
+            ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n * 2
+        )  # direct preference has a pair per prompt
+        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
+        seed = self.config.actor_rollout_ref.actor.data_loader_seed
+        shuffle = self.config.actor_rollout_ref.actor.shuffle
+        if shuffle:
+            sys_logger.warning(
+                "Shuffle is not supported for direct preference during actor update. "
+                "This is to prevent the chosen/rejected pairs from being split across different micro batches. "
+                "Setting shuffle to False."
+            )
+            shuffle = False
+
+        tu.assign_non_tensor(
+            batch_td,
+            global_batch_size=ppo_mini_batch_size,
+            mini_batch_size=ppo_mini_batch_size,
+            epochs=ppo_epochs,
+            seed=seed,
+            dataloader_kwargs={"shuffle": shuffle},
+            height=self.config.actor_rollout_ref.model.pipeline.height,
+            width=self.config.actor_rollout_ref.model.pipeline.width,
+            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        )
+
+        actor_output = self.actor_rollout_wg.update_actor(batch_td)
+        actor_output = tu.get(actor_output, "metrics")
+        actor_output = rename_dict(actor_output, "actor/")
+        return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
+
+    def _compute_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:
+        """Reference transformer output and shared flow tensors."""
+        batch_td = batch.to_tensordict()
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        metadata = {
+            "compute_loss": False,
+            "height": self.config.actor_rollout_ref.model.pipeline.height,
+            "width": self.config.actor_rollout_ref.model.pipeline.width,
+            "vae_scale_factor": self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        }
+        if self.ref_in_actor:
+            metadata["no_lora_adapter"] = True
+        tu.assign_non_tensor(batch_td, **metadata)
+        if self.ref_in_actor:
+            output = self.actor_rollout_wg.infer_actor_batch(batch_td)
+        else:
+            output = self.ref_policy_wg.infer_ref_batch(batch_td)
+        if output is None:
+            return None
+
+        noise_pred = tu.get(output, "noise_pred")
+        if noise_pred.ndim >= 2 and noise_pred.shape[1] == 1:
+            noise_pred = noise_pred[:, 0]
+        noise = tu.get(output, "noise")
+        if noise.ndim >= 2 and noise.shape[1] == 1:
+            noise = noise[:, 0]
+        timesteps = tu.get(output, "timesteps")
+        if timesteps.ndim >= 2 and timesteps.shape[1] == 1:
+            timesteps = timesteps[:, 0]
+        ref_output = {
+            "ref_noise_pred": noise_pred.float(),
+            "noise": noise.float(),
+            "timesteps": timesteps.float(),
+        }
+        return DataProto.from_tensordict(tu.get_tensordict(ref_output))
 
     def _prepare_direct_preference_actor_batch(self, batch: DataProto, reward_tensor: torch.Tensor) -> DataProto:
         return self.direct_preference_handler.prepare_actor_batch(
@@ -1142,10 +1247,17 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         )
 
     def _post_direct_preference_actor_update(self, metrics: dict[str, Any] | None = None) -> None:
+        if self.direct_preference_handler is None:
+            return
         self.direct_preference_handler.post_actor_update(trainer=self, metrics=metrics)
 
     def fit(self):
-        """Run online direct-preference diffusion training."""
+        """
+        The training loop of direct preference algorithms (DPO, DiffusionNFT, etc.).
+        The driver process only need to call the compute functions of the worker group through RPC
+        to construct the PPO dataflow.
+        The light-weight advantage computation is done on the driver process.
+        """
         from omegaconf import OmegaConf
         from verl.utils.tracking import Tracking
 
@@ -1158,8 +1270,10 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
         self.global_steps = 0
         self._load_checkpoint()
-        self.actor_rollout_wg.copy_adapter(source="default", target="old")
-        self.checkpoint_manager.update_weights(self.global_steps)
+        if self.direct_preference_handler is not None:
+            self.actor_rollout_wg.copy_adapter(source="default", target="old")
+        if not self.is_offline:
+            self.checkpoint_manager.update_weights(self.global_steps)
 
         current_epoch = self.global_steps // len(self.train_dataloader)
         if self.config.trainer.get("val_before_train", True):
@@ -1175,49 +1289,81 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         last_val_metrics = None
         self.max_steps_duration = 0
 
+        prev_step_profile = False
+        curr_step_profile = (
+            self.global_steps in self.config.global_profiler.steps
+            if self.config.global_profiler.steps is not None
+            else False
+        )
+        next_step_profile = False
+
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
                 metrics = {}
                 timing_raw = {}
+
+                with marked_timer("start_profile", timing_raw):
+                    self._start_profiling(
+                        not prev_step_profile and curr_step_profile
+                        if self.config.global_profiler.profile_continuous_steps
+                        else curr_step_profile
+                    )
+
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
-                batch.non_tensor_batch["uid"] = np.array(
-                    [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
-                )
-                gen_batch = self._get_gen_batch(batch)
-                gen_batch.meta_info["global_steps"] = self.global_steps
-                gen_batch_output = gen_batch.repeat(
-                    repeat_times=self.config.actor_rollout_ref.rollout.n,
-                    interleave=True,
-                )
+                if "uid" not in batch.non_tensor_batch:
+                    batch.non_tensor_batch["uid"] = np.array(
+                        [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
+                    )
 
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
-                    with marked_timer("gen", timing_raw, color="red"):
-                        gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                        self.checkpoint_manager.sleep_replicas()
-                        timing_raw.update(gen_batch_output.meta_info["timing"])
-                        gen_batch_output.meta_info.pop("timing", None)
+                    reward_extra_infos_dict: dict[str, list] = {}
+                    if self.is_offline:
+                        reward_tensor = batch.batch["sample_level_scores"]
+                        batch.batch["sample_level_rewards"] = reward_tensor
+                        if self.use_reference_policy:
+                            with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
+                                ref_dpo = self._compute_ref_noise_pred(batch)
+                                if ref_dpo is not None:
+                                    batch = batch.union(ref_dpo)
+                        with marked_timer("update_actor", timing_raw, color="red"):
+                            actor_output = self._update_actor(batch)
+                    else:
+                        gen_batch = self._get_gen_batch(batch)
+                        gen_batch.meta_info["global_steps"] = self.global_steps
+                        gen_batch_output = gen_batch.repeat(
+                            repeat_times=self.config.actor_rollout_ref.rollout.n,
+                            interleave=True,
+                        )
 
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    batch = batch.union(gen_batch_output)
+                        with marked_timer("gen", timing_raw, color="red"):
+                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                            self.checkpoint_manager.sleep_replicas()
+                            timing_raw.update(gen_batch_output.meta_info["timing"])
+                            gen_batch_output.meta_info.pop("timing", None)
 
-                    with marked_timer("reward", timing_raw, color="yellow"):
-                        if self.use_rm and "rm_scores" not in batch.batch.keys():
-                            batch_reward = self._compute_reward_colocate(batch)
-                            batch = batch.union(batch_reward)
-                        reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+                        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                        batch = batch.union(gen_batch_output)
 
-                    with marked_timer("prepare_direct_preference_batch", timing_raw, color="brown"):
-                        batch.batch["sample_level_scores"] = reward_tensor
-                        if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
-                        batch = self._prepare_direct_preference_actor_batch(batch, reward_tensor)
+                        with marked_timer("reward", timing_raw, color="yellow"):
+                            if self.use_rm and "rm_scores" not in batch.batch.keys():
+                                batch_reward = self._compute_reward_colocate(batch)
+                                batch = batch.union(batch_reward)
+                            reward_tensor, reward_extra_infos_dict = extract_reward(batch)
 
-                    with marked_timer("update_actor", timing_raw, color="red"):
-                        actor_output = self._update_actor(batch)
-                        self._post_direct_preference_actor_update(metrics)
+                        with marked_timer("prepare_direct_preference_batch", timing_raw, color="brown"):
+                            batch.batch["sample_level_scores"] = reward_tensor
+                            if reward_extra_infos_dict:
+                                batch.non_tensor_batch.update(
+                                    {k: np.array(v) for k, v in reward_extra_infos_dict.items()}
+                                )
+                            batch = self._prepare_direct_preference_actor_batch(batch, reward_tensor)
+
+                        with marked_timer("update_actor", timing_raw, color="red"):
+                            actor_output = self._update_actor(batch)
+                            self._post_direct_preference_actor_update(metrics)
 
                     esi_close_to_expiration = should_save_ckpt_esi(
                         max_steps_duration=self.max_steps_duration,
@@ -1233,30 +1379,53 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                         with marked_timer("save_checkpoint", timing_raw, color="green"):
                             self._save_checkpoint()
 
-                    with marked_timer("update_weights", timing_raw, color="red"):
-                        self.checkpoint_manager.update_weights(self.global_steps)
+                    if not self.is_offline:
+                        with marked_timer("update_weights", timing_raw, color="red"):
+                            self.checkpoint_manager.update_weights(self.global_steps)
 
                     metrics.update(reduce_metrics(actor_output.meta_info["metrics"]))
+
+                    rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
+                    if rollout_data_dir and not self.is_offline:
+                        self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
                 if self.config.trainer.test_freq > 0 and (
                     is_last_step or self.global_steps % self.config.trainer.test_freq == 0
                 ):
                     with marked_timer("testing", timing_raw, color="green"):
-                        val_metrics = self._validate()
+                        val_metrics: dict = self._validate()
                         if is_last_step:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
+
+                with marked_timer("stop_profile", timing_raw):
+                    next_step_profile = (
+                        self.global_steps + 1 in self.config.global_profiler.steps
+                        if self.config.global_profiler.steps is not None
+                        else False
+                    )
+                    self._stop_profiling(
+                        curr_step_profile and not next_step_profile
+                        if self.config.global_profiler.profile_continuous_steps
+                        else curr_step_profile
+                    )
+                    prev_step_profile = curr_step_profile
+                    curr_step_profile = next_step_profile
 
                 steps_duration = timing_raw["step"]
                 self.max_steps_duration = max(self.max_steps_duration, steps_duration)
                 metrics.update({"training/global_step": self.global_steps, "training/epoch": epoch})
                 metrics.update(compute_data_metrics_diffusion(batch=batch))
                 n_gpus = self.resource_pool_manager.get_n_gpus()
-                num_images = batch.batch["advantages"].shape[0]
+                if self.is_offline:
+                    num_images = batch.batch["sample_level_scores"].shape[0]
+                else:
+                    num_images = batch.batch["advantages"].shape[0]
                 metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw, num_images=num_images))
                 metrics.update(compute_throughput_metrics_diffusion(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
-                gradient_norm = metrics.get("actor/grad_norm", None)
-                metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
+                if not self.is_offline:
+                    gradient_norm = metrics.get("actor/grad_norm", None)
+                    metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
                 logger.log(data=metrics, step=self.global_steps)
 
                 progress_bar.update(1)

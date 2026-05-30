@@ -58,6 +58,10 @@ lora_adapter_path: null
 # Named LoRA policy states required by the algorithm. "reference" disables adapters.
 policy_state_adapters: ["default"]
 
+# Convert LoRA parameters to a target dtype for numerical stability (e.g., "fp32", "bf16").
+# Default null means no conversion.
+lora_dtype: null
+
 # MTP
 mtp: 
 

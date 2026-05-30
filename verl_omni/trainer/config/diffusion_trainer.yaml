@@ -66,9 +66,6 @@ algorithm:
   # Whether to normalize advantages by std (specific to GRPO)
   norm_adv_by_std_in_grpo: True
 
-  # Whether to bypass old log-prob recomputation by reusing rollout log-probs
-  bypass_mode: False
-
   # Whether to normalize advantages using global standard deviation
   global_std: True
 
@@ -86,6 +83,36 @@ algorithm:
 
   # DiffusionNFT advantage mapping mode before reward-probability scaling
   adv_mode: continuous
+
+  # Rollout Correction (experimental).  Fields mirror RolloutCorrectionConfig.
+  rollout_correction:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
+
+    # When True, skip old-log-prob recompute and use rollout_log_probs directly
+    # (2-policy bypass). When False, keep the recompute pass for 3-policy
+    # decoupled mode with IS correction from rollout to old.
+    bypass_mode: False
+
+    # Loss type in bypass mode: "ppo_clip" (IS via PPO ratio).
+    loss_type: ppo_clip
+
+    # IS aggregation: null (off), "token", or "sequence".
+    # In bypass ppo_clip mode controls metrics only (PPO ratio handles IS).
+    rollout_is: null
+
+    # IS truncation threshold: float -> TIS upper clamp, "lower_upper" -> IcePop.
+    rollout_is_threshold: 2.0
+
+    # Normalize IS weights to mean=1.0 across the batch.
+    rollout_is_batch_normalize: false
+
+    # RS mode(s), comma-separated (e.g. "seq_mean_k1").
+    rollout_rs: null
+
+    # RS threshold spec. K1 modes: "lower_upper"; K2/K3: a single upper bound.
+    rollout_rs_threshold: null
 
 # config for the trainer
 trainer:

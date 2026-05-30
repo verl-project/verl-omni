@@ -21,8 +21,10 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from omegaconf import DictConfig
 from tensordict import TensorDict
+from verl.utils import tensordict_utils as tu
 
 from verl_omni.workers.config import DiffusionActorConfig
 
@@ -33,7 +35,7 @@ class DiffusionLossResult:
 
     loss: torch.Tensor
     metrics: dict[str, Any]
-    add_loss_metric: bool = True
+    add_loss_metric: bool = False
 
 
 def _format_available_keys(mapping: Any) -> str:
@@ -257,6 +259,7 @@ class FlowGRPOLoss(DiffusionLossFn):
         log_prob: torch.Tensor,
         advantages: torch.Tensor,
         config: DiffusionActorConfig,
+        rollout_is_weights: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         """Compute the clipped policy objective and related metrics for FlowGRPO.
 
@@ -272,6 +275,11 @@ class FlowGRPOLoss(DiffusionLossFn):
                 Advantage estimates for each action, shape (batch_size,).
             config (verl_omni.workers.config.DiffusionActorConfig):
                 Config for the actor.
+            rollout_is_weights (Optional[torch.Tensor]):
+                Optional Rollout Correction multiplier (same shape as ``log_prob``) combining
+                IS weights and RS rejection (rejected samples have weight 0). When provided,
+                the per-element policy loss is multiplied by these (detached) weights before
+                the mean reduction.
         """
         assert config is not None, "config is required for FlowGRPOLoss!"
         loss_cfg = config.diffusion_loss
@@ -288,7 +296,10 @@ class FlowGRPOLoss(DiffusionLossFn):
             1.0 - loss_cfg.clip_ratio,
             1.0 + loss_cfg.clip_ratio,
         )
-        pg_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
+        per_elem_loss = torch.maximum(unclipped_loss, clipped_loss)
+        if rollout_is_weights is not None:
+            per_elem_loss = per_elem_loss * rollout_is_weights.detach()
+        pg_loss = torch.mean(per_elem_loss)
 
         with torch.no_grad():
             ppo_kl = torch.mean(-log_ratio)
@@ -320,6 +331,7 @@ class FlowGRPOLoss(DiffusionLossFn):
             log_prob=model_output["log_probs"],
             advantages=data["advantages"],
             config=config,
+            rollout_is_weights=data.get("rollout_is_weights", None),
         )
         return DiffusionLossResult(loss=loss, metrics=metrics)
 
@@ -343,6 +355,7 @@ class GRPOGuardLoss(DiffusionLossFn):
         prev_sample_mean: torch.Tensor,
         std_dev_t: torch.Tensor,
         sqrt_dt: torch.Tensor,
+        rollout_is_weights: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         """Compute the GRPO-Guard policy objective.
 
@@ -371,6 +384,11 @@ class GRPOGuardLoss(DiffusionLossFn):
                 ``(B, 1, 1, ...)`` or scalar.
             sqrt_dt (torch.Tensor): ``sqrt(-dt)`` for the current denoising step,
                 shape ``(B,)`` or scalar.
+            rollout_is_weights (Optional[torch.Tensor]):
+                Optional Rollout Correction multiplier (same shape as ``log_prob``) combining
+                IS weights and RS rejection (rejected samples have weight 0). When provided,
+                the per-element policy loss is multiplied by these (detached) weights before
+                the mean reduction.
         """
         loss_cfg = config.diffusion_loss
         advantages = torch.clamp(
@@ -398,7 +416,10 @@ class GRPOGuardLoss(DiffusionLossFn):
             1.0 - loss_cfg.clip_ratio,
             1.0 + loss_cfg.clip_ratio,
         )
-        pg_loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss)) / (sqrt_dt_mean**2)
+        per_elem_loss = torch.maximum(unclipped_loss, clipped_loss)
+        if rollout_is_weights is not None:
+            per_elem_loss = per_elem_loss * rollout_is_weights.detach()
+        pg_loss = torch.mean(per_elem_loss) / (sqrt_dt_mean**2)
 
         with torch.no_grad():
             ppo_kl = torch.mean(-log_ratio)
@@ -434,6 +455,116 @@ class GRPOGuardLoss(DiffusionLossFn):
             std_dev_t=model_output["std_dev_t"],
             sqrt_dt=model_output["sqrt_dt"],
             config=config,
+            rollout_is_weights=data.get("rollout_is_weights", None),
+        )
+        return DiffusionLossResult(loss=loss, metrics=metrics)
+
+
+@register_diffusion_loss("dpo")
+class DPOLoss(DiffusionLossFn):
+    """DPO loss with win/reward optimization."""
+
+    required_model_output_keys = ("noise", "latent", "noise_pred")
+    required_data_keys = ("ref_noise_pred", "sample_level_rewards")
+
+    @classmethod
+    def _dpo_adjacent_pairs_share_prompt_uid(cls, index: Any, n: int) -> bool:
+        """Return True if each adjacent (chosen, rejected) pair shares the same prompt uid.
+
+        Avoids slicing or ``np.asarray`` on TensorDict / TensorClass handles (batch_dims==0), which
+        cannot be indexed like a plain tensor.
+        """
+        if isinstance(index, torch.Tensor):
+            flat = index.reshape(-1)[:n]
+            return bool(torch.all(flat[0::2] == flat[1::2]).item())
+        if isinstance(index, np.ndarray):
+            flat = np.asarray(index).reshape(-1)[:n]
+            return bool(np.all(flat[0::2] == flat[1::2]))
+        if isinstance(index, list | tuple):
+            flat = np.asarray(index, dtype=object).reshape(-1)[:n]
+            return bool(np.all(flat[0::2] == flat[1::2]))
+        tolist = getattr(index, "tolist", None)
+        if callable(tolist):
+            try:
+                raw = tolist()
+            except (RuntimeError, TypeError, ValueError):
+                raw = None
+            if raw is not None and not isinstance(raw, str | bytes | bytearray):
+                flat = np.asarray(raw, dtype=object).reshape(-1)[:n]
+                return bool(np.all(flat[0::2] == flat[1::2]))
+        raise TypeError(
+            f"DPO `index` (prompt uid) has unsupported type {type(index)}. "
+            "Use a torch.Tensor, numpy.ndarray, list, or tuple (or pass uids via non_tensor batch)."
+        )
+
+    @classmethod
+    def compute_loss(
+        cls,
+        noise: torch.Tensor,
+        latent: torch.Tensor,
+        model_noise_pred: torch.Tensor,
+        ref_noise_pred: torch.Tensor,
+        sample_level_rewards: torch.Tensor,
+        config: Optional[DictConfig | DiffusionActorConfig] = None,
+        *,
+        index: Optional[np.ndarray | torch.Tensor | list[Any]] = None,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute DPO loss from adjacent ``chosen, rejected`` sample pairs.
+        Adapted from https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/dpo/loss.py
+        """
+        assert config is not None
+        assert isinstance(config, DiffusionActorConfig)
+
+        scores = sample_level_rewards.squeeze(-1) if sample_level_rewards.ndim > 1 else sample_level_rewards
+        if scores.shape[0] < 2 or scores.shape[0] % 2 != 0:
+            raise ValueError("DPO loss expects an even batch of adjacent chosen/rejected pairs.")
+        if index is not None:
+            n = int(scores.shape[0])
+            if not cls._dpo_adjacent_pairs_share_prompt_uid(index, n):
+                raise ValueError("DPO loss expects each adjacent chosen/rejected pair to share the same prompt uid.")
+
+        chosen_scores = scores[0::2]
+        rejected_scores = scores[1::2]
+        if torch.any(chosen_scores < rejected_scores).item():
+            raise ValueError("DPO loss expects each chosen sample reward to be >= its rejected pair reward.")
+
+        beta = config.diffusion_loss.dpo_beta
+        target = noise.float() - latent.float()
+        model_err = ((model_noise_pred.float() - target) ** 2).flatten(1).mean(dim=1)
+        ref_err = ((ref_noise_pred.float() - target) ** 2).flatten(1).mean(dim=1)
+
+        model_w_err = model_err[0::2]
+        model_l_err = model_err[1::2]
+        ref_w_err = ref_err[0::2]
+        ref_l_err = ref_err[1::2]
+        w_diff = model_w_err - ref_w_err
+        l_diff = model_l_err - ref_l_err
+        inside_term = -0.5 * beta * (w_diff - l_diff)
+        implicit_acc = (inside_term > 0).sum().float() / inside_term.size(0)
+        dpo_loss = -F.logsigmoid(inside_term).mean()
+
+        with torch.no_grad():
+            metrics = {
+                "actor/dpo_loss": dpo_loss.detach().item(),
+                "actor/implicit_acc": implicit_acc.detach().item(),
+            }
+        return dpo_loss, metrics
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        loss, metrics = self.compute_loss(
+            noise=model_output["noise"],
+            latent=model_output["latent"],
+            model_noise_pred=model_output["noise_pred"],
+            ref_noise_pred=data["ref_noise_pred"],
+            sample_level_rewards=data["sample_level_rewards"],
+            config=config,
+            index=tu.get_non_tensor_data(data, "uid", default=None),
         )
         return DiffusionLossResult(loss=loss, metrics=metrics)
 

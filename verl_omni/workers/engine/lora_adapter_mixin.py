@@ -55,6 +55,19 @@ class LoRAAdapterMixin:
         if "default" in policy_state_adapters and hasattr(module, "set_adapter"):
             module.set_adapter("default")
 
+        lora_dtype = getattr(self.model_config, "lora_dtype", None)
+        if lora_dtype is not None:
+            from peft.tuners.tuners_utils import BaseTunerLayer
+            from verl.utils.torch_dtypes import PrecisionType
+
+            target_dtype = PrecisionType.to_dtype(lora_dtype)
+            for name, param in module.named_parameters():
+                if param.requires_grad:
+                    param.data = param.data.to(target_dtype)
+            for submodule in module.modules():
+                if isinstance(submodule, BaseTunerLayer):
+                    submodule.cast_input_dtype_enabled = False
+
         return module
 
     @property

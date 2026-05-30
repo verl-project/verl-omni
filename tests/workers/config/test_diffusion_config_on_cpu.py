@@ -84,7 +84,6 @@ class TestDiffusionAlgoConfig:
         cfg = DiffusionAlgoConfig()
         assert cfg.adv_estimator == "flow_grpo"
         assert cfg.norm_adv_by_std_in_grpo is True
-        assert cfg.bypass_mode is False
         assert cfg.global_std is True
         assert cfg.old_policy_decay_type == 0
         assert cfg.old_policy_decay is None

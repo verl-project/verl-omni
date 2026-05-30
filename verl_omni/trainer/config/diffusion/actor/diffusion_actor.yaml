@@ -44,6 +44,40 @@ diffusion_loss:
   # DiffusionNFT minimum adaptive denominator for x0 reconstruction losses
   adaptive_weight_min: 1e-5
 
+  # DPO inverse temperature for pairwise flow-matching preference loss
+  dpo_beta: 2000.0
+
+# Rollout Correction config.  Fields mirror RolloutCorrectionConfig.
+# rollout_is defaults to null (off); override for IS diagnostics.
+rollout_correction:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
+
+  # When True, skip old-log-prob recompute and use rollout_log_probs directly
+  # (2-policy bypass). When False, keep the recompute pass for 3-policy
+  # decoupled mode with IS correction from rollout to old.
+  bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
+
+  # Loss type in bypass mode: "ppo_clip" (IS via PPO ratio)
+  loss_type: ${oc.select:algorithm.rollout_correction.loss_type,ppo_clip}
+
+  # IS aggregation level: null (off), "token" (per-token), or "sequence" (per-sequence)
+  # In bypass ppo_clip mode this controls metrics only (PPO ratio handles IS)
+  rollout_is: ${oc.select:algorithm.rollout_correction.rollout_is,null}
+
+  # IS truncation threshold: float -> TIS upper clamp, "lower_upper" string -> IcePop bounds
+  rollout_is_threshold: ${oc.select:algorithm.rollout_correction.rollout_is_threshold,2.0}
+
+  # Normalize IS weights to mean=1.0 across the batch before applying
+  rollout_is_batch_normalize: ${oc.select:algorithm.rollout_correction.rollout_is_batch_normalize,false}
+
+  # RS aggregation mode: null (off), e.g. "token_k1", "seq_sum_k1", "seq_mean_k1"
+  rollout_rs: ${oc.select:algorithm.rollout_correction.rollout_rs,null}
+
+  # RS threshold spec: K1 modes use "lower_upper" string; K2/K3 use a single upper-bound float
+  rollout_rs_threshold: ${oc.select:algorithm.rollout_correction.rollout_rs_threshold,null}
+
 # loss scale factor for diffusion loss, if applicable. If set to null, it will not be applied.
 loss_scale_factor: null
 

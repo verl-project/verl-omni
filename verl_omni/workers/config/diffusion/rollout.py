@@ -103,6 +103,10 @@ class DiffusionRolloutConfig(BaseConfig):
     n_gpus_per_node: int = 8
     n: int = 1
 
+    # Base seed for deterministic training rollout RNG. Per-step base is
+    # ``seed + global_step - 1``. null disables rollout seeding.
+    seed: Optional[int] = None
+
     prompt_length: int = 512
 
     dtype: str = "bfloat16"

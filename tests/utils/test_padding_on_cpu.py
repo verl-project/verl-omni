@@ -78,6 +78,29 @@ def test_embeds_padding_2_no_padding_uniform_length():
         torch.testing.assert_close(embeds_nested[i], prompt_embeds[i])
 
 
+def _is_absent_embeds_mask(value) -> bool:
+    if value is None:
+        return True
+    return getattr(value, "data", value) is None
+
+
+def test_embeds_padding_2_no_padding_without_mask():
+    """Offline DPO parquet may omit prompt_embeds_mask; full sequences must be kept."""
+    batch_size = 3
+    max_seq_len = 10
+    dim = 8
+    prompt_embeds = torch.randn(batch_size, max_seq_len, dim)
+
+    data = TensorDict({"prompt_embeds": prompt_embeds}, batch_size=batch_size)
+    result = embeds_padding_2_no_padding(data)
+
+    assert result["prompt_embeds"].is_nested
+    assert _is_absent_embeds_mask(result.get("prompt_embeds_mask"))
+    for i in range(batch_size):
+        assert result["prompt_embeds"][i].shape == (max_seq_len, dim)
+        torch.testing.assert_close(result["prompt_embeds"][i], prompt_embeds[i])
+
+
 def test_embeds_padding_2_no_padding_nested_tensor_ragged_idx():
     """test nested tensors from embeds_padding_2_no_padding with _ragged_idx=1"""
     from verl.utils import tensordict_utils as tu

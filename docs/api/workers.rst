@@ -34,8 +34,8 @@ Engine Workers
 
 .. autoclass:: verl_omni.workers.engine_workers.ActorRolloutRefWorker
    :members: __init__, init_model,
-             compute_log_prob, compute_ref_log_prob, update_actor,
-             update_weights, save_checkpoint, load_checkpoint,
+             compute_log_prob, compute_ref_log_prob, infer_actor_batch, infer_ref_batch,
+             update_actor, update_weights, save_checkpoint, load_checkpoint,
              copy_adapter, ema_update_adapter
 
 Diffusers FSDP Engine

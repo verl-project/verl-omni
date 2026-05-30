@@ -64,6 +64,7 @@ from verl_omni.pipelines.utils import (
     forward_velocity,
     prepare_forward_diffusion_inputs,
     prepare_model_inputs,
+    prepare_noisy_latents,
 )
 from verl_omni.utils.fsdp_utils import collect_lora_params
 from verl_omni.workers.config import DiffusionModelConfig
@@ -876,6 +877,193 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
             if micro_batch.get("old_prev_sample_mean", None) is not None:
                 data["old_prev_sample_mean"] = micro_batch["old_prev_sample_mean"][:, step]
 
+            if micro_batch.get("rollout_is_weights", None) is not None:
+                data["rollout_is_weights"] = micro_batch["rollout_is_weights"][:, step]
+
+            loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
+        else:
+            assert forward_only, "forward_only must be True when loss_function is None"
+            loss = torch.tensor(1.0, device=device_name)
+            metrics = {}
+
+        output = {
+            "model_output": model_output,
+            "loss": loss.detach().item(),
+            "metrics": metrics,
+        }
+
+        return loss, output
+
+
+@EngineRegistry.register(model_type="diffusion_dp_model", backend=["fsdp", "fsdp2"], device=["cuda"])
+class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
+    """Diffusers FSDP engine variant for diffusion DPO."""
+
+    def _prepare_noisy_latents(self, micro_batch: TensorDict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        latents = micro_batch.get("image_latents", None)
+        if latents is None:
+            raise KeyError("Diffusion DPO training requires `image_latents` in the micro batch.")
+
+        return prepare_noisy_latents(
+            latents=latents,
+            scheduler=self.scheduler,
+            noise=micro_batch.get(
+                "noise", None
+            ),  # if noise is not provided, sample noise and timesteps in the forward step
+            timesteps=micro_batch.get(
+                "timesteps", None
+            ),  # if timesteps is not provided, sample timesteps in the forward step
+        )
+
+    def _prepare_prompt_embeds(
+        self,
+        prompt_embeds: torch.Tensor,
+        prompt_embeds_mask: torch.Tensor | None,
+        negative_prompt_embeds: torch.Tensor | None,
+        negative_prompt_embeds_mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        """Apply common nested-tensor and sequence-parallel padding to prompt embeds."""
+        sp_size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
+        if not isinstance(prompt_embeds_mask, torch.Tensor):
+            prompt_embeds_mask = None
+        if not isinstance(negative_prompt_embeds, torch.Tensor):
+            negative_prompt_embeds = None
+        if not isinstance(negative_prompt_embeds_mask, torch.Tensor):
+            negative_prompt_embeds_mask = None
+
+        if prompt_embeds.is_nested:
+            prompt_embeds, prompt_embeds_mask = self._unpad_nested_embeds(prompt_embeds, prompt_embeds_mask)
+
+        if sp_size > 1:
+            prompt_embeds, prompt_embeds_mask = self._pad_embeds_for_sp(prompt_embeds, prompt_embeds_mask, sp_size)
+
+        if isinstance(negative_prompt_embeds, torch.Tensor) and negative_prompt_embeds.is_nested:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self._unpad_nested_embeds(
+                negative_prompt_embeds, negative_prompt_embeds_mask
+            )
+
+        if isinstance(negative_prompt_embeds, torch.Tensor) and sp_size > 1:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self._pad_embeds_for_sp(
+                negative_prompt_embeds, negative_prompt_embeds_mask, sp_size
+            )
+
+        return prompt_embeds, prompt_embeds_mask, negative_prompt_embeds, negative_prompt_embeds_mask
+
+    def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
+        del step
+
+        noisy_latents, noise, timesteps = self._prepare_noisy_latents(micro_batch)
+        latent = micro_batch["image_latents"].to(device=noise.device, dtype=noise.dtype)
+        prompt_embeds = micro_batch["prompt_embeds"]
+        prompt_embeds_mask = micro_batch.get("prompt_embeds_mask", None)
+        negative_prompt_embeds = micro_batch.get("negative_prompt_embeds", None)
+        negative_prompt_embeds_mask = micro_batch.get("negative_prompt_embeds_mask", None)
+        prompt_embeds, prompt_embeds_mask, negative_prompt_embeds, negative_prompt_embeds_mask = (
+            self._prepare_prompt_embeds(
+                prompt_embeds=prompt_embeds,
+                prompt_embeds_mask=prompt_embeds_mask,
+                negative_prompt_embeds=negative_prompt_embeds,
+                negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+            )
+        )
+
+        model_inputs, negative_model_inputs = prepare_model_inputs(
+            module=self.module,
+            model_config=self.model_config,
+            latents=noisy_latents,
+            timesteps=timesteps,
+            prompt_embeds=prompt_embeds,
+            prompt_embeds_mask=prompt_embeds_mask,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+            micro_batch=micro_batch,
+            step=0,
+        )
+        return model_inputs, negative_model_inputs, {"noise": noise, "latent": latent, "timesteps": timesteps}
+
+    def prepare_model_outputs(self, output, micro_batch: TensorDict):
+        del micro_batch
+
+        noise_pred, dpo_context = output
+
+        return {
+            "noise_pred": noise_pred,
+            "noise": dpo_context["noise"],
+            "latent": dpo_context["latent"],
+            "timesteps": dpo_context["timesteps"],
+        }
+
+    def forward_backward_batch(
+        self, data: TensorDict, loss_function: Callable, forward_only: bool = False
+    ) -> list[TensorDict]:
+        tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
+        tu.assign_non_tensor(data, use_dynamic_bsz=False)
+
+        micro_batches, indices = prepare_micro_batches(
+            data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
+        )
+
+        gradient_accumulation_steps = len(micro_batches)
+
+        output_lst = []
+
+        ctx = torch.no_grad() if forward_only else nullcontext()
+
+        for micro_batch in micro_batches:
+            micro_batch = micro_batch.to(get_device_id())
+            tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
+            meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
+            with ctx:
+                # DPO is a one-shot flow-matching objective over final image latents,
+                # not a reversed-sampling objective over every rollout timestep.
+                loss, meta_info = self.forward_step(
+                    micro_batch,
+                    loss_function=loss_function,
+                    forward_only=forward_only,
+                    step=None,  # use random step for DPO
+                )
+
+                if not forward_only:
+                    loss.backward()
+
+                for key, val in meta_info.items():
+                    meta_info_lst[key].append(val)
+
+            output_lst.append(meta_info_lst)
+
+        # postprocess and return
+        return self.postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+
+    def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
+        model_inputs, negative_model_inputs, dpo_context = self.prepare_model_inputs(micro_batch=micro_batch, step=step)
+        noise_pred = forward_and_sample_previous_step(
+            module=self.module,
+            scheduler=self.scheduler,
+            model_config=self.model_config,
+            model_inputs=model_inputs,
+            negative_model_inputs=negative_model_inputs,
+            scheduler_inputs=micro_batch,
+            step=step,
+        )
+        model_output = self.prepare_model_outputs(output=(noise_pred, dpo_context), micro_batch=micro_batch)
+
+        if loss_function is not None:
+            data = tu.get_tensordict({"sample_level_rewards": micro_batch["sample_level_rewards"]})
+            uid = tu.get_non_tensor_data(micro_batch, "uid", default=None)
+            tu.assign_non_tensor(
+                data,
+                gradient_accumulation_steps=tu.get_non_tensor_data(
+                    micro_batch, "gradient_accumulation_steps", default=None
+                ),
+                sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
+            )
+            if uid is not None:
+                tu.assign_non_tensor(data, uid=uid)
+            if micro_batch.get("ref_noise_pred", None) is not None:
+                ref_noise_pred = micro_batch["ref_noise_pred"]
+                if ref_noise_pred.ndim == model_output["noise_pred"].ndim + 1 and ref_noise_pred.shape[1] == 1:
+                    ref_noise_pred = ref_noise_pred[:, 0]
+                data["ref_noise_pred"] = ref_noise_pred
             loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
         else:
             assert forward_only, "forward_only must be True when loss_function is None"

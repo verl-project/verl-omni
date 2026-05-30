@@ -21,7 +21,9 @@ from . import (
 from .qwen_image_diffusion_nft import *  # noqa: F401, F403
 from .qwen_image_flow_grpo import *  # noqa: F401, F403
 from .qwen_image_mix_grpo import *  # noqa: F401, F403
+from .sd3_dpo import *  # noqa: F401, F403
 
 __all__ = list(qwen_image_flow_grpo.__all__)
 __all__ += list(qwen_image_diffusion_nft.__all__)
 __all__ += list(qwen_image_mix_grpo.__all__)
+__all__ += list(sd3_dpo.__all__)
