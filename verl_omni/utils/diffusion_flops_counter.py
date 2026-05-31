@@ -12,69 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FLOPs / MFU counter for diffusion DiT models trained with verl-omni.
+"""FLOPs / Model FLOPs Utilization (MFU) counter for diffusion DiT models.
 
-The upstream ``verl.utils.flops_counter.FlopsCounter`` only understands
-HuggingFace ``transformers`` LLM configs.  Diffusion training in verl-omni
-uses ``diffusers`` transformer configs whose schema is different
-(``num_layers``, ``attention_head_dim``, ``num_attention_heads``,
-``joint_attention_dim`` etc.) and additionally:
+This module provides the core logic to estimate FLOPs and compute MFU for
+various multi-modal diffusion architectures (T2I, T2V, T2A, Edit, ControlNet, etc.).
 
-- runs ``num_timesteps`` denoising steps per ``train_batch`` /
-  ``infer_batch`` call,
-- optionally runs two forward passes per step for True-CFG, and
-- attends over a **latent stream** (VAE-encoded image / video / audio
-  latents being denoised) and a **prompt stream** (text-encoder tokens,
-  and any encoded reference tokens that share the cross-attention
-  path), jointly with no causal mask for MM-DiT pipelines.
+Unlike LLMs, diffusion models trained with verl-omni are modality-agnostic and
+operate on two primary token streams:
+1. **Latent stream** — VAE-encoded tokens (image, video, or audio latents) flowing
+   through main-side linears.
+2. **Prompt stream** — conditioning tokens (text-encoder or reference-image tokens)
+   flowing through cross-attention or text-side linears.
 
-The counter is **modality-agnostic**: the latent stream can be image
-latents (Qwen-Image, SD3, Flux), video latents (Wan2.2, Hunyuan, LTX),
-audio latents (AudioLDM-style), or anything else a future diffusion
-pipeline puts on the denoiser's primary input. The prompt stream is
-likewise whatever the cross-attention or text-side linears consume.
-"Latent" here follows diffusers' convention (``latents``,
-``image_latents``, ``all_latents``) — the tokens flowing through the
-main-side linears of the denoiser, noisy or not.
+Adding support for a new architecture requires inheriting from :class:`DiffusionModelFlops`,
+decorating it with :func:`register_diffusion_architecture`, and implementing `estimate_flops`.
 
-The two stream totals are the right granularity for FLOPs accounting
-because they map directly onto where the per-block linears apply:
-
-- **Latent stream** tokens flow through the image-side (or
-  "main-side") linears of each block (``to_q/to_k/to_v``, ``to_out``,
-  ``img_mlp`` in the Qwen-Image / SD3 family; ``attn1`` and ``ffn`` in
-  Wan).
-- **Prompt stream** tokens flow through the text-side / cross-attention
-  linears (``add_q/k/v_proj``, ``to_add_out``, ``txt_mlp`` in MM-DiT;
-  ``attn2``'s KV projections in Wan-style cross-attention).
-- **Joint attention** sees the concatenation of both streams; its cost
-  ``∝ (latent_s + prompt_s)²`` is computed *inside* ``estimate_flops``
-  from the two totals, so a separate "joint_seqlens" field is not
-  needed.
-
-This implies a precise rule for variants that introduce extra latents:
-
-- **Img2Img / Edit / Inpaint / ControlNet** concatenate reference
-  latents to the denoise-target latents along the sequence dim
-  *before* the transformer block, so the reference latents go through
-  the same image-side linears as the denoise targets. They contribute
-  to ``latent_seqlens``, not to a third bucket. ``latent_seqlens`` for
-  an Edit pipeline is therefore
-  ``denoise_target_token_count + reference_token_count`` per sample.
-- **Img2Vid** with a vision-encoded reference image (Wan2.2-I2V style)
-  concatenates the encoded reference tokens to the text encoder output
-  before the cross-attention; those tokens flow through the cross-attn
-  KV linears. They contribute to ``prompt_seqlens``.
-
-Adding a new architecture is a single class with one required method.
-Subclass :class:`DiffusionModelFlops`, decorate with
-:func:`register_diffusion_architecture`, and implement
-``estimate_flops``. ``get_latent_seqlens`` and ``get_prompt_seqlens``
-have sensible defaults that cover vanilla T2I / T2V / T2A models in
-either training or FlowGRPO rollout-stacked layout; override them
-only for variants whose data layout genuinely differs (Edit / Img2Vid
-/ ControlNet that concatenate extra latents, models with flat
-``(B, L, C)`` patched latents, NaViT-style ragged packing, etc.).
+For the complete MFU design details, theoretical FLOPs formulas, stream allocation
+conventions, and subclass integration guides, see:
+`docs/perf/diffusion_mfu.md` (or run `make html` in the docs folder to view the built page).
 """
 
 from __future__ import annotations
