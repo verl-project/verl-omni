@@ -742,49 +742,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         return self.postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
 
 
-class DiffusionFSDPEngineAlgorithmRegistry:
-    """Algorithm-aware registry for diffusion FSDP engine implementations."""
-
-    _registry: dict[str, type[DiffusersFSDPEngine]] = {}
-
-    @classmethod
-    def register(cls, algorithms: str | list[str]):
-        """Register an FSDP engine class for one or more diffusion algorithms."""
-        algorithm_names = [algorithms] if isinstance(algorithms, str) else algorithms
-
-        def decorator(engine_cls: type[DiffusersFSDPEngine]) -> type[DiffusersFSDPEngine]:
-            if not issubclass(engine_cls, DiffusersFSDPEngine):
-                raise TypeError(f"{engine_cls.__name__} must subclass DiffusersFSDPEngine.")
-            for algorithm in algorithm_names:
-                if not algorithm:
-                    raise ValueError("Diffusion FSDP engine algorithm names must be non-empty.")
-                if algorithm in cls._registry:
-                    registered_cls = cls._registry[algorithm]
-                    raise ValueError(
-                        f"Diffusion algorithm {algorithm!r} is already registered to {registered_cls.__name__}."
-                    )
-                cls._registry[algorithm] = engine_cls
-            return engine_cls
-
-        return decorator
-
-    @classmethod
-    def get_engine_cls(cls, model_config: DiffusionModelConfig) -> type[DiffusersFSDPEngine]:
-        """Return the FSDP engine class registered for ``model_config.algorithm``."""
-        algorithm = getattr(model_config, "algorithm", None)
-        if not algorithm:
-            raise ValueError("DiffusionModelConfig.algorithm must be set for diffusion FSDP engine selection.")
-
-        try:
-            return cls._registry[algorithm]
-        except KeyError:
-            registered = sorted(cls._registry)
-            raise NotImplementedError(
-                f"No diffusion FSDP engine registered for algorithm={algorithm!r}. Registered algorithms: {registered}."
-            ) from None
-
-
-@DiffusionFSDPEngineAlgorithmRegistry.register(["flow_grpo", "mix_grpo"])
+@EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
     """Diffusers FSDP engine with PPO forward/backward and I/O preparation."""
 
@@ -1087,7 +1045,7 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
         return loss, output
 
 
-@DiffusionFSDPEngineAlgorithmRegistry.register("diffusion_nft")
+@EngineRegistry.register(model_type="diffusion_nft_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
     """Diffusers FSDP engine for direct-preference / forward-process objectives (e.g. DiffusionNFT)."""
 
@@ -1212,26 +1170,6 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
             "metrics": metrics,
         }
         return loss, output
-
-
-@EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
-class DiffusersFSDPEngineRouter(BaseEngine):
-    """Registered diffusion FSDP entry point that selects the algorithm-specific engine."""
-
-    def __new__(
-        cls,
-        model_config: DiffusionModelConfig,
-        engine_config: FSDPEngineConfig,
-        optimizer_config: FSDPOptimizerConfig,
-        checkpoint_config: CheckpointConfig,
-    ) -> DiffusersFSDPEngine:
-        engine_cls = DiffusionFSDPEngineAlgorithmRegistry.get_engine_cls(model_config)
-        return engine_cls(
-            model_config=model_config,
-            engine_config=engine_config,
-            optimizer_config=optimizer_config,
-            checkpoint_config=checkpoint_config,
-        )
 
 
 class EngineEvalModeCtx(BaseEngineCtx):

@@ -27,6 +27,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.train_batch_size=24 \
     data.max_prompt_length=256 \
     actor_rollout_ref.model.algorithm=diffusion_nft \
+    actor_rollout_ref.model.model_type=diffusion_nft_model \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
