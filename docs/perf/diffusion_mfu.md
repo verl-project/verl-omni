@@ -300,17 +300,21 @@ class WanFlops(DiffusionModelFlops):
     # T, H, W) rollout-stacked variant are both handled by the default
     # extractor — the latent stream here is the video latent tokens.
 
-    @staticmethod
     def estimate_flops(
-        config, latent_seqlens, prompt_seqlens, delta_time,
-        *, num_timesteps, cfg_passes,
-    ):
-        num_heads  = int(config["num_attention_heads"])
-        head_dim   = int(config["attention_head_dim"])
-        num_layers = int(config["num_layers"])
-        ffn_dim    = int(config["ffn_dim"])
-        added_kv   = int(config.get("added_kv_proj_dim") or num_heads * head_dim)
-        dim        = num_heads * head_dim
+        self,
+        latent_seqlens: Sequence[int],
+        prompt_seqlens: Sequence[int],
+        delta_time: float,
+        *,
+        num_timesteps: int,
+        cfg_passes: int,
+    ) -> float:
+        num_heads  = int(self.config["num_attention_heads"])
+        head_dim   = int(self.config["attention_head_dim"])
+        num_layers = int(self.config["num_layers"])
+        ffn_dim    = int(self.config["ffn_dim"])
+        added_kv   = int(self.config.get("added_kv_proj_dim") or self.dim)
+        dim        = self.dim
 
         # latent_s = tokens flowing through attn1 + ffn (the image-side
         # linears in Wan; the latent stream here is the video latents).
@@ -325,16 +329,17 @@ class WanFlops(DiffusionModelFlops):
         cross_o_n   = 1 * dim * dim
         ffn_n       = 2 * dim * ffn_dim                       # explicit ffn_dim, no 4x assumption
 
-        # Dense FLOPs. Factor 6 = 2 FLOPs/MAC * 3 (fwd+bwd).
-        latent_dense = 6 * num_layers * (self_attn_n + ffn_n) * latent_tot
-        cross_dense  = 6 * num_layers * (
-            (cross_q_n + cross_o_n) * latent_tot + cross_kv_n * prompt_tot
+        # Dense FLOPs.
+        latent_dense = self.compute_dense_flops(num_layers * (self_attn_n + ffn_n), latent_tot)
+        cross_dense  = self.compute_dense_flops(
+            num_layers * (cross_q_n + cross_o_n), latent_tot
+        ) + self.compute_dense_flops(
+            num_layers * cross_kv_n, prompt_tot
         )
-        mod_flops    = 6 * num_layers * (6 * dim * dim) * batch  # per-sample timestep embed
+        mod_flops    = self.compute_dense_flops(num_layers * (6 * dim * dim), batch)  # per-sample timestep embed
 
         # Attention FLOPs. Factor 12 = 2 FLOPs/MAC * 2 matmuls * 3 (fwd+bwd).
-        self_attn_flops = 12 * num_layers * num_heads * head_dim * \
-            sum(int(s) ** 2 for s in latent_seqlens)
+        self_attn_flops = 12 * num_layers * num_heads * head_dim * sum(int(s) ** 2 for s in latent_seqlens)
         cross_attn_flops = 12 * num_layers * num_heads * head_dim * sum(
             int(l) * int(p)
             for l, p in zip(latent_seqlens, prompt_seqlens, strict=False)
@@ -382,9 +387,8 @@ separate field. Subclass the parent T2I class and override
 ```python
 @register_diffusion_architecture("QwenImageEditPipeline")
 class QwenImageEditFlops(QwenImageFlops):
-    @staticmethod
-    def get_latent_seqlens(data, config):
-        base = QwenImageFlops.get_latent_seqlens(data, config)
+    def get_latent_seqlens(self, data: Any = None, config: Optional[Mapping[str, Any]] = None) -> list[int]:
+        base = super().get_latent_seqlens(data, config)
         ref = data.get("reference_image_latents")
         if ref is None:
             return base
