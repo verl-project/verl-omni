@@ -56,15 +56,21 @@ from verl_omni.trainer.diffusion.direct_preference_handlers import (
     DIRECT_PREFERENCE_HANDLER_REGISTRY,
     get_direct_preference_handler,
 )
-from verl_omni.trainer.diffusion.diffusion_trainer_utils import NoOpCheckpointManager
 from verl_omni.trainer.diffusion.diffusion_algos import (
     DiffusionAdvantageEstimator,
     get_diffusion_adv_estimator_fn,
 )
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
+    compute_reward_extra_metrics_diffusion,
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
+)
+from verl_omni.trainer.diffusion.diffusion_trainer_utils import NoOpCheckpointManager
+from verl_omni.trainer.diffusion.rollout_correction import (
+    apply_bypass_mode_to_diffusion_batch,
+    apply_rollout_correction_to_diffusion_batch,
+    rollout_correction_enabled,
 )
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
@@ -854,9 +860,9 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
             metadata["no_lora_adapter"] = True
         tu.assign_non_tensor(batch_td, **metadata)
         if self.ref_in_actor:
-            output = self.actor_rollout_wg.compute_log_prob(batch_td)
+            output = self.actor_rollout_wg.infer_actor_batch(batch_td)
         else:
-            output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
+            output = self.ref_policy_wg.infer_ref_batch(batch_td)
         # gather output
         log_probs = tu.get(output, "log_probs")
         prev_sample_mean = tu.get(output, "prev_sample_mean")
@@ -875,7 +881,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
             width=self.config.actor_rollout_ref.model.pipeline.width,
             vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
         )
-        output = self.actor_rollout_wg.compute_log_prob(batch_td)
+        output = self.actor_rollout_wg.infer_actor_batch(batch_td)
         log_probs = tu.get(output, "log_probs")
         old_log_prob_dict = {"old_log_probs": log_probs.float()}
         prev_sample_mean = tu.get(output, "prev_sample_mean")
@@ -961,6 +967,12 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
+
+                # Per-step rollout seed for reproducibility
+                rollout_seed_cfg = self.config.actor_rollout_ref.rollout.get("seed")
+                if rollout_seed_cfg is not None:
+                    gen_batch.meta_info["rollout_seed"] = int(rollout_seed_cfg) + self.global_steps - 1
+
                 gen_batch_output = gen_batch.repeat(
                     repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
                 )
@@ -988,15 +1000,27 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
 
-                    bypass_recomputing_logprobs = self.config.algorithm.get("bypass_mode", False)
+                    # Bypass mode: skip old_log_prob recompute (2 policies).
+                    # Decoupled mode: recompute old_log_probs as proximal anchor (3 policies).
+                    rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
+                    bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
                     if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
-                        batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
+                        apply_bypass_mode_to_diffusion_batch(batch)
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
                             old_log_prob = self._compute_old_log_prob(batch)
                             batch = batch.union(old_log_prob)
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
+
+                    # Decoupled-mode rollout correction (old vs rollout).
+                    # In bypass mode old == rollout, so correction runs per-step in ``diffusion_loss``.
+                    if not bypass_recomputing_logprobs and rollout_correction_enabled(rollout_corr_config):
+                        with marked_timer("rollout_corr", timing_raw, color="cyan"):
+                            batch, rollout_corr_metrics = apply_rollout_correction_to_diffusion_batch(
+                                batch, rollout_corr_config
+                            )
+                            metrics.update(rollout_corr_metrics)
 
                     if self.use_reference_policy:
                         # compute reference log_prob
@@ -1108,6 +1132,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                 num_images = batch.batch["advantages"].shape[0]
                 metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw, num_images=num_images))
                 metrics.update(compute_throughput_metrics_diffusion(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
+                metrics.update(compute_reward_extra_metrics_diffusion(reward_extra_infos_dict))
                 # compute variance proxy metrics
                 gradient_norm = metrics.get("actor/grad_norm", None)
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
