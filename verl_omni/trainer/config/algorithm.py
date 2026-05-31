@@ -37,6 +37,7 @@ class DiffusionAlgoConfig(BaseConfig):
     old_policy_update_interval: int = 1
     timestep_fraction: float = 1.0
     adv_mode: str = "continuous"
+    paired_preference: bool = False  # True for pair-based algorithms (e.g. DPO)
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
 
     def __post_init__(self):

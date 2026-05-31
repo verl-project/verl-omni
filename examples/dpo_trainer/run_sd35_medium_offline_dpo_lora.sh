@@ -16,6 +16,7 @@ NUM_GPUS_ACTOR=1
 python3 -m verl_omni.trainer.main_diffusion \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=offline \
+    algorithm.paired_preference=true \
     data.train_files=$offline_train_path \
     data.val_files=$offline_test_path \
     data.train_batch_size=16 \

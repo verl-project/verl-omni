@@ -40,6 +40,7 @@ python3 tests/special_e2e/create_dummy_offline_dpo_data.py \
 python3 -m verl_omni.trainer.main_diffusion \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=offline \
+    algorithm.paired_preference=true \
     data.train_files="${DATA_FILE}" \
     data.val_files="${DATA_FILE}" \
     data.train_batch_size=${train_batch_size} \

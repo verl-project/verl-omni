@@ -331,14 +331,27 @@ For example, DiffusionNFT registers `NFTDiffusersFSDPEngine` as
 `model_type="diffusion_nft_model"` because its batch contains `latents_clean`,
 `train_timesteps`, and `reward_prob`, not PPO's reverse-step logprob tensors.
 
-Direct-preference algorithms also need trainer-side hooks for their batch
-preparation, config validation, and any policy-state update after the actor
-optimizer step. Register those hooks in
-[`direct_preference_handlers.py`](../../verl_omni/trainer/diffusion/direct_preference_handlers.py)
-with `@register_direct_preference_handler("<your_algo>")`. Keep algorithm-only
-helper math in a focused module under
-`verl_omni/trainer/diffusion/algos/` instead of adding it to the generic
-loss/advantage registry module.
+**Direct-preference algorithms** (DPO, DiffusionNFT, and similar) use
+`DirectPreferenceRayTrainer`, which is designed to accommodate both offline
+(DPO) and online (DiffusionNFT) training via config flags rather than
+algorithm-name branches. The relevant trainer-side config knobs are:
+
+| Config key | Purpose |
+|---|---|
+| `algorithm.sample_source` | `offline` or `online` — selects data flow |
+| `algorithm.paired_preference` | `true` for paired chosen/rejected data (DPO); doubles actor batch size and disables shuffle |
+| `actor_rollout_ref.model.policy_state_adapters` | Include `"old"` to enable old-adapter management (EMA/copy update after each actor step) |
+
+If your algorithm needs custom actor batch preparation (e.g. computing
+group-relative advantages from rollout rewards before passing the batch to
+the actor), override the `prepare_actor_batch` static method on your
+`DiffusionLossFn` subclass. The base implementation is a no-op (the batch
+is passed through unchanged, as for DPO where the dataset already contains
+everything the actor needs). The trainer resolves the active loss class from
+config at init and dispatches through it — no changes to the trainer are
+required. See `DiffusionNFTLoss.prepare_actor_batch` in
+`verl_omni/trainer/diffusion/diffusion_algos.py` for a reference
+implementation.
 
 If your algorithm needs multiple LoRA policy states (for example `default`
 and `old`), declare them with `actor_rollout_ref.model.policy_state_adapters`
@@ -484,8 +497,11 @@ and SDE step, or the direct-preference forward-process contract) against a
       either reuses `PPODiffusersFSDPEngine` (`model_type="diffusion_model"`)
       or registers an algorithm-specific subclass under a new `model_type`.
       Launch script sets `actor_rollout_ref.model.model_type` accordingly.
-- [ ] Direct-preference algorithms register trainer-side hooks with
-      `@register_direct_preference_handler("<name>")`.
+- [ ] Direct-preference algorithms: set `algorithm.trainer_type=direct_preference` and
+      configure the relevant flags (`sample_source`, `paired_preference`,
+      `policy_state_adapters`). Override `_prepare_actor_batch` in a
+      `DirectPreferenceRayTrainer` subclass if the rollout batch needs
+      algorithm-specific preparation before the actor update.
 - [ ] `verl_omni/pipelines/__init__.py` star-imports the new package.
 - [ ] Any new rollout algorithm field is mirrored in both
       [`diffusion_rollout.yaml`](../../verl_omni/trainer/config/diffusion/rollout/diffusion_rollout.yaml)
@@ -494,11 +510,8 @@ and SDE step, or the direct-preference forward-process contract) against a
 - [ ] Example launch script under `examples/<algo>_trainer/`.
 - [ ] Smoke test under `tests/special_e2e/run_<algo>_<model>.sh` wired
       into `tests/gpu_smoke/run_gpu_smoke_tests.sh`.
-- [ ] Set `algorithm.trainer_type` explicitly (`policy_gradient` for
-      PPO-style algorithms, `direct_preference` for forward-process
-      algorithms). For direct-preference algorithms, document the
-      forward-process batch contract (`latents_clean`, `train_timesteps`,
-      sample-level rewards or pairs/groups).
+- [ ] Document the batch contract (`latents_clean`, `train_timesteps`,
+      sample-level rewards or pairs/groups) for direct-preference algorithms.
 - [ ] If the registry or adapter contract changed, update
       [`integrating_a_diffusion_model.md`](integrating_a_diffusion_model.md)
       to match.
