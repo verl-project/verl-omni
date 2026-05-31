@@ -229,6 +229,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         forward_only,
         images_seqlens,
         diffusion_flops_meta: Optional[dict] = None,
+        record_loss: bool = True,
     ):
         """
 
@@ -238,6 +239,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 with keys ``latent_seqlens``, ``prompt_seqlens``, ``num_timesteps``,
                 ``cfg_passes``. Provided only on the diffusion path; ignored
                 otherwise.
+            record_loss: when ``False``, drop ``output["loss"]`` without
+                aggregating or emitting it as a metric. Set this for infer
+                paths that pass ``compute_loss=False`` (e.g. old/ref
+                log-prob recompute), where the engine returns a constant
+                placeholder ``loss=1.0`` per micro-batch that would
+                otherwise surface in wandb as a meaningless
+                ``actor_infer/loss`` / ``ref/loss`` curve.
 
         Returns:
 
@@ -248,14 +256,20 @@ class TrainingWorker(Worker, DistProfilerExtension):
         # metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024 ** 3)
 
         metrics: dict = output.pop("metrics")
+        dp_group = self.engine.get_data_parallel_group()
+
         # perform all gather in dp group to ensure that it's correct.
         # Here each metric in metrics can be a list (micro-batch metrics) or a singleton
         # we should always sum the loss of each micro-batch as we scale by global_bsz/global_token
-        loss = torch.sum(torch.tensor(output.pop("loss"), device=self.device_name))
-        dp_group = self.engine.get_data_parallel_group()
-        if dp_group is not None:
-            torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
-        loss = loss.item()
+        loss = None
+        if record_loss:
+            loss = torch.sum(torch.tensor(output.pop("loss"), device=self.device_name))
+            if dp_group is not None:
+                torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
+            loss = loss.item()
+        else:
+            # Drain the placeholder loss so it cannot leak into downstream handling.
+            output.pop("loss", None)
 
         # For grad_norm, we do not perform all reduce because it is already been done when clipping grad
         grad_norm = metrics.pop("grad_norm", None)
@@ -266,7 +280,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
             final_metrics = allgather_dict_into_dict(data=metrics, group=dp_group)
         else:
             final_metrics = metrics
-        final_metrics["loss"] = loss
+        if record_loss:
+            final_metrics["loss"] = loss
         if grad_norm is not None:
             final_metrics["grad_norm"] = grad_norm
         if lr is not None:
@@ -493,6 +508,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 forward_only=True,
                 images_seqlens=images_seqlens,
                 diffusion_flops_meta=diffusion_flops_meta,
+                # When the caller passed compute_loss=False (old/ref log-prob
+                # recompute on the diffusion path), the engine returns a
+                # constant placeholder loss=1.0 per micro-batch. Suppress
+                # emission so it doesn't surface as a meaningless metric.
+                record_loss=compute_loss,
             ).cpu()
         else:
             final_output = None

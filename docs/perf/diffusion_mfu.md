@@ -358,7 +358,15 @@ What you did **not** have to write:
   (FlowGRPO rollout-stacked) and returns the product of the spatial
   dims. Wan's `(B, C, T, H, W)` produces `T*H*W` tokens per sample
   out of the box; the rollout-stacked `(B, T_steps, C, T, H, W)`
-  collapses to the same per-sample count.
+  collapses to the same per-sample count. MM-DiT-family pipelines
+  (Qwen-Image, SD3, Flux, ...) call `diffusers._pack_latents` *before*
+  the transformer, reshaping `(B, C, H, W)` into a packed
+  `(B, L, C')` (or `(B, T_steps, L, C')` after FlowGRPO stacking) with
+  `L = (H/p) * (W/p)` and `C' = C * p**2 == in_channels`;
+  `QwenImageFlops.get_latent_seqlens` overrides the default to detect
+  this layout via `shape[-1] == in_channels` and return `L` per
+  sample, so subclasses inheriting from `QwenImageFlops` get the
+  packed handling for free.
 - **Prompt → seqlen extraction.** The default reads
   `prompt_embeds_mask` (nested or dense) and falls back to dense
   `prompt_embeds.shape[1]` or zeros for unconditional models.
@@ -388,13 +396,14 @@ separate field. Subclass the parent T2I class and override
 @register_diffusion_architecture("QwenImageEditPipeline")
 class QwenImageEditFlops(QwenImageFlops):
     def get_latent_seqlens(self, data: Any = None, config: Optional[Mapping[str, Any]] = None) -> list[int]:
+        # `super()` already handles the diffusers-packed (B, L, C')
+        # layout for the denoise-target stream; the reference stream
+        # arrives in the same packed shape, so its L is just shape[-2].
         base = super().get_latent_seqlens(data, config)
         ref = data.get("reference_image_latents")
         if ref is None:
             return base
-        ref_per_sample = 1
-        for d in ref.shape[2:]:
-            ref_per_sample *= int(d)
+        ref_per_sample = int(ref.shape[-2])
         return [b + ref_per_sample for b in base]
 ```
 

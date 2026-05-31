@@ -267,36 +267,107 @@ class TestDefaultPromptSeqlens:
         assert seqs == [0, 0]
 
 
+class TestQwenImageFlopsPackedLatents:
+    """Qwen-Image (and the wider MM-DiT family) calls
+    ``diffusers._pack_latents`` *before* the transformer, so the data
+    fields the FLOPs counter receives at runtime are in the packed layout
+    ``(B, L, C')`` for ``image_latents`` or ``(B, T_steps, L, C')`` for
+    FlowGRPO's stacked ``all_latents`` — with ``C' == in_channels``.
+
+    The base ``DiffusionModelFlops.get_latent_seqlens`` was written for
+    the unpacked ``(B, [T,] C, H, W)`` layout, so without the override
+    it mis-identifies ``L`` as a channel dim and returns ``C'`` as the
+    per-sample seqlen (a 16x undercount of the real attention seqlen at
+    512x512, and ~256x undercount on the attention term).
+    """
+
+    def test_packed_3d_image_latents(self):
+        # 512x512 -> latent 64x64 -> packed L = 32*32 = 1024, C' = 16*4 = 64.
+        data = {"image_latents": _Tensor((4, 1024, 64))}
+        flops = QwenImageFlops(QWEN_IMAGE_CONFIG)
+        assert flops.get_latent_seqlens(data) == [1024] * 4
+
+    def test_packed_4d_all_latents_flowgrpo_stacked(self):
+        # FlowGRPO trajectory at 512x512 with sde_window_size=2.
+        data = {"all_latents": _Tensor((4, 2, 1024, 64))}
+        flops = QwenImageFlops(QWEN_IMAGE_CONFIG)
+        assert flops.get_latent_seqlens(data) == [1024] * 4
+
+    def test_counter_dispatch_picks_up_packed_layout(self):
+        # End-to-end through DiffusionFlopsCounter to make sure the
+        # subclass override is actually invoked by collect_meta.
+        counter = DiffusionFlopsCounter("QwenImagePipeline", QWEN_IMAGE_CONFIG)
+        data = {
+            "all_latents": _Tensor((4, 2, 1024, 64)),
+            "prompt_embeds_mask": _Tensor((4, 256)),
+        }
+        meta = counter.collect_meta(data)
+        assert meta["latent_seqlens"] == [1024] * 4
+        assert meta["prompt_seqlens"] == [256] * 4
+
+    def test_packed_undercount_regression(self):
+        # Direct numerical guard: the broken default returns the wrong
+        # number; the override fixes it. This pins the magnitude of the
+        # bug we just fixed (16x undercount of the per-sample latent
+        # seqlen at 512x512 / patch_size=2) so any future refactor that
+        # re-breaks the layout detection fails loudly.
+        data = {"all_latents": _Tensor((4, 2, 1024, 64))}
+        broken = DiffusionModelFlops.get_latent_seqlens(data, QWEN_IMAGE_CONFIG)
+        assert broken == [64] * 4, (
+            "Base default still mis-identifies packed L as channels. "
+            "If this regression test now passes for the base class, "
+            "delete this test and the QwenImageFlops override."
+        )
+        fixed = QwenImageFlops(QWEN_IMAGE_CONFIG).get_latent_seqlens(data)
+        assert fixed == [1024] * 4
+        # Down-stream sanity check: in this batch the dense term
+        # dominates and scales linearly with (L + P), so the FLOPs
+        # ratio is (1024+256) / (64+256) ~= 4x. Production prompts are
+        # typically much shorter (60-100 tokens), pushing the ratio
+        # closer to the underlying 16x latent ratio.
+        counter = DiffusionFlopsCounter("QwenImagePipeline", QWEN_IMAGE_CONFIG)
+        kw = dict(delta_time=1.0, num_timesteps=2, cfg_passes=1)
+        broken_est, _ = counter.estimate_flops(broken, [256] * 4, **kw)
+        fixed_est, _ = counter.estimate_flops(fixed, [256] * 4, **kw)
+        assert fixed_est / max(broken_est, 1e-9) > 3.5
+
+
 class TestSubclassOverridePattern:
     """Demonstrates the pattern the doc teaches: subclass the parent
-    architecture and override only ``latent_seqlens`` for variants that
-    concatenate reference latents along the sequence dim (Edit / Img2Img
-    / Inpaint / ControlNet) — the reference tokens flow through the same
-    image-side linears as the denoise targets, so they belong on the
-    same stream rather than in a third bucket."""
+    architecture and override only ``get_latent_seqlens`` for variants
+    that concatenate reference latents along the sequence dim (Edit /
+    Img2Img / Inpaint / ControlNet) — the reference tokens flow through
+    the same image-side linears as the denoise targets, so they belong
+    on the same stream rather than in a third bucket.
+
+    Inputs use the diffusers packed layout ``(B, L, C')`` produced by
+    ``_pack_latents`` and consumed by the transformer, which is what
+    the FLOPs counter actually sees at runtime.
+    """
 
     def test_edit_concatenates_reference_into_latent_stream(self):
         @register_diffusion_architecture("_QwenImageEdit_CPU")
         class _EditFlops(QwenImageFlops):
             @staticmethod
             def get_latent_seqlens(data, config):
-                # Reference latents are concatenated along the seq dim.
+                # Both denoise and reference latents arrive packed
+                # (B, L, C'); they share the image-side path so we
+                # add ref_L on top of the denoise L.
                 base = QwenImageFlops.get_latent_seqlens(data, config)
                 ref = data.get("reference_image_latents")
                 if ref is None or not hasattr(ref, "shape"):
                     return base
-                ref_per_sample = 1
-                for d in ref.shape[2:]:
-                    ref_per_sample *= int(d)
+                ref_per_sample = int(ref.shape[-2])
                 return [b + ref_per_sample for b in base]
 
         counter = DiffusionFlopsCounter("_QwenImageEdit_CPU", QWEN_IMAGE_CONFIG)
+        # 512x512 denoise + 256x256 packed reference: L_denoise=1024, L_ref=256.
         data = {
-            "image_latents": _Tensor((2, 16, 64, 64)),
-            "reference_image_latents": _Tensor((2, 16, 64, 64)),
+            "image_latents": _Tensor((2, 1024, 64)),
+            "reference_image_latents": _Tensor((2, 256, 64)),
         }
         meta = counter.collect_meta(data)
-        assert meta["latent_seqlens"] == [2 * 64 * 64] * 2
+        assert meta["latent_seqlens"] == [1024 + 256] * 2
 
 
 # ---------------------------------------------------------------------------

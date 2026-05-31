@@ -413,6 +413,41 @@ class QwenImageFlops(DiffusionModelFlops):
     block FLOPs and is included for completeness.
     """
 
+    def get_latent_seqlens(self, data: Any = None, config: Optional[Mapping[str, Any]] = None) -> list[int]:
+        """Override to handle the diffusers ``_pack_latents`` layout.
+
+        Qwen-Image (and the wider MM-DiT family: SD3, Flux, ...) calls
+        ``_pack_latents`` *before* the transformer, reshaping
+        ``(B, num_channels_latents, H_lat, W_lat)`` into
+        ``(B, L, C')`` where ``L = (H_lat//2) * (W_lat//2)`` is the
+        sequence length actually seen by attention and
+        ``C' = num_channels_latents * 4`` happens to equal the
+        transformer's ``in_channels``. FlowGRPO stacks these along a
+        new time axis to produce ``(B, T_steps, L, C')``.
+
+        The base default extractor assumes the unpacked
+        ``(B, [T,] C, H, W)`` layout and would mis-identify ``L`` as
+        a channel dim, returning ``per_sample = C'`` (a 16x undercount
+        of the real attention seqlen at 512x512). Detect the packed
+        layout by ``shape[-1] == in_channels`` and return ``L``;
+        otherwise fall back to the base default for any caller that
+        stores raw VAE-encoded latents.
+        """
+        if not isinstance(self, DiffusionModelFlops):
+            # Static call backward-compatibility: QwenImageFlops.get_latent_seqlens(data, config).
+            data_param = self
+            config_param = data
+            return QwenImageFlops(config_param or {}).get_latent_seqlens(data_param)
+
+        latents, _ = _read_latents(data)
+        if latents is not None and hasattr(latents, "shape"):
+            shape = tuple(int(d) for d in latents.shape)
+            in_channels = int(self.config.get("in_channels") or 0)
+            if len(shape) >= 3 and in_channels > 0 and shape[-1] == in_channels:
+                # Packed: (B, [T_steps,] L, C') with C' == in_channels.
+                return [shape[-2]] * shape[0]
+        return super().get_latent_seqlens(data, config)
+
     def estimate_flops(
         self,
         latent_seqlens: Sequence[int],
