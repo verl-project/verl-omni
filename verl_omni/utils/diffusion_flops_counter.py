@@ -167,63 +167,13 @@ def _sum_seqlen_squared(latent_seqlens: Sequence[int], prompt_seqlens: Sequence[
 
 
 class DiffusionModelFlops:
-    """Base class for per-architecture diffusion FLOPs / MFU support.
+    """Base class for per-architecture diffusion FLOPs and MFU estimators.
 
-    Subclass this and decorate with :func:`register_diffusion_architecture`
-    to add FLOPs / MFU reporting for a new diffusion architecture.
+    To support a new model, subclass this class, decorate with
+    @register_diffusion_architecture, and override :meth:`estimate_flops`.
 
-    Two concepts are used throughout this API:
-
-    - **Latent stream** — the VAE-encoded tokens the model is
-      denoising, flowing through the transformer's "main-side"
-      linears. For image generation these are image latent tokens
-      (``H*W`` after VAE-encoding and patching); for video they are
-      spatiotemporal tokens (``T*H*W``); for audio they are audio
-      latent tokens. For Edit / Img2Img / Inpaint / ControlNet
-      variants this **also includes any reference latents**
-      concatenated along the seq dim before the transformer,
-      because they flow through the same linears as the denoise
-      targets. The naming follows diffusers (``latents``,
-      ``image_latents``, ``all_latents``).
-    - **Prompt stream** — tokens flowing through the text-side /
-      cross-attention linears. Typically text-encoder tokens
-      (after attention masking); for Img2Vid-style models this
-      **also includes any encoded reference-image tokens** the
-      pipeline concatenates to the text encoder output, because
-      they share the cross-attention KV path.
-
-    A useful mental rule: *if two tensors are concatenated along the
-    sequence dim before being fed to a linear, they belong to the same
-    stream for counting purposes — there is no third bucket.*
-
-    Methods
-    -------
-    estimate_flops (REQUIRED)
-        The FLOPs formula. Receives global (DP-allgathered)
-        ``latent_seqlens`` and ``prompt_seqlens`` plus
-        ``num_timesteps``, ``cfg_passes``, and the elapsed wall time;
-        returns achieved TFLOPS assuming the verl
-        ``fwd+bwd = 6 * N * tokens`` convention. Forward-only callers
-        divide by 3 in the worker.
-
-    get_latent_seqlens (OPTIONAL)
-        Per-sample latent-stream token count, dispatched by
-        :meth:`DiffusionFlopsCounter.collect_meta`. The default reads
-        ``data["image_latents"]`` (training-time) or
-        ``data["all_latents"]`` (FlowGRPO rollout-stacked) and returns
-        the product of the spatial dims (``H*W`` for image,
-        ``T*H*W`` for video, etc.), replicated to match the batch
-        size. See the method docstring for the full Args / Returns
-        contract and when to override.
-
-    get_prompt_seqlens (OPTIONAL)
-        Per-sample prompt-stream token count, dispatched by
-        :meth:`DiffusionFlopsCounter.collect_meta`. The default reads
-        ``prompt_embeds_mask`` (nested or dense), falls back to the
-        dense ``prompt_embeds.shape[1]``, or returns zeros for
-        unconditional / class-conditioned models. See the method
-        docstring for the full Args / Returns contract and when to
-        override.
+    Detailed theory, formulas, and multi-modal conventions (T2I, T2V, Audio, etc.)
+    can be found in: `docs/perf/diffusion_mfu.md`
     """
 
     LATENT_KEYS: Sequence[str] = ("image_latents", "audio_latents", "all_latents")
@@ -277,54 +227,11 @@ class DiffusionModelFlops:
         raise NotImplementedError("Subclass DiffusionModelFlops and override estimate_flops().")
 
     def get_latent_seqlens(self, data: Any = None, config: Optional[Mapping[str, Any]] = None) -> list[int]:
-        """Extract per-sample latent-stream token counts from a batch.
+        """Extract per-sample latent-stream (VAE-encoded) token counts from a batch.
 
-        The latent stream is the VAE-encoded tokens flowing through the
-        transformer's main-side linears (``to_q/to_k/to_v``, ``to_out``,
-        the FFN; ``img_*`` in Qwen-Image / SD3, ``attn1`` / ``ffn`` in
-        Wan). For Img2Img / Edit / Inpaint / ControlNet variants this
-        count must include any reference latents concatenated to the
-        denoise-target latents along the seq dim before the
-        transformer, because those reference tokens flow through the
-        same linears.
-
-        This default implementation handles the two standard layouts
-        that ship today:
-
-        * Training-time tensors at ``data["image_latents"]`` with shape
-          ``(B, C, H, W)`` (image DiT) or ``(B, C, T, H, W)`` (video DiT).
-        * FlowGRPO/MixGRPO rollout-stacked tensors at
-          ``data["all_latents"]`` with one extra time-step axis, e.g.
-          ``(B, T_steps, C, H, W)``.
-
-        Override in your subclass when:
-
-        * your pipeline stores the denoise-target latents under a
-          different key (e.g. ``data["audio_latents"]``);
-        * extra reference latents are concatenated along the seq dim
-          (Edit / Img2Img / Inpaint / ControlNet — add the reference
-          token count to each per-sample entry);
-        * the latents arrive already flattened to ``(B, L, C)`` (the
-          default would treat ``C`` as a spatial dim and over-count);
-        * multiple samples are packed into one ragged sequence
-          (NaViT-style).
-
-        Args:
-            data: The TensorDict / mapping that ``TrainingWorker`` passes
-                through the training or inference path. Architecture-
-                specific keys (``image_latents``, ``all_latents``,
-                ``reference_image_latents``, ...) are looked up here.
-            config: Optional diffusers transformer config for backward compatibility.
-
-        Returns:
-            A list of length ``B``, one int per sample in the batch,
-            giving that sample's latent-stream token count after any
-            patchifying / VAE downsampling already reflected in the
-            tensor shape. Returns ``[]`` (or ``[0] * B``) when no
-            latent tensor is present or its rank is below the minimum
-            expected for the standard layout, so the counter degrades
-            to ``mfu=0`` rather than crashing — matching the upstream
-            LLM counter's graceful-degradation contract.
+        This default implementation handles standard 2D image (B, C, H, W),
+        3D video (B, C, T, H, W) training layouts, and rollout-stacked (B, Step, C, ...) layouts.
+        Override in subclasses to support non-standard inputs (e.g. nested sequences).
         """
         if not isinstance(self, DiffusionModelFlops):
             # Static call backward-compatibility path: get_latent_seqlens(data, config)
@@ -365,51 +272,11 @@ class DiffusionModelFlops:
         return [per_sample] * batch_size
 
     def get_prompt_seqlens(self, data: Any = None, config: Optional[Mapping[str, Any]] = None) -> list[int]:
-        """Extract per-sample prompt-stream token counts from a batch.
+        """Extract per-sample prompt-stream (conditioning) token counts from a batch.
 
-        The prompt stream is the tokens flowing through the text-side
-        / cross-attention linears (``add_q/k/v_proj``, ``to_add_out``,
-        ``txt_mlp`` in MM-DiT; ``attn2``'s KV projections in
-        Wan-style cross-attention). For Img2Vid variants this also
-        includes any encoded reference-image tokens the pipeline
-        concatenates to the text-encoder output, because those tokens
-        share the cross-attention KV path with the text tokens.
-
-        This default implementation reads the standard diffusers
-        encoder fields, in order of precedence:
-
-        * ``data["prompt_embeds_mask"]`` — nested
-          (``offsets().diff()``) or dense (``mask.sum(-1)``);
-        * ``data["prompt_embeds"].shape[1]`` — the padded dense
-          length, used when no mask is available;
-        * ``[0] * B`` — for unconditional or class-conditioned
-          models with no text-encoder stream at all.
-
-        Override in your subclass when:
-
-        * your pipeline stores text embeddings under different keys;
-        * masking uses a non-standard convention (e.g. a 4-D mask
-          shared across attention heads);
-        * reference-image or reference-audio tokens are concatenated
-          to the prompt stream before cross-attention (Img2Vid,
-          audio-to-audio — add the encoded reference token count to
-          each per-sample entry).
-
-        Args:
-            data: The TensorDict / mapping that ``TrainingWorker`` passes
-                through the training or inference path. Standard keys
-                (``prompt_embeds``, ``prompt_embeds_mask``) and any
-                pipeline-specific encoded-reference keys are looked up
-                here.
-            config: Optional diffusers transformer config for backward compatibility.
-
-        Returns:
-            A list of length ``B``, one int per sample in the batch,
-            giving that sample's prompt-stream token count *after*
-            attention masking (i.e. the count actually presented to
-            the cross-attention / joint-attention linears, not the
-            padded length). Returns ``[0] * B`` for unconditional or
-            class-conditioned pipelines that carry no prompt stream.
+        The default implementation extracts lengths from standard text-encoder mask/embedding
+        tensors (e.g. `prompt_embeds_mask`, `prompt_embeds`). Override in subclasses
+        for custom conditioning tracks.
         """
         if not isinstance(self, DiffusionModelFlops):
             # Static call backward-compatibility path: get_prompt_seqlens(data, config)
