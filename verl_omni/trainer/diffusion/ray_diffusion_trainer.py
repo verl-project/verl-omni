@@ -70,6 +70,22 @@ from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 sys_logger = logging.getLogger(__name__)
 
 
+def _extract_infer_metrics(output: Any) -> dict[str, Any]:
+    """Extract the ``metrics`` dict produced by ``TrainingWorker.infer_batch``.
+
+    The infer path now emits per-call ``mfu`` / ``loss`` so the diffusion
+    trainer can report ``actor_infer/mfu`` and ``ref/mfu`` alongside the
+    existing ``actor/mfu``. Returns an empty dict when no metrics are
+    attached (e.g. the worker rank is not a collect rank).
+    """
+    if output is None:
+        return {}
+    metrics = tu.get(output, "metrics", default=None)
+    if metrics is None:
+        return {}
+    return {str(k): v for k, v in metrics.items()}
+
+
 def compute_advantage(
     data: DataProto,
     adv_estimator: str,
@@ -862,7 +878,10 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         ref_log_prob = tu.get_tensordict(
             {"ref_log_prob": log_probs.float(), "ref_prev_sample_mean": prev_sample_mean.float()}
         )
-        return DataProto.from_tensordict(ref_log_prob)
+        # Propagate per-call MFU / loss metrics computed in the worker.
+        infer_metrics = _extract_infer_metrics(output)
+        meta_info = {"metrics": infer_metrics} if infer_metrics else {}
+        return DataProto.from_tensordict(ref_log_prob, meta_info=meta_info)
 
     def _compute_old_log_prob(self, batch: DataProto):
         batch_td = batch.to_tensordict()
@@ -881,7 +900,9 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         if prev_sample_mean is not None:
             old_log_prob_dict["old_prev_sample_mean"] = prev_sample_mean.float()
         old_log_prob = tu.get_tensordict(old_log_prob_dict)
-        return DataProto.from_tensordict(old_log_prob)
+        infer_metrics = _extract_infer_metrics(output)
+        meta_info = {"metrics": infer_metrics} if infer_metrics else {}
+        return DataProto.from_tensordict(old_log_prob, meta_info=meta_info)
 
     def fit(self):
         """
@@ -1002,6 +1023,9 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
                             old_log_prob = self._compute_old_log_prob(batch)
+                            metrics.update(
+                                rename_dict(reduce_metrics(old_log_prob.meta_info.get("metrics", {})), "actor_infer/")
+                            )
                             batch = batch.union(old_log_prob)
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
@@ -1019,6 +1043,9 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_log_prob = self._compute_ref_log_prob(batch)
+                            metrics.update(
+                                rename_dict(reduce_metrics(ref_log_prob.meta_info.get("metrics", {})), "ref/")
+                            )
                             batch = batch.union(ref_log_prob)
 
                     with marked_timer("adv", timing_raw, color="brown"):
@@ -1254,7 +1281,9 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
             "noise": noise.float(),
             "timesteps": timesteps.float(),
         }
-        return DataProto.from_tensordict(tu.get_tensordict(ref_output))
+        infer_metrics = _extract_infer_metrics(output)
+        meta_info = {"metrics": infer_metrics} if infer_metrics else {}
+        return DataProto.from_tensordict(tu.get_tensordict(ref_output), meta_info=meta_info)
 
     def fit(self):
         """
@@ -1351,6 +1380,9 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_dpo = self._compute_ref_noise_pred(batch)
                             if ref_dpo is not None:
+                                metrics.update(
+                                    rename_dict(reduce_metrics(ref_dpo.meta_info.get("metrics", {})), "ref/")
+                                )
                                 batch = batch.union(ref_dpo)
                     # update actor
                     with marked_timer("update_actor", timing_raw, color="red"):

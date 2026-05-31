@@ -18,7 +18,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 from functools import partial
 from itertools import chain
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from codetiming import Timer
@@ -52,6 +52,11 @@ from verl.workers.config import (
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
 
+from verl_omni.utils.diffusion_flops_counter import (
+    DiffusionFlopsCounter,
+    image_seqlens_from_latent_shape,
+    resolve_cfg_passes,
+)
 from verl_omni.workers.config import (
     DiffusionActorConfig,
     DiffusionModelConfig,
@@ -60,6 +65,35 @@ from verl_omni.workers.utils.losses import diffusion_loss
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _load_diffusion_transformer_config(model_config: "DiffusionModelConfig") -> Optional[dict]:
+    """Return the diffusers transformer config dict, or ``None`` on miss.
+
+    We read ``{local_path}/transformer/config.json`` directly to avoid depending
+    on the engine module having been initialized. Returns ``None`` (and a
+    warning) when the file is missing so MFU silently degrades to 0 instead of
+    crashing initialization.
+    """
+    import json
+
+    local_path = getattr(model_config, "local_path", None)
+    if not local_path:
+        return None
+    config_path = os.path.join(local_path, "transformer", "config.json")
+    if not os.path.isfile(config_path):
+        logger.warning(
+            "Diffusion MFU disabled: transformer config not found at %s. "
+            "Expected the diffusers pipeline layout `<local_path>/transformer/config.json`.",
+            config_path,
+        )
+        return None
+    try:
+        with open(config_path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Diffusion MFU disabled: failed to read %s: %s", config_path, exc)
+        return None
 
 
 def _with_routing_replay_flag(enabled: bool):
@@ -151,8 +185,16 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         if hasattr(self.model_config, "hf_config"):
             self.flops_counter = FlopsCounter(self.model_config.hf_config)
+        elif self.config.model_type in ("diffusion_model", "diffusion_dp_model"):
+            # Diffusion configs (diffusers ConfigMixin) have a different schema
+            # than HF LLM configs, so we use a dedicated counter that understands
+            # joint-attention DiTs and multi-step denoising.
+            transformer_cfg = _load_diffusion_transformer_config(self.model_config)
+            self.flops_counter = DiffusionFlopsCounter(
+                architecture=getattr(self.model_config, "architecture", None),
+                transformer_config=transformer_cfg,
+            )
         else:
-            # for Diffusion models, FlopsCounter is not supported yet.
             self.flops_counter = None
 
         self.loss_fn = None
@@ -179,11 +221,24 @@ class TrainingWorker(Worker, DistProfilerExtension):
         """
         self.engine.initialize()
 
-    def _postprocess_output(self, output, *, global_token_num, delta_time, forward_only, images_seqlens):
+    def _postprocess_output(
+        self,
+        output,
+        *,
+        global_token_num,
+        delta_time,
+        forward_only,
+        images_seqlens,
+        diffusion_flops_meta: Optional[dict] = None,
+    ):
         """
 
         Args:
             output: a dictionary containing loss, model_outputs and metrics
+            diffusion_flops_meta: optional dict consumed by ``DiffusionFlopsCounter``
+                with keys ``image_seqlens``, ``prompt_seqlens``, ``num_timesteps``,
+                ``cfg_passes``. Provided only on the diffusion path; ignored
+                otherwise.
 
         Returns:
 
@@ -224,7 +279,19 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 flatten_v = [sublist[0] for sublist in v]  # sublist should be single element
                 final_metrics[k] = sum(flatten_v) / len(flatten_v)
         # compute mfu
-        if global_token_num is not None and self.flops_counter is not None:
+        if isinstance(self.flops_counter, DiffusionFlopsCounter):
+            if diffusion_flops_meta is not None:
+                # Counter expects global (DP-allgathered) seqlens, matching the
+                # convention used for ``global_token_num`` in the LLM path.
+                global_meta = self._allgather_diffusion_flops_meta(diffusion_flops_meta)
+                estimated_flops, promised_flops = self.flops_counter.estimate_flops(
+                    delta_time=delta_time, **global_meta
+                )
+                if promised_flops > 0:
+                    final_metrics["mfu"] = estimated_flops / promised_flops / torch.distributed.get_world_size()
+                    if forward_only:
+                        final_metrics["mfu"] /= 3.0
+        elif global_token_num is not None and self.flops_counter is not None:
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(
                 global_token_num, delta_time, images_seqlens=images_seqlens
             )
@@ -336,6 +403,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         global_token_num = tu.get(data, key="global_token_num")
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
         images_seqlens = tu.get(data, key="images_seqlens", default=None)
+        diffusion_flops_meta = self._collect_diffusion_flops_meta(data)
 
         # inject engineering parameters if not specified
         default_keys = dict(
@@ -377,6 +445,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 delta_time=delta_time,
                 forward_only=False,
                 images_seqlens=images_seqlens,
+                diffusion_flops_meta=diffusion_flops_meta,
             ).cpu()
         else:
             final_output = None
@@ -391,6 +460,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
         no_lora_adapter = tu.pop(data, key="no_lora_adapter", default=False)
         images_seqlens = tu.get(data, key="images_seqlens", default=None)
+        diffusion_flops_meta = self._collect_diffusion_flops_meta(data)
 
         default_keys = dict(
             use_remove_padding=self.model_config.get("use_remove_padding", False),
@@ -423,11 +493,123 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 delta_time=delta_time,
                 forward_only=True,
                 images_seqlens=images_seqlens,
+                diffusion_flops_meta=diffusion_flops_meta,
             ).cpu()
         else:
             final_output = None
 
         return final_output
+
+    def _collect_diffusion_flops_meta(self, data: TensorDict) -> Optional[dict]:
+        """Extract per-call FLOPs metadata for the diffusion counter.
+
+        Returns ``None`` for non-diffusion engines so the LLM code path keeps
+        flowing through ``self.flops_counter.estimate_flops(global_token_num, ...)``.
+
+        The function is intentionally **architecture-agnostic**:
+
+        - Image / video latent token counts are derived from the latent
+          tensor's shape via :func:`image_seqlens_from_latent_shape`, which
+          understands 3-D, 4-D and 5-D layouts (image DiT, video DiT) and
+          their FlowGRPO ``all_latents`` time-stacked variants.
+        - Text-encoder seqlens are read from ``prompt_embeds_mask`` (with
+          nested-tensor support) or fall back to the dense
+          ``prompt_embeds`` shape; defaults to ``0`` for unconditional /
+          class-conditioned models.
+        - CFG-pass count is resolved by :func:`resolve_cfg_passes`, which
+          knows about ``true_cfg_scale`` (Qwen-Image), ``guidance_scale``
+          (Wan / SD3 / most standard CFG pipelines), and
+          ``guidance_embeds`` (Flux-style guidance-distilled models that
+          run a single forward pass per step).
+
+        Per-arch estimators decide how to *use* these fields (e.g.
+        single-stream vs dual-stream, cross-attention vs joint attention).
+        """
+        if not isinstance(self.flops_counter, DiffusionFlopsCounter):
+            return None
+
+        prompt_embeds_mask = data.get("prompt_embeds_mask", None)
+        prompt_embeds = data.get("prompt_embeds", None)
+        # Image / video latent token count per sample (constant across the
+        # batch for a fixed resolution). FlowGRPO/MixGRPO store the entire
+        # denoising trajectory in ``all_latents`` (one extra time dim); DPO
+        # and one-shot paths use ``image_latents``.
+        latents = data.get("all_latents", None)
+        all_latents_layout = latents is not None
+        if latents is None:
+            latents = data.get("image_latents", None)
+
+        batch_size = data.shape[0] if data.batch_size else 0
+        shape = getattr(latents, "shape", None)
+        img_seq = image_seqlens_from_latent_shape(shape, all_latents_layout=all_latents_layout)
+        image_seqlens = [img_seq] * batch_size
+
+        if prompt_embeds_mask is not None and hasattr(prompt_embeds_mask, "is_nested"):
+            if prompt_embeds_mask.is_nested:
+                prompt_seqlens = [int(s) for s in prompt_embeds_mask.offsets().diff().tolist()]
+            else:
+                prompt_seqlens = prompt_embeds_mask.sum(dim=-1).long().tolist()
+        elif prompt_embeds is not None and hasattr(prompt_embeds, "shape"):
+            if prompt_embeds.is_nested:
+                prompt_seqlens = [int(s) for s in prompt_embeds.offsets().diff().tolist()]
+            else:
+                prompt_seqlens = [int(prompt_embeds.shape[1])] * batch_size
+        else:
+            # Unconditional or class-conditioned models: text contributes 0
+            # tokens to the joint stream, ``cfg_passes`` resolution still
+            # honours an explicit override on the pipeline config.
+            prompt_seqlens = [0] * batch_size
+
+        all_timesteps = data.get("all_timesteps", None)
+        if all_timesteps is not None and hasattr(all_timesteps, "shape") and all_timesteps.ndim >= 2:
+            num_timesteps = int(all_timesteps.shape[1])
+        else:
+            # DPO and any one-shot path runs a single denoising step per call.
+            num_timesteps = 1
+
+        pipeline_config = getattr(self.model_config, "pipeline", None)
+        transformer_config = getattr(self.flops_counter, "config", None)
+        # ``pipeline`` is typically an OmegaConf DictConfig; coerce just the
+        # fields we care about to a plain mapping for ``resolve_cfg_passes``.
+        pcfg_view: dict[str, Any] = {}
+        for key in ("cfg_passes", "true_cfg_scale", "guidance_scale"):
+            value = getattr(pipeline_config, key, None) if pipeline_config is not None else None
+            if value is not None:
+                pcfg_view[key] = value
+        cfg_passes = resolve_cfg_passes(pcfg_view, transformer_config)
+
+        return {
+            "image_seqlens": image_seqlens,
+            "prompt_seqlens": prompt_seqlens,
+            "num_timesteps": num_timesteps,
+            "cfg_passes": cfg_passes,
+        }
+
+    def _allgather_diffusion_flops_meta(self, meta: dict) -> dict:
+        """All-gather per-rank image/prompt seqlens across the DP group.
+
+        ``num_timesteps`` and ``cfg_passes`` are scalars constant across the
+        DP group, so we keep them as-is. Mirrors the ``global_token_num``
+        gather performed in ``train_mini_batch`` for the LLM counter.
+        """
+        dp_group = self.engine.get_data_parallel_group()
+        if dp_group is None or not torch.distributed.is_initialized():
+            return meta
+
+        dp_world = torch.distributed.get_world_size(dp_group)
+        if dp_world <= 1:
+            return meta
+
+        gathered_img = [None] * dp_world
+        gathered_txt = [None] * dp_world
+        torch.distributed.all_gather_object(gathered_img, meta["image_seqlens"], dp_group)
+        torch.distributed.all_gather_object(gathered_txt, meta["prompt_seqlens"], dp_group)
+        return {
+            "image_seqlens": [x for xs in gathered_img for x in xs],
+            "prompt_seqlens": [x for xs in gathered_txt for x in xs],
+            "num_timesteps": meta["num_timesteps"],
+            "cfg_passes": meta["cfg_passes"],
+        }
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
