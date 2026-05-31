@@ -13,7 +13,8 @@
 # limitations under the License.
 """CPU-only unit tests for ``DiffusionFlopsCounter``.
 
-Verifies the architecture-registry dispatch, the Qwen-Image FLOPs formula's
+Verifies the architecture-registry dispatch, the default
+``DiffusionArchitectureFlops`` extractors, the Qwen-Image FLOPs formula's
 linearity / quadratic scaling, **absolute correctness against a hand-rolled
 reference**, and that the formula's implied ``N_params`` matches the actual
 ``model.numel()`` of a tiny ``QwenImageTransformer2DModel`` instance built
@@ -28,17 +29,17 @@ import pytest
 
 from verl_omni.utils.diffusion_flops_counter import (
     _REGISTRY,
+    DiffusionArchitectureFlops,
     DiffusionFlopsCounter,
-    estimate_qwen_image_flops,
-    image_seqlens_from_latent_shape,
-    register_diffusion_flops_estimator,
+    QwenImageFlops,
+    register_diffusion_architecture,
     resolve_cfg_passes,
 )
 
 
 def _reference_qwen_image_flops(
     config: dict,
-    image_seqlens: list[int],
+    latent_seqlens: list[int],
     prompt_seqlens: list[int],
     delta_time: float,
     *,
@@ -60,8 +61,8 @@ def _reference_qwen_image_flops(
     out_channels = int(config.get("out_channels") or in_channels)
 
     dim = num_attention_heads * attention_head_dim
-    batch_size = max(len(image_seqlens), len(prompt_seqlens))
-    img_tot = sum(image_seqlens)
+    batch_size = max(len(latent_seqlens), len(prompt_seqlens))
+    img_tot = sum(latent_seqlens)
     txt_tot = sum(prompt_seqlens)
 
     # Forward FLOPs per call. Factor 2 below is FLOPs per MAC
@@ -84,7 +85,7 @@ def _reference_qwen_image_flops(
         # Joint full attention per sample: Q@K^T + softmax(weights)@V over
         # the combined (img_s + txt_s) sequence; 2 matmuls of (s, d_h) x
         # (d_h, s) at 2*s^2*d_h FLOPs each, summed over heads.
-        for img_s, txt_s in zip(image_seqlens, prompt_seqlens, strict=False):
+        for img_s, txt_s in zip(latent_seqlens, prompt_seqlens, strict=False):
             joint_s = img_s + txt_s
             flops_fwd += 2 * 2 * (joint_s**2) * attention_head_dim * num_attention_heads
 
@@ -129,22 +130,34 @@ def _qwen_counter() -> DiffusionFlopsCounter:
 class TestDiffusionFlopsRegistry:
     def test_qwen_image_is_registered(self):
         assert "QwenImagePipeline" in _REGISTRY
-        assert _REGISTRY["QwenImagePipeline"] is estimate_qwen_image_flops
+        assert _REGISTRY["QwenImagePipeline"] is QwenImageFlops
+        # Aliases share the same class.
+        assert _REGISTRY["QwenImagePipelineWithLogProb"] is QwenImageFlops
 
     def test_custom_architecture_dispatch(self):
         sentinel = 1234.5
 
-        @register_diffusion_flops_estimator("_TestArch_CPU")
-        def _stub(config, image_seqlens, prompt_seqlens, delta_time, *, num_timesteps, cfg_passes):
-            del config, image_seqlens, prompt_seqlens, delta_time, num_timesteps, cfg_passes
-            return sentinel
+        @register_diffusion_architecture("_TestArch_CPU")
+        class _Stub(DiffusionArchitectureFlops):
+            @staticmethod
+            def estimate_flops(config, latent_seqlens, prompt_seqlens, delta_time, *, num_timesteps, cfg_passes):
+                del config, latent_seqlens, prompt_seqlens, delta_time, num_timesteps, cfg_passes
+                return sentinel
 
         counter = DiffusionFlopsCounter("_TestArch_CPU", {})
         est, prom = counter.estimate_flops(
-            image_seqlens=[1], prompt_seqlens=[1], delta_time=1.0, num_timesteps=1, cfg_passes=1
+            latent_seqlens=[1], prompt_seqlens=[1], delta_time=1.0, num_timesteps=1, cfg_passes=1
         )
         assert est == sentinel
         assert prom > 0
+
+    def test_register_decorator_rejects_non_subclasses(self):
+        with pytest.raises(TypeError, match="DiffusionArchitectureFlops"):
+
+            @register_diffusion_architecture("_BadArch_CPU")
+            def _not_a_class(*args, **kwargs):  # pragma: no cover
+                del args, kwargs
+                return 0.0
 
     def test_unknown_architecture_warns_once_and_returns_zero(self):
         with warnings.catch_warnings(record=True) as warned:
@@ -152,9 +165,138 @@ class TestDiffusionFlopsRegistry:
             counter = DiffusionFlopsCounter("__DoesNotExist__", {})
             assert any("no FLOPs estimator registered" in str(w.message) for w in warned)
         est, _ = counter.estimate_flops(
-            image_seqlens=[1], prompt_seqlens=[1], delta_time=1.0, num_timesteps=1, cfg_passes=1
+            latent_seqlens=[1], prompt_seqlens=[1], delta_time=1.0, num_timesteps=1, cfg_passes=1
         )
         assert est == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Default DiffusionArchitectureFlops extractors
+# ---------------------------------------------------------------------------
+
+
+class _Tensor:
+    """Minimal stand-in for a torch tensor: exposes ``shape`` / ``ndim`` and
+    ``is_nested`` so the default extractors can be unit-tested on CPU
+    without instantiating a real ``TensorDict``."""
+
+    def __init__(self, shape, is_nested=False):
+        self.shape = tuple(shape)
+        self.ndim = len(self.shape)
+        self.is_nested = is_nested
+
+    def sum(self, dim=-1):  # for prompt_embeds_mask path
+        # Pretend each row sums to its full length.
+        rows = self.shape[0]
+        cols = self.shape[1]
+        return _SumResult([cols] * rows)
+
+
+class _SumResult:
+    def __init__(self, values):
+        self._values = values
+
+    def long(self):
+        return self
+
+    def tolist(self):
+        return list(self._values)
+
+
+class TestDefaultLatentSeqlens:
+    """The base-class ``latent_seqlens`` covers the standard ``(B, C, *spatial)``
+    latent-stream layouts that ship today: vanilla T2I, T2V, and any
+    future T2A modality at training time, plus FlowGRPO/MixGRPO
+    rollout-stacked tensors with one extra time axis.
+    """
+
+    def test_4d_image_latents(self):
+        # (B=4, C=16, H=128, W=128) -> 128*128 tokens per sample.
+        data = {"image_latents": _Tensor((4, 16, 128, 128))}
+        seqs = DiffusionArchitectureFlops.latent_seqlens(data, {})
+        assert seqs == [128 * 128] * 4
+
+    def test_5d_video_latents(self):
+        # Wan / Hunyuan / LTX / CogVideoX: (B=1, C=16, T=21, H=60, W=104).
+        data = {"image_latents": _Tensor((1, 16, 21, 60, 104))}
+        seqs = DiffusionArchitectureFlops.latent_seqlens(data, {})
+        assert seqs == [21 * 60 * 104]
+
+    def test_5d_all_latents_rollout_stacked(self):
+        # FlowGRPO image rollouts: (B=2, T_steps=10, C=16, H=128, W=128).
+        data = {"all_latents": _Tensor((2, 10, 16, 128, 128))}
+        seqs = DiffusionArchitectureFlops.latent_seqlens(data, {})
+        assert seqs == [128 * 128] * 2
+
+    def test_6d_all_latents_video_rollout(self):
+        # FlowGRPO video rollouts: (B=1, T_steps=10, C=16, T_lat=21, H=60, W=104).
+        data = {"all_latents": _Tensor((1, 10, 16, 21, 60, 104))}
+        seqs = DiffusionArchitectureFlops.latent_seqlens(data, {})
+        assert seqs == [21 * 60 * 104]
+
+    def test_image_latents_takes_priority_over_all_latents(self):
+        data = {
+            "image_latents": _Tensor((2, 16, 64, 64)),
+            "all_latents": _Tensor((2, 10, 16, 128, 128)),
+        }
+        seqs = DiffusionArchitectureFlops.latent_seqlens(data, {})
+        assert seqs == [64 * 64] * 2
+
+    def test_missing_latents_returns_empty(self):
+        assert DiffusionArchitectureFlops.latent_seqlens({}, {}) == []
+        assert DiffusionArchitectureFlops.latent_seqlens({"image_latents": None}, {}) == []
+
+
+class TestDefaultPromptSeqlens:
+    def test_dense_mask_sums_per_row(self):
+        data = {"prompt_embeds_mask": _Tensor((3, 256))}
+        seqs = DiffusionArchitectureFlops.prompt_seqlens(data, {})
+        assert seqs == [256, 256, 256]
+
+    def test_falls_back_to_prompt_embeds_shape(self):
+        # No mask available, but prompt_embeds is dense (B, L, D).
+        data = {"prompt_embeds": _Tensor((4, 192, 1024))}
+        seqs = DiffusionArchitectureFlops.prompt_seqlens(data, {})
+        assert seqs == [192] * 4
+
+    def test_unconditional_returns_zeros(self):
+        # Neither mask nor embeds. Falls back to [0] * batch_size derived from
+        # whichever data field happens to expose a batch dim.
+        data = {"image_latents": _Tensor((2, 16, 64, 64))}
+        seqs = DiffusionArchitectureFlops.prompt_seqlens(data, {})
+        assert seqs == [0, 0]
+
+
+class TestSubclassOverridePattern:
+    """Demonstrates the pattern the doc teaches: subclass the parent
+    architecture and override only ``latent_seqlens`` for variants that
+    concatenate reference latents along the sequence dim (Edit / Img2Img
+    / Inpaint / ControlNet) — the reference tokens flow through the same
+    image-side linears as the denoise targets, so they belong on the
+    same stream rather than in a third bucket."""
+
+    def test_edit_concatenates_reference_into_latent_stream(self):
+        @register_diffusion_architecture("_QwenImageEdit_CPU")
+        class _EditFlops(QwenImageFlops):
+            @staticmethod
+            def latent_seqlens(data, config):
+                # Reference latents are concatenated along the seq dim.
+                base = QwenImageFlops.latent_seqlens(data, config)
+                ref = data.get("reference_image_latents")
+                if ref is None or not hasattr(ref, "shape"):
+                    return base
+                ref_per_sample = 1
+                for d in ref.shape[2:]:
+                    ref_per_sample *= int(d)
+                return [b + ref_per_sample for b in base]
+
+        counter = DiffusionFlopsCounter("_QwenImageEdit_CPU", QWEN_IMAGE_CONFIG)
+        data = {
+            "image_latents": _Tensor((2, 16, 64, 64)),
+            "reference_image_latents": _Tensor((2, 16, 64, 64)),
+        }
+        meta = counter.collect_meta(data)
+        assert meta["latent_seqlens"] == [2 * 64 * 64] * 2
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +307,7 @@ class TestDiffusionFlopsRegistry:
 class TestQwenImageFlopsScaling:
     def _kwargs(self, **overrides):
         defaults = dict(
-            image_seqlens=[1024, 1024],
+            latent_seqlens=[1024, 1024],
             prompt_seqlens=[256, 192],
             delta_time=2.0,
             num_timesteps=10,
@@ -211,10 +353,10 @@ class TestQwenImageFlopsScaling:
         """
         counter = _qwen_counter()
         est_small, _ = counter.estimate_flops(
-            image_seqlens=[512], prompt_seqlens=[256], delta_time=1.0, num_timesteps=1, cfg_passes=1
+            latent_seqlens=[512], prompt_seqlens=[256], delta_time=1.0, num_timesteps=1, cfg_passes=1
         )
         est_large, _ = counter.estimate_flops(
-            image_seqlens=[1024], prompt_seqlens=[512], delta_time=1.0, num_timesteps=1, cfg_passes=1
+            latent_seqlens=[1024], prompt_seqlens=[512], delta_time=1.0, num_timesteps=1, cfg_passes=1
         )
         ratio = est_large / est_small
         assert 2.0 < ratio < 4.0, ratio
@@ -234,9 +376,11 @@ class TestQwenImageFlopsScaling:
         unusual ``num_timesteps`` / ``cfg_passes``."""
         counter = _qwen_counter()
         scenarios = [
-            dict(image_seqlens=[256], prompt_seqlens=[64], delta_time=0.5, num_timesteps=1, cfg_passes=1),
-            dict(image_seqlens=[1024, 4096], prompt_seqlens=[128, 512], delta_time=8.0, num_timesteps=50, cfg_passes=2),
-            dict(image_seqlens=[4096] * 8, prompt_seqlens=[256] * 8, delta_time=12.0, num_timesteps=10, cfg_passes=1),
+            dict(latent_seqlens=[256], prompt_seqlens=[64], delta_time=0.5, num_timesteps=1, cfg_passes=1),
+            dict(
+                latent_seqlens=[1024, 4096], prompt_seqlens=[128, 512], delta_time=8.0, num_timesteps=50, cfg_passes=2
+            ),
+            dict(latent_seqlens=[4096] * 8, prompt_seqlens=[256] * 8, delta_time=12.0, num_timesteps=10, cfg_passes=1),
         ]
         for kwargs in scenarios:
             est, _ = counter.estimate_flops(**kwargs)
@@ -248,7 +392,7 @@ class TestQwenImageFlopsScaling:
         counter = _qwen_counter()
         # 4 samples * 1024 image tokens * 256 text tokens * 1 step * 1 cfg.
         kwargs = dict(
-            image_seqlens=[1024] * 4,
+            latent_seqlens=[1024] * 4,
             prompt_seqlens=[256] * 4,
             delta_time=1.0,
             num_timesteps=1,
@@ -343,7 +487,7 @@ class TestQwenImageFlopsParamCount:
         txt_tot = 5
         counter = DiffusionFlopsCounter("QwenImagePipeline", cfg)
         est_tflops, _ = counter.estimate_flops(
-            image_seqlens=[img_tot],
+            latent_seqlens=[img_tot],
             prompt_seqlens=[txt_tot],
             delta_time=1.0,
             num_timesteps=1,
@@ -388,14 +532,14 @@ class TestDPGlobalConsistency:
         global_txt = per_rank_txt * world_size
 
         global_est, prom = counter.estimate_flops(
-            image_seqlens=global_img,
+            latent_seqlens=global_img,
             prompt_seqlens=global_txt,
             delta_time=1.0,
             num_timesteps=1,
             cfg_passes=1,
         )
         per_rank_est, _ = counter.estimate_flops(
-            image_seqlens=per_rank_img,
+            latent_seqlens=per_rank_img,
             prompt_seqlens=per_rank_txt,
             delta_time=1.0,
             num_timesteps=1,
@@ -426,7 +570,7 @@ class TestDPGlobalConsistency:
         # block on 4xL20 with LoRA + param/optim offload (rollout/reward
         # excluded).
         est, prom = counter.estimate_flops(
-            image_seqlens=global_img,
+            latent_seqlens=global_img,
             prompt_seqlens=global_txt,
             delta_time=260.0,
             num_timesteps=10,
@@ -439,44 +583,6 @@ class TestDPGlobalConsistency:
         # catch order-of-magnitude wiring regressions, not steady-state
         # performance fluctuations.
         assert 0.0 < mfu < 1.0, mfu
-
-
-class TestImageSeqlensFromLatentShape:
-    """Generality contract for the latent-shape -> seqlen extractor used by
-    ``TrainingWorker._collect_diffusion_flops_meta``.
-
-    Covers image DiTs (3-D / 4-D), video DiTs (5-D), and the FlowGRPO
-    time-stacked ``all_latents`` variants of each.
-    """
-
-    def test_3d_image_latents_BLC(self):
-        assert image_seqlens_from_latent_shape((4, 1024, 64)) == 1024
-
-    def test_4d_image_latents_BCHW(self):
-        # 1024x1024 VAE latents at 8x downsample -> 128x128 = 16384 tokens.
-        assert image_seqlens_from_latent_shape((4, 16, 128, 128)) == 128 * 128
-
-    def test_5d_video_latents_BCTHW(self):
-        # Wan / Hunyuan / LTX / CogVideoX: (B, C, T, H, W).
-        assert image_seqlens_from_latent_shape((1, 16, 21, 60, 104)) == 21 * 60 * 104
-
-    def test_4d_all_latents_BTLC(self):
-        # FlowGRPO-style image rollouts: (B, T_steps, L, C).
-        assert image_seqlens_from_latent_shape((2, 10, 1024, 64), all_latents_layout=True) == 1024
-
-    def test_5d_all_latents_BTCHW(self):
-        # FlowGRPO-style image rollouts in (B, T_steps, C, H, W) layout.
-        assert image_seqlens_from_latent_shape((2, 10, 16, 128, 128), all_latents_layout=True) == 128 * 128
-
-    def test_6d_all_latents_video(self):
-        # FlowGRPO-style video rollouts: (B, T_steps, C, T_lat, H, W).
-        assert image_seqlens_from_latent_shape((1, 10, 16, 21, 60, 104), all_latents_layout=True) == 21 * 60 * 104
-
-    def test_none_and_garbage_shapes_return_zero(self):
-        assert image_seqlens_from_latent_shape(None) == 0
-        assert image_seqlens_from_latent_shape(()) == 0
-        assert image_seqlens_from_latent_shape((4,)) == 0
-        assert image_seqlens_from_latent_shape((4, 16, 32, 32, 32, 32, 32)) == 0
 
 
 class TestResolveCfgPasses:
@@ -531,7 +637,7 @@ class TestNonCfgQwenImageFlops:
     def test_cfg_passes_one_halves_two(self):
         counter = _qwen_counter()
         kwargs = dict(
-            image_seqlens=[1024] * 4,
+            latent_seqlens=[1024] * 4,
             prompt_seqlens=[256] * 4,
             delta_time=2.0,
             num_timesteps=5,
@@ -546,7 +652,7 @@ class TestNonCfgQwenImageFlops:
         # image stream alone (attn quadratic term collapses to img_seq^2).
         counter = _qwen_counter()
         est, _ = counter.estimate_flops(
-            image_seqlens=[1024] * 4,
+            latent_seqlens=[1024] * 4,
             prompt_seqlens=[0] * 4,
             delta_time=1.0,
             num_timesteps=1,
@@ -559,7 +665,7 @@ class TestDiffusionFlopsCounterApi:
     def test_promised_flops_returned_in_tflops(self):
         counter = _qwen_counter()
         _, prom = counter.estimate_flops(
-            image_seqlens=[1024], prompt_seqlens=[256], delta_time=1.0, num_timesteps=1, cfg_passes=1
+            latent_seqlens=[1024], prompt_seqlens=[256], delta_time=1.0, num_timesteps=1, cfg_passes=1
         )
         # ``get_device_flops`` returns TFLOPS by default; CPU baseline is
         # 448 GFLOPS = 0.448 TFLOPS. We accept anything > 0 to keep the test
@@ -570,7 +676,7 @@ class TestDiffusionFlopsCounterApi:
         counter = _qwen_counter()
         with pytest.raises(ValueError, match="same length"):
             counter.estimate_flops(
-                image_seqlens=[1024, 1024],
+                latent_seqlens=[1024, 1024],
                 prompt_seqlens=[256],
                 delta_time=1.0,
                 num_timesteps=1,

@@ -54,7 +54,6 @@ from verl.workers.utils.losses import ppo_loss
 
 from verl_omni.utils.diffusion_flops_counter import (
     DiffusionFlopsCounter,
-    image_seqlens_from_latent_shape,
     resolve_cfg_passes,
 )
 from verl_omni.workers.config import (
@@ -236,7 +235,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         Args:
             output: a dictionary containing loss, model_outputs and metrics
             diffusion_flops_meta: optional dict consumed by ``DiffusionFlopsCounter``
-                with keys ``image_seqlens``, ``prompt_seqlens``, ``num_timesteps``,
+                with keys ``latent_seqlens``, ``prompt_seqlens``, ``num_timesteps``,
                 ``cfg_passes``. Provided only on the diffusion path; ignored
                 otherwise.
 
@@ -506,59 +505,17 @@ class TrainingWorker(Worker, DistProfilerExtension):
         Returns ``None`` for non-diffusion engines so the LLM code path keeps
         flowing through ``self.flops_counter.estimate_flops(global_token_num, ...)``.
 
-        The function is intentionally **architecture-agnostic**:
-
-        - Image / video latent token counts are derived from the latent
-          tensor's shape via :func:`image_seqlens_from_latent_shape`, which
-          understands 3-D, 4-D and 5-D layouts (image DiT, video DiT) and
-          their FlowGRPO ``all_latents`` time-stacked variants.
-        - Text-encoder seqlens are read from ``prompt_embeds_mask`` (with
-          nested-tensor support) or fall back to the dense
-          ``prompt_embeds`` shape; defaults to ``0`` for unconditional /
-          class-conditioned models.
-        - CFG-pass count is resolved by :func:`resolve_cfg_passes`, which
-          knows about ``true_cfg_scale`` (Qwen-Image), ``guidance_scale``
-          (Wan / SD3 / most standard CFG pipelines), and
-          ``guidance_embeds`` (Flux-style guidance-distilled models that
-          run a single forward pass per step).
-
-        Per-arch estimators decide how to *use* these fields (e.g.
-        single-stream vs dual-stream, cross-attention vs joint attention).
+        Per-rank ``latent_seqlens`` / ``prompt_seqlens`` come from the
+        architecture class registered for ``DiffusionModelConfig.architecture``
+        (see :class:`DiffusionArchitectureFlops`). ``num_timesteps`` is read
+        from the FlowGRPO/MixGRPO ``all_timesteps`` trajectory (defaulting
+        to 1 for DPO / one-shot paths) and ``cfg_passes`` is resolved from
+        the pipeline + transformer configs via :func:`resolve_cfg_passes`.
         """
         if not isinstance(self.flops_counter, DiffusionFlopsCounter):
             return None
 
-        prompt_embeds_mask = data.get("prompt_embeds_mask", None)
-        prompt_embeds = data.get("prompt_embeds", None)
-        # Image / video latent token count per sample (constant across the
-        # batch for a fixed resolution). FlowGRPO/MixGRPO store the entire
-        # denoising trajectory in ``all_latents`` (one extra time dim); DPO
-        # and one-shot paths use ``image_latents``.
-        latents = data.get("all_latents", None)
-        all_latents_layout = latents is not None
-        if latents is None:
-            latents = data.get("image_latents", None)
-
-        batch_size = data.shape[0] if data.batch_size else 0
-        shape = getattr(latents, "shape", None)
-        img_seq = image_seqlens_from_latent_shape(shape, all_latents_layout=all_latents_layout)
-        image_seqlens = [img_seq] * batch_size
-
-        if prompt_embeds_mask is not None and hasattr(prompt_embeds_mask, "is_nested"):
-            if prompt_embeds_mask.is_nested:
-                prompt_seqlens = [int(s) for s in prompt_embeds_mask.offsets().diff().tolist()]
-            else:
-                prompt_seqlens = prompt_embeds_mask.sum(dim=-1).long().tolist()
-        elif prompt_embeds is not None and hasattr(prompt_embeds, "shape"):
-            if prompt_embeds.is_nested:
-                prompt_seqlens = [int(s) for s in prompt_embeds.offsets().diff().tolist()]
-            else:
-                prompt_seqlens = [int(prompt_embeds.shape[1])] * batch_size
-        else:
-            # Unconditional or class-conditioned models: text contributes 0
-            # tokens to the joint stream, ``cfg_passes`` resolution still
-            # honours an explicit override on the pipeline config.
-            prompt_seqlens = [0] * batch_size
+        seqlens = self.flops_counter.collect_meta(data)
 
         all_timesteps = data.get("all_timesteps", None)
         if all_timesteps is not None and hasattr(all_timesteps, "shape") and all_timesteps.ndim >= 2:
@@ -579,14 +536,14 @@ class TrainingWorker(Worker, DistProfilerExtension):
         cfg_passes = resolve_cfg_passes(pcfg_view, transformer_config)
 
         return {
-            "image_seqlens": image_seqlens,
-            "prompt_seqlens": prompt_seqlens,
+            "latent_seqlens": seqlens["latent_seqlens"],
+            "prompt_seqlens": seqlens["prompt_seqlens"],
             "num_timesteps": num_timesteps,
             "cfg_passes": cfg_passes,
         }
 
     def _allgather_diffusion_flops_meta(self, meta: dict) -> dict:
-        """All-gather per-rank image/prompt seqlens across the DP group.
+        """All-gather per-rank latent/prompt seqlens across the DP group.
 
         ``num_timesteps`` and ``cfg_passes`` are scalars constant across the
         DP group, so we keep them as-is. Mirrors the ``global_token_num``
@@ -600,13 +557,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
         if dp_world <= 1:
             return meta
 
-        gathered_img = [None] * dp_world
-        gathered_txt = [None] * dp_world
-        torch.distributed.all_gather_object(gathered_img, meta["image_seqlens"], dp_group)
-        torch.distributed.all_gather_object(gathered_txt, meta["prompt_seqlens"], dp_group)
+        gathered_latent = [None] * dp_world
+        gathered_prompt = [None] * dp_world
+        torch.distributed.all_gather_object(gathered_latent, meta["latent_seqlens"], dp_group)
+        torch.distributed.all_gather_object(gathered_prompt, meta["prompt_seqlens"], dp_group)
         return {
-            "image_seqlens": [x for xs in gathered_img for x in xs],
-            "prompt_seqlens": [x for xs in gathered_txt for x in xs],
+            "latent_seqlens": [x for xs in gathered_latent for x in xs],
+            "prompt_seqlens": [x for xs in gathered_prompt for x in xs],
             "num_timesteps": meta["num_timesteps"],
             "cfg_passes": meta["cfg_passes"],
         }
