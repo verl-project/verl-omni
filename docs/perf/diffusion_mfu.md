@@ -218,7 +218,7 @@ via `_allgather_diffusion_flops_meta` gathering `latent_seqlens` and
 ## Adding a new architecture
 
 Adding a new architecture is **one class with one required method**.
-Subclass `DiffusionArchitectureFlops`, implement `estimate_flops`, and
+Subclass `DiffusionModelFlops`, implement `estimate_flops`, and
 register it. The base-class `get_latent_seqlens` and
 `get_prompt_seqlens` extractors cover the standard `(B, C, *spatial)`
 layouts (including FlowGRPO rollout-stacked variants), so most new
@@ -292,7 +292,7 @@ Two facts matter for the estimator:
     "WanPipeline",
     "WanPipelineWithLogProb",   # alias, if you ship a custom rollout class
 )
-class WanFlops(DiffusionArchitectureFlops):
+class WanFlops(DiffusionModelFlops):
     """Wan2.2 DiT FLOPs estimator (self-attn + cross-attn topology)."""
 
     # latent_seqlens and prompt_seqlens are inherited from the base class.

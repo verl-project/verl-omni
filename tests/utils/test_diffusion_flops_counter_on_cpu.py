@@ -14,7 +14,7 @@
 """CPU-only unit tests for ``DiffusionFlopsCounter``.
 
 Verifies the architecture-registry dispatch, the default
-``DiffusionArchitectureFlops`` extractors, the Qwen-Image FLOPs formula's
+``DiffusionModelFlops`` extractors, the Qwen-Image FLOPs formula's
 linearity / quadratic scaling, **absolute correctness against a hand-rolled
 reference**, and that the formula's implied ``N_params`` matches the actual
 ``model.numel()`` of a tiny ``QwenImageTransformer2DModel`` instance built
@@ -29,8 +29,8 @@ import pytest
 
 from verl_omni.utils.diffusion_flops_counter import (
     _REGISTRY,
-    DiffusionArchitectureFlops,
     DiffusionFlopsCounter,
+    DiffusionModelFlops,
     QwenImageFlops,
     register_diffusion_architecture,
     resolve_cfg_passes,
@@ -138,7 +138,7 @@ class TestDiffusionFlopsRegistry:
         sentinel = 1234.5
 
         @register_diffusion_architecture("_TestArch_CPU")
-        class _Stub(DiffusionArchitectureFlops):
+        class _Stub(DiffusionModelFlops):
             @staticmethod
             def estimate_flops(config, latent_seqlens, prompt_seqlens, delta_time, *, num_timesteps, cfg_passes):
                 del config, latent_seqlens, prompt_seqlens, delta_time, num_timesteps, cfg_passes
@@ -152,7 +152,7 @@ class TestDiffusionFlopsRegistry:
         assert prom > 0
 
     def test_register_decorator_rejects_non_subclasses(self):
-        with pytest.raises(TypeError, match="DiffusionArchitectureFlops"):
+        with pytest.raises(TypeError, match="DiffusionModelFlops"):
 
             @register_diffusion_architecture("_BadArch_CPU")
             def _not_a_class(*args, **kwargs):  # pragma: no cover
@@ -213,25 +213,25 @@ class TestDefaultLatentSeqlens:
     def test_4d_image_latents(self):
         # (B=4, C=16, H=128, W=128) -> 128*128 tokens per sample.
         data = {"image_latents": _Tensor((4, 16, 128, 128))}
-        seqs = DiffusionArchitectureFlops.get_latent_seqlens(data, {})
+        seqs = DiffusionModelFlops.get_latent_seqlens(data, {})
         assert seqs == [128 * 128] * 4
 
     def test_5d_video_latents(self):
         # Wan / Hunyuan / LTX / CogVideoX: (B=1, C=16, T=21, H=60, W=104).
         data = {"image_latents": _Tensor((1, 16, 21, 60, 104))}
-        seqs = DiffusionArchitectureFlops.get_latent_seqlens(data, {})
+        seqs = DiffusionModelFlops.get_latent_seqlens(data, {})
         assert seqs == [21 * 60 * 104]
 
     def test_5d_all_latents_rollout_stacked(self):
         # FlowGRPO image rollouts: (B=2, T_steps=10, C=16, H=128, W=128).
         data = {"all_latents": _Tensor((2, 10, 16, 128, 128))}
-        seqs = DiffusionArchitectureFlops.get_latent_seqlens(data, {})
+        seqs = DiffusionModelFlops.get_latent_seqlens(data, {})
         assert seqs == [128 * 128] * 2
 
     def test_6d_all_latents_video_rollout(self):
         # FlowGRPO video rollouts: (B=1, T_steps=10, C=16, T_lat=21, H=60, W=104).
         data = {"all_latents": _Tensor((1, 10, 16, 21, 60, 104))}
-        seqs = DiffusionArchitectureFlops.get_latent_seqlens(data, {})
+        seqs = DiffusionModelFlops.get_latent_seqlens(data, {})
         assert seqs == [21 * 60 * 104]
 
     def test_image_latents_takes_priority_over_all_latents(self):
@@ -239,31 +239,31 @@ class TestDefaultLatentSeqlens:
             "image_latents": _Tensor((2, 16, 64, 64)),
             "all_latents": _Tensor((2, 10, 16, 128, 128)),
         }
-        seqs = DiffusionArchitectureFlops.get_latent_seqlens(data, {})
+        seqs = DiffusionModelFlops.get_latent_seqlens(data, {})
         assert seqs == [64 * 64] * 2
 
     def test_missing_latents_returns_empty(self):
-        assert DiffusionArchitectureFlops.get_latent_seqlens({}, {}) == []
-        assert DiffusionArchitectureFlops.get_latent_seqlens({"image_latents": None}, {}) == []
+        assert DiffusionModelFlops.get_latent_seqlens({}, {}) == []
+        assert DiffusionModelFlops.get_latent_seqlens({"image_latents": None}, {}) == []
 
 
 class TestDefaultPromptSeqlens:
     def test_dense_mask_sums_per_row(self):
         data = {"prompt_embeds_mask": _Tensor((3, 256))}
-        seqs = DiffusionArchitectureFlops.get_prompt_seqlens(data, {})
+        seqs = DiffusionModelFlops.get_prompt_seqlens(data, {})
         assert seqs == [256, 256, 256]
 
     def test_falls_back_to_prompt_embeds_shape(self):
         # No mask available, but prompt_embeds is dense (B, L, D).
         data = {"prompt_embeds": _Tensor((4, 192, 1024))}
-        seqs = DiffusionArchitectureFlops.get_prompt_seqlens(data, {})
+        seqs = DiffusionModelFlops.get_prompt_seqlens(data, {})
         assert seqs == [192] * 4
 
     def test_unconditional_returns_zeros(self):
         # Neither mask nor embeds. Falls back to [0] * batch_size derived from
         # whichever data field happens to expose a batch dim.
         data = {"image_latents": _Tensor((2, 16, 64, 64))}
-        seqs = DiffusionArchitectureFlops.get_prompt_seqlens(data, {})
+        seqs = DiffusionModelFlops.get_prompt_seqlens(data, {})
         assert seqs == [0, 0]
 
 

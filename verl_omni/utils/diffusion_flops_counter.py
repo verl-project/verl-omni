@@ -67,7 +67,7 @@ This implies a precise rule for variants that introduce extra latents:
   KV linears. They contribute to ``prompt_seqlens``.
 
 Adding a new architecture is a single class with one required method.
-Subclass :class:`DiffusionArchitectureFlops`, decorate with
+Subclass :class:`DiffusionModelFlops`, decorate with
 :func:`register_diffusion_architecture`, and implement
 ``estimate_flops``. ``get_latent_seqlens`` and ``get_prompt_seqlens``
 have sensible defaults that cover vanilla T2I / T2V / T2A models in
@@ -85,7 +85,7 @@ from typing import Any, Mapping, Optional, Sequence
 from verl.utils.flops_counter import get_device_flops
 
 __all__ = [
-    "DiffusionArchitectureFlops",
+    "DiffusionModelFlops",
     "DiffusionFlopsCounter",
     "QwenImageFlops",
     "register_diffusion_architecture",
@@ -154,13 +154,13 @@ def resolve_cfg_passes(
 # ---------------------------------------------------------------------------
 
 
-_REGISTRY: dict[str, type[DiffusionArchitectureFlops]] = {}
+_REGISTRY: dict[str, type[DiffusionModelFlops]] = {}
 
 
 def register_diffusion_architecture(
     *architectures: str,
 ):
-    """Class decorator that registers a :class:`DiffusionArchitectureFlops`
+    """Class decorator that registers a :class:`DiffusionModelFlops`
     subclass under one or more pipeline architecture names.
 
     ``architectures`` should match ``DiffusionModelConfig.architecture``
@@ -170,11 +170,9 @@ def register_diffusion_architecture(
     (e.g. a custom vllm-omni rollout wrapper).
     """
 
-    def decorator(cls: type[DiffusionArchitectureFlops]) -> type[DiffusionArchitectureFlops]:
-        if not isinstance(cls, type) or not issubclass(cls, DiffusionArchitectureFlops):
-            raise TypeError(
-                f"@register_diffusion_architecture expects a DiffusionArchitectureFlops subclass, got {cls!r}."
-            )
+    def decorator(cls: type[DiffusionModelFlops]) -> type[DiffusionModelFlops]:
+        if not isinstance(cls, type) or not issubclass(cls, DiffusionModelFlops):
+            raise TypeError(f"@register_diffusion_architecture expects a DiffusionModelFlops subclass, got {cls!r}.")
         for name in architectures:
             _REGISTRY[name] = cls
         return cls
@@ -230,7 +228,7 @@ def _sum_seqlen_squared(latent_seqlens: Sequence[int], prompt_seqlens: Sequence[
 # ---------------------------------------------------------------------------
 
 
-class DiffusionArchitectureFlops:
+class DiffusionModelFlops:
     """Base class for per-architecture diffusion FLOPs / MFU support.
 
     Subclass this and decorate with :func:`register_diffusion_architecture`
@@ -290,9 +288,44 @@ class DiffusionArchitectureFlops:
         override.
     """
 
-    @staticmethod
+    LATENT_KEYS: Sequence[str] = ("image_latents", "audio_latents", "all_latents")
+    PROMPT_KEYS: Sequence[str] = ("prompt_embeds", "prompt_embeds_mask")
+
+    def __init__(self, config: Mapping[str, Any]):
+        self.config = _coerce_config(config)
+
+    @property
+    def dim(self) -> int:
+        """Return the model's hidden dimension (num_heads * head_dim)."""
+        num_heads = int(self.config.get("num_attention_heads", 0))
+        head_dim = int(self.config.get("attention_head_dim", 0))
+        return num_heads * head_dim
+
+    def compute_dense_flops(self, params_per_token: float, total_tokens: float) -> float:
+        """Compute dense linear layer FLOPs (factor 6 = 2 FLOPs/MAC * 3 for fwd+bwd)."""
+        return 6.0 * params_per_token * total_tokens
+
+    def compute_attention_flops(
+        self,
+        latent_seqlens: Sequence[int],
+        prompt_seqlens: Sequence[int],
+        *,
+        causal: bool = False,
+    ) -> float:
+        """Compute FLOPs for the attention dot-products (Q@K^T + attn@V).
+
+        Multiplier factor is 12 (fwd + bwd) for non-causal attention, and 6 for causal.
+        """
+        num_heads = int(self.config.get("num_attention_heads", 0))
+        head_dim = int(self.config.get("attention_head_dim", 0))
+        num_layers = int(self.config.get("num_layers", 0))
+
+        seqlen_square_sum = _sum_seqlen_squared(latent_seqlens, prompt_seqlens)
+        factor = 6 if causal else 12  # 2 FLOPs/MAC * 2 matmuls * 3 (fwd+bwd), causal is halved
+        return factor * num_layers * num_heads * head_dim * seqlen_square_sum
+
     def estimate_flops(
-        config: Mapping[str, Any],
+        self,
         latent_seqlens: Sequence[int],
         prompt_seqlens: Sequence[int],
         delta_time: float,
@@ -303,10 +336,9 @@ class DiffusionArchitectureFlops:
         """Return achieved TFLOPS for one ``train_batch`` / ``infer_batch``
         call. Subclasses must override.
         """
-        raise NotImplementedError("Subclass DiffusionArchitectureFlops and override estimate_flops().")
+        raise NotImplementedError("Subclass DiffusionModelFlops and override estimate_flops().")
 
-    @staticmethod
-    def get_latent_seqlens(data: Any, config: Mapping[str, Any]) -> list[int]:
+    def get_latent_seqlens(self, data: Any = None, config: Optional[Mapping[str, Any]] = None) -> list[int]:
         """Extract per-sample latent-stream token counts from a batch.
 
         The latent stream is the VAE-encoded tokens flowing through the
@@ -344,11 +376,7 @@ class DiffusionArchitectureFlops:
                 through the training or inference path. Architecture-
                 specific keys (``image_latents``, ``all_latents``,
                 ``reference_image_latents``, ...) are looked up here.
-            config: The diffusers transformer config (parsed contents of
-                ``<model>/transformer/config.json``). Available in case
-                the extractor needs fields like ``patch_size`` or
-                ``in_channels`` to interpret a tensor shape; the default
-                does not use it.
+            config: Optional diffusers transformer config for backward compatibility.
 
         Returns:
             A list of length ``B``, one int per sample in the batch,
@@ -360,8 +388,21 @@ class DiffusionArchitectureFlops:
             to ``mfu=0`` rather than crashing — matching the upstream
             LLM counter's graceful-degradation contract.
         """
-        del config  # Default doesn't need transformer config.
-        latents, stacked = _read_latents(data)
+        if not isinstance(self, DiffusionModelFlops):
+            # Static call backward-compatibility path: get_latent_seqlens(data, config)
+            data_param = self
+            config_param = data
+            temp_inst = DiffusionModelFlops(config_param or {})
+            return temp_inst.get_latent_seqlens(data_param)
+
+        latents = None
+        stacked = False
+        for key in self.LATENT_KEYS:
+            latents = _safe_get(data, key)
+            if latents is not None:
+                stacked = key == "all_latents"
+                break
+
         if latents is None:
             return []
         shape = getattr(latents, "shape", None)
@@ -370,7 +411,7 @@ class DiffusionArchitectureFlops:
         try:
             ndim = len(shape)
         except TypeError:
-            return 0  # type: ignore[return-value]
+            return []
 
         # Minimum rank for the default: (B, C, *spatial); +1 if stacked.
         min_rank = 4 if stacked else 3
@@ -385,8 +426,7 @@ class DiffusionArchitectureFlops:
             per_sample *= int(d)
         return [per_sample] * batch_size
 
-    @staticmethod
-    def get_prompt_seqlens(data: Any, config: Mapping[str, Any]) -> list[int]:
+    def get_prompt_seqlens(self, data: Any = None, config: Optional[Mapping[str, Any]] = None) -> list[int]:
         """Extract per-sample prompt-stream token counts from a batch.
 
         The prompt stream is the tokens flowing through the text-side
@@ -423,9 +463,7 @@ class DiffusionArchitectureFlops:
                 (``prompt_embeds``, ``prompt_embeds_mask``) and any
                 pipeline-specific encoded-reference keys are looked up
                 here.
-            config: The diffusers transformer config; available in case
-                the extractor needs fields like ``joint_attention_dim``
-                to interpret ragged shapes. The default does not use it.
+            config: Optional diffusers transformer config for backward compatibility.
 
         Returns:
             A list of length ``B``, one int per sample in the batch,
@@ -435,7 +473,13 @@ class DiffusionArchitectureFlops:
             padded length). Returns ``[0] * B`` for unconditional or
             class-conditioned pipelines that carry no prompt stream.
         """
-        del config
+        if not isinstance(self, DiffusionModelFlops):
+            # Static call backward-compatibility path: get_prompt_seqlens(data, config)
+            data_param = self
+            config_param = data
+            temp_inst = DiffusionModelFlops(config_param or {})
+            return temp_inst.get_prompt_seqlens(data_param)
+
         prompt_embeds_mask = _safe_get(data, "prompt_embeds_mask")
         prompt_embeds = _safe_get(data, "prompt_embeds")
         batch_size = _batch_size(data)
@@ -513,7 +557,7 @@ def _read_latents(data: Any) -> tuple[Any, bool]:
     # Aliases sometimes seen in custom forks / vllm-omni shims.
     "QwenImagePipelineWithLogProb",
 )
-class QwenImageFlops(DiffusionArchitectureFlops):
+class QwenImageFlops(DiffusionModelFlops):
     """FLOPs estimator for ``QwenImageTransformer2DModel``.
 
     Qwen-Image is a dual-stream DiT: image-latent tokens flow through the
@@ -540,9 +584,8 @@ class QwenImageFlops(DiffusionArchitectureFlops):
     block FLOPs and is included for completeness.
     """
 
-    @staticmethod
     def estimate_flops(
-        config: Mapping[str, Any],
+        self,
         latent_seqlens: Sequence[int],
         prompt_seqlens: Sequence[int],
         delta_time: float,
@@ -550,17 +593,13 @@ class QwenImageFlops(DiffusionArchitectureFlops):
         num_timesteps: int,
         cfg_passes: int,
     ) -> float:
-        cfg = _coerce_config(config)
-
-        num_attention_heads = int(cfg["num_attention_heads"])
-        attention_head_dim = int(cfg["attention_head_dim"])
+        cfg = self.config
+        dim = self.dim
         num_layers = int(cfg["num_layers"])
         in_channels = int(cfg["in_channels"])
         joint_attention_dim = int(cfg["joint_attention_dim"])
         patch_size = int(cfg.get("patch_size", 2))
         out_channels = int(cfg.get("out_channels") or in_channels)
-
-        dim = num_attention_heads * attention_head_dim
 
         # Per-stream, per-layer token-scaling params (see class docstring).
         dense_block_n_per_stream = (3 + 1 + 8) * dim * dim  # 12 * dim**2
@@ -577,23 +616,22 @@ class QwenImageFlops(DiffusionArchitectureFlops):
             len(prompt_seqlens) if prompt_seqlens else 0,
         )
 
-        # Dense FLOPs per stream; factor 6 = 2 FLOPs/MAC * 3 (fwd+bwd).
-        img_dense_flops = 6 * (num_layers * dense_block_n_per_stream + img_in_n + proj_out_n) * img_tot
-        txt_dense_flops = 6 * (num_layers * dense_block_n_per_stream + txt_in_n) * txt_tot
+        # Dense FLOPs per stream.
+        img_dense_flops = self.compute_dense_flops(
+            num_layers * dense_block_n_per_stream + img_in_n + proj_out_n, img_tot
+        )
+        txt_dense_flops = self.compute_dense_flops(num_layers * dense_block_n_per_stream + txt_in_n, txt_tot)
 
         # Modulation linears applied to the per-sample timestep embedding
         # (one token per sample), so they scale with batch_size, not tokens.
         mod_block_n = 12 * dim * dim
-        mod_flops = 6 * num_layers * mod_block_n * batch_size
+        mod_flops = self.compute_dense_flops(num_layers * mod_block_n, batch_size)
 
-        # Joint full-attention FLOPs: non-causal Q@K^T + attn@V across the
-        # combined img+txt stream; factor 12 = 2 FLOPs/MAC * 2 matmuls *
-        # 3 (fwd+bwd), matching upstream's _estimate_qwen3_vit_flop.
-        seqlen_square_sum = _sum_seqlen_squared(latent_seqlens, prompt_seqlens)
-        attn_flops = 12 * num_layers * num_attention_heads * attention_head_dim * seqlen_square_sum
+        # Joint full-attention FLOPs.
+        attn_flops = self.compute_attention_flops(latent_seqlens, prompt_seqlens)
 
         flops_all_steps = (img_dense_flops + txt_dense_flops + mod_flops + attn_flops) * num_timesteps * cfg_passes
-        return flops_all_steps * (1.0 / delta_time) / 1e12
+        return flops_all_steps / delta_time / 1e12
 
 
 # ---------------------------------------------------------------------------
@@ -629,7 +667,8 @@ class DiffusionFlopsCounter:
     def __init__(self, architecture: Optional[str], transformer_config: Any):
         self.architecture = architecture
         self.config = _coerce_config(transformer_config) if transformer_config is not None else {}
-        self._arch_cls: Optional[type[DiffusionArchitectureFlops]] = _REGISTRY.get(architecture)
+        self._arch_cls: Optional[type[DiffusionModelFlops]] = _REGISTRY.get(architecture)
+        self._arch: Optional[DiffusionModelFlops] = self._arch_cls(self.config) if self._arch_cls is not None else None
 
         if architecture not in _REGISTRY:
             warnings.warn(
@@ -641,7 +680,7 @@ class DiffusionFlopsCounter:
             )
 
     @property
-    def architecture_cls(self) -> Optional[type[DiffusionArchitectureFlops]]:
+    def architecture_cls(self) -> Optional[type[DiffusionModelFlops]]:
         return self._arch_cls
 
     def collect_meta(self, data: Any) -> dict[str, list[int]]:
@@ -653,11 +692,30 @@ class DiffusionFlopsCounter:
         Returns empty lists for unknown architectures so the caller can
         skip downstream work without special-casing.
         """
-        if self._arch_cls is None:
+        if self._arch is None:
             return {"latent_seqlens": [], "prompt_seqlens": []}
+
+        import inspect
+
+        # get_latent_seqlens signature resolution
+        latent_sig = inspect.signature(self._arch.get_latent_seqlens)
+        latent_params = list(latent_sig.parameters.keys())
+        if len(latent_params) >= 2 and latent_params[1] == "config":
+            latent_seqlens = self._arch.get_latent_seqlens(data, self.config)
+        else:
+            latent_seqlens = self._arch.get_latent_seqlens(data)
+
+        # get_prompt_seqlens signature resolution
+        prompt_sig = inspect.signature(self._arch.get_prompt_seqlens)
+        prompt_params = list(prompt_sig.parameters.keys())
+        if len(prompt_params) >= 2 and prompt_params[1] == "config":
+            prompt_seqlens = self._arch.get_prompt_seqlens(data, self.config)
+        else:
+            prompt_seqlens = self._arch.get_prompt_seqlens(data)
+
         return {
-            "latent_seqlens": list(self._arch_cls.get_latent_seqlens(data, self.config)),
-            "prompt_seqlens": list(self._arch_cls.get_prompt_seqlens(data, self.config)),
+            "latent_seqlens": list(latent_seqlens),
+            "prompt_seqlens": list(prompt_seqlens),
         }
 
     def estimate_flops(
@@ -685,15 +743,32 @@ class DiffusionFlopsCounter:
                 (``true_cfg_scale > 1.0``), otherwise ``1``.
         """
         promised = get_device_flops()
-        if self._arch_cls is None or delta_time <= 0 or num_timesteps <= 0 or cfg_passes <= 0:
+        if self._arch is None or delta_time <= 0 or num_timesteps <= 0 or cfg_passes <= 0:
             return 0.0, promised
 
-        estimated = self._arch_cls.estimate_flops(
-            self.config,
-            latent_seqlens,
-            prompt_seqlens,
-            delta_time,
-            num_timesteps=num_timesteps,
-            cfg_passes=cfg_passes,
-        )
+        import inspect
+
+        sig = inspect.signature(self._arch.estimate_flops)
+        params = list(sig.parameters.keys())
+
+        if params and params[0] == "config":
+            # Legacy static/class method signature: (config, latent_seqlens, prompt_seqlens, delta_time, ...)
+            estimated = self._arch.estimate_flops(
+                self.config,
+                latent_seqlens,
+                prompt_seqlens,
+                delta_time,
+                num_timesteps=num_timesteps,
+                cfg_passes=cfg_passes,
+            )
+        else:
+            # Modern instance method signature: (latent_seqlens, prompt_seqlens, delta_time, ...)
+            estimated = self._arch.estimate_flops(
+                latent_seqlens,
+                prompt_seqlens,
+                delta_time,
+                num_timesteps=num_timesteps,
+                cfg_passes=cfg_passes,
+            )
+
         return float(estimated), float(promised)

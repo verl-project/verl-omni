@@ -507,7 +507,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         Per-rank ``latent_seqlens`` / ``prompt_seqlens`` come from the
         architecture class registered for ``DiffusionModelConfig.architecture``
-        (see :class:`DiffusionArchitectureFlops`). ``num_timesteps`` is read
+        (see :class:`DiffusionModelFlops`). ``num_timesteps`` is read
         from the FlowGRPO/MixGRPO ``all_timesteps`` trajectory (defaulting
         to 1 for DPO / one-shot paths) and ``cfg_passes`` is resolved from
         the pipeline + transformer configs via :func:`resolve_cfg_passes`.
