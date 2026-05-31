@@ -53,54 +53,37 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+def _gt_one(value: Any) -> bool:
+    """Return True if value can be converted to float and is > 1.0."""
+    try:
+        return value is not None and float(value) > 1.0
+    except (TypeError, ValueError):
+        return False
+
+
 def resolve_cfg_passes(
     pipeline_config: Optional[Mapping[str, Any]] = None,
     transformer_config: Optional[Mapping[str, Any]] = None,
 ) -> int:
-    """Decide how many denoiser forward passes a training call runs per step.
+    """Resolve the number of model forward passes run per denoising step."""
+    pcfg = pipeline_config or {}
+    tcfg = transformer_config or {}
 
-    Five sources are consulted in priority order so contributors can override
-    the heuristic per pipeline without touching this module:
+    # Explicit override takes priority
+    if (explicit := pcfg.get("cfg_passes")) is not None:
+        try:
+            return max(int(explicit), 1)
+        except (TypeError, ValueError):
+            pass
 
-    1. Explicit ``pipeline_config.cfg_passes`` (int).  Use this when neither
-       ``true_cfg_scale`` nor ``guidance_scale`` matches the pipeline's
-       runtime behaviour (e.g. a custom rollout adapter that always batches
-       cond + uncond into one tensor).
-    2. ``transformer_config.guidance_embeds == True`` -> 1 pass.  Models
-       like Flux are guidance-distilled: the guidance scalar is consumed
-       inside the model and only one forward is run regardless of
-       ``guidance_scale``.
-    3. ``true_cfg_scale > 1.0`` -> 2 passes.  Qwen-Image-style "true CFG":
-       the pipeline runs separate cond / uncond forwards.
-    4. ``guidance_scale > 1.0`` -> 2 passes.  Standard CFG (Wan2.2, SD3,
-       most non-distilled DiT pipelines).
-    5. Otherwise (unconditional / class-conditioned / explicit no-CFG)
-       -> 1 pass.
-
-    Both arguments are accepted as ``None`` so this helper survives the
-    bring-up window before ``architecture`` is wired into a given pipeline.
-    """
-    pcfg: Mapping[str, Any] = pipeline_config or {}
-    tcfg: Mapping[str, Any] = transformer_config or {}
-
-    explicit = pcfg.get("cfg_passes", None) if isinstance(pcfg, Mapping) else None
-    if explicit is not None:
-        passes = int(explicit)
-        return max(passes, 1)
-
-    if bool(tcfg.get("guidance_embeds", False)):
+    # Guidance-distilled models (e.g. Flux) run only 1 pass
+    if tcfg.get("guidance_embeds"):
         return 1
 
-    def _gt_one(value: Any) -> bool:
-        try:
-            return value is not None and float(value) > 1.0
-        except (TypeError, ValueError):
-            return False
+    # True-CFG or standard CFG scales > 1.0 require 2 passes
+    if _gt_one(pcfg.get("true_cfg_scale")) or _gt_one(pcfg.get("guidance_scale")):
+        return 2
 
-    if _gt_one(pcfg.get("true_cfg_scale")):
-        return 2
-    if _gt_one(pcfg.get("guidance_scale")):
-        return 2
     return 1
 
 
