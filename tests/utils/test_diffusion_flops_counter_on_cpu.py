@@ -213,25 +213,25 @@ class TestDefaultLatentSeqlens:
     def test_4d_image_latents(self):
         # (B=4, C=16, H=128, W=128) -> 128*128 tokens per sample.
         data = {"image_latents": _Tensor((4, 16, 128, 128))}
-        seqs = DiffusionArchitectureFlops.latent_seqlens(data, {})
+        seqs = DiffusionArchitectureFlops.get_latent_seqlens(data, {})
         assert seqs == [128 * 128] * 4
 
     def test_5d_video_latents(self):
         # Wan / Hunyuan / LTX / CogVideoX: (B=1, C=16, T=21, H=60, W=104).
         data = {"image_latents": _Tensor((1, 16, 21, 60, 104))}
-        seqs = DiffusionArchitectureFlops.latent_seqlens(data, {})
+        seqs = DiffusionArchitectureFlops.get_latent_seqlens(data, {})
         assert seqs == [21 * 60 * 104]
 
     def test_5d_all_latents_rollout_stacked(self):
         # FlowGRPO image rollouts: (B=2, T_steps=10, C=16, H=128, W=128).
         data = {"all_latents": _Tensor((2, 10, 16, 128, 128))}
-        seqs = DiffusionArchitectureFlops.latent_seqlens(data, {})
+        seqs = DiffusionArchitectureFlops.get_latent_seqlens(data, {})
         assert seqs == [128 * 128] * 2
 
     def test_6d_all_latents_video_rollout(self):
         # FlowGRPO video rollouts: (B=1, T_steps=10, C=16, T_lat=21, H=60, W=104).
         data = {"all_latents": _Tensor((1, 10, 16, 21, 60, 104))}
-        seqs = DiffusionArchitectureFlops.latent_seqlens(data, {})
+        seqs = DiffusionArchitectureFlops.get_latent_seqlens(data, {})
         assert seqs == [21 * 60 * 104]
 
     def test_image_latents_takes_priority_over_all_latents(self):
@@ -239,31 +239,31 @@ class TestDefaultLatentSeqlens:
             "image_latents": _Tensor((2, 16, 64, 64)),
             "all_latents": _Tensor((2, 10, 16, 128, 128)),
         }
-        seqs = DiffusionArchitectureFlops.latent_seqlens(data, {})
+        seqs = DiffusionArchitectureFlops.get_latent_seqlens(data, {})
         assert seqs == [64 * 64] * 2
 
     def test_missing_latents_returns_empty(self):
-        assert DiffusionArchitectureFlops.latent_seqlens({}, {}) == []
-        assert DiffusionArchitectureFlops.latent_seqlens({"image_latents": None}, {}) == []
+        assert DiffusionArchitectureFlops.get_latent_seqlens({}, {}) == []
+        assert DiffusionArchitectureFlops.get_latent_seqlens({"image_latents": None}, {}) == []
 
 
 class TestDefaultPromptSeqlens:
     def test_dense_mask_sums_per_row(self):
         data = {"prompt_embeds_mask": _Tensor((3, 256))}
-        seqs = DiffusionArchitectureFlops.prompt_seqlens(data, {})
+        seqs = DiffusionArchitectureFlops.get_prompt_seqlens(data, {})
         assert seqs == [256, 256, 256]
 
     def test_falls_back_to_prompt_embeds_shape(self):
         # No mask available, but prompt_embeds is dense (B, L, D).
         data = {"prompt_embeds": _Tensor((4, 192, 1024))}
-        seqs = DiffusionArchitectureFlops.prompt_seqlens(data, {})
+        seqs = DiffusionArchitectureFlops.get_prompt_seqlens(data, {})
         assert seqs == [192] * 4
 
     def test_unconditional_returns_zeros(self):
         # Neither mask nor embeds. Falls back to [0] * batch_size derived from
         # whichever data field happens to expose a batch dim.
         data = {"image_latents": _Tensor((2, 16, 64, 64))}
-        seqs = DiffusionArchitectureFlops.prompt_seqlens(data, {})
+        seqs = DiffusionArchitectureFlops.get_prompt_seqlens(data, {})
         assert seqs == [0, 0]
 
 
@@ -279,9 +279,9 @@ class TestSubclassOverridePattern:
         @register_diffusion_architecture("_QwenImageEdit_CPU")
         class _EditFlops(QwenImageFlops):
             @staticmethod
-            def latent_seqlens(data, config):
+            def get_latent_seqlens(data, config):
                 # Reference latents are concatenated along the seq dim.
-                base = QwenImageFlops.latent_seqlens(data, config)
+                base = QwenImageFlops.get_latent_seqlens(data, config)
                 ref = data.get("reference_image_latents")
                 if ref is None or not hasattr(ref, "shape"):
                     return base

@@ -69,11 +69,11 @@ This implies a precise rule for variants that introduce extra latents:
 Adding a new architecture is a single class with one required method.
 Subclass :class:`DiffusionArchitectureFlops`, decorate with
 :func:`register_diffusion_architecture`, and implement
-``estimate_flops``. ``latent_seqlens`` and ``prompt_seqlens`` have
-sensible defaults that cover vanilla T2I / T2V / T2A models in either
-training or FlowGRPO rollout-stacked layout; override them only for
-variants whose data layout genuinely differs (Edit / Img2Vid /
-ControlNet that concatenate extra latents, models with flat
+``estimate_flops``. ``get_latent_seqlens`` and ``get_prompt_seqlens``
+have sensible defaults that cover vanilla T2I / T2V / T2A models in
+either training or FlowGRPO rollout-stacked layout; override them
+only for variants whose data layout genuinely differs (Edit / Img2Vid
+/ ControlNet that concatenate extra latents, models with flat
 ``(B, L, C)`` patched latents, NaViT-style ragged packing, etc.).
 """
 
@@ -264,38 +264,30 @@ class DiffusionArchitectureFlops:
     -------
     estimate_flops (REQUIRED)
         The FLOPs formula. Receives global (DP-allgathered)
-        ``latent_seqlens`` and ``prompt_seqlens`` plus ``num_timesteps``,
-        ``cfg_passes``, and the elapsed wall time; returns achieved
-        TFLOPS assuming the verl ``fwd+bwd = 6 * N * tokens`` convention.
-        Forward-only callers divide by 3 in the worker.
+        ``latent_seqlens`` and ``prompt_seqlens`` plus
+        ``num_timesteps``, ``cfg_passes``, and the elapsed wall time;
+        returns achieved TFLOPS assuming the verl
+        ``fwd+bwd = 6 * N * tokens`` convention. Forward-only callers
+        divide by 3 in the worker.
 
-    latent_seqlens (OPTIONAL)
-        Per-sample latent-stream token count. The default reads
+    get_latent_seqlens (OPTIONAL)
+        Per-sample latent-stream token count, dispatched by
+        :meth:`DiffusionFlopsCounter.collect_meta`. The default reads
         ``data["image_latents"]`` (training-time) or
         ``data["all_latents"]`` (FlowGRPO rollout-stacked) and returns
         the product of the spatial dims (``H*W`` for image,
         ``T*H*W`` for video, etc.), replicated to match the batch
-        size. Override this for architectures that:
+        size. See the method docstring for the full Args / Returns
+        contract and when to override.
 
-        * concatenate reference latents along the sequence dim
-          (Img2Img / Edit / Inpaint / ControlNet variants — add the
-          reference token count to each per-sample entry),
-        * use flat already-patched ``(B, L, C)`` latents (the default
-          would treat ``C`` as a spatial dim),
-        * pack multiple samples into one ragged sequence (NaViT-style),
-        * use a non-image modality whose latents do not live under
-          either of the two default keys (e.g. audio latents stored
-          under ``data["audio_latents"]``).
-
-    prompt_seqlens (OPTIONAL)
-        Per-sample prompt-stream token count. The default reads
+    get_prompt_seqlens (OPTIONAL)
+        Per-sample prompt-stream token count, dispatched by
+        :meth:`DiffusionFlopsCounter.collect_meta`. The default reads
         ``prompt_embeds_mask`` (nested or dense), falls back to the
         dense ``prompt_embeds.shape[1]``, or returns zeros for
-        unconditional / class-conditioned models. Override this if
-        your pipeline stores text embeddings under different keys, uses
-        a non-standard masking convention, or concatenates encoded
-        reference-image / reference-audio tokens to the text stream
-        before the cross-attention (Img2Vid, audio-to-audio).
+        unconditional / class-conditioned models. See the method
+        docstring for the full Args / Returns contract and when to
+        override.
     """
 
     @staticmethod
@@ -314,20 +306,59 @@ class DiffusionArchitectureFlops:
         raise NotImplementedError("Subclass DiffusionArchitectureFlops and override estimate_flops().")
 
     @staticmethod
-    def latent_seqlens(data: Any, config: Mapping[str, Any]) -> list[int]:
-        """Default extractor for standard ``(B, C, *spatial)`` latent layouts.
+    def get_latent_seqlens(data: Any, config: Mapping[str, Any]) -> list[int]:
+        """Extract per-sample latent-stream token counts from a batch.
 
-        Handles:
+        The latent stream is the VAE-encoded tokens flowing through the
+        transformer's main-side linears (``to_q/to_k/to_v``, ``to_out``,
+        the FFN; ``img_*`` in Qwen-Image / SD3, ``attn1`` / ``ffn`` in
+        Wan). For Img2Img / Edit / Inpaint / ControlNet variants this
+        count must include any reference latents concatenated to the
+        denoise-target latents along the seq dim before the
+        transformer, because those reference tokens flow through the
+        same linears.
+
+        This default implementation handles the two standard layouts
+        that ship today:
 
         * Training-time tensors at ``data["image_latents"]`` with shape
           ``(B, C, H, W)`` (image DiT) or ``(B, C, T, H, W)`` (video DiT).
-        * FlowGRPO/MixGRPO rollout-stacked tensors at ``data["all_latents"]``
-          with one extra time-step axis, e.g. ``(B, T_steps, C, H, W)``.
+        * FlowGRPO/MixGRPO rollout-stacked tensors at
+          ``data["all_latents"]`` with one extra time-step axis, e.g.
+          ``(B, T_steps, C, H, W)``.
 
-        Returns ``[0] * batch_size`` (or ``[]``) when the latents are
-        missing or have an unrecognised rank — the counter then degrades
-        to zero estimated FLOPs, matching the upstream LLM counter's
-        graceful-degradation contract.
+        Override in your subclass when:
+
+        * your pipeline stores the denoise-target latents under a
+          different key (e.g. ``data["audio_latents"]``);
+        * extra reference latents are concatenated along the seq dim
+          (Edit / Img2Img / Inpaint / ControlNet — add the reference
+          token count to each per-sample entry);
+        * the latents arrive already flattened to ``(B, L, C)`` (the
+          default would treat ``C`` as a spatial dim and over-count);
+        * multiple samples are packed into one ragged sequence
+          (NaViT-style).
+
+        Args:
+            data: The TensorDict / mapping that ``TrainingWorker`` passes
+                through the training or inference path. Architecture-
+                specific keys (``image_latents``, ``all_latents``,
+                ``reference_image_latents``, ...) are looked up here.
+            config: The diffusers transformer config (parsed contents of
+                ``<model>/transformer/config.json``). Available in case
+                the extractor needs fields like ``patch_size`` or
+                ``in_channels`` to interpret a tensor shape; the default
+                does not use it.
+
+        Returns:
+            A list of length ``B``, one int per sample in the batch,
+            giving that sample's latent-stream token count after any
+            patchifying / VAE downsampling already reflected in the
+            tensor shape. Returns ``[]`` (or ``[0] * B``) when no
+            latent tensor is present or its rank is below the minimum
+            expected for the standard layout, so the counter degrades
+            to ``mfu=0`` rather than crashing — matching the upstream
+            LLM counter's graceful-degradation contract.
         """
         del config  # Default doesn't need transformer config.
         latents, stacked = _read_latents(data)
@@ -355,11 +386,54 @@ class DiffusionArchitectureFlops:
         return [per_sample] * batch_size
 
     @staticmethod
-    def prompt_seqlens(data: Any, config: Mapping[str, Any]) -> list[int]:
-        """Default extractor for ``prompt_embeds_mask`` / ``prompt_embeds``.
+    def get_prompt_seqlens(data: Any, config: Mapping[str, Any]) -> list[int]:
+        """Extract per-sample prompt-stream token counts from a batch.
 
-        Returns ``[0] * batch_size`` for unconditional / class-conditioned
-        models where no text-encoder stream is present.
+        The prompt stream is the tokens flowing through the text-side
+        / cross-attention linears (``add_q/k/v_proj``, ``to_add_out``,
+        ``txt_mlp`` in MM-DiT; ``attn2``'s KV projections in
+        Wan-style cross-attention). For Img2Vid variants this also
+        includes any encoded reference-image tokens the pipeline
+        concatenates to the text-encoder output, because those tokens
+        share the cross-attention KV path with the text tokens.
+
+        This default implementation reads the standard diffusers
+        encoder fields, in order of precedence:
+
+        * ``data["prompt_embeds_mask"]`` — nested
+          (``offsets().diff()``) or dense (``mask.sum(-1)``);
+        * ``data["prompt_embeds"].shape[1]`` — the padded dense
+          length, used when no mask is available;
+        * ``[0] * B`` — for unconditional or class-conditioned
+          models with no text-encoder stream at all.
+
+        Override in your subclass when:
+
+        * your pipeline stores text embeddings under different keys;
+        * masking uses a non-standard convention (e.g. a 4-D mask
+          shared across attention heads);
+        * reference-image or reference-audio tokens are concatenated
+          to the prompt stream before cross-attention (Img2Vid,
+          audio-to-audio — add the encoded reference token count to
+          each per-sample entry).
+
+        Args:
+            data: The TensorDict / mapping that ``TrainingWorker`` passes
+                through the training or inference path. Standard keys
+                (``prompt_embeds``, ``prompt_embeds_mask``) and any
+                pipeline-specific encoded-reference keys are looked up
+                here.
+            config: The diffusers transformer config; available in case
+                the extractor needs fields like ``joint_attention_dim``
+                to interpret ragged shapes. The default does not use it.
+
+        Returns:
+            A list of length ``B``, one int per sample in the batch,
+            giving that sample's prompt-stream token count *after*
+            attention masking (i.e. the count actually presented to
+            the cross-attention / joint-attention linears, not the
+            padded length). Returns ``[0] * B`` for unconditional or
+            class-conditioned pipelines that carry no prompt stream.
         """
         del config
         prompt_embeds_mask = _safe_get(data, "prompt_embeds_mask")
@@ -572,7 +646,9 @@ class DiffusionFlopsCounter:
 
     def collect_meta(self, data: Any) -> dict[str, list[int]]:
         """Extract per-rank ``latent_seqlens`` and ``prompt_seqlens`` from a
-        batch by dispatching to the registered architecture class.
+        batch by dispatching to the registered architecture class's
+        :meth:`DiffusionArchitectureFlops.get_latent_seqlens` and
+        :meth:`DiffusionArchitectureFlops.get_prompt_seqlens`.
 
         Returns empty lists for unknown architectures so the caller can
         skip downstream work without special-casing.
@@ -580,8 +656,8 @@ class DiffusionFlopsCounter:
         if self._arch_cls is None:
             return {"latent_seqlens": [], "prompt_seqlens": []}
         return {
-            "latent_seqlens": list(self._arch_cls.latent_seqlens(data, self.config)),
-            "prompt_seqlens": list(self._arch_cls.prompt_seqlens(data, self.config)),
+            "latent_seqlens": list(self._arch_cls.get_latent_seqlens(data, self.config)),
+            "prompt_seqlens": list(self._arch_cls.get_prompt_seqlens(data, self.config)),
         }
 
     def estimate_flops(

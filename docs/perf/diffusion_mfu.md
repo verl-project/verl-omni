@@ -219,10 +219,10 @@ via `_allgather_diffusion_flops_meta` gathering `latent_seqlens` and
 
 Adding a new architecture is **one class with one required method**.
 Subclass `DiffusionArchitectureFlops`, implement `estimate_flops`, and
-register it. Default extractors for `latent_seqlens` and `prompt_seqlens`
-cover the standard `(B, C, *spatial)` layouts (including FlowGRPO
-rollout-stacked variants), so most new T2I / T2V / T2A models do not
-write any data-plumbing code.
+register it. The base-class `get_latent_seqlens` and
+`get_prompt_seqlens` extractors cover the standard `(B, C, *spatial)`
+layouts (including FlowGRPO rollout-stacked variants), so most new
+T2I / T2V / T2A models do not write any data-plumbing code.
 
 ### Step 1 — Identify the pipeline class name
 
@@ -367,7 +367,7 @@ What you did **not** have to write:
 - **Device peak lookup.** The counter reuses
   `verl.utils.flops_counter.get_device_flops()`.
 
-#### Sidebar — overriding `latent_seqlens` for Img2Img / Edit / ControlNet
+#### Sidebar — overriding `get_latent_seqlens` for Img2Img / Edit / ControlNet
 
 Image-edit and ControlNet variants concatenate reference latents to the
 denoise-target latents along the sequence dim before the transformer
@@ -377,14 +377,14 @@ therefore belong on the latent stream — the effective
 `latent_seqlens[i]` becomes
 `denoise_target_token_count + reference_token_count` per sample, not a
 separate field. Subclass the parent T2I class and override
-`latent_seqlens` only; `estimate_flops` is inherited:
+`get_latent_seqlens` only; `estimate_flops` is inherited:
 
 ```python
 @register_diffusion_architecture("QwenImageEditPipeline")
 class QwenImageEditFlops(QwenImageFlops):
     @staticmethod
-    def latent_seqlens(data, config):
-        base = QwenImageFlops.latent_seqlens(data, config)
+    def get_latent_seqlens(data, config):
+        base = QwenImageFlops.get_latent_seqlens(data, config)
         ref = data.get("reference_image_latents")
         if ref is None:
             return base
@@ -398,7 +398,7 @@ The same pattern applies to Img2Img, Inpaint, and ControlNet — just
 swap the `reference_*` key for whichever your pipeline stores the
 extra latents under. For Img2Vid models that concatenate
 vision-encoder tokens to the text-encoder output instead, override
-`prompt_seqlens` in the same way (add the encoded reference-image
+`get_prompt_seqlens` in the same way (add the encoded reference-image
 token count to each per-sample entry).
 
 ### Step 4 — Add a unit test
@@ -465,11 +465,11 @@ If `actor/mfu` is `0` or missing, check:
 3. The config fields your `estimate_flops` reads (`num_layers`,
    `ffn_dim`, ...) actually appear in the diffusers config. Print
    `counter.config` to confirm.
-4. The default `latent_seqlens` finds your latents. The default looks
-   for `data["image_latents"]` then `data["all_latents"]`. If your
-   pipeline stores its latent-stream tensor under a different key
-   (e.g. `data["audio_latents"]`), override `latent_seqlens` in the
-   architecture class — same pattern as the Edit sidebar above.
+4. The default `get_latent_seqlens` finds your latents. The default
+   looks for `data["image_latents"]` then `data["all_latents"]`. If
+   your pipeline stores its latent-stream tensor under a different key
+   (e.g. `data["audio_latents"]`), override `get_latent_seqlens` in
+   the architecture class — same pattern as the Edit sidebar above.
 
 If `actor/mfu > 1.0`, the most common cause is forgetting to gather
 `latent_seqlens` / `prompt_seqlens` across the DP group — but
