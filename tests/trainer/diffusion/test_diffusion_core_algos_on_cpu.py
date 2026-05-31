@@ -162,11 +162,14 @@ def test_diffusion_nft_advantage_to_reward_prob(adv_mode: str) -> None:
     elif adv_mode == "negative_only":
         assert (reward_prob <= 0.5).all()
     elif adv_mode == "one_only":
-        # binary: 0.0 or 1.0
-        assert set(reward_prob.unique().tolist()).issubset({0.0, 1.0})
+        # advantages binarized to {0, 1}, then mapped via (adv / adv_clip_max) / 2 + 0.5
+        torch.testing.assert_close(reward_prob[0:3], torch.full((3,), 0.5), atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(reward_prob[3:5], torch.full((2,), 0.6), atol=1e-5, rtol=1e-5)
     elif adv_mode == "binary":
-        # -1 → 0.0, 0 → 0.5, +1 → 1.0
-        assert set(reward_prob.unique().tolist()).issubset({0.0, 0.5, 1.0})
+        # advantages signed to {-1, 0, 1}, then mapped via (adv / adv_clip_max) / 2 + 0.5
+        torch.testing.assert_close(reward_prob[0:2], torch.full((2,), 0.4), atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(reward_prob[2], torch.tensor(0.5), atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(reward_prob[3:5], torch.full((2,), 0.6), atol=1e-5, rtol=1e-5)
 
 
 def test_prepare_diffusion_nft_actor_batch() -> None:
