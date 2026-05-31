@@ -169,11 +169,20 @@ def _sum_seqlen_squared(latent_seqlens: Sequence[int], prompt_seqlens: Sequence[
 class DiffusionModelFlops:
     """Base class for per-architecture diffusion FLOPs and MFU estimators.
 
-    To support a new model, subclass this class, decorate with
-    @register_diffusion_architecture, and override :meth:`estimate_flops`.
+    To support a new model, subclass this class, decorate it with
+    `@register_diffusion_architecture("<PipelineClassName>")`, and override
+    :meth:`estimate_flops`.
 
-    Detailed theory, formulas, and multi-modal conventions (T2I, T2V, Audio, etc.)
-    can be found in: `docs/perf/diffusion_mfu.md`
+    This framework models multi-modal diffusion (DiT) architectures using two streams:
+    1. **Latent Stream:** The noisy/denoised targets flowing through main-side linears
+       (e.g., image, video, or audio latents).
+    2. **Prompt Stream:** Conditioning inputs flowing through cross-attention or
+       text-side linears (e.g., text encoder or reference image embeddings).
+
+    The main estimator calculates bidirectional attention FLOPs proportional to
+    `(latent_seqlen + prompt_seqlen)**2` and stream-specific linear FLOPs.
+
+    For detailed theoretical formulas, refer to: `docs/perf/diffusion_mfu.md`
     """
 
     LATENT_KEYS: Sequence[str] = ("image_latents", "audio_latents", "all_latents")
@@ -229,9 +238,17 @@ class DiffusionModelFlops:
     def get_latent_seqlens(self, data: Any = None, config: Optional[Mapping[str, Any]] = None) -> list[int]:
         """Extract per-sample latent-stream (VAE-encoded) token counts from a batch.
 
-        This default implementation handles standard 2D image (B, C, H, W),
-        3D video (B, C, T, H, W) training layouts, and rollout-stacked (B, Step, C, ...) layouts.
-        Override in subclasses to support non-standard inputs (e.g. nested sequences).
+        The latent stream is the primary tensor denoised by the model. This default
+        implementation extracts spatial/spatiotemporal token counts from:
+        - `data["image_latents"]` with shape `(B, C, H, W)` or `(B, C, T, H, W)`
+        - `data["all_latents"]` with stacked shape `(B, Steps, C, H, W)` or `(B, Steps, C, T, H, W)`
+
+        Override in subclasses when:
+        - The model uses non-standard latent keys (e.g. `audio_latents`).
+        - The pipeline is an Edit/Img2Img/Inpaint model where reference latents are
+          concatenated along the sequence dimension (in which case, the count must
+          include both target and reference tokens).
+        - Latents are already flattened to sequence dimensions `(B, L, C)`.
         """
         if not isinstance(self, DiffusionModelFlops):
             # Static call backward-compatibility path: get_latent_seqlens(data, config)
@@ -274,9 +291,16 @@ class DiffusionModelFlops:
     def get_prompt_seqlens(self, data: Any = None, config: Optional[Mapping[str, Any]] = None) -> list[int]:
         """Extract per-sample prompt-stream (conditioning) token counts from a batch.
 
-        The default implementation extracts lengths from standard text-encoder mask/embedding
-        tensors (e.g. `prompt_embeds_mask`, `prompt_embeds`). Override in subclasses
-        for custom conditioning tracks.
+        This handles text encoder conditioning tokens flowing through text-side/cross-attention
+        paths. The default implementation reads:
+        - `data["prompt_embeds_mask"]` (resolving nested offsets or dense sequence sums).
+        - `data["prompt_embeds"]` (using raw sequence length if unmasked).
+        - Defaults to `[0] * B` for class-conditioned or unconditional models.
+
+        Override in subclasses when:
+        - Text embeddings are stored under non-standard keys.
+        - The pipeline is an Img2Vid model where vision encoder embeddings are
+          concatenated to the text embeddings prior to cross-attention.
         """
         if not isinstance(self, DiffusionModelFlops):
             # Static call backward-compatibility path: get_prompt_seqlens(data, config)
