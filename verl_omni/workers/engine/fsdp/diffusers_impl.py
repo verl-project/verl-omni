@@ -126,11 +126,6 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
     def is_optimizer_offload_enabled(self) -> bool:
         return self._is_offload_optimizer
 
-    @property
-    def _peft_module(self):
-        """PEFT model that owns adapter state (unwraps FSDP when applicable)."""
-        return getattr(self.module, "_fsdp_wrapped_module", self.module)
-
     def is_mp_src_rank_with_outputs(self):
         if self.ulysses_device_mesh is not None:
             is_collect = self.ulysses_device_mesh["ulysses"].get_local_rank() == 0
@@ -663,7 +658,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         peft_config = None
 
-        peft_model = self._peft_module
+        peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
         if hasattr(peft_model, "peft_config"):  # LoRA
             peft_config = peft_model.peft_config.get("default", None)
             adapter_ctx = self.use_adapter(adapter_name) if adapter_name is not None else nullcontext()
@@ -680,7 +675,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         else:
             params = self.module.state_dict()
 
-        params = convert_weight_keys(params, self._peft_module)
+        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
 
         log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
         if self._is_offload_param:
