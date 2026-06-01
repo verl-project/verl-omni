@@ -1,6 +1,6 @@
 # Installation
 
-Last updated: 05/14/2026
+Last updated: 06/03/2026
 
 ## Requirements
 
@@ -10,7 +10,7 @@ For NVIDIA GPU:
 
 For Ascend NPU:
 - **Python**: Version >= 3.10
-- **CANN**: Version == 9.0.0
+- **CANN**: Version >= 8.5.0
 
 ## Install
 
@@ -35,7 +35,7 @@ uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@c7
 For Ascend NPU:
 
 ```bash
-uv pip install vllm==0.20.2
+uv pip install "vllm @ git+https://github.com/vllm-project/vllm.git@releases/v0.20.2"
 uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@07f6fec2aa4404e1283c4cd6c0981aa878bc5be9"
 uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@c7178d89bb7a70817f239febc84c3b21a714dae7"
 ```
