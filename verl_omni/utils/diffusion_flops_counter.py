@@ -158,19 +158,12 @@ def register_diffusion_architecture(
 
 
 def _coerce_config(config: Any) -> Mapping[str, Any]:
-    """Return a dict-like view of a ``diffusers`` model config.
-
-    ``diffusers.ConfigMixin`` exposes a ``FrozenDict`` accessible via
-    ``module.config``, which behaves like a plain ``dict``.  We additionally
-    accept raw dicts for testing.
-    """
-    if isinstance(config, Mapping):
-        return config
+    """Return a dict-like view of a diffusers model config."""
     if hasattr(config, "to_dict"):
         return config.to_dict()
-    if hasattr(config, "items"):
-        return dict(config.items())
-    raise TypeError(f"DiffusionFlopsCounter expects a dict-like transformer config, got {type(config).__name__}.")
+    if isinstance(config, Mapping):
+        return config
+    raise TypeError(f"Expected a dict-like config, got {type(config).__name__}")
 
 
 def _sum_seqlens(seqlens: Optional[Sequence[int]]) -> int:
@@ -359,38 +352,23 @@ class DiffusionModelFlops:
 
 
 def _safe_get(data: Any, key: str) -> Any:
-    """``data.get(key)`` that survives both TensorDict and plain dict inputs."""
+    """Get a key from a TensorDict or dict."""
     if data is None:
         return None
-    getter = getattr(data, "get", None)
-    if callable(getter):
-        try:
-            return getter(key, None)
-        except TypeError:
-            try:
-                return getter(key)
-            except Exception:
-                return None
-    try:
-        return data[key]
-    except (KeyError, IndexError, TypeError):
-        return None
+    if hasattr(data, "get"):
+        return data.get(key)
+    return data[key] if key in data else None
 
 
 def _batch_size(data: Any) -> int:
-    """Best-effort batch size for a TensorDict-like or dict-like input."""
-    shape = getattr(data, "shape", None)
-    if shape is not None and hasattr(data, "batch_size") and getattr(data, "batch_size", None):
-        try:
-            return int(shape[0])
-        except (TypeError, IndexError):
-            pass
-    # Fall back: peek at any tensor-valued entry.
+    """Best-effort batch size for a TensorDict or dict."""
+    if hasattr(data, "batch_size") and data.batch_size:
+        return data.batch_size[0]
+
     for key in ("image_latents", "all_latents", "prompt_embeds", "prompt_embeds_mask"):
-        value = _safe_get(data, key)
-        value_shape = getattr(value, "shape", None)
-        if value_shape is not None and len(value_shape) >= 1:
-            return int(value_shape[0])
+        if (val := _safe_get(data, key)) is not None and hasattr(val, "shape"):
+            return val.shape[0]
+
     return 0
 
 
