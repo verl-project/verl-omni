@@ -34,6 +34,7 @@ conventions, and subclass integration guides, see:
 
 from __future__ import annotations
 
+import os
 import warnings
 from typing import Any, Mapping, Optional, Sequence
 
@@ -45,7 +46,44 @@ __all__ = [
     "QwenImageFlops",
     "register_diffusion_architecture",
     "resolve_cfg_passes",
+    "resolve_device_peak_tflops",
 ]
+
+
+_DEVICE_PEAK_OVERRIDE_ENV = "VERL_OMNI_DEVICE_FLOPS_TFLOPS"
+
+
+def resolve_device_peak_tflops() -> float:
+    """Return the per-device bf16-dense peak in TFLOPS.
+
+    Honors the ``VERL_OMNI_DEVICE_FLOPS_TFLOPS`` env var as a manual
+    override and otherwise falls back to upstream
+    :func:`verl.utils.flops_counter.get_device_flops`.
+
+    The override is needed on clusters where ``torch.cuda.get_device_name()``
+    returns a string verl's built-in table doesn't recognize
+    (e.g. relabeled H200 SKUs that report as ``"NVIDIA L20X"`` and would
+    otherwise mis-match the ``"L20"`` entry, producing nonsensical
+    MFU > 1.0).
+    """
+    raw = os.environ.get(_DEVICE_PEAK_OVERRIDE_ENV)
+    if raw:
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+            warnings.warn(
+                f"{_DEVICE_PEAK_OVERRIDE_ENV}={raw!r} must be positive; falling back to "
+                "verl.utils.flops_counter.get_device_flops().",
+                stacklevel=2,
+            )
+        except ValueError:
+            warnings.warn(
+                f"{_DEVICE_PEAK_OVERRIDE_ENV}={raw!r} is not a valid float; falling back to "
+                "verl.utils.flops_counter.get_device_flops().",
+                stacklevel=2,
+            )
+    return float(get_device_flops("T"))
 
 
 # ---------------------------------------------------------------------------
@@ -606,7 +644,7 @@ class DiffusionFlopsCounter:
             cfg_passes: ``2`` when True-CFG is enabled
                 (``true_cfg_scale > 1.0``), otherwise ``1``.
         """
-        promised = get_device_flops()
+        promised = resolve_device_peak_tflops()
         if self._arch is None or delta_time <= 0 or num_timesteps <= 0 or cfg_passes <= 0:
             return 0.0, promised
 

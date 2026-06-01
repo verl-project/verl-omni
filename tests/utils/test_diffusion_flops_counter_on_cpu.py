@@ -34,6 +34,7 @@ from verl_omni.utils.diffusion_flops_counter import (
     QwenImageFlops,
     register_diffusion_architecture,
     resolve_cfg_passes,
+    resolve_device_peak_tflops,
 )
 
 
@@ -168,6 +169,56 @@ class TestDiffusionFlopsRegistry:
             latent_seqlens=[1], prompt_seqlens=[1], delta_time=1.0, num_timesteps=1, cfg_passes=1
         )
         assert est == 0.0
+
+
+class TestDevicePeakOverride:
+    """Verify the ``VERL_OMNI_DEVICE_FLOPS_TFLOPS`` env-var override.
+
+    Needed on clusters where ``torch.cuda.get_device_name()`` returns a
+    string that mis-matches verl's built-in ``_DEVICE_FLOPS`` table
+    (e.g. relabeled H200 SKUs reporting as ``"NVIDIA L20X"`` and falling
+    through to the L20 entry at ~12% of the real peak). Setting the env
+    var lets the user pin the correct bf16-dense peak so reported MFU is
+    physically meaningful.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch):
+        monkeypatch.delenv("VERL_OMNI_DEVICE_FLOPS_TFLOPS", raising=False)
+
+    def test_override_is_used_by_counter(self, monkeypatch):
+        monkeypatch.setenv("VERL_OMNI_DEVICE_FLOPS_TFLOPS", "989.0")
+        assert resolve_device_peak_tflops() == pytest.approx(989.0)
+        counter = DiffusionFlopsCounter("QwenImagePipeline", QWEN_IMAGE_CONFIG)
+        _, promised = counter.estimate_flops(
+            latent_seqlens=[1024] * 2,
+            prompt_seqlens=[64] * 2,
+            delta_time=1.0,
+            num_timesteps=1,
+            cfg_passes=1,
+        )
+        assert promised == pytest.approx(989.0)
+
+    def test_invalid_override_falls_back_with_warning(self, monkeypatch):
+        monkeypatch.setenv("VERL_OMNI_DEVICE_FLOPS_TFLOPS", "not-a-number")
+        with warnings.catch_warnings(record=True) as warned:
+            warnings.simplefilter("always")
+            value = resolve_device_peak_tflops()
+        assert value > 0  # fell back to upstream get_device_flops
+        assert any("VERL_OMNI_DEVICE_FLOPS_TFLOPS" in str(w.message) for w in warned)
+
+    def test_negative_override_falls_back_with_warning(self, monkeypatch):
+        monkeypatch.setenv("VERL_OMNI_DEVICE_FLOPS_TFLOPS", "-1.0")
+        with warnings.catch_warnings(record=True) as warned:
+            warnings.simplefilter("always")
+            value = resolve_device_peak_tflops()
+        assert value > 0
+        assert any("must be positive" in str(w.message) for w in warned)
+
+    def test_no_override_matches_upstream(self):
+        from verl.utils.flops_counter import get_device_flops
+
+        assert resolve_device_peak_tflops() == pytest.approx(float(get_device_flops("T")))
 
 
 # ---------------------------------------------------------------------------

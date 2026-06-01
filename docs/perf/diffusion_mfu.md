@@ -484,12 +484,28 @@ If `actor/mfu` is `0` or missing, check:
    (e.g. `data["audio_latents"]`), override `get_latent_seqlens` in
    the architecture class — same pattern as the Edit sidebar above.
 
-If `actor/mfu > 1.0`, the most common cause is forgetting to gather
-`latent_seqlens` / `prompt_seqlens` across the DP group — but
-`_allgather_diffusion_flops_meta` handles that generically, so it
-should not happen unless you added a new metadata field that bypasses
-the gather. The regression test `TestDPGlobalConsistency` guards
-against this for the shipped path.
+If `actor/mfu > 1.0`, the two common causes are:
+
+1. **Mis-identified device peak.** `verl.utils.flops_counter.get_device_flops`
+   matches `torch.cuda.get_device_name()` by substring against a built-in
+   table. On clusters with relabeled SKUs (e.g. H200 cards reporting as
+   `"NVIDIA L20X"` via VBIOS), the substring match falls through to the
+   first hit (`"L20"`, 119.5 TFLOPS bf16 dense) rather than the real
+   silicon peak (`H200`, 989 TFLOPS), inflating reported MFU by roughly
+   the peak ratio. Pin the correct peak via the env var:
+
+   ```bash
+   export VERL_OMNI_DEVICE_FLOPS_TFLOPS=989   # H200 bf16 dense
+   ```
+
+   Honored by `resolve_device_peak_tflops()` in
+   `verl_omni.utils.diffusion_flops_counter` and consumed by
+   `DiffusionFlopsCounter.estimate_flops`. See
+   `tests/utils/test_diffusion_flops_counter_on_cpu.py::TestDevicePeakOverride`.
+2. **Missing DP gather of seqlens.** `_allgather_diffusion_flops_meta`
+   handles this generically for the shipped path, so it should only
+   trigger if you added a new metadata field that bypasses the gather.
+   The regression test `TestDPGlobalConsistency` guards against this.
 
 ## Caveats and limitations
 
