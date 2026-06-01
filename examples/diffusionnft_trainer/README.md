@@ -4,7 +4,7 @@ This example shows how to post-train `Qwen-Image` with DiffusionNFT on an OCR-st
 
 DiffusionNFT is a direct-preference / forward-process algorithm. Unlike PPO-style FlowGRPO training, this example trains from final clean latents and uses an `old` LoRA adapter as the rollout policy while updating the `default` adapter.
 
-For the full installation guide, see `docs/start/install.md`. For implementation details on adding or extending diffusion algorithms, see `docs/contributing/integrating_a_new_algorithm_for_diffusion_model.md`.
+For the full installation guide, see `docs/start/install.md`. For implementation details on adding or extending direct-preference diffusion algorithms, see `docs/contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md`.
 
 ## Installation
 
