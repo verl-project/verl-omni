@@ -257,6 +257,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         latents_clean = mm_output.get("latents_clean")
         train_timesteps = mm_output.get("train_timesteps")
 
+        # TODO(andy): refactor later.
         extra_fields = {
             "all_latents": all_latents[0] if all_latents is not None else None,
             "all_timesteps": all_timesteps[0] if all_timesteps is not None else None,

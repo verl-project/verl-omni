@@ -512,7 +512,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         model_config: HFModelConfig | DiffusionModelConfig = omega_conf_to_dataclass(self.config.model)
         is_diffusion = model_config.get("model_type", "language_model") in (
             "diffusion_model",
-            "diffusion_dp_model",
+            "diffusion_dpo_model",
             "diffusion_nft_model",
         )
 
@@ -630,7 +630,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 )
             elif model_config.get("model_type", "language_model") in (
                 "diffusion_model",
-                "diffusion_dp_model",
+                "diffusion_dpo_model",
                 "diffusion_nft_model",
             ):
                 self.loss_fn = partial(diffusion_loss, config=actor_config)

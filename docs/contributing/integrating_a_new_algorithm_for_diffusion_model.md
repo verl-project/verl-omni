@@ -323,7 +323,7 @@ class MyAlgoDiffusersFSDPEngine(DiffusersFSDPEngine):
 ```
 
 Then add `actor_rollout_ref.model.model_type=<your_algo>_model` to your launch
-script. This is the pattern used by DPO (`diffusion_dp_model`) and DiffusionNFT
+script. This is the pattern used by DPO (`diffusion_dpo_model`) and DiffusionNFT
 (`diffusion_nft_model`).
 
 Direct-preference / forward-process algorithms follow this second path.
