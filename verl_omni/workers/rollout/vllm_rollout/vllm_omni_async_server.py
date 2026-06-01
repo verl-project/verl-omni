@@ -174,7 +174,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """
         if self.node_rank != 0:
             return
-        await self.engine.collective_rpc("wake_up", kwargs={"tags": tags if tags is not None else self._get_wake_up_tags()})
+        await self.engine.collective_rpc(
+            "wake_up", kwargs={"tags": tags if tags is not None else self._get_wake_up_tags()}
+        )
 
     async def _sleep_hybrid(self):
         """Preserve non-actor pipeline weights during hybrid training sleep.
