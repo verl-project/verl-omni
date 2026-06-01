@@ -126,6 +126,11 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
     def is_optimizer_offload_enabled(self) -> bool:
         return self._is_offload_optimizer
 
+    @property
+    def _peft_module(self):
+        """PEFT model that owns adapter state (unwraps FSDP when applicable)."""
+        return getattr(self.module, "_fsdp_wrapped_module", self.module)
+
     def is_mp_src_rank_with_outputs(self):
         if self.ulysses_device_mesh is not None:
             is_collect = self.ulysses_device_mesh["ulysses"].get_local_rank() == 0
