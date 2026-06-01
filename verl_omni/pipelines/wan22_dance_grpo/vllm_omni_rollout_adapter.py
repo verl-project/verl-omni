@@ -308,7 +308,7 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt, 1)
         prompt_embeds = prompt_embeds.view(batch_size * num_videos_per_prompt, seq_len, -1)
 
-        prompt_embeds_mask = torch.ones(prompt_embeds.shape[:2], device=device, dtype=torch.long)
+        prompt_embeds_mask = (torch.arange(max_sequence_length, device=device).expand(prompt_embeds.shape[0], -1) < seq_lens.unsqueeze(1)).long()
 
         return prompt_embeds, prompt_embeds_mask
 
