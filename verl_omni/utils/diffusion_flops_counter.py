@@ -91,14 +91,6 @@ def resolve_device_peak_tflops() -> float:
 # ---------------------------------------------------------------------------
 
 
-def _gt_one(value: Any) -> bool:
-    """Return True if value can be converted to float and is > 1.0."""
-    try:
-        return value is not None and float(value) > 1.0
-    except (TypeError, ValueError):
-        return False
-
-
 def resolve_cfg_passes(
     pipeline_config: Optional[Mapping[str, Any]] = None,
     transformer_config: Optional[Mapping[str, Any]] = None,
@@ -108,18 +100,22 @@ def resolve_cfg_passes(
     tcfg = transformer_config or {}
 
     # Explicit override takes priority
-    if (explicit := pcfg.get("cfg_passes")) is not None:
-        try:
-            return max(int(explicit), 1)
-        except (TypeError, ValueError):
-            pass
+    if "cfg_passes" in pcfg:
+        val = pcfg["cfg_passes"]
+        if isinstance(val, int | float):
+            return max(int(val), 1)
 
     # Guidance-distilled models (e.g. Flux) run only 1 pass
     if tcfg.get("guidance_embeds"):
         return 1
 
     # True-CFG or standard CFG scales > 1.0 require 2 passes
-    if _gt_one(pcfg.get("true_cfg_scale")) or _gt_one(pcfg.get("guidance_scale")):
+    true_cfg = pcfg.get("true_cfg_scale", 1.0)
+    if isinstance(true_cfg, int | float) and true_cfg > 1.0:
+        return 2
+
+    guidance = pcfg.get("guidance_scale", 1.0)
+    if isinstance(guidance, int | float) and guidance > 1.0:
         return 2
 
     return 1
