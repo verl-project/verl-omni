@@ -112,3 +112,26 @@ Override these values on the command line if you want to log under a different p
 ### Diffusion-specific metrics
 
 See the [Metrics Documentation](../../docs/start/metrics.md) for a full description of diffusion-specific training metrics.
+
+## Performance
+
+> All experiments were conducted on *NVIDIA H200* GPUs using the OCR reward.
+
+| Script | Model | Algorithm | Hybrid Engine | # Cards | Reward Fn | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | `rollout.n` | lr   | # Val Samples | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / GPU / Seconds) | Time per Step (Seconds) |
+| --- | --- | --- | --- | --- | --- | --- | --- |-------------------------| --- | --- |------| --- | --- | --- |------------------------------| --------------------------------|
+| `run_qwen_image_ocr_lora.sh` | Qwen-Image | DiffusionNFT | True | 4 | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.166                        | 570 |
+
+<table align="center" style="border: none;">
+  <tr style="border: none;">
+    <td style="text-align: center; border: none; padding: 10px;">
+      <h5 style="margin-bottom: 5px;">Validation Performance</h5>
+      <img width="400" alt="nft_val" src="https://github.com/user-attachments/assets/915b717d-5fb7-4a67-89f9-b6a4193aad2c" />
+    </td>
+    <td style="text-align: center; border: none; padding: 10px;">
+      <h5 style="margin-bottom: 5px;">Training Progression</h5>
+      <img width="400" alt="nft_critic" src="https://github.com/user-attachments/assets/e9f62bbe-2ebd-41ae-85b3-403f163c7da6" />
+    </td>
+  </tr>
+</table>
+
+> **Note:** Reward curves may differ from the references above mainly due to rollout-side stochasticity: diffusion rollouts sample random latents/noise, and the example scripts do not fix the data seed, so prompt ordering can vary between runs.
