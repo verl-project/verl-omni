@@ -157,15 +157,6 @@ def register_diffusion_architecture(
 # ---------------------------------------------------------------------------
 
 
-def _coerce_config(config: Any) -> Mapping[str, Any]:
-    """Return a dict-like view of a diffusers model config."""
-    if hasattr(config, "to_dict"):
-        return config.to_dict()
-    if isinstance(config, Mapping):
-        return config
-    raise TypeError(f"Expected a dict-like config, got {type(config).__name__}")
-
-
 def _sum_seqlens(seqlens: Optional[Sequence[int]]) -> int:
     if not seqlens:
         return 0
@@ -216,7 +207,7 @@ class DiffusionModelFlops:
     PROMPT_KEYS: Sequence[str] = ("prompt_embeds", "prompt_embeds_mask")
 
     def __init__(self, config: Mapping[str, Any]):
-        self.config = _coerce_config(config)
+        self.config = config
 
     @property
     def dim(self) -> int:
@@ -287,7 +278,7 @@ class DiffusionModelFlops:
         latents = None
         stacked = False
         for key in self.LATENT_KEYS:
-            latents = _safe_get(data, key)
+            latents = data.get(key)
             if latents is not None:
                 stacked = key == "all_latents"
                 break
@@ -336,8 +327,8 @@ class DiffusionModelFlops:
             temp_inst = DiffusionModelFlops(config_param or {})
             return temp_inst.get_prompt_seqlens(data_param)
 
-        prompt_embeds_mask = _safe_get(data, "prompt_embeds_mask")
-        prompt_embeds = _safe_get(data, "prompt_embeds")
+        prompt_embeds_mask = data.get("prompt_embeds_mask")
+        prompt_embeds = data.get("prompt_embeds")
         batch_size = _batch_size(data)
 
         if prompt_embeds_mask is not None and hasattr(prompt_embeds_mask, "is_nested"):
@@ -351,22 +342,13 @@ class DiffusionModelFlops:
         return [0] * batch_size
 
 
-def _safe_get(data: Any, key: str) -> Any:
-    """Get a key from a TensorDict or dict."""
-    if data is None:
-        return None
-    if hasattr(data, "get"):
-        return data.get(key)
-    return data[key] if key in data else None
-
-
 def _batch_size(data: Any) -> int:
     """Best-effort batch size for a TensorDict or dict."""
     if hasattr(data, "batch_size") and data.batch_size:
         return data.batch_size[0]
 
     for key in ("image_latents", "all_latents", "prompt_embeds", "prompt_embeds_mask"):
-        if (val := _safe_get(data, key)) is not None and hasattr(val, "shape"):
+        if (val := data.get(key)) is not None and hasattr(val, "shape"):
             return val.shape[0]
 
     return 0
@@ -379,11 +361,9 @@ def _read_latents(data: Any) -> tuple[Any, bool]:
     ``all_latents`` with one extra time axis; DPO and one-shot training
     paths store the single-step latents in ``image_latents``.
     """
-    latents = _safe_get(data, "image_latents")
-    if latents is not None:
+    if (latents := data.get("image_latents")) is not None:
         return latents, False
-    latents = _safe_get(data, "all_latents")
-    if latents is not None:
+    if (latents := data.get("all_latents")) is not None:
         return latents, True
     return None, False
 
@@ -544,7 +524,7 @@ class DiffusionFlopsCounter:
 
     def __init__(self, architecture: Optional[str], transformer_config: Any):
         self.architecture = architecture
-        self.config = _coerce_config(transformer_config) if transformer_config is not None else {}
+        self.config = transformer_config if transformer_config is not None else {}
         self._arch_cls: Optional[type[DiffusionModelFlops]] = _REGISTRY.get(architecture)
         self._arch: Optional[DiffusionModelFlops] = self._arch_cls(self.config) if self._arch_cls is not None else None
 
