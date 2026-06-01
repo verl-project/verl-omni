@@ -225,10 +225,7 @@ def test_rollout_without_seed_produces_different_initial_latents(seed_rollout_co
         n = seed_rollout_config.actor_rollout_ref.rollout.n
         batch = _make_prompt_batch(num_prompts=1).repeat(n)
         batch.meta_info["global_steps"] = 1
-
-        # Pin the global RNG so the first run is deterministic and the second
-        # run inevitably uses a different RNG state, avoiding a flaky pass.
-        torch.manual_seed(0)
+        # Deliberately omit rollout_seed — the default behaviour.
 
         first = agent_loop_manager.generate_sequences(prompts=batch)
         second = agent_loop_manager.generate_sequences(prompts=batch)
