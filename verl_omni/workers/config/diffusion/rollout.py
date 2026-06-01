@@ -48,19 +48,11 @@ class DiffusionRolloutAlgoConfig(BaseConfig):
     iters_per_group: int = 1
     sde_window_seed: int = 0
 
-    # Rollout data contract: trajectory for coupled RL, final_latent for decoupled forward-process RL
-    collect_mode: str = "trajectory"
-
     def __post_init__(self):
         if self.sample_strategy not in ("random", "progressive"):
             raise ValueError(f"Unknown sample_strategy: {self.sample_strategy!r}")
         if self.sample_strategy == "progressive" and self.iters_per_group <= 0:
             raise ValueError(f"iters_per_group must be positive, got {self.iters_per_group}.")
-        if self.collect_mode not in ("trajectory", "final_latent"):
-            raise ValueError(
-                f"Invalid diffusion rollout collect_mode: {self.collect_mode}. "
-                "Must be one of ['trajectory', 'final_latent']."
-            )
 
 
 @dataclass

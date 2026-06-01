@@ -194,9 +194,6 @@ algo:
   # Base seed for the random window draws (random only)
   sde_window_seed: 0
 
-  # Rollout data contract: trajectory for coupled RL, final_latent for decoupled forward-process RL
-  collect_mode: trajectory
-
 # Pipeline configuration for diffusion model generation
 pipeline:
 

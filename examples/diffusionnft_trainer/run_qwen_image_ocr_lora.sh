@@ -52,7 +52,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.calculate_log_probs=False \
-    actor_rollout_ref.rollout.algo.collect_mode=final_latent \
     actor_rollout_ref.rollout.rollout_adapter=old \
     actor_rollout_ref.rollout.pipeline.num_inference_steps=10 \
     actor_rollout_ref.rollout.pipeline.true_cfg_scale=1.0 \
