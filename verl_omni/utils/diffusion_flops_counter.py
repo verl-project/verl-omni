@@ -313,7 +313,7 @@ class DiffusionModelFlops:
         paths. The default implementation reads:
         - `data["prompt_embeds_mask"]` (resolving nested offsets or dense sequence sums).
         - `data["prompt_embeds"]` (using raw sequence length if unmasked).
-        - Defaults to `[0] * B` for class-conditioned or unconditional models.
+        - Defaults to `[]` for class-conditioned or unconditional models.
 
         Override in subclasses when:
         - Text embeddings are stored under non-standard keys.
@@ -329,7 +329,6 @@ class DiffusionModelFlops:
 
         prompt_embeds_mask = data.get("prompt_embeds_mask")
         prompt_embeds = data.get("prompt_embeds")
-        batch_size = _batch_size(data)
 
         if prompt_embeds_mask is not None and hasattr(prompt_embeds_mask, "is_nested"):
             if prompt_embeds_mask.is_nested:
@@ -338,20 +337,8 @@ class DiffusionModelFlops:
         if prompt_embeds is not None and hasattr(prompt_embeds, "shape"):
             if getattr(prompt_embeds, "is_nested", False):
                 return [int(s) for s in prompt_embeds.offsets().diff().tolist()]
-            return [int(prompt_embeds.shape[1])] * batch_size
-        return [0] * batch_size
-
-
-def _batch_size(data: Any) -> int:
-    """Best-effort batch size for a TensorDict or dict."""
-    if hasattr(data, "batch_size") and data.batch_size:
-        return data.batch_size[0]
-
-    for key in ("image_latents", "all_latents", "prompt_embeds", "prompt_embeds_mask"):
-        if (val := data.get(key)) is not None and hasattr(val, "shape"):
-            return val.shape[0]
-
-    return 0
+            return [int(prompt_embeds.shape[1])] * int(prompt_embeds.shape[0])
+        return []
 
 
 def _read_latents(data: Any) -> tuple[Any, bool]:

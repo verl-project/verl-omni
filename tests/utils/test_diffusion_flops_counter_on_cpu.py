@@ -313,11 +313,11 @@ class TestDefaultPromptSeqlens:
         assert seqs == [192] * 4
 
     def test_unconditional_returns_zeros(self):
-        # Neither mask nor embeds. Falls back to [0] * batch_size derived from
+        # Neither mask nor embeds. Falls back to [] derived from
         # whichever data field happens to expose a batch dim.
         data = {"image_latents": _Tensor((2, 16, 64, 64))}
         seqs = DiffusionModelFlops.get_prompt_seqlens(data, {})
-        assert seqs == [0, 0]
+        assert seqs == []
 
 
 class TestQwenImageFlopsPackedLatents:
