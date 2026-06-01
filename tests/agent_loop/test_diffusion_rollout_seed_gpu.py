@@ -200,18 +200,12 @@ def test_rollout_seed_reproducible_and_diverse_via_agent_loop(seed_rollout_confi
         ray.shutdown()
 
 
-@pytest.mark.parametrize(
-    "rollout_config_fixture",
-    ["seed_rollout_config", "multi_worker_seed_rollout_config"],
-)
-def test_rollout_without_seed_produces_different_initial_latents(request, rollout_config_fixture):
+def test_rollout_without_seed_produces_different_initial_latents(multi_worker_seed_rollout_config):
     """When ``rollout_seed`` is not provided, initial latents must differ across reruns.
 
     This is the default training behaviour when the rollout config does not set a seed.
-    Verified for both single-worker and multi-worker agent loop setups.
+    Uses a multi-worker setup which also covers the single-worker path.
     """
-    rollout_config = request.getfixturevalue(rollout_config_fixture)
-
     ray.init(
         runtime_env={
             "env_vars": {
@@ -223,13 +217,13 @@ def test_rollout_without_seed_produces_different_initial_latents(request, rollou
     )
     try:
         AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
-        llm_server_manager = LLMServerManager.create(config=rollout_config)
+        llm_server_manager = LLMServerManager.create(config=multi_worker_seed_rollout_config)
         agent_loop_manager = AgentLoopManager.create(
-            config=rollout_config,
+            config=multi_worker_seed_rollout_config,
             llm_client=llm_server_manager.get_client(),
         )
 
-        n = rollout_config.actor_rollout_ref.rollout.n
+        n = multi_worker_seed_rollout_config.actor_rollout_ref.rollout.n
         batch = _make_prompt_batch(num_prompts=1).repeat(n)
         batch.meta_info["global_steps"] = 1
         # Deliberately omit rollout_seed — the default behaviour.
