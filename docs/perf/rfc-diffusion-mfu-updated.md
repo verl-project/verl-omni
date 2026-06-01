@@ -8,7 +8,7 @@ The current `verl-omni` `TrainingWorker` silently sets `self.flops_counter = Non
 
 Looking for feedback on:
 
-1. Is the architecture-agnostic split (class-based registry per pipeline (`DiffusionModelFlops`) + `get_latent_seqlens` / `resolve_cfg_passes` helpers) the right factoring for adding Wan2.2 / Z-Image / SD3 / Flux later?
+1. Is the architecture-agnostic split (class-based registry per pipeline (`DiffusionModelFlops`) + `get_latent_seqlens` / `get_forward_passes_per_step` helpers) the right factoring for adding Wan2.2 / Z-Image / SD3 / Flux later?
 2. Are the FLOPs-formula conventions (factor 6 for fwd+bwd dense, factor 12 for non-causal attention, `/3` divisor for `forward_only`) the right match to upstream's LLM counter?
 3. Reviewers familiar with FlowGRPO / DPO / MixGRPO: does the `num_timesteps = data["all_timesteps"].shape[1]` (with `1` fallback for DPO) cover the algorithms in scope?
 
@@ -72,7 +72,7 @@ verl_omni/utils/diffusion_flops_counter.py
 with the same shape as `verl.utils.flops_counter`:
 
 - A registry of architecture → `DiffusionModelFlops` subclass, keyed by the value stored in `DiffusionModelConfig.architecture` (auto-detected from `model_index.json`'s `_class_name`, e.g. `"QwenImagePipeline"`).
-- A `DiffusionFlopsCounter` class with `estimate_flops(latent_seqlens, prompt_seqlens, delta_time, num_timesteps, cfg_passes) -> (estimated_tflops, promised_tflops)`.
+- A `DiffusionFlopsCounter` class with `estimate_flops(latent_seqlens, prompt_seqlens, delta_time, num_timesteps, num_forward_passes) -> (estimated_tflops, promised_tflops)`.
 - Reuses the existing device → peak-FLOPS table from `verl.utils.flops_counter.get_device_flops`, with a new `VERL_OMNI_DEVICE_FLOPS_TFLOPS` env var to override mis-detected device peaks (e.g. H200s reporting as L20X).
 
 The counter is **stateless** apart from the architecture name and the diffusers transformer config dict. It runs pure-CPU after the metadata all-gather, on every rank — matching the upstream LLM counter (the computation is cheap and the inputs are already replicated, so no rank-0 gating is needed).
@@ -121,10 +121,10 @@ attn_flops = 12 * L * H * d * Σ_i (img_s_i + txt_s_i)**2
 
 # Per-call total (single train_batch / infer_batch call):
 flops_per_call = (img_dense + txt_dense + mod_flops + attn_flops) \
-                 * num_timesteps * cfg_passes
+                 * num_timesteps * num_forward_passes
 ```
 
-`num_timesteps` is the size of the denoising loop in `DiffusersFSDPEngine.forward_backward_batch` (e.g. `data["all_timesteps"].shape[1]` for FlowGRPO; `1` for DPO). `cfg_passes` is `1` (no-CFG / guidance-distilled) or `2` (True-CFG / standard CFG), resolved by `resolve_cfg_passes` (§3.7).
+`num_timesteps` is the size of the denoising loop in `DiffusersFSDPEngine.forward_backward_batch` (e.g. `data["all_timesteps"].shape[1]` for FlowGRPO; `1` for DPO). `num_forward_passes` is `1` (no-CFG / guidance-distilled) or `2` (True-CFG / standard CFG), resolved by `get_forward_passes_per_step` (§3.7).
 
 For forward-only paths (`infer_batch` and reference policy log-prob), the caller divides MFU by 3 — identical to upstream. The `/3` removes the backward contribution from the factor-6 dense convention: forward-only is `2 · params · tokens` (factor 2 = 2 FLOPs/MAC, no backward), the formula bakes in factor 6 = 2 · 3, so `/3` recovers the forward-only count. The same `/3` applies to the factor-12 attention term (`12 / 3 = 4` matches forward-only attention: `2 × 2 · s²·d` with no backward).
 
@@ -170,8 +170,8 @@ ref/mfu                  # reference policy log-prob, fwd only (MFU /= 3)
      - Returns `0` for shapes it cannot interpret, matching the "no info → 0 FLOPs" graceful-degradation of the upstream LLM counter.
    - `prompt_seqlens: list[int]` — per-sample text-encoder token count (derived from `prompt_embeds_mask.sum(-1)`; falls back to the dense `prompt_embeds.shape[1]` when no mask is supplied; `0` for unconditional / class-conditioned models).
    - `num_timesteps: int` — `1` for DPO, `data["all_timesteps"].shape[1]` for FlowGRPO-family algorithms.
-   - `cfg_passes: int` — produced by `resolve_cfg_passes(pipeline_cfg, transformer_cfg)`, which consults in order:
-     1. Explicit `pipeline.cfg_passes` override (for custom rollouts).
+   - `num_forward_passes: int` — produced by `get_forward_passes_per_step(pipeline_cfg, transformer_cfg)`, which consults in order:
+     1. Explicit `pipeline.num_forward_passes` override (for custom rollouts).
      2. `transformer.guidance_embeds == True` → `1` (Flux-style guidance-distilled models).
      3. `pipeline.true_cfg_scale > 1.0` → `2` (Qwen-Image "True CFG").
      4. `pipeline.guidance_scale > 1.0` → `2` (Wan / SD3 / standard CFG).
@@ -203,11 +203,11 @@ def estimate_wan_flops(
     delta_time: float,
     *,
     num_timesteps: int,
-    cfg_passes: int,
+    num_forward_passes: int,
 ) -> float:
     # The two metadata extractors are reused as-is:
     # - latent_seqlens already encodes T*H*W via get_latent_seqlens.
-    # - cfg_passes already accounts for guidance_scale > 1 / guidance_embeds.
+    # - num_forward_passes already accounts for guidance_scale > 1 / guidance_embeds.
     # The estimator only needs to know its own attention topology:
     #   - Wan2.2 uses self-attn on image + cross-attn to text (NOT joint).
     #   - SD3 / Flux use joint full attention (like Qwen-Image).
@@ -227,7 +227,7 @@ What the contributor has to write:
 What the contributor does **not** have to write:
 
 - Latent → seqlen extraction (`latent_seqlens_from_latent_shape` handles 3-D / 4-D / 5-D / 6-D layouts including video and FlowGRPO time-stacked variants).
-- CFG-pass detection (`resolve_cfg_passes` handles `true_cfg_scale`, `guidance_scale`, `guidance_embeds`, and explicit pipeline overrides).
+- CFG-pass detection (`get_forward_passes_per_step` handles `true_cfg_scale`, `guidance_scale`, `guidance_embeds`, and explicit pipeline overrides).
 - Distributed all-gather (`_allgather_diffusion_flops_meta` does the cross-rank concatenation regardless of the architecture).
 - Forward-only divisor (`_postprocess_output` divides by 3 generically).
 - Device peak-FLOPS lookup (reuses `verl.utils.flops_counter.get_device_flops`).
@@ -238,14 +238,14 @@ The result: a new architecture is a single new `@register_diffusion_architecture
 
 The design supports four CFG variants without any per-arch code:
 
-| Pipeline configuration | Resolved `cfg_passes` | Models |
+| Pipeline configuration | Resolved `num_forward_passes` | Models |
 | ---------------------- | --------------------- | ------ |
 | `true_cfg_scale > 1.0` | 2 | Qwen-Image with True-CFG |
 | `guidance_scale > 1.0`, `guidance_embeds=False` | 2 | Wan2.2, SD3, most standard DiT pipelines |
 | `guidance_scale > 1.0`, `guidance_embeds=True` | 1 | Flux (guidance-distilled) |
 | `true_cfg_scale == 1.0` *or* `guidance_scale == 1.0` *or* unconditional / class-conditioned | 1 | Qwen-Image non-CFG, unconditional DiT, class-cond DiT |
 
-The non-CFG path uses the same code path; `cfg_passes = 1` is a no-op multiplier inside `estimate_*_flops`. The unit test `TestNonCfgQwenImageFlops` pins this behaviour so future estimators in the registry can rely on it.
+The non-CFG path uses the same code path; `num_forward_passes = 1` is a no-op multiplier inside `estimate_*_flops`. The unit test `TestNonCfgQwenImageFlops` pins this behaviour so future estimators in the registry can rely on it.
 
 ## 4. Non-goals
 
@@ -257,7 +257,7 @@ The non-CFG path uses the same code path; `cfg_passes = 1` is a no-op multiplier
 
 - **MoE / sparse DiTs** are not yet shipped. The §2 table treats them as a per-arch concern (e.g. Wan2.2-MoE would multiply MLP FLOPs by `num_experts_per_tok / num_experts`); the initial PR only ships a dense Qwen-Image estimator. The registry pattern makes adding an MoE estimator a follow-up PR with no core changes.
 - **Qwen-Image-Edit / Img2Img / Inpaint / ControlNet variants** are deferred. They share the same `QwenImageTransformer2DModel` denoiser but the edit/img2img pipelines concatenate reference-image latents to the noise latents along the sequence dim (`torch.cat([latents, image_latents], dim=1)`), so the effective image-side seqlen is roughly doubled. The current registry warns + reports MFU=0 for these `_class_name`s (pinned by `test_unknown_architecture_warns_once_and_returns_zero`) rather than under-counting silently. Adding support is a follow-up: register the pipeline alias and extend `_collect_diffusion_flops_meta` to sum noise-side + reference-side image seqlens (ControlNet additionally adds the ControlNet backbone's FLOPs). No core changes required.
-- **CFG with gradient detachment.** If a future loss path detaches the negative branch, our `cfg_passes` accounting becomes a slight over-estimate (≤ 2×). We document the assumption and expose `cfg_passes` as an explicit override on the counter (`pipeline.cfg_passes`).
+- **CFG with gradient detachment.** If a future loss path detaches the negative branch, our `num_forward_passes` accounting becomes a slight over-estimate (≤ 2×). We document the assumption and expose `num_forward_passes` as an explicit override on the counter (`pipeline.num_forward_passes`).
 - **Variable text seq length under SP padding.** The counter uses `prompt_embeds_mask.sum(-1)` (the *unpadded* per-sample length). The model, on the other hand, runs on prompt embeds padded to a multiple of `sp_size` (`_pad_embeds_for_sp` in `DiffusersFSDPEngine`). The counter therefore *slightly under-counts* attention FLOPs in the presence of SP padding (≤ `sp_size − 1` extra tokens per sample, typically < 2% of `txt_s`). A future revision can pad the text-side seqlens to match if this becomes material.
 
 ## 6. Test plan
@@ -267,7 +267,7 @@ CPU-only unit tests under `tests/utils/test_diffusion_flops_counter_on_cpu.py`:
 1. **Architecture dispatch**: registering a stub estimator for a synthetic architecture is picked up by `DiffusionFlopsCounter`; unknown architectures warn once and contribute 0 FLOPs.
 2. **Numerical scaling** (`TestQwenImageFlopsScaling`):
    - Per-step FLOPs scales linearly with `num_timesteps`.
-   - Per-step FLOPs scales linearly with `cfg_passes` (including `cfg_passes=1` for non-CFG runs, see `TestNonCfgQwenImageFlops`).
+   - Per-step FLOPs scales linearly with `num_forward_passes` (including `num_forward_passes=1` for non-CFG runs, see `TestNonCfgQwenImageFlops`).
    - Dense FLOPs are linear in `(img_tot, txt_tot)`; attention FLOPs are quadratic in `(img_s + txt_s)` summed per sample.
    - The full formula matches a hand-rolled reference implementation (`_reference_qwen_image_flops`) within 1e-9 across multiple resolutions / batch sizes.
 3. **Parameter-count grounding** (`TestQwenImageFlopsParamCount`):
@@ -278,7 +278,7 @@ CPU-only unit tests under `tests/utils/test_diffusion_flops_counter_on_cpu.py`:
    - Realistic step-time × global-seqlens produces MFU < 1.0 on a 4-GPU H200 (a regression guard against the >100% MFU bug we fixed during the bring-up).
 5. **Architecture-agnostic metadata extractors**:
    - `TestGetLatentSeqlens`: 3-D image, 4-D image, 5-D video, and the 4-D / 5-D / 6-D FlowGRPO `all_latents` variants all extract the correct token count; garbage shapes return 0.
-   - `TestResolveCfgPasses`: non-CFG, `true_cfg_scale`, `guidance_scale`, `guidance_embeds`, and explicit `cfg_passes` overrides all resolve to the right number of forward passes.
+   - `TestGetForwardPassesPerStep`: non-CFG, `true_cfg_scale`, `guidance_scale`, `guidance_embeds`, and explicit `num_forward_passes` overrides all resolve to the right number of forward passes.
 6. **Forward-only divisor**: integration with `_postprocess_output` keeps `mfu` divided by 3 for `forward_only=True` (covered by the existing diffusers FSDP engine test, see below).
 7. **Placeholder loss suppression**: `_postprocess_output` correctly drops the placeholder `loss=1.0` when `record_loss=False`.
 

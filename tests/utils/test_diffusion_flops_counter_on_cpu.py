@@ -32,8 +32,8 @@ from verl_omni.utils.diffusion_flops_counter import (
     DiffusionFlopsCounter,
     DiffusionModelFlops,
     QwenImageFlops,
+    get_forward_passes_per_step,
     register_diffusion_architecture,
-    resolve_cfg_passes,
     resolve_device_peak_tflops,
 )
 
@@ -45,7 +45,7 @@ def _reference_qwen_image_flops(
     delta_time: float,
     *,
     num_timesteps: int,
-    cfg_passes: int,
+    num_forward_passes: int,
 ) -> float:
     """Independent, deliberately verbose reference re-implementation.
 
@@ -99,7 +99,7 @@ def _reference_qwen_image_flops(
     # fwd+bwd = 3 * fwd (verl convention).
     flops_fwd_bwd = 3 * flops_fwd
 
-    flops_all_steps = flops_fwd_bwd * num_timesteps * cfg_passes
+    flops_all_steps = flops_fwd_bwd * num_timesteps * num_forward_passes
     return flops_all_steps / delta_time / 1e12
 
 
@@ -141,13 +141,15 @@ class TestDiffusionFlopsRegistry:
         @register_diffusion_architecture("_TestArch_CPU")
         class _Stub(DiffusionModelFlops):
             @staticmethod
-            def estimate_flops(config, latent_seqlens, prompt_seqlens, delta_time, *, num_timesteps, cfg_passes):
-                del config, latent_seqlens, prompt_seqlens, delta_time, num_timesteps, cfg_passes
+            def estimate_flops(
+                config, latent_seqlens, prompt_seqlens, delta_time, *, num_timesteps, num_forward_passes
+            ):
+                del config, latent_seqlens, prompt_seqlens, delta_time, num_timesteps, num_forward_passes
                 return sentinel
 
         counter = DiffusionFlopsCounter("_TestArch_CPU", {})
         est, prom = counter.estimate_flops(
-            latent_seqlens=[1], prompt_seqlens=[1], delta_time=1.0, num_timesteps=1, cfg_passes=1
+            latent_seqlens=[1], prompt_seqlens=[1], delta_time=1.0, num_timesteps=1, num_forward_passes=1
         )
         assert est == sentinel
         assert prom > 0
@@ -166,7 +168,7 @@ class TestDiffusionFlopsRegistry:
             counter = DiffusionFlopsCounter("__DoesNotExist__", {})
             assert any("no FLOPs estimator registered" in str(w.message) for w in warned)
         est, _ = counter.estimate_flops(
-            latent_seqlens=[1], prompt_seqlens=[1], delta_time=1.0, num_timesteps=1, cfg_passes=1
+            latent_seqlens=[1], prompt_seqlens=[1], delta_time=1.0, num_timesteps=1, num_forward_passes=1
         )
         assert est == 0.0
 
@@ -195,7 +197,7 @@ class TestDevicePeakOverride:
             prompt_seqlens=[64] * 2,
             delta_time=1.0,
             num_timesteps=1,
-            cfg_passes=1,
+            num_forward_passes=1,
         )
         assert promised == pytest.approx(989.0)
 
@@ -377,7 +379,7 @@ class TestQwenImageFlopsPackedLatents:
         # typically much shorter (60-100 tokens), pushing the ratio
         # closer to the underlying 16x latent ratio.
         counter = DiffusionFlopsCounter("QwenImagePipeline", QWEN_IMAGE_CONFIG)
-        kw = dict(delta_time=1.0, num_timesteps=2, cfg_passes=1)
+        kw = dict(delta_time=1.0, num_timesteps=2, num_forward_passes=1)
         broken_est, _ = counter.estimate_flops(broken, [256] * 4, **kw)
         fixed_est, _ = counter.estimate_flops(fixed, [256] * 4, **kw)
         assert fixed_est / max(broken_est, 1e-9) > 3.5
@@ -433,7 +435,7 @@ class TestQwenImageFlopsScaling:
             prompt_seqlens=[256, 192],
             delta_time=2.0,
             num_timesteps=10,
-            cfg_passes=2,
+            num_forward_passes=2,
         )
         defaults.update(overrides)
         return defaults
@@ -444,10 +446,10 @@ class TestQwenImageFlopsScaling:
         est_b, _ = counter.estimate_flops(**self._kwargs(num_timesteps=30))
         assert math.isclose(est_b / est_a, 3.0, rel_tol=1e-9)
 
-    def test_linear_in_cfg_passes(self):
+    def test_linear_in_num_forward_passes(self):
         counter = _qwen_counter()
-        est_a, _ = counter.estimate_flops(**self._kwargs(cfg_passes=1))
-        est_b, _ = counter.estimate_flops(**self._kwargs(cfg_passes=2))
+        est_a, _ = counter.estimate_flops(**self._kwargs(num_forward_passes=1))
+        est_b, _ = counter.estimate_flops(**self._kwargs(num_forward_passes=2))
         assert math.isclose(est_b / est_a, 2.0, rel_tol=1e-9)
 
     def test_inverse_in_delta_time(self):
@@ -461,7 +463,7 @@ class TestQwenImageFlopsScaling:
         counter = _qwen_counter()
         est_zero_time, _ = counter.estimate_flops(**self._kwargs(delta_time=0.0))
         est_zero_steps, _ = counter.estimate_flops(**self._kwargs(num_timesteps=0))
-        est_zero_cfg, _ = counter.estimate_flops(**self._kwargs(cfg_passes=0))
+        est_zero_cfg, _ = counter.estimate_flops(**self._kwargs(num_forward_passes=0))
         assert est_zero_time == 0.0
         assert est_zero_steps == 0.0
         assert est_zero_cfg == 0.0
@@ -475,10 +477,10 @@ class TestQwenImageFlopsScaling:
         """
         counter = _qwen_counter()
         est_small, _ = counter.estimate_flops(
-            latent_seqlens=[512], prompt_seqlens=[256], delta_time=1.0, num_timesteps=1, cfg_passes=1
+            latent_seqlens=[512], prompt_seqlens=[256], delta_time=1.0, num_timesteps=1, num_forward_passes=1
         )
         est_large, _ = counter.estimate_flops(
-            latent_seqlens=[1024], prompt_seqlens=[512], delta_time=1.0, num_timesteps=1, cfg_passes=1
+            latent_seqlens=[1024], prompt_seqlens=[512], delta_time=1.0, num_timesteps=1, num_forward_passes=1
         )
         ratio = est_large / est_small
         assert 2.0 < ratio < 4.0, ratio
@@ -495,14 +497,24 @@ class TestQwenImageFlopsScaling:
     def test_matches_reference_across_shapes(self):
         """Same as ``test_matches_hand_rolled_reference`` but for a range of
         batch shapes, including unequal img/txt seqlens, single sample, and
-        unusual ``num_timesteps`` / ``cfg_passes``."""
+        unusual ``num_timesteps`` / ``num_forward_passes``."""
         counter = _qwen_counter()
         scenarios = [
-            dict(latent_seqlens=[256], prompt_seqlens=[64], delta_time=0.5, num_timesteps=1, cfg_passes=1),
+            dict(latent_seqlens=[256], prompt_seqlens=[64], delta_time=0.5, num_timesteps=1, num_forward_passes=1),
             dict(
-                latent_seqlens=[1024, 4096], prompt_seqlens=[128, 512], delta_time=8.0, num_timesteps=50, cfg_passes=2
+                latent_seqlens=[1024, 4096],
+                prompt_seqlens=[128, 512],
+                delta_time=8.0,
+                num_timesteps=50,
+                num_forward_passes=2,
             ),
-            dict(latent_seqlens=[4096] * 8, prompt_seqlens=[256] * 8, delta_time=12.0, num_timesteps=10, cfg_passes=1),
+            dict(
+                latent_seqlens=[4096] * 8,
+                prompt_seqlens=[256] * 8,
+                delta_time=12.0,
+                num_timesteps=10,
+                num_forward_passes=1,
+            ),
         ]
         for kwargs in scenarios:
             est, _ = counter.estimate_flops(**kwargs)
@@ -518,7 +530,7 @@ class TestQwenImageFlopsScaling:
             prompt_seqlens=[256] * 4,
             delta_time=1.0,
             num_timesteps=1,
-            cfg_passes=1,
+            num_forward_passes=1,
         )
         est, _ = counter.estimate_flops(**kwargs)
         ref = _reference_qwen_image_flops(QWEN_IMAGE_CONFIG, **kwargs)
@@ -613,7 +625,7 @@ class TestQwenImageFlopsParamCount:
             prompt_seqlens=[txt_tot],
             delta_time=1.0,
             num_timesteps=1,
-            cfg_passes=1,
+            num_forward_passes=1,
         )
         est_flops = est_tflops * 1e12
 
@@ -658,14 +670,14 @@ class TestDPGlobalConsistency:
             prompt_seqlens=global_txt,
             delta_time=1.0,
             num_timesteps=1,
-            cfg_passes=1,
+            num_forward_passes=1,
         )
         per_rank_est, _ = counter.estimate_flops(
             latent_seqlens=per_rank_img,
             prompt_seqlens=per_rank_txt,
             delta_time=1.0,
             num_timesteps=1,
-            cfg_passes=1,
+            num_forward_passes=1,
         )
         # Global / world_size should equal per-rank only when the formula is
         # linear in token count (it is, for the dense terms). Attention is
@@ -696,7 +708,7 @@ class TestDPGlobalConsistency:
             prompt_seqlens=global_txt,
             delta_time=260.0,
             num_timesteps=10,
-            cfg_passes=2,
+            num_forward_passes=2,
         )
         # Mimic TrainingWorker._postprocess_output's final step.
         mfu = est / prom / world_size
@@ -707,56 +719,56 @@ class TestDPGlobalConsistency:
         assert 0.0 < mfu < 1.0, mfu
 
 
-class TestResolveCfgPasses:
+class TestGetForwardPassesPerStep:
     """Generality contract for CFG-pass detection. The counter API treats
-    ``cfg_passes`` as a positive int; this helper resolves it from the
+    ``num_forward_passes`` as a positive int; this helper resolves it from the
     pipeline + transformer configs without architecture-specific knowledge."""
 
     def test_no_cfg_returns_one(self):
         # Unconditional / class-conditioned model, no guidance fields.
-        assert resolve_cfg_passes({}, {}) == 1
-        assert resolve_cfg_passes(None, None) == 1
+        assert get_forward_passes_per_step({}, {}) == 1
+        assert get_forward_passes_per_step(None, None) == 1
 
     def test_true_cfg_scale_qwen_image_style(self):
         # Qwen-Image: pipeline.true_cfg_scale=4.0 -> 2 forward passes.
-        assert resolve_cfg_passes({"true_cfg_scale": 4.0}, {}) == 2
-        assert resolve_cfg_passes({"true_cfg_scale": 1.0}, {}) == 1
-        assert resolve_cfg_passes({"true_cfg_scale": None}, {}) == 1
+        assert get_forward_passes_per_step({"true_cfg_scale": 4.0}, {}) == 2
+        assert get_forward_passes_per_step({"true_cfg_scale": 1.0}, {}) == 1
+        assert get_forward_passes_per_step({"true_cfg_scale": None}, {}) == 1
 
     def test_guidance_scale_wan_sd3_style(self):
         # Standard CFG: pipeline.guidance_scale=5.0 -> 2 passes (Wan, SD3).
-        assert resolve_cfg_passes({"guidance_scale": 5.0}, {}) == 2
+        assert get_forward_passes_per_step({"guidance_scale": 5.0}, {}) == 2
         # 1.0 means CFG disabled at inference time.
-        assert resolve_cfg_passes({"guidance_scale": 1.0}, {}) == 1
+        assert get_forward_passes_per_step({"guidance_scale": 1.0}, {}) == 1
 
     def test_guidance_distilled_flux_style(self):
         # Flux: transformer_config.guidance_embeds=True means the guidance
         # scalar is consumed *inside* the model; only one forward runs even
         # when guidance_scale > 1.0.
-        assert resolve_cfg_passes({"guidance_scale": 3.5}, {"guidance_embeds": True}) == 1
+        assert get_forward_passes_per_step({"guidance_scale": 3.5}, {"guidance_embeds": True}) == 1
         # guidance_embeds=False is the explicit non-distilled case.
-        assert resolve_cfg_passes({"guidance_scale": 3.5}, {"guidance_embeds": False}) == 2
+        assert get_forward_passes_per_step({"guidance_scale": 3.5}, {"guidance_embeds": False}) == 2
 
     def test_explicit_override_wins(self):
         # Pipeline can force the value (e.g. custom rollout that batches
         # cond+uncond into one tensor).
-        assert resolve_cfg_passes({"cfg_passes": 1, "guidance_scale": 7.5}, {}) == 1
-        assert resolve_cfg_passes({"cfg_passes": 2, "true_cfg_scale": 1.0}, {}) == 2
+        assert get_forward_passes_per_step({"num_forward_passes": 1, "guidance_scale": 7.5}, {}) == 1
+        assert get_forward_passes_per_step({"num_forward_passes": 2, "true_cfg_scale": 1.0}, {}) == 2
         # Below-1 override is clamped (we never run fewer than one pass).
-        assert resolve_cfg_passes({"cfg_passes": 0}, {}) == 1
+        assert get_forward_passes_per_step({"num_forward_passes": 0}, {}) == 1
 
     def test_unknown_garbage_values_dont_crash(self):
         # Helper survives non-numeric junk for forward-compat with weird
         # pipeline configs.
-        assert resolve_cfg_passes({"guidance_scale": "off"}, {}) == 1
-        assert resolve_cfg_passes({"true_cfg_scale": object()}, {}) == 1
+        assert get_forward_passes_per_step({"guidance_scale": "off"}, {}) == 1
+        assert get_forward_passes_per_step({"true_cfg_scale": object()}, {}) == 1
 
 
 class TestNonCfgQwenImageFlops:
     """Pin the formula behaviour for the non-CFG case so future estimators
-    in the registry can rely on ``cfg_passes=1`` being a no-op multiplier."""
+    in the registry can rely on ``num_forward_passes=1`` being a no-op multiplier."""
 
-    def test_cfg_passes_one_halves_two(self):
+    def test_num_forward_passes_one_halves_two(self):
         counter = _qwen_counter()
         kwargs = dict(
             latent_seqlens=[1024] * 4,
@@ -764,8 +776,8 @@ class TestNonCfgQwenImageFlops:
             delta_time=2.0,
             num_timesteps=5,
         )
-        est_one, _ = counter.estimate_flops(cfg_passes=1, **kwargs)
-        est_two, _ = counter.estimate_flops(cfg_passes=2, **kwargs)
+        est_one, _ = counter.estimate_flops(num_forward_passes=1, **kwargs)
+        est_two, _ = counter.estimate_flops(num_forward_passes=2, **kwargs)
         assert math.isclose(est_two, 2 * est_one, rel_tol=1e-9)
 
     def test_unconditional_zero_text_runs(self):
@@ -778,7 +790,7 @@ class TestNonCfgQwenImageFlops:
             prompt_seqlens=[0] * 4,
             delta_time=1.0,
             num_timesteps=1,
-            cfg_passes=1,
+            num_forward_passes=1,
         )
         assert est > 0
 
@@ -787,7 +799,7 @@ class TestDiffusionFlopsCounterApi:
     def test_promised_flops_returned_in_tflops(self):
         counter = _qwen_counter()
         _, prom = counter.estimate_flops(
-            latent_seqlens=[1024], prompt_seqlens=[256], delta_time=1.0, num_timesteps=1, cfg_passes=1
+            latent_seqlens=[1024], prompt_seqlens=[256], delta_time=1.0, num_timesteps=1, num_forward_passes=1
         )
         # ``get_device_flops`` returns TFLOPS by default; CPU baseline is
         # 448 GFLOPS = 0.448 TFLOPS. We accept anything > 0 to keep the test
@@ -802,5 +814,5 @@ class TestDiffusionFlopsCounterApi:
                 prompt_seqlens=[256],
                 delta_time=1.0,
                 num_timesteps=1,
-                cfg_passes=1,
+                num_forward_passes=1,
             )

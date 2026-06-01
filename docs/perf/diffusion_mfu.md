@@ -167,7 +167,7 @@ mod_flops   = 6 * L * 12*dim**2 * B           # img_mod + txt_mod (per-sample, n
 attn_flops  = 12 * L * H * d * sum_i (img_s_i + txt_s_i)**2
 
 flops_per_call = (img_dense + txt_dense + mod_flops + attn_flops) \
-                 * num_timesteps * cfg_passes
+                 * num_timesteps * num_forward_passes
 ```
 
 The leading `6 *` factor on dense terms is `2 FLOPs/MAC × 3 (fwd+bwd)`;
@@ -192,8 +192,8 @@ Per-call multipliers:
 - `num_timesteps` — denoising-loop depth.
   `data["all_timesteps"].shape[1]` for FlowGRPO-family algorithms; `1`
   for diffusion DPO.
-- `cfg_passes` — `1` (no-CFG / guidance-distilled) or `2` (True-CFG /
-  standard CFG), resolved per pipeline by `resolve_cfg_passes`.
+- `num_forward_passes` — `1` (no-CFG / guidance-distilled) or `2` (True-CFG /
+  standard CFG), resolved per pipeline by `get_forward_passes_per_step`.
 
 ### MFU formula
 
@@ -307,7 +307,7 @@ class WanFlops(DiffusionModelFlops):
         delta_time: float,
         *,
         num_timesteps: int,
-        cfg_passes: int,
+        num_forward_passes: int,
     ) -> float:
         num_heads  = int(self.config["num_attention_heads"])
         head_dim   = int(self.config["attention_head_dim"])
@@ -347,7 +347,7 @@ class WanFlops(DiffusionModelFlops):
 
         flops_per_call = (
             latent_dense + cross_dense + mod_flops + self_attn_flops + cross_attn_flops
-        ) * num_timesteps * cfg_passes
+        ) * num_timesteps * num_forward_passes
         return flops_per_call / delta_time / 1e12              # → TFLOPS achieved
 ```
 
@@ -370,7 +370,7 @@ What you did **not** have to write:
 - **Prompt → seqlen extraction.** The default reads
   `prompt_embeds_mask` (nested or dense) and falls back to dense
   `prompt_embeds.shape[1]` or zeros for unconditional models.
-- **CFG-pass detection.** `resolve_cfg_passes` already covers Wan's
+- **CFG-pass detection.** `get_forward_passes_per_step` already covers Wan's
   `guidance_scale > 1` → 2 passes, including the
   `guidance_embeds=True` short-circuit for guidance-distilled variants.
 - **Distributed all-gather.** `TrainingWorker._allgather_diffusion_flops_meta`
@@ -432,7 +432,7 @@ class TestWanFlopsScaling:
     def test_linear_in_num_timesteps(self):
         counter = DiffusionFlopsCounter("WanPipeline", WAN_CONFIG)
         kw = dict(latent_seqlens=[512] * 2, prompt_seqlens=[64] * 2,
-                  delta_time=1.0, cfg_passes=1)
+                  delta_time=1.0, num_forward_passes=1)
         est_a, _ = counter.estimate_flops(num_timesteps=10, **kw)
         est_b, _ = counter.estimate_flops(num_timesteps=30, **kw)
         assert math.isclose(est_b / est_a, 3.0, rel_tol=1e-9)
@@ -440,7 +440,7 @@ class TestWanFlopsScaling:
     def test_quadratic_in_latent_seqlen(self):
         counter = DiffusionFlopsCounter("WanPipeline", WAN_CONFIG)
         kw = dict(prompt_seqlens=[64], delta_time=1.0,
-                  num_timesteps=1, cfg_passes=1)
+                  num_timesteps=1, num_forward_passes=1)
         small, _ = counter.estimate_flops(latent_seqlens=[256], **kw)
         large, _ = counter.estimate_flops(latent_seqlens=[512], **kw)
         # Self-attn is quadratic, dense is linear → ratio is between 2 and 4.
@@ -448,7 +448,7 @@ class TestWanFlopsScaling:
 ```
 
 Mirror the pattern in `TestQwenImageFlopsScaling` for fuller coverage
-(hand-rolled reference comparison, `cfg_passes=2`, batch-shape sweep).
+(hand-rolled reference comparison, `num_forward_passes=2`, batch-shape sweep).
 For architectures whose weights are tractable to enumerate, also add a
 `TestArchFlopsParamCount` test that asserts the per-block parameter
 count baked into the estimator matches `block.numel()` on a
@@ -543,9 +543,9 @@ For diffusion RL workloads (like FlowGRPO), achieving high MFU requires balancin
   `flops_per_call` depends on the model's text-vs-image work ratio
   but is dominated by the image stream and joint attention.
 - **CFG with gradient detachment.** If a future loss path detaches the
-  negative-CFG branch's backward, `cfg_passes` becomes a slight
+  negative-CFG branch's backward, `num_forward_passes` becomes a slight
   over-estimate ($\le 2\times$). The pipeline can override the
-  detection with an explicit `pipeline.cfg_passes: 1` field.
+  detection with an explicit `pipeline.num_forward_passes: 1` field.
 - **Image-edit / Img2Img / Inpaint / ControlNet variants are not yet
   estimated.** These pipelines concatenate reference latents to the
   denoise-target latents along the sequence dim, so the effective

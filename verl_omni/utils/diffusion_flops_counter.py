@@ -45,7 +45,7 @@ __all__ = [
     "DiffusionFlopsCounter",
     "QwenImageFlops",
     "register_diffusion_architecture",
-    "resolve_cfg_passes",
+    "get_forward_passes_per_step",
     "resolve_device_peak_tflops",
 ]
 
@@ -91,7 +91,7 @@ def resolve_device_peak_tflops() -> float:
 # ---------------------------------------------------------------------------
 
 
-def resolve_cfg_passes(
+def get_forward_passes_per_step(
     pipeline_config: Optional[Mapping[str, Any]] = None,
     transformer_config: Optional[Mapping[str, Any]] = None,
 ) -> int:
@@ -100,8 +100,8 @@ def resolve_cfg_passes(
     tcfg = transformer_config or {}
 
     # Explicit override takes priority
-    if "cfg_passes" in pcfg:
-        val = pcfg["cfg_passes"]
+    if "num_forward_passes" in pcfg:
+        val = pcfg["num_forward_passes"]
         if isinstance(val, int | float):
             return max(int(val), 1)
 
@@ -262,7 +262,7 @@ class DiffusionModelFlops:
         delta_time: float,
         *,
         num_timesteps: int,
-        cfg_passes: int,
+        num_forward_passes: int,
     ) -> float:
         """Return achieved TFLOPS for one ``train_batch`` / ``infer_batch``
         call. Subclasses must override.
@@ -489,7 +489,7 @@ class QwenImageFlops(DiffusionModelFlops):
         delta_time: float,
         *,
         num_timesteps: int,
-        cfg_passes: int,
+        num_forward_passes: int,
     ) -> float:
         cfg = self.config
         dim = self.dim
@@ -528,7 +528,9 @@ class QwenImageFlops(DiffusionModelFlops):
         # Joint full-attention FLOPs.
         attn_flops = self.compute_attention_flops(latent_seqlens, prompt_seqlens)
 
-        flops_all_steps = (img_dense_flops + txt_dense_flops + mod_flops + attn_flops) * num_timesteps * cfg_passes
+        flops_all_steps = (
+            (img_dense_flops + txt_dense_flops + mod_flops + attn_flops) * num_timesteps * num_forward_passes
+        )
         return flops_all_steps / delta_time / 1e12
 
 
@@ -554,7 +556,7 @@ class DiffusionFlopsCounter:
         estimated, promised = counter.estimate_flops(
             delta_time=delta_time,
             num_timesteps=num_timesteps,
-            cfg_passes=cfg_passes,
+            num_forward_passes=num_forward_passes,
             **global_meta,
         )
         mfu = estimated / promised / world_size
@@ -623,7 +625,7 @@ class DiffusionFlopsCounter:
         delta_time: float,
         *,
         num_timesteps: int = 1,
-        cfg_passes: int = 1,
+        num_forward_passes: int = 1,
     ) -> tuple[float, float]:
         """Return ``(estimated_tflops, promised_tflops)`` for one call.
 
@@ -637,11 +639,11 @@ class DiffusionFlopsCounter:
             num_timesteps: number of denoising steps executed per call.
                 ``1`` for diffusion DPO; ``data["all_timesteps"].shape[1]``
                 for FlowGRPO-family algorithms.
-            cfg_passes: ``2`` when True-CFG is enabled
+            num_forward_passes: ``2`` when True-CFG is enabled
                 (``true_cfg_scale > 1.0``), otherwise ``1``.
         """
         promised = resolve_device_peak_tflops()
-        if self._arch is None or delta_time <= 0 or num_timesteps <= 0 or cfg_passes <= 0:
+        if self._arch is None or delta_time <= 0 or num_timesteps <= 0 or num_forward_passes <= 0:
             return 0.0, promised
 
         import inspect
@@ -657,7 +659,7 @@ class DiffusionFlopsCounter:
                 prompt_seqlens,
                 delta_time,
                 num_timesteps=num_timesteps,
-                cfg_passes=cfg_passes,
+                num_forward_passes=num_forward_passes,
             )
         else:
             # Modern instance method signature: (latent_seqlens, prompt_seqlens, delta_time, ...)
@@ -666,7 +668,7 @@ class DiffusionFlopsCounter:
                 prompt_seqlens,
                 delta_time,
                 num_timesteps=num_timesteps,
-                cfg_passes=cfg_passes,
+                num_forward_passes=num_forward_passes,
             )
 
         return float(estimated), float(promised)
