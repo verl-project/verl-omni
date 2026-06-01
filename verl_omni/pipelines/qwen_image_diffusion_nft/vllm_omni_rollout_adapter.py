@@ -41,6 +41,10 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
     log-probabilities.
     """
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.set_progress_bar_config(disable=True)
+
     def _prepare_token_id_generation_context(
         self,
         *,
