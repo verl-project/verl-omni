@@ -213,7 +213,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
                 cur_noise_level = 0.0
             elif i == sde_window[0]:
                 cur_noise_level = noise_level
-                all_latents.append(latents.float())
+                all_latents.append(latents)
             elif i > sde_window[0] and i < sde_window[1]:
                 cur_noise_level = noise_level
             else:
@@ -223,13 +223,10 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             # Broadcast timestep to match batch size
             timestep = timestep_value.expand(latents.shape[0]).to(device=latents.device, dtype=latents.dtype)
 
-            # Cast to model dtype for transformer forward (scheduler returns float32).
-            x = latents.to(self.transformer.img_in.weight.dtype)
-
             self.transformer.do_true_cfg = do_true_cfg
             # Forward pass for positive prompt (or unconditional if no CFG)
             noise_pred = self.transformer(
-                hidden_states=x,
+                hidden_states=latents,
                 timestep=timestep / 1000,
                 guidance=guidance,
                 encoder_hidden_states_mask=prompt_embeds_mask,
@@ -242,7 +239,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             # Forward pass for negative prompt (CFG)
             if do_true_cfg:
                 neg_noise_pred = self.transformer(
-                    hidden_states=x,
+                    hidden_states=latents,
                     timestep=timestep / 1000,
                     guidance=guidance,
                     encoder_hidden_states_mask=negative_prompt_embeds_mask,
@@ -256,7 +253,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
 
             # compute the previous noisy sample x_t -> x_t-1
             latents, log_prob, _, _ = self.scheduler.step(
-                noise_pred.float(),
+                noise_pred,
                 timestep_value,
                 latents,
                 generator=generator,
@@ -385,7 +382,6 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         )
         sde_type = _coalesce_not_none(sampling_params.extra_args.get("sde_type", None), sde_type)
         logprobs = _coalesce_not_none(sampling_params.extra_args.get("logprobs", None), logprobs)
-        collect_mode = _coalesce_not_none(sampling_params.extra_args.get("collect_mode", None), "trajectory")
 
         generator = sampling_params.generator or generator
         if generator is None and sampling_params.seed is not None:
@@ -501,7 +497,6 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         )
 
         self._current_timestep = None
-        latents_clean = latents
         if output_type == "latent":
             image = latents
         else:
@@ -518,20 +513,15 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             latents = latents / latents_std + latents_mean
             image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
 
-        custom_output = {
-            "all_latents": _maybe_to_cpu(all_latents),
-            "all_log_probs": _maybe_to_cpu(all_log_probs),
-            "all_timesteps": _maybe_to_cpu(all_timesteps),
-            "prompt_embeds": _maybe_to_cpu(prompt_embeds),
-            "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
-            "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds),
-            "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
-        }
-        if collect_mode == "final_latent":
-            custom_output["latents_clean"] = _maybe_to_cpu(latents_clean)
-            custom_output["train_timesteps"] = _maybe_to_cpu(timesteps.unsqueeze(0).expand(latents_clean.shape[0], -1))
-
         return DiffusionOutput(
             output=_maybe_to_cpu(image),
-            custom_output=custom_output,
+            custom_output={
+                "all_latents": _maybe_to_cpu(all_latents),
+                "all_log_probs": _maybe_to_cpu(all_log_probs),
+                "all_timesteps": _maybe_to_cpu(all_timesteps),
+                "prompt_embeds": _maybe_to_cpu(prompt_embeds),
+                "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
+                "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds),
+                "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
+            },
         )
