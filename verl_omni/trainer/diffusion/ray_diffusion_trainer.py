@@ -58,7 +58,9 @@ from verl_omni.trainer.diffusion.diffusion_algos import (
     get_diffusion_loss_fn,
 )
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
+    OldPolicyUpdateResult,
     compute_data_metrics_diffusion,
+    compute_old_policy_metrics,
     compute_reward_extra_metrics_diffusion,
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
@@ -1292,31 +1294,21 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                 batch.batch[key] = value
         return batch
 
-    def _update_old_policy(self, metrics: dict[str, Any] | None = None) -> None:
+    def _update_old_policy(self) -> OldPolicyUpdateResult:
         algo_cfg = self.config.algorithm
-        if metrics is not None:
-            metrics["old_policy/update_applied"] = 0.0
-            metrics["old_policy/copy_update"] = 0.0
-            metrics["old_policy/ema_update"] = 0.0
-            metrics["old_policy/decay"] = 0.0
         if self.global_steps % algo_cfg.old_policy_update_interval != 0:
-            return
+            return False, 0.0, "none"
 
         decay = algo_cfg.old_policy_decay
         if decay is None:
             decay = old_policy_decay(self.global_steps, algo_cfg.old_policy_decay_schedule)
 
-        if metrics is not None:
-            metrics["old_policy/update_applied"] = 1.0
-            metrics["old_policy/decay"] = float(decay)
         if decay == 0:
             self.actor_rollout_wg.copy_adapter(source="default", target="old")
-            if metrics is not None:
-                metrics["old_policy/copy_update"] = 1.0
+            return True, float(decay), "copy"
         else:
             self.actor_rollout_wg.ema_update_adapter(source="default", target="old", decay=decay)
-            if metrics is not None:
-                metrics["old_policy/ema_update"] = 1.0
+            return True, float(decay), "ema"
 
     def fit(self):
         """
@@ -1448,7 +1440,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)
                             if self._has_old_adapter:
-                                self._update_old_policy(metrics)
+                                metrics.update(compute_old_policy_metrics(self._update_old_policy()))
 
                     # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                     esi_close_to_expiration = should_save_ckpt_esi(
