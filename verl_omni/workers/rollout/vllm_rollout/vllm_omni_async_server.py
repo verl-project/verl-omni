@@ -161,6 +161,21 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _get_wake_up_tags(self) -> list[str]:
         return ["weights"]
 
+    async def wake_up(self, tags: list[str] | None = None):
+        """Override parent to use collective_rpc instead of engine.wake_up().
+
+        The parent (verl ``1927ad33``+) calls ``self.engine.wake_up(tags=...)``
+        which triggers CUDA initialisation in this HTTP server process when
+        running under vLLM-Omni (AsyncOmni engine).
+        Use ``collective_rpc`` instead.
+
+        # TODO (long): drop this override once vllm-omni wake_up
+        without triggering GPU initialisation.
+        """
+        if self.node_rank != 0:
+            return
+        await self.engine.collective_rpc("wake_up", kwargs={"tags": tags or self._get_wake_up_tags()})
+
     async def _sleep_hybrid(self):
         """Preserve non-actor pipeline weights during hybrid training sleep.
 
