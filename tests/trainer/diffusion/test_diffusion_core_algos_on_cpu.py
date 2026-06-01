@@ -205,20 +205,6 @@ def test_prepare_diffusion_nft_actor_batch() -> None:
     assert ((result["reward_prob"] >= 0) & (result["reward_prob"] <= 1)).all()
 
 
-def test_diffusion_nft_old_policy_decay() -> None:
-    # decay_type=0: always 0
-    assert diffusion_algos.DiffusionNFTLoss.old_policy_decay(0, 0) == 0.0
-    assert diffusion_algos.DiffusionNFTLoss.old_policy_decay(100, 0) == 0.0
-    # decay_type=1: ramps from step 0
-    assert diffusion_algos.DiffusionNFTLoss.old_policy_decay(0, 1) == 0.0
-    assert diffusion_algos.DiffusionNFTLoss.old_policy_decay(1, 1) == pytest.approx(0.001)
-    assert diffusion_algos.DiffusionNFTLoss.old_policy_decay(1000, 1) == pytest.approx(0.5)
-    # decay_type=2: flat for 75 steps then ramps
-    assert diffusion_algos.DiffusionNFTLoss.old_policy_decay(74, 2) == 0.0
-    assert diffusion_algos.DiffusionNFTLoss.old_policy_decay(75, 2) == 0.0
-    assert diffusion_algos.DiffusionNFTLoss.old_policy_decay(76, 2) == pytest.approx(0.0075)
-
-
 def test_compute_policy_loss_diffusion_nft() -> None:
     from hydra import compose, initialize_config_dir
     from verl.utils.config import omega_conf_to_dataclass

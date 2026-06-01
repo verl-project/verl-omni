@@ -54,7 +54,6 @@ from verl.workers.rollout.llm_server import LLMServerManager
 from verl_omni.trainer.config import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import (
     DiffusionAdvantageEstimator,
-    DiffusionNFTLoss,
     get_diffusion_adv_estimator_fn,
     get_diffusion_loss_fn,
 )
@@ -64,7 +63,7 @@ from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
 )
-from verl_omni.trainer.diffusion.diffusion_trainer_utils import NoOpCheckpointManager
+from verl_omni.trainer.diffusion.diffusion_trainer_utils import NoOpCheckpointManager, old_policy_decay
 from verl_omni.trainer.diffusion.rollout_correction import (
     apply_bypass_mode_to_diffusion_batch,
     apply_rollout_correction_to_diffusion_batch,
@@ -1306,7 +1305,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
         decay = algo_cfg.old_policy_decay
         if decay is None:
-            decay = DiffusionNFTLoss.old_policy_decay(self.global_steps, algo_cfg.old_policy_decay_type)
+            decay = old_policy_decay(self.global_steps, algo_cfg.old_policy_decay_type)
 
         if metrics is not None:
             metrics["old_policy/update_applied"] = 1.0

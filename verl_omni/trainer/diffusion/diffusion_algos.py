@@ -679,21 +679,8 @@ class DiffusionNFTLoss(DiffusionLossFn):
         return DiffusionLossResult(loss=loss, metrics=metrics)
 
     # ------------------------------------------------------------------
-    # Trainer-side helpers (batch preparation & old-policy scheduling)
+    # Trainer-side helpers (batch preparation)
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def old_policy_decay(step: int, decay_type: int) -> float:
-        """Old-policy LoRA EMA decay schedules."""
-        if decay_type == 0:
-            flat, uprate, uphold = 0, 0.0, 0.0
-        elif decay_type == 1:
-            flat, uprate, uphold = 0, 0.001, 0.5
-        elif decay_type == 2:
-            flat, uprate, uphold = 75, 0.0075, 0.999
-        else:
-            raise ValueError(f"Unsupported old_policy_decay_type: {decay_type}")
-        return 0.0 if step < flat else min((step - flat) * uprate, uphold)
 
     @staticmethod
     def _compute_group_advantages(
