@@ -71,19 +71,10 @@ sys_logger = logging.getLogger(__name__)
 
 
 def _extract_infer_metrics(output: Any) -> dict[str, Any]:
-    """Extract the ``metrics`` dict produced by ``TrainingWorker.infer_batch``.
-
-    The infer path now emits per-call ``mfu`` / ``loss`` so the diffusion
-    trainer can report ``actor_infer/mfu`` and ``ref/mfu`` alongside the
-    existing ``actor/mfu``. Returns an empty dict when no metrics are
-    attached (e.g. the worker rank is not a collect rank).
-    """
+    """Extract the ``metrics`` dict produced by ``TrainingWorker.infer_batch``."""
     if output is None:
         return {}
-    metrics = tu.get(output, "metrics", default=None)
-    if metrics is None:
-        return {}
-    return {str(k): v for k, v in metrics.items()}
+    return tu.get(output, "metrics", default={})
 
 
 def compute_advantage(
