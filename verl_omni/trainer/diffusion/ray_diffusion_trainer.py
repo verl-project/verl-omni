@@ -847,7 +847,7 @@ class BaseRayDiffusionTrainer(ABC):
 class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
     """Policy-gradient diffusion trainer for FlowGRPO, MixGRPO, DanceGRPO, GRPO-Guard, etc."""
 
-    def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
+    def _compute_ref_log_prob(self, batch: DataProto) -> tuple[DataProto, dict[str, Any]]:
         batch_td = batch.to_tensordict()
         batch_td = embeds_padding_2_no_padding(batch_td)
         metadata = {
@@ -871,10 +871,9 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         )
         # Propagate per-call MFU / loss metrics computed in the worker.
         infer_metrics = _extract_infer_metrics(output)
-        meta_info = {"metrics": infer_metrics} if infer_metrics else {}
-        return DataProto.from_tensordict(ref_log_prob, meta_info=meta_info)
+        return DataProto.from_tensordict(ref_log_prob), infer_metrics
 
-    def _compute_old_log_prob(self, batch: DataProto):
+    def _compute_old_log_prob(self, batch: DataProto) -> tuple[DataProto, dict[str, Any]]:
         batch_td = batch.to_tensordict()
         batch_td = embeds_padding_2_no_padding(batch_td)
         tu.assign_non_tensor(
@@ -892,8 +891,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
             old_log_prob_dict["old_prev_sample_mean"] = prev_sample_mean.float()
         old_log_prob = tu.get_tensordict(old_log_prob_dict)
         infer_metrics = _extract_infer_metrics(output)
-        meta_info = {"metrics": infer_metrics} if infer_metrics else {}
-        return DataProto.from_tensordict(old_log_prob, meta_info=meta_info)
+        return DataProto.from_tensordict(old_log_prob), infer_metrics
 
     def fit(self):
         """
@@ -1013,10 +1011,8 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                         apply_bypass_mode_to_diffusion_batch(batch)
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
-                            old_log_prob = self._compute_old_log_prob(batch)
-                            metrics.update(
-                                rename_dict(reduce_metrics(old_log_prob.meta_info.get("metrics", {})), "actor_infer/")
-                            )
+                            old_log_prob, infer_metrics = self._compute_old_log_prob(batch)
+                            metrics.update(rename_dict(reduce_metrics(infer_metrics), "actor_infer/"))
                             batch = batch.union(old_log_prob)
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
@@ -1033,10 +1029,8 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
-                            ref_log_prob = self._compute_ref_log_prob(batch)
-                            metrics.update(
-                                rename_dict(reduce_metrics(ref_log_prob.meta_info.get("metrics", {})), "ref/")
-                            )
+                            ref_log_prob, infer_metrics = self._compute_ref_log_prob(batch)
+                            metrics.update(rename_dict(reduce_metrics(infer_metrics), "ref/"))
                             batch = batch.union(ref_log_prob)
 
                     with marked_timer("adv", timing_raw, color="brown"):
@@ -1238,7 +1232,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         actor_output = rename_dict(actor_output, "actor/")
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
-    def _compute_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:
+    def _compute_ref_noise_pred(self, batch: DataProto) -> Optional[tuple[DataProto, dict[str, Any]]]:
         """Reference transformer output and shared flow tensors."""
         batch_td = batch.to_tensordict()
         batch_td = embeds_padding_2_no_padding(batch_td)
@@ -1273,8 +1267,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
             "timesteps": timesteps.float(),
         }
         infer_metrics = _extract_infer_metrics(output)
-        meta_info = {"metrics": infer_metrics} if infer_metrics else {}
-        return DataProto.from_tensordict(tu.get_tensordict(ref_output), meta_info=meta_info)
+        return DataProto.from_tensordict(tu.get_tensordict(ref_output)), infer_metrics
 
     def fit(self):
         """
@@ -1371,9 +1364,8 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_dpo = self._compute_ref_noise_pred(batch)
                             if ref_dpo is not None:
-                                metrics.update(
-                                    rename_dict(reduce_metrics(ref_dpo.meta_info.get("metrics", {})), "ref/")
-                                )
+                                ref_dpo, infer_metrics = ref_dpo
+                                metrics.update(rename_dict(reduce_metrics(infer_metrics), "ref/"))
                                 batch = batch.union(ref_dpo)
                     # update actor
                     with marked_timer("update_actor", timing_raw, color="red"):
