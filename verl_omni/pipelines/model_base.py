@@ -114,7 +114,9 @@ class DiffusionModelBase(ABC):
         micro_batch: TensorDict,
         step: int,
     ) -> tuple[dict, dict]:
-        """Build architecture-specific model inputs for the forward pass.
+        """Build architecture-specific inputs for reverse-trajectory training.
+        This packages the stored rollout ``x_t`` for a model forward; the
+        scheduler step that scores/samples toward ``x_{t-1}`` happens later.
         The caller is responsible for universal pre-processing (common tensor extraction
         and nested-embed unpadding) before invoking this method.
 
@@ -178,6 +180,8 @@ class DiffusionModelBase(ABC):
         step: int,
     ) -> tuple[dict, Optional[dict]]:
         """Build inputs for forward-process losses such as DiffusionNFT.
+        This packages an already re-noised ``x_t`` constructed from rollout
+        ``x_0``; the forward noising itself happens before this hook.
 
         Model-specific adapters can override this for architecture-specific
         kwargs. The default matches common Diffusers transformer argument names.
@@ -207,7 +211,6 @@ class DiffusionModelBase(ABC):
         negative_model_inputs: Optional[dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
         """Return a velocity/prediction tensor for forward-process objectives."""
-        del model_config, negative_model_inputs
         return module(**model_inputs)[0]
 
 
