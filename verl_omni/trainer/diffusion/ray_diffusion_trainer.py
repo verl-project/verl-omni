@@ -1155,7 +1155,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
 
 class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
-    """Direct-preference diffusion trainer for DPO (offline), DiffusionNFT (online), and similar algorithms."""
+    """Direct-preference diffusion trainer for DPO, DiffusionNFT, AWM, etc."""
 
     def __init__(
         self,
@@ -1165,6 +1165,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
     ):
         super().__init__(config, *args, **kwargs)
         self.is_offline = config.algorithm.get("sample_source", "online") == "offline"
+        # Direct-preference losses (e.g. DPO) need ref noise preds even when KL paths are disabled.
         self.use_reference_policy = need_reference_policy(self.config) or (
             config.algorithm.get("trainer_type") == "direct_preference"
         )
@@ -1322,8 +1323,8 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
     def fit(self):
         """
         Training loop for direct-preference algorithms (DPO, DiffusionNFT, etc.).
-        Offline algorithms (DPO) read pre-computed rewards from the dataset.
-        Online algorithms (DiffusionNFT) generate rollouts and compute rewards live.
+        Offline algorithms read pre-computed rewards from the dataset.
+        Online algorithms generate rollouts and compute rewards live.
         """
         from omegaconf import OmegaConf
         from verl.utils.tracking import Tracking
@@ -1549,5 +1550,3 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                 # in favor of a general-purpose data buffer pool
                 if hasattr(self.train_dataset, "on_batch_end"):
                     self.train_dataset.on_batch_end(batch=batch)
-
-

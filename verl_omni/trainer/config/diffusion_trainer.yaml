@@ -84,6 +84,9 @@ algorithm:
   # DiffusionNFT advantage mapping mode before reward-probability scaling
   adv_mode: continuous
 
+  # True for pair-based algorithms (e.g. offline DPO); doubles actor batch size and disables shuffle
+  paired_preference: false
+
   # Rollout Correction (experimental).  Fields mirror RolloutCorrectionConfig.
   rollout_correction:
 

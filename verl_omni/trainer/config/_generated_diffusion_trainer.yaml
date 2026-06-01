@@ -424,6 +424,7 @@ algorithm:
   old_policy_update_interval: 1
   timestep_fraction: 1.0
   adv_mode: continuous
+  paired_preference: false
   rollout_correction:
     _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
     bypass_mode: false

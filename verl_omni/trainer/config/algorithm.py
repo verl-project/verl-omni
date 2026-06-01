@@ -47,8 +47,6 @@ class DiffusionAlgoConfig(BaseConfig):
         if self.old_policy_decay is not None and not 0 <= self.old_policy_decay <= 1:
             raise ValueError(f"old_policy_decay must be in [0, 1], got {self.old_policy_decay}.")
         if self.old_policy_update_interval <= 0:
-            raise ValueError(
-                f"old_policy_update_interval must be positive, got {self.old_policy_update_interval}."
-            )
+            raise ValueError(f"old_policy_update_interval must be positive, got {self.old_policy_update_interval}.")
         if not 0 < self.timestep_fraction <= 1:
             raise ValueError(f"timestep_fraction must be in (0, 1], got {self.timestep_fraction}.")

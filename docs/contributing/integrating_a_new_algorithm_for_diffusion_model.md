@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion RL Algorithm
 
-Last updated: 05/22/2026.
+Last updated: 06/01/2026.
 
 This guide explains how to add a new diffusion RL algorithm to VeRL-Omni's
 diffusion trainer. New algorithms must first decide whether they are
@@ -46,7 +46,7 @@ config fields:
 
 | Field | Values | Purpose |
 |-------|--------|---------|
-| `algorithm.trainer_type` | `policy_gradient`, `direct_preference` | Selects `PolicyGradientRayTrainer` (FlowGRPO, MixGRPO, …) vs `DirectPreferenceRayTrainer` (DPO, DiffusionNFT, AWM) |
+| `algorithm.trainer_type` | `policy_gradient`, `direct_preference` | Selects `PolicyGradientRayTrainer` (FlowGRPO, MixGRPO, …) vs `DirectPreferenceRayTrainer` (DPO, DiffusionNFT, ...) |
 | `algorithm.sample_source` | `online`, `offline` | `BaseRayDiffusionTrainer.init_workers` skips rollout/reward engine init when `offline` |
 
 

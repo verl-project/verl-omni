@@ -26,7 +26,6 @@ from verl.workers.config.rollout import (
     PrometheusConfig,
 )
 
-
 __all__ = [
     "DiffusionRolloutAlgoConfig",
     "DiffusionPipelineConfig",
