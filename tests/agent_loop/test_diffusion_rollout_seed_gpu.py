@@ -200,6 +200,55 @@ def test_rollout_seed_reproducible_and_diverse_via_agent_loop(seed_rollout_confi
         ray.shutdown()
 
 
+def test_rollout_without_seed_produces_different_initial_latents(seed_rollout_config):
+    """When ``rollout_seed`` is not provided, initial latents must differ across reruns.
+
+    This is the default training behaviour when the rollout config does not set a seed.
+    """
+    ray.init(
+        runtime_env={
+            "env_vars": {
+                "TOKENIZERS_PARALLELISM": "true",
+                "NCCL_DEBUG": "WARN",
+                "VLLM_LOGGING_LEVEL": "INFO",
+            }
+        }
+    )
+    try:
+        AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
+        llm_server_manager = LLMServerManager.create(config=seed_rollout_config)
+        agent_loop_manager = AgentLoopManager.create(
+            config=seed_rollout_config,
+            llm_client=llm_server_manager.get_client(),
+        )
+
+        n = seed_rollout_config.actor_rollout_ref.rollout.n
+        batch = _make_prompt_batch(num_prompts=1).repeat(n)
+        batch.meta_info["global_steps"] = 1
+
+        # Pin the global RNG so the first run is deterministic and the second
+        # run inevitably uses a different RNG state, avoiding a flaky pass.
+        torch.manual_seed(0)
+
+        first = agent_loop_manager.generate_sequences(prompts=batch)
+        second = agent_loop_manager.generate_sequences(prompts=batch)
+
+        latents_first = _initial_latents(first)
+        latents_second = _initial_latents(second)
+        assert latents_first.shape[0] == n
+        assert not torch.equal(latents_first, latents_second), (
+            "identical batch without rollout_seed must produce different initial latents across reruns"
+        )
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                assert not torch.equal(latents_first[i], latents_first[j]), (
+                    f"rollout indices {i} and {j} must not share the same initial latent"
+                )
+    finally:
+        ray.shutdown()
+
+
 @pytest.mark.xfail(
     reason=(
         "AgentLoopManager chunks rollouts across workers; each worker derives per-row seeds from "
