@@ -507,6 +507,29 @@ If `actor/mfu > 1.0`, the two common causes are:
    trigger if you added a new metadata field that bypasses the gather.
    The regression test `TestDPGlobalConsistency` guards against this.
 
+## Tuning and Improving MFU
+
+For diffusion RL workloads (like FlowGRPO), achieving high MFU requires balancing memory constraints with compute and communication overheads. Based on optimizations for 20B+ models on H200 clusters, here are the primary levers to improve MFU:
+
+1. **Disable Offloading (If Memory Permits):**
+   - **`param_offload`**: Setting this to `False` provides the largest MFU gain. Offloading parameters requires a massive PCIe round-trip every forward/backward pass.
+   - **`optimizer_offload`**: Moving Adam states to CPU and running the update there severely bottlenecks the `update_actor` phase. Set to `False` if possible.
+   - *Tuning Strategy*: Start with both off. If you hit an Out of Memory (OOM) error during `update_weights` or `update_actor`, re-enable `optimizer_offload=True` first (as it doesn't impact the forward pass), and only enable `param_offload=True` as a last resort.
+
+2. **Reduce Sequence Parallelism (SP):**
+   - For moderate sequence lengths (e.g., ~1024 tokens for 512x512 latents), the all-to-all communication overhead of Ulysses SP outweighs its memory benefits.
+   - Setting `ulysses_sequence_parallel_size=1` removes this overhead and increases your Data Parallel (DP) size, which reduces FSDP shard sizes.
+
+3. **Increase Micro-Batch Size:**
+   - Increasing `ppo_micro_batch_size_per_gpu` (e.g., from 16 to 32) helps amortize FSDP all-gather and reduce-scatter collective overheads.
+   - *Note*: Once the effective matrix dimensions (M, N, K) exceed ~512, tensor cores are generally saturated, so returns diminish quickly.
+
+4. **Disable Layered Summon:**
+   - If parameter offloading is disabled, you can set `layered_summon=False` to allow the whole model to sync much faster during weight updates.
+
+5. **Account for Gradient Checkpointing:**
+   - If `enable_gradient_checkpointing: true` is set in your config, the *physical* MFU is actually ~33% higher than the reported MFU. The counter formula assumes a standard 1 forward + 2 backward passes (factor of 6), but checkpointing requires an additional recompute pass (1 fwd + 1 recompute + 2 bwd = 8).
+
 ## Caveats and limitations
 
 - **LoRA over-estimates achieved compute.** As noted above, the formula
