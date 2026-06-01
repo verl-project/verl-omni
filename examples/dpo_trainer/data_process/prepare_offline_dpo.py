@@ -44,8 +44,16 @@ import pyarrow.parquet as pq
 import torch
 from PIL import Image
 
+try:
+    import torch_npu
+except ImportError:
+    torch_npu = None
+
 DEFAULT_SYSTEM_PROMPT = "You are a helpful image generation assistant."
 DEFAULT_REWARD_SERVER_COMMAND = "vllm serve {model} --host {host} --port {port} --dtype bfloat16 --enforce-eager"
+# Due to memory size differences between NPU and GPU devices, we adjust
+# --gpu-memory-utilization and --max-model-len for NPU backends.
+DEFAULT_REWARD_SERVER_COMMAND_NPU = "vllm serve {model} --host {host} --port {port} --dtype bfloat16 --gpu-memory-utilization 0.85 --max-model-len 40000"
 
 
 def _read_prompts_from_txt(path: Path) -> list[str]:
@@ -254,8 +262,14 @@ class _ChunkedParquetWriter:
 
 
 def _apply_gpu_device_defaults(args: argparse.Namespace) -> None:
-    """Prefer reward on the first GPU and image gen on the second; share GPU 0 when only one is visible."""
-    n = torch.cuda.device_count()
+    """Prefer reward on the first NPU/GPU and image gen on the second; share device 0 when only one is visible."""
+    if torch_npu is not None and torch.npu.is_available():
+        n = torch.npu.device_count()
+    elif torch.cuda.is_available():
+        n = torch.cuda.device_count()
+    else:
+        n = 0
+
     if n <= 1:
         args.reward_gpu = 0
         args.image_gpu = 0
@@ -264,7 +278,12 @@ def _apply_gpu_device_defaults(args: argparse.Namespace) -> None:
         args.image_gpu = 1 if args.image_gpu is None else args.image_gpu
 
     if args.device is None:
-        args.device = f"cuda:{args.image_gpu}" if torch.cuda.is_available() else "cpu"
+        if torch_npu is not None and torch.npu.is_available():
+            args.device = f"npu:{args.image_gpu}"
+        elif torch.cuda.is_available():
+            args.device = f"cuda:{args.image_gpu}"
+        else:
+            args.device = "cpu"
 
 
 @contextmanager
@@ -276,18 +295,30 @@ def _maybe_launch_reward_server(args: argparse.Namespace):
     if args.reward_model_name is None:
         raise ValueError("--launch_reward_server requires --reward_model_name.")
 
-    command = args.reward_server_command.format(
+    is_npu = torch_npu is not None and torch.npu.is_available()
+    if is_npu and args.reward_server_command == DEFAULT_REWARD_SERVER_COMMAND:
+        server_command = DEFAULT_REWARD_SERVER_COMMAND_NPU
+    else:
+        server_command = args.reward_server_command
+    command = server_command.format(
         model=args.reward_model_name,
         host=args.reward_server_host,
         port=args.reward_server_port,
     )
     env = os.environ.copy()
     env.setdefault("VLLM_USE_DEEP_GEMM", "0")
-    if torch.cuda.is_available():
+    if is_npu:
+        env["ASCEND_RT_VISIBLE_DEVICES"] = str(args.reward_gpu)
         env["CUDA_VISIBLE_DEVICES"] = str(args.reward_gpu)
+        dev_msg = f"ASCEND_RT_VISIBLE_DEVICES={env.get('ASCEND_RT_VISIBLE_DEVICES')}"
+    elif torch.cuda.is_available():
+        env["CUDA_VISIBLE_DEVICES"] = str(args.reward_gpu)
+        dev_msg = f"CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES')}"
+    else:
+        dev_msg = "CPU Mode"
     print(
-        f"Launching reward server (CUDA device index {args.reward_gpu}, "
-        f"CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES')}): {command}"
+        f"Launching reward server (Device index {args.reward_gpu}, "
+        f"{dev_msg}): {command}"
     )
     process = subprocess.Popen(shlex.split(command), env=env)
     try:
@@ -408,8 +439,8 @@ def main():
         "--device",
         default=None,
         help=(
-            "Diffusers device (e.g. cuda:1). "
-            "Default: cuda:0 on a single visible GPU; cuda:1 on the second GPU when two or more are visible."
+            "Diffusers device (e.g. npu:1, cuda:1). "
+            "Default: npu:0 / cuda:0 on a single visible card; npu:1 / cuda:1 on the second card when two or more are visible."
         ),
     )
     parser.add_argument(
