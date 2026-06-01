@@ -70,13 +70,6 @@ from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 sys_logger = logging.getLogger(__name__)
 
 
-def _extract_infer_metrics(output: Any) -> dict[str, Any]:
-    """Extract the ``metrics`` dict produced by ``TrainingWorker.infer_batch``."""
-    if output is None:
-        return {}
-    return tu.get(output, "metrics", default={})
-
-
 def compute_advantage(
     data: DataProto,
     adv_estimator: str,
@@ -870,7 +863,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
             {"ref_log_prob": log_probs.float(), "ref_prev_sample_mean": prev_sample_mean.float()}
         )
         # Propagate per-call MFU / loss metrics computed in the worker.
-        infer_metrics = _extract_infer_metrics(output)
+        infer_metrics = tu.get(output, "metrics", default={})
         return DataProto.from_tensordict(ref_log_prob), infer_metrics
 
     def _compute_old_log_prob(self, batch: DataProto) -> tuple[DataProto, dict[str, Any]]:
@@ -890,7 +883,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         if prev_sample_mean is not None:
             old_log_prob_dict["old_prev_sample_mean"] = prev_sample_mean.float()
         old_log_prob = tu.get_tensordict(old_log_prob_dict)
-        infer_metrics = _extract_infer_metrics(output)
+        infer_metrics = tu.get(output, "metrics", default={})
         return DataProto.from_tensordict(old_log_prob), infer_metrics
 
     def fit(self):
@@ -1266,7 +1259,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
             "noise": noise.float(),
             "timesteps": timesteps.float(),
         }
-        infer_metrics = _extract_infer_metrics(output)
+        infer_metrics = tu.get(output, "metrics", default={})
         return DataProto.from_tensordict(tu.get_tensordict(ref_output)), infer_metrics
 
     def fit(self):
