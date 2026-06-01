@@ -85,7 +85,7 @@ class TestDiffusionAlgoConfig:
         assert cfg.adv_estimator == "flow_grpo"
         assert cfg.norm_adv_by_std_in_grpo is True
         assert cfg.global_std is True
-        assert cfg.old_policy_decay_type == 0
+        assert cfg.old_policy_decay_schedule == "copy"
         assert cfg.old_policy_decay is None
         assert cfg.old_policy_update_interval == 1
         assert cfg.timestep_fraction == pytest.approx(1.0)
@@ -95,7 +95,7 @@ class TestDiffusionAlgoConfig:
         cfg = DiffusionAlgoConfig(
             norm_adv_by_std_in_grpo=False,
             global_std=False,
-            old_policy_decay_type=2,
+            old_policy_decay_schedule="delayed_linear_to_0_999",
             old_policy_decay=0.5,
             old_policy_update_interval=2,
             timestep_fraction=0.5,
@@ -103,7 +103,7 @@ class TestDiffusionAlgoConfig:
         )
         assert cfg.norm_adv_by_std_in_grpo is False
         assert cfg.global_std is False
-        assert cfg.old_policy_decay_type == 2
+        assert cfg.old_policy_decay_schedule == "delayed_linear_to_0_999"
         assert cfg.old_policy_decay == pytest.approx(0.5)
         assert cfg.old_policy_update_interval == 2
         assert cfg.timestep_fraction == pytest.approx(0.5)
@@ -113,6 +113,7 @@ class TestDiffusionAlgoConfig:
         "kwargs, match",
         [
             ({"adv_mode": "bogus"}, "Invalid adv_mode"),
+            ({"old_policy_decay_schedule": "bogus"}, "Invalid old_policy_decay_schedule"),
             ({"old_policy_decay": 1.1}, "old_policy_decay.*\\[0, 1\\]"),
             ({"old_policy_update_interval": 0}, "old_policy_update_interval.*positive"),
             ({"timestep_fraction": 0.0}, "timestep_fraction.*\\(0, 1\\]"),

@@ -69,10 +69,10 @@ algorithm:
   # Whether to normalize advantages using global standard deviation
   global_std: True
 
-  # DiffusionNFT old-policy EMA schedule type from the reference return_decay function
-  old_policy_decay_type: 0
+  # DiffusionNFT old-policy EMA schedule; choices are copy, linear_to_0_5, delayed_linear_to_0_999.
+  old_policy_decay_schedule: copy
 
-  # DiffusionNFT fixed old-policy EMA decay; null uses old_policy_decay_type schedule
+  # DiffusionNFT fixed old-policy EMA decay; null uses old_policy_decay_schedule.
   old_policy_decay: null
 
   # DiffusionNFT optimizer steps between old-policy adapter refreshes

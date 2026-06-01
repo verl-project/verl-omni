@@ -76,7 +76,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=online \
     algorithm.timestep_fraction=1.0 \
-    algorithm.old_policy_decay_type=1 \
+    algorithm.old_policy_decay_schedule=delayed_linear_to_0_999 \
     algorithm.old_policy_update_interval=1 \
     algorithm.adv_mode=continuous \
     reward.num_workers=1 \

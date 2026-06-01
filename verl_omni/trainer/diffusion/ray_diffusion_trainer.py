@@ -1275,6 +1275,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         return DataProto.from_tensordict(tu.get_tensordict(ref_output))
 
     def _prepare_actor_batch(self, batch: DataProto, reward_tensor: torch.Tensor) -> DataProto:
+        """Delegate algorithm-specific rollout-to-actor batch preparation."""
         actor_cfg = self.config.actor_rollout_ref.actor
         rewards = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
         rollout_dict = {key: batch.batch[key] for key in batch.batch.keys()}
@@ -1303,7 +1304,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
         decay = algo_cfg.old_policy_decay
         if decay is None:
-            decay = old_policy_decay(self.global_steps, algo_cfg.old_policy_decay_type)
+            decay = old_policy_decay(self.global_steps, algo_cfg.old_policy_decay_schedule)
 
         if metrics is not None:
             metrics["old_policy/update_applied"] = 1.0

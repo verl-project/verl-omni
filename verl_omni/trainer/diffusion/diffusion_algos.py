@@ -111,7 +111,15 @@ class DiffusionLossFn(ABC):
         adv_clip_max: float,
         timestep_shuffle_seed: int | None = None,
     ) -> Any:
-        """Prepare the actor batch before the update step. Default is a no-op."""
+        """Prepare rollout outputs for actor update when the trainer has not already done so.
+
+        Reverse-process policy-gradient losses such as FlowGRPO can keep the batch unchanged because their trainer path has
+        already added ``old_log_probs`` and ``advantages``. DPO can also keep
+        the batch unchanged because offline preference data plus reference
+        predictions provide the loss inputs directly. Forward-process online
+        losses such as DiffusionNFT override this hook to turn final-latent
+        rollouts and rewards into loss-specific actor tensors.
+        """
         return batch
 
 

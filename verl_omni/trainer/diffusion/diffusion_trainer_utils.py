@@ -13,20 +13,30 @@
 # limitations under the License.
 """Shared helpers for diffusion Ray trainers."""
 
-from typing import Any
+from typing import Any, Literal
+
+OldPolicyDecaySchedule = Literal["copy", "linear_to_0_5", "delayed_linear_to_0_999"]
+
+OLD_POLICY_DECAY_SCHEDULES: dict[OldPolicyDecaySchedule, tuple[int, float, float]] = {
+    "copy": (0, 0.0, 0.0),
+    "linear_to_0_5": (0, 0.001, 0.5),
+    "delayed_linear_to_0_999": (75, 0.0075, 0.999),
+}
 
 
-def old_policy_decay(step: int, decay_type: int) -> float:
-    """Old-policy LoRA EMA decay schedules."""
-    if decay_type == 0:
-        flat, uprate, uphold = 0, 0.0, 0.0
-    elif decay_type == 1:
-        flat, uprate, uphold = 0, 0.001, 0.5
-    elif decay_type == 2:
-        flat, uprate, uphold = 75, 0.0075, 0.999
+def old_policy_decay(step: int, schedule: OldPolicyDecaySchedule) -> float:
+    """Return the old-policy LoRA EMA decay for a named DiffusionNFT schedule.
+
+    The decay is used as ``old <- decay * old + (1 - decay) * current`` when refreshing
+    the rollout adapter. The schedules mirror the reference DiffusionNFT ``return_decay``
+    helper: ``copy`` hard-copies the current adapter, ``linear_to_0_5`` ramps from 0 to
+    0.5, and ``delayed_linear_to_0_999`` waits 75 steps before ramping to 0.999.
+    """
+    if schedule in OLD_POLICY_DECAY_SCHEDULES:
+        warmup_steps, ramp_rate, max_decay = OLD_POLICY_DECAY_SCHEDULES[schedule]
     else:
-        raise ValueError(f"Unsupported old_policy_decay_type: {decay_type}")
-    return 0.0 if step < flat else min((step - flat) * uprate, uphold)
+        raise ValueError(f"Unsupported old_policy_decay_schedule: {schedule}")
+    return 0.0 if step < warmup_steps else min((step - warmup_steps) * ramp_rate, max_decay)
 
 
 class NoOpCheckpointManager:
