@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Qwen-Image rollout adapter for DiffusionNFT."""
 
 import os
 from typing import Any, Literal
@@ -22,11 +23,10 @@ from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.qwen_image_flow_grpo.common import apply_true_cfg, build_img_shapes
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
-from .common import apply_true_cfg, build_img_shapes
-
-__all__ = ["QwenImagePipelineWithLogProb"]
+__all__ = ["QwenImageDiffusionNFTPipeline"]
 
 
 def _maybe_to_cpu(value):
@@ -39,17 +39,16 @@ def _coalesce_not_none(value, default):
     return default if value is None else value
 
 
-@VllmOmniPipelineBase.register("QwenImagePipeline", algorithm="flow_grpo")
-class QwenImagePipelineWithLogProb(QwenImagePipeline):
-    """Rollout pipeline for Qwen-Image that captures per-step log-probabilities.
+@VllmOmniPipelineBase.register("QwenImagePipeline", algorithm="diffusion_nft")
+class QwenImageDiffusionNFTPipeline(QwenImagePipeline):
+    """Rollout pipeline for Qwen-Image used by DiffusionNFT.
 
     Extends :class:`~vllm_omni.diffusion.models.qwen_image.QwenImagePipeline`
-    with a custom SDE-based scheduler and additional output fields required
-    for RL training (e.g. FlowGRPO).  In addition to the final generated image
-    the pipeline returns all intermediate latents, their log-probabilities,
-    and the corresponding timesteps.
+    with a custom SDE-based scheduler and output fields required for forward-process
+    RL training. In addition to the final generated image, the pipeline returns
+    clean final latents and training timesteps for the DiffusionNFT actor.
 
-    Registered under ``"QwenImagePipeline"`` for vllm-omni rollout dispatch.
+    Registered under ``"QwenImagePipeline"`` with ``algorithm="diffusion_nft"``.
     """
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
@@ -300,13 +299,13 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         attention_kwargs: dict[str, Any] | None = None,
         callback_on_step_end_tensor_inputs: tuple[str, ...] = ("latents",),
         max_sequence_length: int = 512,
-        noise_level: float = 0.7,
+        noise_level: float = 0.0,
         sde_window_size: int | None = None,
         sde_window_range: tuple[int, int] = (0, 5),
         sde_type: Literal["sde", "cps"] = "sde",
-        logprobs: bool = True,
+        logprobs: bool = False,
     ) -> DiffusionOutput:
-        """End-to-end image generation with rollout data collection.
+        """End-to-end image generation with DiffusionNFT rollout data collection.
 
         Encodes the prompt, prepares latents, runs the SDE diffusion loop via
         :meth:`diffuse`, and decodes the final latents through the VAE.  Sampling
@@ -362,8 +361,9 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             DiffusionOutput: Contains the decoded *output* image and a
                 *custom_output* dict with keys ``"all_latents"``,
                 ``"all_log_probs"``, ``"all_timesteps"``, ``"prompt_embeds"``,
-                ``"prompt_embeds_mask"``, ``"negative_prompt_embeds"``, and
-                ``"negative_prompt_embeds_mask"``.
+                ``"prompt_embeds_mask"``, ``"negative_prompt_embeds"``,
+                ``"negative_prompt_embeds_mask"``, and when ``collect_mode`` is
+                ``"final_latent"``, ``"latents_clean"`` and ``"train_timesteps"``.
         """
         custom_prompt = req.prompts[0] if req.prompts else {}
         if isinstance(custom_prompt, dict):
@@ -385,6 +385,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         )
         sde_type = _coalesce_not_none(sampling_params.extra_args.get("sde_type", None), sde_type)
         logprobs = _coalesce_not_none(sampling_params.extra_args.get("logprobs", None), logprobs)
+        collect_mode = _coalesce_not_none(sampling_params.extra_args.get("collect_mode", None), "final_latent")
 
         generator = sampling_params.generator or generator
         if generator is None and sampling_params.seed is not None:
@@ -500,6 +501,7 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         )
 
         self._current_timestep = None
+        latents_clean = latents
         if output_type == "latent":
             image = latents
         else:
@@ -516,15 +518,20 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             latents = latents / latents_std + latents_mean
             image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
 
+        custom_output = {
+            "all_latents": _maybe_to_cpu(all_latents),
+            "all_log_probs": _maybe_to_cpu(all_log_probs),
+            "all_timesteps": _maybe_to_cpu(all_timesteps),
+            "prompt_embeds": _maybe_to_cpu(prompt_embeds),
+            "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
+            "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds),
+            "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
+        }
+        if collect_mode == "final_latent":
+            custom_output["latents_clean"] = _maybe_to_cpu(latents_clean)
+            custom_output["train_timesteps"] = _maybe_to_cpu(timesteps.unsqueeze(0).expand(latents_clean.shape[0], -1))
+
         return DiffusionOutput(
             output=_maybe_to_cpu(image),
-            custom_output={
-                "all_latents": _maybe_to_cpu(all_latents),
-                "all_log_probs": _maybe_to_cpu(all_log_probs),
-                "all_timesteps": _maybe_to_cpu(all_timesteps),
-                "prompt_embeds": _maybe_to_cpu(prompt_embeds),
-                "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
-                "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds),
-                "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
-            },
+            custom_output=custom_output,
         )
