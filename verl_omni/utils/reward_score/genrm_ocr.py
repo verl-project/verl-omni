@@ -134,16 +134,18 @@ async def compute_score_ocr(
             solution_image = solution_image.permute(3, 0, 1, 2)
         # Now [C, F, H, W]: subsample frames, then frame-dim first
         solution_image = solution_image[:, ::frame_interval]  # [C, F', H, W]
-        solution_image = solution_image.permute(1, 0, 2, 3)   # [F', C, H, W]
+        solution_image = solution_image.permute(1, 0, 2, 3)  # [F', C, H, W]
 
     elif solution_image.ndim == 5:
-        frame_interval = extra_info.get("frame_interval", )
+        frame_interval = extra_info.get(
+            "frame_interval",
+        )
         if is_channels_last:
             # [B, F, H, W, C] → [B, C, F, H, W]
             solution_image = solution_image.permute(0, 4, 1, 2, 3)
         # Now [B, C, F, H, W]: subsample frames, flatten batch + frames
         solution_image = solution_image[:, :, ::frame_interval]  # [B, C, F', H, W]
-        solution_image = solution_image.permute(0, 2, 1, 3, 4)   # [B, F', C, H, W]
+        solution_image = solution_image.permute(0, 2, 1, 3, 4)  # [B, F', C, H, W]
         solution_image = solution_image.reshape(-1, *solution_image.shape[2:])  # [B*F', C, H, W]
 
     model_name = model_name or os.path.expanduser(DEFAULT_GRM_MODEL_PATH)

@@ -39,6 +39,47 @@ def test_flow_grpo_advantage_return(norm_adv_by_std_in_grpo: bool, global_std: b
     assert advantages.shape == returns.shape == (batch_size, steps)
 
 
+def test_dance_grpo_loss_registered_and_callable():
+    """``dance_grpo`` loss function is registered and can be invoked."""
+    from hydra import compose, initialize_config_dir
+    from verl.utils.config import omega_conf_to_dataclass
+
+    from verl_omni.workers.config.diffusion.actor import FSDPDiffusionActorConfig
+
+    batch_size = 8
+    rollout_log_probs = torch.randn((batch_size,), dtype=torch.float32)
+    current_log_probs = torch.randn((batch_size,), dtype=torch.float32)
+    advantages = torch.randn((batch_size,), dtype=torch.float32)
+
+    with initialize_config_dir(
+        config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/actor"), version_base=None
+    ):
+        cfg = compose(
+            config_name="dp_diffusion_actor",
+            overrides=[
+                "strategy=fsdp",
+                "diffusion_loss.loss_mode=dance_grpo",
+                "diffusion_loss.clip_ratio=0.0001",
+                "diffusion_loss.adv_clip_max=5.0",
+                "ppo_micro_batch_size_per_gpu=8",
+            ],
+        )
+    actor_config: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
+
+    dance_grpo_loss = diffusion_algos.get_diffusion_loss_fn("dance_grpo")
+    pg_loss, pg_metrics = dance_grpo_loss.compute_loss(
+        old_log_prob=rollout_log_probs,
+        log_prob=current_log_probs,
+        advantages=advantages,
+        config=actor_config,
+    )
+
+    assert pg_loss.shape == ()
+    assert isinstance(pg_loss.item(), float)
+    for key in ("actor/ppo_kl", "actor/pg_clipfrac", "actor/pg_clipfrac_higher", "actor/pg_clipfrac_lower"):
+        assert key in pg_metrics
+
+
 @pytest.mark.parametrize("norm_adv_by_std_in_grpo", [True, False])
 @pytest.mark.parametrize("global_std", [True, False])
 def test_flow_grpo_advantage_grouped_uids(norm_adv_by_std_in_grpo: bool, global_std: bool) -> None:
@@ -170,3 +211,22 @@ def test_compute_policy_loss_grpo_guard() -> None:
         "actor/ratio_std",
     ):
         assert key in pg_metrics, key
+
+
+@pytest.mark.parametrize("norm_adv_by_std_in_grpo", [True, False])
+@pytest.mark.parametrize("global_std", [True, False])
+def test_dance_grpo_advantage_return(norm_adv_by_std_in_grpo: bool, global_std: bool) -> None:
+    """``dance_grpo`` reuses the ``flow_grpo`` advantage estimator."""
+    batch_size = 8
+    steps = 10
+    sample_level_rewards = torch.randn((batch_size, steps), dtype=torch.float32)
+    uid = np.array([f"uid-{idx}" for idx in range(batch_size)], dtype=object)
+
+    advantages, returns = diffusion_algos.compute_flow_grpo_outcome_advantage(
+        sample_level_rewards=sample_level_rewards,
+        index=uid,
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        global_std=global_std,
+    )
+
+    assert advantages.shape == returns.shape == (batch_size, steps)
