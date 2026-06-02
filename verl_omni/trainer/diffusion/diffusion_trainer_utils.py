@@ -13,18 +13,16 @@
 # limitations under the License.
 """Shared helpers for diffusion Ray trainers."""
 
-from typing import Any, Literal
+from typing import Any
 
-OldPolicyDecaySchedule = Literal["copy", "linear_to_0_5", "delayed_linear_to_0_999"]
-
-OLD_POLICY_DECAY_SCHEDULES: dict[OldPolicyDecaySchedule, tuple[int, float, float]] = {
+OLD_POLICY_DECAY_SCHEDULES = {
     "copy": (0, 0.0, 0.0),
     "linear_to_0_5": (0, 0.001, 0.5),
     "delayed_linear_to_0_999": (75, 0.0075, 0.999),
 }
 
 
-def old_policy_decay(step: int, schedule: OldPolicyDecaySchedule) -> float:
+def old_policy_decay(step: int, schedule: str) -> float:
     """Return the old-policy LoRA EMA decay for a named DiffusionNFT schedule.
 
     The decay is used as ``old <- decay * old + (1 - decay) * current`` when refreshing

@@ -21,9 +21,6 @@ import numpy as np
 import torch
 from verl import DataProto
 
-OldPolicyUpdateType = Literal["none", "copy", "ema"]
-OldPolicyUpdateResult = tuple[bool, float, OldPolicyUpdateType]
-
 
 def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
     """
@@ -98,8 +95,10 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
     return metrics
 
 
-def compute_old_policy_metrics(update_result: OldPolicyUpdateResult) -> dict[str, Any]:
-    """Build metrics for DiffusionNFT old-policy adapter refreshes."""
+def compute_old_policy_metrics(
+    update_result: tuple[bool, float, Literal["none", "copy", "ema"]],
+) -> dict[str, Any]:
+    """Build metrics for old-policy adapter refreshes."""
     update_applied, decay, update_type = update_result
     return {
         "old_policy/update_applied": float(update_applied),

@@ -23,7 +23,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from pprint import pprint
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import numpy as np
 import ray
@@ -58,7 +58,6 @@ from verl_omni.trainer.diffusion.diffusion_algos import (
     get_diffusion_loss_fn,
 )
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
-    OldPolicyUpdateResult,
     compute_data_metrics_diffusion,
     compute_old_policy_metrics,
     compute_reward_extra_metrics_diffusion,
@@ -1294,7 +1293,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                 batch.batch[key] = value
         return batch
 
-    def _update_old_policy(self) -> OldPolicyUpdateResult:
+    def _update_old_policy(self) -> tuple[bool, float, Literal["none", "copy", "ema"]]:
         algo_cfg = self.config.algorithm
         if self.global_steps % algo_cfg.old_policy_update_interval != 0:
             return False, 0.0, "none"

@@ -698,6 +698,17 @@ class DiffusionNFTLoss(DiffusionLossFn):
         global_std: bool,
         epsilon: float = 1e-4,
     ) -> torch.Tensor:
+        """Group-normalize raw rewards for DiffusionNFT optimality probability.
+        This is not the same as the policy gradient advantages for loss computation.
+
+        Per prompt ``c`` (``uid``), DiffusionNFT Sec. 3.3 / Algo. 1 steps 4--5:
+
+            r_norm = r^raw(x_0, c) - E_pi_old[r^raw | c]
+            r_norm /= Z_c   (if ``norm_by_std``; ``Z_c`` = per-group or global reward std)
+
+        Optimality reward: r = 1/2 + 1/2 * clip(r_norm / Z_c, -1, 1)  (clip/map in
+        ``_advantage_to_reward_prob``). ``reward_prob`` weights the forward-process loss.
+        """
         rewards = rewards.detach().float()
         advantages = rewards.clone()
         id2score: dict[Any, list[torch.Tensor]] = defaultdict(list)

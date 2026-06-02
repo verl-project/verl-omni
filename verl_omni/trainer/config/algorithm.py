@@ -20,7 +20,7 @@ from typing import Optional
 from verl.base_config import BaseConfig
 from verl.trainer.config.algorithm import RolloutCorrectionConfig
 
-from verl_omni.trainer.diffusion.diffusion_trainer_utils import OLD_POLICY_DECAY_SCHEDULES, OldPolicyDecaySchedule
+from verl_omni.trainer.diffusion.diffusion_trainer_utils import OLD_POLICY_DECAY_SCHEDULES
 
 __all__ = ["DiffusionAlgoConfig", "RolloutCorrectionConfig"]
 
@@ -34,7 +34,7 @@ class DiffusionAlgoConfig(BaseConfig):
     adv_estimator: str = "flow_grpo"
     norm_adv_by_std_in_grpo: bool = True
     global_std: bool = True
-    old_policy_decay_schedule: OldPolicyDecaySchedule = "copy"
+    old_policy_decay_schedule: str = "copy"
     old_policy_decay: Optional[float] = None
     old_policy_update_interval: int = 1
     timestep_fraction: float = 1.0
