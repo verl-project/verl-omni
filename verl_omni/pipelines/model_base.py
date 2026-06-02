@@ -113,18 +113,22 @@ class DiffusionModelBase(ABC):
         negative_prompt_embeds_mask: torch.Tensor,
         micro_batch: TensorDict,
         step: int,
-    ) -> tuple[dict, dict]:
-        """Build architecture-specific inputs for reverse-trajectory training.
-        This packages the stored rollout ``x_t`` for a model forward; the
-        scheduler step that scores/samples toward ``x_{t-1}`` happens later.
+    ) -> tuple[dict, Optional[dict]]:
+        """Build architecture-specific inputs for a model forward.
+        For reverse-trajectory algorithms, ``latents`` and ``timesteps`` usually
+        contain the full rollout trajectory and ``step`` selects the current
+        slice. For forward-process objectives, callers may pass an already
+        selected/noised latent and timestep directly.
         The caller is responsible for universal pre-processing (common tensor extraction
         and nested-embed unpadding) before invoking this method.
 
         Args:
             module (ModelMixin): the diffusion transformer module.
             model_config (DiffusionModelConfig): the configuration of the diffusion model.
-            latents (torch.Tensor): full latent tensor from the micro-batch, shape (B, T, ...).
-            timesteps (torch.Tensor): full timestep tensor from the micro-batch, shape (B, T).
+            latents (torch.Tensor): latent tensor from the micro-batch; either a full trajectory
+                of shape (B, T, ...) or a selected/noised latent of shape (B, ...).
+            timesteps (torch.Tensor): timestep tensor from the micro-batch; either a full
+                trajectory of shape (B, T) or a selected timestep of shape (B,).
             prompt_embeds (torch.Tensor): dense positive prompt embeddings, shape (B, L, D).
             prompt_embeds_mask (torch.Tensor): attention mask for prompt_embeds, shape (B, L).
             negative_prompt_embeds (torch.Tensor): dense negative prompt embeddings, shape (B, L, D).
@@ -166,51 +170,14 @@ class DiffusionModelBase(ABC):
         pass
 
     @classmethod
-    def prepare_forward_diffusion_inputs(
-        cls,
-        module: ModelMixin,
-        model_config: DiffusionModelConfig,
-        xt: torch.Tensor,
-        timestep: torch.Tensor,
-        prompt_embeds: torch.Tensor,
-        prompt_embeds_mask: torch.Tensor,
-        negative_prompt_embeds: Optional[torch.Tensor],
-        negative_prompt_embeds_mask: Optional[torch.Tensor],
-        micro_batch: TensorDict,
-        step: int,
-    ) -> tuple[dict, Optional[dict]]:
-        """Build inputs for forward-process losses such as DiffusionNFT.
-        This packages an already re-noised ``x_t`` constructed from rollout
-        ``x_0``; the forward noising itself happens before this hook.
-
-        Model-specific adapters can override this for architecture-specific
-        kwargs. The default matches common Diffusers transformer argument names.
-        """
-        model_inputs = {
-            "hidden_states": xt,
-            "timestep": timestep,
-            "encoder_hidden_states": prompt_embeds,
-            "encoder_attention_mask": prompt_embeds_mask,
-            "return_dict": False,
-        }
-        negative_model_inputs = None
-        if negative_prompt_embeds is not None:
-            negative_model_inputs = {
-                **model_inputs,
-                "encoder_hidden_states": negative_prompt_embeds,
-                "encoder_attention_mask": negative_prompt_embeds_mask,
-            }
-        return model_inputs, negative_model_inputs
-
-    @classmethod
-    def forward_velocity(
+    def forward(
         cls,
         module: ModelMixin,
         model_config: DiffusionModelConfig,
         model_inputs: dict[str, torch.Tensor],
         negative_model_inputs: Optional[dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
-        """Return ``v_theta(xt, t)`` for forward-process objectives.
+        """Run a single model prediction for forward-process objectives.
 
         Override this when an algorithm trains by noising clean latents
         ``x0 -> xt`` (i.e., forward process) and then optimizing model predictions directly, rather

@@ -31,12 +31,12 @@ __all__ = ["QwenImageDiffusionNFT"]
 class QwenImageDiffusionNFT(QwenImage):
     """Forward-process Qwen-Image adapter used by DiffusionNFT."""
     @classmethod
-    def prepare_forward_diffusion_inputs(
+    def prepare_model_inputs(
         cls,
         module,
         model_config: DiffusionModelConfig,
-        xt: torch.Tensor,
-        timestep: torch.Tensor,
+        latents: torch.Tensor,
+        timesteps: torch.Tensor,
         prompt_embeds: torch.Tensor,
         prompt_embeds_mask: torch.Tensor,
         negative_prompt_embeds: Optional[torch.Tensor],
@@ -45,6 +45,8 @@ class QwenImageDiffusionNFT(QwenImage):
         step: int,
     ) -> tuple[dict, Optional[dict]]:
         del step
+        xt = latents
+        timestep = timesteps
         height = tu.get_non_tensor_data(data=micro_batch, key="height", default=None)
         width = tu.get_non_tensor_data(data=micro_batch, key="width", default=None)
         vae_scale_factor = tu.get_non_tensor_data(data=micro_batch, key="vae_scale_factor", default=None)
@@ -75,7 +77,7 @@ class QwenImageDiffusionNFT(QwenImage):
         return model_inputs, negative_model_inputs
 
     @classmethod
-    def forward_velocity(
+    def forward(
         cls,
         module,
         model_config: DiffusionModelConfig,

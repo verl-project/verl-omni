@@ -60,9 +60,8 @@ from verl.workers.engine.utils import enable_full_determinism, prepare_micro_bat
 
 from verl_omni.pipelines.utils import (
     build_scheduler,
+    forward,
     forward_and_sample_previous_step,
-    forward_velocity,
-    prepare_forward_diffusion_inputs,
     prepare_model_inputs,
     prepare_noisy_latents,
 )
@@ -1002,14 +1001,11 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
 
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
         model_inputs, negative_model_inputs, dpo_context = self.prepare_model_inputs(micro_batch=micro_batch, step=step)
-        noise_pred = forward_and_sample_previous_step(
+        noise_pred = forward(
             module=self.module,
-            scheduler=self.scheduler,
             model_config=self.model_config,
             model_inputs=model_inputs,
             negative_model_inputs=negative_model_inputs,
-            scheduler_inputs=micro_batch,
-            step=step,
         )
         model_output = self.prepare_model_outputs(output=(noise_pred, dpo_context), micro_batch=micro_batch)
 
@@ -1089,11 +1085,11 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
                 negative_prompt_embeds, negative_prompt_embeds_mask, sp_size
             )
 
-        model_inputs, negative_model_inputs = prepare_forward_diffusion_inputs(
+        model_inputs, negative_model_inputs = prepare_model_inputs(
             module=self.module,
             model_config=self.model_config,
-            xt=xt,
-            timestep=timestep,
+            latents=xt,
+            timesteps=timestep,
             prompt_embeds=prompt_embeds,
             prompt_embeds_mask=prompt_embeds_mask,
             negative_prompt_embeds=negative_prompt_embeds,
@@ -1120,14 +1116,14 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
         )
 
         with self.use_adapter("old"), torch.no_grad():
-            old_prediction = forward_velocity(
+            old_prediction = forward(
                 module=self.module,
                 model_config=self.model_config,
                 model_inputs=model_inputs,
                 negative_model_inputs=negative_model_inputs,
             ).detach()
 
-        forward_prediction = forward_velocity(
+        forward_prediction = forward(
             module=self.module,
             model_config=self.model_config,
             model_inputs=model_inputs,
@@ -1136,7 +1132,7 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
 
         with torch.no_grad():
             with self.disable_adapter():
-                ref_forward_prediction = forward_velocity(
+                ref_forward_prediction = forward(
                     module=self.module,
                     model_config=self.model_config,
                     model_inputs=model_inputs,
