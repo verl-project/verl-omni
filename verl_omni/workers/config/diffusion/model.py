@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -94,6 +95,8 @@ class DiffusionModelConfig(BaseConfig):
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
 
     algo: Optional[DiffusionRolloutAlgoConfig] = field(default_factory=DiffusionRolloutAlgoConfig)
+
+    fsdp_layer_prefixes: Sequence[str] = field(default_factory=lambda: ["transformer_blocks."])
 
     def __post_init__(self):
         import_external_libs(self.external_lib)

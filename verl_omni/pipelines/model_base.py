@@ -77,6 +77,19 @@ class DiffusionModelBase(ABC):
             ) from None
 
     @classmethod
+    def build_module(cls, model_config: DiffusionModelConfig, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
+        """Optional custom model loader for non-diffusers models.
+
+        Return ``None`` to fall back to ``diffusers.AutoModel`` (the default).
+        Override to load a model that diffusers cannot handle.
+
+        The returned module is passed through the normal FSDP / LoRA pipeline.
+        It should already be in *torch_dtype* and implement
+        ``enable_gradient_checkpointing()`` if applicable.
+        """
+        return None
+
+    @classmethod
     @abstractmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig) -> SchedulerMixin:
         """Build and configure the diffusion scheduler for this model.

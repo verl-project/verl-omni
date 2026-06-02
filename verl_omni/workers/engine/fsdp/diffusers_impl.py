@@ -188,6 +188,55 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
+    def _build_module_from_registry(self, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
+        """Build the model via a registered ``DiffusionModelBase`` subclass.
+
+        Returns ``None`` when the subclass does not provide a custom loader
+        (i.e. it returns ``None`` from ``build_module()``).  Custom loaders
+        bypass ``diffusers.AutoModel`` — engine-level hooks (attention
+        processors, gradient-checkpointing wrappers, LoRA, dtype upcast)
+        may be partially effective or silently inactive on the returned module.
+        """
+        from verl_omni.pipelines.model_base import DiffusionModelBase
+
+        model_cls = DiffusionModelBase.get_class(self.model_config)
+        module = model_cls.build_module(self.model_config, torch_dtype)
+        if module is None:
+            return None
+
+        logger.warning(
+            "Built %s via DiffusionModelBase custom loader; engine-level hooks "
+            "(attention processors, gradient-checkpointing wrappers, LoRA, "
+            "dtype upcast) may be partially effective or silently inactive. "
+            "See the docstring of _build_module_from_registry.",
+            type(module).__name__,
+        )
+
+        try:
+            module.to(torch_dtype)
+        except AttributeError:
+            raise TypeError(
+                f"{type(module).__name__} returned by build_module() has no to() method. "
+                "Custom models must be torch.nn.Module instances."
+            ) from None
+
+        if self.model_config.enable_gradient_checkpointing:
+            try:
+                module.enable_gradient_checkpointing()
+            except AttributeError:
+                raise NotImplementedError(
+                    f"Gradient checkpointing is enabled in config, but {type(module).__name__} "
+                    "does not implement enable_gradient_checkpointing(). "
+                    "Either implement it or set enable_gradient_checkpointing=False."
+                ) from None
+            logger.info(
+                "Gradient checkpointing enabled on %s via enable_gradient_checkpointing().",
+                type(module).__name__,
+            )
+
+        module.can_generate = lambda: False
+        return module
+
     def _build_module(self):
         from diffusers import AutoModel
         from verl.utils.torch_dtypes import PrecisionType
@@ -200,6 +249,11 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
+        module = self._build_module_from_registry(torch_dtype)
+        if module is not None:
+            return module
+
+        # Default path: load via diffusers AutoModel
         init_context = get_init_weight_context_manager(use_meta_tensor=True, mesh=self.device_mesh)
 
         with init_context(), warnings.catch_warnings():
@@ -667,6 +721,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                     base_sync_done=base_sync_done,
                     is_diffusers=True,
                     adapter_name=adapter_name or "default",
+                    layer_prefixes=self.model_config.fsdp_layer_prefixes,
                 )
             if not base_sync_done:
                 params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
@@ -754,16 +809,16 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
         """
         latents = micro_batch["all_latents"]
         timesteps = micro_batch["all_timesteps"]
-        prompt_embeds = micro_batch["prompt_embeds"]
-        prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
-        negative_prompt_embeds = micro_batch["negative_prompt_embeds"]
-        negative_prompt_embeds_mask = micro_batch["negative_prompt_embeds_mask"]
+        prompt_embeds = micro_batch.get("prompt_embeds", None)
+        prompt_embeds_mask = micro_batch.get("prompt_embeds_mask", None)
+        negative_prompt_embeds = micro_batch.get("negative_prompt_embeds", None)
+        negative_prompt_embeds_mask = micro_batch.get("negative_prompt_embeds_mask", None)
         sp_size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
 
-        if prompt_embeds.is_nested:
+        if isinstance(prompt_embeds, torch.Tensor) and prompt_embeds.is_nested:
             prompt_embeds, prompt_embeds_mask = self._unpad_nested_embeds(prompt_embeds, prompt_embeds_mask)
 
-        if sp_size > 1:
+        if isinstance(prompt_embeds, torch.Tensor) and sp_size > 1:
             prompt_embeds, prompt_embeds_mask = self._pad_embeds_for_sp(prompt_embeds, prompt_embeds_mask, sp_size)
 
         if isinstance(negative_prompt_embeds, torch.Tensor) and negative_prompt_embeds.is_nested:

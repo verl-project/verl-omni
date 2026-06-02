@@ -279,6 +279,8 @@ actor_rollout_ref:
     policy_state_adapters:
     - default
     lora_dtype: null
+    fsdp_layer_prefixes:
+    - transformer_blocks.
     mtp:
       _target_: verl.workers.config.MtpConfig
       enable: false
