@@ -155,7 +155,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         if hasattr(self.model_config, "hf_config"):
             self.flops_counter = FlopsCounter(self.model_config.hf_config)
-        elif self.config.model_type in ("diffusion_model", "diffusion_dp_model"):
+        elif self.config.model_type in ("diffusion_model", "diffusion_dpo_model"):
             self.flops_counter = DiffusionFlopsCounter(
                 architecture=self.model_config.architecture,
                 transformer_config=self.model_config.transformer_config,
