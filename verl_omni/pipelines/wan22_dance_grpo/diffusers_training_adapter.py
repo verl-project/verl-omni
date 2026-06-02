@@ -165,7 +165,6 @@ class Wan22DanceGRPO(DiffusionModelBase):
             "hidden_states": hidden_states,
             "timestep": timestep,
             "encoder_hidden_states": prompt_embeds,
-            "encoder_hidden_states_mask": prompt_embeds_mask,
             "encoder_hidden_states_image": None,
             "return_dict": False,
         }
@@ -176,7 +175,6 @@ class Wan22DanceGRPO(DiffusionModelBase):
                 "hidden_states": hidden_states,
                 "timestep": timestep,
                 "encoder_hidden_states": negative_prompt_embeds,
-                "encoder_attention_mask": negative_prompt_embeds_mask,
                 "encoder_hidden_states_image": None,
                 "return_dict": False,
             }

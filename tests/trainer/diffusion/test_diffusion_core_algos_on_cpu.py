@@ -18,6 +18,12 @@ import numpy as np
 import pytest
 import torch
 
+from verl_omni.pipelines.wan22_dance_grpo.common import (
+    apply_cfg,
+    flatten,
+    sd3_time_shift,
+    seed_from_prompt_ids,
+)
 from verl_omni.trainer.diffusion import diffusion_algos
 
 
@@ -37,6 +43,117 @@ def test_flow_grpo_advantage_return(norm_adv_by_std_in_grpo: bool, global_std: b
     )
 
     assert advantages.shape == returns.shape == (batch_size, steps)
+
+
+# ===========================================================================
+# Wan2.2 DanceGRPO shared-utility tests
+# ===========================================================================
+
+
+class TestSD3TimeShift:
+
+    def test_shape_preserved(self):
+        t = torch.linspace(0, 1, 50)
+        out = sd3_time_shift(5.0, t)
+        assert out.shape == t.shape
+        assert out.dtype == t.dtype
+
+    def test_monotonic(self):
+        t = torch.linspace(0, 1, 100)
+        out = sd3_time_shift(5.0, t)
+        diffs = out[1:] - out[:-1]
+        assert torch.all(diffs >= 0), "output must be monotonically non-decreasing"
+
+    def test_shift_one_is_identity(self):
+        t = torch.linspace(0, 1, 50)
+        out = sd3_time_shift(1.0, t)
+        torch.testing.assert_close(out, t)
+
+    def test_edge_cases(self):
+        assert sd3_time_shift(3.0, torch.tensor(0.0)).item() == 0.0
+        assert sd3_time_shift(3.0, torch.tensor(1.0)).item() == 1.0
+
+    def test_larger_shift_increases_curvature(self):
+        t = torch.tensor(0.5)
+        low = sd3_time_shift(2.0, t)
+        high = sd3_time_shift(10.0, t)
+        assert high > low
+
+
+class TestApplyCFG:
+
+    def test_scale_one_is_positive_only(self):
+        pos = torch.randn(2, 16, 8, 8)
+        neg = torch.randn(2, 16, 8, 8)
+        out = apply_cfg(pos, neg, 1.0)
+        torch.testing.assert_close(out, pos)
+
+    def test_scale_two_formula(self):
+        pos = torch.ones(2, 4)
+        neg = torch.zeros(2, 4)
+        out = apply_cfg(pos, neg, 2.0)
+        expected = neg + 2.0 * (pos - neg)
+        torch.testing.assert_close(out, expected)
+
+    def test_scale_zero_returns_negative_only(self):
+        pos = torch.ones(2, 4)
+        neg = torch.zeros(2, 4)
+        out = apply_cfg(pos, neg, 0.0)
+        torch.testing.assert_close(out, neg)
+
+
+class TestFlatten:
+
+    def test_flat_list(self):
+        assert list(flatten([1, 2, 3])) == [1, 2, 3]
+
+    def test_nested_list(self):
+        assert list(flatten([[1, 2], [3, [4, 5]]])) == [1, 2, 3, 4, 5]
+
+    def test_empty_nested(self):
+        assert list(flatten([[], [[[]]], [1]])) == [1]
+
+    def test_single_element(self):
+        assert list(flatten([42])) == [42]
+
+
+class TestSeedFromPromptIDs:
+
+    def test_tensor_input(self):
+        ids = torch.randint(0, 50000, (77,))
+        seed = seed_from_prompt_ids(ids)
+        assert isinstance(seed, int)
+        assert 0 <= seed < 2**64
+
+    def test_flat_list_input(self):
+        ids = [49406, 320, 1000]
+        seed = seed_from_prompt_ids(ids)
+        assert isinstance(seed, int)
+
+    def test_nested_list_input(self):
+        ids = [[49406, 320], [1000, 5001]]
+        seed = seed_from_prompt_ids(ids)
+        assert isinstance(seed, int)
+
+    def test_deterministic(self):
+        ids = torch.randint(0, 50000, (77,))
+        s1 = seed_from_prompt_ids(ids)
+        s2 = seed_from_prompt_ids(ids.clone())
+        assert s1 == s2
+
+    def test_different_ids_different_seeds(self):
+        ids_a = torch.zeros(10, dtype=torch.long)
+        ids_b = torch.ones(10, dtype=torch.long)
+        assert seed_from_prompt_ids(ids_a) != seed_from_prompt_ids(ids_b)
+
+    def test_2d_tensor(self):
+        ids = torch.randint(0, 50000, (1, 77))
+        seed = seed_from_prompt_ids(ids)
+        assert isinstance(seed, int)
+
+    def test_invalid_type_raises(self):
+        with pytest.raises(TypeError, match="Unsupported type"):
+            seed_from_prompt_ids(42)
 
 
 def test_dance_grpo_loss_registered_and_callable():
