@@ -22,7 +22,6 @@ import numpy as np
 import torch
 from diffusers.models.transformers.transformer_wan import WanTransformer3DModel
 from tensordict import TensorDict
-from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_name
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
@@ -30,7 +29,6 @@ from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.workers.config import DiffusionModelConfig
 
 from .common import (
-    WAN_VAE_SCALE_FACTOR_SPATIAL,
     apply_cfg,
     sd3_time_shift,
 )

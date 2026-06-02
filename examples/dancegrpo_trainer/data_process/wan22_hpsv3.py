@@ -36,7 +36,7 @@ def _contains_chinese(text: str) -> bool:
 
 
 def _load_prompts(path: str) -> list[str]:
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         lines = [line.strip() for line in f if line.strip()]
     return [line for line in lines if not _contains_chinese(line)]
 

@@ -17,9 +17,9 @@ import os
 from dataclasses import asdict
 from typing import Any, Optional
 
+import numpy as np
 import ray
 import torch
-import numpy as np
 import torchvision.transforms as T
 import vllm_omni.entrypoints.cli.serve
 from verl.utils.config import omega_conf_to_dataclass

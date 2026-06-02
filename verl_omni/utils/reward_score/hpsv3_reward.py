@@ -1,3 +1,17 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 import math
 import os
@@ -17,23 +31,46 @@ _lock = threading.Lock()
 _inferencer = None
 
 _INSTRUCTION = """
-You are tasked with evaluating a generated image based on Visual Quality and Text Alignment and give a overall score to estimate the human preference. Please provide a rating from 0 to 10, with 0 being the worst and 10 being the best. 
+You are tasked with evaluating a generated image based on Visual Quality and Text 
+Alignment and give a overall score to estimate the human preference. Please provide 
+a rating from 0 to 10, with 0 being the worst and 10 being the best.
 
-**Visual Quality:**  
-Evaluate the overall visual quality of the image. The following sub-dimensions should be considered:
-- **Reasonableness:** The image should not contain any significant biological or logical errors, such as abnormal body structures or nonsensical environmental setups.
-- **Clarity:** Evaluate the sharpness and visibility of the image. The image should be clear and easy to interpret, with no blurring or indistinct areas.
-- **Detail Richness:** Consider the level of detail in textures, materials, lighting, and other visual elements (e.g., hair, clothing, shadows).
-- **Aesthetic and Creativity:** Assess the artistic aspects of the image, including the color scheme, composition, atmosphere, depth of field, and the overall creative appeal. The scene should convey a sense of harmony and balance.
-- **Safety:** The image should not contain harmful or inappropriate content, such as political, violent, or adult material. If such content is present, the image quality and satisfaction score should be the lowest possible. 
+**Visual Quality:**
+Evaluate the overall visual quality of the image. The following sub-dimensions 
+should be considered:
+- **Reasonableness:** The image should not contain any significant biological or 
+  logical errors, such as abnormal body structures or nonsensical environmental 
+  setups.
+- **Clarity:** Evaluate the sharpness and visibility of the image. The image 
+  should be clear and easy to interpret, with no blurring or indistinct areas.
+- **Detail Richness:** Consider the level of detail in textures, materials, 
+  lighting, and other visual elements (e.g., hair, clothing, shadows).
+- **Aesthetic and Creativity:** Assess the artistic aspects of the image, 
+  including the color scheme, composition, atmosphere, depth of field, and the 
+  overall creative appeal. The scene should convey a sense of harmony and balance.
+- **Safety:** The image should not contain harmful or inappropriate content, 
+  such as political, violent, or adult material. If such content is present, the 
+  image quality and satisfaction score should be the lowest possible.
 
-**Text Alignment:**  
-Assess how well the image matches the textual prompt across the following sub-dimensions:
-- **Subject Relevance** Evaluate how accurately the subject(s) in the image (e.g., person, animal, object) align with the textual description. The subject should match the description in terms of number, appearance, and behavior.
-- **Style Relevance:** If the prompt specifies a particular artistic or stylistic style, evaluate how well the image adheres to this style.
-- **Contextual Consistency**: Assess whether the background, setting, and surrounding elements in the image logically fit the scenario described in the prompt. The environment should support and enhance the subject without contradictions.
-- **Attribute Fidelity**: Check if specific attributes mentioned in the prompt (e.g., colors, clothing, accessories, expressions, actions) are faithfully represented in the image. Minor deviations may be acceptable, but critical attributes should be preserved.
-- **Semantic Coherence**: Evaluate whether the overall meaning and intent of the prompt are captured in the image. The generated content should not introduce elements that conflict with or distort the original description.
+**Text Alignment:**
+Assess how well the image matches the textual prompt across the following 
+sub-dimensions:
+- **Subject Relevance** Evaluate how accurately the subject(s) in the image 
+  (e.g., person, animal, object) align with the textual description. The subject 
+  should match the description in terms of number, appearance, and behavior.
+- **Style Relevance:** If the prompt specifies a particular artistic or stylistic 
+  style, evaluate how well the image adheres to this style.
+- **Contextual Consistency**: Assess whether the background, setting, and 
+  surrounding elements in the image logically fit the scenario described in the 
+  prompt. The environment should support and enhance the subject without 
+  contradictions.
+- **Attribute Fidelity**: Check if specific attributes mentioned in the prompt 
+  (e.g., colors, clothing, accessories, expressions, actions) are faithfully 
+  represented in the image. Minor deviations may be acceptable, but critical 
+  attributes should be preserved.
+- **Semantic Coherence**: Evaluate whether the overall meaning and intent of the 
+  prompt are captured in the image. The generated content should not introduce 
+  elements that conflict with or distort the original description.
 Textual prompt - {text_prompt}
 
 
@@ -96,14 +133,17 @@ def _fetch_image(ele):
         image = image.convert("RGB")
     elif isinstance(image, str):
         if image.startswith("http://") or image.startswith("https://"):
-            import requests
             from io import BytesIO
+
+            import requests
+
             image = Image.open(requests.get(image, stream=True).raw).convert("RGB")
         elif image.startswith("file://"):
             image = Image.open(image[7:]).convert("RGB")
         elif image.startswith("data:image"):
-            from io import BytesIO
             import base64
+            from io import BytesIO
+
             _, base64_data = image.split("base64,", 1)
             data = base64.b64decode(base64_data)
             image = Image.open(BytesIO(data)).convert("RGB")
@@ -187,7 +227,7 @@ class _Qwen2VLRewardModelBT(Qwen2VLForConditionalGeneration):
         mm_token_type_ids=None,
         **kwargs,
     ):
-        outputs: Qwen2VLModelOutputWithPast = self.model(
+        outputs = self.model(
             input_ids=input_ids,
             pixel_values=pixel_values,
             pixel_values_videos=pixel_values_videos,
@@ -202,7 +242,7 @@ class _Qwen2VLRewardModelBT(Qwen2VLForConditionalGeneration):
             **kwargs,
         )
         hidden_states = outputs.last_hidden_state
-        with torch.autocast(device_type='cuda', dtype=torch.float32):
+        with torch.autocast(device_type="cuda", dtype=torch.float32):
             logits = self.rm_head(hidden_states)  # [B, L, N]
 
         if input_ids is not None:
@@ -216,7 +256,7 @@ class _Qwen2VLRewardModelBT(Qwen2VLForConditionalGeneration):
             sequence_lengths = -1
         else:
             if input_ids is not None:
-                sequence_lengths = (torch.eq(input_ids, self.config.pad_token_id).int().argmax(-1) - 1)
+                sequence_lengths = torch.eq(input_ids, self.config.pad_token_id).int().argmax(-1) - 1
                 sequence_lengths = sequence_lengths % input_ids.shape[-1]
                 sequence_lengths = sequence_lengths.to(logits.device)
             else:
@@ -233,9 +273,7 @@ class _Qwen2VLRewardModelBT(Qwen2VLForConditionalGeneration):
 
 
 def _remap_state_dict(state_dict, model_keys):
-    if any("model.language_model" in k for k in model_keys) and not any(
-        "language_model" in k for k in state_dict
-    ):
+    if any("model.language_model" in k for k in model_keys) and not any("language_model" in k for k in state_dict):
         remapped = {}
         for key, value in state_dict.items():
             if "visual" in key:
@@ -274,6 +312,7 @@ class _HPSv3Inferencer:
         logger.info("Loading HPSv3 checkpoint from %s", checkpoint_path)
         if checkpoint_path.endswith(".safetensors"):
             import safetensors.torch
+
             state_dict = safetensors.torch.load_file(checkpoint_path, device="cpu")
         else:
             state_dict = torch.load(checkpoint_path, map_location="cpu")
@@ -295,9 +334,10 @@ class _HPSv3Inferencer:
 
     def _prepare_input(self, data):
         from collections.abc import Mapping
+
         if isinstance(data, Mapping):
             return type(data)({k: self._prepare_input(v) for k, v in data.items()})
-        elif isinstance(data, (tuple, list)):
+        elif isinstance(data, tuple | list):
             return type(data)(self._prepare_input(v) for v in data)
         elif isinstance(data, torch.Tensor):
             return data.to(device=self.device)
@@ -306,7 +346,7 @@ class _HPSv3Inferencer:
     def prepare_batch(self, image_paths, prompts):
         max_pixels = 256 * 28 * 28
         message_list = []
-        for text, image in zip(prompts, image_paths):
+        for text, image in zip(prompts, image_paths, strict=False):
             message_list.append(
                 [
                     {
@@ -394,11 +434,8 @@ def compute_score_hpsv3(
     device: str = "npu",
     **kwargs,
 ) -> dict:
-
     checkpoint_path = os.getenv("custom_reward_model_path", model_name)
-    assert checkpoint_path is not None, (
-        "HPSv3 checkpoint path must be provided via reward.reward_model.model_path"
-    )
+    assert checkpoint_path is not None, "HPSv3 checkpoint path must be provided via reward.reward_model.model_path"
 
     inferencer = _get_inferencer(checkpoint_path, device)
 

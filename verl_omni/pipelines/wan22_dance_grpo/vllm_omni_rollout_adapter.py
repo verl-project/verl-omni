@@ -21,13 +21,13 @@ collection required for RL training (DanceGRPO).
 
 from __future__ import annotations
 
-import os
 import logging
+import os
 from typing import Any
 
 import numpy as np
-import torch
 import PIL.Image
+import torch
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.forward_context import set_forward_context_denoise_step_idx
@@ -244,14 +244,10 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
 
         all_latents_tensor = torch.stack(all_latents, dim=1) if all_latents else None
         all_log_probs_tensor = (
-            torch.stack(all_log_probs, dim=1)
-            if all_log_probs and all_log_probs[0] is not None
-            else None
+            torch.stack(all_log_probs, dim=1) if all_log_probs and all_log_probs[0] is not None else None
         )
         all_timesteps_tensor = (
-            torch.stack(all_timesteps_list).unsqueeze(0).expand(latents.shape[0], -1)
-            if all_timesteps_list
-            else None
+            torch.stack(all_timesteps_list).unsqueeze(0).expand(latents.shape[0], -1) if all_timesteps_list else None
         )
         return latents, all_latents_tensor, all_log_probs_tensor, all_timesteps_tensor
 
@@ -300,7 +296,7 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         # Encode through T5 text encoder
         prompt_embeds = self.text_encoder(ids.to(device), mask.to(device)).last_hidden_state
         prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
-        prompt_embeds = [u[:v] for u, v in zip(prompt_embeds, seq_lens)]
+        prompt_embeds = [u[:v] for u, v in zip(prompt_embeds, seq_lens, strict=False)]
         prompt_embeds = torch.stack(
             [torch.cat([u, u.new_zeros(max_sequence_length - u.size(0), u.size(1))]) for u in prompt_embeds], dim=0
         )
@@ -308,7 +304,9 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt, 1)
         prompt_embeds = prompt_embeds.view(batch_size * num_videos_per_prompt, seq_len, -1)
 
-        prompt_embeds_mask = (torch.arange(max_sequence_length, device=device).expand(prompt_embeds.shape[0], -1) < seq_lens.unsqueeze(1)).long()
+        prompt_embeds_mask = (
+            torch.arange(max_sequence_length, device=device).expand(prompt_embeds.shape[0], -1) < seq_lens.unsqueeze(1)
+        ).long()
 
         return prompt_embeds, prompt_embeds_mask
 
@@ -383,12 +381,14 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
                     multi_modal_data = custom_prompt.get("multi_modal_data", None)
                     if multi_modal_data is None:
                         extra_args = custom_prompt.get("extra_args", {})
-                        multi_modal_data = extra_args.get("multi_modal_data", {}) if isinstance(extra_args, dict) else {}
+                        multi_modal_data = (
+                            extra_args.get("multi_modal_data", {}) if isinstance(extra_args, dict) else {}
+                        )
                     raw_image = multi_modal_data.get("image", None) if multi_modal_data else None
                     image = raw_image if raw_image is not None else image
 
                 # --- Handle warmup / dummy run (both prompt_ids and prompt_embeds are None) ---
-                if custom_prompt.get("prompt", None) == 'dummy run':
+                if custom_prompt.get("prompt", None) == "dummy run":
                     return DiffusionOutput(output=None, custom_output={})
 
         # Default dimensions
@@ -396,7 +396,7 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         height = sampling_params.height or height
         width = sampling_params.width or width
         num_frames = sampling_params.num_frames or frame_num
-        
+
         # Ensure dimensions are compatible with VAE and patch size
         # For expand_timesteps mode, we need latent dims to be even (divisible by patch_size)
         patch_size = self.transformer_config.patch_size
@@ -409,13 +409,13 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
             guidance_scale = sampling_params.guidance_scale
 
         # Resolve guidance_low / guidance_high for dual-transformer models
-        guidance_low = guidance_scale if isinstance(guidance_scale, (int, float)) else guidance_scale[0]
+        guidance_low = guidance_scale if isinstance(guidance_scale, int | float) else guidance_scale[0]
         guidance_high = (
             req.sampling_params.guidance_scale_2
             if req.sampling_params.guidance_scale_2 is not None
             else (
                 guidance_scale[1]
-                if isinstance(guidance_scale, (list, tuple)) and len(guidance_scale) > 1
+                if isinstance(guidance_scale, list | tuple) and len(guidance_scale) > 1
                 else guidance_low
             )
         )
@@ -427,10 +427,18 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         if boundary_ratio is None:
             boundary_ratio = 0.875
 
-        noise_level = _coalesce_not_none(sampling_params.extra_args.get("noise_level", None), kwargs.get("noise_level", 1.2))
-        sde_window_size = _coalesce_not_none(sampling_params.extra_args.get("sde_window_size", None), kwargs.get("sde_window_size"))
-        sde_window_range = _coalesce_not_none(sampling_params.extra_args.get("sde_window_range", None), kwargs.get("sde_window_range", [0, 5]))
-        sde_type = _coalesce_not_none(sampling_params.extra_args.get("sde_type", None), kwargs.get("sde_type", "dance_sde"))
+        noise_level = _coalesce_not_none(
+            sampling_params.extra_args.get("noise_level", None), kwargs.get("noise_level", 1.2)
+        )
+        sde_window_size = _coalesce_not_none(
+            sampling_params.extra_args.get("sde_window_size", None), kwargs.get("sde_window_size")
+        )
+        sde_window_range = _coalesce_not_none(
+            sampling_params.extra_args.get("sde_window_range", None), kwargs.get("sde_window_range", [0, 5])
+        )
+        sde_type = _coalesce_not_none(
+            sampling_params.extra_args.get("sde_type", None), kwargs.get("sde_type", "dance_sde")
+        )
         logprobs = _coalesce_not_none(sampling_params.extra_args.get("logprobs", None), kwargs.get("logprobs", True))
         shift = _coalesce_not_none(sampling_params.extra_args.get("shift", None), kwargs.get("shift", 5.0))
 

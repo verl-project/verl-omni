@@ -16,11 +16,9 @@
 Shared utilities for Wan2.2 DanceGRPO adapters.
 """
 
-import math
-from typing import Optional
+import hashlib
 
 import torch
-import hashlib
 
 WAN_VAE_SCALE_FACTOR_SPATIAL = 8
 WAN_VAE_SCALE_FACTOR_TEMPORAL = 4
@@ -70,16 +68,16 @@ def flatten(lst):
 def seed_from_prompt_ids(prompt_ids):
     """
     Generate a deterministic seed from prompt token ids.
-    
+
     Args:
         prompt_ids: Can be one of:
             - torch.Tensor (e.g., [1, 77])
             - flat list (e.g., [49406, 320, ...])
             - nested list (e.g., [[49406, 320, ...]])
-    
+
     Returns:
         int: A 64-bit integer seed deterministically derived from the ids.
-    
+
     Raises:
         TypeError: If prompt_ids is not a Tensor or list.
     """
@@ -95,5 +93,5 @@ def seed_from_prompt_ids(prompt_ids):
 
     # Hash the tuple to produce a deterministic seed
     hash_bytes = hashlib.md5(str(ids_tuple).encode()).digest()
-    seed = int.from_bytes(hash_bytes[:8], byteorder='big')
+    seed = int.from_bytes(hash_bytes[:8], byteorder="big")
     return seed
