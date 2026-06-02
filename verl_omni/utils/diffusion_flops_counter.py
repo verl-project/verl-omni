@@ -253,7 +253,7 @@ class DiffusionModelFlops:
         """
         raise NotImplementedError("Subclass DiffusionModelFlops and override estimate_flops().")
 
-    def get_latent_seqlens(self, data: Any = None, config: Optional[Mapping[str, Any]] = None) -> list[int]:
+    def get_latent_seqlens(self, data: Any) -> list[int]:
         """Extract per-sample latent-stream (VAE-encoded) token counts from a batch.
 
         The latent stream is the primary tensor denoised by the model. This default
@@ -268,13 +268,6 @@ class DiffusionModelFlops:
           include both target and reference tokens).
         - Latents are already flattened to sequence dimensions `(B, L, C)`.
         """
-        if not isinstance(self, DiffusionModelFlops):
-            # Static call backward-compatibility path: get_latent_seqlens(data, config)
-            data_param = self
-            config_param = data
-            temp_inst = DiffusionModelFlops(config_param or {})
-            return temp_inst.get_latent_seqlens(data_param)
-
         latents = None
         stacked = False
         for key in self.LATENT_KEYS:
@@ -306,7 +299,7 @@ class DiffusionModelFlops:
             per_sample *= int(d)
         return [per_sample] * batch_size
 
-    def get_prompt_seqlens(self, data: Any = None, config: Optional[Mapping[str, Any]] = None) -> list[int]:
+    def get_prompt_seqlens(self, data: Any) -> list[int]:
         """Extract per-sample prompt-stream (conditioning) token counts from a batch.
 
         This handles text encoder conditioning tokens flowing through text-side/cross-attention
@@ -320,13 +313,6 @@ class DiffusionModelFlops:
         - The pipeline is an Img2Vid model where vision encoder embeddings are
           concatenated to the text embeddings prior to cross-attention.
         """
-        if not isinstance(self, DiffusionModelFlops):
-            # Static call backward-compatibility path: get_prompt_seqlens(data, config)
-            data_param = self
-            config_param = data
-            temp_inst = DiffusionModelFlops(config_param or {})
-            return temp_inst.get_prompt_seqlens(data_param)
-
         prompt_embeds_mask = data.get("prompt_embeds_mask")
         prompt_embeds = data.get("prompt_embeds")
 
@@ -392,7 +378,7 @@ class QwenImageFlops(DiffusionModelFlops):
     block FLOPs and is included for completeness.
     """
 
-    def get_latent_seqlens(self, data: Any = None, config: Optional[Mapping[str, Any]] = None) -> list[int]:
+    def get_latent_seqlens(self, data: Any) -> list[int]:
         """Override to handle the diffusers ``_pack_latents`` layout.
 
         Qwen-Image (and the wider MM-DiT family: SD3, Flux, ...) calls
@@ -412,12 +398,6 @@ class QwenImageFlops(DiffusionModelFlops):
         otherwise fall back to the base default for any caller that
         stores raw VAE-encoded latents.
         """
-        if not isinstance(self, DiffusionModelFlops):
-            # Static call backward-compatibility: QwenImageFlops.get_latent_seqlens(data, config).
-            data_param = self
-            config_param = data
-            return QwenImageFlops(config_param or {}).get_latent_seqlens(data_param)
-
         latents, _ = _read_latents(data)
         if latents is not None and hasattr(latents, "shape"):
             shape = tuple(int(d) for d in latents.shape)
@@ -425,7 +405,7 @@ class QwenImageFlops(DiffusionModelFlops):
             if len(shape) >= 3 and in_channels > 0 and shape[-1] == in_channels:
                 # Packed: (B, [T_steps,] L, C') with C' == in_channels.
                 return [shape[-2]] * shape[0]
-        return super().get_latent_seqlens(data, config)
+        return super().get_latent_seqlens(data)
 
     def estimate_flops(
         self,
@@ -540,23 +520,8 @@ class DiffusionFlopsCounter:
         if self._arch is None:
             return {"latent_seqlens": [], "prompt_seqlens": []}
 
-        import inspect
-
-        # get_latent_seqlens signature resolution
-        latent_sig = inspect.signature(self._arch.get_latent_seqlens)
-        latent_params = list(latent_sig.parameters.keys())
-        if len(latent_params) >= 2 and latent_params[1] == "config":
-            latent_seqlens = self._arch.get_latent_seqlens(data, self.config)
-        else:
-            latent_seqlens = self._arch.get_latent_seqlens(data)
-
-        # get_prompt_seqlens signature resolution
-        prompt_sig = inspect.signature(self._arch.get_prompt_seqlens)
-        prompt_params = list(prompt_sig.parameters.keys())
-        if len(prompt_params) >= 2 and prompt_params[1] == "config":
-            prompt_seqlens = self._arch.get_prompt_seqlens(data, self.config)
-        else:
-            prompt_seqlens = self._arch.get_prompt_seqlens(data)
+        latent_seqlens = self._arch.get_latent_seqlens(data)
+        prompt_seqlens = self._arch.get_prompt_seqlens(data)
 
         return {
             "latent_seqlens": list(latent_seqlens),
@@ -591,29 +556,12 @@ class DiffusionFlopsCounter:
         if self._arch is None or delta_time <= 0 or num_timesteps <= 0 or num_forward_passes <= 0:
             return 0.0, promised
 
-        import inspect
-
-        sig = inspect.signature(self._arch.estimate_flops)
-        params = list(sig.parameters.keys())
-
-        if params and params[0] == "config":
-            # Legacy static/class method signature: (config, latent_seqlens, prompt_seqlens, delta_time, ...)
-            estimated = self._arch.estimate_flops(
-                self.config,
-                latent_seqlens,
-                prompt_seqlens,
-                delta_time,
-                num_timesteps=num_timesteps,
-                num_forward_passes=num_forward_passes,
-            )
-        else:
-            # Modern instance method signature: (latent_seqlens, prompt_seqlens, delta_time, ...)
-            estimated = self._arch.estimate_flops(
-                latent_seqlens,
-                prompt_seqlens,
-                delta_time,
-                num_timesteps=num_timesteps,
-                num_forward_passes=num_forward_passes,
-            )
+        estimated = self._arch.estimate_flops(
+            latent_seqlens,
+            prompt_seqlens,
+            delta_time,
+            num_timesteps=num_timesteps,
+            num_forward_passes=num_forward_passes,
+        )
 
         return float(estimated), float(promised)
