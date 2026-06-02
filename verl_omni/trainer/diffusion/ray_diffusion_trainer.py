@@ -1222,7 +1222,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         actor_output = rename_dict(actor_output, "actor/")
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
-    def _compute_ref_noise_pred(self, batch: DataProto) -> Optional[tuple[DataProto, dict[str, Any]]]:
+    def _compute_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:
         """Reference transformer output and shared flow tensors."""
         batch_td = batch.to_tensordict()
         batch_td = embeds_padding_2_no_padding(batch_td)
@@ -1256,8 +1256,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
             "noise": noise.float(),
             "timesteps": timesteps.float(),
         }
-        infer_metrics = tu.get(output, "metrics", default={})
-        return DataProto.from_tensordict(tu.get_tensordict(ref_output)), infer_metrics
+        return DataProto.from_tensordict(tu.get_tensordict(ref_output))
 
     def fit(self):
         """
@@ -1354,8 +1353,6 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_dpo = self._compute_ref_noise_pred(batch)
                             if ref_dpo is not None:
-                                ref_dpo, infer_metrics = ref_dpo
-                                metrics.update(rename_dict(reduce_metrics(infer_metrics), "ref/"))
                                 batch = batch.union(ref_dpo)
                     # update actor
                     with marked_timer("update_actor", timing_raw, color="red"):

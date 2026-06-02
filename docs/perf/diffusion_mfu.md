@@ -4,7 +4,7 @@
 Last updated: 05/31/2026
 
 VeRL-Omni reports **Model FLOPs Utilization (MFU)** for diffusion RL
-training using the same three keys upstream
+training using the same actor keys upstream
 [verl](https://github.com/verl-project/verl) reports for LLM RL — so users
 have a single, hardware-agnostic metric to compare across runs,
 checkpoints, and clusters. This page describes what is reported, how the
@@ -17,14 +17,16 @@ If you are looking for FlowGRPO-specific training metrics
 
 ## Reported metrics
 
-The diffusion trainer emits three MFU keys, on the same step cadence as
+The diffusion trainer emits two MFU keys, on the same step cadence as
 the rest of the actor metrics:
 
 | Metric             | What is timed                                                                                                                                              |
 |--------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `actor/mfu`        | Actor `train_batch` — full mini-batch update (includes all forward/backward micro-batches for gradient accumulation).                                      |
 | `actor_infer/mfu`  | Actor `infer_batch` — full mini-batch forward-only pass (log-prob recompute on the rollout trajectories).                                                  |
-| `ref/mfu`          | Reference policy `infer_batch` — full mini-batch forward-only pass. Only emitted when a reference policy is constructed (e.g., `use_kl_loss=True`).        |
+
+Reference-policy forward passes (e.g. ref log-prob or ref noise-pred) are
+not surfaced at the trainer level, matching upstream verl.
 
 `MFU = 1.0` means every GPU in the data-parallel group is sustaining the
 device's advertised peak FLOPS for the duration of the timed call. The
@@ -458,7 +460,7 @@ freshly-instantiated tiny model.
 
 Use any existing diffusion-RL launch script (e.g.
 `examples/flowgrpo_trainer/run_qwen_image_ocr.sh` adapted to your
-pipeline). Look for the three keys in your logger output:
+pipeline). Look for the two keys in your logger output:
 
 ```text
 {"actor/mfu": 0.XX, "actor_infer/mfu": 0.XX, ...}
