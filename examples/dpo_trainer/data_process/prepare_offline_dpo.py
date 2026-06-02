@@ -53,7 +53,10 @@ DEFAULT_SYSTEM_PROMPT = "You are a helpful image generation assistant."
 DEFAULT_REWARD_SERVER_COMMAND = "vllm serve {model} --host {host} --port {port} --dtype bfloat16 --enforce-eager"
 # Due to memory size differences between NPU and GPU devices, we adjust
 # --gpu-memory-utilization and --max-model-len for NPU backends.
-DEFAULT_REWARD_SERVER_COMMAND_NPU = "vllm serve {model} --host {host} --port {port} --dtype bfloat16 --gpu-memory-utilization 0.85 --max-model-len 40000"
+DEFAULT_REWARD_SERVER_COMMAND_NPU = (
+    "vllm serve {model} --host {host} --port {port} --dtype bfloat16 "
+    "--gpu-memory-utilization 0.85 --max-model-len 40000"
+)
 
 
 def _read_prompts_from_txt(path: Path) -> list[str]:
@@ -316,10 +319,7 @@ def _maybe_launch_reward_server(args: argparse.Namespace):
         dev_msg = f"CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES')}"
     else:
         dev_msg = "CPU Mode"
-    print(
-        f"Launching reward server (Device index {args.reward_gpu}, "
-        f"{dev_msg}): {command}"
-    )
+    print(f"Launching reward server (Device index {args.reward_gpu}, {dev_msg}): {command}")
     process = subprocess.Popen(shlex.split(command), env=env)
     try:
         _wait_for_reward_server(args.reward_server_host, args.reward_server_port, args.reward_server_startup_timeout)
@@ -440,7 +440,8 @@ def main():
         default=None,
         help=(
             "Diffusers device (e.g. npu:1, cuda:1). "
-            "Default: npu:0 / cuda:0 on a single visible card; npu:1 / cuda:1 on the second card when two or more are visible."
+            "Default: npu:0 / cuda:0 on a single visible card; npu:1 / cuda:1 "
+            "on the second card when two or more are visible."
         ),
     )
     parser.add_argument(
