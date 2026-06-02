@@ -44,6 +44,7 @@ import os
 import sys
 
 import pytest
+import torch
 
 # ── Pure-Python utility tests (no vllm required) ─────────────────────────────
 
