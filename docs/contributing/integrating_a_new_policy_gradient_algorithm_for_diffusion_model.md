@@ -31,12 +31,12 @@ algorithm in this repository and exercises every extension point.
 
 A new policy-gradient algorithm needs **four pieces**:
 
-1. **An SDE step formula** for the rollout, usually a new `sde_type` in
+1. **An SDE step formula** for the rollout — usually a new `sde_type` in
    [`FlowMatchSDEDiscreteScheduler`](../../verl_omni/pipelines/schedulers/flow_match_sde.py),
    or a brand-new scheduler if the family changes.
 2. **An advantage estimator** registered with `@register_diffusion_adv_est(...)`.
 3. **A loss function** registered with `@register_diffusion_loss(...)`.
-4. **One adapter pair per (architecture, algorithm) combination**: a
+4. **One adapter pair per (architecture, algorithm) combination** — a
    `DiffusionModelBase` subclass and a `VllmOmniPipelineBase` subclass,
    both decorated with `@register(architecture, algorithm="<name>")`.
 
