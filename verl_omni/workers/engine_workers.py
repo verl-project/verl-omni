@@ -559,13 +559,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
             "latent_seqlens": seqlens["latent_seqlens"],
             "prompt_seqlens": seqlens["prompt_seqlens"],
             "num_timesteps": num_timesteps,
-            "cfg_passes": cfg_passes,
+            "num_forward_passes": cfg_passes,
         }
 
     def _allgather_diffusion_flops_meta(self, meta: dict) -> dict:
         """All-gather per-rank latent/prompt seqlens across the DP group.
 
-        ``num_timesteps`` and ``cfg_passes`` are scalars constant across the
+        ``num_timesteps`` and ``num_forward_passes`` are scalars constant across the
         DP group, so we keep them as-is. Mirrors the ``global_token_num``
         gather performed in ``train_mini_batch`` for the LLM counter.
         """
@@ -585,7 +585,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             "latent_seqlens": [x for xs in gathered_latent for x in xs],
             "prompt_seqlens": [x for xs in gathered_prompt for x in xs],
             "num_timesteps": meta["num_timesteps"],
-            "cfg_passes": meta["cfg_passes"],
+            "num_forward_passes": meta["num_forward_passes"],
         }
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

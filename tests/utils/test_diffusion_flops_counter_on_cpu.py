@@ -665,20 +665,24 @@ class TestDPGlobalConsistency:
         global_img = per_rank_img * world_size
         global_txt = per_rank_txt * world_size
 
-        global_est, prom = counter.estimate_flops(
-            latent_seqlens=global_img,
-            prompt_seqlens=global_txt,
-            delta_time=1.0,
-            num_timesteps=1,
-            num_forward_passes=1,
-        )
-        per_rank_est, _ = counter.estimate_flops(
-            latent_seqlens=per_rank_img,
-            prompt_seqlens=per_rank_txt,
-            delta_time=1.0,
-            num_timesteps=1,
-            num_forward_passes=1,
-        )
+        # The exact dict structure returned by _allgather_diffusion_flops_meta
+        global_meta = {
+            "latent_seqlens": global_img,
+            "prompt_seqlens": global_txt,
+            "num_timesteps": 1,
+            "num_forward_passes": 1,
+        }
+
+        global_est, prom = counter.estimate_flops(delta_time=1.0, **global_meta)
+
+        per_rank_meta = {
+            "latent_seqlens": per_rank_img,
+            "prompt_seqlens": per_rank_txt,
+            "num_timesteps": 1,
+            "num_forward_passes": 1,
+        }
+
+        per_rank_est, _ = counter.estimate_flops(delta_time=1.0, **per_rank_meta)
         # Global / world_size should equal per-rank only when the formula is
         # linear in token count (it is, for the dense terms). Attention is
         # also linear when each sample's joint seqlen is identical.
