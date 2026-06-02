@@ -78,14 +78,10 @@ class DiffusionModelBase(ABC):
 
     @classmethod
     def build_module(cls, model_config: DiffusionModelConfig, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
-        """Optional custom model loader for non-diffusers models.
+        """Load the model without ``diffusers.AutoModel``.
 
-        Return ``None`` to fall back to ``diffusers.AutoModel`` (the default).
-        Override to load a model that diffusers cannot handle.
-
-        The returned module is passed through the normal FSDP / LoRA pipeline.
-        It should already be in *torch_dtype* and implement
-        ``enable_gradient_checkpointing()`` if applicable.
+        Return ``None`` to use the default ``AutoModel`` path.
+        Override this for models that diffusers cannot load.
         """
         return None
 

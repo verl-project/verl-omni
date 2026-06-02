@@ -189,13 +189,10 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
     def _build_module_from_registry(self, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
-        """Build the model via a registered ``DiffusionModelBase`` subclass.
+        """Try loading via ``DiffusionModelBase.build_module()``.
 
-        Returns ``None`` when the subclass does not provide a custom loader
-        (i.e. it returns ``None`` from ``build_module()``).  Custom loaders
-        bypass ``diffusers.AutoModel`` — engine-level hooks (attention
-        processors, gradient-checkpointing wrappers, LoRA, dtype upcast)
-        may be partially effective or silently inactive on the returned module.
+        Returns ``None`` if the registry has no custom loader, so the
+        caller falls back to ``diffusers.AutoModel``.
         """
         from verl_omni.pipelines.model_base import DiffusionModelBase
 
