@@ -122,16 +122,22 @@ class DiffusionModelBase(ABC):
         negative_prompt_embeds_mask: torch.Tensor,
         micro_batch: TensorDict,
         step: int,
-    ) -> tuple[dict, dict]:
-        """Build architecture-specific model inputs for the forward pass.
+    ) -> tuple[dict, Optional[dict]]:
+        """Build architecture-specific inputs for a model forward.
+        For reverse-trajectory algorithms, ``latents`` and ``timesteps`` usually
+        contain the full rollout trajectory and ``step`` selects the current
+        slice. For forward-process objectives, callers may pass an already
+        selected/noised latent and timestep directly.
         The caller is responsible for universal pre-processing (common tensor extraction
         and nested-embed unpadding) before invoking this method.
 
         Args:
             module (ModelMixin): the diffusion transformer module.
             model_config (DiffusionModelConfig): the configuration of the diffusion model.
-            latents (torch.Tensor): full latent tensor from the micro-batch, shape (B, T, ...).
-            timesteps (torch.Tensor): full timestep tensor from the micro-batch, shape (B, T).
+            latents (torch.Tensor): latent tensor from the micro-batch; either a full trajectory
+                of shape (B, T, ...) or a selected/noised latent of shape (B, ...).
+            timesteps (torch.Tensor): timestep tensor from the micro-batch; either a full
+                trajectory of shape (B, T) or a selected timestep of shape (B,).
             prompt_embeds (torch.Tensor): dense positive prompt embeddings, shape (B, L, D).
             prompt_embeds_mask (torch.Tensor): attention mask for prompt_embeds, shape (B, L).
             negative_prompt_embeds (torch.Tensor): dense negative prompt embeddings, shape (B, L, D).
@@ -171,6 +177,25 @@ class DiffusionModelBase(ABC):
             tuple: ``(log_prob, prev_sample_mean, std_dev_t, sqrt_dt)``
         """
         pass
+
+    @classmethod
+    def forward(
+        cls,
+        module: ModelMixin,
+        model_config: DiffusionModelConfig,
+        model_inputs: dict[str, torch.Tensor],
+        negative_model_inputs: Optional[dict[str, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        """Run a single model prediction for forward-process objectives.
+
+        Override this when an algorithm trains by noising clean latents
+        ``x0 -> xt`` (i.e., forward process) and then optimizing model predictions directly, rather
+        than sampling/log-probing the reverse step ``xt -> x_{t-1}``.
+        The default is a plain transformer forward; model adapters only need
+        to override when prediction requires extra handling such as CFG,
+        negative inputs, or output conversion.
+        """
+        return module(**model_inputs)[0]
 
 
 class VllmOmniPipelineBase:
