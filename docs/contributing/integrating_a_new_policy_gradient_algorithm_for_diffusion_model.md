@@ -1,25 +1,35 @@
-# How to Integrate a New PPO-like Algorithm for Diffusion Model
+# How to Integrate a New Policy-Gradient Algorithm for Diffusion Model
 
-Last updated: 05/12/2026.
+Last updated: 06/02/2026.
 
-This guide explains how to add a new PPO-like RL algorithm to VeRL-Omni's
-diffusion trainer. The contracts described here are orthogonal to model
-integration: a single PPO-like algorithm can be extended to any number of
-model architectures by pairing it with the
-`DiffusionModelBase` / `VllmOmniPipelineBase` adapters described in
+This guide explains how to add a new PPO-like policy-gradient algorithm to
+VeRL-Omni's diffusion trainer. Policy-gradient diffusion algorithms operate on
+the reverse denoising trajectory and train from log-probability ratios plus
+advantages. Examples include FlowGRPO, MixGRPO, and GRPO-Guard.
+
+If your algorithm trains from final samples, rewards, or chosen/rejected
+preferences instead of reverse-step logprobs, use
+[`integrating_a_new_direct_preference_algorithm_for_diffusion_model.md`](integrating_a_new_direct_preference_algorithm_for_diffusion_model.md)
+instead. That guide covers direct-preference algorithms such as offline DPO
+and online DiffusionNFT.
+
+The contracts described here are orthogonal to model integration: a single
+policy-gradient algorithm can be extended to any number of model architectures
+by pairing it with the `DiffusionModelBase` / `VllmOmniPipelineBase` adapters
+described in
 [`integrating_a_diffusion_model.md`](integrating_a_diffusion_model.md).
 
 We use **FlowGRPO**
 ([Liu et al., 2025](https://arxiv.org/abs/2505.05470),
  [`verl_omni/pipelines/qwen_image_flow_grpo/`](../../verl_omni/pipelines/qwen_image_flow_grpo/__init__.py))
-as the worked example throughout — it is the reference algorithm in this
-repository and exercises every extension point.
+as the worked example throughout. It is the reference policy-gradient
+algorithm in this repository and exercises every extension point.
 
 ---
 
 ## TL;DR
 
-A new PPO-like algorithm needs **four pieces**:
+A new policy-gradient algorithm needs **four pieces**:
 
 1. **An SDE step formula** for the rollout — usually a new `sde_type` in
    [`FlowMatchSDEDiscreteScheduler`](../../verl_omni/pipelines/schedulers/flow_match_sde.py),
@@ -30,17 +40,10 @@ A new PPO-like algorithm needs **four pieces**:
    `DiffusionModelBase` subclass and a `VllmOmniPipelineBase` subclass,
    both decorated with `@register(architecture, algorithm="<name>")`.
 
-The trainer entrypoint
-([`main_diffusion.py`](../../verl_omni/trainer/main_diffusion.py))
-and the Ray driver
-([`ray_diffusion_trainer.py`](../../verl_omni/trainer/diffusion/ray_diffusion_trainer.py))
-dispatch on model/loss registry strings above, plus two orthogonal algorithm
-config fields:
-
-| Field | Values | Purpose |
-|-------|--------|---------|
-| `algorithm.trainer_type` | `policy_gradient`, `direct_preference` | Selects `PolicyGradientRayTrainer` (FlowGRPO, MixGRPO, …) vs `DirectPreferenceRayTrainer` (DPO, DiffusionNFT, AWM) |
-| `algorithm.sample_source` | `online`, `offline` | `BaseRayDiffusionTrainer.init_workers` skips rollout/reward engine init when `offline` |
+Set `algorithm.trainer_type=policy_gradient` in launch scripts for
+policy-gradient algorithms. The trainer entrypoint
+([`main_diffusion.py`](../../verl_omni/trainer/main_diffusion.py)) then
+selects `PolicyGradientRayTrainer`.
 
 ---
 
@@ -254,7 +257,7 @@ so the registries learn about your package on import.
 ## Step 5 — Wire the Config Knobs
 
 If your algorithm exposes new rollout knobs (e.g. an `sde_window_size`),
-add them to the `DiffusionAlgoConfig` block in
+add them to the `DiffusionRolloutAlgoConfig` block in
 [`diffusion_rollout.yaml`](../../verl_omni/trainer/config/diffusion/rollout/diffusion_rollout.yaml)
 and to the matching dataclass in
 [`verl_omni/workers/config/diffusion/rollout.py`](../../verl_omni/workers/config/diffusion/rollout.py).

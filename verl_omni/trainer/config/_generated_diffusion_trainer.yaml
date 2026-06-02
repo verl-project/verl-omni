@@ -74,6 +74,9 @@ actor_rollout_ref:
       loss_mode: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
       clip_ratio: 0.0001
       adv_clip_max: 5.0
+      mix_beta: 0.5
+      ref_kl_coef: 0.0
+      adaptive_weight_min: 1.0e-05
       dpo_beta: 2000.0
     rollout_correction:
       _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
@@ -418,6 +421,12 @@ algorithm:
   adv_estimator: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
   norm_adv_by_std_in_grpo: true
   global_std: true
+  old_policy_decay_schedule: copy
+  old_policy_decay: null
+  old_policy_update_interval: 1
+  timestep_fraction: 1.0
+  adv_mode: continuous
+  paired_preference: false
   rollout_correction:
     _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
     bypass_mode: false
