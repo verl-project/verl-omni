@@ -23,7 +23,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from pprint import pprint
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import numpy as np
 import ray
@@ -52,14 +52,19 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.trainer.config import DiffusionAlgoConfig
-from verl_omni.trainer.diffusion.diffusion_algos import DiffusionAdvantageEstimator, get_diffusion_adv_estimator_fn
+from verl_omni.trainer.diffusion.diffusion_algos import (
+    DiffusionAdvantageEstimator,
+    get_diffusion_adv_estimator_fn,
+    get_diffusion_loss_fn,
+)
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
+    compute_old_policy_metrics,
     compute_reward_extra_metrics_diffusion,
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
 )
-from verl_omni.trainer.diffusion.diffusion_trainer_utils import NoOpCheckpointManager
+from verl_omni.trainer.diffusion.diffusion_trainer_utils import NoOpCheckpointManager, old_policy_decay
 from verl_omni.trainer.diffusion.rollout_correction import (
     apply_bypass_mode_to_diffusion_batch,
     apply_rollout_correction_to_diffusion_batch,
@@ -1167,14 +1172,31 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         self.use_reference_policy = need_reference_policy(self.config) or (
             config.algorithm.get("trainer_type") == "direct_preference"
         )
+        self._has_old_adapter = "old" in tuple(
+            config.actor_rollout_ref.model.get("policy_state_adapters", ("default",))
+        )
+        if self._has_old_adapter:
+            self._validate_old_adapter_config()
+        loss_mode = config.actor_rollout_ref.actor.diffusion_loss.loss_mode
+        self._loss_fn = get_diffusion_loss_fn(loss_mode)
+
+    def _validate_old_adapter_config(self):
+        rollout_cfg = self.config.actor_rollout_ref.rollout
+        actor_loss_cfg = self.config.actor_rollout_ref.actor.diffusion_loss
+        if rollout_cfg.rollout_adapter != "old":
+            raise ValueError("Old-adapter algorithms require actor_rollout_ref.rollout.rollout_adapter=old.")
+        if actor_loss_cfg.loss_mode != "diffusion_nft":
+            raise ValueError(
+                "Old-adapter algorithms require actor_rollout_ref.actor.diffusion_loss.loss_mode=diffusion_nft."
+            )
 
     def init_workers(self):
-        """Initialize actor-only workers for offline DPO, or full stack for online preference training."""
+        """Initialize actor-only workers for offline, or full stack for online preference training."""
         actor_rollout_resource_pool = self._init_colocated_workers()
         if self.is_offline:
             self.reward_loop_manager = None
             self.llm_server_manager = None
-            self.checkpoint_manager = NoOpCheckpointManager()  # no rollout replicas needed
+            self.checkpoint_manager = NoOpCheckpointManager()
             return
         self._init_online_rollout_stack(actor_rollout_resource_pool)
 
@@ -1187,18 +1209,15 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
-        # update actor
         batch_td = batch.to_tensordict()
-        # step 2: convert from padding to no-padding
         batch_td = embeds_padding_2_no_padding(batch_td)
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-        ppo_mini_batch_size = (
-            ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n * 2
-        )  # direct preference has a pair per prompt
+        paired = self.config.algorithm.get("paired_preference", False)
+        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n * (2 if paired else 1)
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
         seed = self.config.actor_rollout_ref.actor.data_loader_seed
         shuffle = self.config.actor_rollout_ref.actor.shuffle
-        if shuffle:
+        if paired and shuffle:
             sys_logger.warning(
                 "Shuffle is not supported for direct preference during actor update."
                 "This is to prevent the chosen/rejected pairs from being split across different micro batches."
@@ -1260,12 +1279,42 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         }
         return DataProto.from_tensordict(tu.get_tensordict(ref_output))
 
+    def _prepare_actor_batch(self, batch: DataProto, reward_tensor: torch.Tensor) -> DataProto:
+        """Delegate algorithm-specific rollout-to-actor batch preparation."""
+        rewards = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
+        rollout_dict = {key: batch.batch[key] for key in batch.batch.keys()}
+        rollout_dict["uid"] = batch.non_tensor_batch["uid"]
+        updated = self._loss_fn.prepare_actor_batch(
+            rollout_dict,
+            rewards,
+            self.config,
+        )
+        for key, value in updated.items():
+            if isinstance(value, torch.Tensor):
+                batch.batch[key] = value
+        return batch
+
+    def _update_old_policy(self) -> tuple[bool, float, Literal["none", "copy", "ema"]]:
+        algo_cfg = self.config.algorithm
+        if self.global_steps % algo_cfg.old_policy_update_interval != 0:
+            return False, 0.0, "none"
+
+        decay = algo_cfg.old_policy_decay
+        if decay is None:
+            decay = old_policy_decay(self.global_steps, algo_cfg.old_policy_decay_schedule)
+
+        if decay == 0:
+            self.actor_rollout_wg.copy_adapter(source="default", target="old")
+            return True, float(decay), "copy"
+        else:
+            self.actor_rollout_wg.ema_update_adapter(source="default", target="old", decay=decay)
+            return True, float(decay), "ema"
+
     def fit(self):
         """
-        The training loop of direct preference algorithms (DPO, DiffusionNFT, etc.).
-        The driver process only need to call the compute functions of the worker group through RPC
-        to construct the PPO dataflow.
-        The light-weight advantage computation is done on the driver process.
+        Training loop for direct-preference algorithms (DPO, DiffusionNFT, etc.).
+        Offline algorithms read pre-computed rewards from the dataset.
+        Online algorithms generate rollouts and compute rewards live.
         """
         from omegaconf import OmegaConf
         from verl.utils.tracking import Tracking
@@ -1281,6 +1330,8 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
+        if self._has_old_adapter:
+            self.actor_rollout_wg.copy_adapter(source="default", target="old")
         self.checkpoint_manager.update_weights(self.global_steps)
 
         current_epoch = self.global_steps // len(self.train_dataloader)
@@ -1327,38 +1378,69 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                     )
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
-                is_offline = self.is_offline
                 if "uid" not in batch.non_tensor_batch:
                     batch.non_tensor_batch["uid"] = np.array(
                         [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                     )
-                if not is_offline:
-                    raise NotImplementedError("Offline rollout is not supported for direct preference training.")
+
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
                     reward_extra_infos_dict: dict[str, list] = {}
-                    if is_offline:
+
+                    if self.is_offline:
                         reward_tensor = batch.batch["sample_level_scores"]
+
+                        with marked_timer("adv", timing_raw, color="brown"):
+                            batch.batch["sample_level_scores"] = reward_tensor
+                            if reward_extra_infos_dict:
+                                batch.non_tensor_batch.update(
+                                    {k: np.array(v) for k, v in reward_extra_infos_dict.items()}
+                                )
+
+                        batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
+                        if self.use_reference_policy:
+                            with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
+                                ref_dpo = self._compute_ref_noise_pred(batch)
+                                if ref_dpo is not None:
+                                    batch = batch.union(ref_dpo)
+
+                        with marked_timer("update_actor", timing_raw, color="red"):
+                            actor_output = self._update_actor(batch)
                     else:
-                        raise NotImplementedError("Offline rollout is not supported for direct preference training.")
+                        gen_batch = self._get_gen_batch(batch)
+                        gen_batch.meta_info["global_steps"] = self.global_steps
+                        gen_batch_output = gen_batch.repeat(
+                            repeat_times=self.config.actor_rollout_ref.rollout.n,
+                            interleave=True,
+                        )
 
-                    with marked_timer("adv", timing_raw, color="brown"):
-                        # we combine with rule-based rm
-                        reward_extra_infos_dict: dict[str, list]
-                        batch.batch["sample_level_scores"] = reward_tensor
+                        with marked_timer("gen", timing_raw, color="red"):
+                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                            self.checkpoint_manager.sleep_replicas()
+                            timing_raw.update(gen_batch_output.meta_info["timing"])
+                            gen_batch_output.meta_info.pop("timing", None)
 
-                        if reward_extra_infos_dict:
-                            batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                        batch = batch.union(gen_batch_output)
 
-                    batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
-                    if self.use_reference_policy:
-                        with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
-                            ref_dpo = self._compute_ref_noise_pred(batch)
-                            if ref_dpo is not None:
-                                batch = batch.union(ref_dpo)
-                    # update actor
-                    with marked_timer("update_actor", timing_raw, color="red"):
-                        actor_output = self._update_actor(batch)
+                        with marked_timer("reward", timing_raw, color="yellow"):
+                            if self.use_rm and "rm_scores" not in batch.batch.keys():
+                                batch_reward = self._compute_reward_colocate(batch)
+                                batch = batch.union(batch_reward)
+                            reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+
+                        with marked_timer("prepare_actor_batch", timing_raw, color="brown"):
+                            batch.batch["sample_level_scores"] = reward_tensor
+                            if reward_extra_infos_dict:
+                                batch.non_tensor_batch.update(
+                                    {k: np.array(v) for k, v in reward_extra_infos_dict.items()}
+                                )
+                            batch = self._prepare_actor_batch(batch, reward_tensor)
+
+                        with marked_timer("update_actor", timing_raw, color="red"):
+                            actor_output = self._update_actor(batch)
+                            if self._has_old_adapter:
+                                metrics.update(compute_old_policy_metrics(self._update_old_policy()))
 
                     # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                     esi_close_to_expiration = should_save_ckpt_esi(
@@ -1391,7 +1473,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
-                    if rollout_data_dir:
+                    if rollout_data_dir and not self.is_offline:
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
                 # validate
@@ -1431,10 +1513,16 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                 # collect metrics
                 metrics.update(compute_data_metrics_diffusion(batch=batch))
                 n_gpus = self.resource_pool_manager.get_n_gpus()
-
-                num_images = batch.batch["sample_level_scores"].shape[0]
+                num_images = (
+                    batch.batch["advantages"].shape[0]
+                    if "advantages" in batch.batch
+                    else batch.batch["sample_level_scores"].shape[0]
+                )
                 metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw, num_images=num_images))
                 metrics.update(compute_throughput_metrics_diffusion(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
+                if "advantages" in batch.batch:
+                    gradient_norm = metrics.get("actor/grad_norm", None)
+                    metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
 
                 logger.log(data=metrics, step=self.global_steps)
 

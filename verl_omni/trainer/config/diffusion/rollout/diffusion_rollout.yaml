@@ -221,6 +221,9 @@ pipeline:
 # support logging rollout prob for debugging purpose
 calculate_log_probs: False
 
+# Named adapter used by rollout generation
+rollout_adapter: default
+
 # [Experimental] agent loop based rollout configs
 agent:
 

@@ -90,6 +90,9 @@ class DiffusionModelConfig(BaseConfig):
     # path to pre-trained LoRA adapter to load for continued training
     lora_adapter_path: Optional[str] = None
 
+    # Named LoRA policy states required by the algorithm. "reference" uses disabled adapters.
+    policy_state_adapters: tuple[str, ...] = ("default",)
+
     # dtype to convert LoRA parameters to (e.g., "fp32", "bf16"). Default None means no conversion.
     lora_dtype: Optional[str] = None
 

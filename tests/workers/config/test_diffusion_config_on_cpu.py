@@ -20,8 +20,10 @@ from verl_omni.workers.config.diffusion.actor import (
     DiffusionLossConfig,
     FSDPDiffusionActorConfig,
 )
+from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
 from verl_omni.workers.config.diffusion.rollout import (
     DiffusionRolloutAlgoConfig,
+    DiffusionRolloutConfig,
     DiffusionSamplingConfig,
 )
 
@@ -36,15 +38,40 @@ class TestDiffusionLossConfig:
         assert cfg.loss_mode == "flow_grpo"
         assert cfg.clip_ratio == pytest.approx(0.0001)
         assert cfg.adv_clip_max == pytest.approx(5.0)
+        assert cfg.mix_beta == pytest.approx(0.5)
+        assert cfg.ref_kl_coef == pytest.approx(0.0)
+        assert cfg.adaptive_weight_min == pytest.approx(1e-5)
 
     def test_custom_values(self):
-        cfg = DiffusionLossConfig(loss_mode="flow_grpo", clip_ratio=0.01, adv_clip_max=10.0)
+        cfg = DiffusionLossConfig(
+            loss_mode="diffusion_nft",
+            clip_ratio=0.01,
+            adv_clip_max=10.0,
+            mix_beta=0.25,
+            ref_kl_coef=0.1,
+            adaptive_weight_min=1e-4,
+        )
         assert cfg.clip_ratio == pytest.approx(0.01)
         assert cfg.adv_clip_max == pytest.approx(10.0)
+        assert cfg.mix_beta == pytest.approx(0.25)
+        assert cfg.ref_kl_coef == pytest.approx(0.1)
+        assert cfg.adaptive_weight_min == pytest.approx(1e-4)
 
     def test_invalid_loss_mode_raises(self):
         with pytest.raises(ValueError, match="Invalid diffusion loss_mode"):
             DiffusionLossConfig(loss_mode="not_a_valid_mode")
+
+    @pytest.mark.parametrize(
+        "kwargs, match",
+        [
+            ({"adv_clip_max": 0.0}, "adv_clip_max.*positive"),
+            ({"mix_beta": 0.0}, "mix_beta.*positive"),
+            ({"adaptive_weight_min": 0.0}, "adaptive_weight_min.*positive"),
+        ],
+    )
+    def test_invalid_diffusion_nft_loss_values_raise(self, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            DiffusionLossConfig(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -58,11 +85,44 @@ class TestDiffusionAlgoConfig:
         assert cfg.adv_estimator == "flow_grpo"
         assert cfg.norm_adv_by_std_in_grpo is True
         assert cfg.global_std is True
+        assert cfg.old_policy_decay_schedule == "copy"
+        assert cfg.old_policy_decay is None
+        assert cfg.old_policy_update_interval == 1
+        assert cfg.timestep_fraction == pytest.approx(1.0)
+        assert cfg.adv_mode == "continuous"
 
     def test_override(self):
-        cfg = DiffusionAlgoConfig(norm_adv_by_std_in_grpo=False, global_std=False)
+        cfg = DiffusionAlgoConfig(
+            norm_adv_by_std_in_grpo=False,
+            global_std=False,
+            old_policy_decay_schedule="delayed_linear_to_0_999",
+            old_policy_decay=0.5,
+            old_policy_update_interval=2,
+            timestep_fraction=0.5,
+            adv_mode="binary",
+        )
         assert cfg.norm_adv_by_std_in_grpo is False
         assert cfg.global_std is False
+        assert cfg.old_policy_decay_schedule == "delayed_linear_to_0_999"
+        assert cfg.old_policy_decay == pytest.approx(0.5)
+        assert cfg.old_policy_update_interval == 2
+        assert cfg.timestep_fraction == pytest.approx(0.5)
+        assert cfg.adv_mode == "binary"
+
+    @pytest.mark.parametrize(
+        "kwargs, match",
+        [
+            ({"adv_mode": "bogus"}, "Invalid adv_mode"),
+            ({"old_policy_decay_schedule": "bogus"}, "Invalid old_policy_decay_schedule"),
+            ({"old_policy_decay": 1.1}, "old_policy_decay.*\\[0, 1\\]"),
+            ({"old_policy_update_interval": 0}, "old_policy_update_interval.*positive"),
+            ({"timestep_fraction": 0.0}, "timestep_fraction.*\\(0, 1\\]"),
+            ({"timestep_fraction": 1.1}, "timestep_fraction.*\\(0, 1\\]"),
+        ],
+    )
+    def test_invalid_diffusion_nft_algo_values_raise(self, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            DiffusionAlgoConfig(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +153,43 @@ class TestDiffusionSamplingConfig:
         assert cfg.pipeline.num_inference_steps == 10
         assert cfg.seed == 42
         assert isinstance(cfg.algo, DiffusionRolloutAlgoConfig)
+
+
+class TestDiffusionRolloutConfig:
+    def test_invalid_rollout_adapter_raises(self):
+        with pytest.raises(ValueError, match="Invalid diffusion rollout rollout_adapter"):
+            DiffusionRolloutConfig(name="vllm_omni", rollout_adapter="bogus")
+
+
+class TestDiffusionModelConfigPolicyAdapters:
+    def test_policy_state_adapters_via_hydra(self, tmp_path):
+        import json
+        import os
+        from unittest.mock import patch
+
+        from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
+
+        import verl_omni
+
+        model_dir = tmp_path / "dummy-model"
+        model_dir.mkdir()
+        (model_dir / "model_index.json").write_text(json.dumps({"_class_name": "QwenImagePipeline"}))
+
+        config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/diffusion/model")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            cfg = compose(
+                config_name="diffusion_model",
+                overrides=[
+                    f"path={model_dir}",
+                    f"tokenizer_path={model_dir}",
+                    "+load_tokenizer=false",
+                    'policy_state_adapters=["default","old"]',
+                ],
+            )
+        with patch("verl_omni.workers.config.diffusion.model.resolve_model_local_dir", return_value=str(model_dir)):
+            model_cfg: DiffusionModelConfig = omega_conf_to_dataclass(cfg)
+        assert tuple(model_cfg.policy_state_adapters) == ("default", "old")
 
 
 # ---------------------------------------------------------------------------
