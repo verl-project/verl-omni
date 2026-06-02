@@ -20,10 +20,10 @@ If you are looking for FlowGRPO-specific training metrics
 The diffusion trainer emits two MFU keys, on the same step cadence as
 the rest of the actor metrics:
 
-| Metric             | What is timed                                                                                                                                              |
-|--------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `actor/mfu`        | Actor `train_batch` — full mini-batch update (includes all forward/backward micro-batches for gradient accumulation).                                      |
-| `actor_infer/mfu`  | Actor `infer_batch` — full mini-batch forward-only pass (log-prob recompute on the rollout trajectories).                                                  |
+| Metric                   | What is timed                                                                                                                                              |
+|--------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `perf/mfu/actor`         | Actor `train_batch` — full mini-batch update (includes all forward/backward micro-batches for gradient accumulation).                                      |
+| `perf/mfu/actor_infer`   | Actor `infer_batch` — full mini-batch forward-only pass (log-prob recompute on the rollout trajectories).                                                  |
 
 Reference-policy forward passes (e.g. ref log-prob or ref noise-pred) are
 not surfaced at the trainer level, matching upstream verl.
@@ -463,13 +463,13 @@ Use any existing diffusion-RL launch script (e.g.
 pipeline). Look for the two keys in your logger output:
 
 ```text
-{"actor/mfu": 0.XX, "actor_infer/mfu": 0.XX, ...}
+{"perf/mfu/actor": 0.XX, "perf/mfu/actor_infer": 0.XX, ...}
 ```
 
 (Any in-range value confirms the counter is wired up. Absolute numbers
 depend on model, hardware, batch shape, and parallelism.)
 
-If `actor/mfu` is `0` or missing, check:
+If `perf/mfu/actor` is `0` or missing, check:
 
 1. `DiffusionModelConfig.architecture` matches the string you passed
    to `@register_diffusion_architecture`. The pipeline class name in
@@ -486,7 +486,7 @@ If `actor/mfu` is `0` or missing, check:
    (e.g. `data["audio_latents"]`), override `get_latent_seqlens` in
    the architecture class — same pattern as the Edit sidebar above.
 
-If `actor/mfu > 1.0`, the two common causes are:
+If `perf/mfu/actor > 1.0`, the two common causes are:
 
 1. **Mis-identified device peak.** `verl.utils.flops_counter.get_device_flops`
    matches `torch.cuda.get_device_name()` by substring against a built-in
