@@ -184,19 +184,25 @@ def test_prepare_diffusion_nft_actor_batch() -> None:
         "uid": uid,
         "prompts": torch.zeros(B, 16, dtype=torch.long),
     }
-    config = SimpleNamespace(
+    algorithm_config = SimpleNamespace(
         norm_adv_by_std_in_grpo=True,
         global_std=True,
         adv_mode="continuous",
         timestep_fraction=0.5,
     )
-    adv_clip_max = 5.0
-
-    result = diffusion_algos.DiffusionNFTLoss.prepare_actor_batch(
-        rollout_dict, rewards, config, adv_clip_max, timestep_shuffle_seed=42
+    config = SimpleNamespace(
+        algorithm=algorithm_config,
+        actor_rollout_ref=SimpleNamespace(
+            actor=SimpleNamespace(
+                diffusion_loss=SimpleNamespace(adv_clip_max=5.0),
+                data_loader_seed=42,
+            )
+        ),
     )
 
-    num_train = max(1, int(T * config.timestep_fraction))
+    result = diffusion_algos.DiffusionNFTLoss.prepare_actor_batch(rollout_dict, rewards, config)
+
+    num_train = max(1, int(T * algorithm_config.timestep_fraction))
     assert result["train_timesteps"].shape == (B, num_train)
     assert result["advantages"].shape == (B, num_train)
     assert result["reward_prob"].shape == (B, num_train)

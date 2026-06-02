@@ -108,8 +108,6 @@ class DiffusionLossFn(ABC):
         batch: Any,
         reward_tensor: Any,
         config: Any,
-        adv_clip_max: float,
-        timestep_shuffle_seed: int | None = None,
     ) -> Any:
         """Prepare rollout outputs for actor update when the trainer has not already done so.
 
@@ -778,10 +776,13 @@ class DiffusionNFTLoss(DiffusionLossFn):
         rollout_batch: dict[str, Any],
         rewards: torch.Tensor,
         config: Any,
-        adv_clip_max: float,
-        timestep_shuffle_seed: int | None = None,
     ) -> dict[str, Any]:
         """Prepare final-latent rollout data for DiffusionNFT actor updates."""
+        algorithm_cfg = config.algorithm
+        actor_cfg = config.actor_rollout_ref.actor
+        adv_clip_max = actor_cfg.diffusion_loss.adv_clip_max
+        timestep_shuffle_seed = actor_cfg.data_loader_seed
+
         for key in ("latents_clean", "train_timesteps", "uid"):
             if key not in rollout_batch:
                 raise ValueError(f"DiffusionNFT actor batch requires `{key}` from rollout.")
@@ -789,15 +790,15 @@ class DiffusionNFTLoss(DiffusionLossFn):
         advantages = DiffusionNFTLoss._compute_group_advantages(
             rewards=rewards,
             uid=rollout_batch["uid"],
-            norm_by_std=config.norm_adv_by_std_in_grpo,
-            global_std=config.global_std,
+            norm_by_std=algorithm_cfg.norm_adv_by_std_in_grpo,
+            global_std=algorithm_cfg.global_std,
         )
         reward_prob = DiffusionNFTLoss._advantage_to_reward_prob(
-            advantages, adv_clip_max=adv_clip_max, adv_mode=config.adv_mode
+            advantages, adv_clip_max=adv_clip_max, adv_mode=algorithm_cfg.adv_mode
         )
         train_timesteps = DiffusionNFTLoss._select_train_timesteps(
             rollout_batch["train_timesteps"],
-            timestep_fraction=config.timestep_fraction,
+            timestep_fraction=algorithm_cfg.timestep_fraction,
             seed=timestep_shuffle_seed,
         )
         if reward_prob.ndim == 1 and train_timesteps.ndim == 2:

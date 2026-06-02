@@ -1277,16 +1277,13 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
     def _prepare_actor_batch(self, batch: DataProto, reward_tensor: torch.Tensor) -> DataProto:
         """Delegate algorithm-specific rollout-to-actor batch preparation."""
-        actor_cfg = self.config.actor_rollout_ref.actor
         rewards = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
         rollout_dict = {key: batch.batch[key] for key in batch.batch.keys()}
         rollout_dict["uid"] = batch.non_tensor_batch["uid"]
         updated = self._loss_fn.prepare_actor_batch(
             rollout_dict,
             rewards,
-            self.config.algorithm,
-            actor_cfg.diffusion_loss.adv_clip_max,
-            int(actor_cfg.data_loader_seed + self.global_steps),
+            self.config,
         )
         for key, value in updated.items():
             if isinstance(value, torch.Tensor):
