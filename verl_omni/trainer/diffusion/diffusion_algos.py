@@ -111,8 +111,9 @@ class DiffusionLossFn(ABC):
     ) -> Any:
         """Prepare rollout outputs for actor update when the trainer has not already done so.
 
-        Reverse-process policy-gradient losses such as FlowGRPO can keep the batch unchanged because their trainer path has
-        already added ``old_log_probs`` and ``advantages``. DPO can also keep
+        Reverse-process policy-gradient losses such as FlowGRPO can keep the batch
+        unchanged because their trainer path has already added ``old_log_probs`` and
+        ``advantages``. DPO can also keep
         the batch unchanged because offline preference data plus reference
         predictions provide the loss inputs directly. Forward-process online
         losses such as DiffusionNFT override this hook to turn final-latent

@@ -30,6 +30,7 @@ __all__ = ["QwenImageDiffusionNFT"]
 @DiffusionModelBase.register("QwenImagePipeline", algorithm="diffusion_nft")
 class QwenImageDiffusionNFT(QwenImage):
     """Forward-process Qwen-Image adapter used by DiffusionNFT."""
+
     @classmethod
     def prepare_model_inputs(
         cls,
@@ -89,4 +90,3 @@ class QwenImageDiffusionNFT(QwenImage):
             negative_prediction = module(**negative_model_inputs)[0]
             prediction = apply_true_cfg(prediction, negative_prediction, model_config.pipeline.true_cfg_scale)
         return prediction
-
