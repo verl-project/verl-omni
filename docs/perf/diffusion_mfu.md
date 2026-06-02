@@ -22,9 +22,9 @@ the rest of the actor metrics:
 
 | Metric             | What is timed                                                                                                                                              |
 |--------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `actor/mfu`        | Actor `train_batch` — one forward + backward call.                                                                                                         |
-| `actor_infer/mfu`  | Actor `infer_batch` — forward only (log-prob recompute on the rollout trajectories).                                                                       |
-| `ref/mfu`          | Reference policy `infer_batch` — forward only. Only emitted when a reference policy is constructed (i.e. `actor.use_kl_loss=True` or `algorithm.use_kl_in_reward=True`). |
+| `actor/mfu`        | Actor `train_batch` — full mini-batch update (includes all forward/backward micro-batches for gradient accumulation).                                      |
+| `actor_infer/mfu`  | Actor `infer_batch` — full mini-batch forward-only pass (log-prob recompute on the rollout trajectories).                                                  |
+| `ref/mfu`          | Reference policy `infer_batch` — full mini-batch forward-only pass. Only emitted when a reference policy is constructed (e.g., `use_kl_loss=True`).        |
 
 `MFU = 1.0` means every GPU in the data-parallel group is sustaining the
 device's advertised peak FLOPS for the duration of the timed call. The
