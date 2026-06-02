@@ -46,14 +46,14 @@ __all__ = [
     "QwenImageFlops",
     "register_diffusion_architecture",
     "get_forward_passes_per_step",
-    "resolve_device_peak_tflops",
+    "get_device_peak_tflops",
 ]
 
 
 _DEVICE_PEAK_OVERRIDE_ENV = "VERL_OMNI_DEVICE_FLOPS_TFLOPS"
 
 
-def resolve_device_peak_tflops() -> float:
+def get_device_peak_tflops() -> float:
     """Return the per-device bf16-dense peak in TFLOPS.
 
     Honors the ``VERL_OMNI_DEVICE_FLOPS_TFLOPS`` env var as a manual
@@ -552,7 +552,7 @@ class DiffusionFlopsCounter:
             num_forward_passes: ``2`` when True-CFG is enabled
                 (``true_cfg_scale > 1.0``), otherwise ``1``.
         """
-        promised = resolve_device_peak_tflops()
+        promised = get_device_peak_tflops()
         if self._arch is None or delta_time <= 0 or num_timesteps <= 0 or num_forward_passes <= 0:
             return 0.0, promised
 

@@ -498,7 +498,7 @@ If `actor/mfu > 1.0`, the two common causes are:
    export VERL_OMNI_DEVICE_FLOPS_TFLOPS=989   # H200 bf16 dense
    ```
 
-   Honored by `resolve_device_peak_tflops()` in
+   Honored by `get_device_peak_tflops()` in
    `verl_omni.utils.diffusion_flops_counter` and consumed by
    `DiffusionFlopsCounter.estimate_flops`. See
    `tests/utils/test_diffusion_flops_counter_on_cpu.py::TestDevicePeakOverride`.

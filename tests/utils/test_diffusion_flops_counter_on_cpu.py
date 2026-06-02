@@ -32,9 +32,9 @@ from verl_omni.utils.diffusion_flops_counter import (
     DiffusionFlopsCounter,
     DiffusionModelFlops,
     QwenImageFlops,
+    get_device_peak_tflops,
     get_forward_passes_per_step,
     register_diffusion_architecture,
-    resolve_device_peak_tflops,
 )
 
 
@@ -187,7 +187,7 @@ class TestDevicePeakOverride:
 
     def test_override_is_used_by_counter(self, monkeypatch):
         monkeypatch.setenv("VERL_OMNI_DEVICE_FLOPS_TFLOPS", "989.0")
-        assert resolve_device_peak_tflops() == pytest.approx(989.0)
+        assert get_device_peak_tflops() == pytest.approx(989.0)
         counter = DiffusionFlopsCounter("QwenImagePipeline", QWEN_IMAGE_CONFIG)
         _, promised = counter.estimate_flops(
             latent_seqlens=[1024] * 2,
@@ -202,7 +202,7 @@ class TestDevicePeakOverride:
         monkeypatch.setenv("VERL_OMNI_DEVICE_FLOPS_TFLOPS", "not-a-number")
         with warnings.catch_warnings(record=True) as warned:
             warnings.simplefilter("always")
-            value = resolve_device_peak_tflops()
+            value = get_device_peak_tflops()
         assert value > 0  # fell back to upstream get_device_flops
         assert any("VERL_OMNI_DEVICE_FLOPS_TFLOPS" in str(w.message) for w in warned)
 
@@ -210,14 +210,14 @@ class TestDevicePeakOverride:
         monkeypatch.setenv("VERL_OMNI_DEVICE_FLOPS_TFLOPS", "-1.0")
         with warnings.catch_warnings(record=True) as warned:
             warnings.simplefilter("always")
-            value = resolve_device_peak_tflops()
+            value = get_device_peak_tflops()
         assert value > 0
         assert any("must be positive" in str(w.message) for w in warned)
 
     def test_no_override_matches_upstream(self):
         from verl.utils.flops_counter import get_device_flops
 
-        assert resolve_device_peak_tflops() == pytest.approx(float(get_device_flops("T")))
+        assert get_device_peak_tflops() == pytest.approx(float(get_device_flops("T")))
 
 
 # ---------------------------------------------------------------------------

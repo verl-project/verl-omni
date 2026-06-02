@@ -66,35 +66,6 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-def _load_diffusion_transformer_config(model_config: "DiffusionModelConfig") -> Optional[dict]:
-    """Return the diffusers transformer config dict, or ``None`` on miss.
-
-    We read ``{local_path}/transformer/config.json`` directly to avoid depending
-    on the engine module having been initialized. Returns ``None`` (and a
-    warning) when the file is missing so MFU silently degrades to 0 instead of
-    crashing initialization.
-    """
-    import json
-
-    local_path = getattr(model_config, "local_path", None)
-    if not local_path:
-        return None
-    config_path = os.path.join(local_path, "transformer", "config.json")
-    if not os.path.isfile(config_path):
-        logger.warning(
-            "Diffusion MFU disabled: transformer config not found at %s. "
-            "Expected the diffusers pipeline layout `<local_path>/transformer/config.json`.",
-            config_path,
-        )
-        return None
-    try:
-        with open(config_path) as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("Diffusion MFU disabled: failed to read %s: %s", config_path, exc)
-        return None
-
-
 def _with_routing_replay_flag(enabled: bool):
     """Decorator to set 'enable_routing_replay' flag on the data TensorDict."""
 
@@ -185,13 +156,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
         if hasattr(self.model_config, "hf_config"):
             self.flops_counter = FlopsCounter(self.model_config.hf_config)
         elif self.config.model_type in ("diffusion_model", "diffusion_dp_model"):
-            # Diffusion configs (diffusers ConfigMixin) have a different schema
-            # than HF LLM configs, so we use a dedicated counter that understands
-            # joint-attention DiTs and multi-step denoising.
-            transformer_cfg = _load_diffusion_transformer_config(self.model_config)
             self.flops_counter = DiffusionFlopsCounter(
                 architecture=getattr(self.model_config, "architecture", None),
-                transformer_config=transformer_cfg,
+                transformer_config=getattr(self.model_config, "transformer_config", None),
             )
         else:
             self.flops_counter = None

@@ -7,8 +7,8 @@ WORKSPACE=${WORKSPACE:-$HOME}
 # Pin the correct H200 bf16 dense peak so MFU is reported accurately
 export VERL_OMNI_DEVICE_FLOPS_TFLOPS=989
 
-ocr_train_path=$WORKSPACE/data/ocr/qwen_image/train.parquet
-ocr_test_path=$WORKSPACE/data/ocr/qwen_image/test.parquet
+ocr_train_path=$WORKSPACE/data/ocr/train.parquet
+ocr_test_path=$WORKSPACE/data/ocr/test.parquet
 
 model_name=Qwen/Qwen-Image
 reward_model_name=Qwen/Qwen3-VL-8B-Instruct
