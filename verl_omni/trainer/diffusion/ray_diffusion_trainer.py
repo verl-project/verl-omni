@@ -840,7 +840,7 @@ class BaseRayDiffusionTrainer(ABC):
 class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
     """Policy-gradient diffusion trainer for FlowGRPO, MixGRPO, DanceGRPO, GRPO-Guard, etc."""
 
-    def _compute_ref_log_prob(self, batch: DataProto) -> tuple[DataProto, dict[str, Any]]:
+    def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
         batch_td = batch.to_tensordict()
         batch_td = embeds_padding_2_no_padding(batch_td)
         metadata = {
@@ -862,9 +862,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         ref_log_prob = tu.get_tensordict(
             {"ref_log_prob": log_probs.float(), "ref_prev_sample_mean": prev_sample_mean.float()}
         )
-        # Propagate per-call MFU / loss metrics computed in the worker.
-        infer_metrics = tu.get(output, "metrics", default={})
-        return DataProto.from_tensordict(ref_log_prob), infer_metrics
+        return DataProto.from_tensordict(ref_log_prob)
 
     def _compute_old_log_prob(self, batch: DataProto) -> tuple[DataProto, dict[str, Any]]:
         batch_td = batch.to_tensordict()
@@ -1022,8 +1020,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
-                            ref_log_prob, infer_metrics = self._compute_ref_log_prob(batch)
-                            metrics.update(rename_dict(reduce_metrics(infer_metrics), "ref/"))
+                            ref_log_prob = self._compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
 
                     with marked_timer("adv", timing_raw, color="brown"):
