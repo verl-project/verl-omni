@@ -14,6 +14,7 @@
 import argparse
 import logging
 import os
+import dataclasses
 from dataclasses import asdict
 from typing import Any, Optional
 
@@ -38,6 +39,7 @@ from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
 from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
+from vllm_omni.diffusion.data import OmniDiffusionConfig
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.utils.vllm_omni import VLLMOmniHijack
@@ -122,6 +124,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     async def run_server(self, args: argparse.Namespace):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
+
+        diffusion_fields = {f.name for f in dataclasses.fields(OmniDiffusionConfig)}
+        for key in diffusion_fields:
+            if hasattr(args, key):
+                value = getattr(args, key)
+                if value is not None:
+                    engine_args[key] = value
 
         import_external_libs(self.config.external_lib)
         pipeline_path = VllmOmniPipelineBase.get_pipeline_path(

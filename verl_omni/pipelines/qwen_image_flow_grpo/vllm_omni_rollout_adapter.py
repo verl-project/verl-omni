@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import os
 from typing import Any, Literal
 
@@ -20,6 +21,7 @@ from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
 from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.worker.utils import DiffusionRequestState
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
@@ -37,6 +39,10 @@ def _maybe_to_cpu(value):
 
 def _coalesce_not_none(value, default):
     return default if value is None else value
+
+
+def _stack_optional(values: list[torch.Tensor]):
+    return torch.stack(values, dim=1) if values and values[0] is not None else None
 
 
 @VllmOmniPipelineBase.register("QwenImagePipeline", algorithm="flow_grpo")
@@ -64,12 +70,108 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             local_files_only=local_files_only,
         )
 
+    @staticmethod
+    def _get_custom_prompt_fields(req_or_state):
+        prompts = req_or_state.prompts
+        custom_prompt = prompts[0] if prompts else {}
+        if not isinstance(custom_prompt, dict):
+            return None, None, None, None
+        return (
+            custom_prompt.get("prompt_ids"),
+            custom_prompt.get("prompt_mask"),
+            custom_prompt.get("negative_prompt_ids"),
+            custom_prompt.get("negative_prompt_mask"),
+        )
+
+    @staticmethod
+    def _resolve_rollout_args(
+        sampling_params,
+        *,
+        noise_level: float = 0.7,
+        sde_window_size: int | None = None,
+        sde_window_range: tuple[int, int] = (0, 5),
+        sde_type: Literal["sde", "cps"] = "sde",
+        logprobs: bool = True,
+    ):
+        extra_args = sampling_params.extra_args
+        return {
+            "noise_level": _coalesce_not_none(extra_args.get("noise_level", None), noise_level),
+            "sde_window_size": _coalesce_not_none(extra_args.get("sde_window_size", None), sde_window_size),
+            "sde_window_range": _coalesce_not_none(extra_args.get("sde_window_range", None), sde_window_range),
+            "sde_type": _coalesce_not_none(extra_args.get("sde_type", None), sde_type),
+            "logprobs": _coalesce_not_none(extra_args.get("logprobs", None), logprobs),
+        }
+
+    def _resolve_sde_window(self, timesteps, sde_window_size, sde_window_range, generator):
+        if sde_window_size is not None:
+            start = torch.randint(
+                sde_window_range[0],
+                sde_window_range[1] - sde_window_size + 1,
+                (1,),
+                generator=generator,
+                device=self.device,
+            ).item()
+            return start, start + sde_window_size
+        return 0, len(timesteps) - 1
+
+    def _decode_stepwise_output(self, state: DiffusionRequestState, output_type: str = "pil") -> DiffusionOutput:
+        if output_type == "latent":
+            image = state.latents
+        else:
+            height = state.sampling.height or self.default_sample_size * self.vae_scale_factor
+            width = state.sampling.width or self.default_sample_size * self.vae_scale_factor
+            latents = self._unpack_latents(state.latents, height, width, self.vae_scale_factor)
+            latents = latents.to(self.vae.dtype)
+            latents_mean = (
+                torch.tensor(self.vae.config.latents_mean)
+                .view(1, self.vae.config.z_dim, 1, 1, 1)
+                .to(latents.device, latents.dtype)
+            )
+            latents_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(
+                1, self.vae.config.z_dim, 1, 1, 1
+            ).to(latents.device, latents.dtype)
+            latents = latents / latents_std + latents_mean
+            image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
+
+        rollout_state = state.extra.get("flow_grpo", {})
+        all_latents = rollout_state.get("all_latents", [])
+        all_log_probs = rollout_state.get("all_log_probs", [])
+        all_timesteps = rollout_state.get("all_timesteps", [])
+        stacked_latents = torch.stack(all_latents, dim=1) if all_latents else None
+        stacked_log_probs = _stack_optional(all_log_probs)
+        stacked_timesteps = (
+            torch.stack(all_timesteps).unsqueeze(0).expand(state.latents.shape[0], -1) if all_timesteps else None
+        )
+
+        return DiffusionOutput(
+            output=_maybe_to_cpu(image),
+            custom_output={
+                "all_latents": _maybe_to_cpu(stacked_latents),
+                "all_log_probs": _maybe_to_cpu(stacked_log_probs),
+                "all_timesteps": _maybe_to_cpu(stacked_timesteps),
+                "prompt_embeds": _maybe_to_cpu(state.prompt_embeds),
+                "prompt_embeds_mask": _maybe_to_cpu(state.prompt_embeds_mask),
+                "negative_prompt_embeds": _maybe_to_cpu(state.negative_prompt_embeds),
+                "negative_prompt_embeds_mask": _maybe_to_cpu(state.negative_prompt_embeds_mask),
+            },
+        )
+
     def _get_qwen_prompt_embeds(
         self,
-        prompt_ids: torch.Tensor,
+        prompt_ids: torch.Tensor | str | list[str],
         attention_mask: torch.Tensor | None = None,
         dtype: torch.dtype | None = None,
+        max_sequence_length: int | None = None,
+        prompt_name: str = "prompt",
     ):
+        if not isinstance(prompt_ids, torch.Tensor):
+            return super()._get_qwen_prompt_embeds(
+                prompt=prompt_ids,
+                dtype=dtype,
+                max_sequence_length=max_sequence_length,
+                prompt_name=prompt_name,
+            )
+
         dtype = dtype or self.text_encoder.dtype
 
         if attention_mask is None:
@@ -101,12 +203,14 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
 
     def encode_prompt(
         self,
-        prompt_ids: torch.Tensor,
+        prompt_ids: torch.Tensor | None = None,
+        prompt: str | list[str] | None = None,
         attention_mask: torch.Tensor | None = None,
         num_images_per_prompt: int = 1,
         prompt_embeds: torch.Tensor | None = None,
         prompt_embeds_mask: torch.Tensor | None = None,
         max_sequence_length: int = 1024,
+        prompt_name: str = "prompt",
     ):
         """Encode text prompt token IDs into dense embeddings.
 
@@ -129,6 +233,16 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
                 ``(B * num_images_per_prompt, L, D)`` and
                 ``(B * num_images_per_prompt, L)`` respectively.
         """
+        if prompt_ids is None:
+            return super().encode_prompt(
+                prompt=prompt,
+                num_images_per_prompt=num_images_per_prompt,
+                prompt_embeds=prompt_embeds,
+                prompt_embeds_mask=prompt_embeds_mask,
+                max_sequence_length=max_sequence_length,
+                prompt_name=prompt_name,
+            )
+
         prompt_ids = prompt_ids.unsqueeze(0) if prompt_ids.ndim == 1 else prompt_ids
         attention_mask = (
             attention_mask.unsqueeze(0) if attention_mask is not None and attention_mask.ndim == 1 else attention_mask
@@ -275,6 +389,223 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         all_log_probs = torch.stack(all_log_probs, dim=1) if all_log_probs and all_log_probs[0] is not None else None
         all_timesteps = torch.stack(all_timesteps).unsqueeze(0).expand(latents.shape[0], -1)
         return latents, all_latents, all_log_probs, all_timesteps
+
+    def prepare_encode(
+        self,
+        state: DiffusionRequestState,
+        **kwargs: Any,
+    ) -> DiffusionRequestState:
+        prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask = self._get_custom_prompt_fields(state)
+        sampling_params = state.sampling
+        height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
+        width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
+        num_inference_steps = sampling_params.num_inference_steps or 50
+        max_sequence_length = sampling_params.max_sequence_length or 512
+        rollout_args = self._resolve_rollout_args(sampling_params)
+
+        generator = sampling_params.generator
+        true_cfg_scale = _coalesce_not_none(sampling_params.true_cfg_scale, 4.0)
+        num_images_per_prompt = (
+            sampling_params.num_outputs_per_prompt if sampling_params.num_outputs_per_prompt > 0 else 1
+        )
+
+        self._guidance_scale = sampling_params.guidance_scale if sampling_params.guidance_scale_provided else 1.0
+        self._attention_kwargs = kwargs.get("attention_kwargs")
+        self._current_timestep = None
+        self._interrupt = False
+
+        if prompt_ids is None:
+            # Keep text-prompt warmup and non-RL requests on the upstream stepwise path.
+            return super().prepare_encode(state, **kwargs)
+
+        if isinstance(prompt_ids, list):
+            prompt_ids = torch.tensor(prompt_ids, device=self.device)
+        if isinstance(negative_prompt_ids, list):
+            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
+
+        batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
+        has_neg_prompt = negative_prompt_ids is not None
+        do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
+        prompt_embeds, prompt_embeds_mask = self.encode_prompt(
+            prompt_ids=prompt_ids,
+            attention_mask=prompt_mask,
+            num_images_per_prompt=num_images_per_prompt,
+            max_sequence_length=max_sequence_length,
+        )
+        if do_true_cfg:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self.encode_prompt(
+                prompt_ids=negative_prompt_ids,
+                attention_mask=negative_prompt_mask,
+                num_images_per_prompt=num_images_per_prompt,
+                max_sequence_length=max_sequence_length,
+            )
+        else:
+            negative_prompt_embeds = None
+            negative_prompt_embeds_mask = None
+
+        num_channels_latents = self.transformer.in_channels // 4
+        latents = self.prepare_latents(
+            batch_size * num_images_per_prompt,
+            num_channels_latents,
+            height,
+            width,
+            prompt_embeds.dtype,
+            self.device,
+            generator,
+            sampling_params.latents,
+        )
+        latents = latents.float()
+        img_shapes = build_img_shapes(height, width, batch_size, self.vae_scale_factor)
+        timesteps, _ = self.prepare_timesteps(num_inference_steps, sampling_params.sigmas, latents.shape[1])
+        self._num_timesteps = len(timesteps)
+
+        guidance_scale = self.guidance_scale
+        if self.transformer.guidance_embeds:
+            guidance = torch.full([1], guidance_scale, dtype=torch.float32)
+            guidance = guidance.expand(latents.shape[0])
+        else:
+            guidance = None
+
+        if self.attention_kwargs is None:
+            self._attention_kwargs = {}
+
+        txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist() if prompt_embeds_mask is not None else None
+        negative_txt_seq_lens = (
+            negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
+        )
+
+        req_scheduler = copy.deepcopy(self.scheduler)
+        req_scheduler.set_begin_index(0)
+
+        sde_window = self._resolve_sde_window(
+            timesteps,
+            rollout_args["sde_window_size"],
+            rollout_args["sde_window_range"],
+            generator,
+        )
+
+        state.prompt_embeds = prompt_embeds
+        state.prompt_embeds_mask = prompt_embeds_mask
+        state.negative_prompt_embeds = negative_prompt_embeds
+        state.negative_prompt_embeds_mask = negative_prompt_embeds_mask
+        state.latents = latents
+        state.timesteps = timesteps
+        state.step_index = 0
+        state.scheduler = req_scheduler
+        state.do_true_cfg = do_true_cfg
+        state.guidance = guidance
+        state.img_shapes = img_shapes
+        state.txt_seq_lens = txt_seq_lens
+        state.negative_txt_seq_lens = negative_txt_seq_lens
+        state.sampling.cfg_normalize = True
+        state.extra["flow_grpo"] = {
+            "noise_level": rollout_args["noise_level"],
+            "sde_window": sde_window,
+            "sde_type": rollout_args["sde_type"],
+            "logprobs": rollout_args["logprobs"],
+            "all_latents": [],
+            "all_log_probs": [],
+            "all_timesteps": [],
+        }
+        return state
+
+    def denoise_step(
+        self,
+        input_batch,
+        **kwargs: Any,
+    ) -> torch.Tensor | None:
+        del kwargs
+        if self.interrupt:
+            return None
+
+        t = input_batch.timesteps
+        self._current_timestep = t
+        self.transformer.do_true_cfg = input_batch.do_true_cfg
+
+        positive_kwargs, negative_kwargs, output_slice = self._build_denoise_kwargs(
+            latents=input_batch.latents.to(self.transformer.img_in.weight.dtype),
+            timestep=t,
+            guidance=input_batch.guidance,
+            prompt_embeds=input_batch.prompt_embeds,
+            prompt_embeds_mask=input_batch.prompt_embeds_mask,
+            img_shapes=input_batch.img_shapes,
+            txt_seq_lens=input_batch.txt_seq_lens,
+            do_true_cfg=input_batch.do_true_cfg,
+            negative_prompt_embeds=input_batch.negative_prompt_embeds,
+            negative_prompt_embeds_mask=input_batch.negative_prompt_embeds_mask,
+            negative_txt_seq_lens=input_batch.negative_txt_seq_lens,
+            image_latents=input_batch.image_latents,
+            extra_transformer_kwargs={
+                "attention_kwargs": self.attention_kwargs,
+                "return_dict": False,
+            },
+        )
+
+        return self.predict_noise_maybe_with_cfg(
+            input_batch.do_true_cfg,
+            input_batch.true_cfg_scale,
+            positive_kwargs,
+            negative_kwargs,
+            input_batch.cfg_normalize,
+            output_slice,
+        )
+
+    def step_scheduler(
+        self,
+        state: DiffusionRequestState,
+        noise_pred: torch.Tensor,
+        **kwargs: Any,
+    ) -> None:
+        del kwargs
+        if self.interrupt:
+            return
+
+        rollout_state = state.extra.get("flow_grpo")
+        if rollout_state is None:
+            return super().step_scheduler(state, noise_pred)
+
+        step_index = state.step_index
+        sde_start, sde_end = rollout_state["sde_window"]
+        if step_index < sde_start:
+            cur_noise_level = 0.0
+        elif step_index == sde_start:
+            cur_noise_level = rollout_state["noise_level"]
+            rollout_state["all_latents"].append(state.latents.float())
+        elif sde_start < step_index < sde_end:
+            cur_noise_level = rollout_state["noise_level"]
+        else:
+            cur_noise_level = 0.0
+
+        timestep = state.current_timestep
+        latents, log_prob, _, _ = state.scheduler.step(
+            noise_pred.float(),
+            timestep,
+            state.latents,
+            generator=state.sampling.generator,
+            noise_level=cur_noise_level,
+            sde_type=rollout_state["sde_type"],
+            return_logprobs=rollout_state["logprobs"],
+            return_dict=False,
+        )
+
+        if step_index >= sde_start and step_index < sde_end:
+            rollout_state["all_latents"].append(latents)
+            rollout_state["all_log_probs"].append(log_prob)
+            rollout_state["all_timesteps"].append(timestep)
+
+        state.latents = latents
+        state.step_index += 1
+
+    def post_decode(
+        self,
+        state: DiffusionRequestState,
+        **kwargs: Any,
+    ) -> DiffusionOutput:
+        self._current_timestep = None
+        if "flow_grpo" not in state.extra:
+            return super().post_decode(state, **kwargs)
+        output_type = _coalesce_not_none(state.sampling.output_type, kwargs.get("output_type", "pil"))
+        return self._decode_stepwise_output(state, output_type=output_type)
 
     def forward(
         self,
