@@ -54,7 +54,7 @@ from verl.workers.utils.losses import ppo_loss
 
 from verl_omni.utils.diffusion_flops_counter import (
     DiffusionFlopsCounter,
-    resolve_cfg_passes,
+    get_forward_passes_per_step,
 )
 from verl_omni.workers.config import (
     DiffusionActorConfig,
@@ -530,7 +530,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         (see :class:`DiffusionModelFlops`). ``num_timesteps`` is read
         from the FlowGRPO/MixGRPO ``all_timesteps`` trajectory (defaulting
         to 1 for DPO / one-shot paths) and ``cfg_passes`` is resolved from
-        the pipeline + transformer configs via :func:`resolve_cfg_passes`.
+        the pipeline + transformer configs via :func:`get_forward_passes_per_step`.
         """
         if not isinstance(self.flops_counter, DiffusionFlopsCounter):
             return None
@@ -547,13 +547,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
         pipeline_config = getattr(self.model_config, "pipeline", None)
         transformer_config = getattr(self.flops_counter, "config", None)
         # ``pipeline`` is typically an OmegaConf DictConfig; coerce just the
-        # fields we care about to a plain mapping for ``resolve_cfg_passes``.
+        # fields we care about to a plain mapping for ``get_forward_passes_per_step``.
         pcfg_view: dict[str, Any] = {}
         for key in ("cfg_passes", "true_cfg_scale", "guidance_scale"):
             value = getattr(pipeline_config, key, None) if pipeline_config is not None else None
             if value is not None:
                 pcfg_view[key] = value
-        cfg_passes = resolve_cfg_passes(pcfg_view, transformer_config)
+        cfg_passes = get_forward_passes_per_step(pcfg_view, transformer_config)
 
         return {
             "latent_seqlens": seqlens["latent_seqlens"],
