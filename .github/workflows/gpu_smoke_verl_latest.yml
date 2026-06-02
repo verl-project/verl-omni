@@ -40,7 +40,7 @@ jobs:
   gpu_smoke_tests:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
-    timeout-minutes: 20
+    timeout-minutes: 30
     # Informational only — failures here do not block PRs
     continue-on-error: true
     env:

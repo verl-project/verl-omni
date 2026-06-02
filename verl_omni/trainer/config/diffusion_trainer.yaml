@@ -69,6 +69,24 @@ algorithm:
   # Whether to normalize advantages using global standard deviation
   global_std: True
 
+  # DiffusionNFT old-policy EMA schedule; choices are copy, linear_to_0_5, delayed_linear_to_0_999.
+  old_policy_decay_schedule: copy
+
+  # DiffusionNFT fixed old-policy EMA decay; null uses old_policy_decay_schedule.
+  old_policy_decay: null
+
+  # DiffusionNFT optimizer steps between old-policy adapter refreshes
+  old_policy_update_interval: 1
+
+  # DiffusionNFT fraction of rollout timesteps used for forward-process training
+  timestep_fraction: 1.0
+
+  # DiffusionNFT advantage mapping mode before reward-probability scaling
+  adv_mode: continuous
+
+  # True for pair-based algorithms (e.g. offline DPO); doubles actor batch size and disables shuffle
+  paired_preference: false
+
   # Rollout Correction (experimental).  Fields mirror RolloutCorrectionConfig.
   rollout_correction:
 

@@ -108,7 +108,7 @@ Visit our documentation to learn more.
     <td>Diffusion generator</td>
     <td>Text → Image</td>
     <td>DPO</td>
-    <td>WIP</td>
+    <td>✅</td>
   </tr>
 </table>
 
