@@ -108,6 +108,9 @@ class TestDiffusionLossRegistry(unittest.TestCase):
     def test_builtin_flow_grpo_registered(self):
         assert "flow_grpo" in DIFFUSION_LOSS_REGISTRY
 
+    def test_builtin_grpo_guard_registered(self):
+        assert "grpo_guard" in DIFFUSION_LOSS_REGISTRY
+
     def test_builtin_kl_registered(self):
         assert "kl" in DIFFUSION_LOSS_REGISTRY
 
@@ -116,6 +119,10 @@ class TestDiffusionLossRegistry(unittest.TestCase):
 
     def test_get_existing_loss_fn(self):
         fn = get_diffusion_loss_fn("flow_grpo")
+        assert callable(fn)
+
+    def test_get_grpo_guard_loss_fn(self):
+        fn = get_diffusion_loss_fn("grpo_guard")
         assert callable(fn)
 
     def test_get_unknown_loss_fn_raises(self):
