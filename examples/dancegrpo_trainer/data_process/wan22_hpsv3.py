@@ -90,6 +90,7 @@ if __name__ == "__main__":
         }
 
     # Shuffle and split into train/test
+    random.seed(42)
     random.shuffle(prompts)
     test_count = max(1, min(int(len(prompts) * args.test_ratio), 1000))
     test_prompts = prompts[:test_count]
