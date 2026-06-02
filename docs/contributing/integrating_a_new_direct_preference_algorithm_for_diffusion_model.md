@@ -26,15 +26,16 @@ MDP. Rollout stores trajectory tensors such as `all_latents`, `all_timesteps`,
 trainer computes a PPO-like objective over likelihood ratios.
 
 **Direct-preference algorithms** train from final samples or preferences. The
-actor batch contains clean latents or preference pairs plus forward-training
-tensors such as `noise`, `timesteps`, `train_timesteps`, `ref_noise_pred`, or
+actor batch contains clean latents or preference pairs plus objective-specific
+forward-training tensors. For example, DPO uses paired `noise`, `timesteps`, and
+`ref_noise_pred`, while DiffusionNFT uses `train_timesteps` and
 algorithm-specific reward probabilities. The loss consumes prediction-space
 tensors rather than reverse-step logprobs.
 
 ### Offline vs online
 
 **Offline direct-preference** algorithms consume data that has already been
-generated and scored. DPO is the reference implementation: data preparation
+generated and scored. Offline DPO is the reference implementation: data preparation
 writes win/lose pairs to parquet, training sets `algorithm.sample_source=offline`,
 and rollout/reward workers are not started.
 
@@ -47,15 +48,8 @@ into the forward-process actor batch.
 | Algorithm family | Examples | Data source | Trainer | Engine contract |
 |---|---|---|---|---|
 | PPO-like policy gradient | FlowGRPO, MixGRPO, GRPO-Guard | Online rollout trajectories | `PolicyGradientRayTrainer` | `PPODiffusersFSDPEngine`, reverse logprob tensors |
-| Offline direct preference | DPO | Precomputed win/lose pairs | `DirectPreferenceRayTrainer` | `DPODiffusersFSDPEngine`, paired noisy-latent tensors |
+| Offline direct preference | Offline DPO | Precomputed win/lose pairs | `DirectPreferenceRayTrainer` | `DPODiffusersFSDPEngine`, paired noisy-latent tensors |
 | Online direct preference | DiffusionNFT | Live rollout + reward | `DirectPreferenceRayTrainer` | `NFTDiffusersFSDPEngine`, clean latents + forward timesteps |
-
-DiffusionNFT is online reinforcement learning, but not policy-gradient RL. It
-optimizes the forward diffusion process through a flow-matching objective,
-contrasting positive and negative generated samples split by reward. The paper
-describes this as Diffusion Negative-aware FineTuning: it avoids reverse-process
-likelihood estimation and only requires clean images rather than full sampling
-trajectories.
 
 ---
 
@@ -75,8 +69,7 @@ A new direct-preference algorithm usually needs **five pieces**:
 
 The shared trainer is
 [`DirectPreferenceRayTrainer`](../../verl_omni/trainer/diffusion/ray_diffusion_trainer.py).
-It supports both offline DPO-style data and online DiffusionNFT-style rollout
-through config flags instead of algorithm-name branches.
+It supports both offline and online rollout through config flags.
 
 ---
 
@@ -119,7 +112,7 @@ Document the actor batch keys before writing the engine or loss. The trainer
 will pass a `TensorDict` to the worker; the engine and loss must agree on every
 key and shape.
 
-For paired offline algorithms such as DPO, set:
+For paired offline algorithms such as Offline DPO, set:
 
 ```bash
 algorithm.paired_preference=true
@@ -184,7 +177,7 @@ Then add the loss name to
 [`DiffusionLossConfig.__post_init__`](../../verl_omni/workers/config/diffusion/actor.py).
 
 Override `DiffusionLossFn.prepare_actor_batch(...)` only when the trainer must
-transform rollout outputs before actor update. DPO does not need this because
+transform rollout outputs before actor update. Offline DPO does not need this because
 the offline dataset and reference forward pass already supply the loss inputs.
 DiffusionNFT does need it because online rewards must be converted into
 forward-process tensors such as `reward_prob` and `train_timesteps`.
@@ -226,11 +219,6 @@ DPO uses `model_type=diffusion_dpo_model` and
 `DPODiffusersFSDPEngine`. DiffusionNFT uses
 `model_type=diffusion_nft_model` and `NFTDiffusersFSDPEngine`.
 
-If your algorithm's actor batch really is identical to an existing
-direct-preference engine, reuse that engine instead of adding a new class.
-Otherwise keep the new engine narrow and explicit; it is the boundary where the
-batch contract becomes model inputs and loss inputs.
-
 ---
 
 ## Step 5 — Add Model and Rollout Adapters
@@ -238,7 +226,7 @@ batch contract becomes model inputs and loss inputs.
 Add adapters only for the contexts your algorithm actually uses.
 
 Offline algorithms generally need a training adapter but may not need a rollout
-adapter. DPO registers the SD3 training adapter under
+adapter. Offline DPO registers the SD3 training adapter under
 [`verl_omni/pipelines/sd3_dpo/`](../../verl_omni/pipelines/sd3_dpo/__init__.py)
 and consumes precomputed latents plus prompt embeddings from parquet.
 
@@ -247,8 +235,9 @@ algorithm-specific fields. DiffusionNFT registers
 [`verl_omni/pipelines/qwen_image_diffusion_nft/`](../../verl_omni/pipelines/qwen_image_diffusion_nft/__init__.py):
 
 - The rollout adapter emits final clean latents for forward-process training.
-- The training adapter implements forward-process helpers such as
-  `prepare_forward_diffusion_inputs` and `forward_velocity`.
+- The training adapter implements the shared model hooks:
+  `prepare_model_inputs` to build architecture-specific transformer kwargs and
+  `forward` to run a single prediction-space model pass.
 
 Register each package from
 [`verl_omni/pipelines/__init__.py`](../../verl_omni/pipelines/__init__.py) so
@@ -259,8 +248,7 @@ the decorators run on import.
 ## Step 6 — Configure Reference and Old Policies
 
 `DirectPreferenceRayTrainer` enables the reference policy for
-direct-preference losses, because DPO-style and DiffusionNFT-style objectives
-often compare actor predictions to reference predictions.
+direct-preference losses.
 
 For algorithms that use one trainable policy state, normal LoRA or full-weight
 configuration is enough. DPO follows this path.
