@@ -44,7 +44,7 @@ class DiffusionLossConfig(BaseConfig):
 
     def __post_init__(self):
         """Validate diffusion loss configuration."""
-        valid_modes = ["flow_grpo", "grpo_guard", "diffusion_nft", "dpo"]
+        valid_modes = ["flow_grpo", "grpo_guard", "diffusion_nft", "dpo", "dance_grpo"]
         if self.loss_mode not in valid_modes:
             raise ValueError(f"Invalid diffusion loss_mode: {self.loss_mode}. Must be one of {valid_modes}")
         if self.adv_clip_max <= 0:

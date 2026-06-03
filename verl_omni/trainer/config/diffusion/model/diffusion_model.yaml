@@ -98,6 +98,9 @@ pipeline:
   # Distilled guidance scale
   guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
 
+  # Wan2.2 video number of frames
+  num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
+
 # Rollout Algorithm configuration
 algo:
 

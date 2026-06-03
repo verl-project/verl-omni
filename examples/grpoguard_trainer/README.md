@@ -12,7 +12,7 @@ Follow the [installation guide](../../docs/start/install.md) to set up the base 
 pip install Levenshtein
 ```
 
-The provided script is configured for a single node with `4` GPUs.
+The provided GPU script is configured for a single node with `4` GPUs. An NPU script for Ascend 800T A2 with `8` NPUs is also available (see [Run training](#run-training) below).
 
 ## Prepare the dataset
 
@@ -43,11 +43,21 @@ This produces:
 
 Launch the example from the repository root:
 
+**GPU (4 GPUs):**
+
 ```bash
 bash examples/grpoguard_trainer/run_qwen_image_ocr_lora.sh
 ```
 
-The script runs `python3 -m verl_omni.trainer.main_diffusion` with:
+**NPU (8 NPUs, Atlas 800T A2):**
+
+The NPU script requires the CANN software stack. Before running, set the `ASCEND_HOME_PATH` environment variable (defaults to `/usr/local/Ascend/cann-9.0.0`).
+
+```bash
+bash examples/grpoguard_trainer/run_qwen_image_ocr_lora_npu.sh
+```
+
+The scripts run `python3 -m verl_omni.trainer.main_diffusion` with:
 
 - `algorithm.adv_estimator=flow_grpo`
 - `actor_rollout_ref.model.path=Qwen/Qwen-Image`
@@ -58,7 +68,16 @@ The script runs `python3 -m verl_omni.trainer.main_diffusion` with:
 - `actor_rollout_ref.actor.diffusion_loss.clip_ratio=2e-6`
 - `actor_rollout_ref.rollout.algo.sde_type=sde`
 - `reward.custom_reward_function.name=compute_score_ocr`
-- `trainer.n_gpus_per_node=4`
+
+Due to differences in memory capacity, the NPU and GPU configurations differ as follows:
+
+| Parameter | GPU | NPU |
+|---|---|---|
+| `trainer.device` | gpu (default) | `npu` |
+| `actor_rollout_ref.model.attn_backend` | default | `_native_npu` |
+| `trainer.n_gpus_per_node` | 4 | 8 |
+| `actor_rollout_ref.rollout.tensor_model_parallel_size` | 1 | 2 |
+| `actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu` | 16 | 4 |
 
 ## Logging
 
