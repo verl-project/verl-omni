@@ -51,9 +51,9 @@ class QwenImageFlops(DiffusionModelFlops):
             in_channels = int(self.config.get("in_channels") or 0)
             if in_channels > 0 and shape[-1] == in_channels:
                 # Packed: (B, L, C') or FlowGRPO-stacked (B, T, L, C').
-                # Unpacked NFT/VAE latents (B, C, H, W) also end in C' but
-                # have four dims without a timestep axis — defer to the base
-                # spatial product instead of treating H as the seqlen.
+                # Unpacked NFT/VAE latents use NCHW `(B, C, H, W)` (no packed `L` dim),
+                # so even if `shape[-1]` happens to equal `in_channels` we defer to the base
+                # spatial-product extractor instead of treating `H` as the seqlen.
                 if stacked and len(shape) == 4:
                     return [shape[-2]] * shape[0]
                 if not stacked and len(shape) == 3:

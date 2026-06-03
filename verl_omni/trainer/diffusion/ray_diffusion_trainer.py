@@ -871,7 +871,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         )
         return DataProto.from_tensordict(ref_log_prob)
 
-    def _compute_old_log_prob(self, batch: DataProto) -> tuple[DataProto, float]:
+    def _compute_old_log_prob(self, batch: DataProto) -> tuple[DataProto, Optional[float]]:
         batch_td = batch.to_tensordict()
         batch_td = embeds_padding_2_no_padding(batch_td)
         tu.assign_non_tensor(
