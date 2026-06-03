@@ -47,7 +47,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.n=16 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \
     actor_rollout_ref.rollout.load_format=safetensors \
-    actor_rollout_ref.rollout.layered_summon=False \
+    actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.pipeline.true_cfg_scale=1.0 \
     actor_rollout_ref.rollout.pipeline.height=$IMAGE_RESOLUTION \
     actor_rollout_ref.rollout.pipeline.width=$IMAGE_RESOLUTION \
@@ -64,6 +64,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.reward_model.model_path=$reward_model_name \
     reward.reward_model.rollout.name=$REWARD_ENGINE \
     reward.reward_model.rollout.tensor_model_parallel_size=$REWARD_TP \
+    reward.reward_model.rollout.gpu_memory_utilization=0.4 \
+    reward.reward_model.rollout.free_cache_engine=True \
     reward.custom_reward_function.path=$reward_function_path \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.logger='["console", "wandb"]' \

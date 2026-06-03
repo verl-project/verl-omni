@@ -52,7 +52,7 @@ from verl.workers.config import (
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
 
-from verl_omni.utils.diffusion_flops_counter import (
+from verl_omni.utils.mfu import (
     DiffusionFlopsCounter,
     get_forward_passes_per_step,
 )

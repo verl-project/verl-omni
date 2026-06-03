@@ -288,7 +288,7 @@ Two facts matter for the estimator:
 ### Step 3 — Write the architecture class
 
 ```python
-# verl_omni/utils/diffusion_flops_counter.py
+# verl_omni/utils/mfu/qwen_image.py
 
 @register_diffusion_architecture(
     "WanPipeline",
@@ -501,7 +501,7 @@ If `perf/mfu/actor > 1.0`, the two common causes are:
    ```
 
    Honored by `get_device_peak_tflops()` in
-   `verl_omni.utils.diffusion_flops_counter` and consumed by
+   `verl_omni.utils.mfu` and consumed by
    `DiffusionFlopsCounter.estimate_flops`. See
    `tests/utils/test_diffusion_flops_counter_on_cpu.py::TestDevicePeakOverride`.
 2. **Missing DP gather of seqlens.** `_allgather_diffusion_flops_meta`

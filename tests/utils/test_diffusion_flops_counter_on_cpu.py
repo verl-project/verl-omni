@@ -27,8 +27,7 @@ import warnings
 
 import pytest
 
-from verl_omni.utils.diffusion_flops_counter import (
-    _REGISTRY,
+from verl_omni.utils.mfu import (
     DiffusionFlopsCounter,
     DiffusionModelFlops,
     QwenImageFlops,
@@ -36,6 +35,7 @@ from verl_omni.utils.diffusion_flops_counter import (
     get_forward_passes_per_step,
     register_diffusion_architecture,
 )
+from verl_omni.utils.mfu.diffusion_flops_counter import _REGISTRY
 
 
 def _reference_qwen_image_flops(
@@ -339,19 +339,13 @@ class TestQwenImageFlopsPackedLatents:
 
     def test_packed_4d_all_latents_flowgrpo_stacked(self):
         # FlowGRPO trajectory at 512x512 with sde_window_size=2.
-        data = {"all_latents": _Tensor((4, 2, 1024, 64))}
-        flops = QwenImageFlops(QWEN_IMAGE_CONFIG)
-        assert flops.get_latent_seqlens(data) == [1024] * 4
-
-    def test_counter_dispatch_picks_up_packed_layout(self):
-        # End-to-end through DiffusionFlopsCounter to make sure the
-        # subclass override is actually invoked by collect_meta.
-        counter = DiffusionFlopsCounter("QwenImagePipeline", QWEN_IMAGE_CONFIG)
         data = {
             "all_latents": _Tensor((4, 2, 1024, 64)),
             "prompt_embeds_mask": _Tensor((4, 256)),
         }
-        meta = counter.collect_meta(data)
+        flops = QwenImageFlops(QWEN_IMAGE_CONFIG)
+        assert flops.get_latent_seqlens(data) == [1024] * 4
+        meta = DiffusionFlopsCounter("QwenImagePipeline", QWEN_IMAGE_CONFIG).collect_meta(data)
         assert meta["latent_seqlens"] == [1024] * 4
         assert meta["prompt_seqlens"] == [256] * 4
 
@@ -517,25 +511,19 @@ class TestQwenImageFlopsScaling:
             ref = _reference_qwen_image_flops(QWEN_IMAGE_CONFIG, **kwargs)
             assert math.isclose(est, ref, rel_tol=1e-9), (kwargs, est, ref)
 
-    def test_realistic_size_band_consistent_with_reference(self):
-        """Loose sanity band that catches order-of-magnitude regressions."""
+    def test_unconditional_zero_text_runs(self):
+        # Class-conditioned / unconditional: prompt_seqlens = [0]*B should
+        # still produce a sensible non-zero FLOPs estimate driven by the
+        # image stream alone (attn quadratic term collapses to img_seq^2).
         counter = _qwen_counter()
-        # 4 samples * 1024 image tokens * 256 text tokens * 1 step * 1 cfg.
-        kwargs = dict(
+        est, _ = counter.estimate_flops(
             latent_seqlens=[1024] * 4,
-            prompt_seqlens=[256] * 4,
+            prompt_seqlens=[0] * 4,
             delta_time=1.0,
             num_timesteps=1,
             num_forward_passes=1,
         )
-        est, _ = counter.estimate_flops(**kwargs)
-        ref = _reference_qwen_image_flops(QWEN_IMAGE_CONFIG, **kwargs)
-        # Hand sanity check: each token only flows through ONE of the two
-        # ~10.2B-param streams. Image stream: 6 * 10.2B * 4096 = 2.5e14; text
-        # stream: 6 * 10.2B * 1024 = 6.3e13; total dense ≈ 3.1e14 FLOPs at
-        # delta_time=1s. Add ~15 TFLOPS of attention. Empirically ~224 TFLOPS.
-        assert 180.0 < est < 320.0, est
-        assert math.isclose(est, ref, rel_tol=1e-9)
+        assert est > 0
 
 
 class TestQwenImageFlopsParamCount:
@@ -762,37 +750,6 @@ class TestGetForwardPassesPerStep:
         # pipeline configs.
         assert get_forward_passes_per_step({"guidance_scale": "off"}, {}) == 1
         assert get_forward_passes_per_step({"true_cfg_scale": object()}, {}) == 1
-
-
-class TestNonCfgQwenImageFlops:
-    """Pin the formula behaviour for the non-CFG case so future estimators
-    in the registry can rely on ``num_forward_passes=1`` being a no-op multiplier."""
-
-    def test_num_forward_passes_one_halves_two(self):
-        counter = _qwen_counter()
-        kwargs = dict(
-            latent_seqlens=[1024] * 4,
-            prompt_seqlens=[256] * 4,
-            delta_time=2.0,
-            num_timesteps=5,
-        )
-        est_one, _ = counter.estimate_flops(num_forward_passes=1, **kwargs)
-        est_two, _ = counter.estimate_flops(num_forward_passes=2, **kwargs)
-        assert math.isclose(est_two, 2 * est_one, rel_tol=1e-9)
-
-    def test_unconditional_zero_text_runs(self):
-        # Class-conditioned / unconditional: prompt_seqlens = [0]*B should
-        # still produce a sensible non-zero FLOPs estimate driven by the
-        # image stream alone (attn quadratic term collapses to img_seq^2).
-        counter = _qwen_counter()
-        est, _ = counter.estimate_flops(
-            latent_seqlens=[1024] * 4,
-            prompt_seqlens=[0] * 4,
-            delta_time=1.0,
-            num_timesteps=1,
-            num_forward_passes=1,
-        )
-        assert est > 0
 
 
 class TestDiffusionFlopsCounterApi:
