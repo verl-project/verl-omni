@@ -922,6 +922,14 @@ class BagelForTraining(nn.Module):
         self.peft_config[adapter_name] = adapter_config
         inject_adapter_in_model(adapter_config, self, adapter_name)
 
+    def set_adapter(self, adapter_name: str):
+        for module in self.modules():
+            if module is self:
+                continue
+            set_adapter_fn = getattr(module, "set_adapter", None)
+            if callable(set_adapter_fn):
+                set_adapter_fn(adapter_name)
+
     def disable_adapters(self):
         for module in self.modules():
             if module is self:
