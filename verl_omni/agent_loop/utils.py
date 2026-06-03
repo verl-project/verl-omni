@@ -22,14 +22,8 @@ def _derive_rollout_seed(base_seed: int, rollout_index: int) -> int:
     return (int(base_seed) * 1_000_003 + int(rollout_index)) % max_seed
 
 
-def _maybe_per_rollout_seeds(meta_info: dict, batch_size: int, global_indices=None) -> Optional[list[int]]:
-    """Build one seed per post-repeat rollout row.
-
-    Explicit global row ids are preferred so dispatched chunks derive seeds
-    from their original expanded-row identity. Worker-local row positions are
-    retained as a compatibility fallback for callers that do not provide the
-    global id column.
-    """
+def maybe_per_rollout_seeds(meta_info: dict, batch_size: int, global_indices=None) -> Optional[list[int]]:
+    """Build one seed per post-repeat rollout row."""
     base = meta_info.get("rollout_seed")
     if base is None:
         return None
