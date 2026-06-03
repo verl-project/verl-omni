@@ -1,7 +1,7 @@
 (diffusion_mfu)=
 # Diffusion FLOPs / MFU
 
-Last updated: 05/31/2026
+Last updated: 06/02/2026
 
 VeRL-Omni reports **Model FLOPs Utilization (MFU)** for diffusion RL
 training using the same actor keys upstream
@@ -30,9 +30,10 @@ not surfaced at the trainer level, matching upstream verl.
 
 `MFU = 1.0` means every GPU in the data-parallel group is sustaining the
 device's advertised peak FLOPS for the duration of the timed call. The
-peak comes from `verl.utils.flops_counter.get_device_flops()`, so the
-values are normalised against the same device table upstream verl uses
-for LLM MFU — no diffusion-specific device table is introduced.
+peak comes from `get_device_peak_tflops()` in `verl_omni.utils.mfu`,
+which wraps upstream `verl.utils.flops_counter.get_device_flops()` and
+honors the `VERL_OMNI_DEVICE_FLOPS_TFLOPS` env override — no
+diffusion-specific device table is introduced.
 
 Absolute MFU values are model-, hardware-, batch-shape-, and
 parallelism-dependent; treat them as **relative** numbers for comparing
@@ -203,12 +204,17 @@ Given `flops_per_call` and the elapsed wall time `delta_time` returned by
 the worker's timer:
 
 ```python
-peak_FLOPS  = get_device_flops()                                      # device peak (TFLOPS scaled by 1e12)
+peak_FLOPS  = get_device_peak_tflops()                                # device peak in TFLOPS
 achieved    = flops_per_call / (delta_time * world_size)
 MFU         = achieved / peak_FLOPS
 if forward_only:
     MFU /= 3.0                                                        # remove backward contribution
 ```
+
+Here `flops_per_call / delta_time` is already in TFLOPS (the architecture
+`estimate_flops` implementations divide by `1e12`), and
+`DiffusionFlopsCounter.estimate_flops` returns `(achieved_tflops,
+promised_tflops)`.
 
 The `/world_size` divisor mirrors upstream's LLM path:
 `_postprocess_output` consumes the all-gathered `flops_per_call` (across
@@ -459,8 +465,10 @@ freshly-instantiated tiny model.
 ### Step 5 — Verify on a smoke run
 
 Use any existing diffusion-RL launch script (e.g.
-`examples/flowgrpo_trainer/run_qwen_image_ocr.sh` adapted to your
-pipeline). Look for the two keys in your logger output:
+`examples/flowgrpo_trainer/run_qwen_image_ocr.sh`, or the H200-tuned
+`examples/flowgrpo_trainer/run_qwen_image_ocr_h200_mfu_optimized.sh`
+with `export VERL_OMNI_DEVICE_FLOPS_TFLOPS=989`). Look for the two keys
+in your logger output:
 
 ```text
 {"perf/mfu/actor": 0.XX, "perf/mfu/actor_infer": 0.XX, ...}
@@ -526,8 +534,12 @@ For diffusion RL workloads (like FlowGRPO), achieving high MFU requires balancin
    - Increasing `ppo_micro_batch_size_per_gpu` (e.g., from 16 to 32) helps amortize FSDP all-gather and reduce-scatter collective overheads.
    - *Note*: Once the effective matrix dimensions (M, N, K) exceed ~512, tensor cores are generally saturated, so returns diminish quickly.
 
-4. **Disable Layered Summon:**
-   - If parameter offloading is disabled, you can set `layered_summon=False` to allow the whole model to sync much faster during weight updates.
+4. **Layered Summon:**
+   - If **both** `param_offload=False` and `optimizer_offload=False`, set
+     `layered_summon=False` so weight sync can load the full model at once.
+   - When `param_offload=True` (common on colocated hybrid actor/rollout +
+     reward setups), keep `layered_summon=True` — disabling it tends to
+     OOM during `update_weights`.
 
 5. **Account for Gradient Checkpointing:**
    - If `enable_gradient_checkpointing: true` is set in your config, the *physical* MFU is actually ~33% higher than the reported MFU. The counter formula assumes a standard 1 forward + 2 backward passes (factor of 6), but checkpointing requires an additional recompute pass (1 fwd + 1 recompute + 2 bwd = 8).

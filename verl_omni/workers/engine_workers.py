@@ -215,7 +215,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             output: a dictionary containing loss, model_outputs and metrics
             diffusion_flops_meta: optional dict consumed by ``DiffusionFlopsCounter``
                 with keys ``latent_seqlens``, ``prompt_seqlens``, ``num_timesteps``,
-                ``cfg_passes``. Provided only on the diffusion path; ignored
+                ``num_forward_passes``. Provided only on the diffusion path; ignored
                 otherwise.
         """
         # TODO: whether to log memory
@@ -497,8 +497,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
         architecture class registered for ``DiffusionModelConfig.architecture``
         (see :class:`DiffusionModelFlops`). ``num_timesteps`` is read
         from the FlowGRPO/MixGRPO ``all_timesteps`` trajectory (defaulting
-        to 1 for DPO / one-shot paths) and ``cfg_passes`` is resolved from
-        the pipeline + transformer configs via :func:`get_forward_passes_per_step`.
+        to 1 for DPO / one-shot paths) and ``num_forward_passes`` is resolved
+        from the pipeline + transformer configs via
+        :func:`get_forward_passes_per_step`.
         """
         if not isinstance(self.flops_counter, DiffusionFlopsCounter):
             return None
@@ -517,17 +518,17 @@ class TrainingWorker(Worker, DistProfilerExtension):
         # ``pipeline`` is typically an OmegaConf DictConfig; coerce just the
         # fields we care about to a plain mapping for ``get_forward_passes_per_step``.
         pcfg_view: dict[str, Any] = {}
-        for key in ("cfg_passes", "true_cfg_scale", "guidance_scale"):
+        for key in ("num_forward_passes", "true_cfg_scale", "guidance_scale"):
             value = getattr(pipeline_config, key, None) if pipeline_config is not None else None
             if value is not None:
                 pcfg_view[key] = value
-        cfg_passes = get_forward_passes_per_step(pcfg_view, transformer_config)
+        num_forward_passes = get_forward_passes_per_step(pcfg_view, transformer_config)
 
         return {
             "latent_seqlens": seqlens["latent_seqlens"],
             "prompt_seqlens": seqlens["prompt_seqlens"],
             "num_timesteps": num_timesteps,
-            "num_forward_passes": cfg_passes,
+            "num_forward_passes": num_forward_passes,
         }
 
     def _allgather_diffusion_flops_meta(self, meta: dict) -> dict:
