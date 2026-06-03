@@ -675,36 +675,28 @@ class TestDPGlobalConsistency:
             per_rank_est,
         )
 
-    def test_mfu_below_one_at_realistic_step_time(self):
-        """At a realistic ``delta_time`` for a 4-GPU L20 Qwen-Image step,
-        MFU stays in [0, 1] after dividing by ``world_size``."""
+    def test_mfu_divides_by_world_size_after_global_gather(self):
+        """``_postprocess_output`` reports ``mfu = est / prom / world_size``
+        when ``est`` comes from globally gathered seqlens.
+
+        This is a wiring invariant only — absolute MFU bounds belong in GPU
+        smoke/e2e runs, not CPU unit tests (``prom`` is host-dependent).
+        """
         counter = _qwen_counter()
         world_size = 4
-        # ppo_micro_batch_size_per_gpu=16, image 1024x1024 (=1024 latent
-        # tokens after 2x patching at 64x64), text seqlen 256, 10 denoising
-        # steps, true_cfg_scale=4.0 (=> 2 cfg passes).
-        per_rank_img = [1024] * 16
-        per_rank_txt = [256] * 16
-        global_img = per_rank_img * world_size
-        global_txt = per_rank_txt * world_size
+        global_meta = {
+            "latent_seqlens": [1024] * (16 * world_size),
+            "prompt_seqlens": [256] * (16 * world_size),
+            "num_timesteps": 10,
+            "num_forward_passes": 2,
+        }
 
-        # delta_time = 260 s matches the observed end-to-end actor train
-        # block on 4xL20 with LoRA + param/optim offload (rollout/reward
-        # excluded).
-        est, prom = counter.estimate_flops(
-            latent_seqlens=global_img,
-            prompt_seqlens=global_txt,
-            delta_time=260.0,
-            num_timesteps=10,
-            num_forward_passes=2,
-        )
-        # Mimic TrainingWorker._postprocess_output's final step.
+        est, prom = counter.estimate_flops(delta_time=260.0, **global_meta)
+        assert est > 0
+        assert prom > 0
+
         mfu = est / prom / world_size
-        # On L20 (119.5 TFLOPS BF16 peak) with offloaded params + LoRA-only
-        # bwd this should be in the 40-80% band; we use a generous bound to
-        # catch order-of-magnitude wiring regressions, not steady-state
-        # performance fluctuations.
-        assert 0.0 < mfu < 1.0, mfu
+        assert math.isclose(mfu * world_size, est / prom, rel_tol=1e-9)
 
 
 class TestGetForwardPassesPerStep:
