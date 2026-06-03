@@ -1408,9 +1408,16 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                     else:
                         gen_batch = self._get_gen_batch(batch)
                         gen_batch.meta_info["global_steps"] = self.global_steps
+                        rollout_seed_cfg = self.config.actor_rollout_ref.rollout.get("seed")
+                        if rollout_seed_cfg is not None:
+                            gen_batch.meta_info["rollout_seed"] = int(rollout_seed_cfg) + self.global_steps - 1
+
                         gen_batch_output = gen_batch.repeat(
                             repeat_times=self.config.actor_rollout_ref.rollout.n,
                             interleave=True,
+                        )
+                        gen_batch_output.non_tensor_batch["_rollout_seed_global_idx"] = np.arange(
+                            len(gen_batch_output), dtype=np.int64
                         )
 
                         with marked_timer("gen", timing_raw, color="red"):
