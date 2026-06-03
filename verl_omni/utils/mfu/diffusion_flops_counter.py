@@ -82,18 +82,18 @@ def get_forward_passes_per_step(
 
     if "num_forward_passes" in pcfg:
         val = pcfg["num_forward_passes"]
-        if isinstance(val, (int, float)):
+        if isinstance(val, int | float):
             return max(int(val), 1)
 
     if tcfg.get("guidance_embeds"):
         return 1
 
     true_cfg = pcfg.get("true_cfg_scale", 1.0)
-    if isinstance(true_cfg, (int, float)) and true_cfg > 1.0:
+    if isinstance(true_cfg, int | float) and true_cfg > 1.0:
         return 2
 
     guidance = pcfg.get("guidance_scale", 1.0)
-    if isinstance(guidance, (int, float)) and guidance > 1.0:
+    if isinstance(guidance, int | float) and guidance > 1.0:
         return 2
 
     return 1
@@ -306,14 +306,6 @@ def collect_diffusion_flops_meta(
 
     Returns ``None`` when ``flops_counter`` is not a :class:`DiffusionFlopsCounter`
     so the LLM code path can keep using ``FlopsCounter.estimate_flops(global_token_num, ...)``.
-
-    Per-rank ``latent_seqlens`` / ``prompt_seqlens`` come from the architecture
-    class registered for ``DiffusionModelConfig.architecture`` (see
-    :class:`DiffusionModelFlops`). ``num_timesteps`` is read from
-    ``all_timesteps`` (FlowGRPO / MixGRPO), ``train_timesteps`` (DiffusionNFT),
-    or defaults to ``1`` for one-shot paths such as diffusion DPO.
-    ``num_forward_passes`` is resolved from the pipeline + transformer configs
-    via :func:`get_forward_passes_per_step`.
     """
     if not isinstance(flops_counter, DiffusionFlopsCounter):
         return None

@@ -255,9 +255,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 flatten_v = [sublist[0] for sublist in v]  # sublist should be single element
                 final_metrics[k] = sum(flatten_v) / len(flatten_v)
         # compute mfu
-        # Seqlens / token counts are gathered over ``dp_group``; normalize MFU by
-        # the same scope (not global world size) so Ulysses/SP ranks are not
-        # double-penalized when ``dp_group`` is smaller than WORLD.
         mfu_divisor = torch.distributed.get_world_size(dp_group) if dp_group is not None else 1
         if isinstance(self.flops_counter, DiffusionFlopsCounter):
             if diffusion_flops_meta is not None:
