@@ -34,6 +34,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
+    actor_rollout_ref.model.lora_dtype=float32 \
     actor_rollout_ref.model.target_modules="['q_proj_moe_gen','k_proj_moe_gen','v_proj_moe_gen','o_proj_moe_gen','mlp_moe_gen.gate_proj','mlp_moe_gen.up_proj','mlp_moe_gen.down_proj']" \
     actor_rollout_ref.actor.optim.lr=1e-5 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
