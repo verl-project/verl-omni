@@ -127,6 +127,8 @@ run_test() {
     local id="$1"; local name="$2"; shift 2
     local logfile="${LOG_DIR}/test_${id}.log"
 
+    ray stop --force 2>/dev/null || true
+
     sep
     log "Starting  [${id}] ${name}"
     log "Command : $*"
