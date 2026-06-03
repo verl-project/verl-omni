@@ -36,6 +36,7 @@ r^{\mathrm{raw}}(x_0,c)
 -1, 1
 \right).
 \end{aligned}
+$$
 
 This optimality-probability transform follows the GRPO-style practice of
 normalizing rewards within a prompt group before clipping them into a bounded
