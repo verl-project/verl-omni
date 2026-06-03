@@ -65,7 +65,7 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         return_dict: bool = True,
         noise_level: float = 0.7,
         prev_sample: Optional[torch.FloatTensor] = None,
-        sde_type: Literal["sde", "cps"] = "sde",
+        sde_type: Literal["sde", "cps", "dance_sde"] = "sde",
         return_logprobs: bool = True,
     ) -> FlowMatchSDEDiscreteSchedulerOutput | tuple:
         """
@@ -98,7 +98,7 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             prev_sample (`torch.FloatTensor`, *optional*):
                 The sample from the previous timestep. If not provided, it will be sampled inside the function.
             sde_type (`str`, *optional*, defaults to "sde"):
-                The type of SDE to use. Choose between "sde" and "cps".
+                The type of SDE to use. Choose between "sde", "cps", and "dance_sde".
             return_logprobs (`bool`, *optional*, defaults to True):
                 Whether to return log probabilities of the previous sample.
         """
@@ -150,7 +150,7 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         per_token_timesteps: Optional[torch.Tensor] = None,
         noise_level: float = 0.7,
         prev_sample: Optional[torch.Tensor] = None,
-        sde_type: Literal["cps", "sde"] = "sde",
+        sde_type: Literal["cps", "sde", "dance_sde"] = "sde",
         return_logprobs: bool = True,
         return_sqrt_dt: bool = False,
     ):
@@ -175,7 +175,7 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
                 The sample from the previous timestep. If provided, it is used directly for
                 log-probability computation instead of being sampled.
             sde_type (`str`, *optional*, defaults to "sde"):
-                The type of SDE to use. Choose between "sde" and "cps".
+                The type of SDE to use. Choose between "sde", "cps", and "dance_sde".
             return_logprobs (`bool`, *optional*, defaults to True):
                 Whether to return log probabilities of the previous sample.
             return_sqrt_dt (`bool`, *optional*, defaults to False):
@@ -183,7 +183,7 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
                 Used by GRPO-Guard to compute the importance-ratio normalization
                 (see `GRPOGuardLoss`).
         """
-        assert sde_type in ["sde", "cps"]
+        assert sde_type in ["sde", "cps", "dance_sde"]
         assert sample.dtype == torch.float32
         if prev_sample is not None:
             assert prev_sample.dtype == torch.float32
@@ -249,6 +249,49 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
 
             if return_logprobs:
                 log_prob = -((prev_sample.detach() - prev_sample_mean) ** 2)
+            else:
+                log_prob = None
+
+        elif sde_type == "dance_sde":
+            # DanceGRPO SDE step from https://github.com/XueZeyue/DanceGRPO
+            # Based on score-based SDE correction with eta (noise_level) controlling
+            # the stochasticity. This formulation is numerically stable even when
+            # sigma is close to 1, unlike the FlowGRPO "sde" variant.
+            dsigma = sigma_prev - sigma  # negative (sigma decreases)
+            delta_t = sigma - sigma_prev  # positive
+
+            # ODE mean: x_{t-1} = x_t + dsigma * model_output
+            prev_sample_mean = sample + dsigma * model_output
+
+            # Predicted original sample: x_0 = x_t - sigma * model_output
+            pred_original_sample = sample - sigma * model_output
+
+            # Score-based SDE correction term
+            # score_estimate = -(x_t - x_0 * (1 - sigma)) / sigma^2
+            # log_term = -0.5 * eta^2 * score_estimate
+            # prev_sample_mean += log_term * dsigma
+            score_estimate = -(sample - pred_original_sample * (1 - sigma)) / (sigma**2)
+            log_term = -0.5 * noise_level**2 * score_estimate
+            prev_sample_mean = prev_sample_mean + log_term * dsigma
+
+            # Noise standard deviation: eta * sqrt(delta_t)
+            std_dev_t = noise_level * torch.sqrt(delta_t)
+
+            if prev_sample is None:
+                variance_noise = randn_tensor(
+                    model_output.shape,
+                    generator=generator,
+                    device=model_output.device,
+                    dtype=model_output.dtype,
+                )
+                prev_sample = prev_sample_mean + std_dev_t * variance_noise
+
+            if return_logprobs:
+                log_prob = (
+                    -((prev_sample.detach() - prev_sample_mean) ** 2) / (2 * (std_dev_t**2))
+                    - torch.log(std_dev_t)
+                    - torch.log(torch.sqrt(2 * torch.as_tensor(math.pi)))
+                )
             else:
                 log_prob = None
 

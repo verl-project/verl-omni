@@ -73,6 +73,10 @@ class TestDiffusionLossConfig:
         with pytest.raises(ValueError, match=match):
             DiffusionLossConfig(**kwargs)
 
+    def test_dance_grpo_loss_mode(self):
+        cfg = DiffusionLossConfig(loss_mode="dance_grpo")
+        assert cfg.loss_mode == "dance_grpo"
+
 
 # ---------------------------------------------------------------------------
 # DiffusionAlgoConfig

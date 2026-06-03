@@ -17,7 +17,9 @@ import os
 from dataclasses import asdict
 from typing import Any, Optional
 
+import numpy as np
 import ray
+import torch
 import torchvision.transforms as T
 import vllm_omni.entrypoints.cli.serve
 from verl.utils.config import omega_conf_to_dataclass
@@ -253,8 +255,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         async for output in generator:
             final_res = output
         assert final_res is not None
-
-        diffusion_output = self._to_tensor(final_res.images[0]).float() / 255.0
+        diffusion_output = final_res.images[0]
+        if isinstance(diffusion_output, torch.Tensor):
+            diffusion_output = diffusion_output.float()
+        elif isinstance(diffusion_output, np.ndarray):
+            diffusion_output = torch.from_numpy(diffusion_output).float()
+        else:
+            diffusion_output = self._to_tensor(diffusion_output).float() / 255.0
 
         # Extract extra data from custom_output (populated by DiffusionEngine)
         mm_output = final_res.custom_output or {}

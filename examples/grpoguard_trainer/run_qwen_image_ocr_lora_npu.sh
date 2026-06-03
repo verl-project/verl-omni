@@ -1,10 +1,8 @@
-#!/bin/bash
-# Qwen-Image lora RL - 8-NPU Global Distribution Strategy (TP8)
+# Qwen-Image lora RL with GRPO-Guard (https://arxiv.org/abs/2510.22319), vllm_omni rollout
 set -x
 ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.0.0}
 source $ASCEND_HOME_PATH/set_env.sh
 source $ASCEND_HOME_PATH/../nnal/atb/set_env.sh
-export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 
 # Set WORKSPACE to any writable directory; defaults to $HOME
 WORKSPACE=${WORKSPACE:-$HOME}
@@ -16,15 +14,13 @@ model_name=Qwen/Qwen-Image
 reward_model_name=Qwen/Qwen3-VL-8B-Instruct
 reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
 
-# 8-NPU Global Distribution (TP8 for all)
-# This minimizes per-card weight memory footprint (only ~6GB total for all 3 models)
-# leaving >50GB free for FSDP backward pass.
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=8
 ROLLOUT_TP=2
 REWARD_TP=4
 
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
+
 
 python3 -m verl_omni.trainer.main_diffusion \
     trainer.device=npu \
@@ -45,7 +41,9 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-    actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_grpo \
+    actor_rollout_ref.actor.diffusion_loss.loss_mode=grpo_guard \
+    actor_rollout_ref.actor.diffusion_loss.clip_ratio=2e-6 \
+    actor_rollout_ref.actor.diffusion_loss.adv_clip_max=5.0 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.name=$ENGINE \
@@ -69,9 +67,9 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.reward_model.rollout.tensor_model_parallel_size=$REWARD_TP \
     reward.custom_reward_function.path=$reward_function_path \
     reward.custom_reward_function.name=compute_score_ocr \
-    trainer.logger='["console", "tensorboard"]' \
-    trainer.project_name=flow_grpo_npu \
-    trainer.experiment_name=qwen_image_ocr_lora_npu \
+    trainer.logger='["console", "wandb"]' \
+    trainer.project_name=grpo_guard \
+    trainer.experiment_name=qwen_image_ocr_lora \
     trainer.log_val_generations=8 \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
