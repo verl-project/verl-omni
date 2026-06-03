@@ -14,7 +14,13 @@
 from .fsdp import (  # noqa: F401
     DiffusersFSDPEngine,
     DPODiffusersFSDPEngine,
+    NFTDiffusersFSDPEngine,
     PPODiffusersFSDPEngine,
 )
 
-__all__ = ["PPODiffusersFSDPEngine", "DPODiffusersFSDPEngine", "DiffusersFSDPEngine"]
+__all__ = [
+    "PPODiffusersFSDPEngine",
+    "DPODiffusersFSDPEngine",
+    "NFTDiffusersFSDPEngine",
+    "DiffusersFSDPEngine",
+]

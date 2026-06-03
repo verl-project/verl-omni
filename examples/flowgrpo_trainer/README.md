@@ -107,6 +107,7 @@ We have provided a script to enable non-cfg full-weight Qwen-Image OCR training.
 bash examples/flowgrpo_trainer/run_qwen_image_ocr.sh
 ```
 
+
 ## BAGEL recipe
 
 `run_bagel_flowgrpo.sh` post-trains `BAGEL-7B-MoT` (Mixture-of-Transformers)
@@ -162,6 +163,11 @@ Notable differences from the Qwen-Image recipe:
   window (≈60s). If a launch dies during `init_distributed_environment`
   with `EADDRINUSE` on a port in 30005–30105, wait ~60s and re-launch.
 
+An NPU script for Atlas A3 with 16 NPUs is also provided. Before running, set the `ASCEND_HOME_PATH` environment variable (defaults to `/usr/local/Ascend/cann-9.0.0`).
+
+```bash
+bash examples/flowgrpo_trainer/run_qwen_image_ocr_npu.sh
+```
 
 ## Performance
 

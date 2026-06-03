@@ -83,11 +83,19 @@ class DiffusionModelConfig(BaseConfig):
     # path to pre-trained LoRA adapter to load for continued training
     lora_adapter_path: Optional[str] = None
 
+    # Named LoRA policy states required by the algorithm. "reference" uses disabled adapters.
+    policy_state_adapters: tuple[str, ...] = ("default",)
+
+    # dtype to convert LoRA parameters to (e.g., "fp32", "bf16"). Default None means no conversion.
+    lora_dtype: Optional[str] = None
+
     mtp: Optional[MtpConfig] = field(default_factory=MtpConfig)
 
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
 
     algo: Optional[DiffusionRolloutAlgoConfig] = field(default_factory=DiffusionRolloutAlgoConfig)
+
+    fsdp_layer_prefixes: list[str] = field(default_factory=lambda: ["transformer_blocks."])
 
     def __post_init__(self):
         import_external_libs(self.external_lib)

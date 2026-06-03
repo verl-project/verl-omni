@@ -179,6 +179,18 @@ class TrainingWorker(Worker, DistProfilerExtension):
         """
         self.engine.initialize()
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def copy_adapter(self, source: str = "default", target: str = "old"):
+        if not hasattr(self.engine, "copy_adapter"):
+            raise NotImplementedError(f"Engine {type(self.engine).__name__} does not support copy_adapter.")
+        self.engine.copy_adapter(source=source, target=target)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def ema_update_adapter(self, source: str = "default", target: str = "old", decay: float = 0.0):
+        if not hasattr(self.engine, "ema_update_adapter"):
+            raise NotImplementedError(f"Engine {type(self.engine).__name__} does not support ema_update_adapter.")
+        self.engine.ema_update_adapter(source=source, target=target, decay=decay)
+
     def _postprocess_output(self, output, *, global_token_num, delta_time, forward_only, images_seqlens):
         """
 
@@ -498,7 +510,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         model_config: HFModelConfig | DiffusionModelConfig = omega_conf_to_dataclass(self.config.model)
-        is_diffusion = model_config.get("model_type", "language_model") in ("diffusion_model", "diffusion_dp_model")
+        is_diffusion = model_config.get("model_type", "language_model") in (
+            "diffusion_model",
+            "diffusion_dpo_model",
+            "diffusion_nft_model",
+        )
 
         # 1. build reference model
         if "ref" in self.role:
@@ -612,7 +628,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.loss_fn = partial(
                     distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
                 )
-            elif model_config.get("model_type", "language_model") in ("diffusion_model", "diffusion_dp_model"):
+            elif model_config.get("model_type", "language_model") in (
+                "diffusion_model",
+                "diffusion_dpo_model",
+                "diffusion_nft_model",
+            ):
                 self.loss_fn = partial(diffusion_loss, config=actor_config)
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
@@ -688,6 +708,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def copy_adapter(self, source: str = "default", target: str = "old"):
+        assert "actor" in self.role, "copy_adapter only supports actor role"
+        self.actor.copy_adapter(source=source, target=target)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def ema_update_adapter(self, source: str = "default", target: str = "old", decay: float = 0.0):
+        assert "actor" in self.role, "ema_update_adapter only supports actor role"
+        self.actor.ema_update_adapter(source=source, target=target, decay=decay)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         assert "actor" in self.role, "load_checkpoint only support actor role"
         self.actor.load_checkpoint(local_path, hdfs_path, del_local_after_load)
@@ -726,7 +756,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if effective_mode != "naive":
-            per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+            per_tensor_param, _ = self.actor.engine.get_per_tensor_param(
+                adapter_name=self.config.rollout.rollout_adapter
+            )
             await self.checkpoint_engine.send_weights(per_tensor_param)
             return
 
@@ -740,7 +772,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 2. determine if we need a base weight sync (adapter path only)
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
-            layered_summon=self.layered_summon, base_sync_done=True
+            layered_summon=self.layered_summon,
+            base_sync_done=True,
+            adapter_name=self.config.rollout.rollout_adapter,
         )
 
         do_lora_base_sync = False
@@ -751,7 +785,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # 3. sync weights: For SGLang, we need base first (when needed), then adapter/merged
         if do_lora_base_sync:
             per_tensor_param_base, peft_config = self.actor.engine.get_per_tensor_param(
-                layered_summon=self.layered_summon, base_sync_done=False
+                layered_summon=self.layered_summon,
+                base_sync_done=False,
+                adapter_name=self.config.rollout.rollout_adapter,
             )
             await self.rollout.update_weights(
                 per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps

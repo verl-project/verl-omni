@@ -15,7 +15,7 @@
 Metrics for diffusion (image generation) training.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -93,6 +93,19 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
         metrics["critic/rewards/group_size"] = float(len(rewards_np) / len(unique_uids))
 
     return metrics
+
+
+def compute_old_policy_metrics(
+    update_result: tuple[bool, float, Literal["none", "copy", "ema"]],
+) -> dict[str, Any]:
+    """Build metrics for old-policy adapter refreshes."""
+    update_applied, decay, update_type = update_result
+    return {
+        "old_policy/update_applied": float(update_applied),
+        "old_policy/copy_update": float(update_type == "copy"),
+        "old_policy/ema_update": float(update_type == "ema"),
+        "old_policy/decay": float(decay),
+    }
 
 
 def compute_timing_metrics_diffusion(timing_raw: dict[str, float], num_images: int) -> dict[str, Any]:
