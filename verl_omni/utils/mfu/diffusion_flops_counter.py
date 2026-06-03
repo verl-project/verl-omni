@@ -82,18 +82,18 @@ def get_forward_passes_per_step(
 
     if "num_forward_passes" in pcfg:
         val = pcfg["num_forward_passes"]
-        if isinstance(val, int | float):
+        if isinstance(val, (int, float)):
             return max(int(val), 1)
 
     if tcfg.get("guidance_embeds"):
         return 1
 
     true_cfg = pcfg.get("true_cfg_scale", 1.0)
-    if isinstance(true_cfg, int | float) and true_cfg > 1.0:
+    if isinstance(true_cfg, (int, float)) and true_cfg > 1.0:
         return 2
 
     guidance = pcfg.get("guidance_scale", 1.0)
-    if isinstance(guidance, int | float) and guidance > 1.0:
+    if isinstance(guidance, (int, float)) and guidance > 1.0:
         return 2
 
     return 1
