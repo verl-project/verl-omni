@@ -208,7 +208,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
         forward_only,
         images_seqlens,
         diffusion_flops_meta: Optional[dict] = None,
-        record_loss: bool = True,
     ):
         """
         Args:
@@ -229,15 +228,10 @@ class TrainingWorker(Worker, DistProfilerExtension):
         # perform all gather in dp group to ensure that it's correct.
         # Here each metric in metrics can be a list (micro-batch metrics) or a singleton
         # we should always sum the loss of each micro-batch as we scale by global_bsz/global_token
-        loss = None
-        if record_loss:
-            loss = torch.sum(torch.tensor(output.pop("loss"), device=self.device_name))
-            if dp_group is not None:
-                torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
-            loss = loss.item()
-        else:
-            # Drain the placeholder loss so it cannot leak into downstream handling.
-            output.pop("loss", None)
+        loss = torch.sum(torch.tensor(output.pop("loss"), device=self.device_name))
+        if dp_group is not None:
+            torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
+        loss = loss.item()
 
         # For grad_norm, we do not perform all reduce because it is already been done when clipping grad
         grad_norm = metrics.pop("grad_norm", None)
@@ -248,8 +242,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             final_metrics = allgather_dict_into_dict(data=metrics, group=dp_group)
         else:
             final_metrics = metrics
-        if record_loss:
-            final_metrics["loss"] = loss
+        final_metrics["loss"] = loss
         if grad_norm is not None:
             final_metrics["grad_norm"] = grad_norm
         if lr is not None:
@@ -476,11 +469,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 forward_only=True,
                 images_seqlens=images_seqlens,
                 diffusion_flops_meta=diffusion_flops_meta,
-                # When the caller passed compute_loss=False (old/ref log-prob
-                # recompute on the diffusion path), the engine returns a
-                # constant placeholder loss=1.0 per micro-batch. Suppress
-                # emission so it doesn't surface as a meaningless metric.
-                record_loss=compute_loss,
             ).cpu()
         else:
             final_output = None
