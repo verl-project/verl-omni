@@ -77,6 +77,7 @@ class TestDiffusionLossConfig:
         cfg = DiffusionLossConfig(loss_mode="dance_grpo")
         assert cfg.loss_mode == "dance_grpo"
 
+
 # ---------------------------------------------------------------------------
 # DiffusionAlgoConfig
 # ---------------------------------------------------------------------------

@@ -12,7 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import os
+
 from .diffusers_training_adapter import Wan22DanceGRPO
-from .vllm_omni_rollout_adapter import Wan22DanceGRPOPipelineWithLogProb
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+try:
+    from .vllm_omni_rollout_adapter import Wan22DanceGRPOPipelineWithLogProb
+except (ImportError, RuntimeError, AttributeError) as e:
+    logger.info(f"Wan22 Dance GRPO not available: {e}. GPU/NPU required.")
+
+    class _UnavailableModule:
+        def __getattr__(self, _):
+            raise RuntimeError("Wan22 Dance GRPO requires GPU (CUDA/NPU)")
+
+        def __call__(self, *args, **kwargs):
+            raise RuntimeError("Wan22 Dance GRPO requires GPU (CUDA/NPU)")
+
+    Wan22DanceGRPOPipelineWithLogProb = _UnavailableModule()
 
 __all__ = ["Wan22DanceGRPO", "Wan22DanceGRPOPipelineWithLogProb"]

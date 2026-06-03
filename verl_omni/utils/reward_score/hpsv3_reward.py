@@ -15,7 +15,6 @@
 import logging
 import math
 import os
-import tempfile
 import threading
 
 import numpy as np
