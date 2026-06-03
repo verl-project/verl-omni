@@ -44,6 +44,7 @@ __all__ = [
 _DEVICE_PEAK_OVERRIDE_ENV = "VERL_OMNI_DEVICE_FLOPS_TFLOPS"
 
 
+# TODO: drop after introducing VERL_DEVICE_FLOPS_TFLOPS in verl
 def get_device_peak_tflops() -> float:
     """Return the per-device bf16-dense peak in TFLOPS.
 
