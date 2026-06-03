@@ -10,7 +10,7 @@
 # Requires: vllm-omni, diffusers>=0.37,
 #   tiny Qwen-Image at ~/models/tiny-random/Qwen-Image
 #   tiny qwen3-vl  at ~/models/tiny-random/qwen3-vl
-set -xeuo pipefail
+set -euo pipefail
 
 # Override via env: NUM_GPUS, MODEL_PATH, REWARD_MODEL_PATH, DATA_DIR, TOTAL_TRAIN_STEPS,
 #                   TRAIN_FILES, VAL_FILES
@@ -22,10 +22,42 @@ REWARD_TP=${REWARD_TP:-1}
 DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_diffusion}
 dummy_train_path=${TRAIN_FILES:-${DATA_DIR}/train.parquet}
 dummy_test_path=${VAL_FILES:-${DATA_DIR}/test.parquet}
-TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-1}
+TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-2}
 
 ENGINE=vllm_omni
 max_prompt_length=256
+
+# This helper runs nvidia-smi in a background loop during training and
+# fails if any vLLMOmniHttpServer process appears.
+_LEAK_FILE=$(mktemp)
+_LEAK_PID=""
+cleanup_leak_monitor() {
+    [[ -n "${_LEAK_PID}" ]] && kill "${_LEAK_PID}" 2>/dev/null || true
+    rm -f "${_LEAK_FILE}"
+}
+trap cleanup_leak_monitor EXIT
+
+start_leak_monitor() {
+    : > "${_LEAK_FILE}"
+    while true; do
+        if nvidia-smi -i 0 2>&1 | grep -q "vLLMOmniHttpServer"; then
+            echo "LEAK" >> "${_LEAK_FILE}"
+        fi
+        sleep 1
+    done &
+    _LEAK_PID=$!
+}
+
+check_leak_monitor() {
+    kill "${_LEAK_PID}" 2>/dev/null || true
+    _LEAK_PID=""
+    if grep -q "LEAK" "${_LEAK_FILE}" 2>/dev/null; then
+        echo ""
+        echo "FAIL: unexpected vLLMOmniHttpServer process(es) detected on GPU-0 —"
+        ray stop --force 2>/dev/null || true
+        exit 1
+    fi
+}
 
 n_resp_per_prompt=2
 micro_bsz_per_gpu=1
@@ -39,6 +71,7 @@ python3 tests/special_e2e/create_dummy_diffusion_data.py \
     --val_size 4
 
 # ── Pass 1: no reward model (jpeg_compressibility rule reward) ─────────────────
+start_leak_monitor
 python3 -m verl_omni.trainer.main_diffusion \
     data.train_files=${dummy_train_path} \
     data.val_files=${dummy_test_path} \
@@ -93,8 +126,10 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.resume_mode=disable \
     trainer.total_training_steps=${TOTAL_TRAIN_STEPS} \
     "$@"
+check_leak_monitor
 
 # ── Pass 2: vllm reward model (colocated, global pool) ────────────────────────
+start_leak_monitor
 python3 -m verl_omni.trainer.main_diffusion \
     data.train_files=${dummy_train_path} \
     data.val_files=${dummy_test_path} \
@@ -157,5 +192,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.resume_mode=disable \
     trainer.total_training_steps=${TOTAL_TRAIN_STEPS} \
     "$@"
+check_leak_monitor
 
 echo "FlowGRPO diffusion e2e test passed (training completed successfully)."

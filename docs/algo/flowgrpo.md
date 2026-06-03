@@ -108,6 +108,21 @@ the rollout section is the main place to override sampling behavior.
 - `actor_rollout_ref.model.tokenizer_path`: Optional tokenizer path if it is
   not located under the model path.
 
+- `actor_rollout_ref.model.lora_rank`: LoRA rank. Set to a positive integer
+  to enable LoRA fine-tuning (e.g., `64`).
+
+- `actor_rollout_ref.model.lora_alpha`: LoRA scaling factor (default `64`).
+
+- `actor_rollout_ref.model.lora_init_weights`: LoRA initialization method
+  (default `"gaussian"`).
+
+- `actor_rollout_ref.model.target_modules`: Target modules for LoRA (default
+  `"all-linear"`).
+
+- `actor_rollout_ref.model.lora_dtype`: Optional dtype to convert LoRA
+  parameters to for numerical stability during training (e.g., `"fp32"`,
+  `"bf16"`). Default `null` means no conversion.
+
 #### Batch size
 
 FlowGRPO uses three nested batch-size parameters that operate at different

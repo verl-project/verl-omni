@@ -137,7 +137,9 @@ class TaskRunner:
         ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
         if config.algorithm.sample_source == "offline":
-            raise NotImplementedError("algorithm.sample_source=offline is not supported yet.")
+            if not hasattr(Role, "Actor"):
+                raise ValueError("Offline training without rollout requires verl Role.Actor support.")
+            role = Role.Actor
         elif need_reference_policy(config) and not ref_in_actor:
             role = Role.ActorRolloutRef
         else:

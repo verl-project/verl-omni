@@ -15,7 +15,7 @@
 Metrics for diffusion (image generation) training.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -30,8 +30,9 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
     indexed over denoising timesteps rather than output tokens.
 
     Args:
-        batch: A DataProto object containing diffusion batch data with
-            sample_level_rewards [B, T], advantages [B, T], returns [B, T].
+        batch: A DataProto object containing diffusion batch data. GRPO-style
+            batches include sample_level_rewards [B, T], advantages [B, T], and
+            returns [B, T]. DPO-style batches may only include sample_level_rewards [B].
 
     Returns:
         A dictionary of metrics including:
@@ -39,14 +40,14 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
             - critic/rewards/zero_std_ratio: Fraction of prompt groups whose reward std is zero
             - critic/rewards/std_mean: Mean per-prompt reward standard deviation
             - critic/rewards/group_size: Average number of images sampled per unique prompt
-            - critic/advantages/mean, max, min: Element-wise advantage statistics over B*T
-            - critic/returns/mean, max, min: Element-wise return statistics over B*T
+            - critic/advantages/mean, max, min: Element-wise advantage statistics over B*T, when available
+            - critic/returns/mean, max, min: Element-wise return statistics over B*T, when available
     """
-    sequence_reward = batch.batch["sample_level_rewards"].mean(dim=1)  # [B]
-
-    # Flatten [B, T] tensors for aggregate statistics across timesteps
-    advantages = batch.batch["advantages"].flatten()  # [B*T]
-    returns = batch.batch["returns"].flatten()  # [B*T]
+    sample_level_rewards = batch.batch["sample_level_rewards"]
+    if sample_level_rewards.ndim > 1:
+        sequence_reward = sample_level_rewards.mean(dim=1)  # [B]
+    else:
+        sequence_reward = sample_level_rewards  # [B]
 
     reward_mean = torch.mean(sequence_reward).detach().item()
     reward_max = torch.max(sequence_reward).detach().item()
@@ -57,15 +58,28 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
         "critic/rewards/mean": reward_mean,
         "critic/rewards/max": reward_max,
         "critic/rewards/min": reward_min,
-        # adv
-        "critic/advantages/mean": torch.mean(advantages).detach().item(),
-        "critic/advantages/max": torch.max(advantages).detach().item(),
-        "critic/advantages/min": torch.min(advantages).detach().item(),
-        # returns
-        "critic/returns/mean": torch.mean(returns).detach().item(),
-        "critic/returns/max": torch.max(returns).detach().item(),
-        "critic/returns/min": torch.min(returns).detach().item(),
     }
+
+    if "advantages" in batch.batch:
+        # Flatten [B, T] tensors for aggregate statistics across timesteps.
+        advantages = batch.batch["advantages"].flatten()  # [B*T]
+        metrics.update(
+            {
+                "critic/advantages/mean": torch.mean(advantages).detach().item(),
+                "critic/advantages/max": torch.max(advantages).detach().item(),
+                "critic/advantages/min": torch.min(advantages).detach().item(),
+            }
+        )
+
+    if "returns" in batch.batch:
+        returns = batch.batch["returns"].flatten()  # [B*T]
+        metrics.update(
+            {
+                "critic/returns/mean": torch.mean(returns).detach().item(),
+                "critic/returns/max": torch.max(returns).detach().item(),
+                "critic/returns/min": torch.min(returns).detach().item(),
+            }
+        )
 
     if "uid" in batch.non_tensor_batch:
         rewards_np = sequence_reward.cpu().float().numpy()
@@ -79,6 +93,19 @@ def compute_data_metrics_diffusion(batch: DataProto) -> dict[str, Any]:
         metrics["critic/rewards/group_size"] = float(len(rewards_np) / len(unique_uids))
 
     return metrics
+
+
+def compute_old_policy_metrics(
+    update_result: tuple[bool, float, Literal["none", "copy", "ema"]],
+) -> dict[str, Any]:
+    """Build metrics for old-policy adapter refreshes."""
+    update_applied, decay, update_type = update_result
+    return {
+        "old_policy/update_applied": float(update_applied),
+        "old_policy/copy_update": float(update_type == "copy"),
+        "old_policy/ema_update": float(update_type == "ema"),
+        "old_policy/decay": float(decay),
+    }
 
 
 def compute_timing_metrics_diffusion(timing_raw: dict[str, float], num_images: int) -> dict[str, Any]:
@@ -127,7 +154,10 @@ def compute_throughput_metrics_diffusion(batch: DataProto, timing_raw: dict[str,
             - perf/time_per_step: Time taken for the step in seconds
             - perf/throughput: Images generated per second per GPU
     """
-    batch_size = batch.batch["advantages"].shape[0]
+    if "advantages" in batch.batch:
+        batch_size = batch.batch["advantages"].shape[0]
+    else:
+        batch_size = batch.batch["sample_level_rewards"].shape[0]
     time = timing_raw["step"]
     return {
         "perf/total_num_images": batch_size,

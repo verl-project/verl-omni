@@ -20,6 +20,7 @@ from verl import DataProto
 
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
+    compute_old_policy_metrics,
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
 )
@@ -133,6 +134,53 @@ class TestComputeDataMetricsDiffusion:
         metrics = compute_data_metrics_diffusion(batch)
         assert "critic/rewards/mean" in metrics
 
+    def test_dpo_batch_without_advantages_or_returns(self):
+        """Direct-preference batches only carry scalar sample_level_rewards."""
+        tensors = {"sample_level_rewards": torch.tensor([1.0, 0.0, 1.0, 0.0])}
+        non_tensors = {"uid": np.array(["p0", "p0", "p1", "p1"], dtype=object)}
+        batch = DataProto.from_dict(tensors=tensors, non_tensors=non_tensors)
+        metrics = compute_data_metrics_diffusion(batch)
+        assert "critic/rewards/mean" in metrics
+        assert "critic/advantages/mean" not in metrics
+        assert "critic/returns/mean" not in metrics
+
+
+# ---------------------------------------------------------------------------
+# compute_old_policy_metrics
+# ---------------------------------------------------------------------------
+
+
+class TestComputeOldPolicyMetrics:
+    def test_skipped_update(self):
+        metrics = compute_old_policy_metrics((False, 0.0, "none"))
+
+        assert metrics == {
+            "old_policy/update_applied": 0.0,
+            "old_policy/copy_update": 0.0,
+            "old_policy/ema_update": 0.0,
+            "old_policy/decay": 0.0,
+        }
+
+    def test_copy_update(self):
+        metrics = compute_old_policy_metrics((True, 0.0, "copy"))
+
+        assert metrics == {
+            "old_policy/update_applied": 1.0,
+            "old_policy/copy_update": 1.0,
+            "old_policy/ema_update": 0.0,
+            "old_policy/decay": 0.0,
+        }
+
+    def test_ema_update(self):
+        metrics = compute_old_policy_metrics((True, 0.95, "ema"))
+
+        assert metrics == {
+            "old_policy/update_applied": 1.0,
+            "old_policy/copy_update": 0.0,
+            "old_policy/ema_update": 1.0,
+            "old_policy/decay": 0.95,
+        }
+
 
 # ---------------------------------------------------------------------------
 # compute_timing_metrics_diffusion
@@ -183,6 +231,12 @@ class TestComputeThroughputMetricsDiffusion:
         timing_raw = {"step": 1.0}
         metrics = compute_throughput_metrics_diffusion(batch, timing_raw, n_gpus=1)
         assert metrics["perf/total_num_images"] == 12
+
+    def test_throughput_uses_rewards_when_advantages_missing(self):
+        tensors = {"sample_level_rewards": torch.zeros(6)}
+        batch = DataProto.from_dict(tensors=tensors, non_tensors={})
+        metrics = compute_throughput_metrics_diffusion(batch, {"step": 2.0}, n_gpus=1)
+        assert metrics["perf/total_num_images"] == 6
 
     def test_throughput_value(self):
         batch_size = 8

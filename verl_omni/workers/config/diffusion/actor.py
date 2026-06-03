@@ -37,12 +37,22 @@ class DiffusionLossConfig(BaseConfig):
     loss_mode: str = "flow_grpo"
     clip_ratio: float = 0.0001
     adv_clip_max: float = 5.0
+    mix_beta: float = 0.5
+    ref_kl_coef: float = 0.0
+    adaptive_weight_min: float = 1e-5
+    dpo_beta: float = 2000.0
 
     def __post_init__(self):
         """Validate diffusion loss configuration."""
-        valid_modes = ["flow_grpo", "grpo_guard"]
+        valid_modes = ["flow_grpo", "grpo_guard", "diffusion_nft", "dpo", "dance_grpo"]
         if self.loss_mode not in valid_modes:
             raise ValueError(f"Invalid diffusion loss_mode: {self.loss_mode}. Must be one of {valid_modes}")
+        if self.adv_clip_max <= 0:
+            raise ValueError(f"Diffusion adv_clip_max must be positive, got {self.adv_clip_max}.")
+        if self.mix_beta <= 0:
+            raise ValueError(f"mix_beta must be positive, got {self.mix_beta}.")
+        if self.adaptive_weight_min <= 0:
+            raise ValueError(f"adaptive_weight_min must be positive, got {self.adaptive_weight_min}.")
 
 
 @dataclass

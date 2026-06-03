@@ -55,6 +55,13 @@ exclude_modules: null
 # Path to pre-trained LoRA adapter to load for continued training
 lora_adapter_path: null
 
+# Named LoRA policy states required by the algorithm. "reference" disables adapters.
+policy_state_adapters: ["default"]
+
+# Convert LoRA parameters to a target dtype for numerical stability (e.g., "fp32", "bf16").
+# Default null means no conversion.
+lora_dtype: null
+
 # MTP
 mtp: 
 
@@ -87,6 +94,9 @@ pipeline:
 
   # Distilled guidance scale
   guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
+
+  # Wan2.2 video number of frames
+  num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
 
 # Rollout Algorithm configuration
 algo:
