@@ -820,7 +820,8 @@ class BaseRayDiffusionTrainer(ABC):
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
         actor_output = tu.get(actor_output, "metrics")
         actor_output = rename_dict(actor_output, "actor/")
-        actor_output["perf/mfu/actor"] = actor_output.pop("actor/mfu")
+        if (actor_mfu := actor_output.pop("actor/mfu", None)) is not None:
+            actor_output["perf/mfu/actor"] = actor_mfu
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
     def _start_profiling(self, do_profile: bool) -> None:
@@ -887,7 +888,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         if prev_sample_mean is not None:
             old_log_prob_dict["old_prev_sample_mean"] = prev_sample_mean.float()
         old_log_prob = tu.get_tensordict(old_log_prob_dict)
-        old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
+        old_log_prob_mfu = tu.get(output, "metrics").get("mfu")
         return DataProto.from_tensordict(old_log_prob), old_log_prob_mfu
 
     def fit(self):
@@ -1009,7 +1010,8 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
                             old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
-                            metrics.update({"perf/mfu/actor_infer": old_log_prob_mfu})
+                            if old_log_prob_mfu is not None:
+                                metrics.update({"perf/mfu/actor_infer": old_log_prob_mfu})
                             batch = batch.union(old_log_prob)
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
@@ -1240,7 +1242,8 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
         actor_output = tu.get(actor_output, "metrics")
         actor_output = rename_dict(actor_output, "actor/")
-        actor_output["perf/mfu/actor"] = actor_output.pop("actor/mfu")
+        if (actor_mfu := actor_output.pop("actor/mfu", None)) is not None:
+            actor_output["perf/mfu/actor"] = actor_mfu
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
     def _compute_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:

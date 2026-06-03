@@ -155,7 +155,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         if hasattr(self.model_config, "hf_config"):
             self.flops_counter = FlopsCounter(self.model_config.hf_config)
-        elif self.config.model_type in ("diffusion_model", "diffusion_dpo_model"):
+        elif self.config.model_type in ("diffusion_model", "diffusion_dpo_model", "diffusion_nft_model"):
             self.flops_counter = DiffusionFlopsCounter(
                 architecture=self.model_config.architecture,
                 transformer_config=self.model_config.transformer_config,
@@ -495,11 +495,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
         seqlens = self.flops_counter.collect_meta(data)
 
         all_timesteps = data.get("all_timesteps", None)
-        if all_timesteps is not None and hasattr(all_timesteps, "shape") and all_timesteps.ndim >= 2:
-            num_timesteps = int(all_timesteps.shape[1])
-        else:
-            # DPO and any one-shot path runs a single denoising step per call.
-            num_timesteps = 1
+        train_timesteps = data.get("train_timesteps", None)
+        num_timesteps = 1
+        for timesteps in (all_timesteps, train_timesteps):
+            if timesteps is not None and hasattr(timesteps, "shape") and timesteps.ndim >= 2:
+                num_timesteps = int(timesteps.shape[1])
+                break
 
         pipeline_config = getattr(self.model_config, "pipeline", None)
         transformer_config = getattr(self.flops_counter, "config", None)

@@ -349,6 +349,17 @@ class TestQwenImageFlopsPackedLatents:
         assert meta["latent_seqlens"] == [1024] * 4
         assert meta["prompt_seqlens"] == [256] * 4
 
+    def test_latents_clean_diffusion_nft_batch(self):
+        # DiffusionNFT uses unpacked VAE latents (B, C, H, W).
+        data = {
+            "latents_clean": _Tensor((4, 64, 64, 64)),
+            "prompt_embeds_mask": _Tensor((4, 256)),
+        }
+        assert QwenImageFlops(QWEN_IMAGE_CONFIG).get_latent_seqlens(data) == [4096] * 4
+        meta = DiffusionFlopsCounter("QwenImagePipeline", QWEN_IMAGE_CONFIG).collect_meta(data)
+        assert meta["latent_seqlens"] == [4096] * 4
+        assert meta["prompt_seqlens"] == [256] * 4
+
     def test_packed_undercount_regression(self):
         # Direct numerical guard: the broken default returns the wrong
         # number; the override fixes it. This pins the magnitude of the

@@ -45,12 +45,19 @@ class QwenImageFlops(DiffusionModelFlops):
 
     def get_latent_seqlens(self, data: Any) -> list[int]:
         """Handle diffusers ``_pack_latents`` layout ``(B, [T,] L, C')``."""
-        latents, _ = read_latents(data)
+        latents, stacked = read_latents(data)
         if latents is not None and hasattr(latents, "shape"):
             shape = tuple(int(d) for d in latents.shape)
             in_channels = int(self.config.get("in_channels") or 0)
-            if len(shape) >= 3 and in_channels > 0 and shape[-1] == in_channels:
-                return [shape[-2]] * shape[0]
+            if in_channels > 0 and shape[-1] == in_channels:
+                # Packed: (B, L, C') or FlowGRPO-stacked (B, T, L, C').
+                # Unpacked NFT/VAE latents (B, C, H, W) also end in C' but
+                # have four dims without a timestep axis — defer to the base
+                # spatial product instead of treating H as the seqlen.
+                if stacked and len(shape) == 4:
+                    return [shape[-2]] * shape[0]
+                if not stacked and len(shape) == 3:
+                    return [shape[-2]] * shape[0]
         return super().get_latent_seqlens(data)
 
     def estimate_flops(

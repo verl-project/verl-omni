@@ -140,7 +140,7 @@ def sum_seqlen_squared(latent_seqlens: Sequence[int], prompt_seqlens: Sequence[i
 class DiffusionModelFlops:
     """Base class for per-architecture diffusion FLOPs and MFU estimators."""
 
-    LATENT_KEYS: Sequence[str] = ("image_latents", "audio_latents", "all_latents")
+    LATENT_KEYS: Sequence[str] = ("image_latents", "audio_latents", "all_latents", "latents_clean")
     PROMPT_KEYS: Sequence[str] = ("prompt_embeds", "prompt_embeds_mask")
 
     def __init__(self, config: Mapping[str, Any]):
@@ -229,6 +229,8 @@ class DiffusionModelFlops:
 def read_latents(data: Any) -> tuple[Any, bool]:
     """Return ``(latents_tensor, is_rollout_stacked)``."""
     if (latents := data.get("image_latents")) is not None:
+        return latents, False
+    if (latents := data.get("latents_clean")) is not None:
         return latents, False
     if (latents := data.get("all_latents")) is not None:
         return latents, True
