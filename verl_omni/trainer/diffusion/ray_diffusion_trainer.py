@@ -362,7 +362,7 @@ class BaseRayDiffusionTrainer(ABC):
         if "wandb" in self.config.trainer.logger:
             import wandb
 
-            outputs = [wandb.Image(image.float(), file_type="jpg") for image in outputs]
+            outputs = [wandb.Image(image.float()) for image in outputs]
         samples = list(zip(inputs, outputs, scores, strict=True))
         samples.sort(key=lambda x: x[0])  # Sort by input text
 
