@@ -27,6 +27,7 @@ import os
 import warnings
 from typing import Any, Mapping, Optional, Sequence
 
+import torch
 from verl.utils.flops_counter import get_device_flops
 
 __all__ = [
@@ -35,6 +36,8 @@ __all__ = [
     "register_diffusion_architecture",
     "get_forward_passes_per_step",
     "get_device_peak_tflops",
+    "collect_diffusion_flops_meta",
+    "allgather_diffusion_flops_meta",
     "_REGISTRY",
 ]
 
@@ -290,3 +293,76 @@ class DiffusionFlopsCounter:
         )
 
         return float(estimated), float(promised)
+
+
+def collect_diffusion_flops_meta(
+    flops_counter: DiffusionFlopsCounter | None,
+    data: Any,
+    *,
+    pipeline_config: Any = None,
+) -> dict | None:
+    """Extract per-call FLOPs metadata for the diffusion counter.
+
+    Returns ``None`` when ``flops_counter`` is not a :class:`DiffusionFlopsCounter`
+    so the LLM code path can keep using ``FlopsCounter.estimate_flops(global_token_num, ...)``.
+
+    Per-rank ``latent_seqlens`` / ``prompt_seqlens`` come from the architecture
+    class registered for ``DiffusionModelConfig.architecture`` (see
+    :class:`DiffusionModelFlops`). ``num_timesteps`` is read from
+    ``all_timesteps`` (FlowGRPO / MixGRPO), ``train_timesteps`` (DiffusionNFT),
+    or defaults to ``1`` for one-shot paths such as diffusion DPO.
+    ``num_forward_passes`` is resolved from the pipeline + transformer configs
+    via :func:`get_forward_passes_per_step`.
+    """
+    if not isinstance(flops_counter, DiffusionFlopsCounter):
+        return None
+
+    seqlens = flops_counter.collect_meta(data)
+
+    num_timesteps = 1
+    for key in ("all_timesteps", "train_timesteps"):
+        timesteps = data.get(key, None)
+        if timesteps is not None and hasattr(timesteps, "shape") and timesteps.ndim >= 2:
+            num_timesteps = int(timesteps.shape[1])
+            break
+
+    transformer_config = getattr(flops_counter, "config", None)
+    pcfg_view: dict[str, Any] = {}
+    for cfg_key in ("num_forward_passes", "true_cfg_scale", "guidance_scale"):
+        value = getattr(pipeline_config, cfg_key, None) if pipeline_config is not None else None
+        if value is not None:
+            pcfg_view[cfg_key] = value
+    num_forward_passes = get_forward_passes_per_step(pcfg_view, transformer_config)
+
+    return {
+        "latent_seqlens": seqlens["latent_seqlens"],
+        "prompt_seqlens": seqlens["prompt_seqlens"],
+        "num_timesteps": num_timesteps,
+        "num_forward_passes": num_forward_passes,
+    }
+
+
+def allgather_diffusion_flops_meta(meta: dict, dp_group) -> dict:
+    """All-gather per-rank latent/prompt seqlens across the DP group.
+
+    ``num_timesteps`` and ``num_forward_passes`` are scalars constant across the
+    DP group, so they are kept as-is. Mirrors the ``global_token_num`` gather
+    performed in ``TrainingWorker.train_mini_batch`` for the LLM counter.
+    """
+    if dp_group is None or not torch.distributed.is_initialized():
+        return meta
+
+    dp_world = torch.distributed.get_world_size(dp_group)
+    if dp_world <= 1:
+        return meta
+
+    gathered_latent = [None] * dp_world
+    gathered_prompt = [None] * dp_world
+    torch.distributed.all_gather_object(gathered_latent, meta["latent_seqlens"], dp_group)
+    torch.distributed.all_gather_object(gathered_prompt, meta["prompt_seqlens"], dp_group)
+    return {
+        "latent_seqlens": [x for xs in gathered_latent for x in xs],
+        "prompt_seqlens": [x for xs in gathered_prompt for x in xs],
+        "num_timesteps": meta["num_timesteps"],
+        "num_forward_passes": meta["num_forward_passes"],
+    }

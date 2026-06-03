@@ -31,6 +31,7 @@ from verl_omni.utils.mfu import (
     DiffusionFlopsCounter,
     DiffusionModelFlops,
     QwenImageFlops,
+    collect_diffusion_flops_meta,
     get_device_peak_tflops,
     get_forward_passes_per_step,
     register_diffusion_architecture,
@@ -360,6 +361,19 @@ class TestQwenImageFlopsPackedLatents:
         assert meta["latent_seqlens"] == [4096] * 4
         assert meta["prompt_seqlens"] == [256] * 4
 
+    def test_collect_diffusion_flops_meta_train_timesteps(self):
+        counter = DiffusionFlopsCounter("QwenImagePipeline", QWEN_IMAGE_CONFIG)
+        data = {
+            "latents_clean": _Tensor((2, 64, 64, 64)),
+            "prompt_embeds_mask": _Tensor((2, 128)),
+            "train_timesteps": _Tensor((2, 4)),
+        }
+        meta = collect_diffusion_flops_meta(counter, data)
+        assert meta is not None
+        assert meta["num_timesteps"] == 4
+        assert meta["latent_seqlens"] == [4096] * 2
+        assert meta["prompt_seqlens"] == [128] * 2
+
     def test_packed_undercount_regression(self):
         # Direct numerical guard: the broken default returns the wrong
         # number; the override fixes it. This pins the magnitude of the
@@ -660,7 +674,7 @@ class TestDPGlobalConsistency:
         global_img = per_rank_img * world_size
         global_txt = per_rank_txt * world_size
 
-        # The exact dict structure returned by _allgather_diffusion_flops_meta
+        # The exact dict structure returned by allgather_diffusion_flops_meta
         global_meta = {
             "latent_seqlens": global_img,
             "prompt_seqlens": global_txt,

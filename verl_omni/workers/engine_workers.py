@@ -18,7 +18,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 from functools import partial
 from itertools import chain
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 from codetiming import Timer
@@ -54,7 +54,8 @@ from verl.workers.utils.losses import ppo_loss
 
 from verl_omni.utils.mfu import (
     DiffusionFlopsCounter,
-    get_forward_passes_per_step,
+    allgather_diffusion_flops_meta,
+    collect_diffusion_flops_meta,
 )
 from verl_omni.workers.config import (
     DiffusionActorConfig,
@@ -258,7 +259,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
             if diffusion_flops_meta is not None:
                 # Counter expects global (DP-allgathered) seqlens, matching the
                 # convention used for ``global_token_num`` in the LLM path.
-                global_meta = self._allgather_diffusion_flops_meta(diffusion_flops_meta)
+                global_meta = allgather_diffusion_flops_meta(
+                    diffusion_flops_meta, self.engine.get_data_parallel_group()
+                )
                 estimated_flops, promised_flops = self.flops_counter.estimate_flops(
                     delta_time=delta_time, **global_meta
                 )
@@ -378,7 +381,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
         global_token_num = tu.get(data, key="global_token_num")
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
         images_seqlens = tu.get(data, key="images_seqlens", default=None)
-        diffusion_flops_meta = self._collect_diffusion_flops_meta(data)
+        diffusion_flops_meta = collect_diffusion_flops_meta(
+            self.flops_counter,
+            data,
+            pipeline_config=getattr(self.model_config, "pipeline", None),
+        )
 
         # inject engineering parameters if not specified
         default_keys = dict(
@@ -435,7 +442,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
         no_lora_adapter = tu.pop(data, key="no_lora_adapter", default=False)
         images_seqlens = tu.get(data, key="images_seqlens", default=None)
-        diffusion_flops_meta = self._collect_diffusion_flops_meta(data)
+        diffusion_flops_meta = collect_diffusion_flops_meta(
+            self.flops_counter,
+            data,
+            pipeline_config=getattr(self.model_config, "pipeline", None),
+        )
 
         default_keys = dict(
             use_remove_padding=self.model_config.get("use_remove_padding", False),
@@ -474,77 +485,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
             final_output = None
 
         return final_output
-
-    def _collect_diffusion_flops_meta(self, data: TensorDict) -> Optional[dict]:
-        """Extract per-call FLOPs metadata for the diffusion counter.
-
-        Returns ``None`` for non-diffusion engines so the LLM code path keeps
-        flowing through ``self.flops_counter.estimate_flops(global_token_num, ...)``.
-
-        Per-rank ``latent_seqlens`` / ``prompt_seqlens`` come from the
-        architecture class registered for ``DiffusionModelConfig.architecture``
-        (see :class:`DiffusionModelFlops`). ``num_timesteps`` is read
-        from the FlowGRPO/MixGRPO ``all_timesteps`` trajectory (defaulting
-        to 1 for DPO / one-shot paths) and ``num_forward_passes`` is resolved
-        from the pipeline + transformer configs via
-        :func:`get_forward_passes_per_step`.
-        """
-        if not isinstance(self.flops_counter, DiffusionFlopsCounter):
-            return None
-
-        seqlens = self.flops_counter.collect_meta(data)
-
-        all_timesteps = data.get("all_timesteps", None)
-        train_timesteps = data.get("train_timesteps", None)
-        num_timesteps = 1
-        for timesteps in (all_timesteps, train_timesteps):
-            if timesteps is not None and hasattr(timesteps, "shape") and timesteps.ndim >= 2:
-                num_timesteps = int(timesteps.shape[1])
-                break
-
-        pipeline_config = getattr(self.model_config, "pipeline", None)
-        transformer_config = getattr(self.flops_counter, "config", None)
-        # ``pipeline`` is typically an OmegaConf DictConfig; coerce just the
-        # fields we care about to a plain mapping for ``get_forward_passes_per_step``.
-        pcfg_view: dict[str, Any] = {}
-        for key in ("num_forward_passes", "true_cfg_scale", "guidance_scale"):
-            value = getattr(pipeline_config, key, None) if pipeline_config is not None else None
-            if value is not None:
-                pcfg_view[key] = value
-        num_forward_passes = get_forward_passes_per_step(pcfg_view, transformer_config)
-
-        return {
-            "latent_seqlens": seqlens["latent_seqlens"],
-            "prompt_seqlens": seqlens["prompt_seqlens"],
-            "num_timesteps": num_timesteps,
-            "num_forward_passes": num_forward_passes,
-        }
-
-    def _allgather_diffusion_flops_meta(self, meta: dict) -> dict:
-        """All-gather per-rank latent/prompt seqlens across the DP group.
-
-        ``num_timesteps`` and ``num_forward_passes`` are scalars constant across the
-        DP group, so we keep them as-is. Mirrors the ``global_token_num``
-        gather performed in ``train_mini_batch`` for the LLM counter.
-        """
-        dp_group = self.engine.get_data_parallel_group()
-        if dp_group is None or not torch.distributed.is_initialized():
-            return meta
-
-        dp_world = torch.distributed.get_world_size(dp_group)
-        if dp_world <= 1:
-            return meta
-
-        gathered_latent = [None] * dp_world
-        gathered_prompt = [None] * dp_world
-        torch.distributed.all_gather_object(gathered_latent, meta["latent_seqlens"], dp_group)
-        torch.distributed.all_gather_object(gathered_prompt, meta["prompt_seqlens"], dp_group)
-        return {
-            "latent_seqlens": [x for xs in gathered_latent for x in xs],
-            "prompt_seqlens": [x for xs in gathered_prompt for x in xs],
-            "num_timesteps": meta["num_timesteps"],
-            "num_forward_passes": meta["num_forward_passes"],
-        }
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):

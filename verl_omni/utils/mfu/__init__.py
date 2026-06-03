@@ -18,6 +18,8 @@ from verl_omni.utils.mfu import qwen_image  # noqa: F401 — register built-in a
 from verl_omni.utils.mfu.diffusion_flops_counter import (
     DiffusionFlopsCounter,
     DiffusionModelFlops,
+    allgather_diffusion_flops_meta,
+    collect_diffusion_flops_meta,
     get_device_peak_tflops,
     get_forward_passes_per_step,
     register_diffusion_architecture,
@@ -31,4 +33,6 @@ __all__ = [
     "register_diffusion_architecture",
     "get_forward_passes_per_step",
     "get_device_peak_tflops",
+    "collect_diffusion_flops_meta",
+    "allgather_diffusion_flops_meta",
 ]
