@@ -62,6 +62,9 @@ policy_state_adapters: ["default"]
 # Default null means no conversion.
 lora_dtype: null
 
+# FSDP layer name prefixes for LoRA parameter layered summon.
+fsdp_layer_prefixes: ["transformer_blocks."]
+
 # MTP
 mtp: 
 

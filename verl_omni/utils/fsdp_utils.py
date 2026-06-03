@@ -16,8 +16,9 @@ FSDP utilities for verl-omni
 """
 
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import ExitStack, contextmanager
+from functools import partial
 
 from peft.utils.save_and_load import get_peft_model_state_dict
 from verl.utils.fsdp_utils import collect_lora_params as _upstream_collect_lora_params
@@ -167,8 +168,17 @@ def _collect_lora_params_with_adapter(
     return _collect_base_weights_to_cpu(peft_model)
 
 
-def _layered_summon_lora_params_diffusers(fsdp_module, adapter_name: str = "default") -> OrderedDict:
-    """Layered LoRA param collection for diffusers transformer-block models."""
+def _layered_summon_lora_params_diffusers(
+    fsdp_module, adapter_name: str = "default", layer_prefixes: Sequence[str] = ("transformer_blocks.",)
+) -> OrderedDict:
+    """Layered LoRA param collection for diffusers transformer-block models.
+
+    Args:
+        fsdp_module: The FSDP-wrapped module.
+        adapter_name: LoRA adapter name.
+        layer_prefixes: FSDP layer name prefixes.  Defaults to
+            ``["transformer_blocks."]``.
+    """
     from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
     from verl.utils.device import get_torch_device
 
@@ -178,12 +188,12 @@ def _layered_summon_lora_params_diffusers(fsdp_module, adapter_name: str = "defa
                 yield name, submodule
 
     lora_params = OrderedDict()
-    prefix_list = [
+    prefix_list = []
+    for lp in layer_prefixes:
         # FSDP1
-        "_fsdp_wrapped_module.transformer_blocks.",
+        prefix_list.append(f"_fsdp_wrapped_module.{lp}")
         # FSDP2
-        "transformer_blocks.",
-    ]
+        prefix_list.append(lp)
     peft_model = getattr(fsdp_module, "_fsdp_wrapped_module", fsdp_module)
     for prefix in prefix_list:
         for name, submodule in _prefix_submodules(fsdp_module, prefix):
@@ -211,17 +221,42 @@ def collect_lora_params(
     base_sync_done: bool,
     is_diffusers: bool = False,
     adapter_name: str = "default",
+    layer_prefixes: Sequence[str] = ("transformer_blocks.",),
 ) -> OrderedDict:
-    """Extended version of ``verl.utils.fsdp_utils.collect_lora_params``."""
+    """Collect LoRA or base parameters for weight sync to the rollout worker.
+
+    Raises ``RuntimeError`` when no parameters were collected
+    (e.g. mismatched ``layer_prefixes``).
+
+    Args:
+        module: The FSDP-wrapped or plain module.
+        layered_summon: Summon one FSDP unit at a time instead of the full model.
+        base_sync_done: If ``True``, collect only LoRA weights; else full base weights.
+        is_diffusers: Use the diffusers-specific layered summon helper.
+        adapter_name: LoRA adapter name (usually ``"default"``).
+        layer_prefixes: FSDP layer name prefixes (``["transformer_blocks."]``
+    """
     use_diffusers_layered = is_diffusers and layered_summon and fsdp_version(module) > 0
     if adapter_name == "default" and not use_diffusers_layered and fsdp_version(module) != 2:
         return _upstream_collect_lora_params(module, layered_summon=layered_summon, base_sync_done=base_sync_done)
 
-    layered_summon_fn = _layered_summon_lora_params_diffusers if is_diffusers else _upstream_layered_summon_lora_params
-    return _collect_lora_params_with_adapter(
+    if is_diffusers:
+        layered_summon_fn = partial(
+            _layered_summon_lora_params_diffusers, adapter_name=adapter_name, layer_prefixes=layer_prefixes
+        )
+    else:
+        layered_summon_fn = _upstream_layered_summon_lora_params
+    lora_params = _collect_lora_params_with_adapter(
         module,
         layered_summon=layered_summon,
         base_sync_done=base_sync_done,
         adapter_name=adapter_name,
         layered_summon_fn=layered_summon_fn,
     )
+    if not lora_params:
+        raise RuntimeError(
+            f"collect_lora_params collected 0 parameters with prefixes={layer_prefixes}. "
+            "Check ``fsdp_layer_prefixes`` in the model config matches the model's "
+            "FSDP layer naming (e.g. ``['transformer_blocks.']`` for DiT models)."
+        )
+    return lora_params

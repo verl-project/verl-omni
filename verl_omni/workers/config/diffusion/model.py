@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -29,6 +31,8 @@ from .rollout import DiffusionPipelineConfig, DiffusionRolloutAlgoConfig
 
 __all__ = ["DiffusionModelConfig"]
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class DiffusionModelConfig(BaseConfig):
@@ -40,10 +44,13 @@ class DiffusionModelConfig(BaseConfig):
         "local_path",
         "local_tokenizer_path",
         "architecture",
+        "transformer_config",
     }
 
     path: str = MISSING
     architecture: Optional[str] = None
+    # diffusers ``transformer/config.json``; used by DiffusionFlopsCounter for MFU.
+    transformer_config: Optional[dict[str, Any]] = None
     algorithm: str = MISSING
     local_path: Optional[str] = None
     tokenizer_path: Optional[str] = None
@@ -95,6 +102,8 @@ class DiffusionModelConfig(BaseConfig):
 
     algo: Optional[DiffusionRolloutAlgoConfig] = field(default_factory=DiffusionRolloutAlgoConfig)
 
+    fsdp_layer_prefixes: list[str] = field(default_factory=lambda: ["transformer_blocks."])
+
     def __post_init__(self):
         import_external_libs(self.external_lib)
 
@@ -108,11 +117,24 @@ class DiffusionModelConfig(BaseConfig):
             self.tokenizer_path = tokenizer_path if os.path.exists(tokenizer_path) else self.local_path
 
         if self.architecture is None:
-            import json
-
             model_index_path = os.path.join(self.local_path, "model_index.json")
             with open(model_index_path) as f:
                 self.architecture = json.load(f)["_class_name"]
+
+        if self.transformer_config is None:
+            config_path = os.path.join(self.local_path, "transformer", "config.json")
+            if os.path.isfile(config_path):
+                try:
+                    with open(config_path) as f:
+                        self.transformer_config = json.load(f)
+                except (OSError, json.JSONDecodeError) as exc:
+                    logger.warning("Diffusion MFU disabled: failed to read %s: %s", config_path, exc)
+            else:
+                logger.warning(
+                    "Diffusion MFU disabled: transformer config not found at %s. "
+                    "Expected the diffusers pipeline layout `<local_path>/transformer/config.json`.",
+                    config_path,
+                )
 
         # construct tokenizer
         if self.load_tokenizer:

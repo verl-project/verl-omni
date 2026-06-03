@@ -77,6 +77,15 @@ class DiffusionModelBase(ABC):
             ) from None
 
     @classmethod
+    def build_module(cls, model_config: DiffusionModelConfig, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
+        """Load the model without ``diffusers.AutoModel``.
+
+        Return ``None`` to use the default ``AutoModel`` path.
+        Override this for models that diffusers cannot load.
+        """
+        return None
+
+    @classmethod
     @abstractmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig) -> SchedulerMixin:
         """Build and configure the diffusion scheduler for this model.

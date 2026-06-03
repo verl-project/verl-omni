@@ -235,10 +235,11 @@ class DiffusionAgentLoopWorker:
             padding="max_length",
             max_length=self.rollout_config.prompt_length,
             return_tensors="pt",
-            return_attention_mask=False,
+            return_attention_mask=True,
         )
         if prompt_output["input_ids"].dim() == 1:
             prompt_output["input_ids"] = prompt_output["input_ids"].unsqueeze(0)
+            prompt_output["attention_mask"] = prompt_output["attention_mask"].unsqueeze(0)
 
         response_diffusion_output = output.response_diffusion_output.unsqueeze(0)
 
@@ -247,6 +248,7 @@ class DiffusionAgentLoopWorker:
             response_logprobs = output.response_logprobs.unsqueeze(0)
 
         prompt_ids = prompt_output["input_ids"]
+        extra_fields["attention_mask"] = prompt_output["attention_mask"]
 
         await self._compute_score(
             output,
