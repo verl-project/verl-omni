@@ -657,22 +657,21 @@ class TestQwenImageFlopsParamCount:
 
 class TestDPGlobalConsistency:
     """Mirror the wiring invariant in ``TrainingWorker._postprocess_output``:
-    the counter is fed global (allgathered) seqlens and the resulting MFU is
-    divided by ``world_size`` to recover per-GPU achieved compute.
+    the counter is fed global (DP-allgathered) seqlens and the resulting MFU is
+    divided by ``get_world_size(dp_group)`` to recover per-DP-rank achieved
+    compute.
 
-    A single rank reporting per-rank lists and dividing by ``world_size``
-    would double-count if the convention were the LLM-style global form.
-    These tests pin the per-rank == global / world_size invariant so the
-    upstream pattern keeps holding for diffusion.
+    When Ulysses/SP is enabled, ``dp_group`` is smaller than global WORLD;
+    the divisor must match the gather scope (not ``get_world_size()``).
     """
 
-    def test_global_then_div_world_size_equals_per_rank_no_div(self):
+    def test_global_then_div_dp_size_equals_per_rank_no_div(self):
         counter = _qwen_counter()
         per_rank_img = [1024] * 16
         per_rank_txt = [256] * 16
-        world_size = 4
-        global_img = per_rank_img * world_size
-        global_txt = per_rank_txt * world_size
+        dp_size = 4
+        global_img = per_rank_img * dp_size
+        global_txt = per_rank_txt * dp_size
 
         # The exact dict structure returned by allgather_diffusion_flops_meta
         global_meta = {
@@ -692,26 +691,26 @@ class TestDPGlobalConsistency:
         }
 
         per_rank_est, _ = counter.estimate_flops(delta_time=1.0, **per_rank_meta)
-        # Global / world_size should equal per-rank only when the formula is
+        # Global / dp_size should equal per-rank only when the formula is
         # linear in token count (it is, for the dense terms). Attention is
         # also linear when each sample's joint seqlen is identical.
-        assert math.isclose(global_est / world_size, per_rank_est, rel_tol=1e-9), (
-            global_est / world_size,
+        assert math.isclose(global_est / dp_size, per_rank_est, rel_tol=1e-9), (
+            global_est / dp_size,
             per_rank_est,
         )
 
-    def test_mfu_divides_by_world_size_after_global_gather(self):
-        """``_postprocess_output`` reports ``mfu = est / prom / world_size``
-        when ``est`` comes from globally gathered seqlens.
+    def test_mfu_divides_by_dp_size_after_global_gather(self):
+        """``_postprocess_output`` reports ``mfu = est / prom / dp_size``
+        when ``est`` comes from DP-allgathered seqlens.
 
         This is a wiring invariant only — absolute MFU bounds belong in GPU
         smoke/e2e runs, not CPU unit tests (``prom`` is host-dependent).
         """
         counter = _qwen_counter()
-        world_size = 4
+        dp_size = 4
         global_meta = {
-            "latent_seqlens": [1024] * (16 * world_size),
-            "prompt_seqlens": [256] * (16 * world_size),
+            "latent_seqlens": [1024] * (16 * dp_size),
+            "prompt_seqlens": [256] * (16 * dp_size),
             "num_timesteps": 10,
             "num_forward_passes": 2,
         }
@@ -720,8 +719,24 @@ class TestDPGlobalConsistency:
         assert est > 0
         assert prom > 0
 
-        mfu = est / prom / world_size
-        assert math.isclose(mfu * world_size, est / prom, rel_tol=1e-9)
+        mfu = est / prom / dp_size
+        assert math.isclose(mfu * dp_size, est / prom, rel_tol=1e-9)
+
+    def test_mfu_divisor_scales_with_sp(self):
+        """With SP=2 and WORLD=8, dp_size=4: using global world would under-report MFU 2x."""
+        counter = _qwen_counter()
+        dp_size = 4
+        world_size = 8
+        meta = {
+            "latent_seqlens": [1024] * (16 * dp_size),
+            "prompt_seqlens": [256] * (16 * dp_size),
+            "num_timesteps": 1,
+            "num_forward_passes": 1,
+        }
+        est, prom = counter.estimate_flops(delta_time=1.0, **meta)
+        mfu_correct = est / prom / dp_size
+        mfu_wrong = est / prom / world_size
+        assert math.isclose(mfu_correct / mfu_wrong, world_size / dp_size, rel_tol=1e-9)
 
 
 class TestGetForwardPassesPerStep:

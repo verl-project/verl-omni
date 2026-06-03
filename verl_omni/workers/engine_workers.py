@@ -255,6 +255,10 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 flatten_v = [sublist[0] for sublist in v]  # sublist should be single element
                 final_metrics[k] = sum(flatten_v) / len(flatten_v)
         # compute mfu
+        # Seqlens / token counts are gathered over ``dp_group``; normalize MFU by
+        # the same scope (not global world size) so Ulysses/SP ranks are not
+        # double-penalized when ``dp_group`` is smaller than WORLD.
+        mfu_divisor = torch.distributed.get_world_size(dp_group) if dp_group is not None else 1
         if isinstance(self.flops_counter, DiffusionFlopsCounter):
             if diffusion_flops_meta is not None:
                 # Counter expects global (DP-allgathered) seqlens, matching the
@@ -266,14 +270,14 @@ class TrainingWorker(Worker, DistProfilerExtension):
                     delta_time=delta_time, **global_meta
                 )
                 if promised_flops > 0:
-                    final_metrics["mfu"] = estimated_flops / promised_flops / torch.distributed.get_world_size()
+                    final_metrics["mfu"] = estimated_flops / promised_flops / mfu_divisor
                     if forward_only:
                         final_metrics["mfu"] /= 3.0
         elif global_token_num is not None and self.flops_counter is not None:
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(
                 global_token_num, delta_time, images_seqlens=images_seqlens
             )
-            final_metrics["mfu"] = estimated_flops / promised_flops / torch.distributed.get_world_size()
+            final_metrics["mfu"] = estimated_flops / promised_flops / mfu_divisor
             if forward_only:
                 final_metrics["mfu"] /= 3.0
         # model outputs

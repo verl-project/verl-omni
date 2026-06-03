@@ -205,23 +205,27 @@ the worker's timer:
 
 ```python
 peak_FLOPS  = get_device_peak_tflops()                                # device peak in TFLOPS
-achieved    = flops_per_call / (delta_time * world_size)
+achieved    = flops_per_call / (delta_time * dp_size)
 MFU         = achieved / peak_FLOPS
 if forward_only:
     MFU /= 3.0                                                        # remove backward contribution
 ```
+
+Here ``dp_size = torch.distributed.get_world_size(dp_group)`` (or
+``engine.get_data_parallel_size()`` when Ulysses/SP is enabled). It matches
+the scope of the DP all-gather, not global ``WORLD`` size.
 
 Here `flops_per_call / delta_time` is already in TFLOPS (the architecture
 `estimate_flops` implementations divide by `1e12`), and
 `DiffusionFlopsCounter.estimate_flops` returns `(achieved_tflops,
 promised_tflops)`.
 
-The `/world_size` divisor mirrors upstream's LLM path:
-`_postprocess_output` consumes the all-gathered `flops_per_call` (across
-the DP group) and divides by `torch.distributed.get_world_size()` to
-recover per-GPU achieved compute. On the diffusion side this is reached
-via `_allgather_diffusion_flops_meta` gathering `latent_seqlens` and
-`prompt_seqlens` across the DP group *before* `estimate_flops` runs.
+The ``/ dp_size`` divisor matches the doc definition above:
+``_postprocess_output`` consumes DP-allgathered ``flops_per_call`` and
+divides by ``get_world_size(dp_group)`` (same scope as the seqlen gather).
+On the diffusion side this is reached via ``allgather_diffusion_flops_meta``
+gathering ``latent_seqlens`` and ``prompt_seqlens`` across the DP group
+*before* ``estimate_flops`` runs.
 
 ## Adding a new architecture
 
