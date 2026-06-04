@@ -249,7 +249,7 @@ run_selected_test 5 "DiffusionNFT trainer e2e" \
 # ── Test 6: SD3.5 offline DPO trainer e2e (actor-only, 1 GPU) ────────────────
 run_selected_test 6 "SD3.5 offline DPO trainer e2e" \
     env CUDA_VISIBLE_DEVICES=0 NUM_GPUS=1 \
-    bash tests/special_e2e/run_sd35_offline_dpo.sh
+    bash tests/special_e2e/run_offline_dpo_sd35.sh
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SUMMARY
