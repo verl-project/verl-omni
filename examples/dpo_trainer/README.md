@@ -57,7 +57,7 @@ The experiment settings and throughputs are shown in the table below. Online DPO
 
 | Script | Model | Algorithm | Hybrid Engine | # Cards | Reward Fn | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | `rollout.n` | lr   | # Val Samples | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / GPU / Seconds) | Time per Step (Seconds) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `run_qwen_image_online_dpo_lora.sh` | Qwen-Image | Online DPO | True | 4 | qwenvl-ocr-vllm | 4 | 4 | 0 (sync) | 32 | 8 | 3e-4 | 1k (full set) | 32×2=64 | 8 | 0.040 | 408 |
+| `run_qwen_image_online_dpo_lora.sh` | Qwen-Image | Online DPO | True | 4 | qwenvl-ocr-vllm | 4 | 4 | 0 (sync) | 32 | 16 | 3e-4 | 1k (full set) | 32×2=64 | 8 | 0.040 | 408 |
 
 - Colocated actor, vLLM-Omni rollout, and sync OCR reward on 4 GPUs; `rollout.n=16` samples candidates, then top/bottom pairing keeps 64 actor-update images per step (`perf/total_num_images=64`).
 - Validation uses `trainer.val_before_train=True` on the full OCR test parquet (same as FlowGRPO).
