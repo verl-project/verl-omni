@@ -63,14 +63,6 @@ def _configure_qwen_image_scheduler(
     scheduler.set_timesteps(num_inference_steps, device=device, sigmas=sigmas, mu=mu)
 
 
-def _forward_qwen_image_prediction(module: QwenImageTransformer2DModel, model_inputs: dict[str, torch.Tensor]):
-    # Go through ``module(...)`` so FSDP2 / parallelization forward hooks fire and
-    # unshard parameters before the linear layers run. VeOmni's wrapped model also
-    # implements this entrypoint: with ``training_target`` left unset it falls back to
-    # the diffusers base forward and returns the same ``(sample,)`` tuple shape.
-    return module(**model_inputs)[0]
-
-
 @DiffusionModelBase.register("QwenImagePipeline", algorithm="flow_grpo")
 class QwenImage(DiffusionModelBase):
     """Training adapter for the Qwen-Image diffusion model.
@@ -227,11 +219,11 @@ class QwenImage(DiffusionModelBase):
         latents = scheduler_inputs["all_latents"]
         timesteps = scheduler_inputs["all_timesteps"]
 
-        noise_pred = _forward_qwen_image_prediction(module, model_inputs)
+        noise_pred = cls.forward(module, model_config, model_inputs)
         true_cfg_scale = model_config.pipeline.true_cfg_scale
         if true_cfg_scale > 1.0:
             assert negative_model_inputs is not None
-            neg_noise_pred = _forward_qwen_image_prediction(module, negative_model_inputs)
+            neg_noise_pred = cls.forward(module, model_config, negative_model_inputs)
             noise_pred = apply_true_cfg(noise_pred, neg_noise_pred, true_cfg_scale)
 
         _, log_prob, prev_sample_mean, std_dev_t, sqrt_dt = scheduler.sample_previous_step(
