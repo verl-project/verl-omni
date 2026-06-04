@@ -76,10 +76,21 @@ Visit our documentation to learn more.
     <td>✅</td>
   </tr>
   <tr>
+    <td>DPO</td>
+    <td>WIP</td>
+  </tr>
+  <tr>
     <td>Wan2.2</td>
     <td>Diffusion generator</td>
     <td>Text → Video</td>
     <td>DanceGRPO</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>LTX2.3</td>
+    <td>Diffusion generator</td>
+    <td>Text → Video + Audio</td>
+    <td>FlowGRPO</td>
     <td>WIP</td>
   </tr>
   <tr>
