@@ -12,13 +12,32 @@ The provided scripts are configured for a single node with `8` NPUs.
 
 ## Prepare the dataset
 
-### HPSv3 dataset
+The Text-to-Video generation task uses text prompts for video generation. Prepare a `prompt.txt` file (one prompt per line) and place it under `$WORKSPACE/data/hpsv3/prompt.txt`.
 
-The HPSv3 task uses text prompts for video generation. You can find an example prompt file at:
+Below is an example that generates `prompt.txt` from a large-scale annotation JSON (e.g., `v1.1.0_HQ_part3.json` from [LanguageBind/Open-Sora-Plan-v1.2.0](https://huggingface.co/datasets/LanguageBind/Open-Sora-Plan-v1.2.0/blob/main/anno_json/v1.1.0_HQ_part3.json)):
 
-- https://github.com/verl-project/verl-recipe/blob/main/dance_grpo/dance_grpo_mindspeed_mm/data/prompt.txt
+```bash
+python3 examples/dancegrpo_trainer/data_process/gen_prompt_from_opensora_json.py \
+  --input_json /path/to/v1.1.0_HQ_part3.json \
+  --output_path $WORKSPACE/data/hpsv3/prompt.txt \
+  --num_samples 1200 \
+  --min_words 5 \
+  --max_words 768
+```
 
-Place your prompt file (one prompt per line) under `$WORKSPACE/data/hpsv3/prompt.txt`, then preprocess it into parquet files:
+Script options:
+
+| Argument | Default | Description |
+| --- | --- | --- |
+| `--input_json` | (required) | Path to the downloaded JSON file. |
+| `--output_path` | `./prompt.txt` | Path to the output text file (one prompt per line). |
+| `--num_samples` | `None` (all) | Number of prompts to randomly select from filtered results. |
+| `--min_words` | `1` | Minimum number of words a prompt must contain. |
+| `--max_words` | `None` (no limit) | Maximum number of words a prompt may contain. |
+| `--cap_index` | `0` | Index into the `cap` array (0 = long caption, 1 = short caption). |
+| `--seed` | `42` | Random seed for sampling. |
+
+After generating `prompt.txt`, preprocess it into parquet files:
 
 ```bash
 python3 examples/dancegrpo_trainer/data_process/wan22_hpsv3.py \
