@@ -65,7 +65,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=flow_grpo \
-    trainer.experiment_name=qwen_image_ocr_lora \
+    trainer.experiment_name=qwen_image_ocr_lora_fa3 \
     trainer.log_val_generations=8 \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
