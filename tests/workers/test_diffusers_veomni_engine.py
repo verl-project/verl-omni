@@ -20,8 +20,6 @@ overrides do not bleed into the diffusers FSDP/FSDP2 test surface.
 """
 
 import os
-import shutil
-import tempfile
 from functools import partial
 
 import numpy as np
@@ -141,7 +139,6 @@ def create_data_samples(num_device: int, model_config: DiffusionModelConfig) -> 
 
 def test_diffusers_veomni_engine():
     ray.init()
-    tmp_dir = tempfile.mkdtemp(prefix="qwen_image_veomni_")
     try:
         visible_gpus = torch.cuda.device_count()
         device_count = resolve_requested_num_gpus(default_num_gpus=max(1, visible_gpus))
@@ -198,4 +195,3 @@ def test_diffusers_veomni_engine():
         assert "metrics" in output_dict.keys()
     finally:
         ray.shutdown()
-        shutil.rmtree(tmp_dir, ignore_errors=True)

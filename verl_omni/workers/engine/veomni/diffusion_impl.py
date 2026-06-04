@@ -112,6 +112,10 @@ class VeOmniDiffusionEngine(BaseEngine):
             dp_replicate_size = dp_size // fsdp_size
             dp_shard_size = fsdp_size
 
+        self.dp_size = dp_size
+        self.dp_replicate_size = dp_replicate_size
+        self.dp_shard_size = dp_shard_size
+
         parallel_state.init_parallel_state(
             dp_size=dp_size,
             dp_replicate_size=dp_replicate_size,
@@ -135,27 +139,6 @@ class VeOmniDiffusionEngine(BaseEngine):
             name: getattr(self.engine_config, name) for name in ops_fields if hasattr(self.engine_config, name)
         }
         return OpsImplementationConfig(**ops_kwargs)
-
-    def _build_mixed_precision_config(self):
-        from veomni.arguments import MixedPrecisionConfig
-
-        return MixedPrecisionConfig(
-            enable=self.engine_config.mixed_precision,
-            param_dtype=self.engine_config.mixed_precision_param_dtype,
-            reduce_dtype=self.engine_config.mixed_precision_reduce_dtype,
-            output_dtype=self.engine_config.mixed_precision_output_dtype,
-            cast_forward_inputs=self.engine_config.mixed_precision_cast_forward_inputs,
-        )
-
-    def _get_veomni_torch_dtype(self) -> str:
-        dtype = PrecisionType.to_dtype(self.engine_config.model_dtype)
-        if dtype == torch.float32:
-            return "float32"
-        if dtype == torch.float16:
-            return "float16"
-        if dtype == torch.bfloat16:
-            return "bfloat16"
-        raise ValueError(f"Unsupported VeOmni model dtype: {self.engine_config.model_dtype}")
 
     def _get_veomni_model_paths(self) -> tuple[str, str]:
         weights_path = os.path.join(self.model_config.local_path, self.model_config.transformer_subfolder)
@@ -182,15 +165,9 @@ class VeOmniDiffusionEngine(BaseEngine):
         )
 
         config_path, weights_path = self._get_veomni_model_paths()
-        world_size = torch.distributed.get_world_size()
-        dp_size = world_size // self.engine_config.ulysses_parallel_size
-        fsdp_size = self.engine_config.fsdp_size
-        if fsdp_size < 0 or fsdp_size >= dp_size:
-            dp_replicate_size = 1
-            dp_shard_size = dp_size
-        else:
-            dp_replicate_size = dp_size // fsdp_size
-            dp_shard_size = fsdp_size
+        dp_size = self.dp_size
+        dp_replicate_size = self.dp_replicate_size
+        dp_shard_size = self.dp_shard_size
 
         mixed_precision = MixedPrecisionConfig(
             enable=self.engine_config.mixed_precision,
