@@ -186,14 +186,19 @@ class DiffusionModelBase(ABC):
         model_inputs: dict[str, torch.Tensor],
         negative_model_inputs: Optional[dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
-        """Run a single model prediction for forward-process objectives.
+        """Run a single model prediction.
 
-        Override this when an algorithm trains by noising clean latents
-        ``x0 -> xt`` (i.e., forward process) and then optimizing model predictions directly, rather
-        than sampling/log-probing the reverse step ``xt -> x_{t-1}``.
-        The default is a plain transformer forward; model adapters only need
-        to override when prediction requires extra handling such as CFG,
-        negative inputs, or output conversion.
+        The default routes through ``module(**model_inputs)`` (rather than calling an
+        inner submodule directly) so FSDP2 / sequence-parallel forward hooks fire and
+        unshard parameters before the linear layers run, then returns the model's first
+        output (the ``(sample,)`` tuple shape used by diffusers transformers). It is
+        backend-agnostic and shared by both the FSDP and VeOmni engines.
+
+        Used both for forward-process objectives (noising clean latents ``x0 -> xt``
+        then optimizing predictions directly) and as the prediction step inside
+        reverse-sampling algorithms (FlowGRPO et al.). Model adapters only need to
+        override this when prediction requires extra handling such as CFG, negative
+        inputs, or output conversion.
         """
         return module(**model_inputs)[0]
 
