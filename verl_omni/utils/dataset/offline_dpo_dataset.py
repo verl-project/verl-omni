@@ -24,7 +24,6 @@ captions in ``extra_info["raw_prompt"]`` and ``extra_info["raw_negative_prompt"]
 """
 
 import io
-import logging
 import os
 import uuid
 from collections.abc import Sequence
@@ -38,13 +37,7 @@ from omegaconf import DictConfig
 from torch.utils.data import Dataset
 from verl.utils.dataset.rl_dataset import collate_fn as _upstream_collate_fn
 
-logger = logging.getLogger(__name__)
-
 OFFLINE_DPO_PAIR_MARKER = "__offline_dpo_pair__"
-PROMPT_EMBED_MASK_PAIRS = (
-    ("prompt_embeds", "prompt_embeds_mask"),
-    ("negative_prompt_embeds", "negative_prompt_embeds_mask"),
-)
 
 
 def _read_dataframe(data_files: str | Sequence[str]) -> pd.DataFrame:
@@ -174,42 +167,8 @@ def _tensor_from_column(value: Any, *, dtype: torch.dtype) -> torch.Tensor:
     return torch.tensor(_to_nested(value), dtype=dtype)
 
 
-def _pad_tensor_first_dim(tensor: torch.Tensor, target_length: int, pad_value: float | int) -> torch.Tensor:
-    if tensor.shape[0] == target_length:
-        return tensor
-    padded_shape = (target_length, *tensor.shape[1:])
-    padded = tensor.new_full(padded_shape, pad_value)
-    padded[: tensor.shape[0]] = tensor
-    return padded
-
-
-def _pad_prompt_embed_pairs(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    for embed_key, mask_key in PROMPT_EMBED_MASK_PAIRS:
-        embeds = [feature.get(embed_key) for feature in features if isinstance(feature.get(embed_key), torch.Tensor)]
-        if not embeds:
-            continue
-        max_length = max(embed.shape[0] for embed in embeds)
-        for feature in features:
-            embed = feature.get(embed_key)
-            if not isinstance(embed, torch.Tensor):
-                continue
-            feature[embed_key] = _pad_tensor_first_dim(embed, max_length, 0.0)
-
-            mask = feature.get(mask_key)
-            if isinstance(mask, torch.Tensor):
-                if mask.shape[0] != embed.shape[0]:
-                    raise ValueError(
-                        f"{mask_key} length ({mask.shape[0]}) must match {embed_key} length ({embed.shape[0]})."
-                    )
-                feature[mask_key] = _pad_tensor_first_dim(mask, max_length, 0)
-            elif mask is None:
-                mask = torch.ones(embed.shape[0], dtype=torch.int32)
-                feature[mask_key] = _pad_tensor_first_dim(mask, max_length, 0)
-    return features
-
-
 class OfflineDPODataset(Dataset):
-    """Dataset for rows containing offline DPO pairs plus precomputed diffusion tensors."""
+    """Dataset for rows containing offline DPO pairs plus precomputed SD3 tensors."""
 
     def __init__(self, data_files, tokenizer, processor=None, config: DictConfig | None = None, max_samples: int = -1):
         del processor
@@ -236,8 +195,10 @@ class OfflineDPODataset(Dataset):
             self.lose_key,
             "img_win_latents",
             "img_lose_latents",
+            "prompt_embeds",
+            "prompt_embeds_mask",
+            "pooled_prompt_embeds",
         }
-
         missing = required - set(self.dataframe.columns)
         if missing:
             raise ValueError(f"Offline DPO data is missing required columns: {sorted(missing)}")
@@ -279,7 +240,7 @@ class OfflineDPODataset(Dataset):
                 pass
             return _tensor_from_column(value, dtype=dtype)
 
-        feature = {
+        return {
             OFFLINE_DPO_PAIR_MARKER: True,
             "prompts": _tokenize_prompt(prompt, self.tokenizer, self.config),
             "uid": pair_uid,
@@ -290,7 +251,8 @@ class OfflineDPODataset(Dataset):
             "img_win_latents": _tensor_from_column(row["img_win_latents"], dtype=torch.float32),
             "img_lose_latents": _tensor_from_column(row["img_lose_latents"], dtype=torch.float32),
             "prompt_embeds": _tensor_from_column(row["prompt_embeds"], dtype=torch.float32),
-            "prompt_embeds_mask": _optional_tensor("prompt_embeds_mask", dtype=torch.int32),
+            "prompt_embeds_mask": _tensor_from_column(row["prompt_embeds_mask"], dtype=torch.int32),
+            "pooled_prompt_embeds": _tensor_from_column(row["pooled_prompt_embeds"], dtype=torch.float32),
             "win_score": win_score,
             "lose_score": lose_score,
             "data_source": row.get("data_source", self.data_source),
@@ -300,11 +262,6 @@ class OfflineDPODataset(Dataset):
             "negative_prompt_embeds_mask": _optional_tensor("negative_prompt_embeds_mask", torch.int32),
             "negative_pooled_prompt_embeds": _optional_tensor("negative_pooled_prompt_embeds", torch.float32),
         }
-        pooled_prompt_embeds = _optional_tensor("pooled_prompt_embeds", torch.float32)
-        if pooled_prompt_embeds is not None:
-            feature["pooled_prompt_embeds"] = pooled_prompt_embeds
-
-        return feature
 
 
 def expand_offline_dpo_features(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -325,9 +282,8 @@ def expand_offline_dpo_features(features: list[dict[str, Any]]) -> list[dict[str
             "extra_info": feature["extra_info"],
             "prompt_embeds": feature["prompt_embeds"],
             "prompt_embeds_mask": feature["prompt_embeds_mask"],
+            "pooled_prompt_embeds": feature["pooled_prompt_embeds"],
         }
-        if feature.get("pooled_prompt_embeds") is not None:
-            base["pooled_prompt_embeds"] = feature["pooled_prompt_embeds"]
         for key in ("negative_prompt_embeds", "negative_prompt_embeds_mask", "negative_pooled_prompt_embeds"):
             if feature.get(key) is not None:
                 base[key] = feature[key]
@@ -356,5 +312,4 @@ def offline_dpo_collate_fn(features):
     """Collate offline DPO pairs after expanding each row to win/lose samples."""
     if features and isinstance(features[0], dict) and features[0].get(OFFLINE_DPO_PAIR_MARKER):
         features = expand_offline_dpo_features(features)
-    features = _pad_prompt_embed_pairs(features)
     return _upstream_collate_fn(features)
