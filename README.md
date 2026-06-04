@@ -57,9 +57,9 @@ Visit our documentation to learn more.
     <th>Status</th>
   </tr>
   <tr>
-    <td rowspan="3">Qwen-Image</td>
-    <td rowspan="3">Diffusion generator</td>
-    <td rowspan="3">Text → Image</td>
+    <td rowspan="4">Qwen-Image</td>
+    <td rowspan="4">Diffusion generator</td>
+    <td rowspan="4">Text → Image</td>
     <td>FlowGRPO</td>
     <td>✅</td>
   </tr>
@@ -69,6 +69,10 @@ Visit our documentation to learn more.
   </tr>
   <tr>
     <td>GRPO-Guard</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>DiffusionNFT</td>
     <td>✅</td>
   </tr>
   <tr>
@@ -108,7 +112,7 @@ Visit our documentation to learn more.
     <td>Diffusion generator</td>
     <td>Text → Image</td>
     <td>DPO</td>
-    <td>WIP</td>
+    <td>✅</td>
   </tr>
 </table>
 

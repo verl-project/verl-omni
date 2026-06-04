@@ -6,6 +6,10 @@ pipeline, scores the candidates, and writes one pre-ranked win/lose pair per
 prompt. Training consumes those pairs directly and does not run online rollout,
 training-time reward scoring, or online pair selection.
 
+For implementation details on adding or extending direct-preference diffusion
+algorithms, see
+[`docs/contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md`](../../docs/contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md).
+
 ## Pair Data
 
 The resulting parquet rows contain:

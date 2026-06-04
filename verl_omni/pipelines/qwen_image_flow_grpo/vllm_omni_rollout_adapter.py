@@ -26,23 +26,13 @@ from vllm_omni.diffusion.worker.utils import DiffusionRequestState
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
-from .common import apply_true_cfg, build_img_shapes
+from .common import QwenImageTokenIdPromptMixin, apply_true_cfg, build_img_shapes, coalesce_not_none, maybe_to_cpu
 
 __all__ = ["QwenImagePipelineWithLogProb"]
 
 
-def _maybe_to_cpu(value):
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu()
-    return value
-
-
-def _coalesce_not_none(value, default):
-    return default if value is None else value
-
-
 @VllmOmniPipelineBase.register("QwenImagePipeline", algorithm="flow_grpo")
-class QwenImagePipelineWithLogProb(QwenImagePipeline):
+class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipeline):
     """Rollout pipeline for Qwen-Image that captures per-step log-probabilities.
 
     Extends :class:`~vllm_omni.diffusion.models.qwen_image.QwenImagePipeline`
@@ -673,18 +663,16 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
         num_inference_steps = sampling_params.num_inference_steps or num_inference_steps
         max_sequence_length = sampling_params.max_sequence_length or max_sequence_length
 
-        noise_level = _coalesce_not_none(sampling_params.extra_args.get("noise_level", None), noise_level)
-        sde_window_size = _coalesce_not_none(sampling_params.extra_args.get("sde_window_size", None), sde_window_size)
-        sde_window_range = _coalesce_not_none(
-            sampling_params.extra_args.get("sde_window_range", None), sde_window_range
-        )
-        sde_type = _coalesce_not_none(sampling_params.extra_args.get("sde_type", None), sde_type)
-        logprobs = _coalesce_not_none(sampling_params.extra_args.get("logprobs", None), logprobs)
+        noise_level = coalesce_not_none(sampling_params.extra_args.get("noise_level", None), noise_level)
+        sde_window_size = coalesce_not_none(sampling_params.extra_args.get("sde_window_size", None), sde_window_size)
+        sde_window_range = coalesce_not_none(sampling_params.extra_args.get("sde_window_range", None), sde_window_range)
+        sde_type = coalesce_not_none(sampling_params.extra_args.get("sde_type", None), sde_type)
+        logprobs = coalesce_not_none(sampling_params.extra_args.get("logprobs", None), logprobs)
 
         generator = sampling_params.generator or generator
         if generator is None and sampling_params.seed is not None:
             generator = torch.Generator(device=self.device).manual_seed(sampling_params.seed)
-        true_cfg_scale = _coalesce_not_none(sampling_params.true_cfg_scale, true_cfg_scale)
+        true_cfg_scale = coalesce_not_none(sampling_params.true_cfg_scale, true_cfg_scale)
         req_num_outputs = getattr(sampling_params, "num_outputs_per_prompt", None)
         if req_num_outputs and req_num_outputs > 0:
             num_images_per_prompt = req_num_outputs
@@ -812,14 +800,14 @@ class QwenImagePipelineWithLogProb(QwenImagePipeline):
             image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
 
         return DiffusionOutput(
-            output=_maybe_to_cpu(image),
+            output=maybe_to_cpu(image),
             custom_output={
-                "all_latents": _maybe_to_cpu(all_latents),
-                "all_log_probs": _maybe_to_cpu(all_log_probs),
-                "all_timesteps": _maybe_to_cpu(all_timesteps),
-                "prompt_embeds": _maybe_to_cpu(prompt_embeds),
-                "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
-                "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds),
-                "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
+                "all_latents": maybe_to_cpu(all_latents),
+                "all_log_probs": maybe_to_cpu(all_log_probs),
+                "all_timesteps": maybe_to_cpu(all_timesteps),
+                "prompt_embeds": maybe_to_cpu(prompt_embeds),
+                "prompt_embeds_mask": maybe_to_cpu(prompt_embeds_mask),
+                "negative_prompt_embeds": maybe_to_cpu(negative_prompt_embeds),
+                "negative_prompt_embeds_mask": maybe_to_cpu(negative_prompt_embeds_mask),
             },
         )

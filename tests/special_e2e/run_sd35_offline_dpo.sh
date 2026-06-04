@@ -40,6 +40,7 @@ python3 tests/special_e2e/create_dummy_offline_dpo_data.py \
 python3 -m verl_omni.trainer.main_diffusion \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=offline \
+    algorithm.paired_preference=true \
     data.train_files="${DATA_FILE}" \
     data.val_files="${DATA_FILE}" \
     data.train_batch_size=${train_batch_size} \
@@ -49,7 +50,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.custom_cls.collate_fn=offline_dpo_collate_fn \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.algorithm=dpo \
-    actor_rollout_ref.model.model_type=diffusion_dp_model \
+    actor_rollout_ref.model.model_type=diffusion_dpo_model \
     actor_rollout_ref.model.custom_chat_template="\"${custom_chat_template}\"" \
     actor_rollout_ref.model.external_lib=verl_omni.pipelines.sd3_dpo \
     actor_rollout_ref.model.pipeline.guidance_scale=4.0 \

@@ -17,7 +17,9 @@ import os
 from dataclasses import asdict
 from typing import Any, Optional
 
+import numpy as np
 import ray
+import torch
 import torchvision.transforms as T
 import vllm_omni.entrypoints.cli.serve
 from verl.utils.config import omega_conf_to_dataclass
@@ -164,6 +166,23 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _get_wake_up_tags(self) -> list[str]:
         return ["weights"]
 
+    async def wake_up(self, tags: list[str] | None = None):
+        """Override parent to use collective_rpc instead of engine.wake_up().
+
+        The parent (verl ``1927ad33``+) calls ``self.engine.wake_up(tags=...)``
+        which triggers CUDA initialisation in this HTTP server process when
+        running under vLLM-Omni (AsyncOmni engine).
+        Use ``collective_rpc`` instead.
+
+        # TODO (long): drop this override once vllm-omni wake_up
+        without triggering GPU initialisation.
+        """
+        if self.node_rank != 0:
+            return
+        await self.engine.collective_rpc(
+            "wake_up", kwargs={"tags": tags if tags is not None else self._get_wake_up_tags()}
+        )
+
     async def _sleep_hybrid(self):
         """Preserve non-actor pipeline weights during hybrid training sleep.
 
@@ -239,8 +258,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         async for output in generator:
             final_res = output
         assert final_res is not None
-
-        diffusion_output = self._to_tensor(final_res.images[0]).float() / 255.0
+        diffusion_output = final_res.images[0]
+        if isinstance(diffusion_output, torch.Tensor):
+            diffusion_output = diffusion_output.float()
+        elif isinstance(diffusion_output, np.ndarray):
+            diffusion_output = torch.from_numpy(diffusion_output).float()
+        else:
+            diffusion_output = self._to_tensor(diffusion_output).float() / 255.0
 
         # Extract extra data from custom_output (populated by DiffusionEngine)
         mm_output = final_res.custom_output or {}
@@ -257,10 +281,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         prompt_embeds_mask = mm_output.get("prompt_embeds_mask")
         negative_prompt_embeds = mm_output.get("negative_prompt_embeds")
         negative_prompt_embeds_mask = mm_output.get("negative_prompt_embeds_mask")
+        latents_clean = mm_output.get("latents_clean")
+        train_timesteps = mm_output.get("train_timesteps")
 
+        # TODO(andy): refactor later.
         extra_fields = {
             "all_latents": all_latents[0] if all_latents is not None else None,
             "all_timesteps": all_timesteps[0] if all_timesteps is not None else None,
+            "latents_clean": latents_clean[0] if latents_clean is not None else None,
+            "train_timesteps": train_timesteps[0] if train_timesteps is not None else None,
             "prompt_embeds": prompt_embeds[0] if prompt_embeds is not None else None,
             "prompt_embeds_mask": prompt_embeds_mask[0] if prompt_embeds_mask is not None else None,
             "negative_prompt_embeds": negative_prompt_embeds[0] if negative_prompt_embeds is not None else None,

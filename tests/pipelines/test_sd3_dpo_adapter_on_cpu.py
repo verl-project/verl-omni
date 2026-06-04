@@ -199,20 +199,17 @@ class TestStableDiffusion3DPOPrepareModelInputs:
             )
 
 
-class TestStableDiffusion3DPOForwardAndSamplePreviousStep:
+class TestStableDiffusion3DPOForward:
     def test_no_cfg_returns_positive_noise_pred(self):
         pos_pred = torch.randn(2, 16, 8, 8)
         module = MagicMock(return_value=(pos_pred,))
         model_inputs = {"hidden_states": pos_pred}
 
-        result = StableDiffusion3DPO.forward_and_sample_previous_step(
+        result = StableDiffusion3DPO.forward(
             module=module,
-            scheduler=MagicMock(),
             model_config=_make_model_config(guidance_scale=1.0),
             model_inputs=model_inputs,
             negative_model_inputs=None,
-            scheduler_inputs=None,
-            step=0,
         )
 
         module.assert_called_once_with(**model_inputs)
@@ -226,14 +223,11 @@ class TestStableDiffusion3DPOForwardAndSamplePreviousStep:
         model_inputs = {"hidden_states": pos_pred}
         negative_model_inputs = {"hidden_states": neg_pred}
 
-        result = StableDiffusion3DPO.forward_and_sample_previous_step(
+        result = StableDiffusion3DPO.forward(
             module=module,
-            scheduler=MagicMock(),
             model_config=_make_model_config(guidance_scale=guidance_scale),
             model_inputs=model_inputs,
             negative_model_inputs=negative_model_inputs,
-            scheduler_inputs=None,
-            step=0,
         )
 
         assert module.call_count == 2
@@ -242,12 +236,9 @@ class TestStableDiffusion3DPOForwardAndSamplePreviousStep:
 
     def test_cfg_requires_negative_inputs_when_guidance_enabled(self):
         with pytest.raises(ValueError, match="CFG requires negative prompt inputs"):
-            StableDiffusion3DPO.forward_and_sample_previous_step(
+            StableDiffusion3DPO.forward(
                 module=MagicMock(),
-                scheduler=MagicMock(),
                 model_config=_make_model_config(guidance_scale=4.0),
                 model_inputs={"hidden_states": torch.randn(2, 16, 8, 8)},
                 negative_model_inputs=None,
-                scheduler_inputs=None,
-                step=0,
             )
