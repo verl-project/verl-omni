@@ -266,7 +266,6 @@ actor_rollout_ref:
   model:
     _target_: verl_omni.workers.config.diffusion.DiffusionModelConfig
     path: ~/models/Qwen/Qwen-Image
-    architecture: null
     algorithm: flow_grpo
     tokenizer_path: null
     use_shm: false
@@ -341,9 +340,6 @@ data:
     path: null
     name: null
     collate_fn: null
-  sample_filter_fn:
-    path: null
-    name: null
   return_multi_modal_inputs: true
   sampler:
     class_path: null

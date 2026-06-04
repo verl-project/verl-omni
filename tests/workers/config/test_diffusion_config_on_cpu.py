@@ -87,7 +87,6 @@ class TestDiffusionAlgoConfig:
     def test_defaults(self):
         cfg = DiffusionAlgoConfig()
         assert cfg.adv_estimator == "flow_grpo"
-        assert cfg.paired_preference is False
         assert cfg.norm_adv_by_std_in_grpo is True
         assert cfg.global_std is True
         assert cfg.old_policy_decay_schedule == "copy"

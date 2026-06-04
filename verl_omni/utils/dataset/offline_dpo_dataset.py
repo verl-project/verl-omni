@@ -23,13 +23,11 @@ Parquet rows are expected to be produced by
 captions in ``extra_info["raw_prompt"]`` and ``extra_info["raw_negative_prompt"]``.
 """
 
-import functools
 import io
 import logging
 import os
-import random
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -39,12 +37,8 @@ import torch
 from omegaconf import DictConfig
 from torch.utils.data import Dataset
 from verl.utils.dataset.rl_dataset import collate_fn as _upstream_collate_fn
-from verl.utils.import_utils import load_extern_object
 
 logger = logging.getLogger(__name__)
-
-SAMPLE_FILTER_FN_RESERVED_KEYS = frozenset({"path", "name"})
-DEFAULT_SAMPLE_FILTER_MAX_ATTEMPTS = 10_000
 
 OFFLINE_DPO_PAIR_MARKER = "__offline_dpo_pair__"
 PROMPT_EMBED_MASK_PAIRS = (
@@ -189,44 +183,6 @@ def _pad_tensor_first_dim(tensor: torch.Tensor, target_length: int, pad_value: f
     return padded
 
 
-def offline_dpo_score_gap_filter(
-    row: dict,
-    *,
-    min_score_gap: float = 0.07,
-    win_score_key: str = "win_score",
-    lose_score_key: str = "lose_score",
-) -> bool:
-    """Return True when ``win_score - lose_score`` exceeds ``min_score_gap``."""
-    win_score = float(row.get(win_score_key, 1.0))
-    lose_score = float(row.get(lose_score_key, 0.0))
-    return (win_score - lose_score) > min_score_gap
-
-
-def resolve_sample_filter_fn(config: DictConfig) -> Callable[[dict], bool] | None:
-    """Load an optional row filter callable from ``config.sample_filter_fn``."""
-    filter_cfg = config.get("sample_filter_fn")
-    if filter_cfg is None:
-        return None
-
-    path = filter_cfg.get("path")
-    if path is None:
-        return None
-
-    name = filter_cfg.get("name")
-    if name is None:
-        raise ValueError("data.sample_filter_fn.name is required when path is set.")
-
-    fn = load_extern_object(path, name)
-    if not callable(fn):
-        raise TypeError(f"The sample filter function '{name}' from '{path}' must be callable and accept a row dict.")
-
-    kwargs = {key: value for key, value in filter_cfg.items() if key not in SAMPLE_FILTER_FN_RESERVED_KEYS}
-    if kwargs:
-        fn = functools.partial(fn, **kwargs)
-    logger.info("Using offline DPO sample filter: %s:%s", path, name)
-    return fn
-
-
 def _pad_prompt_embed_pairs(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for embed_key, mask_key in PROMPT_EMBED_MASK_PAIRS:
         embeds = [feature.get(embed_key) for feature in features if isinstance(feature.get(embed_key), torch.Tensor)]
@@ -286,42 +242,10 @@ class OfflineDPODataset(Dataset):
         if missing:
             raise ValueError(f"Offline DPO data is missing required columns: {sorted(missing)}")
 
-        self.sample_filter_fn = resolve_sample_filter_fn(config)
-        seed = config.get("seed")
-        self._sample_rng = random.Random(seed)
-
     def __len__(self) -> int:
         return len(self.dataframe)
 
-    def _resolve_sample_index(self, item: int) -> int:
-        """Return an index whose row passes ``sample_filter_fn``, resampling if needed."""
-        if self.sample_filter_fn is None:
-            return item
-
-        dataset_size = len(self.dataframe)
-        row = self.dataframe.iloc[item].to_dict()
-        if self.sample_filter_fn(row):
-            return item
-
-        max_attempts = min(dataset_size * 100, DEFAULT_SAMPLE_FILTER_MAX_ATTEMPTS)
-        for _ in range(max_attempts):
-            candidate = self._sample_rng.randrange(dataset_size)
-            row = self.dataframe.iloc[candidate].to_dict()
-            if self.sample_filter_fn(row):
-                logger.debug(
-                    "Offline DPO sample filter rejected index %s; resampled index %s.",
-                    item,
-                    candidate,
-                )
-                return candidate
-
-        raise RuntimeError(
-            f"Failed to sample an offline DPO row satisfying sample_filter_fn after {max_attempts} attempts. "
-            "Relax the filter or add more qualifying rows to the dataset."
-        )
-
     def __getitem__(self, item: int) -> dict[str, Any]:
-        item = self._resolve_sample_index(item)
         row = self.dataframe.iloc[item].to_dict()
         prompt = row[self.prompt_key]
         negative_prompt = row.get(self.negative_prompt_key, self.default_negative_prompt)

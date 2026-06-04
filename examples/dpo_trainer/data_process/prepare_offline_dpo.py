@@ -20,12 +20,13 @@ The output schema is one logical preference pair per row:
      img_win_latents, img_lose_latents, prompt_embeds, ...}
 
 Training expands each row to adjacent ``win, lose`` samples and consumes the
-precomputed diffusion latents and text embeddings directly.
+precomputed SD3 latents and text embeddings directly.
 """
 
 import argparse
 import asyncio
 import importlib.util
+import io
 import os
 import shlex
 import subprocess
@@ -39,14 +40,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
-from parquet_checkpoint_utils import (
-    ChunkedParquetWriter,
-    ParquetWriterShutdownGuard,
-    load_resume_checkpoint,
-)
 from PIL import Image
-from pipeline_utils import get_pipeline_utils
 
 try:
     import torch_npu
@@ -116,42 +112,23 @@ def _load_reward_fn(path: str | None, name: str | None):
     return getattr(module, name)
 
 
-def _extract_reward_score(result: Any) -> float:
+async def _score_image(reward_fn, image: Image.Image, prompt: str, args: argparse.Namespace) -> float:
+    if reward_fn is None:
+        return 0.0
+    image_array = np.asarray(image).astype("float32") / 255.0
+    result = reward_fn(
+        data_source=args.data_source,
+        solution_image=image_array,
+        ground_truth=prompt,
+        extra_info={"raw_prompt": prompt, "prompt": prompt},
+        reward_router_address=args.reward_router_address,
+        model_name=args.reward_model_name,
+    )
+    if asyncio.iscoroutine(result):
+        result = await result
     if isinstance(result, dict):
         return float(result.get("score", 0.0))
     return float(result)
-
-
-async def _score_images(
-    reward_fn,
-    images: list[Image.Image],
-    prompt: str,
-    args: argparse.Namespace,
-) -> list[float]:
-    """Score candidate images concurrently via repeated ``compute_score`` calls."""
-    if not images:
-        return []
-    if reward_fn is None:
-        return [0.0] * len(images)
-
-    import aiohttp
-
-    async def _score_one(image: Image.Image, session: aiohttp.ClientSession) -> float:
-        result = reward_fn(
-            data_source=args.data_source,
-            solution_image=np.asarray(image).astype("float32") / 255.0,
-            ground_truth=prompt,
-            extra_info={"raw_prompt": prompt, "prompt": prompt, "aiohttp_session": session},
-            reward_router_address=args.reward_router_address,
-            model_name=args.reward_model_name,
-        )
-        if asyncio.iscoroutine(result):
-            result = await result
-        return _extract_reward_score(result)
-
-    timeout = aiohttp.ClientTimeout(total=None)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        return list(await asyncio.gather(*[_score_one(image, session) for image in images]))
 
 
 def _make_generator(seed: int, device: str) -> torch.Generator:
@@ -159,29 +136,73 @@ def _make_generator(seed: int, device: str) -> torch.Generator:
     return torch.Generator(device=generator_device).manual_seed(seed)
 
 
-def _make_generators(seeds: list[int], device: str) -> list[torch.Generator]:
-    return [_make_generator(seed, device) for seed in seeds]
+def _tensor_to_bytes(tensor: torch.Tensor) -> bytes:
+    buffer = io.BytesIO()
+    torch.save(tensor.detach().cpu(), buffer)
+    return buffer.getvalue()
 
 
-def _sample_image_seeds(rng: torch.Generator, count: int) -> list[int]:
-    return [int(torch.randint(0, 2**31, (1,), generator=rng).item()) for _ in range(count)]
+def _encode_image_latent(pipe, image: Image.Image, args: argparse.Namespace) -> torch.Tensor:
+    pixel_values = pipe.image_processor.preprocess([image], height=args.height, width=args.width)
+    pixel_values = pixel_values.to(device=args.device, dtype=pipe.vae.dtype)
+    with torch.no_grad():
+        latents = pipe.vae.encode(pixel_values).latent_dist.sample()
+    scaling_factor = getattr(pipe.vae.config, "scaling_factor", 1.0)
+    shift_factor = getattr(pipe.vae.config, "shift_factor", 0.0)
+    latents = (latents - shift_factor) * scaling_factor
+    return latents[0].detach().cpu()
 
 
-def _uses_classifier_free_guidance(args: argparse.Namespace) -> bool:
-    if args.pipeline == "qwen_image":
-        return args.true_cfg_scale is not None and args.true_cfg_scale > 1.0
-    return args.guidance_scale is not None and args.guidance_scale > 1.0
+def _encode_prompt_tensors(pipe, prompt: str, negative_prompt: str, args: argparse.Namespace) -> dict[str, list | None]:
+    do_cfg = args.guidance_scale is not None and args.guidance_scale > 1.0
+    with torch.no_grad():
+        encoded = pipe.encode_prompt(
+            prompt=[prompt],
+            prompt_2=None,
+            prompt_3=None,
+            device=args.device,
+            num_images_per_prompt=1,
+            do_classifier_free_guidance=do_cfg,
+            negative_prompt=[negative_prompt] if do_cfg else None,
+            negative_prompt_2=None,
+            negative_prompt_3=None,
+            max_sequence_length=args.max_sequence_length,
+        )
 
+    if len(encoded) == 4:
+        prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = encoded
+    elif len(encoded) == 2:
+        prompt_embeds, pooled_prompt_embeds = encoded
+        negative_prompt_embeds = None
+        negative_pooled_prompt_embeds = None
+    else:
+        raise ValueError(f"Unexpected SD3 encode_prompt output length: {len(encoded)}")
 
-def _next_prompt_cfg(args: argparse.Namespace, rng: torch.Generator) -> tuple[str, argparse.Namespace]:
-    drop = args.random_drop_negative_prompt and float(torch.rand(1, generator=rng).item()) < 0.5
-    if not drop:
-        return args.negative_prompt, args
-    prompt_args = argparse.Namespace(**vars(args))
-    prompt_args.negative_prompt = ""
-    scale_key = "true_cfg_scale" if args.pipeline == "qwen_image" else "guidance_scale"
-    setattr(prompt_args, scale_key, 1.0)
-    return "", prompt_args
+    prompt_embeds_mask = torch.ones(
+        prompt_embeds.shape[0],
+        prompt_embeds.shape[1],
+        dtype=torch.int32,
+        device=prompt_embeds.device,
+    )
+    result = {
+        "prompt_embeds": _tensor_to_bytes(prompt_embeds[0]),
+        "prompt_embeds_mask": _tensor_to_bytes(prompt_embeds_mask[0]),
+        "pooled_prompt_embeds": _tensor_to_bytes(pooled_prompt_embeds[0]),
+        "negative_prompt_embeds": None,
+        "negative_prompt_embeds_mask": None,
+        "negative_pooled_prompt_embeds": None,
+    }
+    if negative_prompt_embeds is not None:
+        negative_prompt_embeds_mask = torch.ones(
+            negative_prompt_embeds.shape[0],
+            negative_prompt_embeds.shape[1],
+            dtype=torch.int32,
+            device=negative_prompt_embeds.device,
+        )
+        result["negative_prompt_embeds"] = _tensor_to_bytes(negative_prompt_embeds[0])
+        result["negative_prompt_embeds_mask"] = _tensor_to_bytes(negative_prompt_embeds_mask[0])
+        result["negative_pooled_prompt_embeds"] = _tensor_to_bytes(negative_pooled_prompt_embeds[0])
+    return result
 
 
 def _router_url(host: str, port: int, path: str) -> str:
@@ -201,6 +222,46 @@ def _wait_for_reward_server(host: str, port: int, timeout_s: int) -> None:
             last_error = exc
         time.sleep(5)
     raise TimeoutError(f"Reward server did not become ready at {url} within {timeout_s}s: {last_error}")
+
+
+class _ChunkedParquetWriter:
+    """Write parquet rows incrementally to bound peak memory usage."""
+
+    def __init__(self, path: Path, flush_every: int):
+        self.path = path
+        self.flush_every = max(1, flush_every)
+        self._chunk: list[dict[str, Any]] = []
+        self._writer: pq.ParquetWriter | None = None
+        self.row_count = 0
+
+    def __enter__(self) -> "_ChunkedParquetWriter":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def write(self, row: dict[str, Any]) -> None:
+        self._chunk.append(row)
+        self.row_count += 1
+        if len(self._chunk) >= self.flush_every:
+            self._flush()
+
+    def close(self) -> None:
+        if self._chunk:
+            self._flush()
+        if self._writer is not None:
+            self._writer.close()
+        elif self.row_count == 0:
+            pd.DataFrame().to_parquet(self.path)
+
+    def _flush(self) -> None:
+        if not self._chunk:
+            return
+        table = pa.Table.from_pandas(pd.DataFrame(self._chunk), preserve_index=False)
+        if self._writer is None:
+            self._writer = pq.ParquetWriter(self.path, table.schema)
+        self._writer.write_table(table)
+        self._chunk.clear()
 
 
 def _apply_gpu_device_defaults(args: argparse.Namespace) -> None:
@@ -226,8 +287,6 @@ def _apply_gpu_device_defaults(args: argparse.Namespace) -> None:
             args.device = f"cuda:{args.image_gpu}"
         else:
             args.device = "cpu"
-
-
 
 
 @contextmanager
@@ -277,7 +336,8 @@ def _maybe_launch_reward_server(args: argparse.Namespace):
 
 
 async def _generate_split(args: argparse.Namespace, split: str) -> Path:
-    pipeline_utils = get_pipeline_utils(args)
+    from diffusers import StableDiffusion3Pipeline
+
     input_path = Path(os.path.expanduser(args.input_file))
     output_path = Path(os.path.expanduser(args.output_file))
     prompts = _read_prompts(input_path, args.prompt_key)
@@ -291,118 +351,70 @@ async def _generate_split(args: argparse.Namespace, split: str) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image_dir.mkdir(parents=True, exist_ok=True)
 
-    resume = args.resume
-    resume_base_table: pa.Table | None = None
-    if resume:
-        start_idx, resume_base_table = load_resume_checkpoint(output_path)
-    else:
-        start_idx = 0
-    if start_idx >= len(prompts):
-        kept_rows = resume_base_table.num_rows if resume_base_table is not None else start_idx
-        print(
-            f"Output parquet {output_path} already contains {kept_rows} completed prompts; "
-            f"nothing left to process ({len(prompts)} prompts requested)."
-        )
-        return output_path
-    if start_idx > 0 or resume_base_table is not None:
-        kept_rows = resume_base_table.num_rows if resume_base_table is not None else start_idx
-        print(f"Resuming from prompt index {start_idx}/{len(prompts)} ({kept_rows} rows kept in {output_path}).")
-
     dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[args.dtype]
-    pipe = pipeline_utils.load_pipeline(args, dtype)
+    pipe = StableDiffusion3Pipeline.from_pretrained(args.model_path, torch_dtype=dtype)
     pipe.to(args.device)
-    print("Compiling repeated blocks...")
-    pipe.transformer.compile_repeated_blocks(fullgraph=True)
     pipe.set_progress_bar_config(disable=args.disable_progress)
     reward_fn = _load_reward_fn(args.reward_function_path, args.reward_function_name)
-    seed_rng = torch.Generator().manual_seed(args.seed)
-    for _ in range(start_idx):
-        _next_prompt_cfg(args, seed_rng)
-        _sample_image_seeds(seed_rng, args.num_images_per_prompt)
 
-    with ChunkedParquetWriter(output_path, args.parquet_flush_every, base_table=resume_base_table) as writer:
-        with ParquetWriterShutdownGuard(writer):
-            for prompt_idx in range(start_idx, len(prompts)):
-                prompt = prompts[prompt_idx]
-                print(
-                    f"[{prompt_idx + 1}/{len(prompts)}] Generating {args.num_images_per_prompt} images "
-                    f"for prompt: {prompt!r}"
-                )
-                negative_prompt, prompt_args = _next_prompt_cfg(args, seed_rng)
-                if _uses_classifier_free_guidance(prompt_args):
-                    print(f"  negative_prompt: {negative_prompt!r}")
-                prompt_tensors = pipeline_utils.encode_prompt_tensors(pipe, prompt, negative_prompt, prompt_args)
-                seeds = _sample_image_seeds(seed_rng, args.num_images_per_prompt)
-                images = pipe(
-                    **pipeline_utils.build_generate_kwargs(prompt_args, prompt, _make_generators(seeds, args.device))
-                ).images
-                generated: list[dict[str, Any]] = []
-                for image, seed in zip(images, seeds, strict=True):
-                    generated.append({"image": image, "seed": seed})
-
-                scores = await _score_images(reward_fn, [item["image"] for item in generated], prompt, args)
-                candidates = []
-                for item, score in zip(generated, scores, strict=True):
-                    candidates.append(
-                        {
-                            "image": item["image"],
-                            "score": score,
-                            "seed": item["seed"],
-                        }
-                    )
-
-                candidates.sort(key=lambda item: item["score"], reverse=True)
-                win = candidates[0]
-                lose = candidates[-1]
-                win_path = image_dir / f"{prompt_idx:06d}_win.png"
-                lose_path = image_dir / f"{prompt_idx:06d}_lose.png"
-                win["image"].save(win_path)
-                lose["image"].save(lose_path)
-                win["path"] = str(win_path)
-                lose["path"] = str(lose_path)
-                win_latents = pipeline_utils.tensor_to_bytes(
-                    pipeline_utils.encode_image_latent(pipe, win["image"], args)
-                )
-                lose_latents = pipeline_utils.tensor_to_bytes(
-                    pipeline_utils.encode_image_latent(pipe, lose["image"], args)
-                )
-                score_diff = win["score"] - lose["score"]
-                print(
-                    f"  reward scores: win={win['score']:.4f}, reject={lose['score']:.4f}, "
-                    f"diff(win-reject)={score_diff:.4f}"
-                )
-                writer.write(
+    with _ChunkedParquetWriter(output_path, args.parquet_flush_every) as writer:
+        for prompt_idx, prompt in enumerate(prompts):
+            prompt_tensors = _encode_prompt_tensors(pipe, prompt, args.negative_prompt, args)
+            candidates = []
+            for sample_idx in range(args.num_images_per_prompt):
+                seed = args.seed + prompt_idx * args.num_images_per_prompt + sample_idx
+                image = pipe(
+                    prompt=prompt,
+                    negative_prompt=args.negative_prompt,
+                    height=args.height,
+                    width=args.width,
+                    num_inference_steps=args.num_inference_steps,
+                    guidance_scale=args.guidance_scale,
+                    max_sequence_length=args.max_sequence_length,
+                    generator=_make_generator(seed, args.device),
+                ).images[0]
+                image_path = image_dir / f"{prompt_idx:06d}_{sample_idx:02d}.png"
+                image.save(image_path)
+                score = await _score_image(reward_fn, image, prompt, args)
+                candidates.append(
                     {
-                        "data_source": args.data_source,
-                        "pipeline": args.pipeline,
-                        "prompt": _build_messages(prompt, args.system_prompt),
-                        "negative_prompt": _build_messages(negative_prompt, args.system_prompt),
-                        "img_win": os.path.relpath(win["path"], output_path.parent),
-                        "img_lose": os.path.relpath(lose["path"], output_path.parent),
-                        "img_win_latents": win_latents,
-                        "img_lose_latents": lose_latents,
-                        **prompt_tensors,
-                        "win_score": win["score"],
-                        "lose_score": lose["score"],
-                        "reward_model": {"style": "model", "ground_truth": prompt},
-                        "extra_info": {
-                            "split": split,
-                            "index": prompt_idx,
-                            "raw_prompt": prompt,
-                            "raw_negative_prompt": negative_prompt,
-                            "num_candidates": len(candidates),
-                            "win_seed": win["seed"],
-                            "lose_seed": lose["seed"],
-                            "candidate_scores": [item["score"] for item in candidates],
-                        },
+                        "path": str(image_path),
+                        "latents": _tensor_to_bytes(_encode_image_latent(pipe, image, args)),
+                        "score": score,
+                        "seed": seed,
                     }
                 )
-                writer.commit_checkpoint()
+
+            candidates.sort(key=lambda item: item["score"], reverse=True)
+            win = candidates[0]
+            lose = candidates[-1]
+            writer.write(
+                {
+                    "data_source": args.data_source,
+                    "prompt": _build_messages(prompt, args.system_prompt),
+                    "negative_prompt": _build_messages(args.negative_prompt, args.system_prompt),
+                    "img_win": os.path.relpath(win["path"], output_path.parent),
+                    "img_lose": os.path.relpath(lose["path"], output_path.parent),
+                    "img_win_latents": win["latents"],
+                    "img_lose_latents": lose["latents"],
+                    **prompt_tensors,
+                    "win_score": win["score"],
+                    "lose_score": lose["score"],
+                    "reward_model": {"style": "model", "ground_truth": prompt},
+                    "extra_info": {
+                        "split": split,
+                        "index": prompt_idx,
+                        "raw_prompt": prompt,
+                        "raw_negative_prompt": args.negative_prompt,
+                        "num_candidates": len(candidates),
+                        "win_seed": win["seed"],
+                        "lose_seed": lose["seed"],
+                        "candidate_scores": [item["score"] for item in candidates],
+                    },
+                }
+            )
 
     print(f"Wrote {writer.row_count} offline DPO pairs to {output_path}")
-    if start_idx > 0 or resume_base_table is not None:
-        kept_rows = resume_base_table.num_rows if resume_base_table is not None else start_idx
-        print(f"Added {writer.row_count - kept_rows} new rows (resumed from index {start_idx}).")
     return output_path
 
 
@@ -412,29 +424,17 @@ def main():
     parser.add_argument("--output_file", required=True, help="Parquet file to write.")
     parser.add_argument("--image_dir", default=None, help="Directory to write generated images.")
     parser.add_argument("--prompt_key", default="prompt", help="Prompt column for parquet/json inputs.")
-    parser.add_argument(
-        "--pipeline",
-        choices=["auto", "sd3", "qwen_image"],
-        default="auto",
-        help="Reference image pipeline used to generate tensors for offline DPO. `auto` infers from --model_path.",
-    )
     parser.add_argument("--model_path", default="stabilityai/stable-diffusion-3.5-medium")
     parser.add_argument("--data_source", default="offline_dpo")
     parser.add_argument("--system_prompt", default=DEFAULT_SYSTEM_PROMPT)
-    parser.add_argument("--negative_prompt", default=DEFAULT_NEGATIVE_PROMPT)
-    parser.add_argument(
-        "--random_drop_negative_prompt",
-        action="store_true",
-        help="Randomly drop negative_prompt for 50%% of prompts and disable CFG for those samples.",
-    )
+    parser.add_argument("--negative_prompt", default=" ")
     parser.add_argument("--num_images_per_prompt", type=int, default=4)
     parser.add_argument("--height", type=int, default=512)
     parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--num_inference_steps", type=int, default=40)
     parser.add_argument("--guidance_scale", type=float, default=4.0)
-    parser.add_argument("--true_cfg_scale", type=float, default=4.0, help="Qwen-Image True-CFG scale.")
     parser.add_argument("--max_sequence_length", type=int, default=256)
-    parser.add_argument("--seed", type=int, default=42, help="Master seed for sampling independent per-image seeds.")
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--device",
         default=None,
@@ -472,12 +472,6 @@ def main():
         default=32,
         help="Number of DPO rows to buffer in memory before flushing to parquet.",
     )
-    parser.add_argument(
-        "--resume",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Resume from existing --output_file parquet when present (default: enabled).",
-    )
     parser.add_argument("--reward_function_path", default=None)
     parser.add_argument("--reward_function_name", default=None)
     parser.add_argument("--reward_router_address", default=None)
@@ -492,16 +486,12 @@ def main():
     parser.add_argument(
         "--reward_server_command",
         default=DEFAULT_REWARD_SERVER_COMMAND,
-        help=(
-            "Command template used with --launch_reward_server. "
-            "Available placeholders: {model}, {host}, {port}, {max_num_seqs}."
-        ),
+        help=("Command template used with --launch_reward_server. Available placeholders: {model}, {host}, {port}."),
     )
     parser.add_argument("--reward_server_startup_timeout", type=int, default=900)
     parser.add_argument("--disable_progress", action="store_true")
     parser.add_argument("--split", default=None, help="Optional split name stored in extra_info.split.")
     args = parser.parse_args()
-    get_pipeline_utils(args)
     _apply_gpu_device_defaults(args)
     print(f"Image generation device: {args.device}.")
 

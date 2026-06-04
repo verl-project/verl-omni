@@ -106,16 +106,6 @@ custom_cls:
   # Optional collate function name from the same path. If not set, the default collate function is used.
   collate_fn: null
 
-# Optional callable filter applied when sampling offline DPO rows.
-# Rows that fail the filter trigger resampling until a qualifying row is found.
-sample_filter_fn:
-
-  # Module path for the filter callable.
-  path: null
-
-  # Callable name within the module. Must accept a parquet row dict and return bool.
-  name: null
-
 # Whether to return multi-modal inputs in the dataset. Set to False if rollout generates new multi-modal inputs.
 return_multi_modal_inputs: True
 

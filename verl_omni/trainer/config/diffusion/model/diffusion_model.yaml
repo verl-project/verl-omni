@@ -10,9 +10,6 @@ _target_: verl_omni.workers.config.diffusion.DiffusionModelConfig
 # path to the huggingface model
 path: ~/models/Qwen/Qwen-Image
 
-# Diffusers pipeline architecture name used to select model adapters.
-architecture: null
-
 # RL algorithm name
 algorithm: flow_grpo
 
