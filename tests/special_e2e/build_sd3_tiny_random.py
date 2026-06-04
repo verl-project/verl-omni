@@ -34,6 +34,7 @@ from tokenizers.trainers import BpeTrainer
 from transformers import (
     CLIPTextConfig,
     CLIPTextModelWithProjection,
+    CLIPTokenizer,
     CLIPTokenizerFast,
     PreTrainedTokenizerFast,
     T5Config,
@@ -83,13 +84,22 @@ def _build_tiny_clip_tokenizer() -> CLIPTokenizerFast:
         "a green triangle next to an orange rectangle",
     ]
     tokenizer.train_from_iterator(corpus, trainer=trainer)
-    return CLIPTokenizerFast(
-        tokenizer_object=tokenizer,
-        bos_token="<|startoftext|>",
-        eos_token="<|endoftext|>",
-        pad_token="<|endoftext|>",
-        model_max_length=77,
-    )
+    # Export BPE vocab/merges, then round-trip via slow CLIP tokenizer — required by transformers>=4.17.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tokenizer.model.save(tmp)
+        slow_tokenizer = CLIPTokenizer(
+            vocab_file=os.path.join(tmp, "vocab.json"),
+            merges_file=os.path.join(tmp, "merges.txt"),
+            bos_token="<|startoftext|>",
+            eos_token="<|endoftext|>",
+            pad_token="<|endoftext|>",
+            model_max_length=77,
+        )
+        out_dir = os.path.join(tmp, "clip")
+        slow_tokenizer.save_pretrained(out_dir)
+        return CLIPTokenizerFast.from_pretrained(out_dir, from_slow=True)
 
 
 def _build_tiny_t5_tokenizer(*, vocab_size: int = 1000, model_max_length: int = 512) -> PreTrainedTokenizerFast:
