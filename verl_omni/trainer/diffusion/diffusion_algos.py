@@ -520,10 +520,14 @@ class DPOLoss(DiffusionLossFn):
     def _select_dataproto_indices(batch: DataProto, selected_indices: list[int]) -> DataProto:
         selected_non_tensor = {}
         for key, value in batch.non_tensor_batch.items():
-            values = np.asarray(value, dtype=object).reshape(-1)
-            if len(values) == len(batch):
-                selected_non_tensor[key] = values[selected_indices]
-            else:
+            try:
+                if len(value) == len(batch):
+                    values = np.empty(len(value), dtype=object)
+                    values[:] = list(value)
+                    selected_non_tensor[key] = values[selected_indices]
+                else:
+                    selected_non_tensor[key] = value
+            except TypeError:
                 selected_non_tensor[key] = value
 
         selected_tensor = torch.as_tensor(selected_indices, dtype=torch.long)
@@ -858,7 +862,7 @@ class DiffusionNFTLoss(DiffusionLossFn):
         config: Any,
     ) -> DataProto:
         """Prepare final-latent rollout data for DiffusionNFT actor updates."""
-        
+
         algorithm_cfg = config.algorithm
         actor_cfg = config.actor_rollout_ref.actor
         adv_clip_max = actor_cfg.diffusion_loss.adv_clip_max
