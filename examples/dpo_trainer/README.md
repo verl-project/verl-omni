@@ -24,9 +24,16 @@ training step it:
   and lowest-scoring candidates;
 - runs the diffusion DPO loss on those pairs.
 
-### Run
+### Dataset
 
-Use prompt-only OCR parquet files (for example under `$WORKSPACE/data/ocr/qwen_image/`):
+Use the same OCR prompt parquet as FlowGRPO Qwen-Image training. Prepare the
+data following [Prepare the dataset](../flowgrpo_trainer/README.md#prepare-the-dataset)
+in `examples/flowgrpo_trainer/README.md` (raw OCR from
+[flow_grpo/dataset/ocr](https://github.com/yifan123/flow_grpo/tree/main/dataset/ocr),
+then `examples/flowgrpo_trainer/data_process/qwenimage_ocr.py` to write
+`$WORKSPACE/data/ocr/qwen_image/train.parquet` and `test.parquet`).
+
+### Run
 
 ```bash
 bash examples/dpo_trainer/run_qwen_image_online_dpo_lora.sh \
@@ -38,12 +45,9 @@ bash examples/dpo_trainer/run_qwen_image_online_dpo_lora.sh \
 
 - Pairing is fixed to top-vs-bottom reward per prompt. Set
   `actor_rollout_ref.rollout.n` to at least `2` so each prompt has enough
-  candidates.
-- The example sets `true_cfg_scale=1.0`, so the dataset does not need
-  precomputed negative-prompt embeddings.
-- Resume from checkpoint: use `trainer.resume_mode=auto` (default) or
-  `trainer.resume_mode=resume_path` with a `global_step_*` directory under
-  `checkpoints/${trainer.project_name}/${trainer.experiment_name}`.
+  candidates. Recommend to set it to `8` or `16` for better performance.
+- The example sets `true_cfg_scale=1.0`, so CFG is no applied.
+
 
 ## SD3.5 Offline DPO
 

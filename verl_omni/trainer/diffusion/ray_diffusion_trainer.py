@@ -1299,18 +1299,8 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
     def _prepare_actor_batch(self, batch: DataProto, reward_tensor: torch.Tensor) -> DataProto:
         """Delegate algorithm-specific rollout-to-actor batch preparation."""
-        rewards = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
-        rollout_dict = {key: batch.batch[key] for key in batch.batch.keys()}
-        rollout_dict["uid"] = batch.non_tensor_batch["uid"]
-        updated = self._loss_fn.prepare_actor_batch(
-            rollout_dict,
-            rewards,
-            self.config,
-        )
-        for key, value in updated.items():
-            if isinstance(value, torch.Tensor):
-                batch.batch[key] = value
-        return batch
+        reward_tensor = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
+        return self._loss_fn.prepare_actor_batch(batch, reward_tensor, self.config)
 
     def _update_old_policy(self) -> tuple[bool, float, Literal["none", "copy", "ema"]]:
         algo_cfg = self.config.algorithm

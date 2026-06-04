@@ -106,10 +106,10 @@ class DiffusionLossFn(ABC):
 
     @staticmethod
     def prepare_actor_batch(
-        batch: Any,
-        reward_tensor: Any,
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
         config: Any,
-    ) -> Any:
+    ) -> DataProto:
         """Prepare rollout outputs for actor update when the trainer has not already done so."""
         return batch
 
@@ -544,6 +544,9 @@ class DPOLoss(DiffusionLossFn):
         if DPOLoss._sample_source(config) == "offline":
             return batch
 
+        if "uid" not in batch.non_tensor_batch:
+            raise KeyError("Online DPO pairing requires `uid` in non_tensor_batch.")
+
         selected_indices = DPOLoss.build_online_dpo_pair_indices(
             uids=batch.non_tensor_batch["uid"],
             scores=rewards,
@@ -850,22 +853,28 @@ class DiffusionNFTLoss(DiffusionLossFn):
 
     @staticmethod
     def prepare_actor_batch(
-        rollout_batch: dict[str, Any],
-        rewards: torch.Tensor,
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
         config: Any,
-    ) -> dict[str, Any]:
+    ) -> DataProto:
         """Prepare final-latent rollout data for DiffusionNFT actor updates."""
+        
         algorithm_cfg = config.algorithm
         actor_cfg = config.actor_rollout_ref.actor
         adv_clip_max = actor_cfg.diffusion_loss.adv_clip_max
         timestep_shuffle_seed = actor_cfg.data_loader_seed
 
-        for key in ("latents_clean", "train_timesteps", "uid"):
+        rollout_batch = {key: batch.batch[key] for key in batch.batch.keys()}
+        if "uid" not in batch.non_tensor_batch:
+            raise ValueError("DiffusionNFT actor batch requires `uid` in non_tensor_batch.")
+        rollout_batch["uid"] = batch.non_tensor_batch["uid"]
+
+        for key in ("latents_clean", "train_timesteps"):
             if key not in rollout_batch:
                 raise ValueError(f"DiffusionNFT actor batch requires `{key}` from rollout.")
 
         advantages = DiffusionNFTLoss._compute_group_advantages(
-            rewards=rewards,
+            rewards=reward_tensor,
             uid=rollout_batch["uid"],
             norm_by_std=algorithm_cfg.norm_adv_by_std_in_grpo,
             global_std=algorithm_cfg.global_std,
@@ -881,13 +890,12 @@ class DiffusionNFTLoss(DiffusionLossFn):
         if reward_prob.ndim == 1 and train_timesteps.ndim == 2:
             reward_prob = reward_prob[:, None].expand(-1, train_timesteps.shape[1])
 
-        actor_batch = dict(rollout_batch)
-        actor_batch["train_timesteps"] = train_timesteps
-        actor_batch["advantages"] = advantages[:, None].expand(-1, train_timesteps.shape[1])
-        actor_batch["reward_prob"] = reward_prob
-        actor_batch["returns"] = actor_batch["advantages"]
-        actor_batch["sample_level_rewards"] = rewards[:, None].expand(-1, train_timesteps.shape[1])
-        return actor_batch
+        batch.batch["train_timesteps"] = train_timesteps
+        batch.batch["advantages"] = advantages[:, None].expand(-1, train_timesteps.shape[1])
+        batch.batch["reward_prob"] = reward_prob
+        batch.batch["returns"] = batch.batch["advantages"]
+        batch.batch["sample_level_rewards"] = reward_tensor[:, None].expand(-1, train_timesteps.shape[1])
+        return batch
 
 
 @register_diffusion_loss("kl")
