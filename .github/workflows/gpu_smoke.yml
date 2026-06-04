@@ -82,6 +82,11 @@ jobs:
           pip3 install -r requirements.txt
           pip3 install -r requirements-test.txt
           pip3 install --no-deps -e .
+          # --no-deps keeps the vllm 0.20.2 / torch stack intact; veomni's [gpu] extra pins
+          # torch 2.9 and would conflict. See docs/start/install.md "Optional engine backends".
+          # TODO: rm --no-deps when VeOmni support torch2.11
+          pip3 install veomni==0.1.11 --no-deps
+          pip3 install torchcodec librosa soundfile av
       - name: Run GPU smoke tests
         run: |
           ray stop --force

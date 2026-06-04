@@ -41,6 +41,8 @@ from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 from ..utils.gpu_test_topology import resolve_requested_num_gpus
 
+pytest.importorskip("veomni")
+
 
 def create_training_config(model_type, device_count, model):
     cp = 1

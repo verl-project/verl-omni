@@ -183,7 +183,7 @@ run_selected_test() {
 
 # ── Determine which tests to run ───────────────────────────────────────────────
 declare -A RUN_TEST=(
-    [0]=1 [1]=1 [2]=1 [3]=1 [4]=1 [5]=1 [6]=1
+    [0]=1 [1]=1 [2]=1 [3]=1 [4]=1 [5]=1 [6]=1 [7]=1
 )
 
 # If explicit IDs were passed on the CLI, override to run only those.
@@ -250,6 +250,12 @@ run_selected_test 5 "DiffusionNFT trainer e2e" \
 run_selected_test 6 "SD3.5 offline DPO trainer e2e" \
     env CUDA_VISIBLE_DEVICES=0 NUM_GPUS=1 \
     bash tests/special_e2e/run_sd35_offline_dpo.sh
+
+# ── Test 7: diffusers VeOmni engine ───────────────────────────────────────────
+# Skips itself if the optional `veomni` backend is not installed (importorskip).
+run_selected_test 7 "diffusers VeOmni engine" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    pytest -s tests/workers/test_diffusers_veomni_engine.py
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SUMMARY
