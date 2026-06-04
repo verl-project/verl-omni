@@ -28,7 +28,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.max_prompt_length=256 \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.algorithm=dpo \
-    actor_rollout_ref.model.model_type=diffusion_dp_model \
+    actor_rollout_ref.model.model_type=diffusion_dpo_model \
     actor_rollout_ref.model.external_lib=verl_omni.pipelines.qwen_image_dpo \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
