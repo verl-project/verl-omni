@@ -1,0 +1,540 @@
+# This reference configration yaml is automatically generated via 'scripts/generate_trainer_config.sh'
+# in which it invokes 'python3 scripts/print_cfg.py --cfg job --config-name=diffusion_trainer.yaml diffusion/model_engine=veomni_diffusion' to flatten the 'verl_omni/trainer/config/diffusion_trainer.yaml' config fields into a single file.
+# Do not modify this file directly.
+# The file is usually only for reference and never used.
+
+actor_rollout_ref:
+  actor:
+    optim:
+      _target_: verl_omni.workers.config.diffusion.VeOmniDiffusionOptimizerConfig
+      optimizer: adamw
+      lr: 1.0e-06
+      lr_min: 0.0
+      lr_start: 0.0
+      lr_warmup_steps_ratio: 0.0
+      total_training_steps: -1
+      weight_decay: 0.01
+      betas:
+      - 0.9
+      - 0.999
+      eps: 1.0e-08
+      clip_grad: 1.0
+      lr_scheduler_type: constant
+      lr_decay_ratio: 1.0
+      fused: false
+      lr_warmup_steps: -1
+    veomni_config:
+      _target_: verl_omni.workers.config.diffusion.VeOmniDiffusionEngineConfig
+      param_offload: false
+      optimizer_offload: false
+      fsdp_size: -1
+      ulysses_parallel_size: 1
+      expert_parallel_size: 1
+      init_device: meta
+      reshard_after_forward: true
+      forward_prefetch: true
+      model_dtype: bfloat16
+      mixed_precision: true
+      mixed_precision_param_dtype: bfloat16
+      mixed_precision_reduce_dtype: float32
+      mixed_precision_output_dtype: null
+      mixed_precision_cast_forward_inputs: true
+      enable_reentrant: false
+      enable_activation_offload: false
+      activation_gpu_limit: 0.0
+      strategy: veomni
+      attn_implementation: eager
+      moe_implementation: eager
+      cross_entropy_loss_implementation: eager
+      rms_norm_implementation: eager
+      swiglu_mlp_implementation: eager
+      rotary_pos_emb_implementation: eager
+      load_balancing_loss_implementation: eager
+      rms_norm_gated_implementation: eager
+      causal_conv1d_implementation: eager
+      chunk_gated_delta_rule_implementation: eager
+      forward_only: false
+    profiler:
+      _target_: verl.utils.profiler.ProfilerConfig
+      tool: torch
+      enable: false
+      all_ranks: false
+      ranks: []
+      save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      tool_config:
+        nsys:
+          _target_: verl.utils.profiler.config.NsightToolConfig
+          discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
+          name: nsight
+        torch:
+          _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+          contents: []
+          discrete: false
+          name: torch
+        torch_memory:
+          _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+          trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+          stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+          name: torch_memory
+    _target_: verl_omni.workers.config.diffusion.VeOmniDiffusionActorConfig
+    rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
+    strategy: veomni
+    ppo_mini_batch_size: 256
+    ppo_micro_batch_size_per_gpu: null
+    diffusion_loss:
+      _target_: verl_omni.workers.config.diffusion.DiffusionLossConfig
+      loss_mode: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
+      clip_ratio: 0.0001
+      adv_clip_max: 5.0
+      mix_beta: 0.5
+      ref_kl_coef: 0.0
+      adaptive_weight_min: 1.0e-05
+      dpo_beta: 2000.0
+    rollout_correction:
+      _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
+      bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
+      loss_type: ${oc.select:algorithm.rollout_correction.loss_type,ppo_clip}
+      rollout_is: ${oc.select:algorithm.rollout_correction.rollout_is,null}
+      rollout_is_threshold: ${oc.select:algorithm.rollout_correction.rollout_is_threshold,2.0}
+      rollout_is_batch_normalize: ${oc.select:algorithm.rollout_correction.rollout_is_batch_normalize,false}
+      rollout_rs: ${oc.select:algorithm.rollout_correction.rollout_rs,null}
+      rollout_rs_threshold: ${oc.select:algorithm.rollout_correction.rollout_rs_threshold,null}
+    loss_scale_factor: null
+    use_kl_loss: false
+    kl_loss_coef: 0.001
+    ppo_epochs: 1
+    shuffle: false
+    data_loader_seed: 42
+    checkpoint:
+      _target_: verl.trainer.config.CheckpointConfig
+      save_contents:
+      - model
+      - optimizer
+      - extra
+      load_contents: ${.save_contents}
+      async_save: false
+      mbridge_config: {}
+  ref:
+    rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
+    strategy: veomni
+    log_prob_micro_batch_size_per_gpu: null
+    veomni_config:
+      _target_: verl_omni.workers.config.diffusion.VeOmniDiffusionEngineConfig
+      param_offload: false
+      optimizer_offload: false
+      fsdp_size: -1
+      ulysses_parallel_size: 1
+      expert_parallel_size: 1
+      init_device: meta
+      reshard_after_forward: true
+      forward_prefetch: true
+      model_dtype: bfloat16
+      mixed_precision: true
+      mixed_precision_param_dtype: bfloat16
+      mixed_precision_reduce_dtype: float32
+      mixed_precision_output_dtype: null
+      mixed_precision_cast_forward_inputs: true
+      enable_reentrant: false
+      enable_activation_offload: false
+      activation_gpu_limit: 0.0
+      strategy: veomni
+      attn_implementation: eager
+      moe_implementation: eager
+      cross_entropy_loss_implementation: eager
+      rms_norm_implementation: eager
+      swiglu_mlp_implementation: eager
+      rotary_pos_emb_implementation: eager
+      load_balancing_loss_implementation: eager
+      rms_norm_gated_implementation: eager
+      causal_conv1d_implementation: eager
+      chunk_gated_delta_rule_implementation: eager
+      forward_only: true
+    optim:
+      _target_: verl_omni.workers.config.diffusion.VeOmniDiffusionOptimizerConfig
+      optimizer: adamw
+      lr: 0.001
+      lr_min: 0.0
+      lr_start: 0.0
+      lr_warmup_steps_ratio: 0.0
+      total_training_steps: -1
+      weight_decay: 0.01
+      betas:
+      - 0.9
+      - 0.999
+      eps: 1.0e-08
+      clip_grad: 1.0
+      lr_scheduler_type: constant
+      lr_decay_ratio: 1.0
+      fused: false
+    profiler:
+      _target_: verl.utils.profiler.ProfilerConfig
+      tool: torch
+      enable: false
+      all_ranks: false
+      ranks: []
+      save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      tool_config:
+        nsys:
+          _target_: verl.utils.profiler.config.NsightToolConfig
+          discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
+          name: nsight
+        torch:
+          _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+          contents: []
+          discrete: false
+          name: torch
+        torch_memory:
+          _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+          trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+          stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+          name: torch_memory
+    _target_: verl_omni.workers.config.diffusion.VeOmniDiffusionActorConfig
+  rollout:
+    profiler:
+      _target_: verl.utils.profiler.ProfilerConfig
+      tool: torch
+      enable: false
+      all_ranks: false
+      ranks: []
+      save_path: ${oc.select:global_profiler.save_path,outputs/profile}
+      tool_config:
+        nsys:
+          _target_: verl.utils.profiler.config.NsightToolConfig
+          discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
+          name: nsight
+        torch:
+          _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+          contents: []
+          discrete: false
+          name: torch
+        torch_memory:
+          _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+          trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+          stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+          name: torch_memory
+    _target_: verl_omni.workers.config.diffusion.DiffusionRolloutConfig
+    name: ???
+    mode: async
+    nnodes: 0
+    n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
+    prompt_length: ${oc.select:data.max_prompt_length,512}
+    dtype: bfloat16
+    gpu_memory_utilization: 0.5
+    enforce_eager: false
+    cudagraph_capture_sizes: null
+    free_cache_engine: true
+    tensor_model_parallel_size: 2
+    data_parallel_size: 1
+    expert_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    max_num_batched_tokens: 8192
+    max_model_len: null
+    max_num_seqs: 1024
+    enable_chunked_prefill: true
+    enable_prefix_caching: true
+    logprobs_mode: processed_logprobs
+    scheduling_policy: fcfs
+    load_format: dummy
+    layered_summon: false
+    log_prob_micro_batch_size_per_gpu: null
+    disable_log_stats: true
+    'n': 1
+    seed: null
+    multi_turn:
+      _target_: verl.workers.config.MultiTurnConfig
+      enable: false
+    engine_kwargs:
+      vllm_omni: {}
+    val_kwargs:
+      _target_: verl_omni.workers.config.diffusion.DiffusionSamplingConfig
+      'n': 1
+      pipeline:
+        _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
+        height: ${oc.select:actor_rollout_ref.rollout.pipeline.height,512}
+        width: ${oc.select:actor_rollout_ref.rollout.pipeline.width,512}
+        num_inference_steps: 50
+        true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.true_cfg_scale,1.0}
+        max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
+        guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
+        num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
+      algo:
+        _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
+        noise_level: 0.0
+        sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
+        sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
+        sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
+    algo:
+      _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
+      noise_level: 1.0
+      sde_type: sde
+      sde_window_size: null
+      sde_window_range: null
+      sample_strategy: random
+      iters_per_group: 1
+      sde_window_seed: 0
+    pipeline:
+      _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
+      height: 512
+      width: 512
+      num_inference_steps: 10
+      true_cfg_scale: 1.0
+      max_sequence_length: 512
+      guidance_scale: null
+      num_frames: 1
+    calculate_log_probs: false
+    rollout_adapter: default
+    agent:
+      _target_: verl.workers.config.AgentLoopConfig
+      num_workers: 8
+      default_agent_loop: diffusion_single_turn_agent
+    checkpoint_engine:
+      _target_: verl.workers.config.CheckpointEngineConfig
+      backend: naive
+      update_weights_bucket_megabytes: 2048
+      engine_kwargs: {}
+      custom_backend_module: null
+    skip_tokenizer_init: true
+    enable_rollout_routing_replay: false
+    prometheus:
+      _target_: verl.workers.config.PrometheusConfig
+      enable: false
+    quantization: null
+    mtp: ${oc.select:actor_rollout_ref.model.mtp, null}
+    external_lib: null
+    disaggregation:
+      _target_: verl.workers.config.DisaggregationConfig
+      enabled: false
+  model:
+    _target_: verl_omni.workers.config.diffusion.DiffusionModelConfig
+    path: ~/models/Qwen/Qwen-Image
+    algorithm: flow_grpo
+    tokenizer_path: null
+    use_shm: false
+    trust_remote_code: false
+    custom_chat_template: null
+    external_lib: null
+    enable_gradient_checkpointing: true
+    config_path: null
+    transformer_subfolder: transformer
+    attn_backend: native
+    lora_rank: 0
+    lora_alpha: 64
+    lora_init_weights: gaussian
+    target_modules: all-linear
+    target_parameters: null
+    exclude_modules: null
+    lora_adapter_path: null
+    policy_state_adapters:
+    - default
+    lora_dtype: null
+    fsdp_layer_prefixes:
+    - transformer_blocks.
+    mtp:
+      _target_: verl.workers.config.MtpConfig
+      enable: false
+    pipeline:
+      _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
+      height: ${oc.select:actor_rollout_ref.rollout.pipeline.height,512}
+      width: ${oc.select:actor_rollout_ref.rollout.pipeline.width,512}
+      num_inference_steps: ${oc.select:actor_rollout_ref.rollout.pipeline.num_inference_steps,10}
+      true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.true_cfg_scale,1.0}
+      max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
+      guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
+      num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
+    algo:
+      _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
+      noise_level: ${oc.select:actor_rollout_ref.rollout.algo.noise_level,1.0}
+      sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
+      sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
+      sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
+    model_type: diffusion_model
+  hybrid_engine: true
+  nccl_timeout: 600
+data:
+  tokenizer: null
+  use_shm: false
+  train_files: ~/data/rlhf/gsm8k/train.parquet
+  val_files: ~/data/rlhf/gsm8k/test.parquet
+  train_max_samples: -1
+  val_max_samples: -1
+  prompt_key: prompt
+  reward_fn_key: data_source
+  max_prompt_length: 512
+  max_response_length: 512
+  train_batch_size: 1024
+  val_batch_size: null
+  tool_config_path: ${oc.select:actor_rollout_ref.rollout.multi_turn.tool_config_path,
+    null}
+  return_raw_input_ids: false
+  return_raw_chat: true
+  return_full_prompt: false
+  shuffle: true
+  seed: null
+  dataloader_num_workers: 8
+  image_patch_size: 14
+  validation_shuffle: false
+  filter_overlong_prompts: false
+  filter_overlong_prompts_workers: 1
+  truncation: error
+  image_key: images
+  video_key: videos
+  trust_remote_code: false
+  custom_cls:
+    path: null
+    name: null
+    collate_fn: null
+  return_multi_modal_inputs: true
+  sampler:
+    class_path: null
+    class_name: null
+  datagen:
+    path: null
+    name: null
+  apply_chat_template_kwargs: {}
+reward:
+  num_workers: 8
+  custom_reward_function:
+    path: null
+    name: compute_score
+  reward_functions: {}
+  aggregation: weighted_sum
+  reward_manager:
+    _target_: verl.workers.config.reward_model.RewardManagerConfig
+    source: importlib
+    name: VisualRewardManager
+    module:
+      _target_: verl.trainer.config.config.ModuleConfig
+      path: pkg://verl_omni.reward_loop.reward_manager
+  reward_model:
+    enable: false
+    enable_resource_pool: false
+    n_gpus_per_node: 8
+    nnodes: 0
+    model_path: null
+    rollout:
+      _target_: verl.workers.config.RolloutConfig
+      name: ???
+      dtype: bfloat16
+      gpu_memory_utilization: 0.5
+      enforce_eager: true
+      cudagraph_capture_sizes: null
+      free_cache_engine: true
+      data_parallel_size: 1
+      expert_parallel_size: 1
+      tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 1
+      max_num_batched_tokens: 8192
+      max_model_len: null
+      max_num_seqs: 1024
+      load_format: auto
+      layered_summon: false
+      scheduling_policy: fcfs
+      multi_stage_wake_up: false
+      engine_kwargs: {}
+      limit_images: null
+      enable_chunked_prefill: true
+      enable_prefix_caching: true
+      disable_log_stats: true
+      skip_tokenizer_init: false
+      ignore_eos: false
+      temperature: 1.0
+      top_k: -1
+      top_p: 1
+      do_sample: true
+      'n': 1
+      prompt_length: 2048
+      response_length: 2048
+      quantization: null
+      quantization_config_file: null
+      mtp: null
+      disaggregation:
+        enabled: false
+        prefill_replicas: 1
+        decode_replicas: 1
+        decode_tensor_model_parallel_size: null
+        transfer_backend: nixl
+        bootstrap_port: null
+        ib_device: null
+  sandbox_fusion:
+    url: null
+    max_concurrent: 64
+    memory_limit_mb: 1024
+algorithm:
+  _target_: verl_omni.trainer.config.DiffusionAlgoConfig
+  trainer_type: policy_gradient
+  sample_source: online
+  adv_estimator: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
+  norm_adv_by_std_in_grpo: true
+  global_std: true
+  old_policy_decay_schedule: copy
+  old_policy_decay: null
+  old_policy_update_interval: 1
+  timestep_fraction: 1.0
+  adv_mode: continuous
+  paired_preference: false
+  rollout_correction:
+    _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
+    bypass_mode: false
+    loss_type: ppo_clip
+    rollout_is: null
+    rollout_is_threshold: 2.0
+    rollout_is_batch_normalize: false
+    rollout_rs: null
+    rollout_rs_threshold: null
+trainer:
+  total_epochs: 30
+  total_training_steps: null
+  project_name: verl_examples
+  experiment_name: ocr
+  logger:
+  - console
+  - wandb
+  log_val_generations: 0
+  rollout_data_dir: null
+  validation_data_dir: null
+  nnodes: 1
+  n_gpus_per_node: 8
+  save_freq: -1
+  esi_redundant_time: 0
+  resume_mode: auto
+  resume_from_path: null
+  val_before_train: true
+  val_only: false
+  test_freq: -1
+  default_hdfs_dir: null
+  del_local_ckpt_after_load: false
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  max_actor_ckpt_to_keep: null
+  ray_wait_register_center_timeout: 300
+  device: cuda
+global_profiler:
+  _target_: verl.utils.profiler.ProfilerConfig
+  tool: null
+  steps: null
+  profile_continuous_steps: false
+  save_path: outputs/profile
+  global_tool_config:
+    nsys:
+      _target_: verl.utils.profiler.config.NsightToolConfig
+      discrete: false
+      controller_nsight_options:
+        trace: cuda,nvtx,cublas,ucx
+        cuda-memory-usage: 'true'
+        cuda-graph-trace: graph
+      worker_nsight_options:
+        trace: cuda,nvtx,cublas,ucx
+        cuda-memory-usage: 'true'
+        cuda-graph-trace: graph
+        capture-range: cudaProfilerApi
+        capture-range-end: null
+        kill: none
+    torch_memory:
+      trace_alloc_max_entries: 100000
+      stack_depth: 32
+      context: all
+      stacks: all
+      kw_args: {}
+ray_kwargs:
+  ray_init:
+    num_cpus: null
+  timeline_json_file: null
