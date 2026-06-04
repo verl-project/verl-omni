@@ -1175,13 +1175,10 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         if config.algorithm.get("paired_preference", False):
             actor_cfg = config.actor_rollout_ref.actor
             micro_bsz = actor_cfg.get("ppo_micro_batch_size_per_gpu")
-            if micro_bsz is None or micro_bsz < 2:
-                sys_logger.warning(
-                    "paired_preference requires ppo_micro_batch_size_per_gpu>=2; setting it to 2 (was %s).",
-                    micro_bsz,
+            if micro_bsz is None or micro_bsz < 2 or micro_bsz % 2 != 0:
+                raise ValueError(
+                    f"paired_preference requires ppo_micro_batch_size_per_gpu to be an even number >= 2, got {micro_bsz}"
                 )
-                with open_dict(actor_cfg):
-                    actor_cfg.ppo_micro_batch_size_per_gpu = 2
         self.is_offline = config.algorithm.get("sample_source", "online") == "offline"
         # Direct-preference losses (e.g. DPO) need ref noise preds even when KL paths are disabled.
         self.use_reference_policy = need_reference_policy(self.config) or (
