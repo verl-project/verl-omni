@@ -31,20 +31,22 @@ def prepare_model_inputs(
     latents: torch.Tensor,
     timesteps: torch.Tensor,
     prompt_embeds: torch.Tensor,
-    prompt_embeds_mask: torch.Tensor,
-    negative_prompt_embeds: torch.Tensor,
-    negative_prompt_embeds_mask: torch.Tensor,
+    prompt_embeds_mask: Optional[torch.Tensor],
+    negative_prompt_embeds: Optional[torch.Tensor],
+    negative_prompt_embeds_mask: Optional[torch.Tensor],
     micro_batch: TensorDict,
     step: int,
-) -> tuple[dict, dict]:
+) -> tuple[dict, Optional[dict]]:
     """Build architecture-specific model inputs for the forward pass.
     Dispatches to the registered DiffusionModelBase subclass for the current architecture.
 
     Args:
         module (ModelMixin): the diffusion transformer module.
         model_config (DiffusionModelConfig): the configuration of the diffusion model.
-        latents (torch.Tensor): full latent tensor from the micro-batch, shape (B, T, ...).
-        timesteps (torch.Tensor): full timestep tensor from the micro-batch, shape (B, T).
+        latents (torch.Tensor): latent tensor from the micro-batch. This can be a full trajectory
+            or an already selected/noised latent, depending on the algorithm.
+        timesteps (torch.Tensor): timestep tensor from the micro-batch. This can be a full trajectory
+            or an already selected timestep, depending on the algorithm.
         prompt_embeds (torch.Tensor): dense positive prompt embeddings, shape (B, L, D).
         prompt_embeds_mask (torch.Tensor): attention mask for prompt_embeds, shape (B, L).
         negative_prompt_embeds (torch.Tensor): dense negative prompt embeddings, shape (B, L, D).
@@ -188,3 +190,13 @@ def forward_and_sample_previous_step(
     return DiffusionModelBase.get_class(model_config).forward_and_sample_previous_step(
         module, scheduler, model_config, model_inputs, negative_model_inputs, scheduler_inputs, step
     )
+
+
+def forward(
+    module: ModelMixin,
+    model_config: DiffusionModelConfig,
+    model_inputs: dict,
+    negative_model_inputs: Optional[dict],
+) -> torch.Tensor:
+    """Forward the model for single-pass prediction-space objectives."""
+    return DiffusionModelBase.get_class(model_config).forward(module, model_config, model_inputs, negative_model_inputs)

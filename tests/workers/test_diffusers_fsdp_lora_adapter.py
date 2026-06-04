@@ -105,6 +105,18 @@ def _rank0_params(worker_outputs) -> dict[str, torch.Tensor]:
     return worker_outputs[0]
 
 
+def _lora_params_close(
+    left: dict[str, torch.Tensor],
+    right: dict[str, torch.Tensor],
+    *,
+    rtol: float = _LORA_RTOL,
+    atol: float = _LORA_ATOL,
+) -> None:
+    assert left.keys() == right.keys()
+    for name in sorted(left.keys()):
+        assert torch.allclose(left[name].float(), right[name].float(), rtol=rtol, atol=atol), name
+
+
 def _lora_params_differ(
     left: dict[str, torch.Tensor],
     right: dict[str, torch.Tensor],
@@ -116,6 +128,18 @@ def _lora_params_differ(
     assert any(
         not torch.allclose(left[name].float(), right[name].float(), rtol=rtol, atol=atol) for name in left.keys()
     )
+
+
+def _assert_ema_blend(
+    target: dict[str, torch.Tensor],
+    old: dict[str, torch.Tensor],
+    source: dict[str, torch.Tensor],
+    decay: float,
+) -> None:
+    assert target.keys() == old.keys() == source.keys()
+    for name in sorted(target.keys()):
+        expected = old[name].float() * decay + source[name].float() * (1.0 - decay)
+        assert torch.allclose(target[name].float(), expected, rtol=_LORA_RTOL, atol=_LORA_ATOL), name
 
 
 def _resolve_lora_test_device_count(strategy: str) -> int:
@@ -214,8 +238,84 @@ def _run_lora_adapter_switch_test(strategy: str) -> None:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def _run_copy_ema_adapter_test(strategy: str) -> None:
+    base_model_path = _require_model_path()
+    device_count = _resolve_lora_test_device_count(strategy)
+
+    ray.init()
+    tmp_dir = tempfile.mkdtemp(prefix="qwen_image_lora_fsdp_")
+    try:
+        sp_enabled = device_count > 1 and _diffusers_sp_supported()
+        if sp_enabled:
+            model_path = _create_sp_compatible_model(tmp_dir, base_model_path, num_attention_heads=2)
+        else:
+            model_path = base_model_path
+
+        training_config, actor_config = create_training_config(
+            model_type="diffusion_model",
+            strategy=strategy,
+            device_count=device_count,
+            model=model_path,
+            policy_state_adapters=("default", "old"),
+        )
+
+        ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(LoRAFSDPTestWorker), config=training_config)
+        resource_pool = RayResourcePool(process_on_nodes=[device_count])
+        wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init)
+        wg.reset()
+
+        default_0 = _rank0_params(wg.collect_lora_params("default"))
+        old_0 = _rank0_params(wg.collect_lora_params("old"))
+        assert default_0
+        assert old_0.keys() == default_0.keys()
+        _lora_params_differ(default_0, old_0)
+
+        wg.copy_adapter(source="default", target="old")
+        old_1 = _rank0_params(wg.collect_lora_params("old"))
+        _lora_params_close(old_1, default_0)
+
+        loss_fn = partial(diffusion_loss, config=actor_config)
+        wg.set_loss_fn(loss_fn)
+
+        data_td = create_data_samples(device_count, training_config.model_config).to_tensordict()
+        data_td = embeds_padding_2_no_padding(data_td)
+        ppo_mini_batch_size = 4
+        tu.assign_non_tensor(
+            data_td,
+            global_batch_size=ppo_mini_batch_size * device_count,
+            mini_batch_size=ppo_mini_batch_size * device_count,
+            epochs=actor_config.ppo_epochs,
+            seed=42,
+            dataloader_kwargs={"shuffle": actor_config.shuffle},
+        )
+        output = wg.train_mini_batch(data_td)
+        assert "metrics" in output.get()
+
+        filled = wg.fill_lora_adapter("default", base=_FILL_BASE, step=_FILL_STEP)
+        assert filled[0] > 0
+
+        default_1 = _rank0_params(wg.collect_lora_params("default"))
+        old_2 = _rank0_params(wg.collect_lora_params("old"))
+        _lora_params_differ(default_1, default_0)
+        _lora_params_close(old_2, old_1)
+
+        wg.ema_update_adapter(source="default", target="old", decay=0.9)
+        old_3 = _rank0_params(wg.collect_lora_params("old"))
+        _assert_ema_blend(old_3, old_2, default_1, decay=0.9)
+    finally:
+        ray.shutdown()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 @pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
 def test_diffusers_fsdp_lora_adapter_switch(strategy):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for FSDP LoRA adapter tests.")
     _run_lora_adapter_switch_test(strategy)
+
+
+@pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
+def test_diffusers_fsdp_lora_adapter_copy_ema(strategy):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for FSDP LoRA adapter tests.")
+    _run_copy_ema_adapter_test(strategy)

@@ -138,15 +138,12 @@ class StableDiffusion3DPO(DiffusionModelBase):
         }
 
     @classmethod
-    def forward_and_sample_previous_step(
+    def forward(
         cls,
         module: ModelMixin,
-        scheduler: SchedulerMixin,
         model_config: DiffusionModelConfig,
         model_inputs: dict[str, torch.Tensor],
         negative_model_inputs: Optional[dict[str, torch.Tensor]],
-        scheduler_inputs: Optional[TensorDict | dict[str, torch.Tensor]],
-        step: int,
     ) -> torch.Tensor:
         """Run a single SD3 DPO transformer forward and return predicted noise."""
 

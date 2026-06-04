@@ -103,6 +103,24 @@ class DiffusionLossFn(ABC):
         """Compute loss and metrics from the worker batch."""
         raise NotImplementedError
 
+    @staticmethod
+    def prepare_actor_batch(
+        batch: Any,
+        reward_tensor: Any,
+        config: Any,
+    ) -> Any:
+        """Prepare rollout outputs for actor update when the trainer has not already done so.
+
+        Reverse-process policy-gradient losses such as FlowGRPO can keep the batch
+        unchanged because their trainer path has already added ``old_log_probs`` and
+        ``advantages``. DPO can also keep
+        the batch unchanged because offline preference data plus reference
+        predictions provide the loss inputs directly. Forward-process online
+        losses such as DiffusionNFT override this hook to turn final-latent
+        rollouts and rewards into loss-specific actor tensors.
+        """
+        return batch
+
 
 DIFFUSION_LOSS_REGISTRY: dict[str, DiffusionLossFn] = {}
 
@@ -130,6 +148,7 @@ class DiffusionAdvantageEstimator(str, Enum):
     """Advantage estimators specific to diffusion-based training."""
 
     FLOW_GRPO = "flow_grpo"
+    DANCE_GRPO = "dance_grpo"
 
 
 DIFFUSION_ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -168,6 +187,7 @@ def get_diffusion_adv_estimator_fn(name_or_enum):
 
 
 @register_diffusion_adv_est(DiffusionAdvantageEstimator.FLOW_GRPO)
+@register_diffusion_adv_est(DiffusionAdvantageEstimator.DANCE_GRPO)
 def compute_flow_grpo_outcome_advantage(
     sample_level_rewards: torch.Tensor,
     index: np.ndarray,
@@ -245,6 +265,7 @@ def compute_flow_grpo_outcome_advantage(
 
 
 @register_diffusion_loss("flow_grpo")
+@register_diffusion_loss("dance_grpo")
 class FlowGRPOLoss(DiffusionLossFn):
     """Flow-GRPO clipped policy objective."""
 
@@ -567,6 +588,233 @@ class DPOLoss(DiffusionLossFn):
             index=tu.get_non_tensor_data(data, "uid", default=None),
         )
         return DiffusionLossResult(loss=loss, metrics=metrics)
+
+
+@register_diffusion_loss("diffusion_nft")
+class DiffusionNFTLoss(DiffusionLossFn):
+    """DiffusionNFT forward-process direct-preference objective."""
+
+    required_model_output_keys = (
+        "forward_prediction",
+        "old_prediction",
+        "ref_forward_prediction",
+        "x0",
+        "xt",
+        "t_expanded",
+    )
+    required_data_keys = ("reward_prob",)
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        forward_prediction: torch.Tensor,
+        old_prediction: torch.Tensor,
+        ref_forward_prediction: torch.Tensor,
+        x0: torch.Tensor,
+        xt: torch.Tensor,
+        t_expanded: torch.Tensor,
+        reward_prob: torch.Tensor,
+        config: DiffusionActorConfig,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute the DiffusionNFT policy loss and auxiliary metrics."""
+        loss_cfg = config.diffusion_loss
+        beta = loss_cfg.mix_beta
+
+        old_prediction = old_prediction.detach()
+        ref_forward_prediction = ref_forward_prediction.detach()
+        reward_weight = reward_prob
+        if reward_weight.ndim > 1:
+            reward_weight = reward_weight.flatten(1).mean(dim=1)
+        reward_weight = reward_weight.to(device=x0.device, dtype=x0.dtype)
+
+        reduce_dims = tuple(range(1, x0.ndim))
+        positive_prediction = beta * forward_prediction + (1.0 - beta) * old_prediction
+        implicit_negative_prediction = (1.0 + beta) * old_prediction - beta * forward_prediction
+
+        x0_prediction = xt - t_expanded * positive_prediction
+        negative_x0_prediction = xt - t_expanded * implicit_negative_prediction
+
+        with torch.no_grad():
+            positive_weight = (
+                torch.abs(x0_prediction.double() - x0.double())
+                .mean(dim=reduce_dims, keepdim=True)
+                .clip(min=loss_cfg.adaptive_weight_min)
+                .to(dtype=x0_prediction.dtype)
+            )
+            negative_weight = (
+                torch.abs(negative_x0_prediction.double() - x0.double())
+                .mean(dim=reduce_dims, keepdim=True)
+                .clip(min=loss_cfg.adaptive_weight_min)
+                .to(dtype=negative_x0_prediction.dtype)
+            )
+
+        positive_loss = ((x0_prediction - x0) ** 2 / positive_weight).mean(dim=reduce_dims)
+        negative_loss = ((negative_x0_prediction - x0) ** 2 / negative_weight).mean(dim=reduce_dims)
+        policy_loss_per_sample = (reward_weight * positive_loss / beta) + ((1.0 - reward_weight) * negative_loss / beta)
+        policy_loss = (policy_loss_per_sample * loss_cfg.adv_clip_max).mean()
+
+        ref_kl_loss = ((forward_prediction - ref_forward_prediction) ** 2).mean(dim=reduce_dims).mean()
+        loss = policy_loss + loss_cfg.ref_kl_coef * ref_kl_loss
+
+        with torch.no_grad():
+            metrics = {
+                "actor/policy_loss": policy_loss.detach().item(),
+                "actor/positive_loss": positive_loss.mean().detach().item(),
+                "actor/negative_loss": negative_loss.mean().detach().item(),
+                "actor/ref_kl_loss": ref_kl_loss.detach().item(),
+                "actor/old_deviate": ((forward_prediction - old_prediction) ** 2).mean().detach().item(),
+                "actor/reward_prob_mean": reward_weight.mean().detach().item(),
+                "actor/total_loss": loss.detach().item(),
+            }
+        return loss, metrics
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        loss, metrics = self.compute_loss(
+            forward_prediction=model_output["forward_prediction"],
+            old_prediction=model_output["old_prediction"],
+            ref_forward_prediction=model_output["ref_forward_prediction"],
+            x0=model_output["x0"],
+            xt=model_output["xt"],
+            t_expanded=model_output["t_expanded"],
+            reward_prob=data["reward_prob"],
+            config=config,
+        )
+        return DiffusionLossResult(loss=loss, metrics=metrics)
+
+    # ------------------------------------------------------------------
+    # Trainer-side helpers (batch preparation)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_group_advantages(
+        rewards: torch.Tensor,
+        uid: np.ndarray,
+        norm_by_std: bool,
+        global_std: bool,
+        epsilon: float = 1e-4,
+    ) -> torch.Tensor:
+        """Group-normalize raw rewards for DiffusionNFT optimality probability.
+        This is not the same as the policy gradient advantages for loss computation.
+
+        Per prompt ``c`` (``uid``), DiffusionNFT Sec. 3.3 / Algo. 1 steps 4--5:
+
+            r_norm = r^raw(x_0, c) - E_pi_old[r^raw | c]
+            r_norm /= Z_c   (if ``norm_by_std``; ``Z_c`` = per-group or global reward std)
+
+        Optimality reward: r = 1/2 + 1/2 * clip(r_norm / Z_c, -1, 1)  (clip/map in
+        ``_advantage_to_reward_prob``). ``reward_prob`` weights the forward-process loss.
+        """
+        rewards = rewards.detach().float()
+        advantages = rewards.clone()
+        id2score: dict[Any, list[torch.Tensor]] = defaultdict(list)
+        batch_std = torch.std(rewards) if global_std else None
+
+        for idx, group_id in enumerate(uid):
+            id2score[group_id].append(rewards[idx])
+
+        id2mean: dict[Any, torch.Tensor] = {}
+        id2std: dict[Any, torch.Tensor] = {}
+        for group_id, group_scores in id2score.items():
+            scores_tensor = torch.stack(group_scores)
+            id2mean[group_id] = scores_tensor.mean()
+            if global_std:
+                id2std[group_id] = batch_std
+            elif len(group_scores) > 1:
+                id2std[group_id] = scores_tensor.std()
+            else:
+                id2std[group_id] = torch.tensor(1.0, device=rewards.device)
+
+        for idx, group_id in enumerate(uid):
+            advantages[idx] = rewards[idx] - id2mean[group_id]
+            if norm_by_std:
+                advantages[idx] = advantages[idx] / (id2std[group_id] + epsilon)
+        return advantages
+
+    @staticmethod
+    def _advantage_to_reward_prob(
+        advantages: torch.Tensor,
+        adv_clip_max: float,
+        adv_mode: str,
+    ) -> torch.Tensor:
+        advantages = torch.clamp(advantages, -adv_clip_max, adv_clip_max)
+        if adv_mode == "positive_only":
+            advantages = torch.clamp(advantages, 0, adv_clip_max)
+        elif adv_mode == "negative_only":
+            advantages = torch.clamp(advantages, -adv_clip_max, 0)
+        elif adv_mode == "one_only":
+            advantages = torch.where(advantages > 0, torch.ones_like(advantages), torch.zeros_like(advantages))
+        elif adv_mode == "binary":
+            advantages = torch.sign(advantages)
+        reward_prob = (advantages / adv_clip_max) / 2.0 + 0.5
+        return torch.clamp(reward_prob, 0, 1)
+
+    @staticmethod
+    def _select_train_timesteps(
+        train_timesteps: torch.Tensor,
+        timestep_fraction: float,
+        seed: int | None = None,
+    ) -> torch.Tensor:
+        if train_timesteps.ndim != 2:
+            raise ValueError(f"`train_timesteps` must have shape [B, T], got {train_timesteps.shape}.")
+        num_timesteps = train_timesteps.shape[1]
+        num_train = max(1, int(num_timesteps * timestep_fraction))
+        generator = None
+        if seed is not None:
+            generator = torch.Generator(device=train_timesteps.device)
+            generator.manual_seed(int(seed))
+        permuted = []
+        for row in train_timesteps:
+            perm = torch.randperm(num_timesteps, device=train_timesteps.device, generator=generator)
+            permuted.append(row[perm[:num_train]])
+        return torch.stack(permuted, dim=0).long()
+
+    @staticmethod
+    def prepare_actor_batch(
+        rollout_batch: dict[str, Any],
+        rewards: torch.Tensor,
+        config: Any,
+    ) -> dict[str, Any]:
+        """Prepare final-latent rollout data for DiffusionNFT actor updates."""
+        algorithm_cfg = config.algorithm
+        actor_cfg = config.actor_rollout_ref.actor
+        adv_clip_max = actor_cfg.diffusion_loss.adv_clip_max
+        timestep_shuffle_seed = actor_cfg.data_loader_seed
+
+        for key in ("latents_clean", "train_timesteps", "uid"):
+            if key not in rollout_batch:
+                raise ValueError(f"DiffusionNFT actor batch requires `{key}` from rollout.")
+
+        advantages = DiffusionNFTLoss._compute_group_advantages(
+            rewards=rewards,
+            uid=rollout_batch["uid"],
+            norm_by_std=algorithm_cfg.norm_adv_by_std_in_grpo,
+            global_std=algorithm_cfg.global_std,
+        )
+        reward_prob = DiffusionNFTLoss._advantage_to_reward_prob(
+            advantages, adv_clip_max=adv_clip_max, adv_mode=algorithm_cfg.adv_mode
+        )
+        train_timesteps = DiffusionNFTLoss._select_train_timesteps(
+            rollout_batch["train_timesteps"],
+            timestep_fraction=algorithm_cfg.timestep_fraction,
+            seed=timestep_shuffle_seed,
+        )
+        if reward_prob.ndim == 1 and train_timesteps.ndim == 2:
+            reward_prob = reward_prob[:, None].expand(-1, train_timesteps.shape[1])
+
+        actor_batch = dict(rollout_batch)
+        actor_batch["train_timesteps"] = train_timesteps
+        actor_batch["advantages"] = advantages[:, None].expand(-1, train_timesteps.shape[1])
+        actor_batch["reward_prob"] = reward_prob
+        actor_batch["returns"] = actor_batch["advantages"]
+        actor_batch["sample_level_rewards"] = rewards[:, None].expand(-1, train_timesteps.shape[1])
+        return actor_batch
 
 
 @register_diffusion_loss("kl")

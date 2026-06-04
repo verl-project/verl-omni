@@ -42,6 +42,7 @@ start/http_scorer.md
 :caption: Algorithms
 
 algo/flowgrpo.md
+algo/diffusionnft.md
 algo/grpo_guard.md
 algo/mixgrpo.md
 algo/performance.md
@@ -51,6 +52,7 @@ algo/performance.md
 :maxdepth: 1
 :caption: Performance Tuning Guide
 
+perf/diffusion_mfu.md
 perf/profiler.md
 ```
 
@@ -79,7 +81,8 @@ api/utils.rst
 
 contributing/editing-agent-instructions.md
 contributing/integrating_a_diffusion_model.md
-contributing/integrating_a_new_algorithm_for_diffusion_model.md
+contributing/integrating_a_new_policy_gradient_algorithm_for_diffusion_model.md
+contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md
 contributing/common_pitfalls.md
 ```
 

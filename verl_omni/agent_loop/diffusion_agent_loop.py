@@ -36,7 +36,7 @@ from verl.utils.dataset.rl_dataset import get_dataset_class
 from verl.utils.profiler import simple_timer
 from verl.workers.rollout.llm_server import LLMServerClient
 
-from verl_omni.agent_loop.utils import _maybe_per_rollout_seeds
+from verl_omni.agent_loop.utils import maybe_per_rollout_seeds
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 
 
@@ -168,7 +168,8 @@ class DiffusionAgentLoopWorker:
             sampling_params["logprobs"] = False
         else:
             sampling_params["global_steps"] = batch.meta_info["global_steps"]
-            per_rollout_seeds = _maybe_per_rollout_seeds(batch.meta_info, len(batch))
+            global_indices = batch.non_tensor_batch.get("_rollout_seed_global_idx")
+            per_rollout_seeds = maybe_per_rollout_seeds(batch.meta_info, len(batch), global_indices)
 
         if "agent_name" not in batch.non_tensor_batch:
             default_agent_loop = config.agent.default_agent_loop
@@ -177,9 +178,8 @@ class DiffusionAgentLoopWorker:
         tasks = []
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
-            task_sampling_params = sampling_params
+            task_sampling_params = sampling_params.copy()
             if per_rollout_seeds is not None:
-                task_sampling_params = sampling_params.copy()
                 task_sampling_params["seed"] = per_rollout_seeds[i]
             tasks.append(asyncio.create_task(self._run_agent_loop(task_sampling_params, **kwargs)))
         outputs = await asyncio.gather(*tasks)
@@ -235,10 +235,11 @@ class DiffusionAgentLoopWorker:
             padding="max_length",
             max_length=self.rollout_config.prompt_length,
             return_tensors="pt",
-            return_attention_mask=False,
+            return_attention_mask=True,
         )
         if prompt_output["input_ids"].dim() == 1:
             prompt_output["input_ids"] = prompt_output["input_ids"].unsqueeze(0)
+            prompt_output["attention_mask"] = prompt_output["attention_mask"].unsqueeze(0)
 
         response_diffusion_output = output.response_diffusion_output.unsqueeze(0)
 
@@ -247,6 +248,7 @@ class DiffusionAgentLoopWorker:
             response_logprobs = output.response_logprobs.unsqueeze(0)
 
         prompt_ids = prompt_output["input_ids"]
+        extra_fields["attention_mask"] = prompt_output["attention_mask"]
 
         await self._compute_score(
             output,

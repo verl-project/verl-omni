@@ -134,13 +134,6 @@ def _build_seed_rollout_config(tmp_dir: str, *, default_num_gpus: int, num_worke
 
 
 @pytest.fixture
-def seed_rollout_config() -> DictConfig:
-    # Single worker avoids chunk-dispatch seed collisions (see xfailed test below).
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        yield _build_seed_rollout_config(tmp_dir, default_num_gpus=1, num_workers=1)
-
-
-@pytest.fixture
 def multi_worker_seed_rollout_config() -> DictConfig:
     if torch.cuda.device_count() < 2:
         pytest.skip("requires >= 2 GPUs for multi-worker agent loop")
@@ -153,63 +146,12 @@ def _initial_latents(result: DataProto) -> torch.Tensor:
     return result.batch["all_latents"][:, 0].detach().cpu()
 
 
-def test_rollout_seed_reproducible_and_diverse_via_agent_loop(seed_rollout_config):
-    """End-to-end rollout seeding through vLLM-omni agent loop.
+def test_rollout_without_seed_produces_different_initial_latents(multi_worker_seed_rollout_config):
+    """When ``rollout_seed`` is not provided, initial latents must differ across reruns.
 
-    - Same ``rollout_seed`` + batch -> bit-identical initial latents across reruns.
-    - Distinct rollout indices within one step -> distinct initial latents.
+    This is the default training behaviour when the rollout config does not set a seed.
+    Uses a multi-worker setup which also covers the single-worker path.
     """
-    ray.init(
-        runtime_env={
-            "env_vars": {
-                "TOKENIZERS_PARALLELISM": "true",
-                "NCCL_DEBUG": "WARN",
-                "VLLM_LOGGING_LEVEL": "INFO",
-            }
-        }
-    )
-    try:
-        AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
-        llm_server_manager = LLMServerManager.create(config=seed_rollout_config)
-        agent_loop_manager = AgentLoopManager.create(
-            config=seed_rollout_config,
-            llm_client=llm_server_manager.get_client(),
-        )
-
-        n = seed_rollout_config.actor_rollout_ref.rollout.n
-        batch = _make_prompt_batch(num_prompts=1).repeat(n)
-        batch.meta_info["global_steps"] = 1
-        batch.meta_info["rollout_seed"] = 42
-
-        first = agent_loop_manager.generate_sequences(prompts=batch)
-        second = agent_loop_manager.generate_sequences(prompts=batch)
-
-        latents_first = _initial_latents(first)
-        latents_second = _initial_latents(second)
-        assert latents_first.shape[0] == n
-        assert torch.equal(latents_first, latents_second), (
-            "identical rollout_seed and batch must reproduce initial latents on GPU"
-        )
-
-        for i in range(n):
-            for j in range(i + 1, n):
-                assert not torch.equal(latents_first[i], latents_first[j]), (
-                    f"rollout indices {i} and {j} must not share the same initial latent"
-                )
-    finally:
-        ray.shutdown()
-
-
-@pytest.mark.xfail(
-    reason=(
-        "AgentLoopManager chunks rollouts across workers; each worker derives per-row seeds from "
-        "local indices 0..chunk_size-1, so global rollout indices collide across chunks. "
-        "Fix in a follow-up PR via global rollout index dispatch."
-    ),
-    strict=True,
-)
-def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollout_config):
-    """Every expanded rollout row must get a distinct seed when agent.num_workers > 1."""
     ray.init(
         runtime_env={
             "env_vars": {
@@ -230,16 +172,71 @@ def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollou
         n = multi_worker_seed_rollout_config.actor_rollout_ref.rollout.n
         batch = _make_prompt_batch(num_prompts=1).repeat(n)
         batch.meta_info["global_steps"] = 1
+        # Deliberately omit rollout_seed — the default behaviour.
+
+        first = agent_loop_manager.generate_sequences(prompts=batch)
+        second = agent_loop_manager.generate_sequences(prompts=batch)
+
+        latents_first = _initial_latents(first)
+        latents_second = _initial_latents(second)
+        assert latents_first.shape[0] == n
+        assert not torch.equal(latents_first, latents_second), (
+            "identical batch without rollout_seed must produce different initial latents across reruns"
+        )
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                assert not torch.equal(latents_first[i], latents_first[j]), (
+                    f"rollout indices {i} and {j} must not share the same initial latent"
+                )
+    finally:
+        ray.shutdown()
+
+
+def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollout_config):
+    """Rollout seeds are reproducible and diverse with agent.num_workers > 1.
+
+    - Same ``rollout_seed`` + batch -> bit-identical initial latents across reruns.
+    - Distinct rollout indices within one step -> distinct initial latents.
+    - Covers multi-worker seed dispatch path.
+    """
+    ray.init(
+        runtime_env={
+            "env_vars": {
+                "TOKENIZERS_PARALLELISM": "true",
+                "NCCL_DEBUG": "WARN",
+                "VLLM_LOGGING_LEVEL": "INFO",
+            }
+        }
+    )
+    try:
+        AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
+        llm_server_manager = LLMServerManager.create(config=multi_worker_seed_rollout_config)
+        agent_loop_manager = AgentLoopManager.create(
+            config=multi_worker_seed_rollout_config,
+            llm_client=llm_server_manager.get_client(),
+        )
+
+        n = multi_worker_seed_rollout_config.actor_rollout_ref.rollout.n
+        batch = _make_prompt_batch(num_prompts=1).repeat(n)
+        batch.non_tensor_batch["_rollout_seed_global_idx"] = np.arange(len(batch), dtype=np.int64)
+        batch.meta_info["global_steps"] = 1
         batch.meta_info["rollout_seed"] = 42
 
-        result = agent_loop_manager.generate_sequences(prompts=batch)
-        latents = _initial_latents(result)
-        assert latents.shape[0] == n
+        first = agent_loop_manager.generate_sequences(prompts=batch)
+        second = agent_loop_manager.generate_sequences(prompts=batch)
 
-        # With 2 workers each chunk uses local indices 0..1, so global rows 0 and 2
-        # (same prompt, rollout indices 0 and 2) incorrectly share a seed today.
-        assert not torch.equal(latents[0], latents[2]), (
-            "global rollout rows 0 and 2 must not share the same initial latent"
+        latents_first = _initial_latents(first)
+        latents_second = _initial_latents(second)
+        assert latents_first.shape[0] == n
+        assert torch.equal(latents_first, latents_second), (
+            "identical rollout_seed and batch must reproduce initial latents on GPU"
         )
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                assert not torch.equal(latents_first[i], latents_first[j]), (
+                    f"rollout indices {i} and {j} must not share the same initial latent"
+                )
     finally:
         ray.shutdown()

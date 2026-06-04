@@ -65,6 +65,9 @@ class DiffusionPipelineConfig(BaseConfig):
     max_sequence_length: int = 512
     guidance_scale: Optional[float] = None
 
+    # Wan2.2 video generation: number of frames (81 = ~3s at 24fps)
+    num_frames: int = 1
+
 
 @dataclass
 class DiffusionSamplingConfig(BaseConfig):

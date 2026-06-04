@@ -52,6 +52,11 @@ from verl.workers.config import (
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.utils.losses import ppo_loss
 
+from verl_omni.utils.mfu import (
+    DiffusionFlopsCounter,
+    allgather_diffusion_flops_meta,
+    collect_diffusion_flops_meta,
+)
 from verl_omni.workers.config import (
     DiffusionActorConfig,
     DiffusionModelConfig,
@@ -151,8 +156,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         if hasattr(self.model_config, "hf_config"):
             self.flops_counter = FlopsCounter(self.model_config.hf_config)
+        elif self.config.model_type in ("diffusion_model", "diffusion_dpo_model", "diffusion_nft_model"):
+            self.flops_counter = DiffusionFlopsCounter(
+                architecture=self.model_config.architecture,
+                transformer_config=self.model_config.transformer_config,
+            )
         else:
-            # for Diffusion models, FlopsCounter is not supported yet.
             self.flops_counter = None
 
         self.loss_fn = None
@@ -179,14 +188,35 @@ class TrainingWorker(Worker, DistProfilerExtension):
         """
         self.engine.initialize()
 
-    def _postprocess_output(self, output, *, global_token_num, delta_time, forward_only, images_seqlens):
-        """
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def copy_adapter(self, source: str = "default", target: str = "old"):
+        if not hasattr(self.engine, "copy_adapter"):
+            raise NotImplementedError(f"Engine {type(self.engine).__name__} does not support copy_adapter.")
+        self.engine.copy_adapter(source=source, target=target)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def ema_update_adapter(self, source: str = "default", target: str = "old", decay: float = 0.0):
+        if not hasattr(self.engine, "ema_update_adapter"):
+            raise NotImplementedError(f"Engine {type(self.engine).__name__} does not support ema_update_adapter.")
+        self.engine.ema_update_adapter(source=source, target=target, decay=decay)
+
+    def _postprocess_output(
+        self,
+        output,
+        *,
+        global_token_num,
+        delta_time,
+        forward_only,
+        images_seqlens,
+        diffusion_flops_meta: Optional[dict] = None,
+    ):
+        """
         Args:
             output: a dictionary containing loss, model_outputs and metrics
-
-        Returns:
-
+            diffusion_flops_meta: optional dict consumed by ``DiffusionFlopsCounter``
+                with keys ``latent_seqlens``, ``prompt_seqlens``, ``num_timesteps``,
+                ``num_forward_passes``. Provided only on the diffusion path; ignored
+                otherwise.
         """
         # TODO: whether to log memory
         # metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024 ** 3)
@@ -194,11 +224,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
         # metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024 ** 3)
 
         metrics: dict = output.pop("metrics")
+        dp_group = self.engine.get_data_parallel_group()
+
         # perform all gather in dp group to ensure that it's correct.
         # Here each metric in metrics can be a list (micro-batch metrics) or a singleton
         # we should always sum the loss of each micro-batch as we scale by global_bsz/global_token
         loss = torch.sum(torch.tensor(output.pop("loss"), device=self.device_name))
-        dp_group = self.engine.get_data_parallel_group()
         if dp_group is not None:
             torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG, group=dp_group)
         loss = loss.item()
@@ -224,11 +255,26 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 flatten_v = [sublist[0] for sublist in v]  # sublist should be single element
                 final_metrics[k] = sum(flatten_v) / len(flatten_v)
         # compute mfu
-        if global_token_num is not None and self.flops_counter is not None:
+        mfu_divisor = torch.distributed.get_world_size(dp_group) if dp_group is not None else 1
+        if isinstance(self.flops_counter, DiffusionFlopsCounter):
+            if diffusion_flops_meta is not None:
+                # Counter expects global (DP-allgathered) seqlens, matching the
+                # convention used for ``global_token_num`` in the LLM path.
+                global_meta = allgather_diffusion_flops_meta(
+                    diffusion_flops_meta, self.engine.get_data_parallel_group()
+                )
+                estimated_flops, promised_flops = self.flops_counter.estimate_flops(
+                    delta_time=delta_time, **global_meta
+                )
+                if promised_flops > 0:
+                    final_metrics["mfu"] = estimated_flops / promised_flops / mfu_divisor
+                    if forward_only:
+                        final_metrics["mfu"] /= 3.0
+        elif global_token_num is not None and self.flops_counter is not None:
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(
                 global_token_num, delta_time, images_seqlens=images_seqlens
             )
-            final_metrics["mfu"] = estimated_flops / promised_flops / torch.distributed.get_world_size()
+            final_metrics["mfu"] = estimated_flops / promised_flops / mfu_divisor
             if forward_only:
                 final_metrics["mfu"] /= 3.0
         # model outputs
@@ -336,6 +382,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
         global_token_num = tu.get(data, key="global_token_num")
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
         images_seqlens = tu.get(data, key="images_seqlens", default=None)
+        diffusion_flops_meta = collect_diffusion_flops_meta(
+            self.flops_counter,
+            data,
+            pipeline_config=getattr(self.model_config, "pipeline", None),
+        )
 
         # inject engineering parameters if not specified
         default_keys = dict(
@@ -377,6 +428,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 delta_time=delta_time,
                 forward_only=False,
                 images_seqlens=images_seqlens,
+                diffusion_flops_meta=diffusion_flops_meta,
             ).cpu()
         else:
             final_output = None
@@ -391,6 +443,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
         no_lora_adapter = tu.pop(data, key="no_lora_adapter", default=False)
         images_seqlens = tu.get(data, key="images_seqlens", default=None)
+        diffusion_flops_meta = collect_diffusion_flops_meta(
+            self.flops_counter,
+            data,
+            pipeline_config=getattr(self.model_config, "pipeline", None),
+        )
 
         default_keys = dict(
             use_remove_padding=self.model_config.get("use_remove_padding", False),
@@ -423,6 +480,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 delta_time=delta_time,
                 forward_only=True,
                 images_seqlens=images_seqlens,
+                diffusion_flops_meta=diffusion_flops_meta,
             ).cpu()
         else:
             final_output = None
@@ -498,7 +556,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         model_config: HFModelConfig | DiffusionModelConfig = omega_conf_to_dataclass(self.config.model)
-        is_diffusion = model_config.get("model_type", "language_model") in ("diffusion_model", "diffusion_dp_model")
+        is_diffusion = model_config.get("model_type", "language_model") in (
+            "diffusion_model",
+            "diffusion_dpo_model",
+            "diffusion_nft_model",
+        )
 
         # 1. build reference model
         if "ref" in self.role:
@@ -612,7 +674,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.loss_fn = partial(
                     distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
                 )
-            elif model_config.get("model_type", "language_model") in ("diffusion_model", "diffusion_dp_model"):
+            elif model_config.get("model_type", "language_model") in (
+                "diffusion_model",
+                "diffusion_dpo_model",
+                "diffusion_nft_model",
+            ):
                 self.loss_fn = partial(diffusion_loss, config=actor_config)
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
@@ -686,6 +752,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def update_actor(self, data: TensorDict) -> TensorDict:
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def copy_adapter(self, source: str = "default", target: str = "old"):
+        assert "actor" in self.role, "copy_adapter only supports actor role"
+        self.actor.copy_adapter(source=source, target=target)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def ema_update_adapter(self, source: str = "default", target: str = "old", decay: float = 0.0):
+        assert "actor" in self.role, "ema_update_adapter only supports actor role"
+        self.actor.ema_update_adapter(source=source, target=target, decay=decay)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):

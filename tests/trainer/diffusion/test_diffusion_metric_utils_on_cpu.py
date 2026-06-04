@@ -20,6 +20,7 @@ from verl import DataProto
 
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
+    compute_old_policy_metrics,
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
 )
@@ -142,6 +143,43 @@ class TestComputeDataMetricsDiffusion:
         assert "critic/rewards/mean" in metrics
         assert "critic/advantages/mean" not in metrics
         assert "critic/returns/mean" not in metrics
+
+
+# ---------------------------------------------------------------------------
+# compute_old_policy_metrics
+# ---------------------------------------------------------------------------
+
+
+class TestComputeOldPolicyMetrics:
+    def test_skipped_update(self):
+        metrics = compute_old_policy_metrics((False, 0.0, "none"))
+
+        assert metrics == {
+            "old_policy/update_applied": 0.0,
+            "old_policy/copy_update": 0.0,
+            "old_policy/ema_update": 0.0,
+            "old_policy/decay": 0.0,
+        }
+
+    def test_copy_update(self):
+        metrics = compute_old_policy_metrics((True, 0.0, "copy"))
+
+        assert metrics == {
+            "old_policy/update_applied": 1.0,
+            "old_policy/copy_update": 1.0,
+            "old_policy/ema_update": 0.0,
+            "old_policy/decay": 0.0,
+        }
+
+    def test_ema_update(self):
+        metrics = compute_old_policy_metrics((True, 0.95, "ema"))
+
+        assert metrics == {
+            "old_policy/update_applied": 1.0,
+            "old_policy/copy_update": 0.0,
+            "old_policy/ema_update": 1.0,
+            "old_policy/decay": 0.95,
+        }
 
 
 # ---------------------------------------------------------------------------

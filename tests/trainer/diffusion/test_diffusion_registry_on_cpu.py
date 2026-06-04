@@ -108,6 +108,9 @@ class TestDiffusionLossRegistry(unittest.TestCase):
     def test_builtin_flow_grpo_registered(self):
         assert "flow_grpo" in DIFFUSION_LOSS_REGISTRY
 
+    def test_builtin_dance_grpo_registered(self):
+        assert "dance_grpo" in DIFFUSION_LOSS_REGISTRY
+
     def test_builtin_kl_registered(self):
         assert "kl" in DIFFUSION_LOSS_REGISTRY
 
@@ -228,6 +231,9 @@ class TestDiffusionAdvEstRegistry(unittest.TestCase):
 
     def test_builtin_flow_grpo_registered(self):
         assert DiffusionAdvantageEstimator.FLOW_GRPO.value in DIFFUSION_ADV_ESTIMATOR_REGISTRY
+
+    def test_builtin_dance_grpo_registered(self):
+        assert DiffusionAdvantageEstimator.DANCE_GRPO.value in DIFFUSION_ADV_ESTIMATOR_REGISTRY
 
     def test_get_existing_estimator_by_string(self):
         fn = get_diffusion_adv_estimator_fn("flow_grpo")
