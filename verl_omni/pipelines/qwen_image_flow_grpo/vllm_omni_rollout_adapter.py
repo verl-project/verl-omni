@@ -284,11 +284,11 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         # Resolve SDE / log-prob knobs from sampling extra_args so that the
         # step-execution path mirrors ``forward()``'s rollout behaviour.
         extra = sampling.extra_args or {}
-        noise_level = _coalesce_not_none(extra.get("noise_level", None), 0.7)
-        sde_window_size = _coalesce_not_none(extra.get("sde_window_size", None), None)
-        sde_window_range = _coalesce_not_none(extra.get("sde_window_range", None), (0, 5))
-        sde_type = _coalesce_not_none(extra.get("sde_type", None), "sde")
-        logprobs = _coalesce_not_none(extra.get("logprobs", None), True)
+        noise_level = coalesce_not_none(extra.get("noise_level", None), 0.7)
+        sde_window_size = coalesce_not_none(extra.get("sde_window_size", None), None)
+        sde_window_range = coalesce_not_none(extra.get("sde_window_range", None), (0, 5))
+        sde_type = coalesce_not_none(extra.get("sde_type", None), "sde")
+        logprobs = coalesce_not_none(extra.get("logprobs", None), True)
         if sde_window_size is not None:
             start = torch.randint(
                 sde_window_range[0],
@@ -450,6 +450,9 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
                 return_logprobs=logprobs,
                 return_dict=False,
             )
+            # Scheduler upcasts to float32 internally; cast back to model dtype
+            # to match what the transformer expects on the next iteration.
+            latents = latents.to(x.dtype)
 
             if i >= sde_window[0] and i < sde_window[1]:
                 all_latents.append(latents)
@@ -497,7 +500,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             cur_noise_level = 0.0
 
         new_latents, log_prob, _, _ = state.scheduler.step(
-            noise_pred,
+            noise_pred.float(),
             timestep_value,
             state.latents,
             generator=state.sampling.generator,
@@ -506,7 +509,10 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             return_logprobs=state.logprobs,
             return_dict=False,
         )
-        state.latents = new_latents
+        # Scheduler upcasts to float32 internally; cast back to model dtype
+        # so vllm-omni worker sees consistent dtypes across states.
+        model_dtype = self.transformer.img_in.weight.dtype
+        state.latents = new_latents.to(model_dtype)
 
         if i >= sde_window[0] and i < sde_window[1]:
             state.all_latents.append(state.latents)
@@ -549,15 +555,15 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             torch.stack(all_timesteps).unsqueeze(0).expand(state.latents.shape[0], -1) if all_timesteps else None
         )
 
-        output.output = _maybe_to_cpu(output.output)
+        output.output = maybe_to_cpu(output.output)
         output.custom_output = {
-            "all_latents": _maybe_to_cpu(stacked_latents),
-            "all_log_probs": _maybe_to_cpu(stacked_log_probs),
-            "all_timesteps": _maybe_to_cpu(stacked_timesteps),
-            "prompt_embeds": _maybe_to_cpu(state.prompt_embeds),
-            "prompt_embeds_mask": _maybe_to_cpu(state.prompt_embeds_mask),
-            "negative_prompt_embeds": _maybe_to_cpu(state.negative_prompt_embeds),
-            "negative_prompt_embeds_mask": _maybe_to_cpu(state.negative_prompt_embeds_mask),
+            "all_latents": maybe_to_cpu(stacked_latents),
+            "all_log_probs": maybe_to_cpu(stacked_log_probs),
+            "all_timesteps": maybe_to_cpu(stacked_timesteps),
+            "prompt_embeds": maybe_to_cpu(state.prompt_embeds),
+            "prompt_embeds_mask": maybe_to_cpu(state.prompt_embeds_mask),
+            "negative_prompt_embeds": maybe_to_cpu(state.negative_prompt_embeds),
+            "negative_prompt_embeds_mask": maybe_to_cpu(state.negative_prompt_embeds_mask),
         }
         return output
 
