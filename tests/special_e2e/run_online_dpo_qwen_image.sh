@@ -54,8 +54,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \
     actor_rollout_ref.model.target_modules=all-linear \
-    actor_rollout_ref.model.pipeline.guidance_scale=1.0 \
-    actor_rollout_ref.model.pipeline.true_cfg_scale=1.0 \
     actor_rollout_ref.actor.diffusion_loss.loss_mode=dpo \
     actor_rollout_ref.actor.diffusion_loss.dpo_beta=100.0 \
     actor_rollout_ref.actor.optim.lr=2e-4 \
