@@ -49,6 +49,22 @@ bash examples/dpo_trainer/run_qwen_image_online_dpo_lora.sh \
 - The example sets `true_cfg_scale=1.0`, so CFG is no applied.
 
 
+### Performance
+
+> Online DPO experiment conducted on *NVIDIA H800* GPUs with the same OCR reward and prompt parquet as FlowGRPO Qwen-Image training.
+
+The experiment settings and throughputs are shown in the table below. Online DPO forms one `[chosen, rejected]` pair per prompt after rollout, so **training samples per step** counts actor-update pairs (`train_batch_size × 2`). **Throughput** follows trainer metrics: `perf/total_num_images / (perf/time_per_step × n_gpus)` (64 images per step on 4 GPUs).
+
+| Script | Model | Algorithm | Hybrid Engine | # Cards | Reward Fn | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | `rollout.n` | lr   | # Val Samples | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / GPU / Seconds) | Time per Step (Seconds) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `run_qwen_image_online_dpo_lora.sh` | Qwen-Image | Online DPO | True | 4 | qwenvl-ocr-vllm | 4 | 4 | 0 (sync) | 32 | 8 | 3e-4 | 1k (full set) | 32×2=64 | 8 | 0.040 | 408 |
+
+- Colocated actor, vLLM-Omni rollout, and sync OCR reward on 4 GPUs; `rollout.n=16` samples candidates, then top/bottom pairing keeps 64 actor-update images per step (`perf/total_num_images=64`).
+- Validation uses `trainer.val_before_train=True` on the full OCR test parquet (same as FlowGRPO).
+
+> **Note:** Reward curves may differ between runs because online DPO depends on stochastic diffusion rollouts and the example scripts do not fix the data seed.
+
+
 ## SD3.5 Offline DPO
 
 Offline DPO uses a frozen reference pipeline to generate several candidates per
@@ -109,3 +125,4 @@ bash examples/dpo_trainer/run_sd35_medium_offline_dpo_lora.sh \
   data.train_files=data/offline_dpo_sd3/train.parquet \
   data.val_files=data/offline_dpo_sd3/test.parquet
 ```
+
