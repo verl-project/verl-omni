@@ -25,7 +25,7 @@ reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS:-4}
 NUM_NODES=${NUM_NODES:-1}
-ACTOR_SP=2
+ACTOR_SP=1
 ROLLOUT_TP=1
 REWARD_TP=4
 IMAGE_RESOLUTION=512
