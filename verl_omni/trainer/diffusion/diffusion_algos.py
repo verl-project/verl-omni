@@ -110,16 +110,7 @@ class DiffusionLossFn(ABC):
         reward_tensor: Any,
         config: Any,
     ) -> Any:
-        """Prepare rollout outputs for actor update when the trainer has not already done so.
-
-        Reverse-process policy-gradient losses such as FlowGRPO can keep the batch
-        unchanged because their trainer path has already added ``old_log_probs`` and
-        ``advantages``. Offline DPO can also keep
-        the batch unchanged because offline preference data plus reference
-        predictions provide the loss inputs directly. Forward-process online
-        losses such as DiffusionNFT and online DPO override this hook to turn final-latent
-        rollouts and rewards into loss-specific actor tensors.
-        """
+        """Prepare rollout outputs for actor update when the trainer has not already done so."""
         return batch
 
 
@@ -490,14 +481,10 @@ class DPOLoss(DiffusionLossFn):
     required_data_keys = ("ref_noise_pred", "sample_level_rewards")
 
     @staticmethod
-    def _is_offline_dpo(config: Any) -> bool:
-        if config is None:
-            return False
-        if hasattr(config, "get"):
-            sample_source = config.get("sample_source", "online")
-        else:
-            sample_source = getattr(config, "sample_source", "online")
-        return sample_source == "offline"
+    def _sample_source(config: Any) -> str:
+        if hasattr(config, "algorithm"):
+            return config.algorithm.sample_source
+        return config.sample_source
 
     @staticmethod
     def build_online_dpo_pair_indices(
@@ -549,41 +536,20 @@ class DPOLoss(DiffusionLossFn):
     @staticmethod
     def prepare_actor_batch(
         batch: DataProto,
-        rewards: torch.Tensor,
+        reward_tensor: torch.Tensor,
         config: Any,
     ) -> DataProto:
-        """Select adjacent chosen/rejected samples for direct-preference actor updates.
-
-        Offline DPO batches already contain pre-ranked ``[chosen, rejected]`` pairs, so
-        the batch is returned unchanged. Online DPO groups rollout samples by prompt
-        ``uid``, keeps the highest- and lowest-scoring candidates per prompt, and
-        reindexes the batch to adjacent ``[chosen, rejected]`` order.
-
-        Args:
-            batch (DataProto): Rollout batch with ``sample_level_scores`` and prompt
-                ``uid`` values in ``non_tensor_batch``.
-            rewards (torch.Tensor): Sample-level rewards, shape ``(B,)``.
-            config (Any): Algorithm configuration; ``sample_source`` selects offline vs
-                online pairing behavior.
-
-        Returns:
-            DataProto: The input batch, or a subset reindexed for online pairing.
-        """
-        if DPOLoss._is_offline_dpo(config):
+        """Offline: no-op. Online: pick top/bottom reward pair per prompt uid."""
+        rewards = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
+        if DPOLoss._sample_source(config) == "offline":
             return batch
-
-        if "uid" not in batch.non_tensor_batch:
-            raise KeyError("Online DPO pairing requires `uid` in non_tensor_batch.")
 
         selected_indices = DPOLoss.build_online_dpo_pair_indices(
             uids=batch.non_tensor_batch["uid"],
             scores=rewards,
         )
         if not selected_indices:
-            raise RuntimeError(
-                "Online DPO could not build any preference pairs from rollout rewards. "
-                "Increase actor_rollout_ref.rollout.n so each prompt has at least two sampled candidates."
-            )
+            raise RuntimeError("Online DPO could not build preference pairs; increase actor_rollout_ref.rollout.n.")
 
         batch = DPOLoss._select_dataproto_indices(batch, selected_indices)
         batch.meta_info["prepare_actor_batch_selected_indices"] = selected_indices
