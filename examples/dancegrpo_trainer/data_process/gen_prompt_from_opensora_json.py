@@ -97,11 +97,7 @@ if __name__ == "__main__":
         cap = item.get("cap", [])
         if not cap or args.cap_index >= len(cap):
             continue
-        text = cap[args.cap_index].strip()
-        # Replace newlines with spaces so each prompt stays on a single line
-        text = text.replace("\n", " ").replace("\r", " ")
-        # Collapse multiple spaces into one
-        text = " ".join(text.split())
+        text = ' '.join(cap[args.cap_index].split())
         wc = _word_count(text)
         if wc < args.min_words:
             continue
