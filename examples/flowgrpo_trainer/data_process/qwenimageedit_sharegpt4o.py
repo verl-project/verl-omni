@@ -96,15 +96,30 @@ if __name__ == "__main__":
     )
     parser.add_argument("--train_size", type=int, default=-1, help="Maximum train samples; -1 keeps all samples.")
     parser.add_argument("--val_size", type=int, default=-1, help="Maximum validation samples; -1 keeps all samples.")
-    parser.add_argument("--image_size", type=int, default=512, help="Resize and pad condition images to this square size.")
+    parser.add_argument(
+        "--image_size",
+        type=int,
+        default=512,
+        help="Resize and pad condition images to this square size.",
+    )
 
     args = parser.parse_args()
     input_dir = Path(os.path.expanduser(args.input_dir))
     output_dir = Path(os.path.expanduser(args.output_dir))
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    train_df = _convert_split(input_dir=input_dir, split="train", max_samples=args.train_size, image_size=args.image_size)
-    test_df = _convert_split(input_dir=input_dir, split="test", max_samples=args.val_size, image_size=args.image_size)
+    train_df = _convert_split(
+        input_dir=input_dir,
+        split="train",
+        max_samples=args.train_size,
+        image_size=args.image_size,
+    )
+    test_df = _convert_split(
+        input_dir=input_dir,
+        split="test",
+        max_samples=args.val_size,
+        image_size=args.image_size,
+    )
 
     train_path = output_dir / "train.parquet"
     test_path = output_dir / "test.parquet"

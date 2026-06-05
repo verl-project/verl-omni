@@ -30,7 +30,7 @@
 import asyncio
 import json
 import logging
-from typing import Dict, List, Optional, Union
+from typing import Optional
 
 import aiohttp
 import numpy as np
@@ -56,7 +56,7 @@ def _to_pil(image) -> Image.Image:
 async def _call_vllm_api(
     session: aiohttp.ClientSession,
     router_address: str,
-    messages: List[Dict],
+    messages: list[dict],
     model_name: str,
     temperature: float = 0.3,
     max_tokens: int = 512,
@@ -175,13 +175,13 @@ def _extract_score_from_json(response_text: str) -> Optional[float]:
 
 async def compute_score_vllm_quality(
     data_source: str,
-    solution_image: Union[np.ndarray, torch.Tensor],
+    solution_image: np.ndarray | torch.Tensor,
     ground_truth: str,
-    extra_info: Optional[Dict] = None,
+    extra_info: Optional[dict] = None,
     reward_router_address: Optional[str] = None,
     reward_model_tokenizer: Optional[PreTrainedTokenizer] = None,
     model_name: Optional[str] = None,
-) -> Dict[str, Union[float, str, int]]:
+) -> dict[str, float | str | int]:
     """使用 vLLM 评估图像质量的奖励函数。
 
     通过异步调用 vLLM 推理服务，使用 VLM 模型评估生成图像与提示词的匹配度。
@@ -220,6 +220,7 @@ async def compute_score_vllm_quality(
         >>> print(score_result["score"])  # 0.75
     """
     from verl.utils.ray_utils import get_event_loop
+
     from verl_omni.utils.reward_score.reward_utils import pil_image_to_base64
 
     if extra_info is None:
@@ -249,9 +250,7 @@ async def compute_score_vllm_quality(
             # 转换为 PIL 图像并编码为 base64
             try:
                 pil_image = _to_pil(image)
-                image_base64 = await loop.run_in_executor(
-                    None, pil_image_to_base64, pil_image
-                )
+                image_base64 = await loop.run_in_executor(None, pil_image_to_base64, pil_image)
             except Exception as e:
                 logger.error(f"图像转换失败: {e}")
                 quality_scores.append(0.5)
@@ -268,8 +267,8 @@ async def compute_score_vllm_quality(
                     f"1. 质量：图像的清晰度、真实感、是否有明显的伪影\n"
                     f"2. 匹配度：编辑结果是否符合指令要求\n\n"
                     f"返回格式：JSON {{"
-                    f"\"quality\": <1-10>, \"match\": <1-10>, "
-                    f"\"reason\": \"<简短说明>\"}}"
+                    f'"quality": <1-10>, "match": <1-10>, '
+                    f'"reason": "<简短说明>"}}'
                 )
             else:
                 eval_prompt = (
@@ -280,8 +279,8 @@ async def compute_score_vllm_quality(
                     f"1. 质量：图像的清晰度、真实感、是否有明显的伪影\n"
                     f"2. 匹配度：图像是否符合提示词描述\n\n"
                     f"返回格式：JSON {{"
-                    f"\"quality\": <1-10>, \"match\": <1-10>, "
-                    f"\"reason\": \"<简短说明>\"}}"
+                    f'"quality": <1-10>, "match": <1-10>, '
+                    f'"reason": "<简短说明>"}}'
                 )
 
             # 构建 vLLM 请求消息
@@ -329,22 +328,18 @@ async def compute_score_vllm_quality(
                             match = min(1.0, max(0.0, match))
                             quality_scores.append(quality)
                             match_scores.append(match)
-                            logger.info(
-                                f"  质量: {quality:.2f}, 匹配度: {match:.2f}"
-                            )
+                            logger.info(f"  质量: {quality:.2f}, 匹配度: {match:.2f}")
                             continue
                 except (json.JSONDecodeError, ValueError, KeyError):
                     pass
 
                 # 备用：使用关键词匹配
-                logger.warning(f"无法解析 JSON，使用关键词匹配")
-                quality_score = (
-                    _extract_score_from_json(response_text) or 0.5
-                )
+                logger.warning("无法解析 JSON，使用关键词匹配")
+                quality_score = _extract_score_from_json(response_text) or 0.5
                 quality_scores.append(quality_score)
                 match_scores.append(quality_score)  # 使用相同的分数
             else:
-                logger.error(f"vLLM API 调用失败，使用默认分数")
+                logger.error("vLLM API 调用失败，使用默认分数")
                 quality_scores.append(0.5)
                 match_scores.append(0.5)
 
@@ -353,10 +348,7 @@ async def compute_score_vllm_quality(
     avg_match = float(np.mean(match_scores)) if match_scores else 0.5
     final_score = (avg_quality + avg_match) / 2.0  # 质量和匹配度均等权重
 
-    logger.info(
-        f"最终分数: {final_score:.2f} "
-        f"(质量: {avg_quality:.2f}, 匹配度: {avg_match:.2f})"
-    )
+    logger.info(f"最终分数: {final_score:.2f} (质量: {avg_quality:.2f}, 匹配度: {avg_match:.2f})")
 
     return {
         "score": final_score,
@@ -372,11 +364,11 @@ async def compute_score_vllm_quality(
 # 为了向后兼容，也导出同步包装版本
 def compute_score_vllm_quality_sync(
     data_source: str,
-    solution_image: Union[np.ndarray, torch.Tensor],
+    solution_image: np.ndarray | torch.Tensor,
     ground_truth: str,
-    extra_info: Optional[Dict] = None,
+    extra_info: Optional[dict] = None,
     **kwargs,
-) -> Dict[str, Union[float, str, int]]:
+) -> dict[str, float | str | int]:
     """同步包装版本的 vLLM 奖励函数。
 
     在同步上下文中使用时使用此函数。系统会自动在线程池中执行。

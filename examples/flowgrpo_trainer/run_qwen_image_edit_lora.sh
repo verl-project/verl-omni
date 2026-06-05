@@ -106,7 +106,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.prompt_length=$MAX_PROMPT_LENGTH \
-    actor_rollout_ref.rollout.pipeline.num_inference_steps=10 \
+    actor_rollout_ref.rollout.pipeline.num_inference_steps=28 \
     actor_rollout_ref.rollout.pipeline.true_cfg_scale=4.0 \
     actor_rollout_ref.rollout.pipeline.height=$IMAGE_RESOLUTION \
     actor_rollout_ref.rollout.pipeline.width=$IMAGE_RESOLUTION \

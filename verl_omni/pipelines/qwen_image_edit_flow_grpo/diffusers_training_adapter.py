@@ -30,10 +30,12 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_name
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
+from verl_omni.pipelines.qwen_image_flow_grpo.common import (
+    QWEN_IMAGE_VAE_SCALE_FACTOR,
+    build_img_shapes,
+)
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.workers.config import DiffusionModelConfig
-
-from verl_omni.pipelines.qwen_image_flow_grpo.common import QWEN_IMAGE_VAE_SCALE_FACTOR, apply_true_cfg, build_img_shapes
 
 __all__ = ["QwenImageEditPlus"]
 
@@ -129,7 +131,6 @@ class QwenImageEditPlus(DiffusionModelBase):
         elif hasattr(img_shapes, "tolist"):
             img_shapes = img_shapes.tolist()
 
-        guidance_scale = model_config.pipeline.guidance_scale
         # QwenImageEditPlus does not use guidance_embeds (always None)
         guidance = None
 

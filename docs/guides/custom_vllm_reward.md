@@ -1,5 +1,7 @@
 # 在 VeRL-Omni 中使用自定义 vLLM 奖励函数
 
+Last updated: 06/05/2026
+
 本指南说明如何在 VeRL-Omni 中集成自定义的 vLLM 奖励函数进行训练。
 
 ## 快速开始

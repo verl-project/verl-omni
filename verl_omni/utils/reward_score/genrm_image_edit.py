@@ -33,11 +33,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GRM_MODEL_PATH = "~/models/tiny-random/qwen3-vl"
 DEFAULT_SAMPLING_PARAMS = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 64}
-DEFAULT_GRM_PROMPT = """Rate how well the edited image follows the edit instruction while preserving unrelated content from the source image and looking natural.
-
-If a reference target image is provided, also consider whether the edited image matches it.
-
-Output only one number from 0 to 1. 1 means perfect, 0 means failed."""
+DEFAULT_GRM_PROMPT = (
+    "Rate how well the edited image follows the edit instruction while preserving "
+    "unrelated content from the source image and looking natural.\n\n"
+    "If a reference target image is provided, also consider whether the edited image matches it.\n\n"
+    "Output only one number from 0 to 1. 1 means perfect, 0 means failed."
+)
 DEBUG_LOG_ENV = "GENRM_IMAGE_EDIT_DEBUG_PATH"
 
 # Reward-server resilience knobs.
@@ -107,9 +108,7 @@ async def _chat_complete(router_address: str, chat_complete_request: dict) -> Ch
             )
             await asyncio.sleep(backoff)
 
-    raise _RewardServerError(
-        f"reward server failed after {_MAX_ATTEMPTS} attempts: {last_err}"
-    )
+    raise _RewardServerError(f"reward server failed after {_MAX_ATTEMPTS} attempts: {last_err}")
 
 
 def _to_pil(image) -> Image.Image:
@@ -227,9 +226,7 @@ async def compute_score_image_edit(
         **DEFAULT_SAMPLING_PARAMS,
     }
     try:
-        result = await _chat_complete(
-            router_address=reward_router_address, chat_complete_request=chat_complete_request
-        )
+        result = await _chat_complete(router_address=reward_router_address, chat_complete_request=chat_complete_request)
     except _RewardServerError as e:
         # Soft-fail: a single bad GRM call should not crash a multi-hour
         # training run. Returning the floor score lets GRPO advantage
