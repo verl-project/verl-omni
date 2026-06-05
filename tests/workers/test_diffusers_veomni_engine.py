@@ -76,6 +76,12 @@ def create_training_config(model_type, device_count, model):
                 "ppo_micro_batch_size_per_gpu=4",
                 "optim.lr=1e-4",
                 "optim.weight_decay=0.0001",
+                # VeOmni's BaseTrainer._build_lr_scheduler reads
+                # ``args.train_steps``, which raises unless ``_train_steps`` has
+                # been set away from the ``-1`` sentinel. In production this is
+                # set by ray_diffusion_trainer (len(dataloader) * total_epochs);
+                # in this unit test we pin a small value explicitly.
+                "optim.total_training_steps=10",
                 "veomni_config.param_offload=False",
                 "veomni_config.optimizer_offload=False",
                 "veomni_config.mixed_precision=True",
