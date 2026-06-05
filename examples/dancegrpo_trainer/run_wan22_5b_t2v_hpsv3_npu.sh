@@ -1,5 +1,5 @@
 #!/bin/bash
-# Wan2.2 LoRA RL with DanceGRPO - 8-NPU Global Distribution Strategy (TP8)
+# Wan2.2 LoRA RL with DanceGRPO - 8-NPU Global Distribution Strategy
 #
 # Model: Wan-AI/Wan2.2-TI2V-5B-Diffusers (text+image-to-video, used in T2V mode)
 # Algorithm: DanceGRPO (reuses FlowGRPO's advantage estimator and loss)
@@ -36,13 +36,13 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.diffusion_loss.loss_mode=dance_grpo \
     data.train_files=$hpsv3_train_path \
     data.val_files=$hpsv3_test_path \
-    data.train_batch_size=32 \
+    data.train_batch_size=64 \
     data.max_prompt_length=1024 \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.attn_backend='_native_npu' \
     actor_rollout_ref.model.custom_chat_template='"{% if messages %}{% for message in messages %}{% if message[\"role\"] == \"user\" %}{{ message[\"content\"] }}{% endif %}{% endfor %}{% endif %}</s>"' \
-    actor_rollout_ref.actor.optim.lr=1e-5 \
-    actor_rollout_ref.actor.optim.weight_decay=0.0001 \
+    actor_rollout_ref.actor.optim.lr=3e-6 \
+    actor_rollout_ref.actor.optim.weight_decay=0.01 \
     actor_rollout_ref.actor.ppo_mini_batch_size=8 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
@@ -77,7 +77,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.project_name=dance_grpo_npu \
     trainer.experiment_name=wan22_5b_t2v_hpsv3_npu \
     trainer.log_val_generations=8 \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
     trainer.nnodes=1 \
     trainer.save_freq=30 \

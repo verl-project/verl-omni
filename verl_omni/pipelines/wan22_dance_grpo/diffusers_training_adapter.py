@@ -141,9 +141,8 @@ class Wan22DanceGRPO(DiffusionModelBase):
             tuple[dict, dict]: ``(model_inputs, negative_model_inputs)`` dicts
                 ready to be unpacked into the transformer forward call.
         """
-        guidance_scale = model_config.pipeline.get("guidance_scale", 1.0)
         true_cfg_scale = model_config.pipeline.get("true_cfg_scale", 1.0)
-        do_true_cfg = true_cfg_scale > 1.0 and guidance_scale > 1.0
+        do_true_cfg = true_cfg_scale > 1.0
 
         # Slice to current denoising step
         hidden_states = latents[:, step]  # (B, C, F, H, W)
@@ -218,9 +217,8 @@ class Wan22DanceGRPO(DiffusionModelBase):
         latents = scheduler_inputs["all_latents"]
         timesteps = scheduler_inputs["all_timesteps"]
 
-        guidance_scale = model_config.pipeline.get("guidance_scale", 1.0)
         true_cfg_scale = model_config.pipeline.get("true_cfg_scale", 1.0)
-        do_true_cfg = true_cfg_scale > 1.0 and guidance_scale > 1.0
+        do_true_cfg = true_cfg_scale > 1.0
 
         # Positive forward
         noise_pred = module(**model_inputs)[0]
@@ -228,7 +226,7 @@ class Wan22DanceGRPO(DiffusionModelBase):
         # CFG forward (if enabled)
         if do_true_cfg and negative_model_inputs:
             neg_noise_pred = module(**negative_model_inputs)[0]
-            noise_pred = apply_cfg(noise_pred, neg_noise_pred, guidance_scale)
+            noise_pred = apply_cfg(noise_pred, neg_noise_pred, true_cfg_scale)
 
         # Sample previous step via SDE scheduler
         _, log_prob, prev_sample_mean, std_dev_t, sqrt_dt = scheduler.sample_previous_step(

@@ -14,17 +14,13 @@
 """
 Preprocess the HPSv3 video prompt dataset to parquet format (for Wan2.2 DanceGRPO training).
 
-The raw data is a plain-text file with one prompt per line, obtained from:
-  https://github.com/XueZeyue/DanceGRPO/blob/main/assets/video_prompts.txt
-
-Lines containing Chinese characters are filtered out (following the original
-DanceGRPO preprocessing), the prompts are shuffled, and then split into
-train/test sets. The test set size is ``min(5% total, 1000)``.
+The pre-split train/test prompts are loaded from ``video_prompts/train.txt``
+and ``video_prompts/test.txt`` respectively. Lines containing Chinese characters
+are filtered out (following the original DanceGRPO preprocessing).
 """
 
 import argparse
 import os
-import random
 import re
 
 import pandas as pd
@@ -45,28 +41,34 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--hdfs_dir", default=None)
     parser.add_argument(
-        "--input_path",
-        default="~/data/hpsv3/prompt.txt",
-        help="Path to the raw prompt.txt file.",
+        "--train_path",
+        default=os.path.join(
+            os.path.dirname(__file__), "video_prompts", "train.txt"
+        ),
+        help="Path to the train prompts file.",
+    )
+    parser.add_argument(
+        "--test_path",
+        default=os.path.join(
+            os.path.dirname(__file__), "video_prompts", "test.txt"
+        ),
+        help="Path to the test prompts file.",
     )
     parser.add_argument(
         "--output_dir",
         default="~/data/hpsv3",
         help="Directory to save the preprocessed parquet files.",
     )
-    parser.add_argument(
-        "--test_ratio",
-        type=float,
-        default=0.05,
-        help="Fraction of prompts reserved for the test set.",
-    )
 
     args = parser.parse_args()
-    input_path = os.path.expanduser(args.input_path)
+    train_path = os.path.expanduser(args.train_path)
+    test_path = os.path.expanduser(args.test_path)
     output_dir = os.path.expanduser(args.output_dir)
 
-    prompts = _load_prompts(input_path)
-    print(f"Loaded {len(prompts)} prompts (after filtering Chinese lines)")
+    train_prompts = _load_prompts(train_path)
+    test_prompts = _load_prompts(test_path)
+    print(f"Loaded {len(train_prompts)} train prompts (after filtering Chinese lines)")
+    print(f"Loaded {len(test_prompts)} test prompts (after filtering Chinese lines)")
 
     data_source = "dance_grpo/hpsv3"
 
@@ -89,13 +91,6 @@ if __name__ == "__main__":
             "extra_info": {"split": split, "index": idx},
         }
 
-    # Shuffle and split into train/test
-    random.seed(42)
-    random.shuffle(prompts)
-    test_count = max(1, min(int(len(prompts) * args.test_ratio), 1000))
-    test_prompts = prompts[:test_count]
-    train_prompts = prompts[test_count:]
-
     train_records = [make_record(p, "train", i) for i, p in enumerate(train_prompts)]
     test_records = [make_record(p, "test", i) for i, p in enumerate(test_prompts)]
 
@@ -104,14 +99,14 @@ if __name__ == "__main__":
     train_df = pd.DataFrame(train_records)
     test_df = pd.DataFrame(test_records)
 
-    train_path = os.path.join(output_dir, "train.parquet")
-    test_path = os.path.join(output_dir, "test.parquet")
+    train_parquet_path = os.path.join(output_dir, "train.parquet")
+    test_parquet_path = os.path.join(output_dir, "test.parquet")
 
-    train_df.to_parquet(train_path)
-    test_df.to_parquet(test_path)
+    train_df.to_parquet(train_parquet_path)
+    test_df.to_parquet(test_parquet_path)
 
-    print(f"Train: {len(train_records)} records -> {train_path}")
-    print(f"Test:  {len(test_records)} records -> {test_path}")
+    print(f"Train: {len(train_records)} records -> {train_parquet_path}")
+    print(f"Test:  {len(test_records)} records -> {test_parquet_path}")
 
     hdfs_dir = args.hdfs_dir
     if hdfs_dir is not None:

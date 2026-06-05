@@ -72,6 +72,7 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         super().__init__(od_config=od_config, prefix=prefix)
         self.device = get_local_device()
         self._interrupt = False
+        self.vae.use_slicing = True
         model = od_config.model
         local_files_only = os.path.exists(model)
 
