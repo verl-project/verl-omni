@@ -1,6 +1,6 @@
 # Installation
 
-Last updated: 06/03/2026
+Last updated: 06/05/2026
 
 ## Requirements
 
@@ -42,9 +42,9 @@ uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@c7
 
 3. Install `verl` followed by `verl-omni` from source:
 
-``` bash 
+```bash
 # Install verl
-uv pip install git+https://github.com/verl-project/verl.git@b0028bca560c0185eedad71e7cff1d373b6ae138
+uv pip install "verl==0.8.0"
 
 # Install verl-omni from source
 git clone https://github.com/verl-project/verl-omni.git
@@ -52,7 +52,7 @@ cd verl-omni
 uv pip install -e .
 ```
 
-> Note:  Note: Install `vllm` and `vllm-omni` first, as they may override your existing PyTorch installation. Installing them before `verl` and `verl-omni` ensures a compatible, hardware-aware PyTorch version.
+> Note: Install `vllm` and `vllm-omni` first, as they may override your existing PyTorch installation. Installing them before `verl` and `verl-omni` ensures a compatible, hardware-aware PyTorch version.
 
 ## Optional Dependencies
 
@@ -67,6 +67,7 @@ For NVIDIA GPU:
 ```bash
 python -c "import torch; print('torch', torch.__version__, '| CUDA', torch.version.cuda)"
 python -c "import vllm; print('vllm', vllm.__version__)"
+python -c "import verl; print('verl', verl.__version__)"
 python -c "import verl_omni; print('VeRL-Omni ready')"
 ```
 
@@ -75,5 +76,6 @@ For Ascend NPU:
 ```bash
 python -c "import torch; import torch_npu; print('torch', torch.__version__, '| NPU', torch.npu.is_available())"
 python -c "import vllm; print('vllm', vllm.__version__)"
+python -c "import verl; print('verl', verl.__version__)"
 python -c "import verl_omni; print('VeRL-Omni ready')"
 ```

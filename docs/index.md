@@ -52,6 +52,7 @@ algo/performance.md
 :maxdepth: 1
 :caption: Performance Tuning Guide
 
+perf/diffusion_mfu.md
 perf/profiler.md
 ```
 

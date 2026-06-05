@@ -820,6 +820,8 @@ class BaseRayDiffusionTrainer(ABC):
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
         actor_output = tu.get(actor_output, "metrics")
         actor_output = rename_dict(actor_output, "actor/")
+        if (actor_mfu := actor_output.pop("actor/mfu", None)) is not None:
+            actor_output["perf/mfu/actor"] = actor_mfu
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
     def _start_profiling(self, do_profile: bool) -> None:
@@ -869,7 +871,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         )
         return DataProto.from_tensordict(ref_log_prob)
 
-    def _compute_old_log_prob(self, batch: DataProto):
+    def _compute_old_log_prob(self, batch: DataProto) -> tuple[DataProto, Optional[float]]:
         batch_td = batch.to_tensordict()
         batch_td = embeds_padding_2_no_padding(batch_td)
         tu.assign_non_tensor(
@@ -886,7 +888,8 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         if prev_sample_mean is not None:
             old_log_prob_dict["old_prev_sample_mean"] = prev_sample_mean.float()
         old_log_prob = tu.get_tensordict(old_log_prob_dict)
-        return DataProto.from_tensordict(old_log_prob)
+        old_log_prob_mfu = tu.get(output, "metrics").get("mfu")
+        return DataProto.from_tensordict(old_log_prob), old_log_prob_mfu
 
     def fit(self):
         """
@@ -963,7 +966,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
                 gen_batch = self._get_gen_batch(batch)
 
-                # pass global_steps to trace
+                # Pass step metadata to rollout before expansion.
                 gen_batch.meta_info["global_steps"] = self.global_steps
 
                 # Per-step rollout seed for reproducibility
@@ -973,6 +976,9 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
                 gen_batch_output = gen_batch.repeat(
                     repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
+                )
+                gen_batch_output.non_tensor_batch["_rollout_seed_global_idx"] = np.arange(
+                    len(gen_batch_output), dtype=np.int64
                 )
 
                 is_last_step = self.global_steps >= self.total_training_steps
@@ -1006,7 +1012,9 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                         apply_bypass_mode_to_diffusion_batch(batch)
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
-                            old_log_prob = self._compute_old_log_prob(batch)
+                            old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
+                            if old_log_prob_mfu is not None:
+                                metrics.update({"perf/mfu/actor_infer": old_log_prob_mfu})
                             batch = batch.union(old_log_prob)
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
@@ -1237,6 +1245,8 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
         actor_output = tu.get(actor_output, "metrics")
         actor_output = rename_dict(actor_output, "actor/")
+        if (actor_mfu := actor_output.pop("actor/mfu", None)) is not None:
+            actor_output["perf/mfu/actor"] = actor_mfu
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
     def _compute_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:
@@ -1405,9 +1415,16 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                     else:
                         gen_batch = self._get_gen_batch(batch)
                         gen_batch.meta_info["global_steps"] = self.global_steps
+                        rollout_seed_cfg = self.config.actor_rollout_ref.rollout.get("seed")
+                        if rollout_seed_cfg is not None:
+                            gen_batch.meta_info["rollout_seed"] = int(rollout_seed_cfg) + self.global_steps - 1
+
                         gen_batch_output = gen_batch.repeat(
                             repeat_times=self.config.actor_rollout_ref.rollout.n,
                             interleave=True,
+                        )
+                        gen_batch_output.non_tensor_batch["_rollout_seed_global_idx"] = np.arange(
+                            len(gen_batch_output), dtype=np.int64
                         )
 
                         with marked_timer("gen", timing_raw, color="red"):

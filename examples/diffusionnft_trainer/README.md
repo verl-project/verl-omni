@@ -103,7 +103,7 @@ The script sets:
 ```bash
 trainer.logger='["console", "wandb"]'
 trainer.project_name=diffusion_nft
-trainer.experiment_name=qwen_image_ocr_lora_n_24_v_20
+trainer.experiment_name=qwen_image_ocr_lora
 ```
 
 Override these values on the command line if you want to log under a different project or run name.

@@ -1,5 +1,5 @@
 # requirements.txt records the full set of dependencies for development
-verl>=0.7.1
+verl>=0.8.0
 accelerate
 cachetools
 codetiming
