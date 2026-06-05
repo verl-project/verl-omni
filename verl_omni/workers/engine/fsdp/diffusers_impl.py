@@ -665,8 +665,6 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         if self._is_offload_param or origin_module_device == "cpu":
             load_fsdp_model_to_gpu(self.module)
 
-        if self._is_lora:
-            self._save_lora_adapter_config(local_path)
         self.checkpoint_manager.save_checkpoint(
             local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
         )
@@ -675,26 +673,6 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             offload_fsdp_model_to_cpu(self.module)
         gc.collect()
         aggressive_empty_cache(force_sync=True)
-
-    def _save_lora_adapter_config(self, local_path: str) -> None:
-        """Persist PEFT adapter metadata alongside FSDP weights for offline validation."""
-        if not self._is_lora:
-            return
-        if torch.distributed.get_rank() != 0:
-            return
-
-        peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
-        peft_config = getattr(peft_model, "peft_config", None)
-        if not peft_config:
-            return
-
-        default_config = peft_config.get("default", None)
-        if default_config is None:
-            return
-
-        huggingface_dir = os.path.join(local_path, "huggingface")
-        os.makedirs(huggingface_dir, exist_ok=True)
-        default_config.save_pretrained(huggingface_dir)
 
     def load_checkpoint(
         self, local_path: str, hdfs_path: Optional[str] = None, del_local_after_load: int = True, **kwargs
