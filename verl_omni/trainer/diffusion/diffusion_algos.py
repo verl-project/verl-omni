@@ -149,6 +149,7 @@ class DiffusionAdvantageEstimator(str, Enum):
 
     FLOW_GRPO = "flow_grpo"
     DANCE_GRPO = "dance_grpo"
+    GDPO = "gdpo"
 
 
 DIFFUSION_ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -262,6 +263,105 @@ def compute_flow_grpo_outcome_advantage(
                 scores[i] = scores[i] - id2mean[index[i]]
 
     return scores, scores
+
+
+@register_diffusion_adv_est(DiffusionAdvantageEstimator.GDPO)
+def compute_gdpo_outcome_advantage(
+    sample_level_rewards: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-4,
+    norm_adv_by_std_in_grpo: bool = True,
+    global_std: bool = True,
+    config: Optional[DictConfig] = None,
+    reward_scores: Optional[dict[str, np.ndarray]] = None,
+    reward_weights: Optional[list[float]] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """GDPO: Group reward-Decoupled Normalization Policy Optimization.
+
+    Instead of summing all reward dimensions first (like GRPO), GDPO normalizes
+    each reward dimension independently within each group before aggregation.
+    This prevents a dominant reward signal from drowning out weaker ones.
+
+    Mathematical formulation:
+        Step 1 - Group-wise decoupled normalization (via GRPO per dimension):
+            For each reward dimension k, within each group g:
+            A_k = (r_k - mean_group(r_k)) / (std_group(r_k) + epsilon)
+
+        Step 2 - Weighted aggregation:
+            A_sum = sum_k w_k * A_k
+
+        Step 3 - Batch-level normalization:
+            A_final = (A_sum - mean(A_sum)) / (std(A_sum) + epsilon)
+
+    Args:
+        sample_level_rewards: (bs, num_timesteps) - used as fallback when
+            per-dimension reward_scores is not provided.
+        index: (bs,) - group id per sample (from uid).
+        epsilon: Numerical stability constant.
+        norm_adv_by_std_in_grpo: Whether to normalize by std in per-dimension GRPO.
+        global_std: Whether to use global std for per-dimension normalization.
+        config: Algorithm configuration (optional).
+        reward_scores: Dict mapping reward key -> per-sample scores (bs,).
+            When provided, each dimension is normalized independently.
+        reward_weights: Per-dimension weights for aggregation.
+
+    Note:
+        Ref original GDPO on LLMs (https://arxiv.org/abs/2601.05242).
+        Ref Flow-GDPO (https://arxiv.org/abs/2602.12205).
+
+    Returns:
+        advantages: (bs, num_timesteps)
+        returns: (bs, num_timesteps) - same as advantages (outcome-only).
+    """
+    if reward_scores is None or len(reward_scores) == 0:
+        # Fallback: single reward dimension, behaves like flow_grpo
+        return compute_flow_grpo_outcome_advantage(
+            sample_level_rewards=sample_level_rewards,
+            index=index,
+            epsilon=epsilon,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            global_std=global_std,
+            config=config,
+        )
+
+    num_timesteps = sample_level_rewards.shape[1] if sample_level_rewards.ndim == 2 else 1
+    device = sample_level_rewards.device
+    num_scores = len(reward_scores)
+
+    if reward_weights is not None:
+        weights = torch.tensor(reward_weights, dtype=torch.float32, device=device)
+    else:
+        weights = torch.ones(num_scores, dtype=torch.float32, device=device)
+
+    combined_advantage = None
+
+    for i, (key, scores_np) in enumerate(reward_scores.items()):
+        # Convert per-sample scalar scores to (bs, num_timesteps) format
+        scores_1d = torch.tensor(np.asarray(scores_np, dtype=np.float32), device=device)
+        scores_expanded = scores_1d.unsqueeze(1).expand(-1, num_timesteps)
+
+        # Normalize this reward dimension independently using flow_grpo logic
+        normalized, _ = compute_flow_grpo_outcome_advantage(
+            sample_level_rewards=scores_expanded,
+            index=index,
+            epsilon=epsilon,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            global_std=global_std,
+            config=config,
+        )
+
+        if combined_advantage is None:
+            combined_advantage = weights[i] * normalized
+        else:
+            combined_advantage += weights[i] * normalized
+
+    # Batch-level normalization (whiten)
+    with torch.no_grad():
+        mean = combined_advantage.mean()
+        std = combined_advantage.std()
+        advantages = (combined_advantage - mean) / (std + epsilon)
+
+    return advantages, advantages
 
 
 @register_diffusion_loss("flow_grpo")

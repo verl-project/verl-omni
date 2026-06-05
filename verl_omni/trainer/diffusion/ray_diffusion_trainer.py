@@ -81,6 +81,7 @@ def compute_advantage(
     norm_adv_by_std_in_grpo: bool = True,
     global_std: bool = True,
     config: Optional[DiffusionAlgoConfig] = None,
+    reward_functions_config=None,
 ) -> DataProto:
     """Compute advantage estimates for diffusion policy optimization.
 
@@ -97,6 +98,8 @@ def compute_advantage(
             Defaults to True.
         config (DiffusionAlgoConfig, optional): Configuration object for algorithm settings.
             Defaults to None.
+        reward_functions_config: The ``reward.reward_functions`` config dict. Used by GDPO
+            to auto-derive per-dimension reward keys and weights.
 
     Returns:
         DataProto: The updated data with computed ``advantages`` and ``returns`` in its batch.
@@ -114,6 +117,21 @@ def compute_advantage(
     if adv_estimator == DiffusionAdvantageEstimator.FLOW_GRPO:
         adv_kwargs["norm_adv_by_std_in_grpo"] = norm_adv_by_std_in_grpo
         adv_kwargs["global_std"] = global_std
+    elif adv_estimator == DiffusionAdvantageEstimator.GDPO:
+        adv_kwargs["norm_adv_by_std_in_grpo"] = norm_adv_by_std_in_grpo
+        adv_kwargs["global_std"] = global_std
+        # Auto-derive per-dimension reward keys and weights from reward_functions config
+        if reward_functions_config:
+            reward_scores = {}
+            reward_weights = []
+            for key, entry in reward_functions_config.items():
+                reward_key = f"reward/{key}"
+                if reward_key in data.non_tensor_batch:
+                    reward_scores[reward_key] = data.non_tensor_batch[reward_key]
+                    reward_weights.append(float(entry.get("weight", 1.0)))
+            if reward_scores:
+                adv_kwargs["reward_scores"] = reward_scores
+                adv_kwargs["reward_weights"] = reward_weights
     advantages, returns = adv_estimator_fn(**adv_kwargs)
 
     data.batch["advantages"] = advantages
@@ -1058,6 +1076,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             global_std=self.config.algorithm.global_std,
                             config=self.config.algorithm,
+                            reward_functions_config=self.config.reward.get("reward_functions", None),
                         )
 
                     # update actor
