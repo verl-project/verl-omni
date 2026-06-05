@@ -80,7 +80,7 @@ if __name__ == "__main__":
         "--seed",
         type=int,
         default=None,
-        help="Random seed for shuffling (default: None).",
+        help="Random seed for shuffling (default: no shuffling).",
     )
 
     args = parser.parse_args()

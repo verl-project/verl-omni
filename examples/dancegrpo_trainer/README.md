@@ -35,7 +35,7 @@ Script options:
 | `--min_words` | `1` | Minimum number of words a prompt must contain. |
 | `--max_words` | `None` (no limit) | Maximum number of words a prompt may contain. |
 | `--cap_index` | `0` | Index into the `cap` array (0 = long caption, 1 = short caption). |
-| `--seed` | `42` | Random seed for sampling. |
+| `--seed` | `None` (no shuffling) | Random seed for sampling. |
 
 After generating `prompt.txt`, preprocess it into parquet files:
 

@@ -46,8 +46,8 @@ if __name__ == "__main__":
     parser.add_argument("--hdfs_dir", default=None)
     parser.add_argument(
         "--input_path",
-        default="~/data/hpsv3/video_prompts.txt",
-        help="Path to the raw video_prompts.txt file.",
+        default="~/data/hpsv3/prompt.txt",
+        help="Path to the raw prompt.txt file.",
     )
     parser.add_argument(
         "--output_dir",
