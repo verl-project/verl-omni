@@ -300,6 +300,32 @@ bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_sp2.sh
 ```
 
 
+### Image Editing (Qwen-Image-Edit-Plus)
+
+FlowGRPO supports image-to-image editing models via the `QwenImageEditPlusPipeline`
+adapter. This handles condition-image latent concatenation and norm-preserving
+(rescaled) CFG during rollout.
+
+```bash
+bash examples/flowgrpo_trainer/run_qwen_image_edit_lora.sh
+```
+
+Key differences from the text-to-image OCR example:
+
+- `actor_rollout_ref.model.path=Qwen/Qwen-Image-Edit-2511`
+- The parquet data must include a `condition_image` column (source image for editing)
+- Reward is computed by `compute_score_image_edit` in
+  `verl_omni/utils/reward_score/genrm_image_edit.py`
+
+Prepare the image-editing dataset (ShareGPT-4o-Image-Mini) with:
+
+```bash
+python3 examples/flowgrpo_trainer/data_process/qwenimageedit_sharegpt4o.py \
+    --input_dir ~/data/sharegpt4o_image_mini \
+    --output_dir ~/data/sharegpt4o_image_mini_qwen_image_edit
+```
+
+
 ## Citation
 
 ```bibtex
