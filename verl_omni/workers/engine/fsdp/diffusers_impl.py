@@ -258,10 +258,10 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             warnings.simplefilter("ignore")
 
             module = AutoModel.from_pretrained(
-                self.model_config.local_path,
+                self.model_config.config_path or self.model_config.local_path,
                 torch_dtype=torch_dtype,
                 trust_remote_code=self.model_config.trust_remote_code,
-                subfolder="transformer",  # currently we support DiT with transformer backbone only.
+                subfolder="" if self.model_config.config_path else self.model_config.transformer_subfolder,
             )
             module.set_attention_backend(self.model_config.attn_backend)
 

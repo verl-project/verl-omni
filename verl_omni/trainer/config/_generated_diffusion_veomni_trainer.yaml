@@ -1,47 +1,59 @@
 # This reference configration yaml is automatically generated via 'scripts/generate_trainer_config.sh'
-# in which it invokes 'python3 scripts/print_cfg.py --cfg job --config-name=diffusion_trainer.yaml' to flatten the 'verl_omni/trainer/config/diffusion_trainer.yaml' config fields into a single file.
+# in which it invokes 'python3 scripts/print_cfg.py --cfg job --config-name=diffusion_trainer.yaml diffusion/model_engine=veomni_diffusion' to flatten the 'verl_omni/trainer/config/diffusion_trainer.yaml' config fields into a single file.
 # Do not modify this file directly.
 # The file is usually only for reference and never used.
 
 actor_rollout_ref:
   actor:
     optim:
-      _target_: verl.workers.config.FSDPOptimizerConfig
-      optimizer: AdamW
-      optimizer_impl: torch.optim
+      _target_: verl_omni.workers.config.diffusion.VeOmniDiffusionOptimizerConfig
+      optimizer: adamw
       lr: 1.0e-06
+      lr_min: 0.0
+      lr_start: 0.0
       lr_warmup_steps_ratio: 0.0
       total_training_steps: -1
       weight_decay: 0.01
-      lr_warmup_steps: -1
       betas:
       - 0.9
       - 0.999
+      eps: 1.0e-08
       clip_grad: 1.0
-      min_lr_ratio: 0.0
-      num_cycles: 0.5
       lr_scheduler_type: constant
-      zero_indexed_step: true
-      warmup_style: null
-      override_optimizer_config: null
-    fsdp_config:
-      _target_: verl.workers.config.FSDPEngineConfig
-      wrap_policy:
-        min_num_params: 0
+      lr_decay_ratio: 1.0
+      fused: false
+      lr_warmup_steps: -1
+    veomni_config:
+      _target_: verl_omni.workers.config.diffusion.VeOmniDiffusionEngineConfig
       param_offload: false
       optimizer_offload: false
-      offload_policy: false
-      reshard_after_forward: true
       fsdp_size: -1
-      forward_prefetch: false
-      model_dtype: fp32
-      use_orig_params: false
-      seed: 42
-      full_determinism: false
-      ulysses_sequence_parallel_size: 1
+      ulysses_parallel_size: 1
+      expert_parallel_size: 1
+      init_device: meta
+      reshard_after_forward: true
+      forward_prefetch: true
+      model_dtype: bfloat16
+      mixed_precision: true
+      mixed_precision_param_dtype: bfloat16
+      mixed_precision_reduce_dtype: float32
+      mixed_precision_output_dtype: null
+      mixed_precision_cast_forward_inputs: true
+      enable_reentrant: false
+      enable_activation_offload: false
+      activation_gpu_limit: 0.0
+      strategy: veomni
+      attn_implementation: eager
+      moe_implementation: eager
+      cross_entropy_loss_implementation: eager
+      rms_norm_implementation: eager
+      swiglu_mlp_implementation: eager
+      rotary_pos_emb_implementation: eager
+      load_balancing_loss_implementation: eager
+      rms_norm_gated_implementation: eager
+      causal_conv1d_implementation: eager
+      chunk_gated_delta_rule_implementation: eager
       forward_only: false
-      strategy: fsdp
-      dtype: bfloat16
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: torch
@@ -64,9 +76,9 @@ actor_rollout_ref:
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
           name: torch_memory
-    _target_: verl_omni.workers.config.diffusion.FSDPDiffusionActorConfig
+    _target_: verl_omni.workers.config.diffusion.VeOmniDiffusionActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
-    strategy: fsdp
+    strategy: veomni
     ppo_mini_batch_size: 256
     ppo_micro_batch_size_per_gpu: null
     diffusion_loss:
@@ -102,29 +114,58 @@ actor_rollout_ref:
       load_contents: ${.save_contents}
       async_save: false
       mbridge_config: {}
-    grad_clip: 1.0
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
-    strategy: ${actor_rollout_ref.actor.strategy}
+    strategy: veomni
     log_prob_micro_batch_size_per_gpu: null
-    fsdp_config:
-      _target_: verl.workers.config.FSDPEngineConfig
-      wrap_policy:
-        min_num_params: 0
+    veomni_config:
+      _target_: verl_omni.workers.config.diffusion.VeOmniDiffusionEngineConfig
       param_offload: false
       optimizer_offload: false
-      offload_policy: false
-      reshard_after_forward: true
       fsdp_size: -1
-      forward_prefetch: false
-      model_dtype: fp32
-      use_orig_params: false
-      seed: 42
-      full_determinism: false
-      ulysses_sequence_parallel_size: 1
+      ulysses_parallel_size: 1
+      expert_parallel_size: 1
+      init_device: meta
+      reshard_after_forward: true
+      forward_prefetch: true
+      model_dtype: bfloat16
+      mixed_precision: true
+      mixed_precision_param_dtype: bfloat16
+      mixed_precision_reduce_dtype: float32
+      mixed_precision_output_dtype: null
+      mixed_precision_cast_forward_inputs: true
+      enable_reentrant: false
+      enable_activation_offload: false
+      activation_gpu_limit: 0.0
+      strategy: veomni
+      attn_implementation: eager
+      moe_implementation: eager
+      cross_entropy_loss_implementation: eager
+      rms_norm_implementation: eager
+      swiglu_mlp_implementation: eager
+      rotary_pos_emb_implementation: eager
+      load_balancing_loss_implementation: eager
+      rms_norm_gated_implementation: eager
+      causal_conv1d_implementation: eager
+      chunk_gated_delta_rule_implementation: eager
       forward_only: true
-      strategy: fsdp
-      dtype: bfloat16
+    optim:
+      _target_: verl_omni.workers.config.diffusion.VeOmniDiffusionOptimizerConfig
+      optimizer: adamw
+      lr: 0.001
+      lr_min: 0.0
+      lr_start: 0.0
+      lr_warmup_steps_ratio: 0.0
+      total_training_steps: -1
+      weight_decay: 0.01
+      betas:
+      - 0.9
+      - 0.999
+      eps: 1.0e-08
+      clip_grad: 1.0
+      lr_scheduler_type: constant
+      lr_decay_ratio: 1.0
+      fused: false
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: torch
@@ -147,7 +188,7 @@ actor_rollout_ref:
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
           name: torch_memory
-    _target_: verl_omni.workers.config.diffusion.FSDPDiffusionActorConfig
+    _target_: verl_omni.workers.config.diffusion.VeOmniDiffusionActorConfig
   rollout:
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig

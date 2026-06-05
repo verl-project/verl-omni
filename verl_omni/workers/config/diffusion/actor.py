@@ -20,15 +20,18 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig
 from verl.trainer.config.algorithm import RolloutCorrectionConfig
 from verl.utils.profiler import ProfilerConfig
-from verl.workers.config.engine import FSDPEngineConfig
+from verl.workers.config.engine import EngineConfig, FSDPEngineConfig
 from verl.workers.config.optimizer import OptimizerConfig
 
 from .model import DiffusionModelConfig
 
 __all__ = [
     "DiffusionLossConfig",
+    "VeOmniDiffusionEngineConfig",
+    "VeOmniDiffusionOptimizerConfig",
     "DiffusionActorConfig",
     "FSDPDiffusionActorConfig",
+    "VeOmniDiffusionActorConfig",
 ]
 
 
@@ -53,6 +56,65 @@ class DiffusionLossConfig(BaseConfig):
             raise ValueError(f"mix_beta must be positive, got {self.mix_beta}.")
         if self.adaptive_weight_min <= 0:
             raise ValueError(f"adaptive_weight_min must be positive, got {self.adaptive_weight_min}.")
+
+
+@dataclass
+class VeOmniDiffusionEngineConfig(EngineConfig):
+    _mutable_fields = EngineConfig._mutable_fields | {"ulysses_parallel_size"}
+
+    # VeOmni diffusion backend only supports FSDP2.
+    strategy: str = "veomni"
+    fsdp_size: int = -1
+    ulysses_parallel_size: int = 1
+    expert_parallel_size: int = 1
+    init_device: str = "meta"
+    reshard_after_forward: bool = True
+    forward_prefetch: bool = True
+    model_dtype: str = "bfloat16"
+    mixed_precision: bool = True
+    mixed_precision_param_dtype: str = "bfloat16"
+    mixed_precision_reduce_dtype: str = "float32"
+    mixed_precision_output_dtype: Optional[str] = None
+    mixed_precision_cast_forward_inputs: bool = True
+    enable_reentrant: bool = False
+    enable_activation_offload: bool = False
+    activation_gpu_limit: float = 0.0
+    attn_implementation: str = "eager"
+    moe_implementation: str = "eager"
+    cross_entropy_loss_implementation: str = "eager"
+    rms_norm_implementation: str = "eager"
+    swiglu_mlp_implementation: str = "eager"
+    rotary_pos_emb_implementation: str = "eager"
+    load_balancing_loss_implementation: str = "eager"
+    rms_norm_gated_implementation: str = "eager"
+    causal_conv1d_implementation: str = "eager"
+    chunk_gated_delta_rule_implementation: str = "eager"
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.strategy != "veomni":
+            raise ValueError(f"VeOmni diffusion engine requires strategy='veomni', got {self.strategy!r}")
+        if self.ulysses_parallel_size != 1:
+            raise NotImplementedError("VeOmni Qwen-Image diffusion backend does not support Ulysses SP yet.")
+
+
+@dataclass
+class VeOmniDiffusionOptimizerConfig(OptimizerConfig):
+    optimizer: str = "adamw"
+    lr_min: float = 0.0
+    lr_start: float = 0.0
+    lr_decay_ratio: float = 1.0
+    lr_scheduler_type: str = "constant"
+    eps: float = 1e-8
+    fused: bool = False
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.lr_scheduler_type not in {"constant", "linear", "cosine"}:
+            raise ValueError(
+                f"Invalid VeOmni lr_scheduler_type={self.lr_scheduler_type!r}; "
+                "expected one of ['constant', 'linear', 'cosine']."
+            )
 
 
 @dataclass
@@ -112,3 +174,14 @@ class FSDPDiffusionActorConfig(DiffusionActorConfig):
         # EngineConfig.strategy defaults to None, so without this, engine_workers.py always
         # falls back to FSDP1 even when actor.strategy="fsdp2".
         object.__setattr__(self.engine, "strategy", self.strategy)
+
+
+@dataclass
+class VeOmniDiffusionActorConfig(DiffusionActorConfig):
+    strategy: str = "veomni"
+    veomni_config: VeOmniDiffusionEngineConfig = field(default_factory=VeOmniDiffusionEngineConfig)
+    optim: VeOmniDiffusionOptimizerConfig = field(default_factory=VeOmniDiffusionOptimizerConfig)
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.engine = self.veomni_config

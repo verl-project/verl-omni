@@ -1,0 +1,29 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# defaults specify the default config from each component
+defaults:
+
+  # VeOmni optimizer config
+  - ../../optim@optim: veomni_diffusion
+
+  # VeOmni engine config
+  - ../engine@veomni_config: diffusion_veomni
+
+  # per-role profiler config, inheriting from trainer/config/profiler/profiler.yaml
+  - ../../profiler@profiler: profiler
+
+  # diffusion actor config, inheriting from trainer/config/diffusion/actor/diffusion_actor.yaml
+  - diffusion_actor
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+# Target class for this configuration
+_target_: verl_omni.workers.config.diffusion.VeOmniDiffusionActorConfig
+
+# Training strategy.
+strategy: veomni

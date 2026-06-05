@@ -1,0 +1,29 @@
+# defaults specify the default config from each component
+defaults:
+
+  # diffusion ref config, inheriting from trainer/config/diffusion/ref/diffusion_ref.yaml
+  - diffusion_ref
+
+  # VeOmni engine config
+  - ../engine@veomni_config: diffusion_veomni
+
+  # VeOmni optimizer config
+  - ../../optim@optim: veomni_diffusion
+
+  # per-role profiler config, inheriting from trainer/config/profiler/profiler.yaml
+  - ../../profiler@profiler: profiler
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+# Target class for this configuration
+_target_: verl_omni.workers.config.diffusion.VeOmniDiffusionActorConfig
+
+# Training strategy.
+strategy: veomni
+
+# VeOmni config
+veomni_config:
+
+  # ref model is forward only
+  forward_only: true

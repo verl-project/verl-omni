@@ -5,6 +5,7 @@ set -euox pipefail
 # Define config specifications: "config_name:output_file:config_arg"
 CONFIG_SPECS=(
     "diffusion_trainer:_generated_diffusion_trainer.yaml:--config-name=diffusion_trainer.yaml"
+    "diffusion_trainer:_generated_diffusion_veomni_trainer.yaml:--config-name=diffusion_trainer.yaml diffusion/model_engine=veomni_diffusion"
 )
 
 generate_config() {
