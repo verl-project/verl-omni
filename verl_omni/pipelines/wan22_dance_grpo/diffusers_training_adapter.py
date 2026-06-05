@@ -193,7 +193,6 @@ class Wan22DanceGRPO(DiffusionModelBase):
         negative_model_inputs: Optional[dict[str, torch.Tensor]],
         scheduler_inputs: Optional[TensorDict | dict[str, torch.Tensor]],
         step: int,
-        do_cfg_train: bool = False,
     ):
         """Run the Wan2.2 transformer and sample the previous denoising step.
 
@@ -210,7 +209,6 @@ class Wan22DanceGRPO(DiffusionModelBase):
             negative_model_inputs: Negative-prompt inputs for CFG.
             scheduler_inputs: Must contain ``"all_latents"`` and ``"all_timesteps"``.
             step: Current denoising step index.
-            do_cfg_train: Whether to apply CFG in training.
 
         Returns:
             tuple: ``(log_prob, prev_sample_mean, std_dev_t, sqrt_dt)``.
@@ -219,14 +217,15 @@ class Wan22DanceGRPO(DiffusionModelBase):
         latents = scheduler_inputs["all_latents"]
         timesteps = scheduler_inputs["all_timesteps"]
 
-        guidance_scale = model_config.pipeline.get("guidance_scale", 5.0)
-        do_cfg = guidance_scale > 1.0
+        guidance_scale = model_config.pipeline.get("guidance_scale", 1.0)
+        true_cfg_scale = model_config.pipeline.get("true_cfg_scale", 1.0)
+        do_true_cfg = true_cfg_scale > 1.0 and guidance_scale > 1.0
 
         # Positive forward
         noise_pred = module(**model_inputs)[0]
 
         # CFG forward (if enabled)
-        if do_cfg and negative_model_inputs:
+        if do_true_cfg and negative_model_inputs:
             neg_noise_pred = module(**negative_model_inputs)[0]
             noise_pred = apply_cfg(noise_pred, neg_noise_pred, guidance_scale)
 

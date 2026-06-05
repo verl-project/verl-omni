@@ -251,15 +251,6 @@ class _Qwen2VLRewardModelBT(Qwen2VLForConditionalGeneration):
 
         if self.config.pad_token_id is None and batch_size != 1:
             raise ValueError("Cannot handle batch sizes > 1 if no padding token is defined.")
-        if self.config.pad_token_id is None:
-            sequence_lengths = -1
-        else:
-            if input_ids is not None:
-                sequence_lengths = torch.eq(input_ids, self.config.pad_token_id).int().argmax(-1) - 1
-                sequence_lengths = sequence_lengths % input_ids.shape[-1]
-                sequence_lengths = sequence_lengths.to(logits.device)
-            else:
-                sequence_lengths = -1
 
         special_token_mask = torch.zeros_like(input_ids, dtype=torch.bool)
         for stid in self.special_token_ids:
