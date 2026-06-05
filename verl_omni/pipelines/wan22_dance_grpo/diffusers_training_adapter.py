@@ -141,8 +141,9 @@ class Wan22DanceGRPO(DiffusionModelBase):
             tuple[dict, dict]: ``(model_inputs, negative_model_inputs)`` dicts
                 ready to be unpacked into the transformer forward call.
         """
-        guidance_scale = model_config.pipeline.get("guidance_scale", 5.0)
-        do_cfg = guidance_scale > 1.0
+        guidance_scale = model_config.pipeline.get("guidance_scale", 1.0)
+        true_cfg_scale = model_config.pipeline.get("true_cfg_scale", 1.0)
+        do_true_cfg = true_cfg_scale > 1.0 and guidance_scale > 1.0
 
         # Slice to current denoising step
         hidden_states = latents[:, step]  # (B, C, F, H, W)
@@ -157,7 +158,7 @@ class Wan22DanceGRPO(DiffusionModelBase):
         # attending to padding tokens.
         if prompt_embeds_mask is not None:
             prompt_embeds = prompt_embeds * prompt_embeds_mask.unsqueeze(-1).float()
-        if do_cfg and negative_prompt_embeds_mask is not None:
+        if do_true_cfg and negative_prompt_embeds_mask is not None:
             negative_prompt_embeds = negative_prompt_embeds * negative_prompt_embeds_mask.unsqueeze(-1).float()
 
         # Build positive model inputs
@@ -170,7 +171,7 @@ class Wan22DanceGRPO(DiffusionModelBase):
         }
 
         # Build negative model inputs for CFG
-        if do_cfg:
+        if do_true_cfg:
             negative_model_inputs = {
                 "hidden_states": hidden_states,
                 "timestep": timestep,
