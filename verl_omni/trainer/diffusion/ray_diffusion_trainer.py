@@ -1172,13 +1172,6 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         **kwargs,
     ):
         super().__init__(config, *args, **kwargs)
-        if config.algorithm.get("paired_preference", False):
-            actor_cfg = config.actor_rollout_ref.actor
-            micro_bsz = actor_cfg.get("ppo_micro_batch_size_per_gpu")
-            if micro_bsz is None or micro_bsz < 2 or micro_bsz % 2 != 0:
-                raise ValueError(
-                    f"paired_preference requires ppo_micro_batch_size_per_gpu to be an even number >= 2, got {micro_bsz}"
-                )
         self.is_offline = config.algorithm.get("sample_source", "online") == "offline"
         loss_mode = config.actor_rollout_ref.actor.diffusion_loss.loss_mode
         # DPO needs trainer-side ref noise preds; DiffusionNFT computes ref in the actor engine.

@@ -915,6 +915,17 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
 class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
     """Diffusers FSDP engine variant for diffusion DPO."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.__post_init__()
+
+    def __post_init__(self):
+        micro_bsz = getattr(self.engine_config, "micro_batch_size_per_gpu", None)
+        if micro_bsz is None or micro_bsz < 2 or micro_bsz % 2 != 0:
+            raise ValueError(
+                f"paired_preference requires ppo_micro_batch_size_per_gpu to be an even number >= 2, got {micro_bsz}"
+            )
+
     def _prepare_noisy_latents(self, micro_batch: TensorDict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         latents = micro_batch.get("latents_clean", None)
         if latents is None:
