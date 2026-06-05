@@ -43,7 +43,7 @@ uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@c7
 3. Install `verl` followed by `verl-omni` from source:
 
 ```bash
-# Install verl (requires >= 0.8.0)
+# Install verl
 uv pip install "verl==0.8.0"
 
 # Install verl-omni from source
