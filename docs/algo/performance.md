@@ -1,7 +1,7 @@
 (performance)=
 # Performance Reference
 
-Last updated: 06/04/2026
+Last updated: 06/05/2026
 
 Below are reference benchmark results for VeRL-Omni training runs.
 
@@ -40,62 +40,60 @@ Evaluated with `trainer.val_before_train=True`:
 
 ## FlowGRPO: non-CFG Full Model Training on Qwen-Image OCR
 
-> lr 3e-5, clip_ratio 1e-5, optimizer state fp32. The other parameters are consistent with the LoRA setting.
+> Experiments used NVIDIA H200 GPUs, lr 3e-5, clip_ratio 1e-5, optimizer state fp32. The other parameters are consistent with the LoRA setting.
 
 > Note that the initial reward is expected to be low for non-CFG full model training.
 
-This recipe runs on two interchangeable actor backends. They share the same
-algorithm, data, and hyper-parameters and differ only in the training engine:
+### Full-Model Experiment Settings and Throughput
 
-- **FSDP1** — `run_qwen_image_ocr.sh`
-- **VeOmni** — `run_qwen_image_ocr_veomni.sh` (see the
-  [install guide](../start/install.md) "Optional engine backends")
+| Script | # GPUs | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | Images per Prompt | LR | Throughput (images/GPU/s) | Time per Step (s) |
+|--------|--------|------------------|--------------------|-------------------------|------------|-------------------|----|-----------------------|-------------------|
+| `run_qwen_image_ocr.sh` | 4 | 4 | 4 | 0 (sync) | 32 | 16 | 3e-5 | 0.510 | 250 |
 
-Use the throughput table to choose a backend.
-
-### Settings and Throughput
-
-| Backend | Script | GPU name | # GPUs | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | Images per Prompt | LR | Throughput (images/GPU/s) | Time per Step (s) |
-|---------|--------|--------|--------|------------------|--------------------|-------------------------|------------|-------------------|----|-----------------------|-------------------|
-| FSDP1 | `run_qwen_image_ocr.sh` | H200 | 4 | 4 | 4 | 0 (sync) | 32 | 16 | 3e-5 | 0.510 | 250 |
-| VeOmni | `run_qwen_image_ocr_veomni.sh` | H100 | 64 | 64 | 64 | 0 (sync) | 32 | 16 | 3e-5 | 0.079 | 100 |
-
-> **Note**: VeOmni run with `actor_rollout_ref.actor.veomni_config.param_offload=False`, `actor_rollout_ref.actor.veomni_config.optimizer_offload=True` and `SP=1`. 
-
-### FSDP1 Backend — Training Curves
-
-#### Zero Standard Deviation Ratio and Reward Curve
+### Full-Model Training - Zero Standard Deviation Ratio and Reward Curve
 
 <div align="center">
 <img width="600" alt="Full Model FlowGRPO OCR training zero standard deviation ratio and reward curve" src="https://github.com/user-attachments/assets/ee5db957-f3b0-44e4-8054-b80ddac02bcb" />
 </div>
 
-#### Clip Fraction
+### Training - Clip Fraction
 
 <div align="center">
 <img width="600" alt="Full Model FlowGRPO OCR training Clip Fraction" src="https://github.com/user-attachments/assets/b5d27aae-337b-43bf-8228-1678e71673a5" />
 </div>
 
-#### Validation Reward Curve
+### Full-Model Validation Reward Curve
 
 <div align="center">
 <img width="600" alt="Full Model FlowGRPO OCR validation reward curve" src="https://github.com/user-attachments/assets/5ed8fd76-6f1b-4c80-aa43-af905e58d722" />
 </div>
 
-### VeOmni Backend — Training Curves
+## FlowGRPO non-CFG Full Model: VeOmni vs FSDP1 Backend (same config)
 
-#### Zero Standard Deviation Ratio and Reward Curve
+> Apples-to-apples comparison (requested in review): the **VeOmni** and **FSDP1** actor engines run the *same* FlowGRPO recipe — same algorithm, data, and hyper-parameters — on the *same* hardware (64 × NVIDIA H100), differing only in the training engine. lr 3e-5, clip_ratio 1e-5, optimizer state fp32; other parameters match the LoRA setting.
 
-<img width="600" alt="image" src="https://github.com/user-attachments/assets/22254cb9-0722-4721-92de-abcb1c30a4aa" />
+- **FSDP1** — `run_qwen_image_ocr.sh`
+- **VeOmni** — `run_qwen_image_ocr_veomni.sh` (see the [install guide](../start/install.md) "Optional engine backends")
 
-<img width="600" alt="image" src="https://github.com/user-attachments/assets/232af9b0-ec28-4d2f-abe6-c7d8a34e4533" />
+### Settings and Throughput
 
-#### Clip Fraction
+| Backend | Script | GPU name | # GPUs | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | Images per Prompt | LR | Throughput (images/GPU/s) | Time per Step (s) |
+|---------|--------|--------|--------|------------------|--------------------|-------------------------|------------|-------------------|----|-----------------------|-------------------|
+| VeOmni | `run_qwen_image_ocr_veomni.sh` | H100 | 64 | 64 | 64 | 0 (sync) | 32 | 16 | 3e-5 | 0.079 | 100 |
+| FSDP1 | `run_qwen_image_ocr.sh` | H100 | 64 | 64 | 64 | 0 (sync) | 32 | 16 | 3e-5 | 0.077 | 105 |
 
-<img width="600" alt="image" src="https://github.com/user-attachments/assets/7650739b-0c34-4c74-897c-4dbf0746336e" />
+> **Note**: VeOmni and FSDP1 run with `actor_rollout_ref.actor.veomni_config.param_offload=False`, `actor_rollout_ref.actor.veomni_config.optimizer_offload=True`, and `SP=1`.
 
-#### Validation Reward Curve
+### Full-Model Training - Zero Standard Deviation Ratio and Reward Curve
 
-<img width="600" alt="image" src="https://github.com/user-attachments/assets/a1ec247b-2b82-47df-8572-5e7a132b7eef" />
+<img width="1221" height="465" alt="image" src="https://github.com/user-attachments/assets/254ecbde-32eb-4073-b9ea-6025f80a9611" />
 
+<img width="1221" height="465" alt="image" src="https://github.com/user-attachments/assets/468f6022-8333-4b63-ab7d-39355b327d8d" />
 
+### Training - Clip Fraction
+
+<img width="1221" height="465" alt="image" src="https://github.com/user-attachments/assets/9e992ac5-c091-4bba-9aef-736a2fa0ab15" />
+
+### Full-Model Validation Reward Curve
+
+<img width="1221" height="465" alt="image" src="https://github.com/user-attachments/assets/e2fb0d52-2c47-4170-bc0d-d32f0f1da209" />
