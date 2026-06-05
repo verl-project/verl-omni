@@ -30,7 +30,6 @@ from __future__ import annotations
 import json
 import math
 import os
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
 
@@ -40,6 +39,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
+
+from verl_omni.pipelines.non_diffusers_model_base import NonDiffusersModelBase
 
 # ===================================================================
 #  Config
@@ -727,7 +728,7 @@ class PositionEmbedding(nn.Module):
 # ===================================================================
 
 
-class BagelForTraining(nn.Module):
+class BagelForTraining(NonDiffusersModelBase):
     """Standalone Bagel MoT module for FlowGRPO FSDP training.
 
     ``_no_split_modules`` tells verl's FSDP wrap policy to shard at MoT-layer
@@ -743,11 +744,11 @@ class BagelForTraining(nn.Module):
     """
 
     _no_split_modules = ["BagelMoTLayer"]
+    _supports_gradient_checkpointing = True
 
     def __init__(self, config: BagelTrainingConfig):
         super().__init__()
         self.config = config
-        self.gradient_checkpointing = False
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([BagelMoTLayer(config) for _ in range(config.num_hidden_layers)])
@@ -759,12 +760,6 @@ class BagelForTraining(nn.Module):
         self.vae2llm = nn.Linear(config.patch_latent_dim, config.hidden_size)
         self.llm2vae = nn.Linear(config.hidden_size, config.patch_latent_dim)
         self.latent_pos_embed = PositionEmbedding(config.max_latent_size, config.hidden_size)
-
-    def enable_gradient_checkpointing(self, *args, **kwargs):
-        self.gradient_checkpointing = True
-
-    def disable_gradient_checkpointing(self):
-        self.gradient_checkpointing = False
 
     def forward(
         self,
@@ -853,48 +848,11 @@ class BagelForTraining(nn.Module):
 
         # 7. Transformer layers (split attention: text causal + image full)
         for layer in self.layers:
-            if self.gradient_checkpointing and self.training:
-                from torch.utils.checkpoint import checkpoint
 
-                def custom_forward(
-                    seq,
-                    cos_,
-                    sin_,
-                    text_mask_,
-                    latent_mask_,
-                    key_padding_mask_,
-                    layer=layer,
-                ):
-                    return layer(
-                        seq,
-                        cos_,
-                        sin_,
-                        text_mask_,
-                        latent_mask_,
-                        L_ctx,
-                        key_padding_mask=key_padding_mask_,
-                    )
+            def _layer_fn(seq, cos_, sin_, text_mask_, latent_mask_, kpm, *, _layer=layer):
+                return _layer(seq, cos_, sin_, text_mask_, latent_mask_, L_ctx, key_padding_mask=kpm)
 
-                sequence = checkpoint(
-                    custom_forward,
-                    sequence,
-                    cos,
-                    sin,
-                    text_mask,
-                    latent_mask,
-                    key_padding_mask,
-                    use_reentrant=False,
-                )
-            else:
-                sequence = layer(
-                    sequence,
-                    cos,
-                    sin,
-                    text_mask,
-                    latent_mask,
-                    L_ctx,
-                    key_padding_mask=key_padding_mask,
-                )
+            sequence = self._checkpointed_call(_layer_fn, sequence, cos, sin, text_mask, latent_mask, key_padding_mask)
 
         # 8. Final norm with MoT routing
         normed = sequence.new_zeros(sequence.shape)
@@ -908,51 +866,6 @@ class BagelForTraining(nn.Module):
         velocity = self.llm2vae(latent_output)
 
         return (velocity,)
-
-    # ------------------------------------------------------------------
-    #  PEFT / LoRA compatibility
-    # ------------------------------------------------------------------
-
-    def add_adapter(self, adapter_config, adapter_name: str = "default"):
-        """Add a PEFT LoRA adapter (matches diffusers.ModelMixin API)."""
-        from peft import inject_adapter_in_model
-
-        if not hasattr(self, "peft_config"):
-            self.peft_config = {}
-        self.peft_config[adapter_name] = adapter_config
-        inject_adapter_in_model(adapter_config, self, adapter_name)
-
-    def set_adapter(self, adapter_name: str):
-        for module in self.modules():
-            if module is self:
-                continue
-            set_adapter_fn = getattr(module, "set_adapter", None)
-            if callable(set_adapter_fn):
-                set_adapter_fn(adapter_name)
-
-    def disable_adapters(self):
-        for module in self.modules():
-            if module is self:
-                continue
-            disable_adapters = getattr(module, "disable_adapters", None)
-            if callable(disable_adapters):
-                disable_adapters()
-
-    def enable_adapters(self):
-        for module in self.modules():
-            if module is self:
-                continue
-            enable_adapters = getattr(module, "enable_adapters", None)
-            if callable(enable_adapters):
-                enable_adapters()
-
-    @contextmanager
-    def disable_adapter(self):
-        try:
-            self.disable_adapters()
-            yield
-        finally:
-            self.enable_adapters()
 
     # ------------------------------------------------------------------
     #  Checkpoint loading

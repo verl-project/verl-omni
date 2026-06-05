@@ -54,7 +54,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.pipeline.num_inference_steps=15 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=256 \
-    actor_rollout_ref.rollout.algo.noise_level=1.0 \
+    actor_rollout_ref.rollout.algo.noise_level=0.7 \
     actor_rollout_ref.rollout.algo.sde_type="sde" \
     actor_rollout_ref.rollout.algo.sde_window_size=2 \
     actor_rollout_ref.rollout.algo.sde_window_range="[0,7]" \
