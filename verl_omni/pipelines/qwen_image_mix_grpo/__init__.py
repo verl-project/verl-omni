@@ -12,7 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import os
+
 from .diffusers_training_adapter import QwenImageMixGRPO
-from .vllm_omni_rollout_adapter import QwenImageMixGRPOPipelineWithLogProb
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+try:
+    from .vllm_omni_rollout_adapter import QwenImageMixGRPOPipelineWithLogProb
+except (ImportError, RuntimeError, AttributeError) as e:
+    logger.info(f"Qwen Image MixGRPO rollout adapter not available: {e}. vLLM-Omni required.")
+
+    class _UnavailableModule:
+        def __getattr__(self, _):
+            raise RuntimeError("Qwen Image MixGRPO rollout adapter requires vLLM-Omni")
+
+        def __call__(self, *args, **kwargs):
+            raise RuntimeError("Qwen Image MixGRPO rollout adapter requires vLLM-Omni")
+
+    QwenImageMixGRPOPipelineWithLogProb = _UnavailableModule()
 
 __all__ = ["QwenImageMixGRPO", "QwenImageMixGRPOPipelineWithLogProb"]

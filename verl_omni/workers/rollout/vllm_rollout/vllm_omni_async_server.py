@@ -202,10 +202,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
+        raw_prompt: Optional[str] = None,
+        raw_negative_prompt: Optional[str] = None,
         priority: int = 0,
     ) -> DiffusionOutput:
         """Generate sequence with token-in-image-out."""
         prompt_ids = normalize_token_ids(prompt_ids)
+        sampling_params = sampling_params.copy()
+        raw_prompt = raw_prompt or sampling_params.pop("_raw_prompt", None)
+        raw_negative_prompt = raw_negative_prompt or sampling_params.pop("_raw_negative_prompt", None)
 
         multi_modal_data = {}
         if image_data is not None:
@@ -225,8 +230,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         # Build OmniCustomPrompt with pre-tokenized IDs
         custom_prompt: OmniCustomPrompt = {"prompt_ids": prompt_ids}
+        if raw_prompt is not None:
+            custom_prompt["prompt"] = raw_prompt
         if negative_prompt_ids is not None:
             custom_prompt["negative_prompt_ids"] = negative_prompt_ids
+        if raw_negative_prompt is not None:
+            custom_prompt["negative_prompt"] = raw_negative_prompt
         if multi_modal_data:
             custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
 
@@ -276,8 +285,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         all_timesteps = mm_output.get("all_timesteps")
         prompt_embeds = mm_output.get("prompt_embeds")
         prompt_embeds_mask = mm_output.get("prompt_embeds_mask")
+        pooled_prompt_embeds = mm_output.get("pooled_prompt_embeds")
+        text_ids = mm_output.get("text_ids")
+        latent_image_ids = mm_output.get("latent_image_ids")
         negative_prompt_embeds = mm_output.get("negative_prompt_embeds")
         negative_prompt_embeds_mask = mm_output.get("negative_prompt_embeds_mask")
+        negative_pooled_prompt_embeds = mm_output.get("negative_pooled_prompt_embeds")
+        negative_text_ids = mm_output.get("negative_text_ids")
         latents_clean = mm_output.get("latents_clean")
         train_timesteps = mm_output.get("train_timesteps")
 
@@ -289,10 +303,17 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             "train_timesteps": train_timesteps[0] if train_timesteps is not None else None,
             "prompt_embeds": prompt_embeds[0] if prompt_embeds is not None else None,
             "prompt_embeds_mask": prompt_embeds_mask[0] if prompt_embeds_mask is not None else None,
+            "pooled_prompt_embeds": pooled_prompt_embeds[0] if pooled_prompt_embeds is not None else None,
+            "text_ids": text_ids[0] if text_ids is not None else None,
+            "latent_image_ids": latent_image_ids[0] if latent_image_ids is not None else None,
             "negative_prompt_embeds": negative_prompt_embeds[0] if negative_prompt_embeds is not None else None,
             "negative_prompt_embeds_mask": negative_prompt_embeds_mask[0]
             if negative_prompt_embeds_mask is not None
             else None,
+            "negative_pooled_prompt_embeds": negative_pooled_prompt_embeds[0]
+            if negative_pooled_prompt_embeds is not None
+            else None,
+            "negative_text_ids": negative_text_ids[0] if negative_text_ids is not None else None,
             "global_steps": self.global_steps,
         }
 

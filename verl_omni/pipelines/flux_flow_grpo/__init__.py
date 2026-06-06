@@ -15,23 +15,23 @@
 import logging
 import os
 
-from .diffusers_training_adapter import *  # noqa: F401,F403
+from .diffusers_training_adapter import Flux
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 try:
-    from .vllm_omni_rollout_adapter import *  # noqa: F401,F403
+    from .vllm_omni_rollout_adapter import FluxPipelineWithLogProb
 except (ImportError, RuntimeError, AttributeError) as e:
-    logger.info(f"Qwen Image DiffusionNFT rollout adapter not available: {e}. vLLM-Omni required.")
+    logger.info(f"FLUX FlowGRPO rollout adapter not available: {e}. vLLM-Omni is required.")
 
     class _UnavailableModule:
         def __getattr__(self, _):
-            raise RuntimeError("Qwen Image DiffusionNFT rollout adapter requires vLLM-Omni")
+            raise RuntimeError("FLUX FlowGRPO rollout adapter requires vLLM-Omni.")
 
         def __call__(self, *args, **kwargs):
-            raise RuntimeError("Qwen Image DiffusionNFT rollout adapter requires vLLM-Omni")
+            raise RuntimeError("FLUX FlowGRPO rollout adapter requires vLLM-Omni.")
 
-    QwenImageDiffusionNFTPipeline = _UnavailableModule()
+    FluxPipelineWithLogProb = _UnavailableModule()
 
-__all__ = ["QwenImageDiffusionNFT", "QwenImageDiffusionNFTPipeline"]
+__all__ = ["Flux", "FluxPipelineWithLogProb"]
