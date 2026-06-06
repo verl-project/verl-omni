@@ -43,11 +43,11 @@ If work is duplicate/trivial busywork, **do not proceed**. Return a short explan
 
 ```bash
 # Install vLLM and vLLM-Omni rollout backend first
-pip install "vllm==0.21.0" \
-    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@2289478e3af3d2acac525e94aa414de10bff8cb9"
+pip install "vllm==0.22.0" \
+    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@963ba1ab7a02b2c1f687285fcd2072cd57cd0b34"
 
-# Install verl (latest main)
-pip install git+https://github.com/verl-project/verl.git@main
+# Install verl
+pip install "verl==0.8.0"
 
 # Install VeRL-Omni in editable mode
 pip install -e .

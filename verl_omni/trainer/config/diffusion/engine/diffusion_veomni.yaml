@@ -1,0 +1,90 @@
+# Target class for this configuration
+_target_: verl_omni.workers.config.diffusion.VeOmniDiffusionEngineConfig
+
+# Whether to offload model parameters to CPU
+param_offload: false
+
+# Whether to offload optimizer state to CPU
+optimizer_offload: false
+
+# FSDP shard group size. -1 means use all data-parallel ranks.
+fsdp_size: -1
+
+# Qwen-Image VeOmni backend does not support Ulysses SP yet.
+ulysses_parallel_size: 1
+
+# Expert parallel size. Kept for config compatibility; Qwen-Image uses 1.
+expert_parallel_size: 1
+
+# Initialize the model on meta before FSDP2 weight loading.
+init_device: meta
+
+# Reshard parameters after forward.
+reshard_after_forward: true
+
+# Enable FSDP2 manual prefetching.
+forward_prefetch: true
+
+# Model dtype used while loading VeOmni weights. Match the working FSDP
+# Qwen-Image recipe to avoid keeping fp32 actor weights in colocated runs.
+model_dtype: bfloat16
+
+# Whether to use mixed precision in FSDP2.
+mixed_precision: true
+
+# FSDP2 parameter dtype.
+mixed_precision_param_dtype: bfloat16
+
+# FSDP2 gradient reduction dtype.
+mixed_precision_reduce_dtype: float32
+
+# FSDP2 forward output dtype. null keeps the default.
+mixed_precision_output_dtype: null
+
+# Whether FSDP2 casts forward inputs.
+mixed_precision_cast_forward_inputs: true
+
+# Whether to use reentrant activation checkpointing.
+enable_reentrant: false
+
+# Whether to offload activations to CPU.
+enable_activation_offload: false
+
+# Activation GPU memory limit in GB when activation offload is enabled.
+activation_gpu_limit: 0.0
+
+# The backend strategy registered in EngineRegistry.
+strategy: veomni
+
+# Qwen-Image currently uses eager attention in VeOmni.
+attn_implementation: eager
+
+# MoE backend selector.
+moe_implementation: eager
+
+# Cross entropy backend selector.
+cross_entropy_loss_implementation: eager
+
+# RMSNorm backend selector.
+rms_norm_implementation: eager
+
+# SwiGLU backend selector.
+swiglu_mlp_implementation: eager
+
+# Rotary position embedding backend selector.
+rotary_pos_emb_implementation: eager
+
+# Load-balancing loss backend selector.
+load_balancing_loss_implementation: eager
+
+# Gated RMSNorm backend selector.
+rms_norm_gated_implementation: eager
+
+# Causal conv1d backend selector.
+causal_conv1d_implementation: eager
+
+# Chunk gated delta rule backend selector.
+chunk_gated_delta_rule_implementation: eager
+
+# Whether this engine is forward only.
+forward_only: false

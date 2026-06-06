@@ -57,9 +57,9 @@ Visit our documentation to learn more.
     <th>Status</th>
   </tr>
   <tr>
-    <td rowspan="3">Qwen-Image</td>
-    <td rowspan="3">Diffusion generator</td>
-    <td rowspan="3">Text → Image</td>
+    <td rowspan="5">Qwen-Image</td>
+    <td rowspan="5">Diffusion generator</td>
+    <td rowspan="5">Text → Image</td>
     <td>FlowGRPO</td>
     <td>✅</td>
   </tr>
@@ -72,10 +72,25 @@ Visit our documentation to learn more.
     <td>✅</td>
   </tr>
   <tr>
+    <td>DiffusionNFT</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>DPO</td>
+    <td>WIP</td>
+  </tr>
+  <tr>
     <td>Wan2.2</td>
     <td>Diffusion generator</td>
     <td>Text → Video</td>
     <td>DanceGRPO</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>LTX2.3</td>
+    <td>Diffusion generator</td>
+    <td>Text → Video + Audio</td>
+    <td>FlowGRPO</td>
     <td>WIP</td>
   </tr>
   <tr>
@@ -108,7 +123,7 @@ Visit our documentation to learn more.
     <td>Diffusion generator</td>
     <td>Text → Image</td>
     <td>DPO</td>
-    <td>WIP</td>
+    <td>✅</td>
   </tr>
 </table>
 

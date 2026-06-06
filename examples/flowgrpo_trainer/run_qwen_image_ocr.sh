@@ -11,8 +11,9 @@ model_name=Qwen/Qwen-Image
 reward_model_name=Qwen/Qwen3-VL-8B-Instruct
 reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
 
-NUM_GPUS_ACTOR_ROLLOUT_REWARD=4
-ACTOR_SP=2
+NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS:-4}
+NUM_NODES=${NUM_NODES:-1}
+ACTOR_SP=1
 ROLLOUT_TP=1
 REWARD_TP=4
 IMAGE_RESOLUTION=512
@@ -67,8 +68,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.experiment_name=qwen_image_ocr \
     trainer.log_val_generations=8 \
     trainer.val_before_train=False \
-    trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
-    trainer.nnodes=1 \
+    trainer.n_gpus_per_node=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / NUM_NODES)) \
+    trainer.nnodes=$NUM_NODES \
     trainer.save_freq=30 \
     trainer.test_freq=30 \
     trainer.total_epochs=15 \

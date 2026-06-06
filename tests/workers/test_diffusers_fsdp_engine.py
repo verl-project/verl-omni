@@ -65,7 +65,10 @@ def _create_sp_compatible_model(parent_dir, src_model_path, num_attention_heads=
     return dst
 
 
-def create_training_config(model_type, strategy, device_count, model):
+def create_training_config(model_type, strategy, device_count, model, policy_state_adapters=None):
+    if strategy not in {"fsdp", "fsdp2"}:
+        raise NotImplementedError(f"strategy {strategy} is not supported")
+
     if device_count == 1:
         cp = fsdp_size = 1
     else:
@@ -73,63 +76,60 @@ def create_training_config(model_type, strategy, device_count, model):
         fsdp_size = device_count
     path = os.path.expanduser(model)
     tokenizer_path = os.path.join(path, "tokenizer")
-    model_config = DiffusionModelConfig(path=path, tokenizer_path=tokenizer_path, algorithm="flow_grpo")
 
-    if strategy in ["fsdp", "fsdp2"]:
-        from hydra import compose, initialize_config_dir
-        from verl.utils.config import omega_conf_to_dataclass
+    from hydra import compose, initialize_config_dir
+    from verl.utils.config import omega_conf_to_dataclass
 
-        with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/model")):
-            cfg = compose(
-                config_name="diffusion_model",
-                overrides=[
-                    "path=" + path,
-                    "tokenizer_path=" + tokenizer_path,
-                    "lora_rank=8",
-                    "lora_alpha=16",
-                    "pipeline.true_cfg_scale=4.0",
-                    "algo.noise_level=1.2",
-                    "algo.sde_type=sde",
-                ],
-            )
-        model_config: DiffusionModelConfig = omega_conf_to_dataclass(cfg)
+    model_overrides = [
+        "path=" + path,
+        "tokenizer_path=" + tokenizer_path,
+        "lora_rank=8",
+        "lora_alpha=16",
+        "pipeline.true_cfg_scale=4.0",
+        "algo.noise_level=1.2",
+        "algo.sde_type=sde",
+    ]
+    if policy_state_adapters is not None:
+        adapters = ",".join(f'"{adapter}"' for adapter in policy_state_adapters)
+        model_overrides.append(f"policy_state_adapters=[{adapters}]")
 
-        with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/actor")):
-            cfg = compose(
-                config_name="dp_diffusion_actor",
-                overrides=[
-                    "strategy=" + strategy,
-                    "diffusion_loss.clip_ratio=0.0001",
-                    "diffusion_loss.adv_clip_max=5.0",
-                    "ppo_mini_batch_size=4",
-                    "ppo_micro_batch_size_per_gpu=4",
-                    "optim.lr=1e-4",
-                    "optim.weight_decay=0.0001",
-                    "fsdp_config.param_offload=False",
-                    "fsdp_config.optimizer_offload=False",
-                    "fsdp_config.model_dtype='bfloat16'",
-                    "fsdp_config.dtype='bfloat16'",
-                    "+fsdp_config.mixed_precision.param_dtype='bfloat16'",
-                    "fsdp_config.forward_only=False",
-                    "fsdp_config.fsdp_size=" + str(fsdp_size),
-                    "fsdp_config.ulysses_sequence_parallel_size=" + str(cp),
-                    "diffusion_loss.loss_mode='flow_grpo'",
-                ],
-            )
-        actor_config: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
+    with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/model")):
+        cfg = compose(
+            config_name="diffusion_model",
+            overrides=model_overrides,
+        )
+    model_config: DiffusionModelConfig = omega_conf_to_dataclass(cfg)
 
-        engine_config = actor_config.engine
-        optimizer_config = actor_config.optim
-        checkpoint_config = actor_config.checkpoint
-    else:
-        raise NotImplementedError(f"strategy {strategy} is not supported")
+    with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/actor")):
+        cfg = compose(
+            config_name="dp_diffusion_actor",
+            overrides=[
+                "strategy=" + strategy,
+                "diffusion_loss.clip_ratio=0.0001",
+                "diffusion_loss.adv_clip_max=5.0",
+                "ppo_mini_batch_size=4",
+                "ppo_micro_batch_size_per_gpu=4",
+                "optim.lr=1e-4",
+                "optim.weight_decay=0.0001",
+                "fsdp_config.param_offload=False",
+                "fsdp_config.optimizer_offload=False",
+                "fsdp_config.model_dtype='bfloat16'",
+                "fsdp_config.dtype='bfloat16'",
+                "+fsdp_config.mixed_precision.param_dtype='bfloat16'",
+                "fsdp_config.forward_only=False",
+                "fsdp_config.fsdp_size=" + str(fsdp_size),
+                "fsdp_config.ulysses_sequence_parallel_size=" + str(cp),
+                "diffusion_loss.loss_mode='flow_grpo'",
+            ],
+        )
+    actor_config: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
 
     training_config = TrainingWorkerConfig(
         model_type=model_type,
         model_config=model_config,
-        engine_config=engine_config,
-        optimizer_config=optimizer_config,
-        checkpoint_config=checkpoint_config,
+        engine_config=actor_config.engine,
+        optimizer_config=actor_config.optim,
+        checkpoint_config=actor_config.checkpoint,
     )
     return training_config, actor_config
 
@@ -174,7 +174,13 @@ def create_data_samples(num_device: int, model_config: DiffusionModelConfig) -> 
     return data
 
 
-@pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
+@pytest.mark.parametrize(
+    "strategy",
+    [
+        "fsdp",
+        "fsdp2",
+    ],
+)
 def test_diffusers_fsdp_engine(strategy):
     # Create configs
     ray.init()

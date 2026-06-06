@@ -14,7 +14,19 @@
 from .fsdp import (  # noqa: F401
     DiffusersFSDPEngine,
     DPODiffusersFSDPEngine,
+    NFTDiffusersFSDPEngine,
     PPODiffusersFSDPEngine,
 )
 
-__all__ = ["PPODiffusersFSDPEngine", "DPODiffusersFSDPEngine", "DiffusersFSDPEngine"]
+try:
+    from .veomni import VeOmniDiffusionEngine  # noqa: F401
+except ImportError:
+    VeOmniDiffusionEngine = None
+
+__all__ = [
+    "PPODiffusersFSDPEngine",
+    "DPODiffusersFSDPEngine",
+    "NFTDiffusersFSDPEngine",
+    "DiffusersFSDPEngine",
+    "VeOmniDiffusionEngine",
+]

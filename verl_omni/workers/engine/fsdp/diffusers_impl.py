@@ -19,12 +19,11 @@ import logging
 import os
 import warnings
 from abc import ABC, abstractmethod
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from typing import Callable, Optional
 
 import torch
 import torch.distributed
-from peft import LoraConfig
 from tensordict import TensorDict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
@@ -53,7 +52,7 @@ from verl.utils.fsdp_utils import (
 )
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import convert_weight_keys
-from verl.utils.py_functional import append_to_dict, convert_to_regular_types
+from verl.utils.py_functional import append_to_dict
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig
 from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.fsdp.utils import create_device_mesh, get_sharding_strategy
@@ -61,12 +60,14 @@ from verl.workers.engine.utils import enable_full_determinism, prepare_micro_bat
 
 from verl_omni.pipelines.utils import (
     build_scheduler,
+    forward,
     forward_and_sample_previous_step,
     prepare_model_inputs,
     prepare_noisy_latents,
 )
 from verl_omni.utils.fsdp_utils import collect_lora_params
 from verl_omni.workers.config import DiffusionModelConfig
+from verl_omni.workers.engine.lora_adapter_mixin import LoRAAdapterMixin
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -74,7 +75,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
-class DiffusersFSDPEngine(BaseEngine, ABC):
+class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
     """Base Diffusers engine using PyTorch FullyShardedDataParallel (FSDP).
 
     Supports model sharding, activation/optimizer offloading, LoRA, and sequence parallelism.
@@ -188,6 +189,52 @@ class DiffusersFSDPEngine(BaseEngine, ABC):
 
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
+    def _build_module_from_registry(self, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
+        """Try loading via ``DiffusionModelBase.build_module()``.
+
+        Returns ``None`` if the registry has no custom loader, so the
+        caller falls back to ``diffusers.AutoModel``.
+        """
+        from verl_omni.pipelines.model_base import DiffusionModelBase
+
+        model_cls = DiffusionModelBase.get_class(self.model_config)
+        module = model_cls.build_module(self.model_config, torch_dtype)
+        if module is None:
+            return None
+
+        logger.warning(
+            "Built %s via DiffusionModelBase custom loader; engine-level hooks "
+            "(attention processors, gradient-checkpointing wrappers, LoRA, "
+            "dtype upcast) may be partially effective or silently inactive. "
+            "See the docstring of _build_module_from_registry.",
+            type(module).__name__,
+        )
+
+        try:
+            module.to(torch_dtype)
+        except AttributeError:
+            raise TypeError(
+                f"{type(module).__name__} returned by build_module() has no to() method. "
+                "Custom models must be torch.nn.Module instances."
+            ) from None
+
+        if self.model_config.enable_gradient_checkpointing:
+            try:
+                module.enable_gradient_checkpointing()
+            except AttributeError:
+                raise NotImplementedError(
+                    f"Gradient checkpointing is enabled in config, but {type(module).__name__} "
+                    "does not implement enable_gradient_checkpointing(). "
+                    "Either implement it or set enable_gradient_checkpointing=False."
+                ) from None
+            logger.info(
+                "Gradient checkpointing enabled on %s via enable_gradient_checkpointing().",
+                type(module).__name__,
+            )
+
+        module.can_generate = lambda: False
+        return module
+
     def _build_module(self):
         from diffusers import AutoModel
         from verl.utils.torch_dtypes import PrecisionType
@@ -200,16 +247,21 @@ class DiffusersFSDPEngine(BaseEngine, ABC):
 
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
+        module = self._build_module_from_registry(torch_dtype)
+        if module is not None:
+            return module
+
+        # Default path: load via diffusers AutoModel
         init_context = get_init_weight_context_manager(use_meta_tensor=True, mesh=self.device_mesh)
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
             module = AutoModel.from_pretrained(
-                self.model_config.local_path,
+                self.model_config.config_path or self.model_config.local_path,
                 torch_dtype=torch_dtype,
                 trust_remote_code=self.model_config.trust_remote_code,
-                subfolder="transformer",  # currently we support DiT with transformer backbone only.
+                subfolder="" if self.model_config.config_path else self.model_config.transformer_subfolder,
             )
             module.set_attention_backend(self.model_config.attn_backend)
 
@@ -227,49 +279,6 @@ class DiffusersFSDPEngine(BaseEngine, ABC):
 
             module.can_generate = lambda: False
             module.config.save_pretrained = save_config.__get__(module.config)
-
-        return module
-
-    def _build_lora_module(self, module):
-        from peft.tuners.tuners_utils import BaseTunerLayer
-
-        lora_adapter_path = getattr(self.model_config, "lora_adapter_path", None)
-        if lora_adapter_path is not None:
-            from verl.utils.fs import copy_to_local
-
-            print(f"Loading pre-trained LoRA adapter to from: {lora_adapter_path}")
-            # Copy adapter to local if needed
-            local_adapter_path = copy_to_local(lora_adapter_path, use_shm=self.model_config.use_shm)
-
-            module.load_lora_adapter(local_adapter_path)
-        else:
-            # Convert config to regular Python types before creating PEFT model
-            lora_config = {
-                "r": self.model_config.lora_rank,
-                "lora_alpha": self.model_config.lora_alpha,
-                "init_lora_weights": self.model_config.lora_init_weights,
-                "target_modules": convert_to_regular_types(self.model_config.target_modules),
-                "target_parameters": convert_to_regular_types(self.model_config.target_parameters),
-                "exclude_modules": convert_to_regular_types(self.model_config.exclude_modules),
-                "bias": "none",
-            }
-            module.add_adapter(LoraConfig(**lora_config))
-
-        # Optionally convert LoRA parameters to a target dtype (e.g., fp32).
-        lora_dtype = getattr(self.model_config, "lora_dtype", None)
-        if lora_dtype is not None:
-            from verl.utils.torch_dtypes import PrecisionType
-
-            target_dtype = PrecisionType.to_dtype(lora_dtype)
-            for name, param in module.named_parameters():
-                if param.requires_grad:
-                    orig_dtype = param.dtype
-                    param.data = param.data.to(target_dtype)
-                    logger.debug("LoRA param %s: %s -> %s", name, orig_dtype, param.dtype)
-
-            for submodule in module.modules():
-                if isinstance(submodule, BaseTunerLayer):
-                    submodule.cast_input_dtype_enabled = False
 
         return module
 
@@ -688,7 +697,9 @@ class DiffusersFSDPEngine(BaseEngine, ABC):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.optimizer)
 
-    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
+    def get_per_tensor_param(
+        self, layered_summon=False, base_sync_done=False, adapter_name: str | None = None, **kwargs
+    ):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         load_fsdp_model_to_gpu(self.module)
@@ -700,12 +711,16 @@ class DiffusersFSDPEngine(BaseEngine, ABC):
         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
         if hasattr(peft_model, "peft_config"):  # LoRA
             peft_config = peft_model.peft_config.get("default", None)
-            params = collect_lora_params(
-                module=self.module,
-                layered_summon=layered_summon,
-                base_sync_done=base_sync_done,
-                is_diffusers=True,
-            )
+            adapter_ctx = self.use_adapter(adapter_name) if adapter_name is not None else nullcontext()
+            with adapter_ctx:
+                params = collect_lora_params(
+                    module=self.module,
+                    layered_summon=layered_summon,
+                    base_sync_done=base_sync_done,
+                    is_diffusers=True,
+                    adapter_name=adapter_name or "default",
+                    layer_prefixes=self.model_config.fsdp_layer_prefixes,
+                )
             if not base_sync_done:
                 params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
         else:
@@ -738,23 +753,15 @@ class DiffusersFSDPEngine(BaseEngine, ABC):
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
         return per_tensor_param, peft_config_dict
 
-    @contextmanager
-    def disable_adapter(self):
-        try:
-            self.module.disable_adapters()
-            yield
-        finally:
-            self.module.enable_adapters()
-
-
-@EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
-class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
-    """Diffusers FSDP engine with PPO forward/backward and I/O preparation."""
-
-    def forward_backward_batch(
-        self, data: TensorDict, loss_function: Callable, forward_only: bool = False
-    ) -> list[TensorDict]:
-        num_timesteps = data["all_timesteps"].shape[1]
+    def _run_forward_backward_batch(
+        self,
+        data: TensorDict,
+        loss_function: Callable,
+        forward_only: bool,
+        *,
+        timesteps_key: str,
+    ) -> dict:
+        num_timesteps = data[timesteps_key].shape[1]
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
         tu.assign_non_tensor(data, use_dynamic_bsz=False)
 
@@ -763,9 +770,7 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
         )
 
         gradient_accumulation_steps = len(micro_batches) * num_timesteps
-
         output_lst = []
-
         ctx = torch.no_grad() if forward_only else nullcontext()
 
         for micro_batch in micro_batches:
@@ -778,17 +783,24 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
                     loss, meta_info = self.forward_step(
                         micro_batch, loss_function=loss_function, forward_only=forward_only, step=step
                     )
-
                     if not forward_only:
                         loss.backward()
-
                     for key, val in meta_info.items():
                         meta_info_lst[key].append(val)
-
             output_lst.append(meta_info_lst)
 
         # postprocess and return
         return self.postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+
+
+@EngineRegistry.register(model_type="diffusion_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
+    """Diffusers FSDP engine with PPO forward/backward and I/O preparation."""
+
+    def forward_backward_batch(
+        self, data: TensorDict, loss_function: Callable, forward_only: bool = False
+    ) -> list[TensorDict]:
+        return self._run_forward_backward_batch(data, loss_function, forward_only, timesteps_key="all_timesteps")
 
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
         """
@@ -800,16 +812,16 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
         """
         latents = micro_batch["all_latents"]
         timesteps = micro_batch["all_timesteps"]
-        prompt_embeds = micro_batch["prompt_embeds"]
-        prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
-        negative_prompt_embeds = micro_batch["negative_prompt_embeds"]
-        negative_prompt_embeds_mask = micro_batch["negative_prompt_embeds_mask"]
+        prompt_embeds = micro_batch.get("prompt_embeds", None)
+        prompt_embeds_mask = micro_batch.get("prompt_embeds_mask", None)
+        negative_prompt_embeds = micro_batch.get("negative_prompt_embeds", None)
+        negative_prompt_embeds_mask = micro_batch.get("negative_prompt_embeds_mask", None)
         sp_size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
 
-        if prompt_embeds.is_nested:
+        if isinstance(prompt_embeds, torch.Tensor) and prompt_embeds.is_nested:
             prompt_embeds, prompt_embeds_mask = self._unpad_nested_embeds(prompt_embeds, prompt_embeds_mask)
 
-        if sp_size > 1:
+        if isinstance(prompt_embeds, torch.Tensor) and sp_size > 1:
             prompt_embeds, prompt_embeds_mask = self._pad_embeds_for_sp(prompt_embeds, prompt_embeds_mask, sp_size)
 
         if isinstance(negative_prompt_embeds, torch.Tensor) and negative_prompt_embeds.is_nested:
@@ -900,7 +912,7 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
         return loss, output
 
 
-@EngineRegistry.register(model_type="diffusion_dp_model", backend=["fsdp", "fsdp2"], device=["cuda"])
+@EngineRegistry.register(model_type="diffusion_dpo_model", backend=["fsdp", "fsdp2"], device=["cuda"])
 class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
     """Diffusers FSDP engine variant for diffusion DPO."""
 
@@ -1041,14 +1053,11 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
 
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
         model_inputs, negative_model_inputs, dpo_context = self.prepare_model_inputs(micro_batch=micro_batch, step=step)
-        noise_pred = forward_and_sample_previous_step(
+        noise_pred = forward(
             module=self.module,
-            scheduler=self.scheduler,
             model_config=self.model_config,
             model_inputs=model_inputs,
             negative_model_inputs=negative_model_inputs,
-            scheduler_inputs=micro_batch,
-            step=step,
         )
         model_output = self.prepare_model_outputs(output=(noise_pred, dpo_context), micro_batch=micro_batch)
 
@@ -1081,6 +1090,133 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
             "metrics": metrics,
         }
 
+        return loss, output
+
+
+@EngineRegistry.register(model_type="diffusion_nft_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
+    """Diffusers FSDP engine for direct-preference / forward-process objectives (e.g. DiffusionNFT)."""
+
+    def forward_backward_batch(
+        self, data: TensorDict, loss_function: Callable, forward_only: bool = False
+    ) -> list[TensorDict]:
+        return self._run_forward_backward_batch(data, loss_function, forward_only, timesteps_key="train_timesteps")
+
+    def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
+        x0 = micro_batch["latents_clean"]
+        timestep = micro_batch["train_timesteps"][:, step]
+        t = timestep.float() / 1000.0
+        t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
+
+        if micro_batch.get("forward_noise", None) is not None:
+            forward_noise = micro_batch["forward_noise"]
+            noise = forward_noise[:, step] if forward_noise.ndim == x0.ndim + 1 else forward_noise
+        else:
+            noise = torch.randn_like(x0.float())
+        xt = (1.0 - t_expanded) * x0 + t_expanded * noise
+
+        prompt_embeds = micro_batch["prompt_embeds"]
+        prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
+        negative_prompt_embeds = micro_batch.get("negative_prompt_embeds", None)
+        negative_prompt_embeds_mask = micro_batch.get("negative_prompt_embeds_mask", None)
+        sp_size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
+
+        if prompt_embeds.is_nested:
+            prompt_embeds, prompt_embeds_mask = self._unpad_nested_embeds(prompt_embeds, prompt_embeds_mask)
+
+        if sp_size > 1:
+            prompt_embeds, prompt_embeds_mask = self._pad_embeds_for_sp(prompt_embeds, prompt_embeds_mask, sp_size)
+
+        if isinstance(negative_prompt_embeds, torch.Tensor) and negative_prompt_embeds.is_nested:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self._unpad_nested_embeds(
+                negative_prompt_embeds, negative_prompt_embeds_mask
+            )
+
+        if isinstance(negative_prompt_embeds, torch.Tensor) and sp_size > 1:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self._pad_embeds_for_sp(
+                negative_prompt_embeds, negative_prompt_embeds_mask, sp_size
+            )
+
+        model_inputs, negative_model_inputs = prepare_model_inputs(
+            module=self.module,
+            model_config=self.model_config,
+            latents=xt,
+            timesteps=timestep,
+            prompt_embeds=prompt_embeds,
+            prompt_embeds_mask=prompt_embeds_mask,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+            micro_batch=micro_batch,
+            step=step,
+        )
+        return model_inputs, negative_model_inputs, x0, xt, t_expanded
+
+    def prepare_model_outputs(self, output, micro_batch: TensorDict):
+        old_prediction, forward_prediction, ref_forward_prediction, x0, xt, t_expanded = output
+        return {
+            "old_prediction": old_prediction,
+            "forward_prediction": forward_prediction,
+            "ref_forward_prediction": ref_forward_prediction,
+            "x0": x0,
+            "xt": xt,
+            "t_expanded": t_expanded,
+        }
+
+    def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
+        model_inputs, negative_model_inputs, x0, xt, t_expanded = self.prepare_model_inputs(
+            micro_batch=micro_batch, step=step
+        )
+
+        with self.use_adapter("old"), torch.no_grad():
+            old_prediction = forward(
+                module=self.module,
+                model_config=self.model_config,
+                model_inputs=model_inputs,
+                negative_model_inputs=negative_model_inputs,
+            ).detach()
+
+        forward_prediction = forward(
+            module=self.module,
+            model_config=self.model_config,
+            model_inputs=model_inputs,
+            negative_model_inputs=negative_model_inputs,
+        )
+
+        with torch.no_grad():
+            with self.disable_adapter():
+                ref_forward_prediction = forward(
+                    module=self.module,
+                    model_config=self.model_config,
+                    model_inputs=model_inputs,
+                    negative_model_inputs=negative_model_inputs,
+                ).detach()
+        self._set_adapter("default")
+
+        model_output = self.prepare_model_outputs(
+            output=(old_prediction, forward_prediction, ref_forward_prediction, x0, xt, t_expanded),
+            micro_batch=micro_batch,
+        )
+
+        if loss_function is not None:
+            data = tu.get_tensordict({"reward_prob": micro_batch["reward_prob"][:, step]})
+            tu.assign_non_tensor(
+                data,
+                gradient_accumulation_steps=tu.get_non_tensor_data(
+                    micro_batch, "gradient_accumulation_steps", default=None
+                ),
+                sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
+            )
+            loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
+        else:
+            assert forward_only, "forward_only must be True when loss_function is None"
+            loss = torch.tensor(1.0, device=x0.device)
+            metrics = {}
+
+        output = {
+            "model_output": model_output,
+            "loss": loss.detach().item(),
+            "metrics": metrics,
+        }
         return loss, output
 
 
