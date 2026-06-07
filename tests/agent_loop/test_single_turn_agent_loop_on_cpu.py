@@ -62,3 +62,15 @@ async def test_encode_prompt_ids_falls_back_to_plain_tokenizer_without_chat_temp
     prompt_ids = await loop._encode_prompt_ids([{"role": "user", "content": "a red cabin"}])
 
     assert prompt_ids == [101, 102]
+
+
+@pytest.mark.asyncio
+async def test_encode_prompt_ids_requires_text_without_chat_template():
+    class _Tokenizer:
+        chat_template = None
+
+    loop = object.__new__(DiffusionSingleTurnAgentLoop)
+    loop.tokenizer = _Tokenizer()
+
+    with pytest.raises(ValueError, match="Prompt text is empty"):
+        await loop._encode_prompt_ids([{"role": "user", "content": [{"type": "image", "image": "ignored"}]}])

@@ -145,7 +145,7 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
 
         text = _messages_to_text(raw_prompt)
         if text is None:
-            return await self.apply_chat_template(raw_prompt, images=images, videos=videos)
+            raise ValueError("Prompt text is empty and no chat template is available on the tokenizer.")
         return self.tokenizer.encode(text, add_special_tokens=True)
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> DiffusionAgentLoopOutput:

@@ -77,8 +77,16 @@ def _batch_tensors(batch_size: int = 2):
 
 
 class _DummyModule:
-    def __init__(self, outputs: list[torch.Tensor] | None = None, *, guidance_embeds: bool = False):
+    def __init__(
+        self,
+        outputs: list[torch.Tensor] | None = None,
+        *,
+        guidance_embeds: bool = False,
+        direct_guidance_embeds: bool | None = None,
+    ):
         self.config = SimpleNamespace(guidance_embeds=guidance_embeds)
+        if direct_guidance_embeds is not None:
+            self.guidance_embeds = direct_guidance_embeds
         self.outputs = list(outputs or [])
         self.calls: list[dict] = []
 
@@ -211,6 +219,23 @@ class TestFluxFlowGRPORolloutParamCompat:
         assert _has_guidance_embeds(SimpleNamespace(guidance_embeds=True)) is True
         assert _has_guidance_embeds(SimpleNamespace()) is False
 
+    def test_extract_prompt_batch_preserves_batched_dict_prompts(self):
+        pytest.importorskip("vllm_omni")
+
+        from verl_omni.pipelines.flux_flow_grpo.vllm_omni_rollout_adapter import _extract_prompt_batch
+
+        prompts = [
+            {"prompt": "a red cabin", "prompt_2": "clip cabin", "negative_prompt": "blurry"},
+            {"prompt": "a blue lake", "prompt_2": "clip lake", "negative_prompt": "low quality"},
+        ]
+
+        prompt, prompt_2, negative_prompt, negative_prompt_2 = _extract_prompt_batch(prompts)
+
+        assert prompt == ["a red cabin", "a blue lake"]
+        assert prompt_2 == ["clip cabin", "clip lake"]
+        assert negative_prompt == ["blurry", "low quality"]
+        assert negative_prompt_2 is None
+
 
 class TestFluxFlowGRPOBuildTransformerInputs:
     def test_squeezes_position_ids_and_scales_timestep(self):
@@ -265,6 +290,32 @@ class TestFluxFlowGRPOPrepareModelInputs:
         torch.testing.assert_close(model_inputs["timestep"], tensors["timesteps"][:, 1] / 1000.0)
         torch.testing.assert_close(model_inputs["guidance"], torch.full((2,), 2.5))
         torch.testing.assert_close(model_inputs["pooled_projections"], tensors["pooled_prompt_embeds"])
+
+    def test_guidance_tensor_accepts_direct_module_flag(self):
+        tensors = _batch_tensors()
+        micro_batch = TensorDict(
+            {
+                "pooled_prompt_embeds": tensors["pooled_prompt_embeds"],
+                "text_ids": tensors["text_ids"],
+                "latent_image_ids": tensors["latent_image_ids"],
+            },
+            batch_size=2,
+        )
+
+        model_inputs, _ = Flux.prepare_model_inputs(
+            module=_DummyModule(direct_guidance_embeds=True),
+            model_config=_make_model_config(guidance_scale=2.75),
+            latents=tensors["latents"],
+            timesteps=tensors["timesteps"],
+            prompt_embeds=tensors["prompt_embeds"],
+            prompt_embeds_mask=tensors["prompt_embeds_mask"],
+            negative_prompt_embeds=tensors["negative_prompt_embeds"],
+            negative_prompt_embeds_mask=tensors["negative_prompt_embeds_mask"],
+            micro_batch=micro_batch,
+            step=0,
+        )
+
+        torch.testing.assert_close(model_inputs["guidance"], torch.full((2,), 2.75))
 
     def test_true_cfg_returns_negative_inputs(self):
         tensors = _batch_tensors()

@@ -119,6 +119,28 @@ def _has_guidance_embeds(module: torch.nn.Module) -> bool:
     return bool(getattr(module, "guidance_embeds", False))
 
 
+def _extract_prompt_batch(
+    prompts: list[Any],
+    prompt: str | list[str] | None = None,
+    prompt_2: str | list[str] | None = None,
+    negative_prompt: str | list[str] | None = None,
+    negative_prompt_2: str | list[str] | None = None,
+) -> tuple[str | list[str] | None, str | list[str] | None, str | list[str] | None, str | list[str] | None]:
+    if prompt is None and prompts:
+        prompt = [p if isinstance(p, str) else (p.get("prompt") or "") for p in prompts]
+    if prompt_2 is None and prompts and all(isinstance(p, dict) for p in prompts):
+        prompt_2 = [p.get("prompt_2") for p in prompts]
+    if negative_prompt is None and prompts:
+        negative_prompt = ["" if isinstance(p, str) else (p.get("negative_prompt") or "") for p in prompts]
+        if all(not item for item in negative_prompt):
+            negative_prompt = None
+    if negative_prompt_2 is None and prompts and all(isinstance(p, dict) for p in prompts):
+        negative_prompt_2 = [p.get("negative_prompt_2") for p in prompts]
+        if all(item is None for item in negative_prompt_2):
+            negative_prompt_2 = None
+    return prompt, prompt_2, negative_prompt, negative_prompt_2
+
+
 @contextmanager
 def _patched_flux_transformer_constructor(od_config: OmniDiffusionConfig):
     """Forward checkpoint transformer kwargs while upstream vLLM-Omni does not.
@@ -304,19 +326,13 @@ class FluxPipelineWithLogProb(FluxPipeline):
         sde_type: Literal["sde", "cps"] = "sde",
         logprobs: bool = True,
     ) -> DiffusionOutput:
-        custom_prompt = req.prompts[0] if req.prompts else {}
-        if isinstance(custom_prompt, dict):
-            prompt = custom_prompt.get("prompt", prompt)
-            prompt_2 = custom_prompt.get("prompt_2", prompt_2)
-            negative_prompt = custom_prompt.get("negative_prompt", negative_prompt)
-            negative_prompt_2 = custom_prompt.get("negative_prompt_2", negative_prompt_2)
-
-        if prompt is None and req.prompts:
-            prompt = [p if isinstance(p, str) else (p.get("prompt") or "") for p in req.prompts]
-        if negative_prompt is None and req.prompts:
-            negative_prompt = ["" if isinstance(p, str) else (p.get("negative_prompt") or "") for p in req.prompts]
-            if all(not item for item in negative_prompt):
-                negative_prompt = None
+        prompt, prompt_2, negative_prompt, negative_prompt_2 = _extract_prompt_batch(
+            req.prompts,
+            prompt,
+            prompt_2,
+            negative_prompt,
+            negative_prompt_2,
+        )
 
         sampling_params = req.sampling_params
         height = sampling_params.height or self.default_sample_size * self.vae_scale_factor

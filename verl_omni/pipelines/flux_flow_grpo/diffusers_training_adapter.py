@@ -67,7 +67,7 @@ def _guidance_tensor(
     guidance_scale = model_config.pipeline.guidance_scale
     if guidance_scale is None:
         guidance_scale = 3.5
-    if getattr(module.config, "guidance_embeds", False):
+    if getattr(module, "guidance_embeds", False) or getattr(getattr(module, "config", None), "guidance_embeds", False):
         return torch.full([timesteps.shape[0]], guidance_scale, device=timesteps.device, dtype=torch.float32)
     return None
 
