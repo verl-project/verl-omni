@@ -141,6 +141,12 @@ def _extract_prompt_batch(
     return prompt, prompt_2, negative_prompt, negative_prompt_2
 
 
+def _first_generator(generator: torch.Generator | list[torch.Generator] | None) -> torch.Generator | None:
+    if isinstance(generator, list):
+        return generator[0] if generator else None
+    return generator
+
+
 @contextmanager
 def _patched_flux_transformer_constructor(od_config: OmniDiffusionConfig):
     """Forward checkpoint transformer kwargs while upstream vLLM-Omni does not.
@@ -439,11 +445,12 @@ class FluxPipelineWithLogProb(FluxPipeline):
                 sde_window_range[0],
                 min(sde_window_range[1], len(timesteps)) - sde_window_size,
             )
+            sde_generator = _first_generator(generator)
             start = torch.randint(
                 sde_window_range[0],
                 max_sde_window_start + 1,
                 (1,),
-                generator=generator,
+                generator=sde_generator,
                 device=self.device,
             ).item()
             end = start + sde_window_size

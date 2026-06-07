@@ -236,6 +236,17 @@ class TestFluxFlowGRPORolloutParamCompat:
         assert negative_prompt == ["blurry", "low quality"]
         assert negative_prompt_2 is None
 
+    def test_first_generator_accepts_optional_generator_list(self):
+        pytest.importorskip("vllm_omni")
+
+        from verl_omni.pipelines.flux_flow_grpo.vllm_omni_rollout_adapter import _first_generator
+
+        generator = torch.Generator()
+        assert _first_generator(generator) is generator
+        assert _first_generator([generator]) is generator
+        assert _first_generator([]) is None
+        assert _first_generator(None) is None
+
 
 class TestFluxFlowGRPOBuildTransformerInputs:
     def test_squeezes_position_ids_and_scales_timestep(self):
