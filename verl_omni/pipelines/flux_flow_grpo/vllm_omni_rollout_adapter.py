@@ -112,6 +112,13 @@ def _module_parameter_dtype(module: torch.nn.Module, default: torch.dtype) -> to
     return parameter.dtype if parameter is not None else default
 
 
+def _has_guidance_embeds(module: torch.nn.Module) -> bool:
+    config = getattr(module, "config", None)
+    if config is not None and hasattr(config, "guidance_embeds"):
+        return bool(getattr(config, "guidance_embeds"))
+    return bool(getattr(module, "guidance_embeds", False))
+
+
 @contextmanager
 def _patched_flux_transformer_constructor(od_config: OmniDiffusionConfig):
     """Forward checkpoint transformer kwargs while upstream vLLM-Omni does not.
@@ -402,7 +409,7 @@ class FluxPipelineWithLogProb(FluxPipeline):
         timesteps, _ = self.prepare_timesteps(num_inference_steps, sigmas, latents.shape[1])
         self._num_timesteps = len(timesteps)
 
-        if self.transformer.guidance_embeds:
+        if _has_guidance_embeds(self.transformer):
             guidance = torch.full([1], guidance_scale, dtype=torch.float32, device=self.device)
             guidance = guidance.expand(latents.shape[0])
         else:

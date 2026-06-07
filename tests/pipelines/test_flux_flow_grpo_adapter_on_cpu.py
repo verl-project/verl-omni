@@ -201,6 +201,16 @@ class TestFluxFlowGRPORolloutParamCompat:
         assert _module_parameter_dtype(torch.nn.Linear(2, 2).to(dtype=torch.bfloat16), torch.float32) == torch.bfloat16
         assert _module_parameter_dtype(torch.nn.Identity(), torch.float32) == torch.float32
 
+    def test_guidance_embeds_prefers_diffusers_config(self):
+        pytest.importorskip("vllm_omni")
+
+        from verl_omni.pipelines.flux_flow_grpo.vllm_omni_rollout_adapter import _has_guidance_embeds
+
+        assert _has_guidance_embeds(SimpleNamespace(config=SimpleNamespace(guidance_embeds=True))) is True
+        assert _has_guidance_embeds(SimpleNamespace(config=SimpleNamespace(guidance_embeds=False))) is False
+        assert _has_guidance_embeds(SimpleNamespace(guidance_embeds=True)) is True
+        assert _has_guidance_embeds(SimpleNamespace()) is False
+
 
 class TestFluxFlowGRPOBuildTransformerInputs:
     def test_squeezes_position_ids_and_scales_timestep(self):
