@@ -16,12 +16,14 @@
 These tests keep the adapter boundary covered without loading FLUX weights.
 """
 
+import json
 from types import SimpleNamespace
 
 import pytest
 import torch
 from tensordict import TensorDict
 
+from verl_omni.pipelines.flux_flow_grpo.common import getattr_not_none
 from verl_omni.pipelines.flux_flow_grpo.diffusers_training_adapter import Flux
 from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
@@ -104,6 +106,99 @@ class _DummyScheduler:
 class TestFluxFlowGRPORegistry:
     def test_registered_for_flux_flow_grpo(self):
         assert DiffusionModelBase.get_class(_make_model_config()) is Flux
+
+
+class TestFluxFlowGRPORolloutParamCompat:
+    def test_getattr_not_none_reads_optional_sampling_params(self):
+        assert getattr_not_none(SimpleNamespace(), "guidance_scale", 3.5) == 3.5
+        assert getattr_not_none(SimpleNamespace(guidance_scale=None), "guidance_scale", 3.5) == 3.5
+        assert getattr_not_none(SimpleNamespace(guidance_scale=2.25), "guidance_scale", 3.5) == 2.25
+
+    def test_vllm_omni_custom_pipeline_uses_dummy_initial_load(self):
+        pytest.importorskip("vllm_omni")
+
+        from verl_omni.pipelines.flux_flow_grpo.vllm_omni_rollout_adapter import FluxPipelineWithLogProb
+        from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
+
+        server = object.__new__(vLLMOmniHttpServer)
+        server.model_config = SimpleNamespace(architecture="FluxPipeline", algorithm="flow_grpo")
+        engine_args = {"diffusion_load_format": "safetensors"}
+
+        server._configure_custom_pipeline(engine_args)
+
+        assert engine_args["enable_dummy_pipeline"] is True
+        assert engine_args["diffusion_load_format"] == "dummy"
+        assert engine_args["custom_pipeline_args"] == {
+            "pipeline_class": f"{FluxPipelineWithLogProb.__module__}.{FluxPipelineWithLogProb.__qualname__}"
+        }
+
+    def test_custom_pipeline_fills_missing_transformer_config_from_checkpoint(self, tmp_path):
+        pytest.importorskip("vllm_omni")
+
+        from vllm_omni.diffusion.data import TransformerConfig
+
+        from verl_omni.pipelines.flux_flow_grpo.vllm_omni_rollout_adapter import (
+            _ensure_flux_transformer_config,
+            _get_flux_transformer_config_kwargs,
+        )
+
+        model_dir = tmp_path / "flux"
+        transformer_dir = model_dir / "transformer"
+        transformer_dir.mkdir(parents=True)
+        (transformer_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "_class_name": "FluxTransformer2DModel",
+                    "guidance_embeds": False,
+                    "num_layers": 19,
+                    "num_single_layers": 38,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        od_config = SimpleNamespace(
+            model=str(model_dir),
+            tf_model_config=TransformerConfig.from_dict({"num_layers": 2}),
+        )
+
+        _ensure_flux_transformer_config(od_config)
+
+        merged_config = od_config.tf_model_config.to_dict()
+        assert merged_config["guidance_embeds"] is False
+        assert merged_config["num_layers"] == 2
+        assert merged_config["num_single_layers"] == 38
+
+        class DummyFluxTransformer:
+            def __init__(
+                self,
+                od_config,
+                num_layers: int = 19,
+                guidance_embeds: bool = True,
+                ignored_default: str = "default",
+            ):
+                pass
+
+        config_kwargs = _get_flux_transformer_config_kwargs(DummyFluxTransformer, od_config.tf_model_config)
+        assert config_kwargs["guidance_embeds"] is False
+        assert config_kwargs["num_layers"] == 2
+        assert "ignored_default" not in config_kwargs
+
+    def test_sde_window_is_clamped_to_available_timesteps(self):
+        pytest.importorskip("vllm_omni")
+
+        from verl_omni.pipelines.flux_flow_grpo.vllm_omni_rollout_adapter import _normalize_sde_window
+
+        assert _normalize_sde_window((3, 5), num_timesteps=2) == (1, 2)
+        assert _normalize_sde_window((0, 4), num_timesteps=1) == (0, 1)
+
+    def test_module_parameter_dtype_reads_first_parameter_dtype(self):
+        pytest.importorskip("vllm_omni")
+
+        from verl_omni.pipelines.flux_flow_grpo.vllm_omni_rollout_adapter import _module_parameter_dtype
+
+        assert _module_parameter_dtype(torch.nn.Linear(2, 2).to(dtype=torch.bfloat16), torch.float32) == torch.bfloat16
+        assert _module_parameter_dtype(torch.nn.Identity(), torch.float32) == torch.float32
 
 
 class TestFluxFlowGRPOBuildTransformerInputs:

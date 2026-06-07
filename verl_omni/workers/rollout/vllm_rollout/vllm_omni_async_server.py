@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
+import inspect
 import logging
 import os
 from dataclasses import asdict
-from typing import Any, Optional
+from typing import Any, Optional, TypeAlias
 
 import numpy as np
 import ray
@@ -37,7 +38,7 @@ from vllm.entrypoints.openai.api_server import build_app
 from vllm_omni.engine.arg_utils import OmniEngineArgs
 from vllm_omni.entrypoints import AsyncOmni
 from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
-from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
 
@@ -48,6 +49,8 @@ from verl_omni.workers.rollout.replica import DiffusionOutput
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
+OmniCustomPrompt: TypeAlias = dict[str, Any]
 
 
 class vLLMOmniHttpServer(vLLMHttpServer):
@@ -126,14 +129,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_args = asdict(engine_args)
 
         import_external_libs(self.config.external_lib)
-        pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
-            architecture=self.model_config.architecture,
-            algorithm=self.model_config.algorithm,
-        )
-        # TODO (mike): read custom_pipeline from engine_args
-        if pipeline_path is not None:
-            engine_args["enable_dummy_pipeline"] = True
-            engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
+        self._configure_custom_pipeline(engine_args)
 
         diffusion_master_port, diffusion_master_sock = get_free_port("127.0.0.1", with_alive_sock=True)
         diffusion_master_sock.close()
@@ -151,6 +147,17 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self.engine = engine_client
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
 
+    def _configure_custom_pipeline(self, engine_args: dict[str, Any]) -> None:
+        pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
+            architecture=self.model_config.architecture,
+            algorithm=self.model_config.algorithm,
+        )
+        # TODO (mike): read custom_pipeline from engine_args
+        if pipeline_path is not None:
+            engine_args["enable_dummy_pipeline"] = True
+            engine_args["diffusion_load_format"] = "dummy"
+            engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
+
     async def run_headless(self, args: argparse.Namespace):
         """Run headless server in a separate thread."""
         # TODO (mike): support multi node
@@ -163,20 +170,34 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _get_wake_up_tags(self) -> list[str]:
         return ["weights"]
 
+    async def _call_engine_method(
+        self, method_name: str, kwargs: dict[str, Any] | None = None, *, collective: bool = True
+    ):
+        kwargs = kwargs or {}
+        if collective and hasattr(self.engine, "collective_rpc"):
+            result = self.engine.collective_rpc(method_name, kwargs=kwargs)
+        else:
+            method = getattr(self.engine, method_name)
+            result = method(**kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
     async def wake_up(self, tags: list[str] | None = None):
-        """Override parent to use collective_rpc instead of engine.wake_up().
+        """Override parent to avoid server-process CUDA initialization when possible.
 
         The parent (verl ``1927ad33``+) calls ``self.engine.wake_up(tags=...)``
         which triggers CUDA initialisation in this HTTP server process when
         running under vLLM-Omni (AsyncOmni engine).
-        Use ``collective_rpc`` instead.
+        Use ``collective_rpc`` when vLLM-Omni exposes it; older AsyncOmni
+        builds only provide a direct synchronous ``wake_up`` method.
 
         # TODO (long): drop this override once vllm-omni wake_up
         without triggering GPU initialisation.
         """
         if self.node_rank != 0:
             return
-        await self.engine.collective_rpc(
+        await self._call_engine_method(
             "wake_up", kwargs={"tags": tags if tags is not None else self._get_wake_up_tags()}
         )
 
@@ -191,8 +212,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """
         # TODO (andy): use `sleep_level=2` in the future when the
         #  trainer side incorporates the whole components of the model.
-        await self.engine.collective_rpc("sleep", kwargs={"level": 1})
-        await self.engine.reset_encoder_cache()
+        await self._call_engine_method("sleep", kwargs={"level": 1})
+        if hasattr(self.engine, "reset_encoder_cache"):
+            await self._call_engine_method("reset_encoder_cache", collective=False)
+        elif hasattr(self.engine, "reset_mm_cache"):
+            await self._call_engine_method("reset_mm_cache", collective=False)
 
     async def generate(
         self,

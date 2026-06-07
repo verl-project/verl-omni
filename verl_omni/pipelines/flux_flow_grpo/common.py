@@ -27,6 +27,10 @@ def coalesce_not_none(value, default):
     return default if value is None else value
 
 
+def getattr_not_none(obj, name: str, default):
+    return coalesce_not_none(getattr(obj, name, None), default)
+
+
 def calculate_shift(
     image_seq_len: int,
     base_image_seq_len: int = 256,

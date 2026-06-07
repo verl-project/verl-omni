@@ -12,11 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
+import json
+import logging
 import os
+from collections.abc import Mapping
+from contextlib import contextmanager
 from typing import Any, Literal
 
 import torch
-from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
+from vllm.transformers_utils.config import get_hf_file_to_dict
+from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig, TransformerConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.models.flux import FluxPipeline
 from vllm_omni.diffusion.request import OmniDiffusionRequest
@@ -24,9 +30,123 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
-from .common import batched_position_ids, coalesce_not_none, maybe_to_cpu
+from .common import batched_position_ids, coalesce_not_none, getattr_not_none, maybe_to_cpu
 
 __all__ = ["FluxPipelineWithLogProb"]
+
+logger = logging.getLogger(__name__)
+
+
+def _tf_config_to_dict(tf_model_config: Any) -> dict[str, Any]:
+    if tf_model_config is None:
+        return {}
+    if hasattr(tf_model_config, "to_dict"):
+        return dict(tf_model_config.to_dict())
+    if isinstance(tf_model_config, Mapping):
+        return dict(tf_model_config)
+    return {}
+
+
+def _load_flux_transformer_config(model: str | None) -> dict[str, Any] | None:
+    if not model:
+        return None
+
+    if os.path.isdir(model):
+        config_path = os.path.join(model, "transformer", "config.json")
+        if os.path.isfile(config_path):
+            with open(config_path, encoding="utf-8") as f:
+                return json.load(f)
+
+    try:
+        return get_hf_file_to_dict("transformer/config.json", model)
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not load FLUX transformer config for %s: %s", model, exc)
+        return None
+
+
+def _ensure_flux_transformer_config(od_config: OmniDiffusionConfig) -> None:
+    """Fill missing structural FLUX transformer kwargs before vLLM-Omni builds it."""
+    current_config = _tf_config_to_dict(getattr(od_config, "tf_model_config", None))
+    checkpoint_config = _load_flux_transformer_config(getattr(od_config, "model", None))
+    if not checkpoint_config:
+        return
+
+    current_overrides = {key: value for key, value in current_config.items() if value is not None}
+    merged_config = {**checkpoint_config, **current_overrides}
+    tf_model_config = TransformerConfig.from_dict(merged_config)
+    if hasattr(od_config, "set_tf_model_config"):
+        od_config.set_tf_model_config(tf_model_config)
+    else:
+        od_config.tf_model_config = tf_model_config
+
+
+def _get_flux_transformer_config_kwargs(transformer_cls: type, tf_model_config: Any) -> dict[str, Any]:
+    tf_config = _tf_config_to_dict(tf_model_config)
+    if not tf_config:
+        return {}
+
+    try:
+        parameters = inspect.signature(transformer_cls.__init__).parameters
+    except (TypeError, ValueError):
+        return {}
+
+    return {
+        name: tf_config[name]
+        for name in parameters
+        if name not in {"self", "od_config"} and tf_config.get(name) is not None
+    }
+
+
+def _normalize_sde_window(sde_window: tuple[int, int], num_timesteps: int) -> tuple[int, int]:
+    if num_timesteps <= 0:
+        raise ValueError("FLUX rollout requires at least one denoising timestep.")
+
+    start, end = sde_window
+    start = max(0, min(int(start), num_timesteps - 1))
+    end = max(start + 1, min(int(end), num_timesteps))
+    return start, end
+
+
+def _module_parameter_dtype(module: torch.nn.Module, default: torch.dtype) -> torch.dtype:
+    parameter = next(module.parameters(), None)
+    return parameter.dtype if parameter is not None else default
+
+
+@contextmanager
+def _patched_flux_transformer_constructor(od_config: OmniDiffusionConfig):
+    """Forward checkpoint transformer kwargs while upstream vLLM-Omni does not.
+
+    vLLM-Omni's FLUX pipeline constructs ``FluxTransformer2DModel`` inside its
+    own ``__init__`` and currently only reads part of ``tf_model_config`` there.
+    Patch that constructor only for the duration of ``super().__init__`` instead
+    of copying the upstream pipeline initialization.
+    """
+    init_globals = FluxPipeline.__init__.__globals__
+    transformer_cls = init_globals.get("FluxTransformer2DModel")
+    if transformer_cls is None:
+        yield
+        return
+
+    def configured_flux_transformer(*args: Any, **kwargs: Any):
+        call_od_config = kwargs.get("od_config")
+        if call_od_config is None and args:
+            call_od_config = args[0]
+        if call_od_config is None:
+            call_od_config = od_config
+
+        config_kwargs = _get_flux_transformer_config_kwargs(
+            transformer_cls,
+            getattr(call_od_config, "tf_model_config", None),
+        )
+        for name, value in config_kwargs.items():
+            kwargs.setdefault(name, value)
+        return transformer_cls(*args, **kwargs)
+
+    init_globals["FluxTransformer2DModel"] = configured_flux_transformer
+    try:
+        yield
+    finally:
+        init_globals["FluxTransformer2DModel"] = transformer_cls
 
 
 @VllmOmniPipelineBase.register("FluxPipeline", algorithm="flow_grpo")
@@ -34,7 +154,9 @@ class FluxPipelineWithLogProb(FluxPipeline):
     """vLLM-Omni FLUX rollout pipeline that returns FlowGRPO trajectory data."""
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
-        super().__init__(od_config=od_config, prefix=prefix)
+        _ensure_flux_transformer_config(od_config)
+        with _patched_flux_transformer_constructor(od_config):
+            super().__init__(od_config=od_config, prefix=prefix)
         self.device = get_local_device()
         model = od_config.model
         local_files_only = os.path.exists(model)
@@ -68,6 +190,7 @@ class FluxPipelineWithLogProb(FluxPipeline):
         all_latents = []
         all_log_probs = []
         all_timesteps = []
+        sde_window = _normalize_sde_window(sde_window, len(timesteps))
         self.scheduler.set_begin_index(0)
         self.transformer.do_true_cfg = do_true_cfg
 
@@ -193,8 +316,7 @@ class FluxPipelineWithLogProb(FluxPipeline):
         width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
         num_inference_steps = sampling_params.num_inference_steps or num_inference_steps
         sigmas = sampling_params.sigmas or sigmas
-        if getattr(sampling_params, "guidance_scale_provided", False):
-            guidance_scale = sampling_params.guidance_scale
+        guidance_scale = getattr_not_none(sampling_params, "guidance_scale", guidance_scale)
         generator = sampling_params.generator or generator
         if generator is None and sampling_params.seed is not None:
             generator = torch.Generator(device=self.device).manual_seed(sampling_params.seed)
@@ -290,9 +412,13 @@ class FluxPipelineWithLogProb(FluxPipeline):
             self._joint_attention_kwargs = {}
 
         if sde_window_size is not None:
+            max_sde_window_start = max(
+                sde_window_range[0],
+                min(sde_window_range[1], len(timesteps)) - sde_window_size,
+            )
             start = torch.randint(
                 sde_window_range[0],
-                sde_window_range[1] - sde_window_size + 1,
+                max_sde_window_start + 1,
                 (1,),
                 generator=generator,
                 device=self.device,
@@ -328,6 +454,7 @@ class FluxPipelineWithLogProb(FluxPipeline):
         else:
             latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
             latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
+            latents = latents.to(dtype=_module_parameter_dtype(self.vae, latents.dtype))
             image = self.vae.decode(latents, return_dict=False)[0]
 
         return DiffusionOutput(
