@@ -426,7 +426,7 @@ class FluxPipelineWithLogProb(FluxPipeline):
             end = start + sde_window_size
             sde_window = (start, end)
         else:
-            sde_window = (0, len(timesteps) - 1)
+            sde_window = (0, len(timesteps))
 
         latents, all_latents, all_log_probs, all_timesteps = self.diffuse(
             prompt_embeds,

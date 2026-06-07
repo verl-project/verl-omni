@@ -189,6 +189,7 @@ class TestFluxFlowGRPORolloutParamCompat:
 
         from verl_omni.pipelines.flux_flow_grpo.vllm_omni_rollout_adapter import _normalize_sde_window
 
+        assert _normalize_sde_window((0, 4), num_timesteps=4) == (0, 4)
         assert _normalize_sde_window((3, 5), num_timesteps=2) == (1, 2)
         assert _normalize_sde_window((0, 4), num_timesteps=1) == (0, 1)
 
