@@ -267,6 +267,9 @@ For reward models that are expensive to evaluate (e.g., a VLM judge), the reward
 bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_async_reward.sh
 ```
 
+For the execution model, configuration reference, and troubleshooting notes, see
+{doc}`async_reward`.
+
 ### Full Model Training
 
 We have provided a script to enable non-cfg full-weight Qwen-Image OCR training. The example is runnable on 4 NVIDIA H200 GPUs; enabling CFG requires more GPU resources.
