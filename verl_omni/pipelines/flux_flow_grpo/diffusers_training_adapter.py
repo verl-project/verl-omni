@@ -111,6 +111,7 @@ class Flux(DiffusionModelBase):
         text_ids: torch.Tensor,
         latent_image_ids: torch.Tensor,
         guidance: torch.Tensor | None,
+        prompt_embeds_mask: torch.Tensor | None = None,
         joint_attention_kwargs: dict | None = None,
     ) -> dict:
         return {
@@ -119,6 +120,7 @@ class Flux(DiffusionModelBase):
             "guidance": guidance,
             "pooled_projections": pooled_prompt_embeds,
             "encoder_hidden_states": prompt_embeds,
+            "encoder_attention_mask": prompt_embeds_mask,
             "txt_ids": squeeze_batch_position_ids(text_ids),
             "img_ids": squeeze_batch_position_ids(latent_image_ids),
             "joint_attention_kwargs": joint_attention_kwargs or {},
@@ -158,6 +160,7 @@ class Flux(DiffusionModelBase):
             text_ids=micro_batch["text_ids"],
             latent_image_ids=micro_batch["latent_image_ids"],
             guidance=guidance,
+            prompt_embeds_mask=prompt_embeds_mask,
         )
 
         true_cfg_scale = model_config.pipeline.true_cfg_scale
@@ -176,6 +179,7 @@ class Flux(DiffusionModelBase):
                 text_ids=micro_batch["negative_text_ids"],
                 latent_image_ids=micro_batch["latent_image_ids"],
                 guidance=guidance,
+                prompt_embeds_mask=negative_prompt_embeds_mask,
             )
         else:
             negative_model_inputs = None

@@ -269,11 +269,13 @@ class TestFluxFlowGRPOBuildTransformerInputs:
             text_ids=tensors["text_ids"],
             latent_image_ids=tensors["latent_image_ids"],
             guidance=guidance,
+            prompt_embeds_mask=tensors["prompt_embeds_mask"],
         )
 
         torch.testing.assert_close(inputs["hidden_states"], tensors["latents"][:, 0])
         torch.testing.assert_close(inputs["timestep"], tensors["timesteps"][:, 0] / 1000.0)
         torch.testing.assert_close(inputs["guidance"], guidance)
+        torch.testing.assert_close(inputs["encoder_attention_mask"], tensors["prompt_embeds_mask"])
         assert inputs["txt_ids"].shape == tensors["text_ids"].shape[1:]
         assert inputs["img_ids"].shape == tensors["latent_image_ids"].shape[1:]
         assert inputs["return_dict"] is False
@@ -309,6 +311,7 @@ class TestFluxFlowGRPOPrepareModelInputs:
         torch.testing.assert_close(model_inputs["timestep"], tensors["timesteps"][:, 1] / 1000.0)
         torch.testing.assert_close(model_inputs["guidance"], torch.full((2,), 2.5))
         torch.testing.assert_close(model_inputs["pooled_projections"], tensors["pooled_prompt_embeds"])
+        torch.testing.assert_close(model_inputs["encoder_attention_mask"], tensors["prompt_embeds_mask"])
 
     def test_guidance_tensor_accepts_direct_module_flag(self):
         tensors = _batch_tensors()
@@ -391,6 +394,10 @@ class TestFluxFlowGRPOPrepareModelInputs:
 
         assert negative_model_inputs is not None
         torch.testing.assert_close(negative_model_inputs["encoder_hidden_states"], tensors["negative_prompt_embeds"])
+        torch.testing.assert_close(
+            negative_model_inputs["encoder_attention_mask"],
+            tensors["negative_prompt_embeds_mask"],
+        )
         torch.testing.assert_close(
             negative_model_inputs["pooled_projections"],
             tensors["negative_pooled_prompt_embeds"],
