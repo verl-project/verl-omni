@@ -828,7 +828,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.rollout.sleep_level = 1
             do_lora_base_sync = not self.base_sync_done
 
-        # 3. sync weights: For SGLang, we need base first (when needed), then adapter/merged
+        # 3. sync weights: LoRA takes a fast path that skips ZMQ+IPC; full weights
+        #    use the standard bucketed-IPC pipeline.
         if do_lora_base_sync:
             per_tensor_param_base, peft_config = self.actor.engine.get_per_tensor_param(
                 layered_summon=self.layered_summon,
@@ -838,10 +839,28 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             await self.rollout.update_weights(
                 per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
             )
-
-        await self.rollout.update_weights(
-            per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
-        )
+            # Adapter sync via fast path (no IPC needed for small LoRA tensors)
+            if peft_config is not None:
+                lora_weights = {name: tensor for name, tensor in per_tensor_param}
+                await self.rollout._execute_method(
+                    "update_lora_weights",
+                    kwargs={"lora_weights": lora_weights, "peft_config": peft_config},
+                )
+            else:
+                await self.rollout.update_weights(
+                    per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+                )
+        elif peft_config is not None:
+            # LoRA-only fast path: skip ZMQ+IPC entirely
+            lora_weights = {name: tensor for name, tensor in per_tensor_param}
+            await self.rollout._execute_method(
+                "update_lora_weights",
+                kwargs={"lora_weights": lora_weights, "peft_config": peft_config},
+            )
+        else:
+            await self.rollout.update_weights(
+                per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+            )
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 
