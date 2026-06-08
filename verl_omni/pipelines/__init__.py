@@ -15,9 +15,9 @@
 from . import (
     _patch,  # noqa: F401 — apply Ulysses mask fix
     qwen_image_diffusion_nft,
+    qwen_image_dpo,
     qwen_image_flow_grpo,
     qwen_image_mix_grpo,
-    qwen_image_dpo,
     sd3_dpo,
 )
 from .qwen_image_diffusion_nft import *  # noqa: F401, F403
