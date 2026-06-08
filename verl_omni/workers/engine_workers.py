@@ -11,9 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import functools
 import logging
 import os
+import time
 from contextlib import nullcontext
 from copy import deepcopy
 from functools import partial
@@ -65,6 +67,15 @@ from verl_omni.workers.utils.losses import diffusion_loss
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+async def _timed_await(name: str, timings: dict, coro):
+    """Await ``coro`` while recording its wall-clock duration into ``timings``."""
+    start = time.perf_counter()
+    try:
+        return await coro
+    finally:
+        timings[name] = time.perf_counter() - start
 
 
 def _with_routing_replay_flag(enabled: bool):
@@ -763,6 +774,21 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         assert "actor" in self.role, "ema_update_adapter only supports actor role"
         self.actor.ema_update_adapter(source=source, target=target, decay=decay)
 
+    def _offload_actor_and_empty_cache(self, timings: Optional[dict] = None):
+        """Offload actor params to CPU and free cached GPU memory.
+
+        Safe to run from a worker thread (via ``asyncio.to_thread``): FSDP param
+        offload moves the local shard without collectives, and any gathered LoRA
+        tensors live in separate allocations that are unaffected by moving the
+        base param storage to CPU.
+        """
+        start = time.perf_counter()
+        if self.actor.engine.is_param_offload_enabled:
+            self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
+        aggressive_empty_cache(force_sync=True)
+        if timings is not None:
+            timings["offload_actor_to_cpu"] = time.perf_counter() - start
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         assert "actor" in self.role, "load_checkpoint only support actor role"
@@ -808,15 +834,24 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             await self.checkpoint_engine.send_weights(per_tensor_param)
             return
 
+        # Per-component wall-clock timings (seconds) for monitoring.
+        timings: dict[str, float] = {}
+        update_weights_start = time.perf_counter()
+
         set_expandable_segments(False)
         log_gpu_memory_usage("Before resume weights", logger=logger)
 
-        # 1. resume rollout memory (weights were released during sleep)
+        # 1. resume rollout weight memory (released during sleep). This targets the
+        #    rollout process and is independent of the actor-side param gather below,
+        #    so launch it concurrently and await it before pushing weights.
+        resume_weights_task = None
         if self.config.rollout.free_cache_engine:
-            await self.rollout.resume(tags=["weights"])
-        log_gpu_memory_usage("After resume weights", logger=logger)
+            resume_weights_task = asyncio.create_task(
+                _timed_await("resume_weights", timings, self.rollout.resume(tags=["weights"]))
+            )
 
-        # 2. determine if we need a base weight sync (adapter path only)
+        # 2. gather actor params and determine if we need a base weight sync (adapter path only).
+        gather_start = time.perf_counter()
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
             layered_summon=self.layered_summon,
             base_sync_done=True,
@@ -830,12 +865,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 3. sync weights: LoRA takes a fast path that skips ZMQ+IPC; full weights
         #    use the standard bucketed-IPC pipeline.
+        offloaded = False
         if do_lora_base_sync:
+            timings["get_per_tensor_param"] = time.perf_counter() - gather_start
             per_tensor_param_base, peft_config = self.actor.engine.get_per_tensor_param(
                 layered_summon=self.layered_summon,
                 base_sync_done=False,
                 adapter_name=self.config.rollout.rollout_adapter,
             )
+            if resume_weights_task is not None:
+                await resume_weights_task
+            log_gpu_memory_usage("After resume weights", logger=logger)
+            sync_start = time.perf_counter()
             await self.rollout.update_weights(
                 per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
             )
@@ -850,32 +891,58 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 await self.rollout.update_weights(
                     per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
                 )
+            timings["update_weights_sync"] = time.perf_counter() - sync_start
         elif peft_config is not None:
-            # LoRA-only fast path: skip ZMQ+IPC entirely
+            # LoRA-only fast path: the gathered adapter tensors live in separate
+            # allocations from the base param storage, so offloading the actor to
+            # CPU can overlap with resuming rollout weight memory and the (tiny)
+            # LoRA push instead of running serially after them.
             lora_weights = {name: tensor for name, tensor in per_tensor_param}
+            timings["get_per_tensor_param"] = time.perf_counter() - gather_start
+            offload_task = asyncio.create_task(
+                asyncio.to_thread(self._offload_actor_and_empty_cache, timings)
+            )
+            if resume_weights_task is not None:
+                await resume_weights_task
+            log_gpu_memory_usage("After resume weights", logger=logger)
+            sync_start = time.perf_counter()
             await self.rollout._execute_method(
                 "update_lora_weights",
                 kwargs={"lora_weights": lora_weights, "peft_config": peft_config},
             )
+            timings["update_weights_sync"] = time.perf_counter() - sync_start
+            await offload_task
+            offloaded = True
         else:
+            timings["get_per_tensor_param"] = time.perf_counter() - gather_start
+            if resume_weights_task is not None:
+                await resume_weights_task
+            log_gpu_memory_usage("After resume weights", logger=logger)
+            sync_start = time.perf_counter()
             await self.rollout.update_weights(
                 per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
             )
+            timings["update_weights_sync"] = time.perf_counter() - sync_start
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 
-        # 3. offload model to cpu
-        if self.actor.engine.is_param_offload_enabled:
-            self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
-        aggressive_empty_cache(force_sync=True)
+        # 4. offload model to cpu (already done concurrently in the LoRA-only path)
+        if not offloaded:
+            self._offload_actor_and_empty_cache(timings)
 
-        # 4. resume kv_cache
+        # 5. resume kv_cache
         if self.config.rollout.free_cache_engine:
-            await self.rollout.resume(tags=["kv_cache"])
+            await _timed_await("resume_kv_cache", timings, self.rollout.resume(tags=["kv_cache"]))
         log_gpu_memory_usage("After resume kv_cache", logger=logger)
 
         self.base_sync_done = True
         set_expandable_segments(True)
+
+        timings["update_weights_total"] = time.perf_counter() - update_weights_start
+        logger.info(
+            "update_weights timing (ms): %s",
+            {k: round(v * 1000, 2) for k, v in timings.items()},
+        )
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE, blocking=False)
     def execute_checkpoint_engine(self, method: str, *args, **kwargs):
