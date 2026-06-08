@@ -13,6 +13,10 @@ custom_chat_template='{% for message in messages %}{% if message['\''role'\''] =
 
 NUM_GPUS_ACTOR=1
 
+# Optional: disable prompt embed cache to free memory at the cost of
+# re-running the text encoder for each rollout sample.
+ENABLE_PROMPT_EMBED_CACHE=${ENABLE_PROMPT_EMBED_CACHE:-True}
+
 python3 -m verl_omni.trainer.main_diffusion \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=offline \
@@ -43,6 +47,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.name=vllm_omni \
+    actor_rollout_ref.rollout.enable_prompt_embed_cache=$ENABLE_PROMPT_EMBED_CACHE \
     trainer.resume_mode=disable \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=offline_dpo \

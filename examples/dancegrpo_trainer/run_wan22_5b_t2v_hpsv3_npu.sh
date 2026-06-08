@@ -29,6 +29,10 @@ ROLLOUT_TP=1
 
 ENGINE=vllm_omni
 
+# Optional: disable prompt embed cache to free memory at the cost of
+# re-running the text encoder for each rollout sample.
+ENABLE_PROMPT_EMBED_CACHE=${ENABLE_PROMPT_EMBED_CACHE:-True}
+
 python3 -m verl_omni.trainer.main_diffusion \
     trainer.device=npu \
     algorithm.adv_estimator=dance_grpo \
@@ -56,6 +60,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
+    actor_rollout_ref.rollout.enable_prompt_embed_cache=$ENABLE_PROMPT_EMBED_CACHE \
     actor_rollout_ref.rollout.pipeline.height=704 \
     actor_rollout_ref.rollout.pipeline.width=1280 \
     actor_rollout_ref.rollout.pipeline.num_frames=8 \

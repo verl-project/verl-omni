@@ -138,6 +138,8 @@ class DiffusionRolloutConfig(BaseConfig):
 
     enable_prefix_caching: bool = True
 
+    enable_prompt_embed_cache: bool = True
+
     load_format: str = "dummy"
 
     layered_summon: bool = False

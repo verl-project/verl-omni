@@ -18,6 +18,10 @@ REWARD_TP=4
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
+# Optional: disable prompt embed cache to free memory at the cost of
+# re-running the text encoder for each rollout sample.
+ENABLE_PROMPT_EMBED_CACHE=${ENABLE_PROMPT_EMBED_CACHE:-True}
+
 python3 -m verl_omni.trainer.main_diffusion \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=online \
@@ -49,6 +53,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
+    actor_rollout_ref.rollout.enable_prompt_embed_cache=$ENABLE_PROMPT_EMBED_CACHE \
     actor_rollout_ref.rollout.pipeline.num_inference_steps=35 \
     actor_rollout_ref.rollout.pipeline.true_cfg_scale=1.0 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=256 \
