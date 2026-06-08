@@ -12,8 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .diffusion_agent_loop import DiffusionAgentLoopOutput, DiffusionAgentLoopWorker
+import logging
+import os
+
 from .single_turn_agent_loop import DiffusionSingleTurnAgentLoop
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+_LIGHTWEIGHT_IMPORT = os.getenv("VERL_OMNI_LIGHTWEIGHT_IMPORT") == "1"
+
+if _LIGHTWEIGHT_IMPORT:
+    _DIFFUSION_AGENT_LOOP_IMPORT_ERROR = RuntimeError("VERL_OMNI_LIGHTWEIGHT_IMPORT=1")
+
+    class _UnavailableModule:
+        def __getattr__(self, _):
+            raise RuntimeError("Diffusion agent-loop worker requires the full verl runtime") from (
+                _DIFFUSION_AGENT_LOOP_IMPORT_ERROR
+            )
+
+        def __call__(self, *args, **kwargs):
+            raise RuntimeError("Diffusion agent-loop worker requires the full verl runtime") from (
+                _DIFFUSION_AGENT_LOOP_IMPORT_ERROR
+            )
+
+    DiffusionAgentLoopOutput = _UnavailableModule()
+    DiffusionAgentLoopWorker = _UnavailableModule()
+else:
+    from .diffusion_agent_loop import DiffusionAgentLoopOutput, DiffusionAgentLoopWorker
 
 __all__ = [
     "DiffusionAgentLoopOutput",

@@ -11,12 +11,42 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .fsdp import (  # noqa: F401
-    DiffusersFSDPEngine,
-    DPODiffusersFSDPEngine,
-    NFTDiffusersFSDPEngine,
-    PPODiffusersFSDPEngine,
-)
+import logging
+import os
+
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+class _UnavailableEngine:
+    def __init__(self, name: str, reason: BaseException):
+        self._name = name
+        self._reason = reason
+
+    def __getattr__(self, _):
+        raise RuntimeError(f"{self._name} is unavailable because its backend dependencies failed to import") from (
+            self._reason
+        )
+
+    def __call__(self, *args, **kwargs):
+        raise RuntimeError(f"{self._name} is unavailable because its backend dependencies failed to import") from (
+            self._reason
+        )
+
+
+try:
+    from .fsdp import (  # noqa: F401
+        DiffusersFSDPEngine,
+        DPODiffusersFSDPEngine,
+        NFTDiffusersFSDPEngine,
+        PPODiffusersFSDPEngine,
+    )
+except (ImportError, RuntimeError, AttributeError, NameError) as e:
+    logger.info(f"Diffusers FSDP engines not available: {e}")
+    DiffusersFSDPEngine = _UnavailableEngine("DiffusersFSDPEngine", e)
+    DPODiffusersFSDPEngine = _UnavailableEngine("DPODiffusersFSDPEngine", e)
+    NFTDiffusersFSDPEngine = _UnavailableEngine("NFTDiffusersFSDPEngine", e)
+    PPODiffusersFSDPEngine = _UnavailableEngine("PPODiffusersFSDPEngine", e)
 
 try:
     from .veomni import VeOmniDiffusionEngine  # noqa: F401

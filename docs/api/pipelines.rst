@@ -25,6 +25,7 @@ model's ``model_index.json``; the algorithm string is taken from the model confi
 
    verl_omni.pipelines.model_base.DiffusionModelBase
    verl_omni.pipelines.model_base.VllmOmniPipelineBase
+   verl_omni.pipelines.flux_flow_grpo.Flux
    verl_omni.pipelines.qwen_image_flow_grpo.QwenImage
    verl_omni.pipelines.qwen_image_mix_grpo.QwenImageMixGRPO
    verl_omni.pipelines.sd3_dpo.StableDiffusion3DPO
@@ -63,6 +64,16 @@ Schedulers
 
 Built-in Pipelines
 ~~~~~~~~~~~~~~~~~~~
+
+FLUX (FlowGRPO)
+^^^^^^^^^^^^^^^^
+
+.. autoclass:: verl_omni.pipelines.flux_flow_grpo.Flux
+   :members: build_scheduler, set_timesteps,
+             prepare_model_inputs, forward_and_sample_previous_step
+
+.. autoclass:: verl_omni.pipelines.flux_flow_grpo.FluxPipelineWithLogProb
+   :members:
 
 Qwen-Image (FlowGRPO)
 ^^^^^^^^^^^^^^^^^^^^^^

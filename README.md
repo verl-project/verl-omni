@@ -80,6 +80,13 @@ Visit our documentation to learn more.
     <td>WIP</td>
   </tr>
   <tr>
+    <td>FLUX</td>
+    <td>Diffusion generator</td>
+    <td>Text → Image</td>
+    <td>FlowGRPO</td>
+    <td>Experimental</td>
+  </tr>
+  <tr>
     <td>Wan2.2</td>
     <td>Diffusion generator</td>
     <td>Text → Video</td>

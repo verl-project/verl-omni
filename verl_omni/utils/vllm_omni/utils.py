@@ -31,9 +31,6 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.diffusion.lora.manager import DiffusionLoRAManager, logger
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
-from vllm_omni.diffusion.models.diffusers_adapter.pipeline_diffusers_adapter import (
-    DiffusersAdapterPipeline,
-)
 from vllm_omni.diffusion.registry import initialize_model
 from vllm_omni.lora.request import LoRARequest as OmniLoRARequest
 
@@ -180,11 +177,19 @@ class VLLMOmniHijack:
                             if load_format == "default":
                                 model = initialize_model(od_config)
                             elif load_format == "diffusers":
+                                from vllm_omni.diffusion.models.diffusers_adapter.pipeline_diffusers_adapter import (
+                                    DiffusersAdapterPipeline,
+                                )
+
                                 model = DiffusersAdapterPipeline(od_config=od_config, device=target_device)
                             else:
                                 raise ValueError(f"Unknown load_format: {load_format}")
                 logger.debug("Loading weights on %s ...", load_device)
                 if load_format == "diffusers":
+                    from vllm_omni.diffusion.models.diffusers_adapter.pipeline_diffusers_adapter import (
+                        DiffusersAdapterPipeline,
+                    )
+
                     cast(DiffusersAdapterPipeline, model).load_weights()
                 elif self._is_gguf_quantization(od_config):
                     self._load_weights_with_gguf(model, od_config)
