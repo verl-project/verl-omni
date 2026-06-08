@@ -1,6 +1,6 @@
 # Installation
 
-Last updated: 06/03/2026
+Last updated: 06/05/2026
 
 ## Requirements
 
@@ -42,9 +42,9 @@ uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@c7
 
 3. Install `verl` followed by `verl-omni` from source:
 
-``` bash 
+```bash
 # Install verl
-uv pip install git+https://github.com/verl-project/verl.git@b0028bca560c0185eedad71e7cff1d373b6ae138
+uv pip install "verl==0.8.0"
 
 # Install verl-omni from source
 git clone https://github.com/verl-project/verl-omni.git
@@ -52,13 +52,38 @@ cd verl-omni
 uv pip install -e .
 ```
 
-> Note:  Note: Install `vllm` and `vllm-omni` first, as they may override your existing PyTorch installation. Installing them before `verl` and `verl-omni` ensures a compatible, hardware-aware PyTorch version.
+> Note: Install `vllm` and `vllm-omni` first, as they may override your existing PyTorch installation. Installing them before `verl` and `verl-omni` ensures a compatible, hardware-aware PyTorch version.
 
 ## Optional Dependencies
 
 | Extra | Install | When needed |
 |---|---|---|
 | OCR reward | `uv pip install Levenshtein` | FlowGRPO training with OCR-based reward |
+| VeOmni engine backend | See [Optional engine backends](#optional-engine-backends) | Running the diffusion trainer with VeOmni instead of the default FSDP2 |
+
+## Optional engine backends
+
+VeRL-Omni defaults to **FSDP2** as the training engine for the policy and reference models. The diffusion trainer can alternatively be switched to [**VeOmni**](https://github.com/ByteDance-Seed/VeOmni). The engine is selected at the Hydra command line — see [`examples/flowgrpo_trainer/run_qwen_image_ocr_veomni.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/run_qwen_image_ocr_veomni.sh) for a complete recipe.
+
+### Installing VeOmni alongside vLLM 0.20.2
+
+VeOmni 0.1.11's `gpu` extra pins `torch==2.9.1+cu129`, which conflicts with `vllm==0.20.2` (depends on `torch>=2.11`). A plain `uv pip install veomni[gpu,dit]==0.1.11` therefore fails dependency resolution.
+
+VeOmni itself runs correctly on torch 2.11 — only the `[gpu]` extra's pin is too strict. Install it without dependency resolution so the existing torch/vllm stack is preserved, and add the small set of runtime extras that the verl-omni VeOmni engine actually needs:
+
+```bash
+uv pip install veomni==0.1.11 --no-deps
+uv pip install torchcodec librosa soundfile av
+```
+
+Verify the engine is importable:
+
+```bash
+python -c "import veomni; print('veomni', veomni.__version__)"
+python -c "from veomni.distributed.offloading import load_model_to_gpu, load_optimizer, offload_model_to_cpu, offload_optimizer; print('VeOmni offloading helpers OK')"
+```
+
+If you want VeOmni's full `[gpu,dit]` extras (flash-attn variants, liger-kernel, cuda-python, etc.), install them in a separate environment not pinned to vllm 0.20.2; verl-omni does not need them.
 
 ## Post-Installation Verification
 
@@ -67,6 +92,7 @@ For NVIDIA GPU:
 ```bash
 python -c "import torch; print('torch', torch.__version__, '| CUDA', torch.version.cuda)"
 python -c "import vllm; print('vllm', vllm.__version__)"
+python -c "import verl; print('verl', verl.__version__)"
 python -c "import verl_omni; print('VeRL-Omni ready')"
 ```
 
@@ -75,5 +101,6 @@ For Ascend NPU:
 ```bash
 python -c "import torch; import torch_npu; print('torch', torch.__version__, '| NPU', torch.npu.is_available())"
 python -c "import vllm; print('vllm', vllm.__version__)"
+python -c "import verl; print('verl', verl.__version__)"
 python -c "import verl_omni; print('VeRL-Omni ready')"
 ```

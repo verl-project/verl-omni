@@ -53,7 +53,9 @@ def _encode_image_latent(pipe, image: Image.Image, height: int, width: int, devi
     pixel_values = pipe.image_processor.preprocess([image], height=height, width=width)
     pixel_values = pixel_values.to(device=device, dtype=pipe.vae.dtype)
     with torch.no_grad():
-        latents = pipe.vae.encode(pixel_values).latent_dist.sample()
+        # Tiny SD3 VAE can fail cuDNN SDPA plan selection; fall back to math SDP.
+        with torch.nn.attention.sdpa_kernel(backends=[torch.nn.attention.SDPBackend.MATH]):
+            latents = pipe.vae.encode(pixel_values).latent_dist.sample()
     scaling_factor = getattr(pipe.vae.config, "scaling_factor", 1.0)
     shift_factor = getattr(pipe.vae.config, "shift_factor", 0.0)
     latents = (latents - shift_factor) * scaling_factor

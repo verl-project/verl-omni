@@ -291,7 +291,7 @@ def expand_offline_dpo_features(features: list[dict[str, Any]]) -> list[dict[str
             {
                 **base,
                 "image_path": feature["img_win"],
-                "image_latents": feature["img_win_latents"],
+                "latents_clean": feature["img_win_latents"],
                 "sample_level_scores": torch.tensor([feature["win_score"]], dtype=torch.float32),
                 "is_chosen": True,
             }
@@ -300,7 +300,7 @@ def expand_offline_dpo_features(features: list[dict[str, Any]]) -> list[dict[str
             {
                 **base,
                 "image_path": feature["img_lose"],
-                "image_latents": feature["img_lose_latents"],
+                "latents_clean": feature["img_lose_latents"],
                 "sample_level_scores": torch.tensor([feature["lose_score"]], dtype=torch.float32),
                 "is_chosen": False,
             }

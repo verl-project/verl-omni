@@ -1173,16 +1173,14 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
     ):
         super().__init__(config, *args, **kwargs)
         self.is_offline = config.algorithm.get("sample_source", "online") == "offline"
-        # Direct-preference losses (e.g. DPO) need ref noise preds even when KL paths are disabled.
-        self.use_reference_policy = need_reference_policy(self.config) or (
-            config.algorithm.get("trainer_type") == "direct_preference"
-        )
+        loss_mode = config.actor_rollout_ref.actor.diffusion_loss.loss_mode
+        # DPO needs trainer-side ref noise preds; DiffusionNFT computes ref in the actor engine.
+        self.use_reference_policy = need_reference_policy(self.config) or (loss_mode == "dpo")
         self._has_old_adapter = "old" in tuple(
             config.actor_rollout_ref.model.get("policy_state_adapters", ("default",))
         )
         if self._has_old_adapter:
             self._validate_old_adapter_config()
-        loss_mode = config.actor_rollout_ref.actor.diffusion_loss.loss_mode
         self._loss_fn = get_diffusion_loss_fn(loss_mode)
 
     def _validate_old_adapter_config(self):
@@ -1218,7 +1216,9 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         batch_td = embeds_padding_2_no_padding(batch_td)
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         paired = self.config.algorithm.get("paired_preference", False)
-        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n * (2 if paired else 1)
+        ppo_mini_batch_size = (
+            ppo_mini_batch_size * 2 if paired else ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        )  # direct preference has a pair per prompt
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
         seed = self.config.actor_rollout_ref.actor.data_loader_seed
         shuffle = self.config.actor_rollout_ref.actor.shuffle
@@ -1287,18 +1287,8 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
     def _prepare_actor_batch(self, batch: DataProto, reward_tensor: torch.Tensor) -> DataProto:
         """Delegate algorithm-specific rollout-to-actor batch preparation."""
-        rewards = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
-        rollout_dict = {key: batch.batch[key] for key in batch.batch.keys()}
-        rollout_dict["uid"] = batch.non_tensor_batch["uid"]
-        updated = self._loss_fn.prepare_actor_batch(
-            rollout_dict,
-            rewards,
-            self.config,
-        )
-        for key, value in updated.items():
-            if isinstance(value, torch.Tensor):
-                batch.batch[key] = value
-        return batch
+        reward_tensor = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
+        return self._loss_fn.prepare_actor_batch(batch, reward_tensor, self.config)
 
     def _update_old_policy(self) -> tuple[bool, float, Literal["none", "copy", "ema"]]:
         algo_cfg = self.config.algorithm
@@ -1406,9 +1396,9 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                         batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
                         if self.use_reference_policy:
                             with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
-                                ref_dpo = self._compute_ref_noise_pred(batch)
-                                if ref_dpo is not None:
-                                    batch = batch.union(ref_dpo)
+                                ref_infer_res = self._compute_ref_noise_pred(batch)
+                                if ref_infer_res is not None:
+                                    batch = batch.union(ref_infer_res)
 
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)
@@ -1449,6 +1439,13 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                                     {k: np.array(v) for k, v in reward_extra_infos_dict.items()}
                                 )
                             batch = self._prepare_actor_batch(batch, reward_tensor)
+
+                        batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
+                        if self.use_reference_policy:
+                            with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
+                                ref_infer_res = self._compute_ref_noise_pred(batch)
+                                if ref_infer_res is not None:
+                                    batch = batch.union(ref_infer_res)
 
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self._update_actor(batch)

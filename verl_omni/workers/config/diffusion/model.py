@@ -104,6 +104,13 @@ class DiffusionModelConfig(BaseConfig):
 
     fsdp_layer_prefixes: list[str] = field(default_factory=lambda: ["transformer_blocks."])
 
+    # Optional model config path. If unset, the backend uses
+    # ``<local_path>/<transformer_subfolder>``.
+    config_path: Optional[str] = None
+
+    # Subfolder containing the diffusion transformer weights/config.
+    transformer_subfolder: str = "transformer"
+
     def __post_init__(self):
         import_external_libs(self.external_lib)
 
