@@ -142,7 +142,7 @@ def _apply_flash_attention_3_varlen_hub_fix() -> None:
             value_packed = value.flatten(0, 1)
 
         func = _ad._HUB_KERNELS_REGISTRY[backend].kernel_fn
-        out, lse, *_ = func(
+        out = func(
             q=query_packed,
             k=key_packed,
             v=value_packed,
@@ -154,6 +154,9 @@ def _apply_flash_attention_3_varlen_hub_fix() -> None:
             causal=is_causal,
             return_attn_probs=return_lse,
         )
+        lse = None
+        if return_lse:
+            out, lse, *_ = out
         out = out.unflatten(0, (batch_size, -1))
 
         return (out, lse) if return_lse else out
