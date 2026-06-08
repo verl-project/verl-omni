@@ -18,9 +18,6 @@ REWARD_TP=4
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
-# Optional reproducibility (yaml defaults are null / unseeded):
-#   data.seed=42
-#   actor_rollout_ref.rollout.seed=42
 
 python3 -m verl_omni.trainer.main_diffusion \
     data.train_files=$ocr_train_path \
@@ -40,6 +37,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
+    actor_rollout_ref.actor.fsdp_config.strategy=fsdp2 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.name=$ENGINE \
