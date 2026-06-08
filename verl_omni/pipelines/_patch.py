@@ -152,6 +152,7 @@ def _apply_flash_attention_3_varlen_hub_fix() -> None:
             max_seqlen_k=max_seqlen_k,
             softmax_scale=scale,
             causal=is_causal,
+            return_attn_probs=return_lse,
         )
         out = out.unflatten(0, (batch_size, -1))
 
