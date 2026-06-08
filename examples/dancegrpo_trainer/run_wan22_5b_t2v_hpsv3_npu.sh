@@ -42,7 +42,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.attn_backend='_native_npu' \
     actor_rollout_ref.model.custom_chat_template='"{% if messages %}{% for message in messages %}{% if message[\"role\"] == \"user\" %}{{ message[\"content\"] }}{% endif %}{% endfor %}{% endif %}</s>"' \
     actor_rollout_ref.actor.optim.lr=3e-6 \
-    actor_rollout_ref.actor.optim.weight_decay=0.01 \
+    actor_rollout_ref.actor.optim.weight_decay=0.001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=8 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
