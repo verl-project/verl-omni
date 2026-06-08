@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from . import (
-    _patch,  # noqa: F401 — apply Ulysses mask fix
+    _patch,  # noqa: F401 — apply Ulysses mask & FA3 varlen mask fixes
     qwen_image_diffusion_nft,
     qwen_image_flow_grpo,
     qwen_image_mix_grpo,
