@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import inspect
+import ast
 import json
 import logging
 import os
@@ -145,6 +146,19 @@ def _first_generator(generator: torch.Generator | list[torch.Generator] | None) 
     if isinstance(generator, list):
         return generator[0] if generator else None
     return generator
+
+
+def _normalize_sde_window_args(
+    sde_window_size: int | str | None,
+    sde_window_range: tuple[int, int] | list[int] | str,
+) -> tuple[int | None, tuple[int, int]]:
+    if sde_window_size is not None:
+        sde_window_size = int(sde_window_size)
+    if isinstance(sde_window_range, str):
+        sde_window_range = ast.literal_eval(sde_window_range)
+    if len(sde_window_range) != 2:
+        raise ValueError("FLUX rollout sde_window_range must contain exactly two values.")
+    return sde_window_size, (int(sde_window_range[0]), int(sde_window_range[1]))
 
 
 @contextmanager
@@ -284,7 +298,7 @@ class FluxPipelineWithLogProb(FluxPipeline):
                 noise_pred.float(),
                 timestep_value,
                 latents,
-                generator=generator,
+                generator=_first_generator(generator),
                 noise_level=cur_noise_level,
                 sde_type=sde_type,
                 return_logprobs=logprobs,
@@ -292,7 +306,7 @@ class FluxPipelineWithLogProb(FluxPipeline):
             )
 
             if i >= sde_window[0] and i < sde_window[1]:
-                all_latents.append(latents)
+                all_latents.append(latents.float())
                 all_log_probs.append(log_prob)
                 all_timesteps.append(timestep_value)
 
@@ -360,6 +374,7 @@ class FluxPipelineWithLogProb(FluxPipeline):
         noise_level = coalesce_not_none(sampling_params.extra_args.get("noise_level", None), noise_level)
         sde_window_size = coalesce_not_none(sampling_params.extra_args.get("sde_window_size", None), sde_window_size)
         sde_window_range = coalesce_not_none(sampling_params.extra_args.get("sde_window_range", None), sde_window_range)
+        sde_window_size, sde_window_range = _normalize_sde_window_args(sde_window_size, sde_window_range)
         sde_type = coalesce_not_none(sampling_params.extra_args.get("sde_type", None), sde_type)
         logprobs = coalesce_not_none(sampling_params.extra_args.get("logprobs", None), logprobs)
 

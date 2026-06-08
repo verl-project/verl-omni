@@ -247,6 +247,14 @@ class TestFluxFlowGRPORolloutParamCompat:
         assert _first_generator([]) is None
         assert _first_generator(None) is None
 
+    def test_sde_window_args_parse_hydra_strings(self):
+        pytest.importorskip("vllm_omni")
+
+        from verl_omni.pipelines.flux_flow_grpo.vllm_omni_rollout_adapter import _normalize_sde_window_args
+
+        assert _normalize_sde_window_args("2", "[0,4]") == (2, (0, 4))
+        assert _normalize_sde_window_args(3, [1, 5]) == (3, (1, 5))
+
 
 class TestFluxFlowGRPOBuildTransformerInputs:
     def test_squeezes_position_ids_and_scales_timestep(self):
@@ -327,6 +335,33 @@ class TestFluxFlowGRPOPrepareModelInputs:
         )
 
         torch.testing.assert_close(model_inputs["guidance"], torch.full((2,), 2.75))
+
+    def test_guidance_tensor_unwraps_distributed_module(self):
+        tensors = _batch_tensors()
+        micro_batch = TensorDict(
+            {
+                "pooled_prompt_embeds": tensors["pooled_prompt_embeds"],
+                "text_ids": tensors["text_ids"],
+                "latent_image_ids": tensors["latent_image_ids"],
+            },
+            batch_size=2,
+        )
+
+        wrapped_module = SimpleNamespace(module=_DummyModule(direct_guidance_embeds=True))
+        model_inputs, _ = Flux.prepare_model_inputs(
+            module=wrapped_module,
+            model_config=_make_model_config(guidance_scale=3.25),
+            latents=tensors["latents"],
+            timesteps=tensors["timesteps"],
+            prompt_embeds=tensors["prompt_embeds"],
+            prompt_embeds_mask=tensors["prompt_embeds_mask"],
+            negative_prompt_embeds=tensors["negative_prompt_embeds"],
+            negative_prompt_embeds_mask=tensors["negative_prompt_embeds_mask"],
+            micro_batch=micro_batch,
+            step=0,
+        )
+
+        torch.testing.assert_close(model_inputs["guidance"], torch.full((2,), 3.25))
 
     def test_true_cfg_returns_negative_inputs(self):
         tensors = _batch_tensors()
