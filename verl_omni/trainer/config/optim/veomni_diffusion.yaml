@@ -1,0 +1,41 @@
+# Target class for this configuration
+_target_: verl_omni.workers.config.diffusion.VeOmniDiffusionOptimizerConfig
+
+# Optimizer type passed to VeOmni.
+optimizer: adamw
+
+# Learning rate
+lr: 1e-3
+
+# Minimum learning rate for cosine decay.
+lr_min: 0.0
+
+# Initial learning rate during warmup.
+lr_start: 0.0
+
+# LR warmup steps ratio
+lr_warmup_steps_ratio: 0.0
+
+# Total training steps
+total_training_steps: -1
+
+# Weight decay
+weight_decay: 0.01
+
+# Betas for Adam optimizer
+betas: [0.9, 0.999]
+
+# Adam epsilon
+eps: 1e-8
+
+# Clip gradient
+clip_grad: 1.0
+
+# LR scheduler type: "constant", "linear", or "cosine"
+lr_scheduler_type: constant
+
+# LR decay ratio
+lr_decay_ratio: 1.0
+
+# Whether to use fused AdamW where supported.
+fused: false

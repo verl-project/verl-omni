@@ -216,15 +216,19 @@ def test_diffusion_nft_advantage_to_reward_prob(adv_mode: str) -> None:
 def test_prepare_diffusion_nft_actor_batch() -> None:
     from types import SimpleNamespace
 
+    from verl import DataProto
+
     B, T, C, H, W = 4, 6, 4, 8, 8
     rewards = torch.randn(B)
     uid = np.array([f"uid-{i // 2}" for i in range(B)], dtype=object)
-    rollout_dict = {
-        "latents_clean": torch.randn(B, C, H, W),
-        "train_timesteps": torch.randint(0, 1000, (B, T)),
-        "uid": uid,
-        "prompts": torch.zeros(B, 16, dtype=torch.long),
-    }
+    batch = DataProto.from_dict(
+        tensors={
+            "latents_clean": torch.randn(B, C, H, W),
+            "train_timesteps": torch.randint(0, 1000, (B, T)),
+            "prompts": torch.zeros(B, 16, dtype=torch.long),
+        },
+        non_tensors={"uid": uid},
+    )
     algorithm_config = SimpleNamespace(
         norm_adv_by_std_in_grpo=True,
         global_std=True,
@@ -241,15 +245,38 @@ def test_prepare_diffusion_nft_actor_batch() -> None:
         ),
     )
 
-    result = diffusion_algos.DiffusionNFTLoss.prepare_actor_batch(rollout_dict, rewards, config)
+    result = diffusion_algos.DiffusionNFTLoss.prepare_actor_batch(batch, rewards, config)
 
     num_train = max(1, int(T * algorithm_config.timestep_fraction))
-    assert result["train_timesteps"].shape == (B, num_train)
-    assert result["advantages"].shape == (B, num_train)
-    assert result["reward_prob"].shape == (B, num_train)
-    assert result["returns"].shape == (B, num_train)
-    assert result["sample_level_rewards"].shape == (B, num_train)
-    assert ((result["reward_prob"] >= 0) & (result["reward_prob"] <= 1)).all()
+    assert result.batch["train_timesteps"].shape == (B, num_train)
+    assert result.batch["advantages"].shape == (B, num_train)
+    assert result.batch["reward_prob"].shape == (B, num_train)
+    assert result.batch["returns"].shape == (B, num_train)
+    assert result.batch["sample_level_rewards"].shape == (B, num_train)
+    assert ((result.batch["reward_prob"] >= 0) & (result.batch["reward_prob"] <= 1)).all()
+
+
+def test_prepare_online_dpo_actor_batch() -> None:
+    from types import SimpleNamespace
+
+    from verl import DataProto
+
+    # Two prompts, two rollouts each; rewards pick high/low per uid.
+    uid = np.array(["p0", "p0", "p1", "p1"], dtype=object)
+    rewards = torch.tensor([1.0, 0.0, 0.5, 1.0])
+    batch = DataProto.from_dict(
+        tensors={"sample_level_scores": rewards.clone()},
+        non_tensors={"uid": uid},
+    )
+    config = SimpleNamespace(algorithm=SimpleNamespace(sample_source="online"))
+
+    result = diffusion_algos.DPOLoss.prepare_actor_batch(batch, rewards, config)
+
+    assert len(result) == 4
+    assert list(result.non_tensor_batch["uid"]) == ["p0", "p0", "p1", "p1"]
+    chosen_rejected = result.batch["sample_level_scores"].squeeze(-1)
+    assert chosen_rejected[0] >= chosen_rejected[1]
+    assert chosen_rejected[2] >= chosen_rejected[3]
 
 
 def test_compute_policy_loss_diffusion_nft() -> None:

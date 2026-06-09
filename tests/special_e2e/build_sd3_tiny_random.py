@@ -34,7 +34,6 @@ from tokenizers.trainers import BpeTrainer
 from transformers import (
     CLIPTextConfig,
     CLIPTextModelWithProjection,
-    CLIPTokenizerFast,
     PreTrainedTokenizerFast,
     T5Config,
     T5EncoderModel,
@@ -67,8 +66,8 @@ _CLIP_VOCAB_WORDS = (
 )
 
 
-def _build_tiny_clip_tokenizer() -> CLIPTokenizerFast:
-    """Build a minimal CLIP tokenizer in memory (no Hub download)."""
+def _build_tiny_clip_tokenizer() -> PreTrainedTokenizerFast:
+    """Build a minimal CLIP-style tokenizer in memory (no Hub download)."""
     tokenizer = Tokenizer(BPE(unk_token="<|endoftext|>"))
     tokenizer.pre_tokenizer = ByteLevelPreTokenizer(add_prefix_space=False)
     tokenizer.decoder = ByteLevelDecoder()
@@ -83,7 +82,7 @@ def _build_tiny_clip_tokenizer() -> CLIPTokenizerFast:
         "a green triangle next to an orange rectangle",
     ]
     tokenizer.train_from_iterator(corpus, trainer=trainer)
-    return CLIPTokenizerFast(
+    return PreTrainedTokenizerFast(
         tokenizer_object=tokenizer,
         bos_token="<|startoftext|>",
         eos_token="<|endoftext|>",
