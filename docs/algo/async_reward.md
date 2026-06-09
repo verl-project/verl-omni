@@ -155,7 +155,7 @@ function that sends generated images to a separate scorer service. Because rewar
 workers batch samples with `asyncio.gather`, requests in the batch can hit the
 HTTP service concurrently rather than serially.
 
-See {doc}`../start/http_scorer` for the service protocol and an end-to-end OCR
+See [HTTP Scorer](../start/http_scorer.md) for the service protocol and an end-to-end OCR
 reward-server example.
 
 ## References
