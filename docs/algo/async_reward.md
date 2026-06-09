@@ -1,19 +1,14 @@
 (async_reward)=
 # Async Reward for Diffusion Training
 
-Last updated: 06/08/2026
+Last updated: 06/09/2026
 
 Async reward lets VeRL-Omni score completed rollout samples through reward-loop
 workers while other samples are still being generated. It is useful when reward
-computation is expensive, for example when a VLM judge, OCR model, preference
+computation is expensive, for example, when a VLM judge, OCR model, preference
 model, or external HTTP scorer takes a significant fraction of the training step.
 
-> **Status:** Supported for online diffusion training. The current
-> implementation overlaps reward computation with rollout collection inside a
-> training step; the policy update still waits for the full batch before
-> advantage computation and actor optimization.
-
-## Why
+## Motivation
 
 In a standard online FlowGRPO step, training data flows through three major
 stages:
@@ -43,16 +38,14 @@ hide behind the remaining rollout work.
 Async reward in VeRL-Omni is **sample-level streaming reward computation** within
 an otherwise on-policy training step.
 
-<img width="1380" height="1020" alt="demo" src="https://github.com/user-attachments/assets/eaa577d0-e608-4a21-b044-961a89bcc590" />
+<img width="1367" height="1020" alt="image" src="https://github.com/user-attachments/assets/eeeafc07-a11f-47d1-9ba6-f03ae032a9c5" />
 
-
-
-The upper panel shows the colocated/synchronous case: early rollout samples sit
-idle until the slowest sample finishes, then the reward batch runs, then actor
-training starts. The lower panel shows async reward: each completed sample is
-streamed to a reward worker immediately. Training still starts only after the
-full scored batch is ready, but the reward stage is partly hidden behind the
-remaining rollout work.
+The upper panel shows the synchronous reward case: rollout workers can continue
+generating later samples, but reward scoring starts only after the full rollout
+batch is ready. The lower panel shows async reward: each completed sample is
+streamed to a reward worker immediately, while rollout workers continue on later
+samples. Training still starts only after the full scored batch is ready, but
+the reward stage is partly hidden behind the remaining rollout work.
 
 
 The important boundary is the policy update. Async reward does **not** make the
@@ -60,11 +53,6 @@ actor update proceed on partial or stale batches. The trainer still assembles th
 full rollout batch, extracts rewards, computes advantages, and then performs the
 actor update. This keeps the usual on-policy FlowGRPO semantics while reducing
 idle time inside the rollout/reward phase.
-
-For fully asynchronous RL across training iterations, where rollout generation
-and policy optimization run continuously with controlled policy staleness, see
-systems such as Relax. VeRL-Omni's async reward feature is narrower: it overlaps
-reward computation with rollout collection for the current batch.
 
 ## Quickstart
 
@@ -159,24 +147,6 @@ if self.use_rm and "rm_scores" not in batch.batch.keys():
 This is why async reward can reduce the measured `reward` section in the trainer
 timer: the reward work has already been streamed during generation.
 
-## Reward function behavior
-
-The visual reward manager supports both coroutine and synchronous reward
-functions:
-
-- If the reward function is `async def`, it is awaited directly.
-- If the reward function is synchronous, it is run through
-  `loop.run_in_executor(...)` so it does not block the reward worker's event
-  loop.
-
-This makes async reward compatible with both model-backed rewards and ordinary
-Python reward code.
-
-For multiple reward functions, `MultiVisualRewardManager` loads each configured
-sub-reward, detects whether it is async, and combines the weighted scores. Sub
-rewards currently run sequentially inside one sample, but each individual
-function can still be async and reward workers can process samples concurrently.
-
 ## External HTTP scorers
 
 Async reward also pairs well with external HTTP scorers. The HTTP reward client
@@ -188,56 +158,6 @@ HTTP service concurrently rather than serially.
 See {doc}`../start/http_scorer` for the service protocol and an end-to-end OCR
 reward-server example.
 
-## Performance notes
-
-The Qwen-Image OCR LoRA benchmark in `examples/flowgrpo_trainer/README.md`
-compares sync reward with async reward:
-
-| Script | GPUs | Async reward GPUs | Time per step |
-| --- | --- | --- | --- |
-| `run_qwen_image_ocr_lora.sh` | 4 | 0 | 420 s |
-| `run_qwen_image_ocr_lora_async_reward.sh` | 5 | 1 | 360 s |
-
-The async setup is faster in wall-clock time because reward inference runs on a
-dedicated fifth GPU and overlaps with rollout collection. Its images/GPU/s number
-can be lower because the denominator includes the extra reward GPU; use both
-step time and total GPU budget when comparing setups.
-
-## When to use it
-
-Async reward is most useful when:
-
-- The reward model is expensive relative to rollout generation.
-- The reward model causes OOM when colocated with actor/rollout workers.
-- You have spare GPUs that can host a dedicated reward pool.
-- You call an external scorer service and want many reward requests in flight.
-
-It may not help when:
-
-- The reward is a cheap rule-based function.
-- Rollout generation dominates the full step and reward latency is small.
-- You do not have additional GPU budget and colocated scheduling is already
-  efficient.
-- The reward service has low concurrency or becomes the bottleneck.
-
-## Troubleshooting
-
-**Reward model OOM.** Increase `REWARD_TP`, reduce `reward.num_workers`, or
-allocate more reward GPUs through `reward.reward_model.n_gpus_per_node`.
-
-**Reward workers are idle.** Check that
-`reward.reward_model.enable_resource_pool=True` is set and that
-`reward.num_workers > 0`.
-
-**Rollout still waits a long time.** Async reward only overlaps reward with
-unfinished rollout work. If every rollout finishes before reward starts to
-dominate, the trainer still waits for reward completion before training.
-
-**HTTP scorer is slow.** Scale the scorer service, increase its worker count, or
-check network latency. The HTTP scorer client reuses `aiohttp.ClientSession` and
-offloads image serialization to a thread pool, but the remote service still needs
-enough capacity.
-
 ## References
 
 - [Flow-GRPO: Training Flow Matching Models via Online RL](https://arxiv.org/abs/2505.05470)
@@ -245,6 +165,3 @@ enough capacity.
 - [HybridFlow: A Flexible and Efficient RLHF Framework](https://arxiv.org/abs/2409.19256)
   describes the verl systems model behind flexible role placement and resource
   pools.
-- [Relax: An Asynchronous Reinforcement Learning Engine for Omni-Modal Post-Training at Scale](https://arxiv.org/abs/2604.11554)
-  is related systems work on fully asynchronous RL training with explicit
-  staleness control.
