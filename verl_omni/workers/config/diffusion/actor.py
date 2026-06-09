@@ -175,6 +175,15 @@ class FSDPDiffusionActorConfig(DiffusionActorConfig):
         # falls back to FSDP1 even when actor.strategy="fsdp2".
         object.__setattr__(self.engine, "strategy", self.strategy)
 
+        if (
+            self.model_config.attn_backend == "_flash_3_varlen_hub"
+            and self.fsdp_config.ulysses_sequence_parallel_size > 1
+        ):
+            raise ValueError(
+                "_flash_3_varlen_hub does not support sequence parallelism. "
+                "Set fsdp_config.ulysses_sequence_parallel_size=1."
+            )
+
 
 @dataclass
 class VeOmniDiffusionActorConfig(DiffusionActorConfig):
