@@ -172,8 +172,9 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         txt = [self.prompt_template_encode.format(e) for e in prompt]
         tokens = self.tokenizer(
             txt,
+            max_length=self.tokenizer_max_length + self.prompt_template_encode_start_idx,
             padding=True,
-            truncation=False,
+            truncation=True,
             return_tensors="pt",
         ).to(self.device)
         return tokens.input_ids, tokens.attention_mask
@@ -493,7 +494,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             cur_noise_level = 0.0
         elif i == sde_window[0]:
             cur_noise_level = state.noise_level
-            state.all_latents.append(state.latents)
+            state.all_latents.append(state.latents.float())
         elif i > sde_window[0] and i < sde_window[1]:
             cur_noise_level = state.noise_level
         else:
@@ -515,11 +516,45 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         state.latents = new_latents.to(model_dtype)
 
         if i >= sde_window[0] and i < sde_window[1]:
-            state.all_latents.append(state.latents)
+            state.all_latents.append(state.latents.float())
             state.all_log_probs.append(log_prob)
             state.all_timesteps.append(timestep_value)
 
         state.step_index += 1
+
+    def denoise_step(self, input_batch, **kwargs):
+        print("=============================================== Run this denoise step ===================================================")
+        del kwargs
+        if self.interrupt:
+            return None
+
+        t = input_batch.timesteps
+        self._current_timestep = t
+        x = input_batch.latents.to(self.transformer.img_in.weight.dtype)
+
+        positive_kwargs, negative_kwargs, output_slice = self._build_denoise_kwargs(
+            latents=x,
+            timestep=t,
+            guidance=input_batch.guidance,
+            prompt_embeds=input_batch.prompt_embeds,
+            prompt_embeds_mask=input_batch.prompt_embeds_mask,
+            img_shapes=input_batch.img_shapes,
+            txt_seq_lens=input_batch.txt_seq_lens,
+            do_true_cfg=input_batch.do_true_cfg,
+            negative_prompt_embeds=input_batch.negative_prompt_embeds,
+            negative_prompt_embeds_mask=input_batch.negative_prompt_embeds_mask,
+            negative_txt_seq_lens=input_batch.negative_txt_seq_lens,
+            extra_transformer_kwargs={"attention_kwargs": self.attention_kwargs, "return_dict": False},
+        )
+        noise_pred = self.predict_noise_maybe_with_cfg(
+            input_batch.do_true_cfg,
+            input_batch.true_cfg_scale,
+            positive_kwargs,
+            negative_kwargs,
+            input_batch.cfg_normalize,
+            output_slice,
+        )
+        return noise_pred.float()   # step_scheduler expects fp32 noise_pred
 
     def post_decode(
         self,

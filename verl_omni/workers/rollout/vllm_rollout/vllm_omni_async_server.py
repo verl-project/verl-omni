@@ -205,6 +205,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
+        prompt_mask: torch.BoolTensor | None = None,
         priority: int = 0,
     ) -> DiffusionOutput:
         """Generate sequence with token-in-image-out."""
@@ -228,6 +229,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         # Build OmniCustomPrompt with pre-tokenized IDs
         custom_prompt: OmniCustomPrompt = {"prompt_ids": prompt_ids}
+        if prompt_mask is not None:
+            custom_prompt["prompt_mask"] = prompt_mask
         if negative_prompt_ids is not None:
             custom_prompt["negative_prompt_ids"] = negative_prompt_ids
         if multi_modal_data:
