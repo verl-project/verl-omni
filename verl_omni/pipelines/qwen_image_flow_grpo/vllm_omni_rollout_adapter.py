@@ -188,7 +188,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
 
         Override of ``QwenImagePipeline.prepare_encode`` that accepts pre-tokenized
         ``prompt_ids`` (and optional ``prompt_mask``) instead of raw text prompts,
-        matching the input contract of ``QwenImagePipelineWithLogProbForTest``.
+        matching the input contract of ``QwenImagePipelineWithLogProb``.
         """
         sampling = state.sampling
         prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask = self._extract_prompt_ids(
@@ -203,7 +203,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
 
         if prompt_ids is None:
             raise ValueError(
-                "QwenImagePipelineWithLogProbForTest.prepare_encode requires either "
+                "QwenImagePipelineWithLogProb.prepare_encode requires either "
                 "'prompt_ids' or a text 'prompt' in state.prompts[0]."
             )
 
@@ -263,7 +263,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             None,
         )
 
-        img_shapes = [[(1, height // self.vae_scale_factor // 2, width // self.vae_scale_factor // 2)]] * batch_size
+        img_shapes = build_img_shapes(height, width, batch_size, self.vae_scale_factor)
 
         timesteps, _ = self.prepare_timesteps(num_inference_steps, sigmas, latents.shape[1])
         self._num_timesteps = len(timesteps)
@@ -274,10 +274,17 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         else:
             guidance = None
 
-        txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist() if prompt_embeds_mask is not None else None
-        negative_txt_seq_lens = (
-            negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
-        )
+        # Set RoPE length from padded embed width (match diffusers text_seq_len),
+        # not from mask.sum() (valid token count).  When Continuous Batching
+        # pads requests to a shared target_seq_len, mask.sum() would give
+        # different per-request RoPE lengths even though the embeddings have
+        # been padded to a uniform width.
+        txt_seq_lens = [int(prompt_embeds.shape[1])] * int(prompt_embeds.shape[0])
+        if negative_prompt_embeds is not None:
+            neg_seq_len = int(negative_prompt_embeds.shape[1])
+            negative_txt_seq_lens = [neg_seq_len] * int(negative_prompt_embeds.shape[0])
+        else:
+            negative_txt_seq_lens = None
 
         req_scheduler = copy.deepcopy(self.scheduler)
         req_scheduler.set_begin_index(0)
@@ -451,14 +458,16 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
                 return_logprobs=logprobs,
                 return_dict=False,
             )
-            # Scheduler upcasts to float32 internally; cast back to model dtype
-            # to match what the transformer expects on the next iteration.
-            latents = latents.to(x.dtype)
 
+            # Save fp32 trajectory BEFORE casting to model dtype, so the
+            # trainer recomputes log-probs on full-precision latents.
             if i >= sde_window[0] and i < sde_window[1]:
-                all_latents.append(latents)
+                all_latents.append(latents.float())
                 all_log_probs.append(log_prob)
                 all_timesteps.append(timestep_value)
+
+            # Cast back to model dtype for next transformer forward.
+            latents = latents.to(x.dtype)
 
         all_latents = torch.stack(all_latents, dim=1)
         all_log_probs = torch.stack(all_log_probs, dim=1) if all_log_probs and all_log_probs[0] is not None else None
@@ -510,20 +519,20 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             return_logprobs=state.logprobs,
             return_dict=False,
         )
-        # Scheduler upcasts to float32 internally; cast back to model dtype
-        # so vllm-omni worker sees consistent dtypes across states.
-        model_dtype = self.transformer.img_in.weight.dtype
-        state.latents = new_latents.to(model_dtype)
-
+        # Save fp32 trajectory BEFORE casting live state to model dtype,
+        # so the trainer later recomputes log-probs on full-precision latents.
         if i >= sde_window[0] and i < sde_window[1]:
-            state.all_latents.append(state.latents.float())
+            state.all_latents.append(new_latents.float())
             state.all_log_probs.append(log_prob)
             state.all_timesteps.append(timestep_value)
+
+        # Cast live state back to model dtype for next transformer forward.
+        model_dtype = self.transformer.img_in.weight.dtype
+        state.latents = new_latents.to(model_dtype)
 
         state.step_index += 1
 
     def denoise_step(self, input_batch, **kwargs):
-        print("=============================================== Run this denoise step ===================================================")
         del kwargs
         if self.interrupt:
             return None
@@ -785,10 +794,14 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         if self.attention_kwargs is None:
             self._attention_kwargs = {}
 
-        txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist() if prompt_embeds_mask is not None else None
-        negative_txt_seq_lens = (
-            negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
-        )
+        # Set RoPE length from padded embed width (match diffusers text_seq_len),
+        # not from mask.sum() (valid token count).
+        txt_seq_lens = [int(prompt_embeds.shape[1])] * int(prompt_embeds.shape[0])
+        if negative_prompt_embeds is not None:
+            neg_seq_len = int(negative_prompt_embeds.shape[1])
+            negative_txt_seq_lens = [neg_seq_len] * int(negative_prompt_embeds.shape[0])
+        else:
+            negative_txt_seq_lens = None
 
         if sde_window_size is not None:
             start = torch.randint(
