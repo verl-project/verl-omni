@@ -24,7 +24,7 @@ export custom_reward_model_path=$WORKSPACE/CKPT/HPSv3/HPSv3.safetensors
 custom_reward_function_path=verl_omni/utils/reward_score/hpsv3_reward.py
 
 # 8-NPU Global Distribution
-NUM_GPUS_ACTOR_ROLLOUT_REWARD=16
+NUM_GPUS_ACTOR_ROLLOUT_REWARD=8
 ROLLOUT_TP=1
 
 ENGINE=vllm_omni
