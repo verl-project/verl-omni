@@ -65,7 +65,7 @@ Visit our documentation to learn more.
     <td rowspan="5">Qwen-Image</td>
     <td rowspan="5">Diffusion generator</td>
     <td rowspan="5">Text → Image</td>
-    <td>FlowGRPO (+CPS)</td>
+    <td>FlowGRPO (+ CPS/SDE)</td>
     <td>✅</td>
   </tr>
   <tr>
