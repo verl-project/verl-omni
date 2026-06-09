@@ -33,7 +33,7 @@ Multimodal generative RL training differs from text-only LLM RL not only in mode
 
 - **Optimized rollout:** [`vLLM-Omni`](https://github.com/vllm-project/vllm-omni) as rollout backend for high-throughput multimodal generation
 - **Flexible and async multi-reward serving:** support multi-reward serving (HPSv3, GenRM-OCR, UnifiedReward, etc) and [HTTP scorer](https://verl-omni.readthedocs.io/en/latest/start/http_scorer.html), support [asynchronous reward computation](https://verl-omni.readthedocs.io/en/latest/algo/async_reward.html) to overlap rollout phase. 
-- **Modular training backends:** selectable VeOmni and FSDP2 backend with combinable parallelism (USP/TP/DP) for distributed training
+- **Modular training backends:** selectable [VeOmni](https://github.com/ByteDance-Seed/VeOmni) and FSDP2 backend with combinable parallelism (USP/TP/DP) for distributed training
 - **Stability tools:** improve diffusion RL stability with [rollout correction](https://verl-omni.readthedocs.io/en/latest/algo/rollout_correction.html) and deterministic rollout/reward/trainer.  
 - **End-to-end examples and benchmarks:** validated recipes for co-located sync and fully-async RL on the model families above
 - **High training throughput** — on our reference Qwen-Image FlowGRPO setup, `VeRL-Omni` achieves **~25% higher end-to-end throughput** than the diffusers-based [`flow_grpo`](https://github.com/yifan123/flow_grpo) implementation, driven by `vLLM-Omni` rollout, FSDP2 trainer, overlapped reward computation (asynchronous), etc.
