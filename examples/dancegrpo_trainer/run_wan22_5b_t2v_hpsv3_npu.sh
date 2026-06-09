@@ -24,7 +24,7 @@ export custom_reward_model_path=$WORKSPACE/CKPT/HPSv3/HPSv3.safetensors
 custom_reward_function_path=verl_omni/utils/reward_score/hpsv3_reward.py
 
 # 8-NPU Global Distribution
-NUM_GPUS_ACTOR_ROLLOUT_REWARD=8
+NUM_GPUS_ACTOR_ROLLOUT_REWARD=16
 ROLLOUT_TP=1
 
 ENGINE=vllm_omni
@@ -36,12 +36,12 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.diffusion_loss.loss_mode=dance_grpo \
     data.train_files=$hpsv3_train_path \
     data.val_files=$hpsv3_test_path \
-    data.train_batch_size=64 \
-    data.max_prompt_length=1024 \
+    data.train_batch_size=32 \
+    data.max_prompt_length=512 \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.attn_backend='_native_npu' \
     actor_rollout_ref.model.custom_chat_template='"{% if messages %}{% for message in messages %}{% if message[\"role\"] == \"user\" %}{{ message[\"content\"] }}{% endif %}{% endfor %}{% endif %}</s>"' \
-    actor_rollout_ref.actor.optim.lr=1e-5 \
+    actor_rollout_ref.actor.optim.lr=3e-5 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=8 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
@@ -62,7 +62,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.pipeline.num_frames=8 \
     actor_rollout_ref.rollout.pipeline.num_inference_steps=10 \
     actor_rollout_ref.rollout.pipeline.guidance_scale=5.0 \
-    actor_rollout_ref.rollout.pipeline.max_sequence_length=1024 \
+    actor_rollout_ref.rollout.pipeline.max_sequence_length=512 \
     actor_rollout_ref.rollout.algo.noise_level=1.2 \
     actor_rollout_ref.rollout.algo.sde_type="dance_sde" \
     actor_rollout_ref.rollout.algo.sde_window_size=2 \
