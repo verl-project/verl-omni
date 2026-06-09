@@ -114,9 +114,15 @@ class DiffusionModelConfig(BaseConfig):
     def __post_init__(self):
         import_external_libs(self.external_lib)
 
-        valid_backends = {"native", "_native_npu"}
+        valid_backends = {"native", "_native_npu", "_flash_3_varlen_hub"}
         if self.attn_backend not in valid_backends:
             raise ValueError(f"Invalid attn_backend: {self.attn_backend}. Must be one of {sorted(valid_backends)}")
+
+        if self.attn_backend == "_flash_3_varlen_hub":
+            try:
+                import kernels  # noqa: F401
+            except ImportError as e:
+                raise ImportError("attn_backend '_flash_3_varlen_hub' requires `kernels` package. ") from e
 
         self.local_path = resolve_model_local_dir(self.path, use_shm=self.use_shm)
         if self.tokenizer_path is None:
