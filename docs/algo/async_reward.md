@@ -43,17 +43,17 @@ hide behind the remaining rollout work.
 Async reward in VeRL-Omni is **sample-level streaming reward computation** within
 an otherwise on-policy training step.
 
-```text
-sync reward:
+<img width="1380" height="1020" alt="demo" src="https://github.com/user-attachments/assets/eaa577d0-e608-4a21-b044-961a89bcc590" />
 
-rollout batch ----------------> reward batch ----> train
 
-async reward:
 
-sample 1 rollout -> reward \
-sample 2 rollout ----> reward +--> batch assembly -> train
-sample 3 rollout ------> reward /
-```
+The upper panel shows the colocated/synchronous case: early rollout samples sit
+idle until the slowest sample finishes, then the reward batch runs, then actor
+training starts. The lower panel shows async reward: each completed sample is
+streamed to a reward worker immediately. Training still starts only after the
+full scored batch is ready, but the reward stage is partly hidden behind the
+remaining rollout work.
+
 
 The important boundary is the policy update. Async reward does **not** make the
 actor update proceed on partial or stale batches. The trainer still assembles the
