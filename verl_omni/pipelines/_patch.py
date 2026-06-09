@@ -20,6 +20,7 @@ from packaging import version
 logger = logging.getLogger(__name__)
 
 
+# TODO (mike): It was fixed in diffusers main branch. Remove this patch once we upgrade the diffusers version.
 def _apply_qwen_image_ulysses_mask_fix() -> None:
     if version.parse(diffusers.__version__) < version.parse("0.38.0"):
         return
@@ -76,6 +77,7 @@ def _apply_qwen_image_ulysses_mask_fix() -> None:
     QwenImageTransformer2DModel.forward = _patched_forward
 
 
+# TODO (mike): drop this once it is fixed in upstream diffusers.
 def _apply_flash_attention_3_varlen_hub_fix() -> None:
     """Patch ``_flash_attention_3_varlen_hub`` to support non-contiguous attention masks.
 
