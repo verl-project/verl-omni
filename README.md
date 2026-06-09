@@ -77,7 +77,7 @@ Visit our documentation to learn more.
   </tr>
   <tr>
     <td>DPO</td>
-    <td>WIP</td>
+    <td>✅</td>
   </tr>
   <tr>
     <td>Wan2.2</td>

@@ -12,9 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""End-to-end tests for the VeOmni diffusion actor engine.
+
+Mirrors :mod:`tests.workers.test_diffusers_fsdp_engine` but exercises the
+``veomni`` backend in isolation so that VeOmni-specific imports and config
+overrides do not bleed into the diffusers FSDP/FSDP2 test surface.
+"""
+
 import os
-import shutil
-import tempfile
 from functools import partial
 
 import numpy as np
@@ -27,102 +32,66 @@ from verl.utils import tensordict_utils as tu
 from verl.workers.config import TrainingWorkerConfig
 
 from verl_omni.pipelines.utils import build_scheduler
-from verl_omni.workers.config import DiffusionModelConfig, FSDPDiffusionActorConfig
+from verl_omni.workers.config import DiffusionModelConfig, VeOmniDiffusionActorConfig
 from verl_omni.workers.engine_workers import TrainingWorker
 from verl_omni.workers.utils.losses import diffusion_loss
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 from ..utils.gpu_test_topology import resolve_requested_num_gpus
 
-
-def _diffusers_sp_supported() -> bool:
-    """Return True if the installed diffusers version supports ContextParallelConfig (>= 0.38.0)."""
-    import diffusers
-    from packaging import version
-
-    return version.parse(diffusers.__version__) >= version.parse("0.38.0")
+pytest.importorskip("veomni")
 
 
-def _create_sp_compatible_model(parent_dir, src_model_path, num_attention_heads=2):
-    """Create a temporary Qwen-Image model copy compatible with SP."""
-    from diffusers import QwenImageTransformer2DModel
-
-    dst = os.path.join(parent_dir, "Qwen-Image")
-    shutil.copytree(src_model_path, dst)
-
-    transformer = QwenImageTransformer2DModel(
-        num_attention_heads=num_attention_heads,
-        attention_head_dim=32,
-        num_layers=2,
-        in_channels=64,
-        out_channels=16,
-        patch_size=2,
-        joint_attention_dim=32,
-        axes_dims_rope=(8, 12, 12),
-        guidance_embeds=False,
-    )
-    transformer.save_pretrained(os.path.join(dst, "transformer"))
-    return dst
-
-
-def create_training_config(model_type, strategy, device_count, model, policy_state_adapters=None):
-    if strategy not in {"fsdp", "fsdp2"}:
-        raise NotImplementedError(f"strategy {strategy} is not supported")
-
-    if device_count == 1:
-        cp = fsdp_size = 1
-    else:
-        cp = 2 if _diffusers_sp_supported() else 1
-        fsdp_size = device_count
+def create_training_config(model_type, device_count, model):
+    cp = 1
+    fsdp_size = device_count
     path = os.path.expanduser(model)
     tokenizer_path = os.path.join(path, "tokenizer")
 
     from hydra import compose, initialize_config_dir
     from verl.utils.config import omega_conf_to_dataclass
 
-    model_overrides = [
-        "path=" + path,
-        "tokenizer_path=" + tokenizer_path,
-        "lora_rank=8",
-        "lora_alpha=16",
-        "pipeline.true_cfg_scale=4.0",
-        "algo.noise_level=1.2",
-        "algo.sde_type=sde",
-    ]
-    if policy_state_adapters is not None:
-        adapters = ",".join(f'"{adapter}"' for adapter in policy_state_adapters)
-        model_overrides.append(f"policy_state_adapters=[{adapters}]")
-
     with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/model")):
         cfg = compose(
             config_name="diffusion_model",
-            overrides=model_overrides,
+            overrides=[
+                "path=" + path,
+                "tokenizer_path=" + tokenizer_path,
+                "lora_rank=0",
+                "pipeline.true_cfg_scale=4.0",
+                "algo.noise_level=1.2",
+                "algo.sde_type=sde",
+                "config_path=" + os.path.join(path, "transformer"),
+            ],
         )
     model_config: DiffusionModelConfig = omega_conf_to_dataclass(cfg)
 
     with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/actor")):
         cfg = compose(
-            config_name="dp_diffusion_actor",
+            config_name="veomni_diffusion_actor",
             overrides=[
-                "strategy=" + strategy,
                 "diffusion_loss.clip_ratio=0.0001",
                 "diffusion_loss.adv_clip_max=5.0",
                 "ppo_mini_batch_size=4",
                 "ppo_micro_batch_size_per_gpu=4",
                 "optim.lr=1e-4",
                 "optim.weight_decay=0.0001",
-                "fsdp_config.param_offload=False",
-                "fsdp_config.optimizer_offload=False",
-                "fsdp_config.model_dtype='bfloat16'",
-                "fsdp_config.dtype='bfloat16'",
-                "+fsdp_config.mixed_precision.param_dtype='bfloat16'",
-                "fsdp_config.forward_only=False",
-                "fsdp_config.fsdp_size=" + str(fsdp_size),
-                "fsdp_config.ulysses_sequence_parallel_size=" + str(cp),
+                # VeOmni's BaseTrainer._build_lr_scheduler reads
+                # ``args.train_steps``, which raises unless ``_train_steps`` has
+                # been set away from the ``-1`` sentinel. In production this is
+                # set by ray_diffusion_trainer (len(dataloader) * total_epochs);
+                # in this unit test we pin a small value explicitly.
+                "optim.total_training_steps=10",
+                "veomni_config.param_offload=False",
+                "veomni_config.optimizer_offload=False",
+                "veomni_config.mixed_precision=True",
+                "veomni_config.forward_only=False",
+                "veomni_config.fsdp_size=" + str(fsdp_size),
+                "veomni_config.ulysses_parallel_size=" + str(cp),
                 "diffusion_loss.loss_mode='flow_grpo'",
             ],
         )
-    actor_config: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
+    actor_config: VeOmniDiffusionActorConfig = omega_conf_to_dataclass(cfg)
 
     training_config = TrainingWorkerConfig(
         model_type=model_type,
@@ -174,43 +143,26 @@ def create_data_samples(num_device: int, model_config: DiffusionModelConfig) -> 
     return data
 
 
-@pytest.mark.parametrize(
-    "strategy",
-    [
-        "fsdp",
-        "fsdp2",
-    ],
-)
-def test_diffusers_fsdp_engine(strategy):
-    # Create configs
+def test_diffusers_veomni_engine():
     ray.init()
-    tmp_dir = tempfile.mkdtemp(prefix="qwen_image_sp_")
     try:
         visible_gpus = torch.cuda.device_count()
         device_count = resolve_requested_num_gpus(default_num_gpus=max(1, visible_gpus))
         if device_count > 1 and device_count % 2 != 0:
-            pytest.skip(f"Need even GPU count for cp=2/fsdp_size=device_count test, got {device_count}")
+            pytest.skip(f"Need even GPU count for fsdp_size=device_count test, got {device_count}")
 
-        sp_enabled = device_count > 1 and _diffusers_sp_supported()
-        base_model_path = os.path.expanduser("~/models/tiny-random/Qwen-Image")
-        if sp_enabled:
-            # SP requires num_attention_heads divisible by sp_size (cp=2).
-            model_path = _create_sp_compatible_model(tmp_dir, base_model_path, num_attention_heads=2)
-        else:
-            model_path = base_model_path
+        model_path = os.path.expanduser("~/models/tiny-random/Qwen-Image")
         training_config, actor_config = create_training_config(
             model_type="diffusion_model",
-            strategy=strategy,
             device_count=device_count,
             model=model_path,
         )
-        # init model
+
         ray_cls_with_init = RayClassWithInitArgs(cls=ray.remote(TrainingWorker), config=training_config)
         resource_pool = RayResourcePool(process_on_nodes=[device_count])
-        wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init)  # TrainigWorker
+        wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init)
         wg.reset()
 
-        # forward only without loss function
         data_td = create_data_samples(device_count, training_config.model_config).to_tensordict()
         data_td = embeds_padding_2_no_padding(data_td)
         tu.assign_non_tensor(
@@ -226,12 +178,9 @@ def test_diffusers_fsdp_engine(strategy):
         for key in ["log_probs", "metrics"]:
             assert key in output_dict
 
-        # forward and backward with loss function
-        # set loss function
         loss_fn = partial(diffusion_loss, config=actor_config)
         wg.set_loss_fn(loss_fn)
 
-        # train batch
         data_td = create_data_samples(device_count, training_config.model_config).to_tensordict()
         data_td = embeds_padding_2_no_padding(data_td)
         ppo_mini_batch_size = 4
@@ -252,4 +201,3 @@ def test_diffusers_fsdp_engine(strategy):
         assert "metrics" in output_dict.keys()
     finally:
         ray.shutdown()
-        shutil.rmtree(tmp_dir, ignore_errors=True)

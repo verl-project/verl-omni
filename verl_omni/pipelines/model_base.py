@@ -187,14 +187,12 @@ class DiffusionModelBase(ABC):
         model_inputs: dict[str, torch.Tensor],
         negative_model_inputs: Optional[dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
-        """Run a single model prediction for forward-process objectives.
-
-        Override this when an algorithm trains by noising clean latents
-        ``x0 -> xt`` (i.e., forward process) and then optimizing model predictions directly, rather
-        than sampling/log-probing the reverse step ``xt -> x_{t-1}``.
-        The default is a plain transformer forward; model adapters only need
-        to override when prediction requires extra handling such as CFG,
-        negative inputs, or output conversion.
+        """Run a single model prediction.
+        Used both for forward-process objectives (noising clean latents ``x0 -> xt``
+        then optimizing predictions directly) and as the prediction step inside
+        reverse-sampling algorithms (FlowGRPO et al.). Model adapters only need to
+        override this when prediction requires extra handling such as CFG, negative
+        inputs, or output conversion.
         """
         return module(**model_inputs)[0]
 

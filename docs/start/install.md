@@ -59,6 +59,42 @@ uv pip install -e .
 | Extra | Install | When needed |
 |---|---|---|
 | OCR reward | `uv pip install Levenshtein` | FlowGRPO training with OCR-based reward |
+| Diffusers Flash Attention 3 backend | `uv pip install kernels==0.14.1` | Using `attn_backend="_flash_3_varlen_hub"` for faster attention |
+| VeOmni engine backend | See [Optional engine backends](#optional-engine-backends) | Running the diffusion trainer with VeOmni instead of the default FSDP2 |
+
+### Flash Attention 3 (`_flash_3_varlen_hub`)
+
+Set `actor_rollout_ref.model.attn_backend="_flash_3_varlen_hub"` in your
+training script to switch from the default `native` attention to a
+Flash-Attention-3-based backend. This requires the `kernels` package:
+
+```bash
+uv pip install kernels==0.14.1
+```
+
+## Optional engine backends
+
+VeRL-Omni defaults to **FSDP2** as the training engine for the policy and reference models. The diffusion trainer can alternatively be switched to [**VeOmni**](https://github.com/ByteDance-Seed/VeOmni). The engine is selected at the Hydra command line — see [`examples/flowgrpo_trainer/run_qwen_image_ocr_veomni.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/run_qwen_image_ocr_veomni.sh) for a complete recipe.
+
+### Installing VeOmni alongside vLLM 0.20.2
+
+VeOmni 0.1.11's `gpu` extra pins `torch==2.9.1+cu129`, which conflicts with `vllm==0.20.2` (depends on `torch>=2.11`). A plain `uv pip install veomni[gpu,dit]==0.1.11` therefore fails dependency resolution.
+
+VeOmni itself runs correctly on torch 2.11 — only the `[gpu]` extra's pin is too strict. Install it without dependency resolution so the existing torch/vllm stack is preserved, and add the small set of runtime extras that the verl-omni VeOmni engine actually needs:
+
+```bash
+uv pip install veomni==0.1.11 --no-deps
+uv pip install torchcodec librosa soundfile av
+```
+
+Verify the engine is importable:
+
+```bash
+python -c "import veomni; print('veomni', veomni.__version__)"
+python -c "from veomni.distributed.offloading import load_model_to_gpu, load_optimizer, offload_model_to_cpu, offload_optimizer; print('VeOmni offloading helpers OK')"
+```
+
+If you want VeOmni's full `[gpu,dit]` extras (flash-attn variants, liger-kernel, cuda-python, etc.), install them in a separate environment not pinned to vllm 0.20.2; verl-omni does not need them.
 
 ## Post-Installation Verification
 
