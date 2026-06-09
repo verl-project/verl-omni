@@ -179,10 +179,7 @@ class FSDPDiffusionActorConfig(DiffusionActorConfig):
             self.model_config.attn_backend == "_flash_3_varlen_hub"
             and self.fsdp_config.ulysses_sequence_parallel_size > 1
         ):
-            raise ValueError(
-                "_flash_3_varlen_hub does not support sequence parallelism. "
-                "Set fsdp_config.ulysses_sequence_parallel_size=1."
-            )
+            raise ValueError("_flash_3_varlen_hub does not support sequence parallelism. ")
 
 
 @dataclass
