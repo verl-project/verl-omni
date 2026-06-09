@@ -74,15 +74,15 @@ REWARD_TP=1
 The key overrides are:
 
 ```bash
-reward.num_workers=$((NUM_GPUS_REWARD / REWARD_TP)) \
-reward.reward_model.enable=True \
-reward.reward_model.model_path=$reward_model_name \
-reward.reward_model.rollout.name=$REWARD_ENGINE \
-reward.reward_model.enable_resource_pool=True \
-reward.reward_model.nnodes=1 \
-reward.reward_model.n_gpus_per_node=$NUM_GPUS_REWARD \
-reward.reward_model.rollout.tensor_model_parallel_size=$REWARD_TP \
-reward.custom_reward_function.path=$reward_function_path \
+reward.num_workers=$((NUM_GPUS_REWARD / REWARD_TP))
+reward.reward_model.enable=True
+reward.reward_model.model_path=$reward_model_name
+reward.reward_model.rollout.name=$REWARD_ENGINE
+reward.reward_model.enable_resource_pool=True
+reward.reward_model.nnodes=1
+reward.reward_model.n_gpus_per_node=$NUM_GPUS_REWARD
+reward.reward_model.rollout.tensor_model_parallel_size=$REWARD_TP
+reward.custom_reward_function.path=$reward_function_path
 reward.custom_reward_function.name=compute_score_ocr
 ```
 
