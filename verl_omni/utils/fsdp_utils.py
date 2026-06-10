@@ -28,24 +28,7 @@ from verl.utils.fsdp_utils import layered_summon_lora_params as _upstream_layere
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["collect_lora_params", "fsdp_summon_full_params", "get_rollout_weight_prefix"]
-
-
-def get_rollout_weight_prefix(architecture: str | None) -> str:
-    """Checkpoint key prefix expected by the colocated vLLM-Omni rollout worker.
-
-    Qwen-Image and other diffusers pipelines expose ``pipeline.transformer.*``.
-    BAGEL nests the trainable MoT stack under ``pipeline.transformer``
-    (``self.transformer = self.language_model.model`` in BagelPipeline).
-    The rollout-side LoRA manager iterates ``self.pipeline.transformer``
-    and constructs module names as ``transformer.<path>``, so the prefix
-    must be ``transformer.`` for both architectures.
-    """
-    # All diffusers-based pipelines in vllm-omni expose the trainable
-    # transformer under ``pipeline.transformer``. The LoRA manager's
-    # ``_replace_layers_with_lora`` iterates ``pipeline.transformer``
-    # and builds full module names with the ``transformer.`` prefix.
-    return "transformer."
+__all__ = ["collect_lora_params", "fsdp_summon_full_params"]
 
 
 def _get_fsdp_module_cls():

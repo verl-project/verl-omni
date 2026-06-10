@@ -65,7 +65,7 @@ from verl_omni.pipelines.utils import (
     prepare_model_inputs,
     prepare_noisy_latents,
 )
-from verl_omni.utils.fsdp_utils import collect_lora_params, get_rollout_weight_prefix
+from verl_omni.utils.fsdp_utils import collect_lora_params
 from verl_omni.workers.config import DiffusionModelConfig
 from verl_omni.workers.engine.lora_adapter_mixin import LoRAAdapterMixin
 
@@ -761,8 +761,9 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             )
 
         # Prefix keys so the colocated rollout worker can map them into its pipeline.
-        rollout_prefix = get_rollout_weight_prefix(self.model_config.architecture)
-        per_tensor_param = ((f"{rollout_prefix}{name}", tensor) for name, tensor in per_tensor_param)
+        # vllm-omni's DiffusionLoRAManager._replace_layers_with_lora iterates
+        # pipeline.transformer and builds module names as ``transformer.<path>``.
+        per_tensor_param = ((f"transformer.{name}", tensor) for name, tensor in per_tensor_param)
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
         return per_tensor_param, peft_config_dict
 
