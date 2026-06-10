@@ -232,8 +232,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # Build OmniCustomPrompt with pre-tokenized IDs
         custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_ids}
         if len(default_params_list) > 1:
-            # Multi-stage pipelines (e.g. BAGEL) — tag the diffusion stage
-            # so the orchestrator can route inputs correctly.
+            # Multi-stage pipelines tag the diffusion stage so the orchestrator can route inputs correctly.
             custom_prompt["modalities"] = ["image"]
         if negative_prompt_ids is not None:
             custom_prompt["negative_prompt_ids"] = negative_prompt_ids

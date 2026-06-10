@@ -197,15 +197,10 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             )
 
     def _build_module_from_registry(self, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
-        """Build the model via a registered ``DiffusionModelBase`` subclass.
+        """Try loading via ``DiffusionModelBase.build_module()``.
 
-        Returns ``None`` when the subclass does not provide a custom loader.
-        Custom loaders bypass ``diffusers.AutoModel``, so engine-level hooks
-        (attention processors, gradient checkpointing, LoRA, dtype upcast)
-        may be silently inactive on the returned module.
-
-        TODO: drop this function once the model is integrated into a
-        first-class engine (``transformers`` / ``diffusers`` / ``veomni``).
+        Returns ``None`` if the registry has no custom loader, so the
+        caller falls back to ``diffusers.AutoModel``.
         """
         from verl_omni.pipelines.model_base import DiffusionModelBase
 
@@ -248,6 +243,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         return module
 
     def _build_module(self):
+        from diffusers import AutoModel
         from verl.utils.torch_dtypes import PrecisionType
 
         torch_dtype = self.engine_config.model_dtype
@@ -263,8 +259,6 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             return module
 
         # Default path: load via diffusers AutoModel
-        from diffusers import AutoModel
-
         init_context = get_init_weight_context_manager(use_meta_tensor=True, mesh=self.device_mesh)
 
         with init_context(), warnings.catch_warnings():
