@@ -112,6 +112,10 @@ class DiffusionRolloutConfig(BaseConfig):
     max_model_len: Optional[int] = None
     max_num_seqs: int = 1024
 
+    # When True, the vLLM-Omni engine runs in step-execution mode and selects
+    # the *_stepwise variant of the pipeline (e.g. flow_grpo_stepwise).
+    step_execution: bool = False
+
     # note that the logprob computation should belong to the actor
     log_prob_micro_batch_size_per_gpu: Optional[int] = None
 
