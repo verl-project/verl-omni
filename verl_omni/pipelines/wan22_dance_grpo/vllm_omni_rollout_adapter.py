@@ -44,12 +44,6 @@ logger = logging.getLogger(__name__)
 __all__ = ["Wan22DanceGRPOPipelineWithLogProb"]
 
 
-def _maybe_to_cpu(value):
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu()
-    return value
-
-
 def _coalesce_not_none(value, default):
     return default if value is None else value
 
@@ -657,16 +651,17 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
             output = self.vae.decode(latents, return_dict=False)[0]
 
         return DiffusionOutput(
-            output=_maybe_to_cpu(output),
+            output=output,
             custom_output={
-                "all_latents": _maybe_to_cpu(all_latents),
-                "all_log_probs": _maybe_to_cpu(all_log_probs),
-                "all_timesteps": _maybe_to_cpu(all_timesteps_tensor),
-                "prompt_embeds": _maybe_to_cpu(prompt_embeds),
-                "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
-                "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds),
-                "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
+                "all_latents": all_latents,
+                "all_log_probs": all_log_probs,
+                "all_timesteps": all_timesteps_tensor,
+                "prompt_embeds": prompt_embeds,
+                "prompt_embeds_mask": prompt_embeds_mask,
+                "negative_prompt_embeds": negative_prompt_embeds,
+                "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
             },
+            to_cpu=True,
         )
 
     def check_inputs(

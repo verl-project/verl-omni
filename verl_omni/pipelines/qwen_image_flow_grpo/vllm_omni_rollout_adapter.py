@@ -24,7 +24,7 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
-from .common import QwenImageTokenIdPromptMixin, apply_true_cfg, build_img_shapes, coalesce_not_none, maybe_to_cpu
+from .common import QwenImageTokenIdPromptMixin, apply_true_cfg, build_img_shapes, coalesce_not_none
 
 __all__ = ["QwenImagePipelineWithLogProb"]
 
@@ -423,14 +423,15 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
 
         return DiffusionOutput(
-            output=maybe_to_cpu(image),
+            output=image,
             custom_output={
-                "all_latents": maybe_to_cpu(all_latents),
-                "all_log_probs": maybe_to_cpu(all_log_probs),
-                "all_timesteps": maybe_to_cpu(all_timesteps),
-                "prompt_embeds": maybe_to_cpu(prompt_embeds),
-                "prompt_embeds_mask": maybe_to_cpu(prompt_embeds_mask),
-                "negative_prompt_embeds": maybe_to_cpu(negative_prompt_embeds),
-                "negative_prompt_embeds_mask": maybe_to_cpu(negative_prompt_embeds_mask),
+                "all_latents": all_latents,
+                "all_log_probs": all_log_probs,
+                "all_timesteps": all_timesteps,
+                "prompt_embeds": prompt_embeds,
+                "prompt_embeds_mask": prompt_embeds_mask,
+                "negative_prompt_embeds": negative_prompt_embeds,
+                "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
             },
+            to_cpu=True,
         )
