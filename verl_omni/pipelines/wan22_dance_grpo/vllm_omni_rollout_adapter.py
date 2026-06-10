@@ -372,7 +372,7 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         if len(req.prompts) == 1:
             custom_prompt = req.prompts[0] if isinstance(req.prompts[0], dict) else {}
             if isinstance(custom_prompt, dict):
-                prompt_ids = custom_prompt.get("prompt_ids", prompt_ids)
+                prompt_ids = custom_prompt.get("prompt_token_ids", prompt_ids)
                 prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
                 negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
                 negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)
