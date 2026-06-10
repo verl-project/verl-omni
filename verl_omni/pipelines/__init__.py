@@ -15,10 +15,13 @@
 from . import (
     _patch,  # noqa: F401 — apply Ulysses mask & FA3 varlen mask fixes
     qwen_image_diffusion_nft,
+    qwen_image_dpo,
     qwen_image_flow_grpo,
     qwen_image_mix_grpo,
+    sd3_dpo,
 )
 from .qwen_image_diffusion_nft import *  # noqa: F401, F403
+from .qwen_image_dpo import *  # noqa: F401, F403
 from .qwen_image_flow_grpo import *  # noqa: F401, F403
 from .qwen_image_mix_grpo import *  # noqa: F401, F403
 from .sd3_dpo import *  # noqa: F401, F403
@@ -29,3 +32,4 @@ __all__ += list(qwen_image_diffusion_nft.__all__)
 __all__ += list(qwen_image_mix_grpo.__all__)
 __all__ += list(sd3_dpo.__all__)
 __all__ += list(wan22_dance_grpo.__all__)
+__all__ += list(qwen_image_dpo.__all__)

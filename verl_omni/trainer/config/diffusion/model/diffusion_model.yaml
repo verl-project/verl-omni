@@ -37,8 +37,8 @@ config_path: null
 # Subfolder containing the diffusion transformer weights/config.
 transformer_subfolder: transformer
 
-# Diffusers attention backend.
-# Supported: "native", "_native_npu", "flash_varlen_hub" and "_flash_3_varlen_hub"
+# Diffusers attention backend. 
+# Supported: "native", "_native_npu", "_flash_3_varlen_hub"
 attn_backend: native
 
 # Set to positive value to enable LoRA (e.g., 32)

@@ -20,6 +20,7 @@ from packaging import version
 logger = logging.getLogger(__name__)
 
 
+# TODO (mike): It was fixed in diffusers main branch. Remove this patch once we upgrade the diffusers version.
 def _apply_qwen_image_ulysses_mask_fix() -> None:
     if version.parse(diffusers.__version__) < version.parse("0.38.0"):
         return
@@ -76,6 +77,7 @@ def _apply_qwen_image_ulysses_mask_fix() -> None:
     QwenImageTransformer2DModel.forward = _patched_forward
 
 
+# TODO (mike): drop this once it is fixed in upstream diffusers.
 def _apply_flash_attention_3_varlen_hub_fix() -> None:
     """Patch ``_flash_attention_3_varlen_hub`` to support non-contiguous attention masks.
 
@@ -142,7 +144,7 @@ def _apply_flash_attention_3_varlen_hub_fix() -> None:
             value_packed = value.flatten(0, 1)
 
         func = _ad._HUB_KERNELS_REGISTRY[backend].kernel_fn
-        kernel_result = func(
+        out = func(
             q=query_packed,
             k=key_packed,
             v=value_packed,
@@ -152,12 +154,11 @@ def _apply_flash_attention_3_varlen_hub_fix() -> None:
             max_seqlen_k=max_seqlen_k,
             softmax_scale=scale,
             causal=is_causal,
+            return_attn_probs=return_lse,
         )
-        if isinstance(kernel_result, tuple):
-            out, lse, *_ = kernel_result
-        else:
-            out = kernel_result
-            lse = None
+        lse = None
+        if return_lse:
+            out, lse, *_ = out
         out = out.unflatten(0, (batch_size, -1))
 
         return (out, lse) if return_lse else out

@@ -246,10 +246,10 @@ run_selected_test 5 "DiffusionNFT trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_diffusionnft_qwen_image.sh
 
-# ── Test 6: SD3.5 offline DPO trainer e2e (actor-only, 1 GPU) ────────────────
-run_selected_test 6 "SD3.5 offline DPO trainer e2e" \
-    env CUDA_VISIBLE_DEVICES=0 NUM_GPUS=1 \
-    bash tests/special_e2e/run_sd35_offline_dpo.sh
+# ── Test 6: Qwen-Image online DPO trainer e2e (vllm_omni rollout) ─────────────
+run_selected_test 6 "Qwen-Image online DPO trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
+    bash tests/special_e2e/run_online_dpo_qwen_image.sh
 
 # ── Test 7: diffusers VeOmni engine ───────────────────────────────────────────
 # Skips itself if the optional `veomni` backend is not installed (importorskip).
