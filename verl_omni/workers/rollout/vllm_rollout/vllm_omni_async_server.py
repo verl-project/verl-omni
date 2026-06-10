@@ -125,6 +125,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
 
+        # inject multi-stage yaml config
         deploy_config = getattr(args, "deploy_config", None)
         if deploy_config:
             engine_args["deploy_config"] = deploy_config
@@ -228,7 +229,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                     lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
                 )
 
-        # Build OmniCustomPrompt with pre-tokenized IDs (downstream pipelines read "prompt_token_ids")
+        # Build OmniCustomPrompt with pre-tokenized IDs
         custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_ids}
         if len(default_params_list) > 1:
             # Multi-stage pipelines (e.g. BAGEL) — tag the diffusion stage
@@ -280,7 +281,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         mm_output = final_res.custom_output or {}
 
         if sampling_params.get("logprobs", False):
-            log_probs = mm_output.get("all_log_probs")
+            all_log_probs = mm_output.get("all_log_probs")
+            log_probs = all_log_probs[0] if all_log_probs is not None else None
         else:
             log_probs = None
 
