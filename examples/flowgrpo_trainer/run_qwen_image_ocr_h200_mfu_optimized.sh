@@ -25,6 +25,10 @@ ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
 
+
+
+export DIFFUSION_ATTENTION_BACKEND=FLASH_ATTN
+
 python3 -m verl_omni.trainer.main_diffusion \
     algorithm.adv_estimator=flow_grpo \
     data.train_files=$ocr_train_path \
@@ -32,6 +36,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.train_batch_size=32 \
     data.max_prompt_length=256 \
     actor_rollout_ref.model.path=$model_name \
+    actor_rollout_ref.model.attn_backend=_flash_3_varlen_hub \
     actor_rollout_ref.actor.optim.lr=3e-5 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \

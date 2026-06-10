@@ -18,6 +18,10 @@ REWARD_TP=4
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
+
+
+export DIFFUSION_ATTENTION_BACKEND=FLASH_ATTN
+
 python3 -m verl_omni.trainer.main_diffusion \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=online \
@@ -27,6 +31,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.train_batch_size=32 \
     data.max_prompt_length=256 \
     actor_rollout_ref.model.path=$model_name \
+    actor_rollout_ref.model.attn_backend=_flash_3_varlen_hub \
     actor_rollout_ref.model.algorithm=dpo \
     actor_rollout_ref.model.model_type=diffusion_dpo_model \
     actor_rollout_ref.model.external_lib=verl_omni.pipelines.qwen_image_dpo \

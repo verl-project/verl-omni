@@ -42,20 +42,14 @@ If work is duplicate/trivial busywork, **do not proceed**. Return a short explan
 ### Environment setup
 
 ```bash
-# Install vLLM and vLLM-Omni rollout backend first
-pip install "vllm==0.22.0" \
-    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@963ba1ab7a02b2c1f687285fcd2072cd57cd0b34"
+# GPU (two steps — engine stack first, then rollout + train)
+uv pip install -e ".[gpu]" --torch-backend=auto
+uv pip install -e ".[vllm-omni,train,dev]"
 
-# Install verl
-pip install "verl==0.8.0"
-
-# Install VeRL-Omni in editable mode
-pip install -e .
-
-# Install pre-commit
-pip install pre-commit
 pre-commit install
 ```
+
+See [`docs/start/install.md`](docs/start/install.md) for NPU and optional extras.
 
 ### PR title format
 

@@ -47,6 +47,10 @@ Launch the example from the repository root:
 bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh
 ```
 
+GPU recipes set FA3 inline (`DIFFUSION_ATTENTION_BACKEND=FLASH_ATTN` for rollout,
+`actor_rollout_ref.model.attn_backend=_flash_3_varlen_hub` for actor). Training falls back to
+native/SDPA if FA3 deps are unavailable.
+
 Optional KL loss tuning:
 
 - `actor_rollout_ref.actor.use_kl_loss=True`
@@ -139,6 +143,7 @@ The experiment settings and throughputs are shown in the table below.
 | Script | Model | Algorithm | Hybrid Engine | # Cards | Reward Fn | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | `rollout.n` | lr   | # Val Samples | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / GPU / Seconds) | Time per Step (Seconds) |
 | --- | --- | --- | --- | --- | --- | --- | --- |-------------------------| --- | --- |------| --- | --- | --- |------------------------------| --------------------------------|
 | `run_qwen_image_ocr_lora.sh` | Qwen-Image | Flow-GRPO | True | 4 | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 32 | 16 | 3e-4 | 1k (full set) | 32×16=512 | 16 | 0.305                        | 420 |
+| `run_qwen_image_ocr_lora_fsdp2_fa3.sh` | Qwen-Image | Flow-GRPO (FSDP2) | True | 4 | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 32 | 16 | 3e-4 | 1k (full set) | 32×16=512 | 16 | —                            | — |
 | `run_qwen_image_ocr_lora_async_reward.sh` | Qwen-Image | Flow-GRPO | True | 5 | qwenvl-ocr-vllm | 4 | 4 | 1                       | 32 | 16 | 3e-4 | 1k (full set) | 32×16=512 | 16 | 0.280                        | 360 |
 
 - Validation reward curve (evaluated with `trainer.val_before_train=True`):

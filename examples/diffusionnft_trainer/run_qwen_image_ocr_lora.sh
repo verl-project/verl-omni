@@ -20,6 +20,10 @@ ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
 
+
+
+export DIFFUSION_ATTENTION_BACKEND=FLASH_ATTN
+
 python3 -m verl_omni.trainer.main_diffusion \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
@@ -29,6 +33,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.algorithm=diffusion_nft \
     actor_rollout_ref.model.model_type=diffusion_nft_model \
     actor_rollout_ref.model.path=$model_name \
+    actor_rollout_ref.model.attn_backend=_flash_3_varlen_hub \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
     actor_rollout_ref.model.policy_state_adapters='["default","old"]' \

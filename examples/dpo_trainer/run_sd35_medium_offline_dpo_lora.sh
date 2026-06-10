@@ -13,6 +13,8 @@ custom_chat_template='{% for message in messages %}{% if message['\''role'\''] =
 
 NUM_GPUS_ACTOR=1
 
+export DIFFUSION_ATTENTION_BACKEND=FLASH_ATTN
+
 python3 -m verl_omni.trainer.main_diffusion \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=offline \
@@ -25,6 +27,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.custom_cls.name=OfflineDPODataset \
     data.custom_cls.collate_fn=offline_dpo_collate_fn \
     actor_rollout_ref.model.path=$model_name \
+    actor_rollout_ref.model.attn_backend=_flash_3_varlen_hub \
     actor_rollout_ref.model.algorithm=dpo \
     actor_rollout_ref.model.model_type=diffusion_dpo_model \
     actor_rollout_ref.model.custom_chat_template="\"$custom_chat_template\"" \
