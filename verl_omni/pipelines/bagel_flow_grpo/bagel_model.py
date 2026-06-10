@@ -14,12 +14,9 @@
 
 """BagelForTraining – FSDP-compatible BAGEL MoT module for flow-matching training.
 
-Ported from vllm-omni/BAGEL.  Key details:
-  * MoT (Mixture-of-Thought): dual pathways for text vs generation tokens
-  * start_of_image / end_of_image boundary tokens are required
-  * All latent tokens share ONE RoPE position (spatial via 2-D sincos embed)
-  * QK-norm + RoPE in float32; cast to bfloat16 only for SDPA
-  * Attention mask: text-context is causal & cannot see image region
+Ported from vllm-omni/BAGEL.  MoT dual pathways (text vs generation),
+start/end-of-image boundary tokens, shared RoPE for latent tokens, and
+QK-norm + RoPE in float32 (cast to bf16 only for SDPA).
 """
 
 from __future__ import annotations
@@ -71,7 +68,11 @@ class BagelTrainingConfig:
         return self.latent_patch_size**2 * self.latent_channel
 
     def save_pretrained(self, save_directory: str):
-        """Save config as JSON (compatible with diffusers checkpoint manager)."""
+        """Save config as JSON.
+
+        Args:
+            save_directory: Target directory.
+        """
         from dataclasses import asdict
 
         output_path = os.path.join(save_directory, "config.json")
@@ -81,6 +82,14 @@ class BagelTrainingConfig:
 
     @classmethod
     def from_model_path(cls, model_path: str) -> BagelTrainingConfig:
+        """Parse BAGEL config from ``config.json`` in *model_path*.
+
+        Args:
+            model_path: Directory containing ``config.json``.
+
+        Returns:
+            BagelTrainingConfig with values from the checkpoint config.
+        """
         cfg_path = os.path.join(model_path, "config.json")
         with open(cfg_path) as f:
             root_cfg = json.load(f)
@@ -104,7 +113,17 @@ class BagelTrainingConfig:
 
 
 def get_flattened_position_ids(img_h: int, img_w: int, patch_size: int, max_num_patches_per_side: int) -> torch.Tensor:
-    """Compute flattened 2-D position IDs for latent patches (extrapolate mode)."""
+    """Compute flattened 2-D position IDs for latent patches.
+
+    Args:
+        img_h: Image height in pixels.
+        img_w: Image width in pixels.
+        patch_size: Latent patch size (VAE downsample × latent_patch_size).
+        max_num_patches_per_side: Max grid size for position embedding.
+
+    Returns:
+        Flattened position IDs of shape ``(num_patches,)``.
+    """
     num_patches_h = img_h // patch_size
     num_patches_w = img_w // patch_size
     coords_h = torch.arange(0, num_patches_h)
@@ -178,7 +197,11 @@ class RotaryEmbedding(nn.Module):
 
 
 class BagelMoTAttention(nn.Module):
-    """MoT attention with separate standard and generation projections."""
+    """MoT attention with separate standard and generation projections.
+
+    Args:
+        config: ``BagelTrainingConfig`` with head dimensions and MoT settings.
+    """
 
     def __init__(self, config: BagelTrainingConfig):
         super().__init__()
@@ -256,24 +279,8 @@ class BagelMoTAttention(nn.Module):
             k_normed = k_normed.unsqueeze(3).expand(-1, -1, -1, rep, -1).reshape(B, L, self.num_heads, self.head_dim)
             v = v.unsqueeze(3).expand(-1, -1, -1, rep, -1).reshape(B, L, self.num_heads, self.head_dim)
 
-        # Split attention. The original (vllm-omni) BAGEL implementation packs
-        # ``[text, soi, latent, eoi]`` for each request into a single 1-D
-        # ``flash_attn_varlen`` segment with no padding, so all key positions
-        # are valid by construction. Here we run *padded* batched SDPA: when
-        # prompts within a micro-batch have different lengths, samples are
-        # right-padded with ``token_id=0`` up to ``max_text_len``. Image
-        # queries attending to those padding positions inject batch-grouping
-        # noise into the velocity prediction (the same sample produces
-        # different ``log_prob`` depending on which other prompts share its
-        # micro-batch), which under the FlowGRPO importance-sampling ratio
-        # shows up as a non-trivial ``ratio_std`` even at PPO step 1 with
-        # ``ppo_epochs=1``. Mask the padding key columns to recover the
-        # ``log_prob`` invariance that the rollout side already has.
-        #
-        # Note: text-causal block (rows ``:L_ctx``) does not need a key mask
-        # because real-text rows only attend to earlier real-text columns
-        # (padding is right-aligned). Padding *rows* still produce contaminated
-        # outputs, but those positions are never read out as latent velocity.
+        # Padded SDPA requires a key padding mask so that zero-padded text
+        # tokens don't leak into image-region attention (log_prob invariance).
         q_normed = q_normed.transpose(1, 2)  # (B, H, L, D)
         k_normed = k_normed.transpose(1, 2)
         v = v.transpose(1, 2)
@@ -286,9 +293,7 @@ class BagelMoTAttention(nn.Module):
                 is_causal=True,
             )
             if key_padding_mask is not None and not key_padding_mask.all():
-                # ``key_padding_mask`` is True at valid (non-padding) keys.
-                # SDPA wants an additive/bool mask broadcastable to
-                # ``(B, H, L_q, L_k)``. We use ``(B, 1, 1, L)``.
+                # key_padding_mask: True = valid key, broadcast as (B,1,1,L).
                 img_attn_mask = key_padding_mask.view(B, 1, 1, L)
                 img_out = F.scaled_dot_product_attention(
                     q_normed[:, :, L_ctx:],
@@ -342,6 +347,20 @@ class BagelMoTLayer(nn.Module):
         L_ctx: int = 0,
         key_padding_mask: Optional[Tensor] = None,
     ) -> Tensor:
+        """Forward pass with MoT-routed layernorm, attention, and MLP.
+
+        Args:
+            hidden_states: ``(B, L, D)`` input sequence.
+            cos: RoPE cosine embedding.
+            sin: RoPE sine embedding.
+            text_mask: Bool mask — True for text pathway.
+            latent_mask: Bool mask — True for gen pathway.
+            L_ctx: Text context length for causal split.
+            key_padding_mask: ``(B, L)`` — True at valid keys.
+
+        Returns:
+            Output of shape ``(B, L, D)``.
+        """
         text_idx = text_mask.nonzero(as_tuple=True)
         latent_idx = latent_mask.nonzero(as_tuple=True)
 
@@ -429,16 +448,8 @@ class PositionEmbedding(nn.Module):
 class BagelForTraining(NonDiffusersModelBase):
     """Standalone Bagel MoT module for FlowGRPO FSDP training.
 
-    ``_no_split_modules`` tells verl's FSDP wrap policy to shard at MoT-layer
-    granularity (like Qwen-Image's ``QwenImageTransformerBlock``).  Without this,
-    LoRA training uses a per-leaf lambda wrap policy and ``layered_summon`` cannot
-    find FSDP-wrapped ``layers.N`` submodules, so rollout weight sync is empty.
-
-    Forward signature:
-        hidden_states:  (B, L_latent, patch_latent_dim) — noisy latent patches
-        timestep:       (B,) — diffusion timestep scalars
-        text_token_ids: (B, L_text) — tokenized prompt IDs (with bos/eos)
-        latent_pos_ids: (B, L_latent) — 2-D position indices for latent patches
+    ``_no_split_modules`` enables layer-level FSDP sharding so that
+    ``layered_summon`` finds ``layers.N`` for rollout weight sync.
     """
 
     _no_split_modules = ["BagelMoTLayer"]
@@ -469,8 +480,16 @@ class BagelForTraining(NonDiffusersModelBase):
     ) -> tuple[Tensor]:
         """Forward pass.
 
-        When text_token_ids is None the sequence is [soi, latent, eoi] only
-        (no text context). This is used for the CFG unconditional pass.
+        Args:
+            hidden_states: ``(B, L_latent, patch_latent_dim)`` noisy latent patches.
+            timestep: ``(B,)`` diffusion timestep.
+            text_token_ids: ``(B, L_text)`` token IDs, or ``None`` for CFG unconditional.
+            latent_pos_ids: ``(B, L_latent)`` 2-D position indices.
+            text_attention_mask: ``(B, L_text)`` bool mask (via ``**kwargs``).
+
+        Returns:
+            Tuple of ``(velocity,)`` — noise prediction of shape
+            ``(B, L_latent, patch_latent_dim)``.
         """
         text_attention_mask = kwargs.pop("text_attention_mask", None)
         if text_token_ids is not None and text_attention_mask is not None:
@@ -533,11 +552,8 @@ class BagelForTraining(NonDiffusersModelBase):
             position_ids = torch.zeros(1, L_total, dtype=torch.long, device=dev).expand(B, -1)
         cos, sin = self.rotary_emb(position_ids)
 
-        # 6b. Build per-sequence key padding mask. Only the text segment can
-        # contain right-padded ``token_id=0`` slots when prompts in a
-        # micro-batch have different lengths; ``soi``/latent/``eoi`` are always
-        # valid keys. We pass ``None`` (and SDPA stays on flash backend) when
-        # there is no padding to mask, which matches the rollout configuration.
+        # Key padding mask: zero-padded text tokens in uneven micro-batches
+        # must not attend to image queries.  ``None`` keeps the flash backend.
         if L_ctx > 0 and text_attention_mask is not None and not bool(text_attention_mask.all()):
             key_padding_mask = text_attention_mask.new_ones(B, L_total, dtype=torch.bool)
             key_padding_mask[:, :L_ctx] = text_attention_mask
@@ -571,6 +587,15 @@ class BagelForTraining(NonDiffusersModelBase):
 
     @classmethod
     def from_pretrained(cls, model_path: str, torch_dtype=torch.bfloat16) -> BagelForTraining:
+        """Load pretrained weights from ``ema.safetensors``.
+
+        Args:
+            model_path: Directory containing ``config.json`` and ``ema.safetensors``.
+            torch_dtype: Target dtype (default ``bfloat16``).
+
+        Returns:
+            BagelForTraining instance with loaded weights.
+        """
         config = BagelTrainingConfig.from_model_path(model_path)
         ckpt_path = os.path.join(model_path, "ema.safetensors")
         from safetensors.torch import load_file
@@ -596,7 +621,15 @@ class BagelForTraining(NonDiffusersModelBase):
 
 
 def _map_checkpoint_to_training(state_dict: dict[str, Tensor], config: BagelTrainingConfig) -> dict:
-    """Map ema.safetensors keys to BagelForTraining parameter names."""
+    """Map ``ema.safetensors`` keys to ``BagelForTraining`` parameter names.
+
+    Args:
+        state_dict: Raw checkpoint state dict.
+        config: Training config (unused, reserved for future key remapping).
+
+    Returns:
+        Dict with keys matching ``BagelForTraining`` parameters.
+    """
     mapped: dict[str, Tensor] = {}
     for src_key, tensor in state_dict.items():
         dst_key: str | None = None
