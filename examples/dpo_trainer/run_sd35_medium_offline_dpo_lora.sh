@@ -43,6 +43,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.name=vllm_omni \
+    actor_rollout_ref.rollout.step_execution=False \
+    actor_rollout_ref.rollout.max_num_seqs=256 \
     trainer.resume_mode=disable \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=offline_dpo \

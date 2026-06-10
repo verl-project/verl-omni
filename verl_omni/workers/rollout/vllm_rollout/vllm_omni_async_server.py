@@ -126,17 +126,35 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_args = asdict(engine_args)
 
         import_external_libs(self.config.external_lib)
+
+        # When step_execution is enabled, prefer the _stepwise variant of the
+        # pipeline (e.g. flow_grpo_stepwise instead of flow_grpo) so that the
+        # engine uses the experimental prepare_encode / step_scheduler /
+        # post_decode overrides.
+        enable_step_execution = self.config.get("step_execution", False)
+        algorithm = self.model_config.algorithm
+        if enable_step_execution:
+            # Import experimental modules so their @register decorators fire
+            # and populate the pipeline registry.
+            import verl_omni.experimental.qwen_image_flow_grpo.vllm_omni_rollout_adapter  # noqa: F401
+            import verl_omni.experimental.qwen_image_mix_grpo.vllm_omni_rollout_adapter  # noqa: F401
+
+            stepwise_algorithm = f"{algorithm}_stepwise"
+            if VllmOmniPipelineBase.get_class(self.model_config.architecture, stepwise_algorithm):
+                algorithm = stepwise_algorithm
+
         pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
             architecture=self.model_config.architecture,
-            algorithm=self.model_config.algorithm,
+            algorithm=algorithm,
         )
         # TODO (mike): read custom_pipeline from engine_args
         if pipeline_path is not None:
             engine_args["enable_dummy_pipeline"] = True
             engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
-        engine_args["max_num_seqs"] = 256
-        engine_args["step_execution"] = True
+        if enable_step_execution:
+            engine_args["max_num_seqs"] = self.config.get("max_num_seqs", 256)
+            engine_args["step_execution"] = True
 
         diffusion_master_port, diffusion_master_sock = get_free_port("127.0.0.1", with_alive_sock=True)
         diffusion_master_sock.close()
