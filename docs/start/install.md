@@ -1,6 +1,6 @@
 # Installation
 
-Last updated: 06/05/2026
+Last updated: 06/10/2026
 
 ## Requirements
 
@@ -29,15 +29,15 @@ For NVIDIA GPU:
 
 ```bash
 uv pip install vllm==0.22.0 --torch-backend=auto
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@963ba1ab7a02b2c1f687285fcd2072cd57cd0b34"
+uv pip install vllm-omni==0.22.0
 ```
 
 For Ascend NPU:
 
 ```bash
-uv pip install "vllm @ git+https://github.com/vllm-project/vllm.git@releases/v0.20.2"
-uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@07f6fec2aa4404e1283c4cd6c0981aa878bc5be9"
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@963ba1ab7a02b2c1f687285fcd2072cd57cd0b34"
+uv pip install "vllm @ git+https://github.com/vllm-project/vllm.git@releases/v0.22.0"
+uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@bb4d0776eee8fc45c3484a45c971a7049f1a2bbf"
+uv pip install vllm-omni==0.22.0
 ```
 
 3. Install `verl` followed by `verl-omni` from source:
