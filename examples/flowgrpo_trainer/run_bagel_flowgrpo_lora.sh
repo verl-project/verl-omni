@@ -1,11 +1,17 @@
 # Bagel LoRA RL, vllm_omni rollout (FlowGRPO)
+#
+# Prerequisite: preprocess the OCR dataset for BAGEL:
+#   python examples/flowgrpo_trainer/data_process/bagel_ocr.py \
+#       --model_path ~/models/ByteDance-Seed/BAGEL-7B-MoT \
+#       --input_dir ~/data/ocr \
+#       --output_dir ~/data/ocr/bagel
 set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME
 WORKSPACE=${WORKSPACE:-$HOME}
 
-ocr_train_path=$WORKSPACE/data/ocr/train.parquet
-ocr_test_path=$WORKSPACE/data/ocr/test.parquet
+ocr_train_path=$WORKSPACE/data/ocr/bagel/train.parquet
+ocr_test_path=$WORKSPACE/data/ocr/bagel/test.parquet
 
 BAGEL_DEPLOY_CONFIG=${BAGEL_DEPLOY_CONFIG:-"$(dirname "$0")/bagel_deploy_config.yaml"}
 

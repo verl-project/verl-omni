@@ -14,21 +14,10 @@
 
 """BAGEL (MoT) training-side adapter for FlowGRPO.
 
-Registers as ``OmniBagelForConditionalGeneration`` so the FSDP engine
-can load and train the model via the DiffusionModelBase registry.
-
-Key differences from standard diffusion models (e.g. Qwen-Image):
-  * BAGEL is a *Mixture-of-Thought* transformer that processes text token
-    IDs and noisy latent patches in a single forward pass (no separate
-    text encoder).
-  * ``prompt_embeds`` are not used.  Instead the raw prompt token IDs
-    (available as ``micro_batch["prompts"]``) are passed directly to the
-    model as ``text_token_ids``.
-  * CFG must match what the rollout pipeline applied, otherwise the
-    importance-sampling ratio is biased.  We implement BAGEL's 3-branch
-    CFG with global renormalization here (cfg_img branch == gen branch
-    for text2img, i.e. text-only 2-branch in practice), exactly mirroring
-    ``_combine_cfg`` in vllm-omni's ``bagel_transformer``.
+Registered as ``OmniBagelForConditionalGeneration`` in the DiffusionModelBase
+registry.  Unlike standard diffusion models, BAGEL takes raw token IDs
+(instead of prompt_embeds) and applies 3-branch CFG with global
+renormalization matching the rollout pipeline exactly.
 """
 
 from __future__ import annotations
@@ -51,35 +40,6 @@ logger = logging.getLogger(__name__)
 
 TIMESTEP_SHIFT = 3.0  # must match BagelPipeline.forward() hardcoded value
 
-# BAGEL chat markers (same as vllm_omni_rollout_adapter._CHAT_MARKERS)
-_CHAT_MARKERS = (
-    "<|vision_start|>",
-    "<|vision_end|>",
-    "<|image_pad|>",
-    "<|video_pad|>",
-)
-
-
-def _extract_user_text_from_chat(decoded: str) -> str:
-    """Extract the last user message content from a Qwen-style chat template.
-
-    Mirrors ``_extract_prompt_text`` in ``vllm_omni_rollout_adapter.py``
-    so that training-side tokenization matches rollout exactly.
-    """
-    if "<|im_start|>" in decoded:
-        user_chunks = []
-        for segment in decoded.split("<|im_start|>"):
-            if not segment.startswith("user"):
-                continue
-            content = segment[len("user") :].lstrip("\n")
-            content = content.split("<|im_end|>", 1)[0]
-            user_chunks.append(content)
-        if user_chunks:
-            decoded = user_chunks[-1]
-    for marker in _CHAT_MARKERS:
-        decoded = decoded.replace(marker, "")
-    return decoded.replace("<|im_start|>", "").replace("<|im_end|>", "").strip()
-
 
 @DiffusionModelBase.register("OmniBagelForConditionalGeneration", algorithm="flow_grpo")
 class BagelDiffusion(DiffusionModelBase):
@@ -100,11 +60,8 @@ class BagelDiffusion(DiffusionModelBase):
     @classmethod
     def set_timesteps(cls, scheduler: FlowMatchSDEDiscreteScheduler, model_config: DiffusionModelConfig, device: str):
         num_inference_steps = model_config.pipeline.num_inference_steps
-        # Use torch.float32 to be bit-exact with vllm-omni's BAGEL rollout
-        # (``BagelTransformer.generate_image`` uses ``torch.linspace`` which
-        # defaults to float32 on GPU).  ``index_for_timestep`` does exact
-        # float32 comparison; a float64 path (e.g. ``np.linspace``) produces
-        # subtly different float32-rounded values and causes IndexError.
+        # Use float32 for bit-exact match with vllm-omni rollout (BagelTransformer
+        # uses torch.linspace which defaults to float32; float64 rounding differs).
         t = torch.linspace(1, 0, num_inference_steps, dtype=torch.float32, device=device)
         t_shifted = TIMESTEP_SHIFT * t / (1 + (TIMESTEP_SHIFT - 1) * t)
         sigmas = t_shifted[:-1].tolist()
@@ -130,76 +87,30 @@ class BagelDiffusion(DiffusionModelBase):
         pos_ids = get_flattened_position_ids(H_px, W_px, latent_ds, config.max_latent_size)
         return pos_ids.to(device)
 
-    @classmethod
-    def _get_bagel_tokenizer(cls, model_config: DiffusionModelConfig):
-        """Load the BAGEL tokenizer once and cache at class level.
-
-        BAGEL uses a Qwen2 tokenizer with ``<|im_start|>`` / ``<|im_end|>``
-        boundary tokens and requires ``trust_remote_code=True``.
-        """
-        if not hasattr(cls, "_cached_bagel_tokenizer"):
-            from transformers import AutoTokenizer
-
-            tok_path = model_config.tokenizer_path or model_config.local_path
-            cls._cached_bagel_tokenizer = AutoTokenizer.from_pretrained(tok_path, trust_remote_code=True)
-        return cls._cached_bagel_tokenizer
-
-    @classmethod
-    def _chat_tokens_to_bagel_format(
-        cls,
-        prompts: torch.Tensor,
-        attention_mask: torch.Tensor,
-        model_config: DiffusionModelConfig,
+    @staticmethod
+    def _bagel_ids_to_batch(
+        bagel_prompt_ids: list,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Convert chat-template token IDs to BAGEL's native format.
+        """Pad variable-length BAGEL token ID lists into a uniform batch.
 
-        vllm-omni's BagelPipeline calls ``bagel.prepare_prompts()`` which
-        does **raw** ``tokenizer.encode(prompt)`` — no chat template, just
-        ``[<|im_start|>] + encode(user_text) + [<|im_end|>]``.
-
-        The verl-omni data pipeline produces chat-template-tokenized IDs
-        (system prompt + role markers + user text).  Passing those directly
-        to the training forward pass means the model sees a *different*
-        text context than what was used during rollout, biasing the
-        importance-sampling ratio and preventing convergence.
-
-        This method decodes the chat-template tokens, extracts the user
-        content (matching the rollout's ``_extract_prompt_text``), and
-        re-tokenizes in BAGEL format so both sides are identical.
+        Args:
+            bagel_prompt_ids: List of ``np.ndarray`` or ``list[int]``,
+                one per sample, already in BAGEL format.
+            device: Target device.
 
         Returns:
             ``(text_token_ids, text_attention_mask)`` — padded tensors
-            of shape ``(B, max_len)`` ready for ``BagelForTraining.forward``.
+            of shape ``(B, max_len)``.
         """
-        tokenizer = cls._get_bagel_tokenizer(model_config)
-        bos_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
-        eos_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
-
-        B = prompts.shape[0]
-        token_ids_list: list[torch.Tensor] = []
-
-        for i in range(B):
-            mask = attention_mask[i].bool()
-            chat_ids = prompts[i][mask]  # chat-template token IDs (no padding)
-
-            # Decode the full chat template back to text
-            decoded = tokenizer.decode(chat_ids.tolist(), skip_special_tokens=False)
-            # Extract user content (same logic as rollout)
-            user_text = _extract_user_text_from_chat(decoded)
-            # Re-tokenize in BAGEL format: raw encode + BOS/EOS
-            raw_ids = tokenizer.encode(user_text, add_special_tokens=False)
-            bagel_ids = [bos_id] + raw_ids + [eos_id]
-            token_ids_list.append(torch.tensor(bagel_ids, dtype=torch.long, device=device))
-
-        max_len = max(ids.shape[0] for ids in token_ids_list)
+        B = len(bagel_prompt_ids)
+        max_len = max(len(ids) for ids in bagel_prompt_ids)
         text_token_ids = torch.zeros(B, max_len, dtype=torch.long, device=device)
         text_attention_mask = torch.zeros(B, max_len, dtype=torch.bool, device=device)
-        for i, ids in enumerate(token_ids_list):
-            n = ids.shape[0]
-            text_token_ids[i, :n] = ids
+        for i, ids in enumerate(bagel_prompt_ids):
+            n = len(ids)
+            text_token_ids[i, :n] = torch.as_tensor(ids, dtype=torch.long, device=device)
             text_attention_mask[i, :n] = True
-
         return text_token_ids, text_attention_mask
 
     @classmethod
@@ -222,15 +133,9 @@ class BagelDiffusion(DiffusionModelBase):
         hidden_states = latents[:, step]
         timestep = timesteps[:, step]
 
-        # Convert chat-template token IDs to BAGEL's native format
-        # ([<|im_start|>] + encode(user_text) + [<|im_end|>]) so that
-        # training-time text conditioning matches rollout exactly.
-        text_token_ids, text_attention_mask = cls._chat_tokens_to_bagel_format(
-            prompts=micro_batch["prompts"],
-            attention_mask=micro_batch["attention_mask"],
-            model_config=model_config,
-            device=device,
-        )
+        # Read pre-tokenized BAGEL prompt IDs from the data pipeline
+        # (produced by examples/flowgrpo_trainer/data_process/bagel_ocr.py).
+        text_token_ids, text_attention_mask = cls._bagel_ids_to_batch(micro_batch["bagel_prompt_ids"], device)
 
         # Compute latent position IDs
         latent_pos_ids = cls._get_latent_pos_ids(model_config, module, device)
@@ -256,17 +161,17 @@ class BagelDiffusion(DiffusionModelBase):
 
     @staticmethod
     def _get_cfg_params(model_config: DiffusionModelConfig) -> dict:
-        """Resolve CFG params for training, preferring values from
-        ``model_config.pipeline`` and falling back to flow_grpo BAGEL
-        defaults (same defaults the rollout adapter forces).
+        """Resolve CFG params, falling back to BAGEL flow_grpo defaults.
 
-        Override examples (Hydra/OmegaConf, both rollout *and* model side
-        must be set together if you change them):
+        Override via Hydra (set both rollout and model sides together)::
+
             +actor_rollout_ref.model.pipeline.cfg_text_scale=4.0
             +actor_rollout_ref.model.pipeline.cfg_img_scale=1.0
-            +actor_rollout_ref.model.pipeline.cfg_renorm_type=global
-            +actor_rollout_ref.model.pipeline.cfg_renorm_min=0.0
-            +actor_rollout_ref.model.pipeline.cfg_interval=[0,1.0]
+
+        Returns:
+            Dict with ``cfg_text_scale``, ``cfg_img_scale``,
+            ``cfg_renorm_type``, ``cfg_renorm_min``,
+            ``cfg_interval_low``, ``cfg_interval_high``.
         """
         p = model_config.pipeline
         cfg_interval = getattr(p, "cfg_interval", BAGEL_FLOWGRPO_CFG_DEFAULTS["cfg_interval"])
@@ -293,15 +198,22 @@ class BagelDiffusion(DiffusionModelBase):
         cfg_renorm_type: str,
         cfg_renorm_min: float,
     ) -> torch.Tensor:
-        """Byte-identical port of
-        ``vllm_omni.diffusion.models.bagel.bagel_transformer.BagelTransformer
-        ._combine_cfg`` so that training-time velocity matches what the
-        rollout actually used to generate the recorded trajectory.
+        """Byte-identical port of vllm-omni's ``_combine_cfg``.
 
-        For text2img there is no input image, so the rollout's cfg_img
-        branch is fed the same conditioning as the gen branch; callers
-        therefore pass ``cfg_img_v_t = v_t`` (or ``None`` to skip it
-        entirely when ``cfg_img_scale == 1.0``).
+        Applies BAGEL 3-branch CFG with global/channel renormalization
+        so training velocity matches the rollout trajectory exactly.
+
+        Args:
+            v_t: Gen-branch velocity ``(B, L, D)``.
+            cfg_text_v_t: Text-unconditional velocity.
+            cfg_img_v_t: Image-unconditional velocity (or ``None``).
+            cfg_text_scale: Text CFG scale (e.g. 4.0).
+            cfg_img_scale: Image CFG scale (e.g. 1.0 to disable).
+            cfg_renorm_type: ``"global"`` or ``"channel"``.
+            cfg_renorm_min: Minimum renorm clamp.
+
+        Returns:
+            CFG-combined velocity of shape ``(B, L, D)``.
         """
         if cfg_renorm_type == "text_channel":
             v_t_text_ = cfg_text_v_t + cfg_text_scale * (v_t - cfg_text_v_t)
@@ -354,16 +266,8 @@ class BagelDiffusion(DiffusionModelBase):
         # Gen branch (text-conditional).
         noise_pred = module(**model_inputs)[0]
 
-        # --------------------------------------------------------------- #
-        # Bug 2 fix:                                                       #
-        # Apply BAGEL CFG matching the rollout so the importance-sampling  #
-        # ratio in compute_diffusion_loss_flow_grpo is unbiased.  The     #
-        # previous implementation used a simple 2-branch CFG with per-token #
-        # renormalization gated by ``true_cfg_scale > 1.0`` (which is the  #
-        # default 1.0, so CFG was *off*).  The rollout, however, always    #
-        # ran with cfg_text_scale=4.0 + global renorm; the resulting      #
-        # mismatch silently biased the policy gradient.                    #
-        # --------------------------------------------------------------- #
+        # Apply BAGEL CFG matching rollout so importance-sampling ratio
+        # is unbiased. Rollout always uses cfg_text_scale=4.0 + global renorm.
         cfg = cls._get_cfg_params(model_config)
         # sigma at this denoising step (same for the entire batch in BAGEL)
         sigma_now = float(timesteps[0, step].item())
