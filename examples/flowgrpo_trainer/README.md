@@ -110,7 +110,7 @@ bash examples/flowgrpo_trainer/run_qwen_image_ocr.sh
 
 ## BAGEL recipe
 
-`run_bagel_flowgrpo.sh` post-trains `BAGEL-7B-MoT` (Mixture-of-Transformers)
+`run_bagel_flowgrpo_lora.sh` post-trains `BAGEL-7B-MoT` (Mixture-of-Transformers)
 with the same OCR reward. BAGEL is registered through the
 `verl_omni.pipelines.bagel_flow_grpo` adapter pair as the architecture
 `OmniBagelForConditionalGeneration`, and the rollout uses a
@@ -131,7 +131,7 @@ export REWARD_MODEL_PATH=/path/to/Qwen3-VL-8B-Instruct
 export OCR_TRAIN_PATH=$WORKSPACE/data/ocr/train.parquet
 export OCR_TEST_PATH=$WORKSPACE/data/ocr/test.parquet
 
-bash examples/flowgrpo_trainer/run_bagel_flowgrpo.sh
+bash examples/flowgrpo_trainer/run_bagel_flowgrpo_lora.sh
 ```
 
 Notable differences from the Qwen-Image recipe:
