@@ -85,10 +85,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _get_engine_kwargs_key(self) -> str:
         return "vllm_omni"
 
-    def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
-        # No-op: ``deploy_config`` is a vllm-omni CLI flag and must reach the parser.
-        return
-
     def _get_worker_extension_cls(self) -> str:
         return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
 
@@ -129,16 +125,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
 
-        # ``deploy_config`` lives on ``OrchestratorArgs``, not ``OmniEngineArgs``,
-        # so ``from_cli_args`` drops it; forward it manually.
         deploy_config = getattr(args, "deploy_config", None)
         if deploy_config:
             engine_args["deploy_config"] = deploy_config
-
-        # Drop verl's injected ``compilation_config``: re-validation under
-        # pydantic-strict rejects ``CompilationConfig``'s default ``None`` fields.
-        # BAGEL's deploy YAML sets ``enforce_eager: true``, so this is a no-op.
-        engine_args.pop("compilation_config", None)
 
         import_external_libs(self.config.external_lib)
         pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
@@ -218,8 +207,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         video_data: Optional[list[Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
         priority: int = 0,
-        lora_request: Optional[LoRARequest] = None,
-        lora_scale: float = 1.0,
     ) -> DiffusionOutput:
         """Generate sequence with token-in-image-out."""
         prompt_ids = normalize_token_ids(prompt_ids)
@@ -231,8 +218,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if video_data is not None:
             multi_modal_data["video"] = video_data
 
-        # Add lora request (caller-supplied takes precedence over lora_as_adapter)
-        if lora_request is None and self.lora_as_adapter:
+        # Add lora request
+        lora_request = None
+        if self.lora_as_adapter:
             # Make sure we also check that the lora is already loaded in the engine
             lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
             if lora_loaded:
@@ -243,6 +231,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # Build OmniCustomPrompt with pre-tokenized IDs (downstream pipelines read "prompt_token_ids")
         custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_ids}
         if len(default_params_list) > 1:
+            # Multi-stage pipelines (e.g. BAGEL) — tag the diffusion stage
+            # so the orchestrator can route inputs correctly.
             custom_prompt["modalities"] = ["image"]
         if negative_prompt_ids is not None:
             custom_prompt["negative_prompt_ids"] = negative_prompt_ids
@@ -261,7 +251,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         sampling_kwargs["extra_args"] = extra_args
         if lora_request is not None:
             sampling_kwargs["lora_request"] = lora_request
-            sampling_kwargs["lora_scale"] = lora_scale
         diffusion_sampling_params = OmniDiffusionSamplingParams(**sampling_kwargs)
 
         # Build sampling params list: multi-stage models use defaults for non-diffusion stages
