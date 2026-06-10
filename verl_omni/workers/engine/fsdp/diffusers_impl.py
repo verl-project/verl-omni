@@ -760,9 +760,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                 for name, param in params.items()
             )
 
-        # Prefix keys so the colocated rollout worker can map them into its pipeline.
-        # vllm-omni's DiffusionLoRAManager._replace_layers_with_lora iterates
-        # pipeline.transformer and builds module names as ``transformer.<path>``.
+        # we need to add the prefix to make it compatible with rollout engine
         per_tensor_param = ((f"transformer.{name}", tensor) for name, tensor in per_tensor_param)
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
         return per_tensor_param, peft_config_dict
