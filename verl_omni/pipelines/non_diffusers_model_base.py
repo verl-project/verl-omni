@@ -27,15 +27,10 @@ import json
 import logging
 import os
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import Callable
 
 import torch
 import torch.nn as nn
-from safetensors.torch import save_file as safetensors_save_file
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -43,21 +38,14 @@ __all__ = ["NonDiffusersModelBase"]
 
 
 class NonDiffusersModelBase(nn.Module, ABC):
-    """ABC for non-diffusers diffusion / flow-matching model modules.
+    """ABC for non-diffusers models used in verl-omni FSDP training.
 
-    Provides the infrastructure every non-diffusers model needs to
-    participate in verl-omni's FSDP training loop:
+    Provides LoRA/PEFT adapter lifecycle (required by ``LoRAAdapterMixin``),
+    gradient checkpointing with an opt-in guard, FSDP wrapping hints via
+    ``_no_split_modules``, and checkpoint persistence.
 
-    * LoRA / PEFT adapter lifecycle (required by ``LoRAAdapterMixin``).
-    * Gradient checkpointing with an opt-in guard — raises if the subclass
-      has not wired the feature via `_checkpointed_call`.
-    * FSDP wrapping hints via `_no_split_modules`.
-    * Config persistence via `save_pretrained` and `_save_config`.
-
-    Subclasses must implement `from_pretrained` and `forward`, and should
-    set `_no_split_modules` for layer-level FSDP sharding.  To enable
-    gradient checkpointing set `_supports_gradient_checkpointing = True`
-    and wrap each layer call with `_checkpointed_call`.
+    Subclasses must implement ``from_pretrained`` and ``forward``, and set
+    ``_no_split_modules`` for layer-level FSDP sharding.
 
     Example::
 
@@ -79,97 +67,44 @@ class NonDiffusersModelBase(nn.Module, ABC):
     #  Class-level FSDP configuration
     # ------------------------------------------------------------------
 
-    #: FSDP leaf-module class names used by `get_fsdp_wrap_policy`.
-    #: Set in subclasses to enable layer-level sharding, e.g.
-    #: ``["MyTransformerLayer"]``.  When empty the engine falls back to
-    #: per-leaf LoRA wrapping or size-based policies.
+    #: FSDP leaf-module class names; set in subclasses for layer-level sharding.
     _no_split_modules: list[str] = []
 
     # ------------------------------------------------------------------
     #  Gradient checkpointing
     # ------------------------------------------------------------------
 
-    #: Opt-in flag — set to True in subclasses that wire `_checkpointed_call`
-    #: into their `forward` loop.  `enable_gradient_checkpointing` raises
-    #: ValueError if this is still False, guarding against silent no-ops.
+    #: Opt-in flag — set True in subclasses that wire ``_checkpointed_call``
+    #: into ``forward``.  ``enable_gradient_checkpointing`` raises if False.
     _supports_gradient_checkpointing: bool = False
 
-    #: Runtime toggle set by `enable_gradient_checkpointing` /
-    #: `disable_gradient_checkpointing`.
+    #: Runtime toggle set by ``enable_gradient_checkpointing``.
     gradient_checkpointing: bool = False
 
-    #: Custom checkpoint function; None falls back to
-    #: `torch.utils.checkpoint.checkpoint`.
-    _gradient_checkpointing_func: object | None = None
-
-    @property
-    def is_gradient_checkpointing(self) -> bool:
-        """Return whether gradient checkpointing is currently active."""
-        return self.gradient_checkpointing
+    #: Custom checkpoint function; ``None`` falls back to
+    #: ``torch.utils.checkpoint.checkpoint``.
+    _gradient_checkpointing_func: Callable | None = None
 
     def enable_gradient_checkpointing(
         self,
-        gradient_checkpointing_func: object | None = None,
+        gradient_checkpointing_func: Callable | None = None,
     ) -> None:
         """Enable gradient checkpointing.
 
-        Raises ValueError if `_supports_gradient_checkpointing` is False —
-        the subclass must opt-in and wire `_checkpointed_call` into its
-        `forward` before this can be called.
-
-        Args:
-            gradient_checkpointing_func: Optional custom checkpoint
-                function.  When None, `_checkpointed_call` uses
-                `torch.utils.checkpoint.checkpoint` with
-                ``use_reentrant=False``.
+        Raises ValueError if ``_supports_gradient_checkpointing`` is False.
         """
         if not self._supports_gradient_checkpointing:
             raise ValueError(
                 f"{type(self).__name__} does not support gradient "
-                f"checkpointing.  To enable it, set "
-                f"`_supports_gradient_checkpointing = True` in the class "
-                f"definition and use `_checkpointed_call` to wrap each "
-                f"layer call in your `forward` method."
+                f"checkpointing.  Set ``_supports_gradient_checkpointing = True`` "
+                f"and use ``_checkpointed_call`` in your ``forward`` method."
             )
-
         if gradient_checkpointing_func is not None:
             self._gradient_checkpointing_func = gradient_checkpointing_func
         self.gradient_checkpointing = True
 
-    def disable_gradient_checkpointing(self) -> None:
-        """Disable gradient checkpointing.
-
-        After this call `_checkpointed_call` passes straight through to the
-        layer without `torch.utils.checkpoint.checkpoint` wrapping.
-        """
-        self.gradient_checkpointing = False
-
     def _checkpointed_call(self, fn, *args, **ckpt_kwargs):
-        """Call *fn*, wrapping with gradient checkpointing when enabled.
-
-        Subclasses should use this as the single entry point for
-        checkpointed layer iteration in `forward`::
-
-            for layer in self.layers:
-                h = self._checkpointed_call(layer, h, t)
-
-        For layer calls needing a custom closure (e.g. extra non-tensor
-        arguments captured from the enclosing scope)::
-
-            for layer in self.layers:
-                def _fn(h, t):
-                    return layer(h, t, extra=flag)
-                h = self._checkpointed_call(_fn, h, t)
-
-        Args:
-            fn (callable): The callable to invoke (layer module or closure).
-            *args: Positional arguments forwarded to *fn* (must be tensors).
-            **ckpt_kwargs: Forwarded to `torch.utils.checkpoint.checkpoint`
-                (e.g. ``use_reentrant``).  Not passed to *fn*.
-
-        Returns:
-            Tensor: The output of ``fn(*args)``, checkpointed if applicable.
-        """
+        """Call *fn*, wrapping with checkpoint when enabled and training."""
         if not self.gradient_checkpointing or not self.training:
             return fn(*args)
 
@@ -184,15 +119,7 @@ class NonDiffusersModelBase(nn.Module, ABC):
     # ------------------------------------------------------------------
 
     def add_adapter(self, adapter_config, adapter_name: str = "default") -> None:
-        """Inject a PEFT LoRA adapter via `peft.inject_adapter_in_model`.
-
-        The config is stored in `self.peft_config` for later reference.
-
-        Args:
-            adapter_config: A PEFT config object (e.g. `LoraConfig`).
-            adapter_name (str): Name for this adapter.  Defaults to
-                ``"default"``.
-        """
+        """Inject a PEFT LoRA adapter and store its config."""
         from peft import inject_adapter_in_model
 
         if not hasattr(self, "peft_config"):
@@ -203,15 +130,9 @@ class NonDiffusersModelBase(nn.Module, ABC):
     def load_lora_adapter(self, adapter_path: str, adapter_name: str = "default") -> None:
         """Load a pre-trained LoRA adapter from *adapter_path*.
 
-        Reads `adapter_config.json` and `adapter_model.safetensors`,
-        injects a new adapter via `add_adapter`, then copies checkpoint
-        weights into the newly created parameters.  Mismatched keys are
-        logged as warnings — missing keys keep their initial values,
-        unexpected keys are ignored.
-
-        Args:
-            adapter_path (str): Directory containing the saved adapter.
-            adapter_name (str): Name to register the adapter under.
+        Reads ``adapter_config.json`` and ``adapter_model.safetensors``,
+        injects the adapter, then copies weights in.  Mismatched keys are
+        warned about but do not raise.
         """
         from peft import LoraConfig, get_peft_model_state_dict
         from safetensors.torch import load_file as safetensors_load_file
@@ -255,11 +176,7 @@ class NonDiffusersModelBase(nn.Module, ABC):
             current_state[key].copy_(adapter_state_dict[key])
 
     def set_adapter(self, adapter_name: str) -> None:
-        """Activate a named PEFT adapter across all submodules.
-
-        Args:
-            adapter_name (str): Name of the adapter to activate.
-        """
+        """Activate a named PEFT adapter across all submodules."""
         for module in self.modules():
             if module is self:
                 continue
@@ -268,7 +185,7 @@ class NonDiffusersModelBase(nn.Module, ABC):
                 set_adapter_fn(adapter_name)
 
     def disable_adapters(self) -> None:
-        """Disable all PEFT adapters so only base weights are used."""
+        """Disable all PEFT adapters (base weights only)."""
         for module in self.modules():
             if module is self:
                 continue
@@ -277,7 +194,7 @@ class NonDiffusersModelBase(nn.Module, ABC):
                 disable_adapters_fn()
 
     def enable_adapters(self) -> None:
-        """Re-enable all PEFT adapters after `disable_adapters`."""
+        """Re-enable all PEFT adapters after ``disable_adapters``."""
         for module in self.modules():
             if module is self:
                 continue
@@ -285,35 +202,12 @@ class NonDiffusersModelBase(nn.Module, ABC):
             if callable(enable_adapters_fn):
                 enable_adapters_fn()
 
-    @contextmanager
-    def disable_adapter(self) -> Iterator[None]:
-        """Context manager that temporarily disables all PEFT adapters.
-
-        Usage::
-
-            with model.disable_adapter():
-                output = model(...)
-        """
-        try:
-            self.disable_adapters()
-            yield
-        finally:
-            self.enable_adapters()
-
     # ------------------------------------------------------------------
     #  Checkpoint persistence
     # ------------------------------------------------------------------
 
     def _save_config(self, save_directory: str) -> None:
-        """Save the model configuration to *save_directory*.
-
-        Calls `self.config.save_pretrained(save_directory)` if the config
-        object exposes that method.  Override if your config uses a
-        different serialisation format.
-
-        Args:
-            save_directory (str): Target directory (created if needed).
-        """
+        """Save ``self.config`` to *save_directory*, if supported."""
         if hasattr(self.config, "save_pretrained"):
             self.config.save_pretrained(save_directory)
         else:
@@ -328,23 +222,15 @@ class NonDiffusersModelBase(nn.Module, ABC):
         safe_serialization: bool = True,
         **kwargs,
     ) -> None:
-        """Save model config and weights to *save_directory*.
+        """Save config and weights to *save_directory*."""
+        from safetensors.torch import save_file as safetensors_save_file
 
-        Writes config via `_save_config` and weights via safetensors
-        (`model.safetensors`) by default.  Pass
-        ``safe_serialization=False`` to use `torch.save` instead.
-
-        Args:
-            save_directory (str): Target directory (created if needed).
-            safe_serialization (bool): If True (default), use safetensors.
-        """
         os.makedirs(save_directory, exist_ok=True)
         self._save_config(save_directory)
 
         if safe_serialization:
             weights_path = os.path.join(save_directory, "model.safetensors")
             state_dict = self.state_dict()
-            # Convert non-tensor entries that may have leaked into state_dict.
             clean_state = {k: v for k, v in state_dict.items() if isinstance(v, torch.Tensor)}
             safetensors_save_file(clean_state, weights_path)
         else:
@@ -365,28 +251,10 @@ class NonDiffusersModelBase(nn.Module, ABC):
         torch_dtype: torch.dtype = torch.bfloat16,
         **kwargs,
     ) -> NonDiffusersModelBase:
-        """Load a pretrained model from *model_path*.
-
-        Subclasses must parse config, instantiate the model, load weights,
-        and cast to *torch_dtype*.
-
-        Args:
-            model_path (str): Directory containing config and weights.
-            torch_dtype (torch.dtype): Target dtype (default bfloat16).
-            **kwargs: Additional model-specific arguments.
-
-        Returns:
-            NonDiffusersModelBase: An instance of the subclass with
-                loaded weights.
-        """
+        """Load a pretrained model from *model_path*."""
         ...
 
     @abstractmethod
     def forward(self, **kwargs):
-        """Forward pass of the model.
-
-        Subclasses must implement the architecture-specific computation.
-        The exact signature is model-dependent; the training adapter
-        constructs inputs via `DiffusionModelBase.prepare_model_inputs`.
-        """
+        """Forward pass; signature is model-dependent."""
         ...
