@@ -18,6 +18,7 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/vers
 
 
 # Import pipelines / rollout / reward loop / engines to auto-register them
+import verl_omni.experimental  # noqa: E402, F401
 import verl_omni.pipelines  # noqa: E402, F401
 import verl_omni.reward_loop  # noqa: E402, F401
 import verl_omni.workers.engine  # noqa: E402, F401

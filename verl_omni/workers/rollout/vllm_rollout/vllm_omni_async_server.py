@@ -134,11 +134,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         enable_step_execution = self.config.get("step_execution", False)
         algorithm = self.model_config.algorithm
         if enable_step_execution:
-            # Import experimental modules so their @register decorators fire
-            # and populate the pipeline registry.
-            import verl_omni.experimental.qwen_image_flow_grpo.vllm_omni_rollout_adapter  # noqa: F401
-            import verl_omni.experimental.qwen_image_mix_grpo.vllm_omni_rollout_adapter  # noqa: F401
-
             stepwise_algorithm = f"{algorithm}_stepwise"
             if VllmOmniPipelineBase.get_class(self.model_config.architecture, stepwise_algorithm):
                 algorithm = stepwise_algorithm
