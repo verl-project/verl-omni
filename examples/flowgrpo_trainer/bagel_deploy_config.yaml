@@ -1,25 +1,16 @@
-# Single-stage BAGEL deploy config for FlowGRPO training with colocated workers.
-#
-# Uses vllm-omni 0.20+'s ``--deploy-config`` schema (``pipeline`` topology
-# marker + flat ``stages`` list). The legacy ``--stage-configs-path`` schema
-# (``stage_args`` + ``runtime`` block) silently kills the BAGEL
-# ``DiffusionWorker`` after warmup on vllm-omni 0.20, so we don't use it.
-#
-# Mirrors vllm-omni's reference single-stage BAGEL config at
-# ``vllm_omni/deploy/bagel_single_stage.yaml``: the DiT stage owns the full
-# LLM (Qwen2-MoT), ViT, VAE, and tokenizer, so a single stage covers all
-# four modalities (text2img, img2img, img2text, text2text) plus think mode.
+# BAGEL-7B-MoT single-stage deploy config for FlowGRPO training.
+# Mirrors vllm-omni's ``vllm_omni/deploy/bagel_single_stage.yaml``.
 
 pipeline: bagel_single_stage
 async_chunk: false
 
 stages:
   - stage_id: 0
-    max_num_batched_tokens: 32768
-    max_num_seqs: 1
-    enforce_eager: true
-    trust_remote_code: true
-    enable_prefix_caching: false
-    devices: "0"
+    max_num_batched_tokens: 32768        # max tokens per diffusion batch
+    max_num_seqs: 1                      # diffusion processes 1 seq at a time
+    enforce_eager: true                  # required: no CUDA graphs for diffusion
+    trust_remote_code: true              # BAGEL uses custom Qwen2-MoT code
+    enable_prefix_caching: false         # single-request, no cache needed
+    devices: "0"                         # GPU device index
     default_sampling_params:
-      seed: 52
+      seed: 52                           # overridden per-request in FlowGRPO

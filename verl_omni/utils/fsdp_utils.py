@@ -15,7 +15,6 @@
 FSDP utilities for verl-omni
 """
 
-import logging
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack, contextmanager
@@ -25,8 +24,6 @@ from peft.utils.save_and_load import get_peft_model_state_dict
 from verl.utils.fsdp_utils import collect_lora_params as _upstream_collect_lora_params
 from verl.utils.fsdp_utils import fsdp_version
 from verl.utils.fsdp_utils import layered_summon_lora_params as _upstream_layered_summon_lora_params
-
-logger = logging.getLogger(__name__)
 
 __all__ = ["collect_lora_params", "fsdp_summon_full_params"]
 
