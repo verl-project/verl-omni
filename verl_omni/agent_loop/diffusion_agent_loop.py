@@ -230,7 +230,6 @@ class DiffusionAgentLoopWorker:
 
         extra_fields["raw_prompt"] = kwargs["raw_prompt"]
 
-        # ``return_attention_mask=True`` is required by token-aware adapters (e.g. BAGEL).
         prompt_output = self.tokenizer.pad(
             {"input_ids": output.prompt_ids},
             padding="max_length",

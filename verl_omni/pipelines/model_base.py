@@ -78,11 +78,10 @@ class DiffusionModelBase(ABC):
 
     @classmethod
     def build_module(cls, model_config: DiffusionModelConfig, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
-        """Optional hook for custom model loading.
+        """Load the model without ``diffusers.AutoModel``.
 
-        Override this to load non-standard models (e.g. models not loadable
-        via ``diffusers.AutoModel``). Return ``None`` to fall back to the
-        default ``AutoModel.from_pretrained`` path in the FSDP engine.
+        Return ``None`` to use the default ``AutoModel`` path.
+        Override this for models that diffusers cannot load.
         """
         return None
 
