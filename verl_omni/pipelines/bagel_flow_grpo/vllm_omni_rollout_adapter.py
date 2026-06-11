@@ -11,14 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Custom vllm-omni pipeline for BAGEL RL rollouts with verl-omni.
+"""BAGEL (MoT) rollout-side adapter for FlowGRPO.
 
-Extends :class:`BagelPipeline` to:
-* Replace the scheduler with an SDE scheduler for stochastic denoising
-  with log-probability recording.
-* Always enable trajectory recording.
-* Read SDE kwargs from ``sampling_params.extra_args``.
-* Return RL artifacts in ``DiffusionOutput.custom_output``.
+Extends ``BagelPipeline`` with an SDE scheduler for stochastic denoising
+and log-probability recording.  Applies per-request SDE windowing so noise
+is only injected on a contiguous subset of denoising steps, matching the
+original flow_grpo BAGEL rollout.
 """
 
 from __future__ import annotations
@@ -89,35 +87,16 @@ class _AdapterStepOutput:
 
 
 class _BagelSchedulerAdapter:
-    """Wraps the diffusers-based FlowMatchSDEDiscreteScheduler to match
-    BAGEL's calling convention: ``step(v_t, sigma, x_t, dt, **kwargs)``.
+    """Adapt ``FlowMatchSDEDiscreteScheduler`` to BAGEL's calling convention.
 
-    BAGEL's transformer calls ``scheduler.step(model_output, timesteps[i],
-    sample, dts[i], **scheduler_kwargs)`` with 4 positional args, while the
-    diffusers scheduler takes ``step(model_output, timestep, sample, **kwargs)``
-    and computes dt internally.  This adapter bridges the gap.
-
-    Stateful SDE-windowing
-    ----------------------
-    Beyond the calling-convention adapter, this class also implements the
-    "SDE window" behavior from flow_grpo's original BAGEL rollout
-    (flow_grpo/flow_grpo/bagel/modeling/bagel/bagel.py::generate_image):
-    noise is injected only on a contiguous window of denoising steps
-    ``[window_begin, window_begin + window_size)``, while steps outside the
-    window are run deterministically (ODE, ``noise_level=0``).  Log-prob
-    recording is also gated to the window, otherwise outside-window steps
-    would produce ``-inf`` / ``NaN`` log-probs (``std_dev_t == 0``).
-
-    Without this windowing, ``noise_level`` would be injected at every step
-    (e.g. 15 steps with ``noise_level=1.2``), the recorded latents would be
-    far off the deterministic ODE manifold, rewards would flatten, and the
-    PPO policy gradient would degenerate.  See the bug analysis in the
-    chat history for the failure mode.
+    BAGEL calls ``scheduler.step(v_t, sigma, x_t, dt, **kwargs)`` with 4
+    positional args; the diffusers scheduler expects 3.  SDE noise and
+    log-prob recording are gated to a per-request window so steps outside
+    the window run deterministically (ODE, ``noise_level=0``).
     """
 
     def __init__(self, inner: FlowMatchSDEDiscreteScheduler):
         self._inner = inner
-        # Per-rollout state, reset via ``begin_forward``.
         self._sde_window: Optional[tuple[int, int]] = None
         self._base_noise_level: float = 0.0
         self._base_return_logprobs: bool = True
@@ -156,13 +135,25 @@ class _BagelSchedulerAdapter:
         dt: float | torch.Tensor,  # noqa: ARG002 — inner derives dt from timestep schedule
         **kwargs,
     ) -> _AdapterStepOutput:
+        """Run one denoising step, gating noise and log-probs by the SDE window.
+
+        Args:
+            model_output: Velocity prediction ``v_t`` from the model.
+            sigma: Current noise level (BAGEL uses raw sigma, not 0-1000).
+            sample: Current latent ``x_t``.
+            dt: Step size (ignored; derived from the inner scheduler's
+                timestep schedule).
+
+        Returns:
+            ``(prev_sample, log_prob)`` where ``log_prob`` is a scalar
+            (or ``None`` outside the SDE window).
+        """
         i = self._step_counter
         if self._sde_window is not None:
             begin, end = self._sde_window
             in_window = begin <= i < end
-            # Inside window  -> use configured noise_level & record log_prob.
-            # Outside window -> deterministic ODE; skip log_prob (otherwise
-            # std_dev_t = 0 -> log(0) = -inf in sample_previous_step).
+            # Outside the SDE window, run deterministic ODE (noise_level=0)
+            # and skip log-prob recording (std_dev_t=0 → log(0)=-inf).
             cur_noise_level = self._base_noise_level if in_window else 0.0
             cur_return_logprobs = self._base_return_logprobs and in_window
             kwargs = {
@@ -170,7 +161,6 @@ class _BagelSchedulerAdapter:
                 "noise_level": cur_noise_level,
                 "return_logprobs": cur_return_logprobs,
             }
-        # else: pass caller kwargs through unchanged (legacy behavior).
 
         out = self._inner.step(
             model_output=model_output.float(),  # cast bf16→fp32 for scheduler precision
@@ -180,21 +170,9 @@ class _BagelSchedulerAdapter:
             **kwargs,
         )
         self._step_counter += 1
-        # step() with return_dict=False returns
-        # (prev_sample, log_prob, prev_sample_mean, std_dev_t)
         prev_sample, log_prob = out[0], out[1]
-        # BAGEL packs latents as ``(num_tokens, channels)`` per request (no
-        # explicit batch dim, since rollout handles one sample at a time).
-        # The inner scheduler's ``mean(dim=tuple(range(1, ndim)))`` therefore
-        # preserves the spatial-token dim, yielding ``(num_tokens,)`` instead
-        # of a scalar.  At training time, latents *do* have a batch dim
-        # (``(B, num_tokens, channels)``), so the same reduction yields
-        # ``(B,)``.  Without the extra reduction here, ``old_log_probs`` ends
-        # up with shape ``(B, num_steps, num_tokens)`` while training's
-        # ``log_prob`` is ``(B,)`` — broadcasting then fails inside
-        # ``compute_diffusion_loss_flow_grpo``.  Match the original flow_grpo
-        # behavior (``log_prob.mean()`` in ``bagel.py::_sde_step_with_logprob``)
-        # by fully reducing to a per-step scalar.
+        # Rollout latents are (tokens, channels); reduce to scalar to
+        # match training's batched log_prob shape.
         if log_prob is not None:
             log_prob = log_prob.mean()
         return _AdapterStepOutput(prev_sample=prev_sample, log_prob=log_prob)
@@ -206,20 +184,20 @@ def _pick_sde_window(
     seed: Optional[int],
     request_id: Optional[str],
 ) -> Optional[tuple[int, int]]:
-    """Pick a contiguous SDE window ``[begin, begin + window_size)`` randomly
-    inside ``window_range`` (inclusive).  Returns ``None`` when windowing is
-    disabled (``window_size`` is ``None`` or 0).
+    """Pick a random contiguous window ``[begin, begin + window_size)``.
 
-    Reproducibility:
-    * ``seed != None``        -> seed Python RNG with ``seed``.
-    * ``request_id`` provided -> seed RNG with sha256(request_id) so
-      concurrent requests inside one process still get different windows.
-    * Both ``None``           -> use default RNG (non-deterministic).
+    Args:
+        window_size: Number of steps in the window.  ``None`` or 0
+            disables windowing.
+        window_range: ``(low, high)`` inclusive range for the window
+            start.  ``None`` defaults to ``[0, window_size)``.
+        seed: If set, seed the RNG for reproducibility.
+        request_id: If set (and ``seed`` is ``None``), seed the RNG
+            with a hash of the request ID so concurrent requests get
+            different windows.
 
-    This mirrors flow_grpo's ``random.randint(window_range[0],
-    window_range[1] - window_size)`` call but is seeded per-request rather
-    than per-process so that different rollouts inside one replica explore
-    different parts of the trajectory.
+    Returns:
+        ``(begin, end_exclusive)`` or ``None`` if windowing is disabled.
     """
     if window_size is None or int(window_size) <= 0:
         return None
@@ -255,6 +233,7 @@ class BagelPipelineWithLogProb(BagelPipeline):
         logger.info("BagelPipelineWithLogProb: SDE scheduler enabled for RL rollouts")
 
     def _decode_token_prompt(self, token_ids: Any) -> str | None:
+        """Decode BAGEL token IDs to a cleaned prompt text string."""
         token_list = _to_token_list(token_ids)
         if not token_list:
             return None
@@ -262,6 +241,7 @@ class BagelPipelineWithLogProb(BagelPipeline):
         return _extract_prompt_text(decoded)
 
     def _ensure_bagel_prompt_text(self, req: OmniDiffusionRequest) -> None:
+        """Fill ``prompt`` and ``negative_prompt`` from token IDs if missing."""
         if not req.prompts or not isinstance(req.prompts[0], dict):
             return
 
@@ -314,10 +294,8 @@ class BagelPipelineWithLogProb(BagelPipeline):
                 request_id=getattr(req, "request_id", None),
             )
 
-        # Scheduler kwargs passed to every step.  ``_BagelSchedulerAdapter``
-        # overrides ``noise_level`` and ``return_logprobs`` per-step based
-        # on whether the step is inside ``sde_window``; we still pass these
-        # defaults so the no-window legacy path works.
+        # Pass scheduler kwargs; _BagelSchedulerAdapter overrides noise_level
+        # and return_logprobs per-step based on the SDE window.
         self.scheduler_kwargs = {k: extra_args[k] for k in ("noise_level", "sde_type", "generator") if k in extra_args}
         self.scheduler_kwargs["return_logprobs"] = logprobs
 
@@ -325,8 +303,7 @@ class BagelPipelineWithLogProb(BagelPipeline):
         assert req.sampling_params.num_inference_steps is not None, "num_inference_steps must be set for RL rollouts"
         setup_bagel_sigmas(self.scheduler._inner, req.sampling_params.num_inference_steps)
 
-        # Reset the stateful adapter for this request (must happen *after*
-        # ``set_timesteps`` so that the inner step_index is None again).
+        # Reset adapter state *after* set_timesteps so inner step_index is None.
         self.scheduler.begin_forward(
             sde_window=sde_window,
             noise_level=noise_level,
@@ -343,13 +320,9 @@ class BagelPipelineWithLogProb(BagelPipeline):
         if sde_window is not None:
             begin, end = sde_window
             if traj_latents is not None:
-                # shape: (num_steps + 1, ...); keep x at sigma_begin .. sigma_end
                 traj_latents = traj_latents[begin : end + 1]
             if traj_timesteps is not None:
-                # shape: (num_steps,); keep sigma_begin .. sigma_{end-1}
                 traj_timesteps = traj_timesteps[begin:end]
-            # traj_log_probs already has length (end - begin) thanks to
-            # _BagelSchedulerAdapter gating; no slicing needed.
 
         return DiffusionOutput(
             output=maybe_to_cpu(output.output),
