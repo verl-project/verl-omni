@@ -43,6 +43,8 @@ from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 logger = logging.getLogger(__name__)
 
 
+# TODO: Drop decode→re-tokenize helpers once vllm-omni BagelPipeline accepts
+# prompt_token_ids directly (currently only reads text from req.prompts[0]["prompt"]).
 _CHAT_MARKERS = (
     "<|vision_start|>",
     "<|vision_end|>",

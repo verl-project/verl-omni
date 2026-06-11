@@ -63,26 +63,29 @@ class NonDiffusersModelBase(nn.Module, ABC):
                 ...
     """
 
-    # ------------------------------------------------------------------
-    #  Class-level FSDP configuration
-    # ------------------------------------------------------------------
+    # Abstract interface — subclasses must implement these.
+    @classmethod
+    @abstractmethod
+    def from_pretrained(
+        cls,
+        model_path: str,
+        torch_dtype: torch.dtype = torch.bfloat16,
+        **kwargs,
+    ) -> NonDiffusersModelBase:
+        """Load a pretrained model from *model_path*."""
+        ...
 
-    #: FSDP leaf-module class names; set in subclasses for layer-level sharding.
+    @abstractmethod
+    def forward(self, **kwargs):
+        """Forward pass; signature is model-dependent."""
+        ...
+
+    # FSDP configuration
     _no_split_modules: list[str] = []
 
-    # ------------------------------------------------------------------
-    #  Gradient checkpointing
-    # ------------------------------------------------------------------
-
-    #: Opt-in flag — set True in subclasses that wire ``_checkpointed_call``
-    #: into ``forward``.  ``enable_gradient_checkpointing`` raises if False.
+    # Gradient checkpointing
     _supports_gradient_checkpointing: bool = False
-
-    #: Runtime toggle set by ``enable_gradient_checkpointing``.
     gradient_checkpointing: bool = False
-
-    #: Custom checkpoint function; ``None`` falls back to
-    #: ``torch.utils.checkpoint.checkpoint``.
     _gradient_checkpointing_func: Callable | None = None
 
     def enable_gradient_checkpointing(
@@ -114,9 +117,7 @@ class NonDiffusersModelBase(nn.Module, ABC):
             ckpt_func = torch.utils.checkpoint.checkpoint
         return ckpt_func(fn, *args, **ckpt_kwargs)
 
-    # ------------------------------------------------------------------
-    #  LoRA / PEFT adapter lifecycle
-    # ------------------------------------------------------------------
+    # LoRA / PEFT adapter lifecycle
 
     def add_adapter(self, adapter_config, adapter_name: str = "default") -> None:
         """Inject a PEFT LoRA adapter and store its config."""
@@ -202,9 +203,7 @@ class NonDiffusersModelBase(nn.Module, ABC):
             if callable(enable_adapters_fn):
                 enable_adapters_fn()
 
-    # ------------------------------------------------------------------
-    #  Checkpoint persistence
-    # ------------------------------------------------------------------
+    # Checkpoint persistence
 
     def _save_config(self, save_directory: str) -> None:
         """Save ``self.config`` to *save_directory*, if supported."""
@@ -238,23 +237,3 @@ class NonDiffusersModelBase(nn.Module, ABC):
             torch.save(self.state_dict(), weights_path)
 
         logger.info("Model saved to %s", save_directory)
-
-    # ------------------------------------------------------------------
-    #  Abstract interface
-    # ------------------------------------------------------------------
-
-    @classmethod
-    @abstractmethod
-    def from_pretrained(
-        cls,
-        model_path: str,
-        torch_dtype: torch.dtype = torch.bfloat16,
-        **kwargs,
-    ) -> NonDiffusersModelBase:
-        """Load a pretrained model from *model_path*."""
-        ...
-
-    @abstractmethod
-    def forward(self, **kwargs):
-        """Forward pass; signature is model-dependent."""
-        ...
