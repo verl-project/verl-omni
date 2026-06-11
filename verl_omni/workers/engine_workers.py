@@ -52,6 +52,7 @@ from verl.workers.config import (
     TrainingWorkerConfig,
 )
 from verl.workers.rollout.base import BaseRollout, get_rollout_class
+from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
 from verl.workers.utils.losses import ppo_loss
 
 from verl_omni.utils.mfu import (
@@ -789,18 +790,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if timings is not None:
             timings["offload_actor_to_cpu"] = time.perf_counter() - start
 
-    def _gather_lora_and_offload(self, timings: Optional[dict] = None):
-        """Gather LoRA adapter params and then offload the actor to CPU.
+    def _gather_lora_weights(self, timings: Optional[dict] = None):
+        """Gather LoRA adapter params into a CPU dict, without offloading the actor.
 
-        Intended to run as a single unit in a worker thread (via
-        ``asyncio.to_thread``) so the gather *and* offload can overlap with
-        resuming rollout weight memory, instead of blocking the event loop
-        before resume can start. The ordering is sequential and intentional:
-        the adapter gather eagerly materializes the LoRA tensors into
-        independent GPU allocations, after which moving the base param storage
-        to CPU is safe. ``_offload_actor_and_empty_cache`` ends with a forced
-        device sync, so the returned tensors are safe to use on the main thread
-        once this completes.
+        Intended to run in a worker thread (via ``asyncio.to_thread``) so the
+        gather overlaps with resuming rollout weight memory, instead of blocking
+        the event loop. ``collect_lora_params`` materializes the LoRA tensors on
+        CPU (independent allocations), so the subsequent actor offload can run
+        concurrently with the rollout-side sync without affecting these tensors.
         """
         gather_start = time.perf_counter()
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
@@ -811,7 +808,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         lora_weights = {name: tensor for name, tensor in per_tensor_param}
         if timings is not None:
             timings["get_per_tensor_param"] = time.perf_counter() - gather_start
-        self._offload_actor_and_empty_cache(timings)
         return lora_weights, peft_config
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -887,26 +883,46 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 3. sync weights.
         offloaded = False
+        offload_task = None
         if use_lora_fast_path:
-            # LoRA-only fast path: run the adapter gather and the actor offload as a
-            # single unit in a worker thread so both overlap with resuming rollout
-            # weight memory, instead of the gather blocking the event loop before
-            # resume can even start. The gathered LoRA tensors live in separate
-            # allocations from the base param storage, so offloading the base after
-            # the gather is safe.
+            # LoRA-only fast path. Three independent stages overlap:
+            #   (a) gather the LoRA adapter into a CPU dict in a worker thread,
+            #       overlapping with resuming rollout weight memory;
+            #   (b) push the adapter to the rollout (the long pole), awaited here
+            #       so ``update_weights_sync`` measures the sync alone;
+            #   (c) offload the actor base to CPU in a background worker thread,
+            #       launched before the sync so it overlaps it, but only awaited
+            #       later (just before kv_cache resume, which needs the freed
+            #       memory). The gathered LoRA tensors are independent CPU
+            #       allocations, so moving the base param storage to CPU cannot
+            #       corrupt the in-flight sync.
             self.rollout.sleep_level = 1
-            gather_offload_task = asyncio.create_task(
-                asyncio.to_thread(self._gather_lora_and_offload, timings)
-            )
+            gather_task = asyncio.create_task(asyncio.to_thread(self._gather_lora_weights, timings))
             if resume_weights_task is not None:
                 await resume_weights_task
             log_gpu_memory_usage("After resume weights", logger=logger)
-            lora_weights, peft_config = await gather_offload_task
+            lora_weights, peft_config = await gather_task
+            # Launch the actor offload in the background so it overlaps the sync.
+            offload_task = asyncio.create_task(asyncio.to_thread(self._offload_actor_and_empty_cache, timings))
+
+            # Use ZMQ IPC to transfer LoRA weights, bypassing Ray serialization.
+            # The _execute_method call only carries a small metadata dict (peft_config,
+            # base_sync_done, use_shm) — tensor data goes through the ZMQ socket.
             sync_start = time.perf_counter()
-            await self.rollout._execute_method(
-                "update_lora_weights",
-                kwargs={"lora_weights": lora_weights, "peft_config": peft_config},
+            future = await self.rollout._execute_method(
+                "update_weights_from_ipc",
+                non_block=True,
+                kwargs={"peft_config": peft_config, "base_sync_done": True, "use_shm": self.rollout.use_shm},
             )
+            bucket_size_mb = self.config.rollout.checkpoint_engine.update_weights_bucket_megabytes
+            sender = BucketedWeightSender(
+                zmq_handle=self.rollout.zmq_handle,
+                bucket_size_mb=bucket_size_mb,
+                use_shm=self.rollout.use_shm,
+            )
+            await sender.async_send_weights(lora_weights.items())
+            if future is not None:
+                await future
             timings["update_weights_sync"] = time.perf_counter() - sync_start
             offloaded = True
         else:
@@ -964,8 +980,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 
-        # 4. offload model to cpu (already done concurrently in the LoRA-only path)
-        if not offloaded:
+        # 4. offload model to cpu. In the LoRA-only fast path this was launched in
+        #    the background to overlap the sync; await it here (before kv_cache
+        #    resume, which needs the freed GPU memory). Otherwise offload inline.
+        if offload_task is not None:
+            await offload_task
+        elif not offloaded:
             self._offload_actor_and_empty_cache(timings)
 
         # 5. resume kv_cache
@@ -977,7 +997,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         set_expandable_segments(True)
 
         timings["update_weights_total"] = time.perf_counter() - update_weights_start
-        logger.info(
+        print(
             "update_weights timing (ms): %s",
             {k: round(v * 1000, 2) for k, v in timings.items()},
         )
