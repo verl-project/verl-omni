@@ -926,8 +926,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             timings["update_weights_sync"] = time.perf_counter() - sync_start
             offloaded = True
         else:
-            # gather actor params and determine if we need a base weight sync (adapter path only).
-            gather_start = time.perf_counter()
+            # Normal path: resume rollout weight memory, gather actor params and
+            # sync via the standard bucketed-IPC pipeline.
+            if resume_weights_task is not None:
+                await resume_weights_task
+            log_gpu_memory_usage("After resume weights", logger=logger)
+
+            # determine if we need a base weight sync (adapter path only)
             per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
                 layered_summon=self.layered_summon,
                 base_sync_done=True,
@@ -939,44 +944,20 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.rollout.sleep_level = 1
                 do_lora_base_sync = not self.base_sync_done
 
-            # full weights use the standard bucketed-IPC pipeline; the first LoRA
-            # base sync pushes base weights then the adapter via the fast path.
+            # sync weights: For SGLang, we need base first (when needed), then adapter/merged
             if do_lora_base_sync:
-                timings["get_per_tensor_param"] = time.perf_counter() - gather_start
                 per_tensor_param_base, peft_config = self.actor.engine.get_per_tensor_param(
                     layered_summon=self.layered_summon,
                     base_sync_done=False,
                     adapter_name=self.config.rollout.rollout_adapter,
                 )
-                if resume_weights_task is not None:
-                    await resume_weights_task
-                log_gpu_memory_usage("After resume weights", logger=logger)
-                sync_start = time.perf_counter()
                 await self.rollout.update_weights(
                     per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
                 )
-                # Adapter sync via fast path (no IPC needed for small LoRA tensors)
-                if peft_config is not None:
-                    lora_weights = {name: tensor for name, tensor in per_tensor_param}
-                    await self.rollout._execute_method(
-                        "update_lora_weights",
-                        kwargs={"lora_weights": lora_weights, "peft_config": peft_config},
-                    )
-                else:
-                    await self.rollout.update_weights(
-                        per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
-                    )
-                timings["update_weights_sync"] = time.perf_counter() - sync_start
-            else:
-                timings["get_per_tensor_param"] = time.perf_counter() - gather_start
-                if resume_weights_task is not None:
-                    await resume_weights_task
-                log_gpu_memory_usage("After resume weights", logger=logger)
-                sync_start = time.perf_counter()
-                await self.rollout.update_weights(
-                    per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
-                )
-                timings["update_weights_sync"] = time.perf_counter() - sync_start
+
+            await self.rollout.update_weights(
+                per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+            )
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 

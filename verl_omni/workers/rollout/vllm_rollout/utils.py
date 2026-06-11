@@ -114,42 +114,6 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
                 on_bucket_received=lambda weights: self.load_weights(weights)
             )
 
-    def update_lora_weights(self, lora_weights: dict[str, torch.Tensor], peft_config: dict):
-        """Fast-path LoRA weight update bypassing ZMQ+CUDA IPC.
-
-        Called via ``ServerAdapter._execute_method`` → ``collective_rpc`` on the
-        vLLM HTTP server, which dispatches to all worker processes.  LoRA tensors
-        are passed directly as a Ray argument (serialized through the object store
-        for small payloads), avoiding the bucketed-IPC handshake entirely.
-
-        Args:
-            lora_weights: Complete dict of LoRA parameter name → GPU tensor.
-            peft_config: PEFT configuration dict.
-        """
-        t0 = time.perf_counter()
-        self.remove_lora(VLLM_LORA_INT_ID)
-        t1 = time.perf_counter()
-        logger.debug("remove_lora took %.3f ms", (t1 - t0) * 1000)
-
-        lora_request = OmniTensorLoRARequest(
-            lora_name=VLLM_LORA_NAME,
-            lora_int_id=VLLM_LORA_INT_ID,
-            lora_path=VLLM_LORA_PATH,
-            peft_config=peft_config,
-            lora_tensors=lora_weights,
-        )
-        self.add_lora(lora_request)
-        t2 = time.perf_counter()
-        logger.debug("add_lora took %.3f ms", (t2 - t1) * 1000)
-        logger.debug(
-            "LoRA update (fast path) total: %.3f ms (remove=%.3f, add=%.3f, params=%d, size=%.2f MB)",
-            (t2 - t0) * 1000,
-            (t1 - t0) * 1000,
-            (t2 - t1) * 1000,
-            len(lora_weights),
-            sum(t.element_size() * t.numel() for t in lora_weights.values()) / (1024 * 1024),
-        )
-
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.
         Uses Ray job id + replica_rank + local_rank to form the handle so it
