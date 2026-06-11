@@ -98,11 +98,22 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
 
-    dataset = datasets.load_dataset(local_dataset_path)
+    # Load explicitly as text files to avoid conflicts with any stale
+    # parquet files that may exist in subdirectories (e.g. bagel/).
+    train_file = os.path.join(local_dataset_path, "train.txt")
+    test_file = os.path.join(local_dataset_path, "test.txt")
+    if not os.path.exists(train_file) or not os.path.exists(test_file):
+        raise FileNotFoundError(
+            f"Expected raw text files at {train_file} and {test_file}. "
+            f"Download the dataset from https://github.com/yifan123/flow_grpo/tree/main/dataset/ocr"
+        )
+    dataset = datasets.load_dataset("text", data_files={"train": train_file, "test": test_file})
     train_dataset = dataset["train"]
     test_dataset = dataset["test"]
 
     data_source = "flow_grpo/ocr"
+
+    negative_user_prompt = " "
 
     def make_map_fn(split: str):
         def process_fn(example, idx):
@@ -119,7 +130,14 @@ if __name__ == "__main__":
 
             return {
                 "data_source": data_source,
-                "prompt": user_text,
+                "prompt": [
+                    {"role": "system", "content": args.system_prompt},
+                    {"role": "user", "content": text},
+                ],
+                "negative_prompt": [
+                    {"role": "system", "content": args.system_prompt},
+                    {"role": "user", "content": negative_user_prompt},
+                ],
                 "bagel_prompt_ids": np.array(bagel_prompt_ids, dtype=np.int64),
                 "ability": "ocr",
                 "reward_model": {
