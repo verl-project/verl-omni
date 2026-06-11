@@ -77,9 +77,9 @@ jobs:
           fetch-depth: 0
       - name: Install dependencies
         run: |
+          pip3 install ".[gpu,dev]"
           pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
           pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
-          pip3 install ".[gpu,dev]"
           pip3 install --no-deps -e .
           # veomni's [gpu] extra pins torch 2.9 and would conflict with the vLLM stack.
           # See docs/start/install.md "Optional engine backends".
