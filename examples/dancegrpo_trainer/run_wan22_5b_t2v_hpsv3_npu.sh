@@ -41,7 +41,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.attn_backend='_native_npu' \
     actor_rollout_ref.model.custom_chat_template='"{% if messages %}{% for message in messages %}{% if message[\"role\"] == \"user\" %}{{ message[\"content\"] }}{% endif %}{% endfor %}{% endif %}</s>"' \
-    actor_rollout_ref.actor.optim.lr=5e-6 \
+    actor_rollout_ref.actor.optim.lr=1e-5 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
@@ -57,8 +57,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.pipeline.true_cfg_scale=1.0 \
-    actor_rollout_ref.rollout.pipeline.height=704 \
-    actor_rollout_ref.rollout.pipeline.width=1280 \
+    actor_rollout_ref.rollout.pipeline.height=512 \
+    actor_rollout_ref.rollout.pipeline.width=512 \
     actor_rollout_ref.rollout.pipeline.num_frames=8 \
     actor_rollout_ref.rollout.pipeline.num_inference_steps=10 \
     actor_rollout_ref.rollout.pipeline.guidance_scale=5.0 \
