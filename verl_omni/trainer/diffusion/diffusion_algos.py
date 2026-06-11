@@ -149,6 +149,7 @@ class DiffusionAdvantageEstimator(str, Enum):
     """Advantage estimators specific to diffusion-based training."""
 
     FLOW_GRPO = "flow_grpo"
+    FLOW_DPPO = "flow_dppo"
     DANCE_GRPO = "dance_grpo"
 
 
@@ -188,6 +189,7 @@ def get_diffusion_adv_estimator_fn(name_or_enum):
 
 
 @register_diffusion_adv_est(DiffusionAdvantageEstimator.FLOW_GRPO)
+@register_diffusion_adv_est(DiffusionAdvantageEstimator.FLOW_DPPO)
 @register_diffusion_adv_est(DiffusionAdvantageEstimator.DANCE_GRPO)
 def compute_flow_grpo_outcome_advantage(
     sample_level_rewards: torch.Tensor,
@@ -352,6 +354,115 @@ class FlowGRPOLoss(DiffusionLossFn):
             old_log_prob=data["old_log_probs"],
             log_prob=model_output["log_probs"],
             advantages=data["advantages"],
+            config=config,
+            rollout_is_weights=data.get("rollout_is_weights", None),
+        )
+        return DiffusionLossResult(loss=loss, metrics=metrics)
+
+
+@register_diffusion_loss("flow_dppo")
+class FlowDPPOLoss(DiffusionLossFn):
+    """Flow-DPPO policy objective with an exact divergence trust-region mask."""
+
+    required_model_output_keys = ("log_probs", "prev_sample_mean", "std_dev_t", "sqrt_dt")
+    required_data_keys = ("old_log_probs", "advantages", "old_prev_sample_mean")
+
+    @staticmethod
+    def _broadcast_sqrt_dt(sqrt_dt: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if sqrt_dt.ndim == 0:
+            return sqrt_dt.reshape(1, *([1] * (target.ndim - 1)))
+        return sqrt_dt.reshape(sqrt_dt.shape[0], *([1] * (target.ndim - 1)))
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        old_log_prob: torch.Tensor,
+        log_prob: torch.Tensor,
+        advantages: torch.Tensor,
+        config: DiffusionActorConfig,
+        old_prev_sample_mean: torch.Tensor,
+        prev_sample_mean: torch.Tensor,
+        std_dev_t: torch.Tensor,
+        sqrt_dt: torch.Tensor,
+        rollout_is_weights: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute Flow-DPPO's asymmetric KL-mask policy objective.
+
+        Flow-DPPO replaces PPO ratio clipping with an exact Gaussian KL
+        trust-region mask. Updates are masked only when they both exceed the
+        divergence threshold and move farther from the old policy.
+        """
+        assert config is not None, "config is required for FlowDPPOLoss!"
+        loss_cfg = config.diffusion_loss
+        advantages = torch.clamp(
+            advantages,
+            -loss_cfg.adv_clip_max,
+            loss_cfg.adv_clip_max,
+        )
+
+        log_ratio = log_prob - old_log_prob
+        ratio = torch.exp(log_ratio)
+        unclipped_loss = -advantages * ratio
+
+        mean_diff_sq = (prev_sample_mean - old_prev_sample_mean).pow(2)
+        if getattr(loss_cfg, "add_kl_coefficient", True):
+            sigma_t = std_dev_t * cls._broadcast_sqrt_dt(sqrt_dt, std_dev_t)
+            kl_per_elem = mean_diff_sq / (2 * sigma_t.pow(2))
+        else:
+            kl_per_elem = mean_diff_sq / 2
+        if kl_per_elem.ndim > 1:
+            kl_per_sample = kl_per_elem.mean(dim=tuple(range(1, kl_per_elem.ndim)))
+        else:
+            kl_per_sample = kl_per_elem
+
+        kl_mask_threshold = loss_cfg.kl_mask_threshold
+        high_kl_mask = kl_per_sample >= kl_mask_threshold
+        pos_rm_mask = high_kl_mask & (ratio > 1.0) & (advantages > 0)
+        neg_rm_mask = high_kl_mask & (ratio < 1.0) & (advantages < 0)
+        rm_mask = pos_rm_mask | neg_rm_mask
+        keep_mask = (~rm_mask).detach()
+
+        zero = torch.zeros((), dtype=unclipped_loss.dtype, device=unclipped_loss.device)
+        per_elem_loss = torch.where(keep_mask, unclipped_loss, zero)
+        if rollout_is_weights is not None:
+            per_elem_loss = per_elem_loss * rollout_is_weights.detach()
+        pg_loss = torch.mean(per_elem_loss)
+
+        with torch.no_grad():
+            ratio_std = ratio.std(unbiased=False)
+            pg_metrics = {
+                "actor/ppo_kl": torch.mean(-log_ratio).detach().item(),
+                "actor/approx_kl": (0.5 * log_ratio.pow(2)).mean().detach().item(),
+                "actor/ratio_mean": ratio.mean().detach().item(),
+                "actor/ratio_std": ratio_std.detach().item(),
+                "actor/ratio_min": ratio.min().detach().item(),
+                "actor/ratio_max": ratio.max().detach().item(),
+                "actor/kl_new_old_mean": kl_per_sample.mean().detach().item(),
+                "actor/kl_new_old_max": kl_per_sample.max().detach().item(),
+                "actor/kl_mask_fraction": high_kl_mask.float().mean().detach().item(),
+                "actor/pos_rm_fraction": pos_rm_mask.float().mean().detach().item(),
+                "actor/neg_rm_fraction": neg_rm_mask.float().mean().detach().item(),
+                "actor/masked_fraction": rm_mask.float().mean().detach().item(),
+                "actor/unmasked_fraction": keep_mask.float().mean().detach().item(),
+            }
+        return pg_loss, pg_metrics
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        loss, metrics = self.compute_loss(
+            old_log_prob=data["old_log_probs"],
+            log_prob=model_output["log_probs"],
+            advantages=data["advantages"],
+            old_prev_sample_mean=data["old_prev_sample_mean"],
+            prev_sample_mean=model_output["prev_sample_mean"],
+            std_dev_t=model_output["std_dev_t"],
+            sqrt_dt=model_output["sqrt_dt"],
             config=config,
             rollout_is_weights=data.get("rollout_is_weights", None),
         )

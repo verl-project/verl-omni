@@ -108,6 +108,9 @@ class TestDiffusionLossRegistry(unittest.TestCase):
     def test_builtin_flow_grpo_registered(self):
         assert "flow_grpo" in DIFFUSION_LOSS_REGISTRY
 
+    def test_builtin_flow_dppo_registered(self):
+        assert "flow_dppo" in DIFFUSION_LOSS_REGISTRY
+
     def test_builtin_dance_grpo_registered(self):
         assert "dance_grpo" in DIFFUSION_LOSS_REGISTRY
 
@@ -156,6 +159,24 @@ class TestDiffusionLossRegistry(unittest.TestCase):
         assert "std_dev_t" in message
         assert "Available model_output keys" in message
         assert "prev_sample_mean" in message
+
+    def test_flow_dppo_loss_input_validation_reports_missing_data_key(self):
+        fn = get_diffusion_loss_fn("flow_dppo")
+        with pytest.raises(KeyError) as exc_info:
+            fn.validate_inputs(
+                loss_name="flow_dppo",
+                model_output={
+                    "log_probs": torch.randn(4),
+                    "prev_sample_mean": torch.randn(4, 2, 2, 2),
+                    "std_dev_t": torch.ones(4, 1, 1, 1),
+                    "sqrt_dt": torch.ones(4),
+                },
+                data={"old_log_probs": torch.randn(4), "advantages": torch.randn(4)},
+            )
+
+        message = str(exc_info.value)
+        assert "flow_dppo" in message
+        assert "old_prev_sample_mean" in message
 
     def test_register_and_retrieve_custom_fn(self):
         @register_diffusion_loss("test_loss_cpu")
@@ -232,6 +253,9 @@ class TestDiffusionAdvEstRegistry(unittest.TestCase):
     def test_builtin_flow_grpo_registered(self):
         assert DiffusionAdvantageEstimator.FLOW_GRPO.value in DIFFUSION_ADV_ESTIMATOR_REGISTRY
 
+    def test_builtin_flow_dppo_registered(self):
+        assert DiffusionAdvantageEstimator.FLOW_DPPO.value in DIFFUSION_ADV_ESTIMATOR_REGISTRY
+
     def test_builtin_dance_grpo_registered(self):
         assert DiffusionAdvantageEstimator.DANCE_GRPO.value in DIFFUSION_ADV_ESTIMATOR_REGISTRY
 
@@ -242,6 +266,9 @@ class TestDiffusionAdvEstRegistry(unittest.TestCase):
     def test_get_existing_estimator_by_enum(self):
         fn = get_diffusion_adv_estimator_fn(DiffusionAdvantageEstimator.FLOW_GRPO)
         assert callable(fn)
+
+    def test_flow_dppo_reuses_flow_grpo_estimator(self):
+        assert get_diffusion_adv_estimator_fn("flow_dppo") is get_diffusion_adv_estimator_fn("flow_grpo")
 
     def test_get_unknown_estimator_raises(self):
         with self.assertRaises(ValueError):
