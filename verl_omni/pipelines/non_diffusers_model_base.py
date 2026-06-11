@@ -80,10 +80,11 @@ class NonDiffusersModelBase(nn.Module, ABC):
         """Forward pass; signature is model-dependent."""
         ...
 
-    # FSDP configuration
+    # Set in subclasses to enable layer-level FSDP sharding.
     _no_split_modules: list[str] = []
 
-    # Gradient checkpointing
+    # Opt in by setting ``_supports_gradient_checkpointing = True`` and
+    # wiring ``_checkpointed_call`` into ``forward``.
     _supports_gradient_checkpointing: bool = False
     gradient_checkpointing: bool = False
     _gradient_checkpointing_func: Callable | None = None
