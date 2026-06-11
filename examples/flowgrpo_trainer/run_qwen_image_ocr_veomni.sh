@@ -34,6 +34,7 @@ ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 TRAINER_BACKEND=veomni
 
+
 python3 -m verl_omni.trainer.main_diffusion \
     diffusion/model_engine=veomni_diffusion \
     algorithm.adv_estimator=flow_grpo \

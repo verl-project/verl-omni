@@ -25,6 +25,7 @@ IMAGE_RESOLUTION=512
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
+
 python3 -m verl_omni.trainer.main_diffusion \
     trainer.device=npu \
     algorithm.adv_estimator=flow_grpo \
