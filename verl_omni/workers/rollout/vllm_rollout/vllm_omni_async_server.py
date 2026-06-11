@@ -148,7 +148,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
         if enable_step_execution:
-            engine_args["max_num_seqs"] = self.config.get("max_num_seqs", 256)
             engine_args["step_execution"] = True
 
         diffusion_master_port, diffusion_master_sock = get_free_port("127.0.0.1", with_alive_sock=True)
