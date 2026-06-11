@@ -8,13 +8,13 @@ build:
   tools:
     python: "3.11"
   jobs:
-    # Install heavy deps before RTD's default python.install step runs,
-    # so that `pip install .` finds them already satisfied.
+    # Install pinned heavy deps and base runtime deps before RTD's docs step.
     pre_install:
-      - pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.18.0/vllm-0.18.0+cpu-cp38-abi3-manylinux_2_35_x86_64.whl"
-      - pip install "vllm-omni==0.18.0"
+      - pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.20.2/vllm-0.20.2+cpu-cp38-abi3-manylinux_2_35_x86_64.whl"
+      - pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
       - pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
-      - pip install -r requirements/common.txt
+      - pip install .
+      - pip install --no-deps -e .
 
 sphinx:
   configuration: docs/conf.py
@@ -22,5 +22,3 @@ sphinx:
 python:
   install:
     - requirements: docs/requirements-docs.txt
-    - method: pip
-      path: .

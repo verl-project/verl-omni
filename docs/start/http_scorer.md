@@ -58,7 +58,7 @@ A reference implementation is available at [deepgen_rl/ocr_scorer_service](https
 ```bash
 # Clone and start the OCR scorer service
 cd rewards_services/api_services/ocr_scorer_service
-pip install -r requirements/common.txt
+pip install -r requirements.txt
 gunicorn -c gunicorn.conf.py 'app:create_app()'
 ```
 

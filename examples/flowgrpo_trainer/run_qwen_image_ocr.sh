@@ -21,10 +21,6 @@ IMAGE_RESOLUTION=512
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
-
-
-
-
 python3 -m verl_omni.trainer.main_diffusion \
     algorithm.adv_estimator=flow_grpo \
     data.train_files=$ocr_train_path \

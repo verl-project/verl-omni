@@ -8,7 +8,7 @@ on:
     paths:
       - "verl_omni/**"
       - "tests/**/*_on_cpu.py"
-      - "requirements*.txt"
+      - "pyproject.toml"
       - .github/workflows/cpu_unit_tests.yml
   pull_request:
     branches:
@@ -18,7 +18,7 @@ on:
     paths:
       - "verl_omni/**"
       - "tests/**/*_on_cpu.py"
-      - "requirements*.txt"
+      - "pyproject.toml"
       - .github/workflows/cpu_unit_tests.yml
 
 # Cancel jobs on the same ref if a new one is triggered
@@ -54,7 +54,8 @@ jobs:
           pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.20.2/vllm-0.20.2+cpu-cp38-abi3-manylinux_2_35_x86_64.whl"
           pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
           pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
-          pip install -e ".[dev]"
+          pip install ".[dev]"
+          pip install --no-deps -e .
       - name: Run CPU unit tests
         run: |
           echo '[pytest]' > pytest.ini

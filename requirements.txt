@@ -1,5 +1,0 @@
-# GPU-oriented legacy shim. Prefer: docs/start/install.md
-#   uv pip install -e ".[gpu]" --torch-backend=auto
-#   uv pip install -e ".[vllm-omni,train]"
--r requirements/common.txt
--r requirements/gpu.txt

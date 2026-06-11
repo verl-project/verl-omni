@@ -22,7 +22,6 @@ REWARD_ENGINE=vllm
 #   data.seed=42
 #   actor_rollout_ref.rollout.seed=42
 
-
 python3 -m verl_omni.trainer.main_diffusion \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
