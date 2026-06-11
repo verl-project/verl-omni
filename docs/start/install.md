@@ -75,14 +75,9 @@ Pick **either** `gpu` **or** `npu`, not both.
 
 ### Flash Attention 3
 
-The `gpu` extra pulls `kernels==0.14.1` for the Diffusers **actor** FA3 backend. Rollout FA3 comes from `vllm-omni` (`fa3-fwd`), not from `kernels`. GPU example scripts set matched FA3 inline:
+The `gpu` extra pulls `kernels==0.14.1` for the Diffusers **actor** FA3 backend. Rollout FA3 comes from `vllm-omni` (`fa3-fwd`), not from `kernels`.
 
-```bash
-export DIFFUSION_ATTENTION_BACKEND=FLASH_ATTN          # rollout (vLLM-Omni)
-actor_rollout_ref.model.attn_backend=_flash_3_varlen_hub  # actor (Diffusers)
-```
-
-If FA3 deps are missing at runtime, training falls back to native/SDPA automatically.
+If FA3 deps are missing at runtime, training falls back to native/SDPA automatically. NPU recipes override with `actor_rollout_ref.model.attn_backend=_native_npu`.
 
 ## Optional engine backends
 
