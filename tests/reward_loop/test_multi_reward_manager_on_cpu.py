@@ -14,12 +14,12 @@
 """CPU tests for MultiVisualRewardManager."""
 
 import os
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
-from transformers import AutoTokenizer
 from verl import DataProto
 
 from verl_omni.reward_loop.reward_manager.multi import MultiVisualRewardManager, _filter_kwargs
@@ -82,7 +82,7 @@ def _make_single_data() -> DataProto:
 
 def _build_manager(reward_functions: dict) -> MultiVisualRewardManager:
     config = _make_config(reward_functions)
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    tokenizer = MagicMock()
     return MultiVisualRewardManager(config, tokenizer, compute_score=None)
 
 

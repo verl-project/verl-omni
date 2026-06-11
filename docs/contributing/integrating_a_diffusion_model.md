@@ -23,7 +23,8 @@ code is the canonical reference.
 ## TL;DR
 
 A new model needs **three files in one new package** plus **two registry
-hooks**:
+hooks**. The same adapters work with both the default diffusers + FSDP2
+backend and the optional [VeOmni backend](#53-use-the-veomni-backend-optional) — backend selection is purely a configuration concern.
 
 ```
 verl_omni/pipelines/<model>_flow_grpo/
@@ -51,6 +52,8 @@ algorithm** (FlowGRPO) but use **different runtimes**:
 |---|---|---|
 | **Rollout** (sampling trajectories) | vllm-omni | `VllmOmniPipelineBase` subclass — runs the SDE loop and returns latents, log-probs, and prompt embeddings. |
 | **Training** (per-step forward + loss) | FSDP + diffusers | `DiffusionModelBase` subclass — re-runs one denoising step per micro-batch slot to compute fresh log-probs for the policy gradient. |
+
+The trainer runtime can also be VeOmni's FSDP2-based DiT trainer; see [§ 5.3](#53-use-the-veomni-backend-optional). The training-adapter contract (`prepare_model_inputs` / `forward_and_sample_previous_step`) is identical on both backends.
 
 ```text
   ┌─────────────────────────┐                ┌──────────────────────────┐
@@ -330,6 +333,41 @@ The data preprocessor's tokenisation **must match the upstream
 `_encode_prompt` exactly** — same chat template, same special tokens,
 same `enable_thinking` flag, etc. Mismatches here cause silent reward
 collapse.
+
+### 5.3 Use the VeOmni Backend
+
+Backend selection is **orthogonal** to model integration: the adapters you wrote in Steps 3–4 work unchanged regardless of whether the actor runs on the default diffusers + FSDP2 engine or on [VeOmni](https://github.com/ByteDance-Seed/VeOmni). Switching is a configuration concern handled by a few Hydra overrides at launch time.
+
+#### What VeOmni reuses from your model adapter
+
+- `DiffusionModelBase` subclass (Step 3) — used verbatim. The VeOmni engine calls the same `prepare_model_inputs` / `forward_and_sample_previous_step` contract.
+- `VllmOmniPipelineBase` subclass (Step 4) — used verbatim. Rollout always runs in vllm-omni, independent of the actor backend.
+- `FlowMatchSDEDiscreteScheduler` (Step 3.1) — used verbatim.
+
+#### What VeOmni requires that diffusers does not
+
+1. **Upstream support in VeOmni.** Just as diffusers must provide your `<Name>Transformer2DModel`, VeOmni must be able to load your model via its `DiTTrainer` path. If VeOmni does not yet support the architecture, upstream it there first (the diffusers prerequisite from Step 1 still applies for rollout — both upstreams are required).
+2. **`config_path` / `transformer_subfolder`.** The VeOmni engine loads the transformer from `<local_path>/<transformer_subfolder>` and the config from `config_path` (falling back to the weights path). These fields are already on `DiffusionModelConfig` and are shared with the diffusers backend, so no new model-specific fields are needed.
+
+#### Launching with the VeOmni backend
+
+`diffusion/model_engine=veomni_diffusion` switches the entire actor / reference Hydra schema; the other actor-engine fields then live under `actor_rollout_ref.actor.veomni_config.*` and `actor_rollout_ref.ref.veomni_config.*`:
+
+```bash
+python3 -m verl_omni.trainer.main_diffusion \
+    diffusion/model_engine=veomni_diffusion \
+    actor_rollout_ref.actor.strategy=veomni \
+    actor_rollout_ref.actor.veomni_config.strategy=veomni \
+    actor_rollout_ref.ref.veomni_config.strategy=veomni \
+    ...  # everything else identical to your diffusers/FSDP2 recipe
+```
+
+See [`examples/flowgrpo_trainer/run_qwen_image_ocr_veomni.sh`](../../examples/flowgrpo_trainer/run_qwen_image_ocr_veomni.sh) for a complete VeOmni recipe that mirrors [`run_qwen_image_ocr.sh`](../../examples/flowgrpo_trainer/run_qwen_image_ocr.sh) line-for-line — the diff is only the engine-selection fields. Install instructions for VeOmni alongside vLLM 0.20.2 are in [`docs/start/install.md`](../start/install.md#optional-engine-backends).
+
+
+#### Mixing override schemas — don't
+
+`diffusion/model_engine=veomni_diffusion` selects the Hydra schema as a whole. Do **not** mix `actor.fsdp_config.*` and `actor.veomni_config.*` overrides in the same run — the fields for the other engine will be rejected as unknown keys at config-resolution time.
 
 ---
 
