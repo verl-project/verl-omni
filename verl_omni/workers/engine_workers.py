@@ -997,7 +997,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         set_expandable_segments(True)
 
         timings["update_weights_total"] = time.perf_counter() - update_weights_start
-        print(
+        logger.debug(
             "update_weights timing (ms): %s",
             {k: round(v * 1000, 2) for k, v in timings.items()},
         )

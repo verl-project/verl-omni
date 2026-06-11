@@ -71,7 +71,7 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
             t0 = time.perf_counter()
             self.remove_lora(VLLM_LORA_INT_ID)
             t1 = time.perf_counter()
-            logger.info("remove_lora took %.3f ms", (t1 - t0) * 1000)
+            logger.debug("remove_lora took %.3f ms", (t1 - t0) * 1000)
 
             # Accumulate all LoRA tensors across buckets (LoRA weights are small;
             # a single atomic ``add_lora`` is both correct for multi-bucket edge
@@ -82,7 +82,7 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
                 on_bucket_received=lambda weights: accumulated_weights.update(weights)
             )
             t_recv_end = time.perf_counter()
-            logger.info(
+            logger.debug(
                 "IPC receive took %.3f ms (%d params, %.2f MB)",
                 (t_recv_end - t_recv_start) * 1000,
                 len(accumulated_weights),
@@ -99,8 +99,8 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
             t2 = time.perf_counter()
             self.add_lora(lora_request)
             t3 = time.perf_counter()
-            logger.info("add_lora took %.3f ms", (t3 - t2) * 1000)
-            logger.info(
+            logger.debug("add_lora took %.3f ms", (t3 - t2) * 1000)
+            logger.debug(
                 "LoRA update total: %.3f ms (remove=%.3f, recv=%.3f, add=%.3f)",
                 (t3 - t0) * 1000,
                 (t1 - t0) * 1000,
@@ -129,7 +129,7 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
         t0 = time.perf_counter()
         self.remove_lora(VLLM_LORA_INT_ID)
         t1 = time.perf_counter()
-        logger.info("remove_lora took %.3f ms", (t1 - t0) * 1000)
+        logger.debug("remove_lora took %.3f ms", (t1 - t0) * 1000)
 
         lora_request = OmniTensorLoRARequest(
             lora_name=VLLM_LORA_NAME,
@@ -140,8 +140,8 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
         )
         self.add_lora(lora_request)
         t2 = time.perf_counter()
-        logger.info("add_lora took %.3f ms", (t2 - t1) * 1000)
-        logger.info(
+        logger.debug("add_lora took %.3f ms", (t2 - t1) * 1000)
+        logger.debug(
             "LoRA update (fast path) total: %.3f ms (remove=%.3f, add=%.3f, params=%d, size=%.2f MB)",
             (t2 - t0) * 1000,
             (t1 - t0) * 1000,
