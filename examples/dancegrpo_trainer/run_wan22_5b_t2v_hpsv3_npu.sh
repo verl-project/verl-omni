@@ -34,6 +34,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     algorithm.adv_estimator=dance_grpo \
     actor_rollout_ref.model.algorithm=dance_grpo \
     actor_rollout_ref.actor.diffusion_loss.loss_mode=dance_grpo \
+    actor_rollout_ref.actor.diffusion_loss.clip_ratio=1e-5 \
     data.train_files=$hpsv3_train_path \
     data.val_files=$hpsv3_test_path \
     data.train_batch_size=64 \
