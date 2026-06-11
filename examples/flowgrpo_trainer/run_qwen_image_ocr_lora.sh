@@ -4,11 +4,11 @@ set -x
 # Set WORKSPACE to any writable directory; defaults to $HOME
 WORKSPACE=${WORKSPACE:-$HOME}
 
-ocr_train_path=/root/data/ocr/train.parquet
-ocr_test_path=/root/data/ocr/test.parquet
+ocr_train_path=$WORKSPACE/data/ocr/qwen_image/train.parquet
+ocr_test_path=$WORKSPACE/data/ocr/qwen_image/test.parquet
 
-model_name=/data/n0090/tiny-random/Qwen-Image
-reward_model_name=/root/Qwen3-VL-8B-Instruct
+model_name=Qwen/Qwen-Image
+reward_model_name=Qwen/Qwen3-VL-8B-Instruct
 reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=4
@@ -62,7 +62,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.reward_model.rollout.tensor_model_parallel_size=$REWARD_TP \
     reward.custom_reward_function.path=$reward_function_path \
     reward.custom_reward_function.name=compute_score_ocr \
-    trainer.logger='["console"]' \
+    trainer.logger='["console", "wandb"]' \
     trainer.project_name=flow_grpo \
     trainer.experiment_name=qwen_image_ocr_lora \
     trainer.log_val_generations=8 \
