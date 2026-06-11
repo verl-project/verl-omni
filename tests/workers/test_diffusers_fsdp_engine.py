@@ -89,6 +89,8 @@ def create_training_config(model_type, strategy, device_count, model, policy_sta
         "algo.noise_level=1.2",
         "algo.sde_type=sde",
     ]
+    if cp > 1:
+        model_overrides.append("attn_backend=native")
     if policy_state_adapters is not None:
         adapters = ",".join(f'"{adapter}"' for adapter in policy_state_adapters)
         model_overrides.append(f"policy_state_adapters=[{adapters}]")
