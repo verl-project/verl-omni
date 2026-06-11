@@ -10,8 +10,8 @@ build:
   jobs:
     # Install pinned heavy deps and base runtime deps before RTD's docs step.
     pre_install:
-      - pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.20.2/vllm-0.20.2+cpu-cp38-abi3-manylinux_2_35_x86_64.whl"
-      - pip install --no-deps "vllm-omni==0.22.0"
+      - pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.22.0/vllm-0.22.0+cpu-cp38-abi3-manylinux_2_34_x86_64.whl"
+      - pip install "vllm-omni==0.22.0"
       - pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
       - pip install .
       - pip install --no-deps -e .
