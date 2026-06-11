@@ -34,11 +34,9 @@ from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.workers.config import DiffusionModelConfig
 
 from .bagel_model import BagelForTraining, get_flattened_position_ids
-from .vllm_omni_rollout_adapter import BAGEL_FLOWGRPO_CFG_DEFAULTS
+from .common import BAGEL_FLOWGRPO_CFG_DEFAULTS, setup_bagel_sigmas
 
 logger = logging.getLogger(__name__)
-
-TIMESTEP_SHIFT = 3.0  # must match BagelPipeline.forward() hardcoded value
 
 
 @DiffusionModelBase.register("OmniBagelForConditionalGeneration", algorithm="flow_grpo")
@@ -59,18 +57,7 @@ class BagelDiffusion(DiffusionModelBase):
 
     @classmethod
     def set_timesteps(cls, scheduler: FlowMatchSDEDiscreteScheduler, model_config: DiffusionModelConfig, device: str):
-        num_inference_steps = model_config.pipeline.num_inference_steps
-        # Use float32 for bit-exact match with vllm-omni rollout (BagelTransformer
-        # uses torch.linspace which defaults to float32; float64 rounding differs).
-        t = torch.linspace(1, 0, num_inference_steps, dtype=torch.float32, device=device)
-        t_shifted = TIMESTEP_SHIFT * t / (1 + (TIMESTEP_SHIFT - 1) * t)
-        sigmas = t_shifted[:-1].tolist()
-
-        scheduler.set_shift(1.0)  # identity — sigmas already shifted
-        # Pass ``timesteps=sigmas`` to skip diffusers' default ``sigmas * 1000``
-        # conversion; BAGEL rollout records raw sigma values as timesteps.
-        scheduler.set_timesteps(sigmas=sigmas, timesteps=sigmas, device=device)
-        scheduler.set_begin_index(0)
+        setup_bagel_sigmas(scheduler, model_config.pipeline.num_inference_steps, device=device)
 
     @classmethod
     def _get_latent_pos_ids(cls, model_config: DiffusionModelConfig, module, device) -> torch.Tensor:
