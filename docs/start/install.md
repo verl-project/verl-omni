@@ -28,7 +28,7 @@ source .venv/bin/activate
 
 2. Install the platform backend:
 
-- **GPU:**
+**For NVIDIA GPU**:
 
 ```bash
 uv pip install -e ".[gpu]" --torch-backend=auto
@@ -36,7 +36,8 @@ uv pip install -e ".[gpu]" --torch-backend=auto
 
 It will install `vllm` for CUDA PyTorch stack and `kernels` for the actor FA3 backend.
 
-- **NPU:**
+
+**For Ascend NPU**:
 
 ```bash
 uv pip install -e ".[npu]"
