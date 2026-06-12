@@ -65,7 +65,7 @@ def flatten(lst):
             yield item
 
 
-def seed_from_prompt_ids(prompt_ids):
+def seed_from_prompt_ids(prompt_ids, global_steps: int = None):
     """
     Generate a deterministic seed from prompt token ids.
 
@@ -94,4 +94,6 @@ def seed_from_prompt_ids(prompt_ids):
     # Hash the tuple to produce a deterministic seed
     hash_bytes = hashlib.md5(str(ids_tuple).encode()).digest()
     seed = int.from_bytes(hash_bytes[:8], byteorder="big")
+    if global_steps is not None:
+        seed += global_steps
     return seed
