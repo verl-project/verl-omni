@@ -393,11 +393,7 @@ class FlowDPPOLoss(DiffusionLossFn):
         """
         assert config is not None, "config is required for FlowDPPOLoss!"
         loss_cfg = config.diffusion_loss
-        advantages = torch.clamp(
-            advantages,
-            -loss_cfg.adv_clip_max,
-            loss_cfg.adv_clip_max,
-        )
+        advantages = advantages.detach()
 
         log_ratio = log_prob - old_log_prob
         ratio = torch.exp(log_ratio)

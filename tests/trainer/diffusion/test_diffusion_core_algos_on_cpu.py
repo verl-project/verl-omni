@@ -199,7 +199,7 @@ def test_compute_policy_loss_flow_dppo_matches_unirl_reference(add_kl_coefficien
 
     old_log_prob = torch.zeros(4, dtype=torch.float32)
     log_prob = torch.log(torch.tensor([1.2, 0.8, 1.2, 0.8], dtype=torch.float32))
-    advantages = torch.tensor([1.0, -1.0, -1.0, 1.0], dtype=torch.float32)
+    advantages = torch.tensor([10.0, -10.0, -8.0, 8.0], dtype=torch.float32)
     old_prev_sample_mean = torch.zeros((4, 2, 2, 2), dtype=torch.float32)
     prev_sample_mean = torch.full_like(old_prev_sample_mean, 0.2)
     std_dev_t = torch.full((4, 1, 1, 1), 0.5, dtype=torch.float32)
@@ -249,6 +249,17 @@ def test_compute_policy_loss_flow_dppo_matches_unirl_reference(add_kl_coefficien
     )
 
     torch.testing.assert_close(loss, ref_loss)
+    clamped_advantages = torch.clamp(advantages, -actor_config.diffusion_loss.adv_clip_max, actor_config.diffusion_loss.adv_clip_max)
+    clamped_ref_loss, _ = _reference_flow_dppo_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        old_prev_sample_mean=old_prev_sample_mean,
+        prev_sample_mean=prev_sample_mean,
+        advantages=clamped_advantages,
+        sigma_t=sigma_t,
+        kl_mask_threshold=kl_mask_threshold,
+    )
+    assert not torch.isclose(loss, clamped_ref_loss)
     assert ref_masks["pos_rm_mask"].tolist() == [True, False, False, False]
     assert ref_masks["neg_rm_mask"].tolist() == [False, True, False, False]
     assert ref_masks["rm_mask"].tolist() == [True, True, False, False]
