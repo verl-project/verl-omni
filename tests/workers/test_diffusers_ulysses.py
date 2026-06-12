@@ -29,7 +29,9 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
 
-import verl_omni.pipelines._patch  # noqa: F401
+from verl_omni.models.diffusers.qwen_image import apply_qwen_image_ulysses_mask_fix
+
+apply_qwen_image_ulysses_mask_fix()
 
 
 def get_device_name() -> str:

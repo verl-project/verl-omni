@@ -101,6 +101,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
 
+        # inject multi-stage yaml config
+        deploy_config = getattr(args, "deploy_config", None)
+        if deploy_config:
+            engine_args["deploy_config"] = deploy_config
+
         import_external_libs(self.config.external_lib)
         pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
             architecture=self.model_config.architecture,
@@ -180,6 +185,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     ) -> DiffusionOutput:
         """Generate sequence with token-in-image-out."""
         prompt_ids = normalize_token_ids(prompt_ids)
+        default_params_list = self.engine.default_sampling_params_list
 
         multi_modal_data = {}
         if image_data is not None:
@@ -198,10 +204,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 )
 
         # Build OmniCustomPrompt with pre-tokenized IDs
-        custom_prompt: OmniCustomPrompt = {"prompt_ids": prompt_ids}
+        custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_ids}
+        if len(default_params_list) > 1:
+            # Multi-stage pipelines tag the diffusion stage so the orchestrator can route inputs correctly.
+            custom_prompt["modalities"] = ["image"]
         if negative_prompt_ids is not None:
             custom_prompt["negative_prompt_ids"] = negative_prompt_ids
         if multi_modal_data:
+            custom_prompt["multi_modal_data"] = multi_modal_data
             custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
 
         # Build OmniDiffusionSamplingParams from the incoming dict
@@ -217,11 +227,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             sampling_kwargs["lora_request"] = lora_request
         diffusion_sampling_params = OmniDiffusionSamplingParams(**sampling_kwargs)
 
+        # Build sampling params list: multi-stage models use defaults for non-diffusion stages
+        sampling_params_list = default_params_list[:-1] + [diffusion_sampling_params]
+
         # Call AsyncOmni.generate() with the correct API
         generator = self.engine.generate(
             prompt=custom_prompt,
             request_id=request_id,
-            sampling_params_list=[diffusion_sampling_params],
+            sampling_params_list=sampling_params_list,
         )
 
         # Get final response

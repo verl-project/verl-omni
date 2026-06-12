@@ -29,6 +29,8 @@ except ImportError:
 
 
 # Import pipelines / rollout / reward loop / engines to auto-register them
+# Apply model patches and auto-register pipelines / rollout / reward loop / engines
+import verl_omni.models  # noqa: E402, F401
 import verl_omni.pipelines  # noqa: E402, F401
 import verl_omni.reward_loop  # noqa: E402, F401
 import verl_omni.workers.engine  # noqa: E402, F401
