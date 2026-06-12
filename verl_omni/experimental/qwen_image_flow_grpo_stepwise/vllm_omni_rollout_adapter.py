@@ -373,16 +373,22 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
             return_logprobs=state.logprobs,
             return_dict=False,
         )
-        # Save fp32 trajectory BEFORE casting live state to model dtype,
-        # so the trainer later recomputes log-probs on full-precision latents.
+        # Save fp32 trajectory so the trainer later recomputes log-probs on
+        # full-precision latents.
         if i >= sde_window[0] and i < sde_window[1]:
             state.all_latents.append(new_latents.to(torch.float32))
             state.all_log_probs.append(log_prob)
             state.all_timesteps.append(timestep_value)
 
-        # Cast live state back to model dtype for next transformer forward.
-        model_dtype = self.transformer.img_in.weight.dtype
-        state.latents = new_latents.to(model_dtype)
+        # Keep live state in fp32 for the whole trajectory. ``denoise_step``
+        # already casts latents to the transformer dtype before the forward
+        # pass, so storing model_dtype here is unnecessary. More importantly,
+        # under continuous batching the engine gathers ``state.latents`` across
+        # all in-flight requests: a freshly-added request still holds fp32
+        # latents from ``prepare_encode`` while stepped requests would hold
+        # model-dtype latents, producing a "Mixed dtypes in latents batch"
+        # error. Keeping fp32 throughout makes the batch dtype consistent.
+        state.latents = new_latents.to(torch.float32)
 
         state.step_index += 1
 
