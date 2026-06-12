@@ -62,10 +62,14 @@ Visit our documentation to learn more.
     <th>Status</th>
   </tr>
   <tr>
-    <td rowspan="5">Qwen-Image</td>
-    <td rowspan="5">Diffusion generator</td>
-    <td rowspan="5">Text → Image</td>
+    <td rowspan="6">Qwen-Image</td>
+    <td rowspan="6">Diffusion generator</td>
+    <td rowspan="6">Text → Image</td>
     <td>FlowGRPO (+ CPS/SDE)</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>Flow-DPPO</td>
     <td>✅</td>
   </tr>
   <tr>
