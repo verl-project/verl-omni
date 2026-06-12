@@ -57,7 +57,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
-    actor_rollout_ref.rollout.pipeline.true_cfg_scale=1.0 \
+    actor_rollout_ref.rollout.pipeline.true_cfg_scale=5.0 \
     actor_rollout_ref.rollout.pipeline.height=704 \
     actor_rollout_ref.rollout.pipeline.width=1280 \
     actor_rollout_ref.rollout.pipeline.num_frames=8 \
