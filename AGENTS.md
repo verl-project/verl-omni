@@ -49,7 +49,7 @@ uv pip install -e ".[vllm-omni,train,dev]"
 pre-commit install
 ```
 
-See [`docs/start/install.md`](docs/start/install.md) for NPU and optional extras.
+See [`docs/start/install.md`](docs/start/install.md) for optional extras.
 
 ### PR title format
 

@@ -45,7 +45,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Rollout engine (install in step 2, after gpu/npu step 1).
+# Rollout engine (install in step 2, after gpu step 1).
 vllm-omni = [
     "vllm-omni==0.22.0",
 ]
@@ -59,11 +59,6 @@ gpu = [
 train = [
     "verl==0.8.0",
 ]
-# Ascend backend (install in step 1 on NPU; mutually exclusive with gpu).
-npu = [
-    "vllm @ git+https://github.com/vllm-project/vllm.git@releases/v0.22.0",
-    "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@bb4d0776eee8fc45c3484a45c971a7049f1a2bbf",
-]
 dev = [
     "pytest",
     "pre-commit",
@@ -74,11 +69,6 @@ dev = [
 ]
 ocr = [
     "Levenshtein",
-]
-
-[tool.uv]
-conflicts = [
-    [{ extra = "gpu" }, { extra = "npu" }],
 ]
 
 # -------------------------------

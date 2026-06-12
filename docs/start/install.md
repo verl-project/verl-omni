@@ -28,22 +28,11 @@ source .venv/bin/activate
 
 2. Install the platform backend:
 
-**For NVIDIA GPU**:
-
 ```bash
 uv pip install -e ".[gpu]" --torch-backend=auto
 ```
 
 It will install `vllm` for CUDA PyTorch stack and `kernels` for the actor FA3 backend.
-
-
-**For Ascend NPU**:
-
-```bash
-uv pip install -e ".[npu]"
-```
-
-It will install `vllm` and `vllm-ascend` (no `kernels`).
 
 3. Install VeRL-Omni:
 
@@ -58,13 +47,10 @@ It will install vllm-omni, verl, and verl-omni.
 | Extra | Adds | When |
 |---|---|---|
 | `gpu` | `vllm==0.22.0`, `kernels==0.14.1`, `liger-kernel` | CUDA rollout + actor FA3 |
-| `npu` | git `vllm`, git `vllm-ascend` | Ascend rollout (`attn_backend='_native_npu'`) |
 | `vllm-omni` | `vllm-omni==0.22.0` | vLLM-Omni rollout |
 | `train` | `verl==0.8.0` | RL training |
 | `dev` | `pytest`, `pre-commit`, `Levenshtein`, … | Local development / CI |
 | `ocr` | `Levenshtein` | OCR reward (FlowGRPO) |
-
-Pick **either** `gpu` **or** `npu`, not both.
 
 ## Optional Dependencies
 
