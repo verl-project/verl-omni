@@ -1,7 +1,7 @@
 (performance)=
 # Performance Reference
 
-Last updated: 05/13/2026
+Last updated: 06/05/2026
 
 Below are reference benchmark results for VeRL-Omni training runs.
 
@@ -67,3 +67,33 @@ Evaluated with `trainer.val_before_train=True`:
 <div align="center">
 <img width="600" alt="Full Model FlowGRPO OCR validation reward curve" src="https://github.com/user-attachments/assets/5ed8fd76-6f1b-4c80-aa43-af905e58d722" />
 </div>
+
+## FlowGRPO non-CFG Full Model: VeOmni vs FSDP1 Backend (same config)
+
+> Apples-to-apples comparison: the **VeOmni** and **FSDP1** actor engines run the *same* FlowGRPO recipe — same algorithm, data, and hyper-parameters — on the *same* hardware (64 × NVIDIA H100), differing only in the training engine. lr 3e-5, clip_ratio 1e-5, optimizer state fp32; other parameters match the LoRA setting.
+
+- **FSDP1** — `run_qwen_image_ocr.sh`
+- **VeOmni** — `run_qwen_image_ocr_veomni.sh` (see the [install guide](../start/install.md) "Optional engine backends")
+
+### Settings and Throughput
+
+| Backend | Script | GPU name | # GPUs | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | Images per Prompt | LR | Throughput (images/GPU/s) | Time per Step (s) |
+|---------|--------|--------|--------|------------------|--------------------|-------------------------|------------|-------------------|----|-----------------------|-------------------|
+| VeOmni | `run_qwen_image_ocr_veomni.sh` | H100 | 64 | 64 | 64 | 0 (sync) | 32 | 16 | 3e-5 | 0.079 | 100 |
+| FSDP1 | `run_qwen_image_ocr.sh` | H100 | 64 | 64 | 64 | 0 (sync) | 32 | 16 | 3e-5 | 0.077 | 105 |
+
+> **Note**: VeOmni and FSDP1 run with `actor_rollout_ref.actor.veomni_config.param_offload=False`, `actor_rollout_ref.actor.veomni_config.optimizer_offload=True`, and `SP=1`.
+
+### Full-Model Training - Zero Standard Deviation Ratio and Reward Curve
+
+<img width="1221" height="465" alt="image" src="https://github.com/user-attachments/assets/254ecbde-32eb-4073-b9ea-6025f80a9611" />
+
+<img width="1221" height="465" alt="image" src="https://github.com/user-attachments/assets/468f6022-8333-4b63-ab7d-39355b327d8d" />
+
+### Training - Clip Fraction
+
+<img width="1221" height="465" alt="image" src="https://github.com/user-attachments/assets/9e992ac5-c091-4bba-9aef-736a2fa0ab15" />
+
+### Full-Model Validation Reward Curve
+
+<img width="1221" height="465" alt="image" src="https://github.com/user-attachments/assets/e2fb0d52-2c47-4170-bc0d-d32f0f1da209" />

@@ -189,6 +189,13 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
+        # TODO (mike): we will drop this after it supports in diffusers.
+        if self.use_ulysses_sp and self.model_config.attn_backend == "_flash_3_varlen_hub":
+            raise ValueError(
+                "_flash_3_varlen_hub does not support sequence parallelism. "
+                "Set fsdp_config.ulysses_sequence_parallel_size=1 or switch to a different attn_backend."
+            )
+
     def _build_module_from_registry(self, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
         """Try loading via ``DiffusionModelBase.build_module()``.
 
@@ -258,10 +265,10 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             warnings.simplefilter("ignore")
 
             module = AutoModel.from_pretrained(
-                self.model_config.local_path,
+                self.model_config.config_path or self.model_config.local_path,
                 torch_dtype=torch_dtype,
                 trust_remote_code=self.model_config.trust_remote_code,
-                subfolder="transformer",  # currently we support DiT with transformer backbone only.
+                subfolder="" if self.model_config.config_path else self.model_config.transformer_subfolder,
             )
             module.set_attention_backend(self.model_config.attn_backend)
 
@@ -668,7 +675,6 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         self.checkpoint_manager.save_checkpoint(
             local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
         )
-
         torch.distributed.barrier()
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.module)
@@ -917,9 +923,9 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
     """Diffusers FSDP engine variant for diffusion DPO."""
 
     def _prepare_noisy_latents(self, micro_batch: TensorDict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        latents = micro_batch.get("image_latents", None)
+        latents = micro_batch.get("latents_clean", None)
         if latents is None:
-            raise KeyError("Diffusion DPO training requires `image_latents` in the micro batch.")
+            raise KeyError("Diffusion DPO training requires `latents_clean` in the micro batch.")
 
         return prepare_noisy_latents(
             latents=latents,
@@ -970,7 +976,7 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
         del step
 
         noisy_latents, noise, timesteps = self._prepare_noisy_latents(micro_batch)
-        latent = micro_batch["image_latents"].to(device=noise.device, dtype=noise.dtype)
+        latent = micro_batch["latents_clean"].to(device=noise.device, dtype=noise.dtype)
         prompt_embeds = micro_batch["prompt_embeds"]
         prompt_embeds_mask = micro_batch.get("prompt_embeds_mask", None)
         negative_prompt_embeds = micro_batch.get("negative_prompt_embeds", None)

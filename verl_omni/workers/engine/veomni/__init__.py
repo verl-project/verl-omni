@@ -11,22 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .fsdp import (  # noqa: F401
-    DiffusersFSDPEngine,
-    DPODiffusersFSDPEngine,
-    NFTDiffusersFSDPEngine,
-    PPODiffusersFSDPEngine,
-)
 
-try:
-    from .veomni import VeOmniDiffusionEngine  # noqa: F401
-except ImportError:
-    VeOmniDiffusionEngine = None
+from .diffusion_impl import VeOmniDiffusionEngine
 
-__all__ = [
-    "PPODiffusersFSDPEngine",
-    "DPODiffusersFSDPEngine",
-    "NFTDiffusersFSDPEngine",
-    "DiffusersFSDPEngine",
-    "VeOmniDiffusionEngine",
-]
+__all__ = ["VeOmniDiffusionEngine"]

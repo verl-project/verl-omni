@@ -105,12 +105,25 @@ class DiffusionModelConfig(BaseConfig):
 
     fsdp_layer_prefixes: list[str] = field(default_factory=lambda: ["transformer_blocks."])
 
+    # Optional model config path. If unset, the backend uses
+    # ``<local_path>/<transformer_subfolder>``.
+    config_path: Optional[str] = None
+
+    # Subfolder containing the diffusion transformer weights/config.
+    transformer_subfolder: str = "transformer"
+
     def __post_init__(self):
         import_external_libs(self.external_lib)
 
-        valid_backends = {"native", "_native_npu"}
+        valid_backends = {"native", "_native_npu", "_flash_3_varlen_hub"}
         if self.attn_backend not in valid_backends:
             raise ValueError(f"Invalid attn_backend: {self.attn_backend}. Must be one of {sorted(valid_backends)}")
+
+        if self.attn_backend == "_flash_3_varlen_hub":
+            try:
+                import kernels  # noqa: F401
+            except ImportError as e:
+                raise ImportError("attn_backend '_flash_3_varlen_hub' requires `kernels` package. ") from e
 
         self.local_path = resolve_model_local_dir(self.path, use_shm=self.use_shm)
         if self.tokenizer_path is None:
