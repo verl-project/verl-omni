@@ -81,6 +81,7 @@ jobs:
           pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
           pip3 install -r requirements.txt
           pip3 install -r requirements-test.txt
+          pip3 install kernels==0.14.1
           pip3 install --no-deps -e .
           # --no-deps keeps the vllm 0.20.2 / torch stack intact; veomni's [gpu] extra pins
           # torch 2.9 and would conflict. See docs/start/install.md "Optional engine backends".
