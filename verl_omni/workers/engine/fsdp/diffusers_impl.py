@@ -279,7 +279,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                         self.model_config.attn_backend,
                         e,
                     )
-                    self.model_config.attn_backend = "native"
+                    object.__setattr__(self.model_config, "attn_backend", "native")
                     module.set_attention_backend("native")
                 else:
                     raise e
