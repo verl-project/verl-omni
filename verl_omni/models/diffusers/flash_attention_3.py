@@ -14,71 +14,13 @@
 import logging
 
 import diffusers
-import torch
 from packaging import version
 
 logger = logging.getLogger(__name__)
 
 
-# TODO (mike): It was fixed in diffusers main branch. Remove this patch once we upgrade the diffusers version.
-def _apply_qwen_image_ulysses_mask_fix() -> None:
-    if version.parse(diffusers.__version__) < version.parse("0.38.0"):
-        return
-
-    from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformer2DModel
-
-    _orig_forward = QwenImageTransformer2DModel.forward
-    if getattr(_orig_forward, "_verl_omni_ulysses_mask_patched", False):
-        return
-
-    def _patched_forward(
-        self,
-        hidden_states,
-        encoder_hidden_states=None,
-        encoder_hidden_states_mask=None,
-        attention_kwargs=None,
-        **kwargs,
-    ):
-        parallel_config = getattr(self, "_parallel_config", None)
-        cp_config = parallel_config.context_parallel_config if parallel_config is not None else None
-        ulysses_degree = cp_config.ulysses_degree if cp_config is not None else 1
-
-        if ulysses_degree > 1 and encoder_hidden_states_mask is not None:
-            if not _patched_forward._warned:
-                logger.warning(
-                    "verl_omni patch applied: QwenImageTransformer2DModel.forward has been monkey-patched to fix "
-                    "the Ulysses SP joint-attention-mask layout bug (diffusers==0.38). "
-                    "The joint mask is now built in interleaved [txt_0, img_0, txt_1, img_1, ...] order "
-                    "to match the post-all-to-all sequence layout when ulysses_degree > 1. "
-                    "Remove this patch once the fix is upstreamed to diffusers."
-                )
-                _patched_forward._warned = True
-            # Build the joint mask in the interleaved layout that matches the
-            # post-all-to-all sequence order: [txt_0, img_0, txt_1, img_1, ...]
-            batch_size, image_seq_len = hidden_states.shape[:2]
-            image_mask = torch.ones((batch_size, image_seq_len), dtype=torch.bool, device=hidden_states.device)
-            txt_chunks = encoder_hidden_states_mask.chunk(ulysses_degree, dim=1)
-            img_chunks = image_mask.chunk(ulysses_degree, dim=1)
-            joint_mask = torch.cat([x for pair in zip(txt_chunks, img_chunks, strict=False) for x in pair], dim=1)
-            attention_kwargs = dict(attention_kwargs or {}, attention_mask=joint_mask[:, None, None, :])
-            encoder_hidden_states_mask = None
-
-        return _orig_forward(
-            self,
-            hidden_states,
-            encoder_hidden_states=encoder_hidden_states,
-            encoder_hidden_states_mask=encoder_hidden_states_mask,
-            attention_kwargs=attention_kwargs,
-            **kwargs,
-        )
-
-    _patched_forward._verl_omni_ulysses_mask_patched = True
-    _patched_forward._warned = False
-    QwenImageTransformer2DModel.forward = _patched_forward
-
-
 # TODO (mike): drop this once it is fixed in upstream diffusers.
-def _apply_flash_attention_3_varlen_hub_fix() -> None:
+def apply_flash_attention_3_varlen_hub_fix() -> None:
     """Patch ``_flash_attention_3_varlen_hub`` to support non-contiguous attention masks.
 
     diffusers==0.38.0 packs the valid key/value tokens with ``key[b, :valid_len]``, which
@@ -168,7 +110,3 @@ def _apply_flash_attention_3_varlen_hub_fix() -> None:
 
     registry._backends[backend] = _patched_flash_attention_3_varlen_hub
     _ad._flash_attention_3_varlen_hub = _patched_flash_attention_3_varlen_hub
-
-
-_apply_qwen_image_ulysses_mask_fix()
-_apply_flash_attention_3_varlen_hub_fix()

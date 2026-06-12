@@ -33,6 +33,7 @@ start/metrics.md
 :maxdepth: 1
 :caption: Advanced Features
 
+algo/async_reward.md
 algo/rollout_correction.md
 start/http_scorer.md
 ```

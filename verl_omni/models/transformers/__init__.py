@@ -11,15 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
-
-with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/version")) as f:
-    __version__ = f.read().strip()
-
-
-# Apply model patches and auto-register pipelines / rollout / reward loop / engines
-import verl_omni.models  # noqa: E402, F401
-import verl_omni.pipelines  # noqa: E402, F401
-import verl_omni.reward_loop  # noqa: E402, F401
-import verl_omni.workers.engine  # noqa: E402, F401
-import verl_omni.workers.rollout  # noqa: E402, F401

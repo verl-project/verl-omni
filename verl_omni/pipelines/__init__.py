@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from . import (
-    _patch,  # noqa: F401 — apply Ulysses mask & FA3 varlen mask fixes
     bagel_flow_grpo,
     qwen_image_diffusion_nft,
     qwen_image_dpo,
