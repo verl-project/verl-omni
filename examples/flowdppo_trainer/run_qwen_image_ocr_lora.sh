@@ -1,36 +1,30 @@
-# Qwen-Image LoRA Flow-DPPO RL, vllm_omni rollout
+# Qwen-Image lora RL with Flow-DPPO (https://arxiv.org/abs/2606.11025), vllm_omni rollout
 set -x
 
-# Set WORKSPACE to any writable directory; defaults to $HOME.
+# Set WORKSPACE to any writable directory; defaults to $HOME
 WORKSPACE=${WORKSPACE:-$HOME}
 
-ocr_train_path=${TRAIN_FILES:-$WORKSPACE/data/ocr/qwen_image/train.parquet}
-ocr_test_path=${VAL_FILES:-$WORKSPACE/data/ocr/qwen_image/test.parquet}
+ocr_train_path=$WORKSPACE/data/ocr/qwen_image/train.parquet
+ocr_test_path=$WORKSPACE/data/ocr/qwen_image/test.parquet
 
 model_name=${MODEL_PATH:-Qwen/Qwen-Image}
 reward_model_name=${REWARD_MODEL_PATH:-Qwen/Qwen3-VL-8B-Instruct}
 reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
 
-NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-4}
-ROLLOUT_TP=${ROLLOUT_TP:-1}
-REWARD_TP=${REWARD_TP:-4}
-KL_MASK_THRESHOLD=${KL_MASK_THRESHOLD:-1e-5}
-TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-300}
+NUM_GPUS_ACTOR_ROLLOUT_REWARD=4
+ROLLOUT_TP=1
+REWARD_TP=4
 
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
-# Optional reproducibility (yaml defaults are null / unseeded):
-#   data.seed=42
-#   actor_rollout_ref.rollout.seed=42
 
 python3 -m verl_omni.trainer.main_diffusion \
+    algorithm.adv_estimator=flow_grpo \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
     data.train_batch_size=32 \
     data.max_prompt_length=256 \
-    algorithm.adv_estimator=flow_dppo \
-    actor_rollout_ref.model.algorithm=flow_dppo \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
@@ -40,7 +34,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_dppo \
-    actor_rollout_ref.actor.diffusion_loss.kl_mask_threshold=$KL_MASK_THRESHOLD \
+    actor_rollout_ref.actor.diffusion_loss.kl_mask_threshold=1e-5 \
     actor_rollout_ref.actor.diffusion_loss.add_kl_coefficient=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
@@ -78,4 +72,4 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.save_freq=30 \
     trainer.test_freq=30 \
     trainer.total_epochs=15 \
-    trainer.total_training_steps=$TOTAL_TRAINING_STEPS "$@"
+    trainer.total_training_steps=300 "$@"

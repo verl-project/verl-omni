@@ -1,50 +1,65 @@
 # Flow-DPPO
 
-Flow-DPPO ([paper](https://arxiv.org/abs/2606.11025), [UniRL code](https://github.com/Tencent-Hunyuan/UniRL/blob/main/unirl/algorithms/flowdppo.py)) is a policy-gradient algorithm for flow matching models. It keeps FlowGRPO's stochastic reverse-SDE rollout, group-relative advantages, and per-step log-prob ratios, but replaces PPO ratio clipping with an exact Gaussian divergence mask.
+Last updated: 06/12/2026.
 
-At each trainable denoising step, the SDE transition is Gaussian. Flow-DPPO computes the KL between the old and current reverse-step means:
+Flow-DPPO ([paper](https://arxiv.org/abs/2606.11025)) is an extension of
+[Flow-GRPO](flowgrpo.md) that replaces PPO-style ratio clipping with an
+asymmetric divergence mask. It keeps Flow-GRPO's stochastic reverse-SDE rollout,
+group-relative advantages, and per-step log-prob ratios.
 
-```text
-KL(old || new) = mean((mu_new - mu_old)^2 / (2 * sigma_t^2))
-```
+## Algorithm
 
-The policy update is masked only when it is both outside the divergence trust region and moving farther from the old policy:
+For step $t$ with proposal mean $\mu_\theta(x_t)$ from the current policy and
+$\mu_{\text{old}}(x_t)$ from the rollout policy, SDE noise scale
+$\sigma_t = \mathrm{std\\_dev\\_t}$, and $\sqrt{-dt}$:
 
-- positive advantage, `ratio > 1`, and `KL > kl_mask_threshold`
-- negative advantage, `ratio < 1`, and `KL > kl_mask_threshold`
+$$
+D_t =
+\frac{\lVert \mu_\theta - \mu_{\text{old}} \rVert_{\text{mean}}^2}
+     {2 (\sqrt{-dt}\, \sigma_t)^2}
+$$
 
-All other updates remain active, including corrective updates that move the current policy back toward the old policy.
+The update is masked only when it is outside the divergence threshold and moving
+farther from the rollout policy:
+
+- positive advantage, $\rho_t > 1$, and $D_t > \epsilon_D$
+- negative advantage, $\rho_t < 1$, and $D_t > \epsilon_D$
+
+Corrective updates stay active. See `FlowDPPOLoss` in
+[`verl_omni/trainer/diffusion/diffusion_algos.py`](../../verl_omni/trainer/diffusion/diffusion_algos.py).
 
 ## Configuration
 
-Use the standard diffusion policy-gradient trainer:
+Flow-DPPO reuses the entire Flow-GRPO training stack — only the actor loss mode
+and divergence threshold change. Refer to [Flow-GRPO](flowgrpo.md) for
+advantage estimator, rollout, sampling, batch-size, and reward configuration.
 
-```bash
-algorithm.trainer_type=policy_gradient
-algorithm.adv_estimator=flow_dppo
-actor_rollout_ref.model.algorithm=flow_dppo
-actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_dppo
-```
+To enable Flow-DPPO:
 
-Important knobs:
+- `algorithm.adv_estimator=flow_grpo`
+- `actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_dppo`
+- `actor_rollout_ref.actor.diffusion_loss.kl_mask_threshold=1e-5`
+- `actor_rollout_ref.rollout.algo.sde_type=sde`
 
-- `actor_rollout_ref.actor.diffusion_loss.kl_mask_threshold`: divergence threshold for the asymmetric mask. The default is `1e-5`.
-- `actor_rollout_ref.actor.diffusion_loss.add_kl_coefficient`: when `True`, normalize the mean drift by the scheduler's SDE noise scale `std_dev_t * sqrt_dt`. This matches the Flow-SDE log-prob variance used during Qwen-Image training.
-- `actor_rollout_ref.rollout.algo.sde_type`: Flow-DPPO can use the same sampler family as FlowGRPO. The Qwen-Image example uses `sde`.
+`actor_rollout_ref.actor.diffusion_loss.add_kl_coefficient=True` normalizes the
+mean drift by the scheduler's SDE noise scale `std_dev_t * sqrt_dt`, matching
+the Flow-SDE log-prob variance used during Qwen-Image training.
 
-## Example
+## Example script
 
-Run the Qwen-Image OCR LoRA recipe:
+A 4-card collocated training script is provided:
 
 ```bash
 bash examples/flowdppo_trainer/run_qwen_image_ocr_lora.sh
 ```
 
-For a short local run, override paths and steps:
+It reuses the Flow-GRPO Qwen-Image OCR setup and only flips the actor loss mode,
+the divergence threshold, and the experiment name. Dataset and model preparation
+follow the same instructions as the [Flow-GRPO quick-start](../start/flowgrpo_quickstart.md).
 
-```bash
-MODEL_PATH=/path/to/Qwen-Image \
-REWARD_MODEL_PATH=/path/to/Qwen3-VL-8B-Instruct \
-TOTAL_TRAINING_STEPS=2 \
-bash examples/flowdppo_trainer/run_qwen_image_ocr_lora.sh
-```
+## References
+
+- [Flow-GRPO: Online policy gradient RL for flow matching models](https://arxiv.org/abs/2505.05470)
+- [Flow-DPPO: Divergence proximal policy optimization for diffusion models](https://arxiv.org/abs/2606.11025)
+- [UniRL Flow-DPPO implementation](https://github.com/Tencent-Hunyuan/UniRL/blob/main/unirl/algorithms/flowdppo.py)
+- [GRPO-Guard: ratio-bias regularisation for diffusion-model RL](https://arxiv.org/abs/2510.22319)

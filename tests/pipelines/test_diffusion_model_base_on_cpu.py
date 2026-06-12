@@ -80,28 +80,14 @@ class TestDiffusionModelBaseRegistry:
         assert _Impl.__name__ == "_Impl"
         assert issubclass(_Impl, DiffusionModelBase)
 
-    def test_builtin_qwen_flow_dppo_training_adapter_registered(self):
-        from verl_omni.pipelines.qwen_image_flow_dppo.diffusers_training_adapter import QwenImageFlowDPPO
-
-        cfg = _make_model_config("QwenImagePipeline", algorithm="flow_dppo")
-        assert DiffusionModelBase.get_class(cfg) is QwenImageFlowDPPO
-
-
 class TestVllmOmniPipelineBaseRegistry:
     def test_builtin_qwen_rollout_algorithms_registered(self):
         from verl_omni.pipelines.qwen_image_diffusion_nft.vllm_omni_rollout_adapter import (
             QwenImageDiffusionNFTPipeline,
         )
-        from verl_omni.pipelines.qwen_image_flow_dppo.vllm_omni_rollout_adapter import (
-            QwenImageFlowDPPOPipelineWithLogProb,
-        )
         from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
 
         assert VllmOmniPipelineBase.get_class("QwenImagePipeline", "flow_grpo") is QwenImagePipelineWithLogProb
-        assert (
-            VllmOmniPipelineBase.get_class("QwenImagePipeline", "flow_dppo")
-            is QwenImageFlowDPPOPipelineWithLogProb
-        )
         assert VllmOmniPipelineBase.get_class("QwenImagePipeline", "diffusion_nft") is QwenImageDiffusionNFTPipeline
 
     def test_diffusion_nft_rollout_does_not_override_sde_trajectory_loop(self):
