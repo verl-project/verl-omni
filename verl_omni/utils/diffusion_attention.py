@@ -68,15 +68,25 @@ def fallback_fa3_if_unavailable(config: Any) -> None:
     if fa3_available():
         if config.actor_rollout_ref.rollout.get("name") == "vllm_omni":
             os.environ.setdefault(DIFFUSION_ATTENTION_ENV, ROLLOUT_FA3_BACKEND)
-        return
+    else:
+        logger.warning(
+            "FA3 requested but unavailable for matched actor+rollout (kernels=%s, rollout_fa3=%s); "
+            "falling back to actor=%s rollout=%s.",
+            actor_fa3_available(),
+            rollout_fa3_available(),
+            ACTOR_NATIVE_BACKEND,
+            ROLLOUT_NATIVE_BACKEND,
+        )
+        config.actor_rollout_ref.model.attn_backend = ACTOR_NATIVE_BACKEND
+        os.environ[DIFFUSION_ATTENTION_ENV] = ROLLOUT_NATIVE_BACKEND
 
-    logger.warning(
-        "FA3 requested but unavailable for matched actor+rollout (kernels=%s, rollout_fa3=%s); "
-        "falling back to actor=%s rollout=%s.",
-        actor_fa3_available(),
-        rollout_fa3_available(),
-        ACTOR_NATIVE_BACKEND,
-        ROLLOUT_NATIVE_BACKEND,
-    )
-    config.actor_rollout_ref.model.attn_backend = ACTOR_NATIVE_BACKEND
-    os.environ[DIFFUSION_ATTENTION_ENV] = ROLLOUT_NATIVE_BACKEND
+    # Inject into Ray runtime_env.env_vars to ensure propagation to Ray workers in distributed clusters
+    if DIFFUSION_ATTENTION_ENV in os.environ:
+        if "ray_kwargs" in config and "ray_init" in config.ray_kwargs:
+            ray_init = config.ray_kwargs.ray_init
+            if "runtime_env" not in ray_init:
+                ray_init["runtime_env"] = {}
+            runtime_env = ray_init["runtime_env"]
+            if "env_vars" not in runtime_env:
+                runtime_env["env_vars"] = {}
+            runtime_env["env_vars"][DIFFUSION_ATTENTION_ENV] = os.environ[DIFFUSION_ATTENTION_ENV]
