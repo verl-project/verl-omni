@@ -17,13 +17,13 @@ import os
 from typing import cast
 
 import torch
-from msgspec import field
 
 try:
     from vllm.lora.lora_model import LoRAModel
 except ImportError:
     from vllm.lora.models import LoRAModel
 
+from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -35,12 +35,10 @@ from vllm_omni.diffusion.models.diffusers_adapter.pipeline_diffusers_adapter imp
     DiffusersAdapterPipeline,
 )
 from vllm_omni.diffusion.registry import initialize_model
-from vllm_omni.lora.request import LoRARequest as OmniLoRARequest
 
 
-class OmniTensorLoRARequest(OmniLoRARequest):
-    peft_config: dict = field(default=None)
-    lora_tensors: dict = field(default=None)
+class OmniTensorLoRARequest(TensorLoRARequest):
+    """Tensor-backed LoRA request for vLLM-Omni hot loading."""
 
 
 class VLLMOmniHijack:
@@ -86,6 +84,11 @@ class VLLMOmniHijack:
                 peft_helper.target_modules,
             )
 
+            model = getattr(self, "pipeline", None)
+            hf_to_vllm_mapper = None
+            if model is not None and getattr(model, "hf_to_vllm_mapper", None) is not None:
+                hf_to_vllm_mapper = model.hf_to_vllm_mapper
+
             if isinstance(lora_request, OmniTensorLoRARequest):
                 lora_model = LoRAModel.from_lora_tensors(
                     tensors=lora_tensors,
@@ -94,7 +97,7 @@ class VLLMOmniHijack:
                     device="cpu",  # consistent w/ vllm's behavior
                     dtype=self.dtype,
                     model_vocab_size=None,
-                    weights_mapper=None,
+                    weights_mapper=hf_to_vllm_mapper,
                 )
             else:
                 lora_model = LoRAModel.from_local_checkpoint(
@@ -106,7 +109,7 @@ class VLLMOmniHijack:
                     dtype=self.dtype,
                     model_vocab_size=None,
                     tensorizer_config_dict=lora_request.tensorizer_config_dict,
-                    weights_mapper=None,
+                    weights_mapper=hf_to_vllm_mapper,
                 )
 
             logger.info(
@@ -239,3 +242,5 @@ class VLLMOmniHijack:
         if not getattr(OmniDiffusionConfig, "_verl_omni_master_port_hijacked", False):
             do_hijack(OmniDiffusionConfig, "__post_init__", hijack_omni_diffusion_config_post_init)
             OmniDiffusionConfig._verl_omni_master_port_hijacked = True
+
+        VLLMHijack.hijack()

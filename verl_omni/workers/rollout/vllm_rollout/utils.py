@@ -13,6 +13,7 @@
 # limitations under the License.
 import logging
 import os
+from typing import Any
 
 import torch
 from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID, VLLM_LORA_NAME, VLLM_LORA_PATH, set_death_signal
@@ -23,6 +24,34 @@ from verl_omni.workers.rollout.vllm_rollout.npu_utils import NPUColocateWorkerMi
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def get_weight_sync_zmq_handle(rank: int, default_handle: str) -> str:
+    """Return an optional fixed ZMQ handle for split train/vLLM placement."""
+    handles = os.getenv("VERL_VLLM_WEIGHT_SYNC_ZMQ_HANDLES", "").strip()
+    if not handles:
+        return default_handle
+
+    parts = [part.strip() for part in handles.replace(";", ",").split(",") if part.strip()]
+    if len(parts) == 1:
+        return parts[0]
+    if rank < 0 or rank >= len(parts):
+        raise ValueError(
+            "VERL_VLLM_WEIGHT_SYNC_ZMQ_HANDLES must contain either one handle or one handle per rank; "
+            f"got {len(parts)} handles and rank={rank}"
+        )
+    return parts[rank]
+
+
+def _vllm_lora_enabled(worker: Any) -> bool:
+    model_runner = getattr(worker, "model_runner", None)
+    if getattr(model_runner, "lora_config", None) is not None:
+        return True
+
+    vllm_config = getattr(model_runner, "vllm_config", None) or getattr(worker, "vllm_config", None)
+    if vllm_config is None:
+        return True
+    return getattr(vllm_config, "lora_config", None) is not None
 
 
 class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWorkerExtension):
@@ -52,8 +81,11 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
 
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
-        # In async mode, make sure the old lora is removed before adding the new one
-        if peft_config and base_sync_done:
+        adapter_update = bool(peft_config and base_sync_done)
+        lora_enabled = _vllm_lora_enabled(self)
+
+        # In async mode, make sure the old lora is removed before adding the new one.
+        if adapter_update and lora_enabled:
             self.remove_lora(VLLM_LORA_INT_ID)
 
         assert self.device is not None
@@ -62,14 +94,40 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
             device=self.device,
             use_shm=use_shm,
         )
-        receiver.receive_weights(
-            on_bucket_received=lambda weights: self._update_weights(
-                weights, peft_config=peft_config, base_sync_done=base_sync_done
+        if adapter_update and not lora_enabled:
+            logger.info("Draining adapter-only weight update because vLLM-Omni LoRA is disabled")
+            receiver.receive_weights(on_bucket_received=lambda _weights: None)
+            return
+
+        if adapter_update:
+            accumulated_weights: list[tuple[str, torch.Tensor]] = []
+
+            def _accumulate(weights: list[tuple[str, torch.Tensor]]) -> None:
+                accumulated_weights.extend(weights)
+
+            receiver.receive_weights(on_bucket_received=_accumulate)
+            try:
+                self._update_weights(
+                    accumulated_weights,
+                    peft_config=peft_config,
+                    base_sync_done=base_sync_done,
+                )
+            finally:
+                accumulated_weights.clear()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+        else:
+            receiver.receive_weights(
+                on_bucket_received=lambda weights: self._update_weights(
+                    weights, peft_config=peft_config, base_sync_done=base_sync_done
+                )
             )
-        )
 
     def _update_weights(self, weights: list[tuple[str, torch.Tensor]], peft_config: dict, base_sync_done: bool):
         if peft_config and base_sync_done:
+            if not _vllm_lora_enabled(self):
+                logger.info("Skipping adapter-only weight update because vLLM-Omni LoRA is disabled")
+                return
             weights = dict(weights)
             lora_request = OmniTensorLoRARequest(
                 lora_name=VLLM_LORA_NAME,
@@ -79,6 +137,7 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
                 lora_tensors=weights,
             )
             self.add_lora(lora_request)
+            lora_request.lora_tensors = None
             logger.info(f"vLLM-Omni load weights, loaded_params: {len(weights)}")
         else:
             logger.info("Loading standard weights (async)")
@@ -95,4 +154,6 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
         """
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
         job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
-        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{self.local_rank}.sock"
+        default_handle = f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{self.local_rank}.sock"
+        rank = int(getattr(self, "rank", getattr(self, "local_rank", 0)))
+        return get_weight_sync_zmq_handle(rank, default_handle)
