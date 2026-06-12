@@ -1,9 +1,6 @@
 # FlowGRPO Trainer
 
-This example shows how to post-train `Qwen-Image` (and, in a separate
-recipe, `BAGEL-7B-MoT`) with FlowGRPO on an OCR-style image generation
-task using `vllm-omni` rollout and a visual generative reward model
-(`Qwen3-VL-8B-Instruct` in this example).
+This example shows how to post-train `Qwen-Image` with FlowGRPO on an OCR-style image generation task using `vllm-omni` rollout and a visual generative reward model (`Qwen3-VL-8B-Instruct` in this example).
 
 For the full installation and quickstart guide, see `docs/start/flowgrpo_quickstart.md`. For algorithm details and rule-based reward training (e.g. JPEG incompressibility), see `docs/algo/flowgrpo.md`.
 
@@ -106,62 +103,6 @@ We have provided a script to enable non-cfg full-weight Qwen-Image OCR training.
 ```bash
 bash examples/flowgrpo_trainer/run_qwen_image_ocr.sh
 ```
-
-
-## BAGEL recipe
-
-`run_bagel_flowgrpo_lora.sh` post-trains `BAGEL-7B-MoT` (Mixture-of-Transformers)
-with the same OCR reward. BAGEL is registered through the
-`verl_omni.pipelines.bagel_flow_grpo` adapter pair as the architecture
-`OmniBagelForConditionalGeneration`, and the rollout uses a
-single-stage vllm-omni pipeline whose schema is described in
-[`bagel_deploy_config.yaml`](bagel_deploy_config.yaml).
-
-Prerequisites in addition to the Qwen-Image recipe:
-
-- A local copy of `BAGEL-7B-MoT` (HF repo `ByteDance-Seed/BAGEL-7B-MoT`).
-- The same `Qwen3-VL-8B-Instruct` reward model and OCR parquet files
-  produced above.
-
-Launch:
-
-```bash
-export BAGEL_MODEL_PATH=/path/to/BAGEL-7B-MoT
-export REWARD_MODEL_PATH=/path/to/Qwen3-VL-8B-Instruct
-export OCR_TRAIN_PATH=$WORKSPACE/data/ocr/train.parquet
-export OCR_TEST_PATH=$WORKSPACE/data/ocr/test.parquet
-
-bash examples/flowgrpo_trainer/run_bagel_flowgrpo_lora.sh
-```
-
-Notable differences from the Qwen-Image recipe:
-
-- Uses `+actor_rollout_ref.model.architecture=OmniBagelForConditionalGeneration`
-  to bypass the `model_index.json` lookup (BAGEL ships as a single
-  custom checkpoint, not a `diffusers` pipeline).
-- LoRA `target_modules` are the BAGEL MoT generation projections
-  (`q_proj_moe_gen`, `k_proj_moe_gen`, `v_proj_moe_gen`,
-  `o_proj_moe_gen`).
-- Passes the deploy-config YAML to vllm-omni via
-  `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.deploy_config`. The
-  legacy `stage_configs_path` entrypoint is **not** supported: it routes
-  through vllm-omni 0.20's deprecated stage-args loader, which silently
-  kills the BAGEL `DiffusionWorker` subprocess after warmup. Always use
-  the `deploy_config` schema documented at
-  [`bagel_deploy_config.yaml`](bagel_deploy_config.yaml).
-- Defaults to `trainer.n_gpus_per_node=4` with
-  `actor_rollout_ref.rollout.tensor_model_parallel_size=1` (4 TP=1
-  rollout replicas), matching the Qwen-Image recipe. Be aware of a
-  TOCTOU race in vllm-omni's per-process `MASTER_PORT` picker
-  (`OmniDiffusionConfig.__post_init__` →`settle_port` in
-  [`vllm_omni/diffusion/data.py`](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/diffusion/data.py)):
-  every concurrent `vLLMOmniHttpServer` Ray actor independently calls
-  `is_port_available(p)` and may pick the same port before any of them
-  actually `bind`s. Birthday-paradox collision probability is roughly 4%
-  at 4 actors and 18% at 8 in the default 100-port window, and is
-  amplified further when retries land inside the prior run's TIME_WAIT
-  window (≈60s). If a launch dies during `init_distributed_environment`
-  with `EADDRINUSE` on a port in 30005–30105, wait ~60s and re-launch.
 
 An NPU script for Atlas A3 with 16 NPUs is also provided. Before running, set the `ASCEND_HOME_PATH` environment variable (defaults to `/usr/local/Ascend/cann-9.0.0`).
 
