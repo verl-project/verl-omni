@@ -90,6 +90,7 @@ def create_training_config(model_type, strategy, device_count, model, policy_sta
         "algo.sde_type=sde",
     ]
     from verl_omni.utils.diffusion_attention import fa3_available
+
     if cp > 1 or not fa3_available():
         model_overrides.append("attn_backend=native")
     if policy_state_adapters is not None:
