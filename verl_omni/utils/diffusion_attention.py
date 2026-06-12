@@ -61,12 +61,15 @@ def fa3_available() -> bool:
 
 def fallback_fa3_if_unavailable(config: Any) -> None:
     """Downgrade explicit FA3 settings to native/SDPA when deps are missing."""
-    attn_backend = config.actor_rollout_ref.model.get("attn_backend", ACTOR_FA3_BACKEND)
+    from omegaconf import OmegaConf
+
+    attn_backend = OmegaConf.select(config, "actor_rollout_ref.model.attn_backend", default=ACTOR_FA3_BACKEND)
     if attn_backend != ACTOR_FA3_BACKEND:
         return
 
     if fa3_available():
-        if config.actor_rollout_ref.rollout.get("name") == "vllm_omni":
+        rollout_name = OmegaConf.select(config, "actor_rollout_ref.rollout.name")
+        if rollout_name == "vllm_omni":
             os.environ.setdefault(DIFFUSION_ATTENTION_ENV, ROLLOUT_FA3_BACKEND)
     else:
         logger.warning(
@@ -77,22 +80,14 @@ def fallback_fa3_if_unavailable(config: Any) -> None:
             ACTOR_NATIVE_BACKEND,
             ROLLOUT_NATIVE_BACKEND,
         )
-        config.actor_rollout_ref.model.attn_backend = ACTOR_NATIVE_BACKEND
+        OmegaConf.update(config, "actor_rollout_ref.model.attn_backend", ACTOR_NATIVE_BACKEND, force_add=True)
         os.environ[DIFFUSION_ATTENTION_ENV] = ROLLOUT_NATIVE_BACKEND
 
     # Inject into Ray runtime_env.env_vars to ensure propagation to Ray workers in distributed clusters
-    if DIFFUSION_ATTENTION_ENV in os.environ:
-        if (
-            "ray_kwargs" in config
-            and config.ray_kwargs is not None
-            and "ray_init" in config.ray_kwargs
-            and config.ray_kwargs.ray_init is not None
-        ):
-            from omegaconf import OmegaConf
-
-            OmegaConf.update(
-                config,
-                f"ray_kwargs.ray_init.runtime_env.env_vars.{DIFFUSION_ATTENTION_ENV}",
-                os.environ[DIFFUSION_ATTENTION_ENV],
-                force_add=True,
-            )
+    if DIFFUSION_ATTENTION_ENV in os.environ and OmegaConf.select(config, "ray_kwargs.ray_init") is not None:
+        OmegaConf.update(
+            config,
+            f"ray_kwargs.ray_init.runtime_env.env_vars.{DIFFUSION_ATTENTION_ENV}",
+            os.environ[DIFFUSION_ATTENTION_ENV],
+            force_add=True,
+        )
