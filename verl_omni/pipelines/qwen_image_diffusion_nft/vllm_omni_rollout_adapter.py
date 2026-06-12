@@ -26,7 +26,6 @@ from verl_omni.pipelines.qwen_image_flow_grpo.common import (
     QwenImageTokenIdPromptMixin,
     build_img_shapes,
     coalesce_not_none,
-    maybe_to_cpu,
 )
 
 __all__ = ["QwenImageDiffusionNFTPipeline"]
@@ -257,13 +256,14 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         decoded = self._decode_latents(latents, height, width, output_type or "pil")
 
         return DiffusionOutput(
-            output=maybe_to_cpu(decoded.output),
+            output=decoded.output,
             custom_output={
-                "latents_clean": maybe_to_cpu(latents_clean),
-                "train_timesteps": maybe_to_cpu(ctx["timesteps"].unsqueeze(0).expand(latents_clean.shape[0], -1)),
-                "prompt_embeds": maybe_to_cpu(ctx["prompt_embeds"]),
-                "prompt_embeds_mask": maybe_to_cpu(ctx["prompt_embeds_mask"]),
-                "negative_prompt_embeds": maybe_to_cpu(ctx["negative_prompt_embeds"]),
-                "negative_prompt_embeds_mask": maybe_to_cpu(ctx["negative_prompt_embeds_mask"]),
+                "latents_clean": latents_clean,
+                "train_timesteps": ctx["timesteps"].unsqueeze(0).expand(latents_clean.shape[0], -1),
+                "prompt_embeds": ctx["prompt_embeds"],
+                "prompt_embeds_mask": ctx["prompt_embeds_mask"],
+                "negative_prompt_embeds": ctx["negative_prompt_embeds"],
+                "negative_prompt_embeds_mask": ctx["negative_prompt_embeds_mask"],
             },
+            to_cpu=True,
         )

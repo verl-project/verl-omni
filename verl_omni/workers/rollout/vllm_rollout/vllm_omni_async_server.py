@@ -42,7 +42,6 @@ from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
-from verl_omni.utils.vllm_omni import VLLMOmniHijack
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
 
@@ -94,29 +93,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _get_cli_description(self) -> str:
         return "vLLM-Omni CLI"
 
-    # TODO: drop it after updating verl pin (at least 5ff595ac9fcb4)
-    async def launch_server(self, master_address: str = None, master_port: int = None, dp_rpc_port: int = None):
-        """Launch vLLM-Omni engine; coerce null ``rollout.seed`` for engine init only.
-
-        Upstream verl uses ``config.get("seed", 0)``, but Hydra ``seed: null`` sets the
-        attribute to None, so the default is not applied and launch crashes with
-        ``replica_rank + None``. Training rollout seeding stays unset via meta_info.
-        """
-        original_get = self.config.get
-
-        def get_with_engine_seed_default(key: str, default: Any = None) -> Any:
-            if key == "seed":
-                value = original_get(key, default)
-                return 0 if value is None else value
-            return original_get(key, default)
-
-        self.config.get = get_with_engine_seed_default
-        try:
-            await super().launch_server(master_address, master_port, dp_rpc_port)
-        finally:
-            # BaseConfig is frozen; pop the shadowed get instead of reassigning it.
-            self.config.__dict__.pop("get", None)
-
     # -----------------------------------------------------------------------
     # Server lifecycle
     # -----------------------------------------------------------------------
@@ -142,8 +118,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         os.environ["MASTER_PORT"] = str(diffusion_master_port)
         logger.info("Using MASTER_PORT=%s for vLLM-Omni diffusion workers", os.environ["MASTER_PORT"])
 
-        # Apply before AsyncOmni builds OmniDiffusionConfig in this process.
-        VLLMOmniHijack.hijack()
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
         await omni_init_app_state(engine_client, app.state, args)

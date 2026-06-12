@@ -28,12 +28,6 @@ from verl_omni.pipelines.qwen_image_flow_grpo.common import apply_true_cfg, buil
 __all__ = ["QwenImageDPOPipeline"]
 
 
-def _maybe_to_cpu(value):
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu()
-    return value
-
-
 def _coalesce_not_none(value, default):
     return default if value is None else value
 
@@ -273,12 +267,13 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         image = self.vae.decode(unpacked_latents, return_dict=False)[0][:, :, 0]
 
         return DiffusionOutput(
-            output=_maybe_to_cpu(image),
+            output=image,
             custom_output={
-                "latents_clean": _maybe_to_cpu(latents_clean),
-                "prompt_embeds": _maybe_to_cpu(prompt_embeds),
-                "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
-                "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds),
-                "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
+                "latents_clean": latents_clean,
+                "prompt_embeds": prompt_embeds,
+                "prompt_embeds_mask": prompt_embeds_mask,
+                "negative_prompt_embeds": negative_prompt_embeds,
+                "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
             },
+            to_cpu=True,
         )
