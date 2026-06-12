@@ -82,11 +82,17 @@ def fallback_fa3_if_unavailable(config: Any) -> None:
 
     # Inject into Ray runtime_env.env_vars to ensure propagation to Ray workers in distributed clusters
     if DIFFUSION_ATTENTION_ENV in os.environ:
-        if "ray_kwargs" in config and "ray_init" in config.ray_kwargs:
-            ray_init = config.ray_kwargs.ray_init
-            if "runtime_env" not in ray_init:
-                ray_init["runtime_env"] = {}
-            runtime_env = ray_init["runtime_env"]
-            if "env_vars" not in runtime_env:
-                runtime_env["env_vars"] = {}
-            runtime_env["env_vars"][DIFFUSION_ATTENTION_ENV] = os.environ[DIFFUSION_ATTENTION_ENV]
+        if (
+            "ray_kwargs" in config
+            and config.ray_kwargs is not None
+            and "ray_init" in config.ray_kwargs
+            and config.ray_kwargs.ray_init is not None
+        ):
+            from omegaconf import OmegaConf
+
+            OmegaConf.update(
+                config,
+                f"ray_kwargs.ray_init.runtime_env.env_vars.{DIFFUSION_ATTENTION_ENV}",
+                os.environ[DIFFUSION_ATTENTION_ENV],
+                force_add=True,
+            )
