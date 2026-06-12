@@ -319,7 +319,7 @@ under `algorithm`.
 
 Add an end-to-end smoke test under `tests/special_e2e/`:
 
-- Use [`tests/special_e2e/run_sd35_offline_dpo.sh`](../../tests/special_e2e/run_sd35_offline_dpo.sh)
+- Use [`tests/special_e2e/run_offline_dpo_sd35.sh`](../../tests/special_e2e/run_offline_dpo_sd35.sh)
   as the reference for offline pair training.
 - Use [`tests/special_e2e/run_diffusionnft_qwen_image.sh`](../../tests/special_e2e/run_diffusionnft_qwen_image.sh)
   as the reference for online direct-preference training.
