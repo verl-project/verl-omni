@@ -68,31 +68,28 @@ def fallback_fa3_if_unavailable(config: Any) -> None:
     if fa3_available():
         if config.actor_rollout_ref.rollout.get("name") == "vllm_omni":
             os.environ.setdefault(DIFFUSION_ATTENTION_ENV, ROLLOUT_FA3_BACKEND)
-    else:
-        logger.warning(
-            "FA3 requested but unavailable for matched actor+rollout (kernels=%s, rollout_fa3=%s); "
-            "falling back to actor=%s rollout=%s.",
-            actor_fa3_available(),
-            rollout_fa3_available(),
-            ACTOR_NATIVE_BACKEND,
-            ROLLOUT_NATIVE_BACKEND,
-        )
-        config.actor_rollout_ref.model.attn_backend = ACTOR_NATIVE_BACKEND
-        os.environ[DIFFUSION_ATTENTION_ENV] = ROLLOUT_NATIVE_BACKEND
+            _set_ray_env(config, DIFFUSION_ATTENTION_ENV, ROLLOUT_FA3_BACKEND)
+        return
 
-    # Inject into Ray runtime_env.env_vars to ensure propagation to Ray workers in distributed clusters
-    if DIFFUSION_ATTENTION_ENV in os.environ:
-        if (
-            "ray_kwargs" in config
-            and config.ray_kwargs is not None
-            and "ray_init" in config.ray_kwargs
-            and config.ray_kwargs.ray_init is not None
-        ):
-            from omegaconf import OmegaConf
+    logger.warning(
+        "FA3 requested but unavailable for matched actor+rollout (kernels=%s, rollout_fa3=%s); "
+        "falling back to actor=%s rollout=%s.",
+        actor_fa3_available(),
+        rollout_fa3_available(),
+        ACTOR_NATIVE_BACKEND,
+        ROLLOUT_NATIVE_BACKEND,
+    )
+    config.actor_rollout_ref.model.attn_backend = ACTOR_NATIVE_BACKEND
+    os.environ[DIFFUSION_ATTENTION_ENV] = ROLLOUT_NATIVE_BACKEND
+    _set_ray_env(config, DIFFUSION_ATTENTION_ENV, ROLLOUT_NATIVE_BACKEND)
 
-            OmegaConf.update(
-                config,
-                f"ray_kwargs.ray_init.runtime_env.env_vars.{DIFFUSION_ATTENTION_ENV}",
-                os.environ[DIFFUSION_ATTENTION_ENV],
-                force_add=True,
-            )
+
+def _set_ray_env(config: Any, key: str, value: str) -> None:
+    from omegaconf import OmegaConf
+
+    OmegaConf.update(
+        config,
+        f"ray_kwargs.ray_init.runtime_env.env_vars.{key}",
+        value,
+        force_add=True,
+    )

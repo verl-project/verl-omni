@@ -79,3 +79,43 @@ class TestDiffusionAttentionFallback:
             da.fallback_fa3_if_unavailable(config)
 
         assert config.ray_kwargs.ray_init.runtime_env.env_vars[da.DIFFUSION_ATTENTION_ENV] == da.ROLLOUT_FA3_BACKEND
+
+    def test_ray_worker_propagation(self, monkeypatch):
+        import ray
+
+        monkeypatch.delenv(da.DIFFUSION_ATTENTION_ENV, raising=False)
+        config = OmegaConf.create(
+            {
+                "actor_rollout_ref": {
+                    "model": {"attn_backend": da.ACTOR_FA3_BACKEND},
+                    "rollout": {"name": "vllm_omni"},
+                },
+                "ray_kwargs": {"ray_init": {}},
+            }
+        )
+        OmegaConf.set_struct(config, True)
+
+        with patch.object(da, "fa3_available", return_value=False):
+            da.fallback_fa3_if_unavailable(config)
+
+        # Retrieve ray_init container
+        ray_init_kwargs = OmegaConf.to_container(config.ray_kwargs.ray_init, resolve=True)
+
+        # Initialize Ray with the generated runtime_env
+        if ray.is_initialized():
+            ray.shutdown()
+        ray.init(**ray_init_kwargs)
+
+        try:
+
+            @ray.remote
+            def check_env_on_worker():
+                import os
+
+                return os.environ.get(da.DIFFUSION_ATTENTION_ENV)
+
+            # Verify that the environment variable was successfully propagated to Ray workers
+            worker_val = ray.get(check_env_on_worker.remote())
+            assert worker_val == da.ROLLOUT_NATIVE_BACKEND
+        finally:
+            ray.shutdown()
