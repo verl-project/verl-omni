@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 class DiffusionModelConfig(BaseConfig):
     _mutable_fields = {
         "model_type",
+        "algorithm",
         "tokenizer_path",
         "tokenizer",
         "processor",

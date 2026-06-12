@@ -181,3 +181,17 @@ class DiffusionRolloutConfig(BaseConfig):
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
+
+    def resolve_algorithm(self, model_config) -> None:
+        """Update model_config.algorithm to the _stepwise variant when step_execution is enabled.
+
+        When ``step_execution=True`` and a ``<algorithm>_stepwise`` pipeline class is registered
+        for the given architecture, model_config.algorithm is updated in-place so that the engine
+        uses the experimental prepare_encode / step_scheduler / post_decode overrides.
+        """
+        if self.step_execution:
+            from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+
+            stepwise = f"{model_config.algorithm}_stepwise"
+            if VllmOmniPipelineBase.get_class(model_config.architecture, stepwise):
+                model_config.algorithm = stepwise

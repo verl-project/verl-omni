@@ -164,9 +164,9 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
 
             # compute the previous noisy sample x_t -> x_t-1
             latents, log_prob, _, _ = self.scheduler.step(
-                noise_pred.float(),
+                noise_pred.to(torch.float32),
                 timestep_value,
-                latents,
+                latents.to(torch.float32),
                 generator=generator,
                 noise_level=cur_noise_level,
                 sde_type=sde_type,
@@ -177,7 +177,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             # Save fp32 trajectory BEFORE casting to model dtype, so the
             # trainer recomputes log-probs on full-precision latents.
             if i >= sde_window[0] and i < sde_window[1]:
-                all_latents.append(latents.float())
+                all_latents.append(latents.to(torch.float32))
                 all_log_probs.append(log_prob)
                 all_timesteps.append(timestep_value)
 
@@ -353,7 +353,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             num_channels_latents,
             height,
             width,
-            prompt_embeds.dtype,
+            torch.float32,
             self.device,
             generator,
             latents,

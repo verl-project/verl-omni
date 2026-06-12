@@ -127,27 +127,18 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         import_external_libs(self.config.external_lib)
 
-        # When step_execution is enabled, prefer the _stepwise variant of the
-        # pipeline (e.g. flow_grpo_stepwise instead of flow_grpo) so that the
-        # engine uses the experimental prepare_encode / step_scheduler /
-        # post_decode overrides.
-        enable_step_execution = self.config.get("step_execution", False)
-        algorithm = self.model_config.algorithm
-        if enable_step_execution:
-            stepwise_algorithm = f"{algorithm}_stepwise"
-            if VllmOmniPipelineBase.get_class(self.model_config.architecture, stepwise_algorithm):
-                algorithm = stepwise_algorithm
+        self.config.resolve_algorithm(self.model_config)
 
         pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
             architecture=self.model_config.architecture,
-            algorithm=algorithm,
+            algorithm=self.model_config.algorithm,
         )
         # TODO (mike): read custom_pipeline from engine_args
         if pipeline_path is not None:
             engine_args["enable_dummy_pipeline"] = True
             engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
-        if enable_step_execution:
+        if self.config.step_execution:
             engine_args["step_execution"] = True
 
         diffusion_master_port, diffusion_master_sock = get_free_port("127.0.0.1", with_alive_sock=True)

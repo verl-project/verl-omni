@@ -246,7 +246,7 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
             num_channels_latents,
             height,
             width,
-            prompt_embeds.dtype,
+            torch.float32,
             self.device,
             generator,
             None,
@@ -357,16 +357,16 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
             cur_noise_level = 0.0
         elif i == sde_window[0]:
             cur_noise_level = state.noise_level
-            state.all_latents.append(state.latents.float())
+            state.all_latents.append(state.latents.to(torch.float32))
         elif i > sde_window[0] and i < sde_window[1]:
             cur_noise_level = state.noise_level
         else:
             cur_noise_level = 0.0
 
         new_latents, log_prob, _, _ = state.scheduler.step(
-            noise_pred.float(),
+            noise_pred.to(torch.float32),
             timestep_value,
-            state.latents,
+            state.latents.to(torch.float32),
             generator=state.sampling.generator,
             noise_level=cur_noise_level,
             sde_type=state.sde_type,
@@ -376,7 +376,7 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
         # Save fp32 trajectory BEFORE casting live state to model dtype,
         # so the trainer later recomputes log-probs on full-precision latents.
         if i >= sde_window[0] and i < sde_window[1]:
-            state.all_latents.append(new_latents.float())
+            state.all_latents.append(new_latents.to(torch.float32))
             state.all_log_probs.append(log_prob)
             state.all_timesteps.append(timestep_value)
 

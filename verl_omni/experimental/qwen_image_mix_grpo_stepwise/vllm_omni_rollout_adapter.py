@@ -31,7 +31,7 @@ from vllm_omni.diffusion.worker.utils import DiffusionRequestState
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_mix_grpo.vllm_omni_rollout_adapter import QwenImageMixGRPOPipelineWithLogProb
-from verl_omni.experimental.qwen_image_flow_grpo.vllm_omni_rollout_adapter import (
+from verl_omni.experimental.qwen_image_flow_grpo_stepwise.vllm_omni_rollout_adapter import (
     QwenImagePipelineWithLogProbStepwise,
 )
 
