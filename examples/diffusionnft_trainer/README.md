@@ -56,11 +56,27 @@ WORKSPACE=/path/to/workspace bash examples/diffusionnft_trainer/run_qwen_image_o
 
 ## Run training
 
+### NVIDIA GPU
+
 Launch the example from the repository root:
 
 ```bash
 bash examples/diffusionnft_trainer/run_qwen_image_ocr_lora.sh
 ```
+
+### NPU
+
+For Huawei Ascend NPUs, use the NPU-optimized script:
+
+```bash
+bash examples/diffusionnft_trainer/run_qwen_image_ocr_lora_npu.sh
+```
+
+This script uses a 16-NPU global distribution strategy with:
+- `actor_rollout_ref.model.attn_backend='_native_npu'`
+- `actor_rollout_ref.rollout.tensor_model_parallel_size=2`
+- `reward.reward_model.rollout.tensor_model_parallel_size=4`
+- `trainer.n_gpus_per_node=16`
 
 The script accepts normal Hydra overrides after the command:
 
@@ -114,11 +130,12 @@ See the [Metrics Documentation](../../docs/start/metrics.md) for a full descript
 
 ## Performance
 
-> All experiments were conducted on *NVIDIA H200* GPUs using the OCR reward.
+> All experiments were conducted on *NVIDIA H200* GPUs using the OCR reward. NPU experiments use *16× Ascend NPUs*.
 
 | Script | Model | Algorithm | Hybrid Engine | # Cards | Reward Fn | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | `rollout.n` | lr   | # Val Samples | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / GPU / Seconds) | Time per Step (Seconds) |
 | --- | --- | --- | --- | --- | --- | --- | --- |-------------------------| --- | --- |------| --- | --- | --- |------------------------------| --------------------------------|
-| `run_qwen_image_ocr_lora.sh` | Qwen-Image | DiffusionNFT | True | 4 | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.166                        | 570 |
+| `run_qwen_image_ocr_lora.sh` | Qwen-Image | DiffusionNFT | True | 4 (NVIDIA) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.166                        | 570 |
+| `run_qwen_image_ocr_lora_npu.sh` | Qwen-Image | DiffusionNFT | True | 16 (NPU) | qwenvl-ocr-vllm | 16 | 16 | 0 (sync)               | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.0078                      | ~490 |
 
 <table align="center" style="border: none;">
   <tr style="border: none;">
