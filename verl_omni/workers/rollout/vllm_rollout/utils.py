@@ -78,9 +78,7 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
             # cases and more efficient than per-bucket loading).
             t_recv_start = time.perf_counter()
             accumulated_weights: dict[str, torch.Tensor] = {}
-            receiver.receive_weights(
-                on_bucket_received=lambda weights: accumulated_weights.update(weights)
-            )
+            receiver.receive_weights(on_bucket_received=lambda weights: accumulated_weights.update(weights))
             t_recv_end = time.perf_counter()
             logger.debug(
                 "IPC receive took %.3f ms (%d params, %.2f MB)",
@@ -110,9 +108,7 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
         else:
             # Full-weight path: stream bucket-by-bucket to bound GPU memory
             logger.info("Loading standard weights (async)")
-            receiver.receive_weights(
-                on_bucket_received=lambda weights: self.load_weights(weights)
-            )
+            receiver.receive_weights(on_bucket_received=lambda weights: self.load_weights(weights))
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.
