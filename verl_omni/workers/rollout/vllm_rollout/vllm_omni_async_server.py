@@ -26,6 +26,8 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import import_external_libs
 from verl.utils.net_utils import get_free_port
 from verl.utils.tokenizer import normalize_token_ids
+from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.rollout.replica import TokenOutput
 from verl.workers.rollout.utils import run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
@@ -33,6 +35,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_PATH,
 )
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
+from vllm import SamplingParams
 from vllm.entrypoints.openai.api_server import build_app
 from vllm_omni.engine.arg_utils import OmniEngineArgs
 from vllm_omni.entrypoints import AsyncOmni
@@ -51,10 +54,11 @@ logger.setLevel(logging.INFO)
 
 
 class vLLMOmniHttpServer(vLLMHttpServer):
-    """vLLM-Omni http server in single node, this is equivalent to launch server with command line:
-    ```
-    vllm serve --tensor-parallel-size=8 ...
-    ```
+    """vLLM-Omni http server supporting diffusion and AR modes.
+
+    Mode is selected by ``engine_kwargs.vllm_omni.output_mode``:
+    - ``diffusion`` (default): token-in, image-out generation
+    - ``ar``: token-in, token-out generation, used by thinker-only Qwen3-Omni
     """
 
     # -----------------------------------------------------------------------
@@ -62,24 +66,32 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     def _init_model_config(self, model_config):
-        """Use DiffusionModelConfig instead of HFModelConfig."""
+        engine_kwargs = getattr(self.config, "engine_kwargs", None) or {}
+        omni_kwargs = engine_kwargs.get("vllm_omni", {}) or {}
+        self._ar_mode = omni_kwargs.get("output_mode", "diffusion") == "ar"
+
+        if self._ar_mode:
+            return omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
         return omega_conf_to_dataclass(model_config, dataclass_type=DiffusionModelConfig)
 
     def _validate_configs(self) -> None:
-        """No-op: diffusion models don't have max_position_embeddings."""
-        pass
+        if self._ar_mode and self.config.max_model_len is None:
+            self.config.max_model_len = self.config.prompt_length + self.config.response_length
 
     def _post_init(self, cuda_visible_devices: str) -> None:
-        """Omni-specific post-init: create PIL→tensor converter, then log."""
-        self._to_tensor = T.PILToTensor()
-        super()._post_init(cuda_visible_devices)
+        if self._ar_mode:
+            vLLMHttpServer._post_init(self, cuda_visible_devices)
+        else:
+            self._to_tensor = T.PILToTensor()
+            super()._post_init(cuda_visible_devices)
 
     # -----------------------------------------------------------------------
     # launch_server hooks
     # -----------------------------------------------------------------------
 
     def _get_override_generation_config(self) -> dict:
-        """Diffusion models have no LLM sampling params; return empty dict."""
+        if self._ar_mode:
+            return vLLMHttpServer._get_override_generation_config(self)
         return {}
 
     def _get_engine_kwargs_key(self) -> str:
@@ -93,6 +105,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
     def _get_cli_description(self) -> str:
         return "vLLM-Omni CLI"
+
+    def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
+        engine_kwargs.pop("output_mode", None)
+        if self._ar_mode:
+            engine_kwargs.pop("custom_pipeline", None)
+            for underscore_key in ("stage_configs_path", "deploy_config", "stage_overrides", "async_chunk"):
+                if underscore_key in engine_kwargs:
+                    engine_kwargs[underscore_key.replace("_", "-")] = engine_kwargs.pop(underscore_key)
 
     # TODO: drop it after updating verl pin (at least 5ff595ac9fcb4)
     async def launch_server(self, master_address: str = None, master_port: int = None, dp_rpc_port: int = None):
@@ -125,22 +145,28 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
 
-        import_external_libs(self.config.external_lib)
-        pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
-            architecture=self.model_config.architecture,
-            algorithm=self.model_config.algorithm,
-        )
-        # TODO (mike): read custom_pipeline from engine_args
-        if pipeline_path is not None:
-            engine_args["enable_dummy_pipeline"] = True
-            engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
+        if self._ar_mode:
+            if isinstance(engine_args.get("compilation_config"), dict):
+                engine_args["compilation_config"] = {
+                    k: v for k, v in engine_args["compilation_config"].items() if v is not None
+                }
+        else:
+            import_external_libs(self.config.external_lib)
+            pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
+                architecture=self.model_config.architecture,
+                algorithm=self.model_config.algorithm,
+            )
+            # TODO (mike): read custom_pipeline from engine_args
+            if pipeline_path is not None:
+                engine_args["enable_dummy_pipeline"] = True
+                engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
-        diffusion_master_port, diffusion_master_sock = get_free_port("127.0.0.1", with_alive_sock=True)
-        diffusion_master_sock.close()
+            diffusion_master_port, diffusion_master_sock = get_free_port("127.0.0.1", with_alive_sock=True)
+            diffusion_master_sock.close()
 
-        os.environ["MASTER_ADDR"] = "127.0.0.1"
-        os.environ["MASTER_PORT"] = str(diffusion_master_port)
-        logger.info("Using MASTER_PORT=%s for vLLM-Omni diffusion workers", os.environ["MASTER_PORT"])
+            os.environ["MASTER_ADDR"] = "127.0.0.1"
+            os.environ["MASTER_PORT"] = str(diffusion_master_port)
+            logger.info("Using MASTER_PORT=%s for vLLM-Omni diffusion workers", os.environ["MASTER_PORT"])
 
         # Apply before AsyncOmni builds OmniDiffusionConfig in this process.
         VLLMOmniHijack.hijack()
@@ -195,6 +221,22 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         await self.engine.reset_encoder_cache()
 
     async def generate(
+        self,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        request_id: str,
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+        negative_prompt_ids: Optional[list[int]] = None,
+        priority: int = 0,
+    ) -> DiffusionOutput | TokenOutput:
+        if self._ar_mode:
+            return await self._generate_ar(prompt_ids, sampling_params, request_id, image_data, video_data, priority)
+        return await self._generate_diffusion(
+            prompt_ids, sampling_params, request_id, image_data, video_data, negative_prompt_ids, priority
+        )
+
+    async def _generate_diffusion(
         self,
         prompt_ids: list[int],
         sampling_params: dict[str, Any],
@@ -321,6 +363,112 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             extra_fields=extra_fields,
         )
 
+    async def _generate_ar(
+        self,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        request_id: str,
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+        priority: int = 0,
+    ) -> TokenOutput:
+        """Generate sequence with token-in-token-out."""
+        prompt_ids = normalize_token_ids(prompt_ids)
+
+        max_possible_tokens = self.config.max_model_len - len(prompt_ids)
+        if max_possible_tokens < 1:
+            raise ValueError(
+                f"Prompt length ({len(prompt_ids)}) leaves no room to generate within the "
+                f"model's maximum context length ({self.config.max_model_len}); need at least "
+                "1 token of headroom."
+            )
+
+        if "max_tokens" in sampling_params:
+            max_tokens = sampling_params.pop("max_tokens")
+        elif "max_new_tokens" in sampling_params:
+            max_tokens = sampling_params.pop("max_new_tokens")
+        else:
+            max_tokens = min(
+                self.config.response_length,
+                self.config.prompt_length + self.config.response_length - len(prompt_ids),
+            )
+        max_tokens = max(1, min(max_tokens, max_possible_tokens))
+
+        sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
+        sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
+        sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
+
+        multi_modal_data = {}
+        if image_data is not None:
+            multi_modal_data["image"] = image_data
+        if video_data is not None:
+            multi_modal_data["video"] = video_data
+
+        prompt = {"prompt_token_ids": prompt_ids}
+        if multi_modal_data:
+            prompt["multi_modal_data"] = multi_modal_data
+
+        lora_request = None
+        if self.lora_as_adapter:
+            try:
+                lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
+            except TypeError:
+                lora_loaded = True
+            if lora_loaded:
+                lora_request = LoRARequest(
+                    lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
+                )
+
+        generator = self.engine.generate(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+            lora_request=lora_request,
+            priority=priority,
+        )
+
+        final_res: Optional[OmniRequestOutput] = None
+        async for output in generator:
+            final_res = output
+        assert final_res is not None
+
+        req_output = final_res.request_output
+        assert req_output is not None, "AR mode expects request_output with token IDs"
+
+        if not req_output.outputs:
+            return TokenOutput(
+                token_ids=[],
+                log_probs=None,
+                routed_experts=None,
+                stop_reason="aborted",
+                extra_fields={"global_steps": self.global_steps},
+            )
+
+        token_ids = req_output.outputs[0].token_ids
+        log_probs = None
+        if sampling_params.logprobs is not None:
+            log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(req_output.outputs[0].logprobs)]
+
+        finish_reason = req_output.outputs[0].finish_reason
+        if finish_reason == "abort":
+            stop_reason = "aborted"
+        elif finish_reason in ("stop", "length"):
+            stop_reason = "completed"
+        else:
+            stop_reason = finish_reason
+
+        num_preempted = None
+        if hasattr(req_output.outputs[0], "num_preempted"):
+            num_preempted = req_output.outputs[0].num_preempted
+
+        return TokenOutput(
+            token_ids=token_ids,
+            log_probs=log_probs,
+            stop_reason=stop_reason,
+            num_preempted=num_preempted,
+            extra_fields={"global_steps": self.global_steps},
+        )
+
     async def wait_for_requests_to_drain(self):
         # TODO (mike): implement this once DP is supported.
         pass
@@ -330,8 +478,8 @@ class vLLMOmniReplica(vLLMReplica):
     def __init__(
         self,
         replica_rank: int,
-        config: DiffusionRolloutConfig,
-        model_config: DiffusionModelConfig,
+        config: DiffusionRolloutConfig | RolloutConfig,
+        model_config: DiffusionModelConfig | HFModelConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
     ):
