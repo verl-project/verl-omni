@@ -80,6 +80,7 @@ class TestDiffusionModelBaseRegistry:
         assert _Impl.__name__ == "_Impl"
         assert issubclass(_Impl, DiffusionModelBase)
 
+
 class TestVllmOmniPipelineBaseRegistry:
     def test_builtin_qwen_rollout_algorithms_registered(self):
         from verl_omni.pipelines.qwen_image_diffusion_nft.vllm_omni_rollout_adapter import (
