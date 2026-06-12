@@ -1,24 +1,17 @@
-#!/bin/bash
-# Qwen-Image lora RL - 8-NPU Global Distribution Strategy (TP8)
+# Qwen-Image DiffusionNFT LoRA RL, vllm_omni rollout
 set -x
-ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.0.0}
-source $ASCEND_HOME_PATH/set_env.sh
-source $ASCEND_HOME_PATH/../nnal/atb/set_env.sh
 
 # Set WORKSPACE to any writable directory; defaults to $HOME
 WORKSPACE=${WORKSPACE:-$HOME}
 
-ocr_train_path=$WORKSPACE/data/ocr/qwen_image/train.parquet
-ocr_test_path=$WORKSPACE/data/ocr/qwen_image/test.parquet
+ocr_train_path=$WORKSPACE/data/ocr/train.parquet
+ocr_test_path=$WORKSPACE/data/ocr/test.parquet
 
 model_name=Qwen/Qwen-Image
 reward_model_name=Qwen/Qwen3-VL-8B-Instruct
 reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
 
-# 8-NPU Global Distribution (TP8 for all)
-# This minimizes per-card weight memory footprint (only ~6GB total for all 3 models)
-# leaving >50GB free for FSDP backward pass.
-NUM_GPUS_ACTOR_ROLLOUT_REWARD=8
+NUM_GPUS_ACTOR_ROLLOUT_REWARD=16
 ROLLOUT_TP=2
 REWARD_TP=4
 IMAGE_RESOLUTION=512
