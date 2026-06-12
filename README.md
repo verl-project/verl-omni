@@ -103,7 +103,7 @@ Visit our documentation to learn more.
     <td>Unified understand + gen</td>
     <td>Text + Image</td>
     <td>FlowGRPO</td>
-    <td>WIP</td>
+    <td>✅</td>
   </tr>
   <tr>
     <td rowspan="2">HunyuanImage-3.0</td>
