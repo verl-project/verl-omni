@@ -168,7 +168,7 @@ def _reference_flow_dppo_loss(
     sigma_t: torch.Tensor,
     kl_mask_threshold: float,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Self-contained equivalent of UniRL's Flow-DPPO KL-ADV masking math."""
+    """Compute the expected Flow-DPPO KL-advantage masking math."""
     log_diff = log_prob - old_log_prob
     ratio = torch.exp(log_diff)
     unclipped_loss = -advantages.detach() * ratio
@@ -191,7 +191,7 @@ def _reference_flow_dppo_loss(
 
 
 @pytest.mark.parametrize("add_kl_coefficient", [True, False])
-def test_compute_policy_loss_flow_dppo_matches_unirl_reference(add_kl_coefficient: bool) -> None:
+def test_compute_policy_loss_flow_dppo_applies_asymmetric_kl_mask(add_kl_coefficient: bool) -> None:
     from hydra import compose, initialize_config_dir
     from verl.utils.config import omega_conf_to_dataclass
 
@@ -249,7 +249,11 @@ def test_compute_policy_loss_flow_dppo_matches_unirl_reference(add_kl_coefficien
     )
 
     torch.testing.assert_close(loss, ref_loss)
-    clamped_advantages = torch.clamp(advantages, -actor_config.diffusion_loss.adv_clip_max, actor_config.diffusion_loss.adv_clip_max)
+    clamped_advantages = torch.clamp(
+        advantages,
+        -actor_config.diffusion_loss.adv_clip_max,
+        actor_config.diffusion_loss.adv_clip_max,
+    )
     clamped_ref_loss, _ = _reference_flow_dppo_loss(
         old_log_prob=old_log_prob,
         log_prob=log_prob,
