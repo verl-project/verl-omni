@@ -17,22 +17,37 @@
 # Override via env: NUM_GPUS, MODEL_PATH, DATA_DIR, TOTAL_TRAIN_STEPS
 set -xeuo pipefail
 
-NUM_GPUS=${NUM_GPUS:-1}
+# NCCL / accelerator env guards (mirror the example recipe; without these the
+# NCCL net plugin can segfault at init on some single-node setups).
+export NCCL_IB_DISABLE=1
+export CPATH=/usr/include${CPATH:+:$CPATH}
+export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
+
+NUM_GPUS=${NUM_GPUS:-2}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/Qwen3-Omni}
 DATA_DIR=${DATA_DIR:-${HOME}/data/math}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-2}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-# AR stage config reused from the example recipe (output_mode=ar pipeline).
-STAGE_CONFIG="${REPO_ROOT}/examples/gspo_trainer/qwen3_omni_thinker_only.yaml"
+# 2-GPU AR stage config (output_mode=ar). FSDP needs >1 GPU to shard (FULL_SHARD);
+# on a single GPU it falls into NO_SHARD, which can't run the offload_to_cpu summon
+# used during LoRA weight sync. TP is fixed in the stage YAML (vLLM-Omni strips
+# top-level CLI engine args when a stage config is set).
+STAGE_CONFIG="${REPO_ROOT}/tests/special_e2e/qwen3_omni_thinker_only_smoke.yaml"
 
 # Same Thinker-only module filter as the example recipe.
 EXCLUDE_MODULES=".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*"
 
 # ── Build dummy model if not present ──────────────────────────────────────────
 if [ ! -d "${MODEL_PATH}" ]; then
-    python3 "${REPO_ROOT}/tests/special_e2e/create_dummy_qwen3_omni.py" \
-        --output_dir "${MODEL_PATH}"
+    python3 "${REPO_ROOT}/tests/special_e2e/build_qwen3_omni_tiny_random.py" \
+        --output-dir "${MODEL_PATH}"
+fi
+
+# ── Build dummy math dataset if not present ───────────────────────────────────
+if [ ! -f "${DATA_DIR}/train.parquet" ]; then
+    python3 "${REPO_ROOT}/tests/special_e2e/create_dummy_math_data.py" \
+        --local_save_dir "${DATA_DIR}"
 fi
 
 # ── Run training (tiny: 2 steps, LoRA, GSPO, vLLM-Omni AR rollout) ────────────
@@ -46,6 +61,7 @@ python3 -m verl.trainer.main_ppo \
     data.truncation='left' \
     \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
+    actor_rollout_ref.model.external_lib=verl_omni.models.transformers.qwen3_omni_thinker \
     +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \

@@ -9,15 +9,23 @@ For the base environment setup, see the [installation guide](../../docs/start/in
 ## Installation
 
 Follow the [installation guide](../../docs/start/install.md) to set up the base
-environment (vLLM + vLLM-Omni). This recipe was validated with **vLLM-Omni
-v0.22.0**. It also requires a **verl** build that includes the `verl.plugins`
-loader and the FSDP layered-summon fix (see the companion verl PR; not yet in a
-tagged release), so install verl from that branch:
+environment (vLLM + vLLM-Omni). This recipe was last validated end-to-end on the
+following stack (rollout↔actor pearson ≈ 0.993):
+
+| Component | Version |
+| --- | --- |
+| vLLM | `0.23.0` |
+| vLLM-Omni | `0.22.1.dev` (the vLLM-0.23 rebase on `main`) |
+| transformers | `4.57.6` (see warning below) |
+| torch | `2.11.0+cu130` |
+| flash-attn | `2.8.3` |
+| accelerate | `1.12.0` |
+| verl | the companion PR branch (`verl.plugins` loader + FSDP LoRA fixes) |
 
 ```bash
-# vLLM + vLLM-Omni rollout backend (see docs/start/install.md for the exact
-# vLLM version paired with this vLLM-Omni release)
-pip install vllm-omni==0.22.0
+# vLLM + vLLM-Omni rollout backend
+pip install vllm==0.23.0
+pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@main"
 
 # verl (must include the verl.plugins loader + FSDP layered-summon fix)
 pip install "verl @ git+https://github.com/verl-project/verl.git@main"
@@ -26,10 +34,25 @@ pip install "verl @ git+https://github.com/verl-project/verl.git@main"
 pip install -e .
 ```
 
+> **Pin transformers to 4.x.** transformers `5.x` rewrote the weight-loading
+> path (`core_model_loading.py`); combined with `accelerate`'s meta-device init
+> it raises `TypeError: Parameter.__new__() got an unexpected keyword argument
+> '_is_hf_initialized'` when loading the 30B checkpoint. Use `transformers<5`
+> (validated on `4.57.6`); vLLM 0.23's pin (`>=4.56`) is satisfied either way.
+
+> **flash-attn needs a CUDA toolkit matching torch.** torch `2.11.0+cu130` is
+> built against CUDA 13; building flash-attn from source against a system CUDA 12.x
+> `nvcc` fails the version check. If you hit this, point `CUDA_HOME` at the
+> pip-installed `nvidia/cu13` toolkit (`export CUDA_HOME=$(python -c "import os,
+> nvidia; print(os.path.join(os.path.dirname(nvidia.__file__), 'cu13'))")`)
+> before `pip install flash-attn==2.8.3 --no-build-isolation`.
+
 Verify:
 
 ```bash
 python -c "import verl, verl_omni, vllm, vllm_omni; print('OK')"
+# verl must discover verl-omni as a plugin:
+python -c "import importlib.metadata as m; print([e.name for e in m.entry_points(group='verl.plugins')])"  # -> ['verl_omni']
 ```
 
 The provided script is configured for a single node with **4 × H100/H200 80GB**:
@@ -47,7 +70,7 @@ validated.
 > GPU with the FSDP actor**. To change rollout memory/batching, edit that stage
 > file, not the verl rollout config.
 
-> `vllm>=0.21` pulls `numpy>=2.x` while verl/verl-omni still pin `numpy<2.0.0`;
+> `vllm==0.23` pulls `numpy>=2.x` while verl/verl-omni still pin `numpy<2.0.0`;
 > the codepaths used here are numpy-2 compatible, so the pip resolver warning is
 > safe to ignore.
 
