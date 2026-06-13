@@ -20,13 +20,35 @@ from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID, VLLM_LORA_
 from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
 
 from verl_omni.utils.vllm_omni import OmniTensorLoRARequest, VLLMOmniHijack
-from verl_omni.workers.rollout.vllm_rollout.npu_utils import NPUColocateWorkerMixin
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWorkerExtension):
+# Conditionally include NPUColocateWorkerMixin in the class hierarchy.
+# vLLM v1 multiproc_executor asserts that an extension does not redefine
+# attributes already present on the worker class. On GPU,
+# GPUARWorker already provides ``_maybe_get_memory_pool_context``, ``sleep``,
+# and ``wake_up``, so adding the NPU mixin (which redefines them, even when
+# guarded by ``_is_npu_platform()`` internally) trips that assertion. On NPU
+# the mixin is required because the underlying worker does not implement
+# the NPU-specific memory-pool / sleep / wake_up flow.
+def _platform_extension_bases():
+    # TODO: the NPU (Ascend) path below is not yet verified on real NPU hardware;
+    #       only the GPU branch is exercised by current tests / training runs.
+    try:
+        from vllm.platforms import current_platform
+
+        if current_platform.device_type == "npu":
+            from verl_omni.workers.rollout.vllm_rollout.npu_utils import NPUColocateWorkerMixin
+
+            return (NPUColocateWorkerMixin, CustomPipelineWorkerExtension)
+    except Exception:
+        pass
+    return (CustomPipelineWorkerExtension,)
+
+
+class vLLMOmniColocateWorkerExtension(*_platform_extension_bases()):
     """
     The class for vLLM-Omni's worker to inherit from, in the colocate setting.
     By defining an extension class, the code can work no matter what is
