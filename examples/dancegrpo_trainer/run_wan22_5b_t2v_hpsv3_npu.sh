@@ -37,7 +37,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.diffusion_loss.clip_ratio=1e-5 \
     data.train_files=$hpsv3_train_path \
     data.val_files=$hpsv3_test_path \
-    data.train_batch_size=32 \
+    data.train_batch_size=64 \
     data.max_prompt_length=1024 \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.attn_backend='_native_npu' \
