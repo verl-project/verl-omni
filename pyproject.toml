@@ -23,6 +23,12 @@ license = {text = "Apache-2.0"}
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10"
 
+# Discovered by verl's plugin loader (verl.utils.plugins.load_plugins): importing
+# verl_omni registers its rollout adapters (e.g. vllm_omni) on the driver and Ray
+# workers when training is launched via verl's own entry point (verl.trainer.main_ppo).
+[project.entry-points."verl.plugins"]
+verl_omni = "verl_omni"
+
 # -------------------------------
 # tool.ruff - Linting configuration
 # -------------------------------

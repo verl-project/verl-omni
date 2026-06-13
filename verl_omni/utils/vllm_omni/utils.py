@@ -25,6 +25,8 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm_omni.diffusion.lora.manager import DiffusionLoRAManager, logger
 from vllm_omni.lora.request import LoRARequest as OmniLoRARequest
 
+from verl.utils.vllm import VLLMHijack
+
 
 class OmniTensorLoRARequest(OmniLoRARequest):
     peft_config: dict = field(default=None)
@@ -32,10 +34,25 @@ class OmniTensorLoRARequest(OmniLoRARequest):
 
 
 class VLLMOmniHijack:
-    """Monkey-patches vllm-omni internals to support in-memory LoRA tensors."""
+    """Monkey-patches vLLM + vllm-omni internals to support in-memory LoRA tensors.
+
+    Applies verl's base vLLM LoRA hijack (``VLLMHijack.hijack()``) first, then
+    layers the vllm-omni diffusion-side patches on top, so callers only need a
+    single ``VLLMOmniHijack.hijack()`` call.
+    """
+
+    _patched = False
 
     @staticmethod
     def hijack():
+        # Idempotency guard: hijack() runs on every worker __new__; only patch once.
+        if VLLMOmniHijack._patched:
+            return
+        VLLMOmniHijack._patched = True
+
+        # verl's base vLLM LoRA hijack first, then the vllm-omni diffusion patches.
+        VLLMHijack.hijack()
+
         def hijack__load_adapter(self, lora_request: OmniTensorLoRARequest) -> tuple[LoRAModel, PEFTHelper]:
             """
             based on vllm_omni.diffusion.lora.manager.DiffusionLoRAManager._load_adapter,

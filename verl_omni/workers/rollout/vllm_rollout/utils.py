@@ -48,6 +48,25 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
 
         return super().__new__(cls)
 
+    def _get_standard_weight_model_and_config(self):
+        """Return ``(model, model_config)`` for the standard (non-LoRA) AR weight path.
+
+        Reaches the underlying vLLM model + ``ModelConfig`` via the worker's
+        ``model_runner``. Returns ``None`` for workers without this chain (e.g. the
+        diffusion pipeline worker), so the caller falls back to ``self.load_weights``.
+        """
+        model_runner = getattr(self, "model_runner", None)
+        if model_runner is None:
+            return None
+        if hasattr(model_runner, "get_model"):
+            model = model_runner.get_model()
+        else:
+            model = getattr(model_runner, "model", None)
+        model_config = getattr(model_runner, "model_config", None)
+        if model is not None and model_config is not None and hasattr(model, "load_weights"):
+            return model, model_config
+        return None
+
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model.
 
@@ -87,13 +106,28 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
                 sum(t.element_size() * t.numel() for t in accumulated_weights.values()) / (1024 * 1024),
             )
 
-            lora_request = OmniTensorLoRARequest(
-                lora_name=VLLM_LORA_NAME,
-                lora_int_id=VLLM_LORA_INT_ID,
-                lora_path=VLLM_LORA_PATH,
-                peft_config=peft_config,
-                lora_tensors=accumulated_weights,
-            )
+            # AR (standard vLLM) workers go through verl's base VLLMHijack, which
+            # dispatches on ``isinstance(req, TensorLoRARequest)``; diffusion workers
+            # go through vllm-omni's DiffusionLoRAManager, which expects the
+            # OmniLoRARequest-derived ``OmniTensorLoRARequest``. Pick by worker type.
+            if self._get_standard_weight_model_and_config() is not None:
+                from verl.utils.vllm.utils import TensorLoRARequest
+
+                lora_request = TensorLoRARequest(
+                    lora_name=VLLM_LORA_NAME,
+                    lora_int_id=VLLM_LORA_INT_ID,
+                    lora_path=VLLM_LORA_PATH,
+                    peft_config=peft_config,
+                    lora_tensors=accumulated_weights,
+                )
+            else:
+                lora_request = OmniTensorLoRARequest(
+                    lora_name=VLLM_LORA_NAME,
+                    lora_int_id=VLLM_LORA_INT_ID,
+                    lora_path=VLLM_LORA_PATH,
+                    peft_config=peft_config,
+                    lora_tensors=accumulated_weights,
+                )
             t2 = time.perf_counter()
             self.add_lora(lora_request)
             t3 = time.perf_counter()
@@ -106,9 +140,21 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
                 (t3 - t2) * 1000,
             )
         else:
-            # Full-weight path: stream bucket-by-bucket to bound GPU memory
+            # Full-weight path: stream bucket-by-bucket to bound GPU memory.
             logger.info("Loading standard weights (async)")
-            receiver.receive_weights(on_bucket_received=lambda weights: self.load_weights(weights))
+            standard = self._get_standard_weight_model_and_config()
+            if standard is not None:
+                # AR (standard vLLM) model: load each bucket via the low-level
+                # model.load_weights (no per-bucket finalize), then run the single
+                # post-load processing pass once all buckets are received.
+                model, model_config = standard
+                receiver.receive_weights(on_bucket_received=lambda weights: model.load_weights(weights))
+                from vllm.model_executor.model_loader.utils import process_weights_after_loading
+
+                process_weights_after_loading(model, model_config, self.device)
+            else:
+                # Diffusion pipeline worker: use its own loader.
+                receiver.receive_weights(on_bucket_received=lambda weights: self.load_weights(weights))
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.
