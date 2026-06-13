@@ -44,6 +44,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.custom_chat_template='"{% if messages %}{% for message in messages %}{% if message[\"role\"] == \"user\" %}{{ message[\"content\"] }}{% endif %}{% endfor %}{% endif %}</s>"' \
     actor_rollout_ref.actor.optim.lr=3e-5 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
+    actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
