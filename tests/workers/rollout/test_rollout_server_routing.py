@@ -66,7 +66,6 @@ def test_rollout_server_routing_config_override():
                     "server_routing": {
                         "_target_": "verl_omni.workers.config.RolloutServerRoutingConfig",
                         "policy": "prompt_uid_affinity",
-                        "routing_key_field": "uid",
                     }
                 }
             }

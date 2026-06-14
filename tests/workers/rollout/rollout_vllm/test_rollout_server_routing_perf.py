@@ -126,7 +126,6 @@ def _build_rollout_cfg() -> Any:
             "server_routing": {
                 "_target_": "verl_omni.workers.config.RolloutServerRoutingConfig",
                 "policy": ROUTING_POLICY,
-                "routing_key_field": "uid",
             },
         }
     )

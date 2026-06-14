@@ -215,7 +215,6 @@ actor_rollout_ref:
     server_routing:
       _target_: verl_omni.workers.config.RolloutServerRoutingConfig
       policy: least_inflight
-      routing_key_field: uid
     _target_: verl_omni.workers.config.diffusion.DiffusionRolloutConfig
     name: ???
     mode: async

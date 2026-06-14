@@ -8,5 +8,4 @@ _target_: verl_omni.workers.config.RolloutServerRoutingConfig
 # least_inflight | prompt_uid_affinity | prompt_hash_sharding | round_robin
 policy: least_inflight
 
-# Per-sample kwargs field used as routing key (FlowGRPO: uid groups rollout.n copies).
-routing_key_field: uid
+# routing_key_field defaults to uid (FlowGRPO prompt group id in per-sample kwargs).
