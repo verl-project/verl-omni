@@ -27,7 +27,7 @@ from verl.workers.rollout.replica import TokenOutput
 
 from verl_omni.workers.rollout.request_routing import (
     DEFAULT_ROUTING_CACHE_SIZE,
-    ConfigurableRequestLoadBalancer,
+    OmniRequestLoadBalancer,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class OmniLLMServerClient(LLMServerClient):
-    """LLM server client with configurable replica routing policies."""
+    """LLM server client that routes requests via ``OmniRequestLoadBalancer``."""
 
     def __init__(self, config: DictConfig, load_balancer_handle: ray.actor.ActorHandle | None = None, **kwargs):
         super().__init__(config=config, load_balancer_handle=load_balancer_handle, **kwargs)
@@ -86,18 +86,18 @@ class OmniLLMServerClient(LLMServerClient):
 
 
 class OmniLLMServerManager(LLMServerManager):
-    """Launch rollout replicas with ``ConfigurableRequestLoadBalancer``."""
+    """Launch rollout replicas with ``OmniRequestLoadBalancer``."""
 
     async def _init_global_load_balancer(self) -> None:
         policy = OmegaConf.select(self.rollout_config, "server_routing.policy", default="least_inflight")
         routing_key_field = OmegaConf.select(self.rollout_config, "server_routing.routing_key_field", default="uid")
-        self.global_load_balancer = ConfigurableRequestLoadBalancer.remote(
+        self.global_load_balancer = OmniRequestLoadBalancer.remote(
             servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
             policy=policy,
             max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
         )
         logger.info(
-            "[OmniLLMServerManager] ConfigurableRequestLoadBalancer policy=%s routing_key_field=%s",
+            "[OmniLLMServerManager] OmniRequestLoadBalancer policy=%s routing_key_field=%s",
             policy,
             routing_key_field,
         )

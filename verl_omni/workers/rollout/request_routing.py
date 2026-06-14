@@ -39,8 +39,13 @@ def stable_shard_index(key: str, num_shards: int) -> int:
 
 
 @ray.remote
-class ConfigurableRequestLoadBalancer:
-    """Replica router with pluggable policies for diffusion / omni rollouts."""
+class OmniRequestLoadBalancer:
+    """Multi-replica request load balancer for verl-omni rollout servers.
+
+    Replaces verl's ``GlobalRequestLoadBalancer`` with pluggable routing policies
+    (for example ``prompt_uid_affinity`` and ``least_inflight``) for diffusion and
+    omni async rollouts.
+    """
 
     def __init__(
         self,

@@ -52,7 +52,7 @@ servers:
 1. The trainer assigns one `uid` per prompt, then repeats the batch
    `rollout.n` times (interleaved).
 2. Each agent-loop worker calls `server_manager.generate(..., routing_key=uid)`.
-3. `ConfigurableRequestLoadBalancer` picks a replica according to `policy`.
+3. `OmniRequestLoadBalancer` picks a replica according to `policy`.
 4. The chosen `OmniLLMServer` runs generation as usual.
 
 Training semantics stay on-policy: routing only affects **where** a request
@@ -146,14 +146,14 @@ output = await self.server_manager.generate(
 )
 ```
 
-`OmniLLMServerManager` installs `ConfigurableRequestLoadBalancer` and reads the
+`OmniLLMServerManager` installs `OmniRequestLoadBalancer` and reads the
 policy from config:
 
 ```python
 policy = OmegaConf.select(
     self.rollout_config, "server_routing.policy", default="least_inflight"
 )
-self.global_load_balancer = ConfigurableRequestLoadBalancer.remote(
+self.global_load_balancer = OmniRequestLoadBalancer.remote(
     servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
     policy=policy,
 )

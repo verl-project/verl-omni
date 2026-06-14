@@ -22,7 +22,7 @@ from omegaconf import OmegaConf
 
 from verl_omni.workers.config.rollout_routing import RolloutServerRoutingConfig
 from verl_omni.workers.rollout.request_routing import (
-    ConfigurableRequestLoadBalancer,
+    OmniRequestLoadBalancer,
     stable_shard_index,
 )
 
@@ -34,7 +34,7 @@ class _DummyServer:
 
 def _make_lb(policy: str, num_servers: int = 4) -> ray.actor.ActorHandle:
     servers = {f"s{i}": _DummyServer.remote() for i in range(num_servers)}
-    return ConfigurableRequestLoadBalancer.remote(servers=servers, policy=policy)
+    return OmniRequestLoadBalancer.remote(servers=servers, policy=policy)
 
 
 @pytest.fixture(scope="module", autouse=True)

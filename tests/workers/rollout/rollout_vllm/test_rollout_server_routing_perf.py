@@ -48,7 +48,7 @@ from verl.workers.rollout.replica import RolloutMode
 
 from verl_omni.workers.rollout.omni_llm_server import OmniLLMServerClient
 from verl_omni.workers.rollout.replica import DiffusionOutput
-from verl_omni.workers.rollout.request_routing import ConfigurableRequestLoadBalancer
+from verl_omni.workers.rollout.request_routing import OmniRequestLoadBalancer
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
 _flowgrpo_spec = importlib.util.spec_from_file_location(
@@ -268,7 +268,7 @@ def test_flowgrpo_routing_policy_performance(multi_server_cluster, policy: str):
 
     for routing_policy in policies:
         verify_log.write_text("")
-        lb = ConfigurableRequestLoadBalancer.remote(servers=server_map, policy=routing_policy)
+        lb = OmniRequestLoadBalancer.remote(servers=server_map, policy=routing_policy)
         trainer_cfg = _build_trainer_cfg(routing_policy)
         client = OmniLLMServerClient(config=trainer_cfg, load_balancer_handle=lb)
 

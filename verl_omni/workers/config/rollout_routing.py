@@ -31,9 +31,10 @@ VALID_ROLLOUT_SERVER_ROUTING_POLICIES = frozenset(
 class RolloutServerRoutingConfig(BaseConfig):
     """How agent loops route HTTP rollout requests across omni server replicas.
 
-    This applies to any async rollout using ``OmniLLMServerClient`` (diffusion
-    and omni LLM). It controls **verl-side replica selection**, not the internal
-    vllm-omni diffusion scheduler policy (``scheduling_policy``).
+    This applies to any async rollout using ``OmniLLMServerClient`` and
+    ``OmniRequestLoadBalancer`` (diffusion and omni LLM). It controls
+    **verl-side replica selection**, not the internal vllm-omni diffusion
+    scheduler policy (``scheduling_policy``).
     """
 
     # Replica routing policy:
