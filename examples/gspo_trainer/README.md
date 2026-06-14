@@ -14,18 +14,24 @@ following stack (rollout↔actor pearson ≈ 0.993):
 
 | Component | Version |
 | --- | --- |
-| vLLM | `0.23.0` |
-| vLLM-Omni | `0.22.1.dev` (the vLLM-0.23 rebase on `main`) |
+| vLLM | `0.22.0` |
+| vLLM-Omni | `0.22.0` (the `v0.22.0` release tag) |
 | transformers | `4.57.6` (see warning below) |
 | torch | `2.11.0+cu130` |
 | flash-attn | `2.8.3` |
 | accelerate | `1.12.0` |
 | verl | the companion PR branch (`verl.plugins` loader + FSDP LoRA fixes) |
 
+This pins to the upcoming `vllm 0.22.0` + `vllm-omni 0.22.0` release so the recipe
+stays aligned with what maintainers ship.
+
 ```bash
 # vLLM + vLLM-Omni rollout backend
-pip install vllm==0.23.0
-pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@main"
+pip install vllm==0.22.0
+pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@v0.22.0"
+
+# vllm-omni's CLI entrypoints import pydub at startup but don't declare it
+pip install pydub
 
 # verl (must include the verl.plugins loader + FSDP layered-summon fix)
 pip install "verl @ git+https://github.com/verl-project/verl.git@main"
@@ -38,7 +44,7 @@ pip install -e .
 > path (`core_model_loading.py`); combined with `accelerate`'s meta-device init
 > it raises `TypeError: Parameter.__new__() got an unexpected keyword argument
 > '_is_hf_initialized'` when loading the 30B checkpoint. Use `transformers<5`
-> (validated on `4.57.6`); vLLM 0.23's pin (`>=4.56`) is satisfied either way.
+> (validated on `4.57.6`); vLLM's transformers floor is satisfied either way.
 
 > **flash-attn needs a CUDA toolkit matching torch.** torch `2.11.0+cu130` is
 > built against CUDA 13; building flash-attn from source against a system CUDA 12.x
@@ -70,7 +76,7 @@ validated.
 > GPU with the FSDP actor**. To change rollout memory/batching, edit that stage
 > file, not the verl rollout config.
 
-> `vllm==0.23` pulls `numpy>=2.x` while verl/verl-omni still pin `numpy<2.0.0`;
+> `vllm==0.22` pulls `numpy>=2.x` while verl/verl-omni still pin `numpy<2.0.0`;
 > the codepaths used here are numpy-2 compatible, so the pip resolver warning is
 > safe to ignore.
 
@@ -132,9 +138,10 @@ bash examples/gspo_trainer/run_qwen3_omni_thinker_gspo_lora.sh \
 
 To verify the wiring before a full run, use the end-to-end GSPO smoke test
 [`tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_smoke.sh`](../../tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_smoke.sh),
-which trains on a dummy model built by
-[`create_dummy_qwen3_omni.py`](../../tests/special_e2e/create_dummy_qwen3_omni.py)
-(no 60 GB download).
+which trains on a tiny random-weight model built by
+[`build_qwen3_omni_tiny_random.py`](../../tests/special_e2e/build_qwen3_omni_tiny_random.py)
+(no 60 GB download). It is also wired into CI as test 8 of
+[`tests/gpu_smoke/run_gpu_smoke_tests.sh`](../../tests/gpu_smoke/run_gpu_smoke_tests.sh).
 
 ## Logging
 
