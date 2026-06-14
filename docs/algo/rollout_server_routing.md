@@ -1,13 +1,14 @@
 (rollout_server_routing)=
-# Multi-Replica Rollout Server Routing
+# Uid-Affinity Server Routing for Diffusion Rollouts
 
 Last updated: 06/14/2026
 
-Multi-replica rollout server routing lets VeRL-Omni choose **which rollout HTTP
-replica** handles each diffusion generation request when `actor_rollout_ref.rollout.nnodes > 0`
-or multiple `OmniLLMServer` actors are running. It is most useful for online
-diffusion RL (FlowGRPO, MixGRPO, DiffusionNFT) where each prompt is expanded into
-`rollout.n` parallel samples that should ideally land on the same replica.
+Diffusion async rollouts in VeRL-Omni already run across multiple `OmniLLMServer`
+replicas via verl's server-manager stack. This feature adds **uid-affinity server
+routing**: configurable replica selection keyed on per-prompt `uid`, so all
+`rollout.n` copies of the same prompt can co-locate on one replica. It is aimed at
+online diffusion RL (FlowGRPO, MixGRPO, DiffusionNFT) when
+`actor_rollout_ref.rollout.nnodes > 0` or multiple rollout servers are active.
 
 ## Motivation
 
@@ -36,10 +37,13 @@ batch formation when combined with vLLM-Omni request-level batching or wide
 | Sticky key | `request_id` (unique per HTTP call) | `routing_key` (default: batch `uid`) |
 | Typical effect with `rollout.n=16` | ~1–4 requests per replica at a time | Up to 16 requests per replica per prompt |
 
-## What rollout server routing means
+## What uid-affinity server routing means
 
-Rollout server routing in VeRL-Omni is **verl-side replica selection** in
-`OmniLLMServerManager` / `OmniLLMServerClient`. It is distinct from:
+Uid-affinity server routing in VeRL-Omni is **verl-side replica selection policy**
+in `OmniLLMServerManager` / `OmniLLMServerClient`. It replaces verl's
+`GlobalRequestLoadBalancer` on the diffusion trainer path with
+`OmniRequestLoadBalancer`, which can stick requests by `uid` instead of only by
+`request_id`. It is distinct from:
 
 - **`scheduling_policy`** (`fcfs`, etc.) — internal vLLM-Omni diffusion scheduler
   policy on a single replica.
