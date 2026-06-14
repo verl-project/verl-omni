@@ -51,10 +51,13 @@ def test_stable_shard_index_is_deterministic():
 
 
 def test_rollout_server_routing_config_from_rollout_yaml():
-    cfg = OmegaConf.create({"actor_rollout_ref": {"rollout": {}}})
-    assert OmegaConf.select(cfg.actor_rollout_ref.rollout, "server_routing.policy", default="least_inflight") == (
-        "least_inflight"
-    )
+    import os
+
+    from hydra import compose, initialize_config_dir
+
+    with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config"), version_base=None):
+        cfg = compose(config_name="diffusion_trainer")
+    assert OmegaConf.select(cfg.actor_rollout_ref.rollout, "server_routing.policy") == "prompt_uid_affinity"
     assert OmegaConf.select(cfg.actor_rollout_ref.rollout, "server_routing.routing_key_field", default="uid") == "uid"
 
 

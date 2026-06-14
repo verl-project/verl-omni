@@ -173,7 +173,7 @@ actor_rollout_ref:
           name: torch_memory
     server_routing:
       _target_: verl_omni.workers.config.RolloutServerRoutingConfig
-      policy: least_inflight
+      policy: prompt_uid_affinity
     _target_: verl_omni.workers.config.diffusion.DiffusionRolloutConfig
     name: ???
     mode: async

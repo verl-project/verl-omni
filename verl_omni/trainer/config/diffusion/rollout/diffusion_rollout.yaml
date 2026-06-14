@@ -83,7 +83,10 @@ scheduling_policy: fcfs
 
 # Replica routing across rollout HTTP servers (verl-side load balancer).
 # Distinct from vllm-omni internal diffusion scheduler batching.
-# Populated from trainer/config/rollout/server_routing.yaml via defaults.
+# Base schema from trainer/config/rollout/server_routing.yaml; diffusion defaults
+# to prompt_uid_affinity so rollout.n copies for one prompt co-locate on a replica.
+server_routing:
+  policy: prompt_uid_affinity
 
 # Which loader to use for rollout model weights: dummy, hf, megatron, etc.
 # safetensors (for huge model, and set use_shm=True); dummy: randomly init model weight
