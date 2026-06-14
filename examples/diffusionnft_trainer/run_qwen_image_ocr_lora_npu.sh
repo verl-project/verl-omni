@@ -86,3 +86,4 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.test_freq=20 \
     trainer.total_epochs=1 \
     trainer.total_training_steps=300 "$@"
+    
