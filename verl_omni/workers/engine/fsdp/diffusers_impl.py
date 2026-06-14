@@ -270,7 +270,19 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                 trust_remote_code=self.model_config.trust_remote_code,
                 subfolder="" if self.model_config.config_path else self.model_config.transformer_subfolder,
             )
-            module.set_attention_backend(self.model_config.attn_backend)
+            try:
+                module.set_attention_backend(self.model_config.attn_backend)
+            except Exception as e:
+                if self.model_config.attn_backend == "_flash_3_varlen_hub":
+                    logger.warning(
+                        "Failed to set attention backend to %s (%s). Falling back to 'native' attention backend.",
+                        self.model_config.attn_backend,
+                        e,
+                    )
+                    object.__setattr__(self.model_config, "attn_backend", "native")
+                    module.set_attention_backend("native")
+                else:
+                    raise e
 
             # some parameters may not in torch_dtype
             module.to(torch_dtype)
