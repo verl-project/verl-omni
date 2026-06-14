@@ -196,6 +196,7 @@ class TestDiffusionModelConfigPolicyAdapters:
                     f"path={model_dir}",
                     f"tokenizer_path={model_dir}",
                     "+load_tokenizer=false",
+                    "attn_backend=native",
                     'policy_state_adapters=["default","old"]',
                 ],
             )

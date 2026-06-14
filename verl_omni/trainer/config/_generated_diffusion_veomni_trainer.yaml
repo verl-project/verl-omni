@@ -318,7 +318,7 @@ actor_rollout_ref:
     enable_gradient_checkpointing: true
     config_path: null
     transformer_subfolder: transformer
-    attn_backend: native
+    attn_backend: _flash_3_varlen_hub
     lora_rank: 0
     lora_alpha: 64
     lora_init_weights: gaussian

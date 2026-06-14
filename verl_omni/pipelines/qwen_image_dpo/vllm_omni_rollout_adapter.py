@@ -28,12 +28,6 @@ from verl_omni.pipelines.qwen_image_flow_grpo.common import apply_true_cfg, buil
 __all__ = ["QwenImageDPOPipeline"]
 
 
-def _maybe_to_cpu(value):
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu()
-    return value
-
-
 def _coalesce_not_none(value, default):
     return default if value is None else value
 
@@ -132,7 +126,7 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         del output_type
         custom_prompt = req.prompts[0] if req.prompts else {}
         if isinstance(custom_prompt, dict):
-            prompt_ids = custom_prompt.get("prompt_ids", prompt_ids)
+            prompt_ids = custom_prompt.get("prompt_token_ids", prompt_ids)
             prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
             negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
             negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)
@@ -273,12 +267,13 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         image = self.vae.decode(unpacked_latents, return_dict=False)[0][:, :, 0]
 
         return DiffusionOutput(
-            output=_maybe_to_cpu(image),
+            output=image,
             custom_output={
-                "latents_clean": _maybe_to_cpu(latents_clean),
-                "prompt_embeds": _maybe_to_cpu(prompt_embeds),
-                "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
-                "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds),
-                "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
+                "latents_clean": latents_clean,
+                "prompt_embeds": prompt_embeds,
+                "prompt_embeds_mask": prompt_embeds_mask,
+                "negative_prompt_embeds": negative_prompt_embeds,
+                "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
             },
+            to_cpu=True,
         )

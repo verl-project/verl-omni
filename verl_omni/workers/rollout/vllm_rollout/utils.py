@@ -13,6 +13,7 @@
 # limitations under the License.
 import logging
 import os
+import time
 
 import torch
 from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID, VLLM_LORA_NAME, VLLM_LORA_PATH, set_death_signal
@@ -48,13 +49,15 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
         return super().__new__(cls)
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
-        """Update the weights of the rollout model."""
+        """Update the weights of the rollout model.
+
+        For LoRA updates, all LoRA tensors are accumulated across buckets and loaded
+        atomically via a single ``add_lora`` call, avoiding per-bucket partial loading.
+        For full-weight updates, weights are streamed bucket-by-bucket via
+        ``load_weights`` to keep GPU memory usage bounded.
+        """
 
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
-
-        # In async mode, make sure the old lora is removed before adding the new one
-        if peft_config and base_sync_done:
-            self.remove_lora(VLLM_LORA_INT_ID)
 
         assert self.device is not None
         receiver = BucketedWeightReceiver(
@@ -62,27 +65,50 @@ class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWork
             device=self.device,
             use_shm=use_shm,
         )
-        receiver.receive_weights(
-            on_bucket_received=lambda weights: self._update_weights(
-                weights, peft_config=peft_config, base_sync_done=base_sync_done
-            )
-        )
 
-    def _update_weights(self, weights: list[tuple[str, torch.Tensor]], peft_config: dict, base_sync_done: bool):
         if peft_config and base_sync_done:
-            weights = dict(weights)
+            # In async mode, make sure the old lora is removed before adding the new one
+            t0 = time.perf_counter()
+            self.remove_lora(VLLM_LORA_INT_ID)
+            t1 = time.perf_counter()
+            logger.debug("remove_lora took %.3f ms", (t1 - t0) * 1000)
+
+            # Accumulate all LoRA tensors across buckets (LoRA weights are small;
+            # a single atomic ``add_lora`` is both correct for multi-bucket edge
+            # cases and more efficient than per-bucket loading).
+            t_recv_start = time.perf_counter()
+            accumulated_weights: dict[str, torch.Tensor] = {}
+            receiver.receive_weights(on_bucket_received=lambda weights: accumulated_weights.update(weights))
+            t_recv_end = time.perf_counter()
+            logger.debug(
+                "IPC receive took %.3f ms (%d params, %.2f MB)",
+                (t_recv_end - t_recv_start) * 1000,
+                len(accumulated_weights),
+                sum(t.element_size() * t.numel() for t in accumulated_weights.values()) / (1024 * 1024),
+            )
+
             lora_request = OmniTensorLoRARequest(
                 lora_name=VLLM_LORA_NAME,
                 lora_int_id=VLLM_LORA_INT_ID,
                 lora_path=VLLM_LORA_PATH,
                 peft_config=peft_config,
-                lora_tensors=weights,
+                lora_tensors=accumulated_weights,
             )
+            t2 = time.perf_counter()
             self.add_lora(lora_request)
-            logger.info(f"vLLM-Omni load weights, loaded_params: {len(weights)}")
+            t3 = time.perf_counter()
+            logger.debug("add_lora took %.3f ms", (t3 - t2) * 1000)
+            logger.debug(
+                "LoRA update total: %.3f ms (remove=%.3f, recv=%.3f, add=%.3f)",
+                (t3 - t0) * 1000,
+                (t1 - t0) * 1000,
+                (t_recv_end - t_recv_start) * 1000,
+                (t3 - t2) * 1000,
+            )
         else:
+            # Full-weight path: stream bucket-by-bucket to bound GPU memory
             logger.info("Loading standard weights (async)")
-            self.load_weights(weights)
+            receiver.receive_weights(on_bucket_received=lambda weights: self.load_weights(weights))
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.
