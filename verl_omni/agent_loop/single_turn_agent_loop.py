@@ -60,11 +60,8 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
 
         # 3. generate sequences
         routing_key_field = OmegaConf.select(self.rollout_config, "server_routing.routing_key_field", default="uid")
-        routing_key = None
-        if routing_key_field:
-            value = kwargs.get(routing_key_field)
-            if value is not None:
-                routing_key = str(value)
+        value = kwargs.get(routing_key_field) if routing_key_field else None
+        routing_key = str(value) if value is not None else None
 
         metrics = {}
         with simple_timer("generate_sequences", metrics):
