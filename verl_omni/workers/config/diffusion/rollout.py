@@ -26,11 +26,14 @@ from verl.workers.config.rollout import (
     PrometheusConfig,
 )
 
+from verl_omni.workers.config.rollout_routing import RolloutServerRoutingConfig
+
 __all__ = [
     "DiffusionRolloutAlgoConfig",
     "DiffusionPipelineConfig",
     "DiffusionSamplingConfig",
     "DiffusionRolloutConfig",
+    "RolloutServerRoutingConfig",
 ]
 
 
@@ -157,6 +160,9 @@ class DiffusionRolloutConfig(BaseConfig):
     algo: Optional[DiffusionRolloutAlgoConfig] = field(default_factory=DiffusionRolloutAlgoConfig)
 
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
+
+    # Replica routing for async rollout HTTP servers (diffusion + omni LLM).
+    server_routing: RolloutServerRoutingConfig = field(default_factory=RolloutServerRoutingConfig)
 
     external_lib: Optional[str] = None
 
