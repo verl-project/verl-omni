@@ -150,5 +150,4 @@ See the [Metrics Documentation](../../docs/start/metrics.md) for a full descript
   </tr>
 </table>
 
-
 > **Note:** Reward curves may differ from the references above mainly due to rollout-side stochasticity: diffusion rollouts sample random latents/noise, and the example scripts do not fix the data seed, so prompt ordering can vary between runs.
