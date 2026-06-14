@@ -37,9 +37,10 @@ config_path: null
 # Subfolder containing the diffusion transformer weights/config.
 transformer_subfolder: transformer
 
-# Diffusers attention backend. 
+# Diffusers attention backend.
 # Supported: "native", "_native_npu", "_flash_3_varlen_hub"
-attn_backend: native
+# GPU default; NPU recipes override with _native_npu. Falls back to native when FA3 deps are missing.
+attn_backend: _flash_3_varlen_hub
 
 # Set to positive value to enable LoRA (e.g., 32)
 lora_rank: 0
