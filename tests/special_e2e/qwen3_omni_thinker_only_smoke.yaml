@@ -48,7 +48,7 @@ stage_args:
       max_lora_rank: 64
       max_loras: 1
 
-      # ── veRL integration ──
+      # ── verl integration ──
       enable_sleep_mode: true
       logprobs_mode: processed_logprobs
       disable_log_stats: true

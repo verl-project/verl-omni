@@ -1,4 +1,4 @@
-# Thinker-only stage config for Qwen3-Omni RL training with veRL.
+# Thinker-only stage config for Qwen3-Omni RL training with verl.
 #
 # vLLM-Omni normally loads 3 stages (Thinker, Talker, Code2Wav), splitting
 # GPUs across them.  For Thinker-only RL (GSPO/GRPO), we need a single
@@ -40,7 +40,7 @@ stage_args:
       max_lora_rank: 64
       max_loras: 1
 
-      # ── veRL integration ──
+      # ── verl integration ──
       enable_sleep_mode: true
       logprobs_mode: processed_logprobs
       disable_log_stats: true

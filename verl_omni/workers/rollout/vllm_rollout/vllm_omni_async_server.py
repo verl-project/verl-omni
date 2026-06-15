@@ -15,7 +15,7 @@ import argparse
 import logging
 import os
 from dataclasses import asdict
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 import numpy as np
 import ray
@@ -223,7 +223,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         video_data: Optional[list[Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
         priority: int = 0,
-    ) -> Union[DiffusionOutput, TokenOutput]:
+    ) -> DiffusionOutput | TokenOutput:
         prompt_ids = normalize_token_ids(prompt_ids)
         multi_modal_data = self._build_multi_modal_data(image_data, video_data)
         lora_request = await self._resolve_lora_request()
@@ -238,9 +238,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     @staticmethod
-    def _build_multi_modal_data(
-        image_data: Optional[list[Any]], video_data: Optional[list[Any]]
-    ) -> dict[str, Any]:
+    def _build_multi_modal_data(image_data: Optional[list[Any]], video_data: Optional[list[Any]]) -> dict[str, Any]:
         """Assemble the vLLM multi_modal_data dict from optional image/video inputs."""
         multi_modal_data: dict[str, Any] = {}
         if image_data is not None:
@@ -481,8 +479,8 @@ class vLLMOmniReplica(vLLMReplica):
     def __init__(
         self,
         replica_rank: int,
-        config: Union[DiffusionRolloutConfig, RolloutConfig],
-        model_config: Union[DiffusionModelConfig, HFModelConfig],
+        config: DiffusionRolloutConfig | RolloutConfig,
+        model_config: DiffusionModelConfig | HFModelConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
     ):

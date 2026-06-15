@@ -20,12 +20,11 @@ try:
 except ImportError:
     from vllm.lora.models import LoRAModel
 
+from verl.utils.vllm import VLLMHijack
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm_omni.diffusion.lora.manager import DiffusionLoRAManager, logger
 from vllm_omni.lora.request import LoRARequest as OmniLoRARequest
-
-from verl.utils.vllm import VLLMHijack
 
 
 class OmniTensorLoRARequest(OmniLoRARequest):
