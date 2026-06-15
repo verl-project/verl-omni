@@ -24,7 +24,7 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
-from .common import QwenImageTokenIdPromptMixin, apply_true_cfg, build_img_shapes, coalesce_not_none, maybe_to_cpu
+from .common import QwenImageTokenIdPromptMixin, apply_true_cfg, build_img_shapes, coalesce_not_none
 
 __all__ = ["QwenImagePipelineWithLogProb"]
 
@@ -192,7 +192,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
     def forward(
         self,
         req: OmniDiffusionRequest,
-        prompt_ids: torch.Tensor | list[int] | None = None,
+        prompt_token_ids: torch.Tensor | list[int] | None = None,
         prompt_mask: torch.Tensor | None = None,
         negative_prompt_ids: torch.Tensor | list[int] | None = None,
         negative_prompt_mask: torch.Tensor | None = None,
@@ -228,9 +228,9 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         Args:
             req (OmniDiffusionRequest): Rollout request containing prompts and
                 :class:`~vllm_omni.diffusion.data.OmniDiffusionSamplingParams`.
-            prompt_ids (torch.Tensor | list[int], *optional*): Token IDs for
+            prompt_token_ids (torch.Tensor | list[int], *optional*): Token IDs for
                 the positive prompt.
-            prompt_mask (torch.Tensor, *optional*): Attention mask for *prompt_ids*.
+            prompt_mask (torch.Tensor, *optional*): Attention mask for *prompt_token_ids*.
             negative_prompt_ids (torch.Tensor | list[int], *optional*): Token IDs
                 for the negative prompt used in True-CFG.
             negative_prompt_mask (torch.Tensor, *optional*): Attention mask for
@@ -280,7 +280,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         """
         custom_prompt = req.prompts[0] if req.prompts else {}
         if isinstance(custom_prompt, dict):
-            prompt_ids = custom_prompt.get("prompt_ids", prompt_ids)
+            prompt_token_ids = custom_prompt.get("prompt_token_ids", prompt_token_ids)
             prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
             negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
             negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)
@@ -310,14 +310,14 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         self._current_timestep = None
         self._interrupt = False
 
-        if prompt_ids is not None:
-            if isinstance(prompt_ids, list):
-                prompt_ids = torch.tensor(prompt_ids, device=self.device)
-            batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
+        if prompt_token_ids is not None:
+            if isinstance(prompt_token_ids, list):
+                prompt_token_ids = torch.tensor(prompt_token_ids, device=self.device)
+            batch_size = prompt_token_ids.shape[0] if prompt_token_ids.ndim == 2 else 1
         elif prompt_embeds is not None:
             batch_size = prompt_embeds.shape[0]
         else:
-            # Both prompt_ids and prompt_embeds are None (e.g. during warmup/dummy run).
+            # Both prompt_token_ids and prompt_embeds are None (e.g. during warmup/dummy run).
             # Return a minimal dummy output to avoid crashing.
             return DiffusionOutput(output=None, custom_output={})
 
@@ -330,7 +330,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
 
         do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
         prompt_embeds, prompt_embeds_mask = self.encode_prompt(
-            prompt_ids=prompt_ids,
+            prompt_ids=prompt_token_ids,
             attention_mask=prompt_mask,
             prompt_embeds=prompt_embeds,
             prompt_embeds_mask=prompt_embeds_mask,
@@ -432,14 +432,15 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
 
         return DiffusionOutput(
-            output=maybe_to_cpu(image),
+            output=image,
             custom_output={
-                "all_latents": maybe_to_cpu(all_latents),
-                "all_log_probs": maybe_to_cpu(all_log_probs),
-                "all_timesteps": maybe_to_cpu(all_timesteps),
-                "prompt_embeds": maybe_to_cpu(prompt_embeds),
-                "prompt_embeds_mask": maybe_to_cpu(prompt_embeds_mask),
-                "negative_prompt_embeds": maybe_to_cpu(negative_prompt_embeds),
-                "negative_prompt_embeds_mask": maybe_to_cpu(negative_prompt_embeds_mask),
+                "all_latents": all_latents,
+                "all_log_probs": all_log_probs,
+                "all_timesteps": all_timesteps,
+                "prompt_embeds": prompt_embeds,
+                "prompt_embeds_mask": prompt_embeds_mask,
+                "negative_prompt_embeds": negative_prompt_embeds,
+                "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
             },
+            to_cpu=True,
         )

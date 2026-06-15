@@ -17,8 +17,21 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/vers
     __version__ = f.read().strip()
 
 
+# Fallback for CPU-only environments where vLLM-Omni current_omni_platform.device_type is empty.
+# This prevents RuntimeError: Device string must not be empty when importing modules with torch.amp.autocast.
+try:
+    import vllm_omni.platforms
+
+    if not vllm_omni.platforms.current_omni_platform.device_type:
+        vllm_omni.platforms.current_omni_platform.device_type = "cpu"
+except ImportError:
+    pass
+
+
 # Import pipelines / rollout / reward loop / engines to auto-register them
+# Apply model patches and auto-register pipelines / rollout / reward loop / engines
 import verl_omni.experimental  # noqa: E402, F401
+import verl_omni.models  # noqa: E402, F401
 import verl_omni.pipelines  # noqa: E402, F401
 import verl_omni.reward_loop  # noqa: E402, F401
 import verl_omni.workers.engine  # noqa: E402, F401

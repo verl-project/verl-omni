@@ -75,7 +75,7 @@ class DiffusionModelConfig(BaseConfig):
     external_lib: Optional[str] = None
 
     enable_gradient_checkpointing: bool = True
-    attn_backend: str = "native"
+    attn_backend: str = "_flash_3_varlen_hub"
 
     lora_rank: int = 0
     lora_alpha: int = 64

@@ -42,7 +42,6 @@ from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
-from verl_omni.utils.vllm_omni import VLLMOmniHijack
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
 
@@ -94,29 +93,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _get_cli_description(self) -> str:
         return "vLLM-Omni CLI"
 
-    # TODO: drop it after updating verl pin (at least 5ff595ac9fcb4)
-    async def launch_server(self, master_address: str = None, master_port: int = None, dp_rpc_port: int = None):
-        """Launch vLLM-Omni engine; coerce null ``rollout.seed`` for engine init only.
-
-        Upstream verl uses ``config.get("seed", 0)``, but Hydra ``seed: null`` sets the
-        attribute to None, so the default is not applied and launch crashes with
-        ``replica_rank + None``. Training rollout seeding stays unset via meta_info.
-        """
-        original_get = self.config.get
-
-        def get_with_engine_seed_default(key: str, default: Any = None) -> Any:
-            if key == "seed":
-                value = original_get(key, default)
-                return 0 if value is None else value
-            return original_get(key, default)
-
-        self.config.get = get_with_engine_seed_default
-        try:
-            await super().launch_server(master_address, master_port, dp_rpc_port)
-        finally:
-            # BaseConfig is frozen; pop the shadowed get instead of reassigning it.
-            self.config.__dict__.pop("get", None)
-
     # -----------------------------------------------------------------------
     # Server lifecycle
     # -----------------------------------------------------------------------
@@ -124,6 +100,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     async def run_server(self, args: argparse.Namespace):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
+
+        # inject multi-stage yaml config
+        deploy_config = getattr(args, "deploy_config", None)
+        if deploy_config:
+            engine_args["deploy_config"] = deploy_config
 
         import_external_libs(self.config.external_lib)
 
@@ -148,8 +129,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         os.environ["MASTER_PORT"] = str(diffusion_master_port)
         logger.info("Using MASTER_PORT=%s for vLLM-Omni diffusion workers", os.environ["MASTER_PORT"])
 
-        # Apply before AsyncOmni builds OmniDiffusionConfig in this process.
-        VLLMOmniHijack.hijack()
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
         await omni_init_app_state(engine_client, app.state, args)
@@ -213,6 +192,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     ) -> DiffusionOutput:
         """Generate sequence with token-in-image-out."""
         prompt_ids = normalize_token_ids(prompt_ids)
+        default_params_list = self.engine.default_sampling_params_list
 
         multi_modal_data = {}
         if image_data is not None:
@@ -231,12 +211,16 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 )
 
         # Build OmniCustomPrompt with pre-tokenized IDs
-        custom_prompt: OmniCustomPrompt = {"prompt_ids": prompt_ids}
+        custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_ids}
         if prompt_mask is not None:
             custom_prompt["prompt_mask"] = prompt_mask
+        if len(default_params_list) > 1:
+            # Multi-stage pipelines tag the diffusion stage so the orchestrator can route inputs correctly.
+            custom_prompt["modalities"] = ["image"]
         if negative_prompt_ids is not None:
             custom_prompt["negative_prompt_ids"] = negative_prompt_ids
         if multi_modal_data:
+            custom_prompt["multi_modal_data"] = multi_modal_data
             custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
 
         # Build OmniDiffusionSamplingParams from the incoming dict
@@ -252,11 +236,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             sampling_kwargs["lora_request"] = lora_request
         diffusion_sampling_params = OmniDiffusionSamplingParams(**sampling_kwargs)
 
+        # Build sampling params list: multi-stage models use defaults for non-diffusion stages
+        sampling_params_list = default_params_list[:-1] + [diffusion_sampling_params]
+
         # Call AsyncOmni.generate() with the correct API
         generator = self.engine.generate(
             prompt=custom_prompt,
             request_id=request_id,
-            sampling_params_list=[diffusion_sampling_params],
+            sampling_params_list=sampling_params_list,
         )
 
         # Get final response

@@ -1,0 +1,16 @@
+# BAGEL-7B-MoT single-stage deploy config for FlowGRPO training.
+# Mirrors vllm-omni's ``vllm_omni/deploy/bagel_single_stage.yaml``.
+
+pipeline: bagel_single_stage
+async_chunk: false
+
+stages:
+  - stage_id: 0
+    max_num_batched_tokens: 32768        # max tokens per diffusion batch
+    max_num_seqs: 1                      # diffusion processes 1 seq at a time
+    enforce_eager: true                  # required: no CUDA graphs for diffusion
+    trust_remote_code: true              # BAGEL uses custom Qwen2-MoT code
+    enable_prefix_caching: false         # single-request, no cache needed
+    devices: "0"                         # GPU device index
+    default_sampling_params:
+      seed: 52                           # overridden per-request in FlowGRPO
