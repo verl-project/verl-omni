@@ -4,6 +4,8 @@ Last updated: 06/15/2026.
 
 ---
 
+## Float32 Precision Loss in Stored Rollout Latents
+
 (symptom-float32)=
 ### Symptom
 
@@ -53,6 +55,8 @@ inference backends.
 | `actor/pg_clipfrac` | ~12% | ~9% | ~1% |
 
 ---
+
+## RoPE Sequence Length Mismatch
 
 (symptom-rope)=
 ### Symptom
@@ -109,6 +113,8 @@ divergence due to unavoidable vLLM vs PyTorch attention kernel
 difference).
 
 ---
+
+## Float32 Precision Loss in Stepwise Scheduler
 
 (symptom-fp32-stepwise)=
 ### Symptom
