@@ -141,7 +141,7 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
         if prompts:
             p0 = prompts[0]
             if isinstance(p0, dict):
-                prompt_ids = p0.get("prompt_ids", None)
+                prompt_ids = p0.get("prompt_token_ids", None)
                 prompt_mask = p0.get("prompt_mask", None)
                 negative_prompt_ids = p0.get("negative_prompt_ids", None)
                 negative_prompt_mask = p0.get("negative_prompt_mask", None)
