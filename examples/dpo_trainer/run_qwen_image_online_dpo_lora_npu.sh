@@ -1,4 +1,4 @@
-# Qwen-Image DiffusionNFT LoRA RL, vllm_omni rollout
+# Qwen-Image Diffusion DPO LoRA RL, vllm_omni rollout
 set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME
