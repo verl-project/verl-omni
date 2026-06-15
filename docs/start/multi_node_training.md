@@ -143,7 +143,7 @@ actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / R
 reward.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / REWARD_TP))
 
 # ── Multi-node ──────────────────────
-ROLLOUT_NUM_WORKERS=$((TOTAL_GPUS / ROLLOUT_TP))   # 16
+ROLLOUT_NUM_WORKERS=$((TOTAL_GPUS / ROLLOUT_TP)) 
 actor_rollout_ref.rollout.agent.num_workers=$ROLLOUT_NUM_WORKERS
 
 reward.num_workers=$((TOTAL_GPUS / REWARD_TP))
