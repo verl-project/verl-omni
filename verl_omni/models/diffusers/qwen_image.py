@@ -20,7 +20,18 @@ from packaging import version
 logger = logging.getLogger(__name__)
 
 
-def _apply_qwen_image_ulysses_mask_fix() -> None:
+# TODO (mike): It was fixed in diffusers main branch. Remove this patch once we upgrade the diffusers version.
+def apply_qwen_image_ulysses_mask_fix() -> None:
+    """Patch ``QwenImageTransformer2DModel.forward`` for Ulysses sequence-parallel attention masks.
+
+    diffusers==0.38.0 builds the joint text/image attention mask in contiguous
+    ``[txt..., img...]`` order, but Ulysses all-to-all reorders tokens to interleaved
+    ``[txt_0, img_0, txt_1, img_1, ...]``. When ``ulysses_degree > 1``, this patch
+    rebuilds the joint mask in that interleaved layout before calling the original
+    forward pass.
+
+    Remove this patch once the fix is upstreamed to diffusers.
+    """
     if version.parse(diffusers.__version__) < version.parse("0.38.0"):
         return
 
@@ -74,6 +85,3 @@ def _apply_qwen_image_ulysses_mask_fix() -> None:
     _patched_forward._verl_omni_ulysses_mask_patched = True
     _patched_forward._warned = False
     QwenImageTransformer2DModel.forward = _patched_forward
-
-
-_apply_qwen_image_ulysses_mask_fix()

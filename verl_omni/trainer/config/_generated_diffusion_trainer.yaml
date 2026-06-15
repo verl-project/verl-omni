@@ -78,6 +78,8 @@ actor_rollout_ref:
       ref_kl_coef: 0.0
       adaptive_weight_min: 1.0e-05
       dpo_beta: 2000.0
+      kl_mask_threshold: 1.0e-05
+      add_kl_coefficient: true
     rollout_correction:
       _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
       bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
@@ -275,7 +277,7 @@ actor_rollout_ref:
     enable_gradient_checkpointing: true
     config_path: null
     transformer_subfolder: transformer
-    attn_backend: native
+    attn_backend: _flash_3_varlen_hub
     lora_rank: 0
     lora_alpha: 64
     lora_init_weights: gaussian

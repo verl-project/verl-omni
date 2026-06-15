@@ -47,6 +47,12 @@ diffusion_loss:
   # DPO inverse temperature for pairwise flow-matching preference loss
   dpo_beta: 2000.0
 
+  # Flow-DPPO divergence threshold for masking high-KL policy updates
+  kl_mask_threshold: 1e-5
+
+  # Whether Flow-DPPO normalizes mean drift by the scheduler SDE noise scale
+  add_kl_coefficient: true
+
 # Rollout Correction config.  Fields mirror RolloutCorrectionConfig.
 # rollout_is defaults to null (off); override for IS diagnostics.
 rollout_correction:

@@ -33,6 +33,7 @@ start/metrics.md
 :maxdepth: 1
 :caption: Advanced Features
 
+algo/async_reward.md
 algo/rollout_correction.md
 start/http_scorer.md
 ```
@@ -42,6 +43,7 @@ start/http_scorer.md
 :caption: Algorithms
 
 algo/flowgrpo.md
+algo/flowdppo.md
 algo/diffusion_dpo.md
 algo/diffusionnft.md
 algo/grpo_guard.md

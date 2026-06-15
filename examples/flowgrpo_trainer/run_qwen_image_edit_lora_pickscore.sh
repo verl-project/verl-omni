@@ -101,7 +101,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=$ACTOR_SP \
-    actor_rollout_ref.actor.diffusion_loss.clip_ratio=0.0001 \
+    actor_rollout_ref.actor.diffusion_loss.clip_ratio=0.001 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.seed=42 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
