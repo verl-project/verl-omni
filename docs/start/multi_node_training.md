@@ -98,7 +98,7 @@ NUM_GPUS_ACTOR_ROLLOUT_REWARD=4
 # ── Multi-node ──────────────────────
 NNODES=${NNODES:-2}
 GPUS_PER_NODE=${GPUS_PER_NODE:-4}
-TOTAL_GPUS=$((NNODES * GPUS_PER_NODE))     # 8
+TOTAL_GPUS=$((NNODES * GPUS_PER_NODE))     
 ```
 
 The environment variables accept overrides so the same script works on any
@@ -119,9 +119,9 @@ data.train_batch_size=32
 actor_rollout_ref.actor.ppo_mini_batch_size=16
 
 # ── Multi-node ──────────────────────
-TRAIN_BATCH_SIZE=$((32 * TOTAL_GPUS / 4))       # 256 on 8 GPUs
-PPO_MINI_BATCH_SIZE=$((16 * TOTAL_GPUS / 4))    # 128 on 8 GPUs
-PPO_MICRO_BATCH_PER_GPU=16                       # unchanged
+TRAIN_BATCH_SIZE=$((32 * TOTAL_GPUS / 4))       
+PPO_MINI_BATCH_SIZE=$((16 * TOTAL_GPUS / 4))    
+PPO_MICRO_BATCH_PER_GPU=16                     
 
 data.train_batch_size=$TRAIN_BATCH_SIZE
 actor_rollout_ref.actor.ppo_mini_batch_size=$PPO_MINI_BATCH_SIZE
