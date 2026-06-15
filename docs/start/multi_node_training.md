@@ -76,8 +76,6 @@ training.
   InfiniBand or RoCE. All nodes must have identical software environments
   (same Python, CUDA, and pip packages) and shared access to model weights,
   data, and a writable checkpoint directory (e.g., via NFS or HDFS).
-- A launcher that sets `MASTER_ADDR`, `MASTER_PORT`, `RANK`, and `WORLD_SIZE`
-  — `torchrun`, `srun` (Slurm), or `mpirun` all work.
 
 ## Conversion recipe: single-node → multi-node
 
