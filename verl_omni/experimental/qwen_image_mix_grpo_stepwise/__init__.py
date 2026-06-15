@@ -1,4 +1,4 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Fallback when tooling does not read pyproject.toml metadata.
-from setuptools import setup
+from .vllm_omni_rollout_adapter import QwenImageMixGRPOPipelineWithLogProbStepwise
 
-setup()
+__all__ = ["QwenImageMixGRPOPipelineWithLogProbStepwise"]

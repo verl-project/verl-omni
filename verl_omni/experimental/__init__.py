@@ -1,4 +1,4 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Fallback when tooling does not read pyproject.toml metadata.
-from setuptools import setup
+from . import (
+    qwen_image_flow_grpo_stepwise,
+    qwen_image_mix_grpo_stepwise,
+)
+from .qwen_image_flow_grpo_stepwise import *  # noqa: F401, F403
+from .qwen_image_mix_grpo_stepwise import *  # noqa: F401, F403
 
-setup()
+__all__ = list(qwen_image_flow_grpo_stepwise.__all__)
+__all__ += list(qwen_image_mix_grpo_stepwise.__all__)

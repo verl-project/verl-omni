@@ -35,11 +35,29 @@ then `examples/flowgrpo_trainer/data_process/qwenimage_ocr.py` to write
 
 ### Run
 
+### NVIDIA GPU
+
 ```bash
 bash examples/dpo_trainer/run_qwen_image_online_dpo_lora.sh \
   data.train_files=$WORKSPACE/data/ocr/qwen_image/train.parquet \
   data.val_files=$WORKSPACE/data/ocr/qwen_image/test.parquet
 ```
+
+### NPU
+
+For Huawei Ascend NPUs, use the NPU-optimized script:
+
+```bash
+bash examples/dpo_trainer/run_qwen_image_online_dpo_lora_npu.sh \
+  data.train_files=$WORKSPACE/data/ocr/qwen_image/train.parquet \
+  data.val_files=$WORKSPACE/data/ocr/qwen_image/test.parquet
+```
+
+This script uses a 16-NPU global distribution strategy with:
+- `actor_rollout_ref.model.attn_backend='_native_npu'`
+- `actor_rollout_ref.rollout.tensor_model_parallel_size=2`
+- `reward.reward_model.rollout.tensor_model_parallel_size=4`
+- `trainer.n_gpus_per_node=16`
 
 ### Notes
 
@@ -51,15 +69,15 @@ bash examples/dpo_trainer/run_qwen_image_online_dpo_lora.sh \
 
 ### Performance
 
-> Online DPO experiment conducted on *NVIDIA H800* GPUs with the same OCR reward and prompt parquet as FlowGRPO Qwen-Image training.
+> All experiments were conducted on *NVIDIA H800* GPUs; NPU experiments use *16× Ascend NPUs*. The OCR reward was used for all experiments.
 
+| Script | Model | Algorithm | Hybrid Engine | # Cards | Reward Fn | # Cards for Actor | # Cards for Rollout | # Cards for Async Reward | Batch Size | `rollout.n` | lr   | # Val Samples | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / Card / Seconds) | Time per Step (Seconds) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `run_qwen_image_online_dpo_lora.sh` | Qwen-Image | Online DPO | True | 4 (NVIDIA) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync) | 32 | 16 | 3e-4 | 1k (full set) | 32×2=64 | 8 | 0.040 | 408 |
+| `run_qwen_image_online_dpo_lora_npu.sh` | Qwen-Image | Online DPO | True | 16 (NPU) | qwenvl-ocr-vllm | 16 | 16 | 0 (sync) | 32 | 16 | 3e-4 | 1k (full set) | 32×2=64 | 4 | 0.003 | 1188 |
 
-| Script | Model | Algorithm | Hybrid Engine | # Cards | Reward Fn | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | `rollout.n` | lr   | # Val Samples | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / GPU / Seconds) | Time per Step (Seconds) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `run_qwen_image_online_dpo_lora.sh` | Qwen-Image | Online DPO | True | 4 | qwenvl-ocr-vllm | 4 | 4 | 0 (sync) | 32 | 16 | 3e-4 | 1k (full set) | 32×2=64 | 8 | 0.040 | 408 |
-
-- Colocated actor, vLLM-Omni rollout, and sync OCR reward on 4 GPUs; `rollout.n=16` samples candidates, then top/bottom pairing keeps 64 actor-update images per step (`perf/total_num_images=64`).
-- Validation uses `trainer.val_before_train=True` on the full OCR test parquet (same as FlowGRPO).
+- Colocated actor, vLLM-Omni rollout, and sync OCR reward on 4 NVIDIA GPUs (or 16 NPUs for NPU script); `rollout.n=16` samples candidates, then top/bottom pairing keeps 64 actor-update images per step.
+- Validation uses the full OCR test parquet.
 - Unlike policy-gradient trainers (e.g. FlowGRPO), where actor updates use `train_batch_size × rollout.n` images per step, online DPO keeps one `[chosen, rejected]` pair per prompt (`train_batch_size × 2`), so throughput numbers are not directly comparable—use the **Training Samples per Step** column.
 
 > **Note:** Reward curves may differ between runs because online DPO depends on stochastic diffusion rollouts and the example scripts do not fix the data seed.

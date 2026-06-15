@@ -143,6 +143,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 engine_args["deploy_config"] = deploy_config
 
             import_external_libs(self.config.external_lib)
+
+            self.config.resolve_algorithm(self.model_config)
+
             pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
                 architecture=self.model_config.architecture,
                 algorithm=self.model_config.algorithm,
@@ -151,6 +154,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             if pipeline_path is not None:
                 engine_args["enable_dummy_pipeline"] = True
                 engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
+
+        if self.config.step_execution:
+            engine_args["step_execution"] = True
 
         diffusion_master_port, diffusion_master_sock = get_free_port("127.0.0.1", with_alive_sock=True)
         diffusion_master_sock.close()
@@ -222,6 +228,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
+        prompt_mask: torch.BoolTensor | None = None,
         priority: int = 0,
     ) -> DiffusionOutput | TokenOutput:
         prompt_ids = normalize_token_ids(prompt_ids)
@@ -330,6 +337,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         default_params_list = self.engine.default_sampling_params_list
 
         custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_ids}
+        if prompt_mask is not None:
+            custom_prompt["prompt_mask"] = prompt_mask
         if len(default_params_list) > 1:
             # Multi-stage pipelines tag the diffusion stage so the orchestrator can route inputs correctly.
             custom_prompt["modalities"] = ["image"]

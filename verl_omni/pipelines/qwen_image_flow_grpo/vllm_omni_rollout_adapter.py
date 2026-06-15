@@ -164,9 +164,9 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
 
             # compute the previous noisy sample x_t -> x_t-1
             latents, log_prob, _, _ = self.scheduler.step(
-                noise_pred.float(),
+                noise_pred.to(torch.float32),
                 timestep_value,
-                latents,
+                latents.to(torch.float32),
                 generator=generator,
                 noise_level=cur_noise_level,
                 sde_type=sde_type,
@@ -174,10 +174,15 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
                 return_dict=False,
             )
 
+            # Save fp32 trajectory BEFORE casting to model dtype, so the
+            # trainer recomputes log-probs on full-precision latents.
             if i >= sde_window[0] and i < sde_window[1]:
-                all_latents.append(latents)
+                all_latents.append(latents.to(torch.float32))
                 all_log_probs.append(log_prob)
                 all_timesteps.append(timestep_value)
+
+            # Cast back to model dtype for next transformer forward.
+            latents = latents.to(x.dtype)
 
         all_latents = torch.stack(all_latents, dim=1)
         all_log_probs = torch.stack(all_log_probs, dim=1) if all_log_probs and all_log_probs[0] is not None else None
@@ -348,7 +353,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             num_channels_latents,
             height,
             width,
-            prompt_embeds.dtype,
+            torch.float32,
             self.device,
             generator,
             latents,
@@ -367,10 +372,14 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         if self.attention_kwargs is None:
             self._attention_kwargs = {}
 
-        txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist() if prompt_embeds_mask is not None else None
-        negative_txt_seq_lens = (
-            negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
-        )
+        # Set RoPE length from padded embed width (match diffusers text_seq_len),
+        # not from mask.sum() (valid token count).
+        txt_seq_lens = [int(prompt_embeds.shape[1])] * int(prompt_embeds.shape[0])
+        if negative_prompt_embeds is not None:
+            neg_seq_len = int(negative_prompt_embeds.shape[1])
+            negative_txt_seq_lens = [neg_seq_len] * int(negative_prompt_embeds.shape[0])
+        else:
+            negative_txt_seq_lens = None
 
         if sde_window_size is not None:
             start = torch.randint(

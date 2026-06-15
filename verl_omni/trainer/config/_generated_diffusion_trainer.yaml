@@ -78,6 +78,8 @@ actor_rollout_ref:
       ref_kl_coef: 0.0
       adaptive_weight_min: 1.0e-05
       dpo_beta: 2000.0
+      kl_mask_threshold: 1.0e-05
+      add_kl_coefficient: true
     rollout_correction:
       _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
       bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
@@ -189,6 +191,7 @@ actor_rollout_ref:
     max_num_batched_tokens: 8192
     max_model_len: null
     max_num_seqs: 1024
+    step_execution: false
     enable_chunked_prefill: true
     enable_prefix_caching: true
     logprobs_mode: processed_logprobs

@@ -15,6 +15,7 @@ It originated from the multi-modal generation RL effort in `verl`, and now has a
 
 ## News 🔥
 
+- **[2026-06]** [Flow-DPPO](https://verl-omni.readthedocs.io/en/latest/algo/flowdppo.html) is integrated for more stable convergence. vLLM-Omni rollout backend is upgraded to v0.22 for higher throughput, with default actor attn backend switched to FA3.
 - **[2026-06]** [DiffusionNFT](https://verl-omni.readthedocs.io/en/latest/algo/diffusionnft.html) and [Diffusion DPO](https://verl-omni.readthedocs.io/en/latest/algo/diffusion_dpo.html) are integrated with verified recipes on Qwen-Image/SD3.5. [Wan2.2](examples/dancegrpo_trainer/README.md) is now supported for video generation tasks.  
 
 ## Why `VeRL-Omni`
@@ -62,10 +63,14 @@ Visit our documentation to learn more.
     <th>Status</th>
   </tr>
   <tr>
-    <td rowspan="5">Qwen-Image</td>
-    <td rowspan="5">Diffusion generator</td>
-    <td rowspan="5">Text → Image</td>
+    <td rowspan="6">Qwen-Image</td>
+    <td rowspan="6">Diffusion generator</td>
+    <td rowspan="6">Text → Image</td>
     <td>FlowGRPO (+ CPS/SDE)</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>Flow-DPPO</td>
     <td>✅</td>
   </tr>
   <tr>
