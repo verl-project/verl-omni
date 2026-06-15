@@ -158,6 +158,120 @@ def test_compute_policy_loss_flow_grpo() -> None:
         assert "actor/pg_clipfrac_lower" in pg_metrics
 
 
+def _reference_flow_dppo_loss(
+    *,
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    old_prev_sample_mean: torch.Tensor,
+    prev_sample_mean: torch.Tensor,
+    advantages: torch.Tensor,
+    sigma_t: torch.Tensor,
+    kl_mask_threshold: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Compute the expected Flow-DPPO KL-advantage masking math."""
+    log_diff = log_prob - old_log_prob
+    ratio = torch.exp(log_diff)
+    unclipped_loss = -advantages.detach() * ratio
+
+    kl_per_elem = (prev_sample_mean - old_prev_sample_mean).pow(2) / (2 * sigma_t.pow(2))
+    kl_per_sample = kl_per_elem.mean(dim=tuple(range(1, kl_per_elem.ndim)))
+    kl_mask = kl_per_sample < kl_mask_threshold
+    pos_rm_mask = (~kl_mask) & (ratio > 1.0) & (advantages > 0)
+    neg_rm_mask = (~kl_mask) & (ratio < 1.0) & (advantages < 0)
+    rm_mask = pos_rm_mask | neg_rm_mask
+    keep_mask = (~rm_mask).detach()
+    zero = torch.zeros((), dtype=unclipped_loss.dtype, device=unclipped_loss.device)
+    loss = torch.where(keep_mask, unclipped_loss, zero).mean()
+    return loss, {
+        "kl_per_sample": kl_per_sample,
+        "pos_rm_mask": pos_rm_mask,
+        "neg_rm_mask": neg_rm_mask,
+        "rm_mask": rm_mask,
+    }
+
+
+@pytest.mark.parametrize("add_kl_coefficient", [True, False])
+def test_compute_policy_loss_flow_dppo_applies_asymmetric_kl_mask(add_kl_coefficient: bool) -> None:
+    from hydra import compose, initialize_config_dir
+    from verl.utils.config import omega_conf_to_dataclass
+
+    from verl_omni.workers.config.diffusion.actor import FSDPDiffusionActorConfig
+
+    old_log_prob = torch.zeros(4, dtype=torch.float32)
+    log_prob = torch.log(torch.tensor([1.2, 0.8, 1.2, 0.8], dtype=torch.float32))
+    advantages = torch.tensor([10.0, -10.0, -8.0, 8.0], dtype=torch.float32)
+    old_prev_sample_mean = torch.zeros((4, 2, 2, 2), dtype=torch.float32)
+    prev_sample_mean = torch.full_like(old_prev_sample_mean, 0.2)
+    std_dev_t = torch.full((4, 1, 1, 1), 0.5, dtype=torch.float32)
+    sqrt_dt = torch.full((4,), 0.5, dtype=torch.float32)
+    kl_mask_threshold = 1e-5
+
+    with initialize_config_dir(
+        config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/actor"), version_base=None
+    ):
+        cfg = compose(
+            config_name="dp_diffusion_actor",
+            overrides=[
+                "strategy=fsdp",
+                "diffusion_loss.loss_mode=flow_dppo",
+                f"diffusion_loss.add_kl_coefficient={str(add_kl_coefficient)}",
+                f"diffusion_loss.kl_mask_threshold={kl_mask_threshold}",
+                "diffusion_loss.adv_clip_max=5.0",
+                "ppo_micro_batch_size_per_gpu=4",
+            ],
+        )
+    actor_config: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
+
+    flow_dppo_loss = diffusion_algos.get_diffusion_loss_fn("flow_dppo")
+    loss, metrics = flow_dppo_loss.compute_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        config=actor_config,
+        old_prev_sample_mean=old_prev_sample_mean,
+        prev_sample_mean=prev_sample_mean,
+        std_dev_t=std_dev_t,
+        sqrt_dt=sqrt_dt,
+    )
+
+    if add_kl_coefficient:
+        sigma_t = std_dev_t * sqrt_dt.reshape(4, 1, 1, 1)
+    else:
+        sigma_t = torch.ones_like(std_dev_t)
+    ref_loss, ref_masks = _reference_flow_dppo_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        old_prev_sample_mean=old_prev_sample_mean,
+        prev_sample_mean=prev_sample_mean,
+        advantages=advantages,
+        sigma_t=sigma_t,
+        kl_mask_threshold=kl_mask_threshold,
+    )
+
+    torch.testing.assert_close(loss, ref_loss)
+    clamped_advantages = torch.clamp(
+        advantages,
+        -actor_config.diffusion_loss.adv_clip_max,
+        actor_config.diffusion_loss.adv_clip_max,
+    )
+    clamped_ref_loss, _ = _reference_flow_dppo_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        old_prev_sample_mean=old_prev_sample_mean,
+        prev_sample_mean=prev_sample_mean,
+        advantages=clamped_advantages,
+        sigma_t=sigma_t,
+        kl_mask_threshold=kl_mask_threshold,
+    )
+    assert not torch.isclose(loss, clamped_ref_loss)
+    assert ref_masks["pos_rm_mask"].tolist() == [True, False, False, False]
+    assert ref_masks["neg_rm_mask"].tolist() == [False, True, False, False]
+    assert ref_masks["rm_mask"].tolist() == [True, True, False, False]
+    assert metrics["actor/masked_fraction"] == pytest.approx(0.5)
+    assert metrics["actor/unmasked_fraction"] == pytest.approx(0.5)
+    assert "actor/kl_new_old_mean" in metrics
+
+
 @pytest.mark.parametrize("norm_by_std", [True, False])
 @pytest.mark.parametrize("global_std", [True, False])
 def test_compute_diffusion_nft_group_advantages(norm_by_std: bool, global_std: bool) -> None:

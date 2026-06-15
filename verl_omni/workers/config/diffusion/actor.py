@@ -44,10 +44,12 @@ class DiffusionLossConfig(BaseConfig):
     ref_kl_coef: float = 0.0
     adaptive_weight_min: float = 1e-5
     dpo_beta: float = 2000.0
+    kl_mask_threshold: float = 1e-5
+    add_kl_coefficient: bool = True
 
     def __post_init__(self):
         """Validate diffusion loss configuration."""
-        valid_modes = ["flow_grpo", "grpo_guard", "diffusion_nft", "dpo", "dance_grpo"]
+        valid_modes = ["flow_grpo", "flow_dppo", "grpo_guard", "diffusion_nft", "dpo", "dance_grpo"]
         if self.loss_mode not in valid_modes:
             raise ValueError(f"Invalid diffusion loss_mode: {self.loss_mode}. Must be one of {valid_modes}")
         if self.adv_clip_max <= 0:
@@ -56,6 +58,8 @@ class DiffusionLossConfig(BaseConfig):
             raise ValueError(f"mix_beta must be positive, got {self.mix_beta}.")
         if self.adaptive_weight_min <= 0:
             raise ValueError(f"adaptive_weight_min must be positive, got {self.adaptive_weight_min}.")
+        if self.kl_mask_threshold <= 0:
+            raise ValueError(f"kl_mask_threshold must be positive, got {self.kl_mask_threshold}.")
 
 
 @dataclass

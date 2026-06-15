@@ -19,6 +19,7 @@ from . import (
     qwen_image_flow_grpo,
     qwen_image_mix_grpo,
     sd3_dpo,
+    wan22_dance_grpo,
 )
 from .bagel_flow_grpo import *  # noqa: F401, F403
 from .qwen_image_diffusion_nft import *  # noqa: F401, F403
