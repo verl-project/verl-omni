@@ -240,17 +240,13 @@ def build(output_dir: str, *, seed: int = 42, dtype: torch.dtype = torch.bfloat1
 
 
 def _merge_image_processor_config(output_dir: str, processor) -> None:
-    """Merge the image-processor config into preprocessor_config.json.
-
-    ProcessorMixin.save_pretrained writes both the image processor and the audio
-    feature extractor to the same preprocessor_config.json, and the feature
-    extractor wins — dropping ``image_processor_type``. vLLM-Omni's loader then
-    can't find the image processor. Re-merge the image keys (the real Qwen3-Omni
-    checkpoint ships both in one file).
-    """
+    """Re-merge image-processor keys into preprocessor_config.json (save_pretrained lets
+    the audio feature extractor overwrite ``image_processor_type``). No-op if absent."""
     import json
 
     pc_path = os.path.join(output_dir, "preprocessor_config.json")
+    if not os.path.isfile(pc_path):
+        return
     with open(pc_path) as f:
         merged = json.load(f)
     image_dict = processor.image_processor.to_dict()

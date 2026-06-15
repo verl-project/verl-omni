@@ -24,7 +24,10 @@ export CPATH=/usr/include${CPATH:+:$CPATH}
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 
 NUM_GPUS=${NUM_GPUS:-2}
-MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/Qwen3-Omni}
+# Tiny model: prefer the community-hosted Hub checkpoint; build one locally if it
+# is not available yet (not uploaded / offline CI). Override with MODEL_PATH.
+MODEL_REPO=${MODEL_REPO:-tiny-random/Qwen3-Omni}
+MODEL_PATH=${MODEL_PATH:-}
 DATA_DIR=${DATA_DIR:-${HOME}/data/math}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-2}
 
@@ -38,10 +41,18 @@ STAGE_CONFIG="${REPO_ROOT}/tests/special_e2e/qwen3_omni_thinker_only_smoke.yaml"
 # Same Thinker-only module filter as the example recipe.
 EXCLUDE_MODULES=".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*"
 
-# ── Build dummy model if not present ──────────────────────────────────────────
-if [ ! -d "${MODEL_PATH}" ]; then
-    python3 "${REPO_ROOT}/tests/special_e2e/build_qwen3_omni_tiny_random.py" \
-        --output-dir "${MODEL_PATH}"
+# This recipe is validated on transformers<5; the CI base image may ship 5.x.
+pip install -q 'transformers<5'
+
+# ── Resolve the tiny model: Hub checkpoint if present, else build locally ──────
+if [ -z "${MODEL_PATH}" ]; then
+    if python3 -c "from huggingface_hub import snapshot_download; snapshot_download('${MODEL_REPO}')" 2>/dev/null; then
+        MODEL_PATH="${MODEL_REPO}"
+    else
+        MODEL_PATH="${HOME}/models/tiny-random/Qwen3-Omni"
+        [ -d "${MODEL_PATH}" ] || python3 "${REPO_ROOT}/tests/special_e2e/build_qwen3_omni_tiny_random.py" \
+            --output-dir "${MODEL_PATH}"
+    fi
 fi
 
 # ── Build dummy math dataset if not present ───────────────────────────────────
