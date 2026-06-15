@@ -33,6 +33,7 @@ from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import Q
 
 __all__ = ["QwenImagePipelineWithLogProbStepwise"]
 
+
 def maybe_to_cpu(value):
     """Move a single value to CPU if it is a ``torch.Tensor``; else return unchanged."""
     if isinstance(value, torch.Tensor):
@@ -465,7 +466,7 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
             torch.stack(all_timesteps).unsqueeze(0).expand(state.latents.shape[0], -1) if all_timesteps else None
         )
 
-        output.output = maybe_to_cpu(output.output) 
+        output.output = maybe_to_cpu(output.output)
 
         output.custom_output = {
             "all_latents": maybe_to_cpu(stacked_latents),
