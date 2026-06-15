@@ -4,8 +4,7 @@ Last updated: 06/15/2026.
 
 ---
 
-## Float32 precision loss in stored rollout latents
-
+(symptom-float32)=
 ### Symptom
 
 Training metrics show a systematic negative bias **at step 1** (before any
@@ -17,6 +16,7 @@ weight update):
 - Most visible with rollout correction (`bypass_mode=True`), but also
   degrades stored trajectory precision in standard training.
 
+(root-cause-float32)=
 ### Root cause
 
 `FlowMatchSDEDiscreteScheduler.step()` computes `log_prob` in **float32**
@@ -24,6 +24,7 @@ using the fp32 `prev_sample`, then **casts `prev_sample` back to
 `model_output.dtype` (bfloat16)** before returning.  The stored latents
 lose precision, creating a mismatch with the log-prob computation.
 
+(fix-float32)=
 ### Fix
 
 Two changes in the scheduler, one in the rollout adapter.
@@ -37,6 +38,7 @@ cannot accidentally pass lower precision.
 before the forward pass (performance), noise_pred is cast to float32 before
 the scheduler (precision), and all stored latents are in float32.
 
+(verification-float32)=
 ### Verification
 
 The fix eliminates the systematic precision-loss bias from the scheduler.
@@ -52,8 +54,7 @@ inference backends.
 
 ---
 
-## RoPE text-length mismatch under continuous batching
-
+(symptom-rope)=
 ### Symptom
 
 When `step_execution=True`, `actor/ppo_kl` is elevated even at step 1
@@ -65,6 +66,7 @@ This also affects the **stock vllm-omni (non-stepwise) path** in some
 configurations — the root cause is upstream, not specific to stepwise
 mode.
 
+(root-cause-rope)=
 ### Root cause
 
 vllm-omni sets Rotary Position Embedding (RoPE) sequence lengths from
@@ -79,6 +81,7 @@ Concretely, if a request has 200 valid tokens and is padded to width
 position for token 100 is computed as position 100 of a 200-length
 sequence rather than position 100 of a 1058-length sequence.
 
+(fix-rope)=
 ### Fix
 
 In `prepare_encode`, set `txt_seq_lens` from the padded embed width
@@ -96,6 +99,7 @@ The stepwise adapters in `verl_omni/experimental/` already do this.
 The stock vllm-omni path is still affected and tracked as an upstream
 issue.
 
+(verification-rope)=
 ### Verification
 
 Compare `actor/ppo_kl` at step 1 between `step_execution=True` and
@@ -106,8 +110,7 @@ difference).
 
 ---
 
-## fp32 latent storage regression in stepwise mode
-
+(symptom-fp32-stepwise)=
 ### Symptom
 
 Training metrics show a systematic negative bias **at step 1** when
@@ -120,6 +123,7 @@ Training metrics show a systematic negative bias **at step 1** when
 The same model/config produces correct `ratio_mean ≈ 1.0` when
 `step_execution=False`.
 
+(root-cause-fp32-stepwise)=
 ### Root cause
 
 `step_scheduler` stores `new_latents` in the model's compute dtype (bf16)
@@ -130,6 +134,7 @@ batching the engine gathers latents across in-flight requests:
 a freshly-added request has fp32 latents while stepped requests have
 bf16 latents, producing a "Mixed dtypes in latents batch" error.
 
+(fix-fp32-stepwise)=
 ### Fix
 
 Two changes in `step_scheduler`:
@@ -150,9 +155,8 @@ state.latents = new_latents.to(torch.float32)
 The non-CB `diffuse()` path already does this correctly — the stepwise
 override must match.
 
+(verification-fp32-stepwise)=
 ### Verification
 
 `ratio_mean ≈ 1.0` at step 1 with `step_execution=True`, matching the
 `step_execution=False` baseline within tolerance.
-
----

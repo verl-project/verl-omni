@@ -183,7 +183,8 @@ This is the most involved override. It must:
 The canonical reference is
 [`QwenImagePipelineWithLogProbStepwise.prepare_encode`](../../verl_omni/experimental/qwen_image_flow_grpo_stepwise/vllm_omni_rollout_adapter.py).
 
-<a id="rope-mismatch-cb"></a>
+(rope-mismatch-cb)=
+
 > **RoPE text length.** In continuous batching, vllm-omni pads prompt
 > embeddings to a shared `target_seq_len`. If you compute RoPE `txt_seq_lens`
 > from `mask.sum()` (valid token count), each request gets a *different* RoPE

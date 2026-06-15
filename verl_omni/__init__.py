@@ -24,7 +24,7 @@ try:
 
     if not vllm_omni.platforms.current_omni_platform.device_type:
         vllm_omni.platforms.current_omni_platform.device_type = "cpu"
-except ImportError:
+except Exception:
     pass
 
 
