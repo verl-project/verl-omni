@@ -115,15 +115,7 @@ WORKSPACE              # base directory for data (default: $HOME)
 
 ## Step 3: Perform FlowGRPO training
 
-The provided example script launches `python3 -m verl_omni.trainer.main_diffusion` with the BAGEL-specific config:
-
-- `+actor_rollout_ref.model.architecture=OmniBagelForConditionalGeneration` — selects the BAGEL registry entry
-- `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.deploy_config=$BAGEL_DEPLOY_CONFIG` — uses the BAGEL single-stage deploy config
-- `algorithm.adv_estimator=flow_grpo`
-- `actor_rollout_ref.rollout.name=vllm_omni`
-- `reward.custom_reward_function.name=compute_score_ocr`
-- LoRA fine-tuning on BAGEL MoT-specific projection layers
-- a single-node, `4`-GPU layout
+The provided example script launches `python3 -m verl_omni.trainer.main_diffusion` with BAGEL-specific config overrides for architecture, deploy config, LoRA targets, FSDP prefixes, and reward function.  See the script for the full command.
 
 Run the training script:
 
@@ -190,19 +182,6 @@ BAGEL's transformer layers are named `layers.N` (not `transformer_blocks.N`):
 ```bash
 actor_rollout_ref.model.fsdp_layer_prefixes="['layers.']"
 ```
-
-### CFG parameters
-
-BAGEL uses a 3-branch CFG scheme (gen, text-unconditional, image-unconditional) with global renormalisation. Override the defaults via Hydra:
-
-```bash
-+actor_rollout_ref.model.pipeline.cfg_text_scale=4.0
-+actor_rollout_ref.model.pipeline.cfg_img_scale=1.0
-+actor_rollout_ref.model.pipeline.cfg_renorm_type=global
-+actor_rollout_ref.model.pipeline.cfg_interval="[0.0, 1.0]"
-```
-
-These are mirrored in the rollout via `extra_args` in `DiffusionOutput.sampling_params.extra_args`.
 
 ### Timestep shift
 
