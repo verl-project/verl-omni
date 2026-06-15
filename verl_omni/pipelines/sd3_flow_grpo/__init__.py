@@ -12,15 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import (
-    qwen_image_flow_grpo_stepwise,
-    qwen_image_mix_grpo_stepwise,
-    sd3_flow_grpo_stepwise,
-)
-from .qwen_image_flow_grpo_stepwise import *  # noqa: F401, F403
-from .qwen_image_mix_grpo_stepwise import *  # noqa: F401, F403
-from .sd3_flow_grpo_stepwise import *  # noqa: F401, F403
+"""SD3.5 FlowGRPO training adapter."""
 
-__all__ = list(qwen_image_flow_grpo_stepwise.__all__)
-__all__ += list(qwen_image_mix_grpo_stepwise.__all__)
-__all__ += list(sd3_flow_grpo_stepwise.__all__)
+from .diffusers_training_adapter import StableDiffusion3FlowGRPO
+
+__all__ = ["StableDiffusion3FlowGRPO"]
