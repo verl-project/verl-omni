@@ -54,7 +54,6 @@ If possible, please add CI test(s) for your new feature:
 ## Building the Docs
 
 ```bash
-cd verl-omni
 pip install -e .
 pip install -r docs/requirements-docs.txt
 
