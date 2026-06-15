@@ -218,8 +218,6 @@ trainer.n_gpus_per_node=$GPUS_PER_NODE \
 trainer.nnodes=$NNODES \
 ```
 
-These values must match the launcher's `--nnodes` and `--nproc_per_node`.
-
 ### 7. Experiment name
 
 Tag the run with the cluster topology for bookkeeping:
