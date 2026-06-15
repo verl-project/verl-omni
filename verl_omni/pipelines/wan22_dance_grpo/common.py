@@ -96,4 +96,4 @@ def seed_from_prompt_ids(prompt_ids, global_steps: int = None):
     seed = int.from_bytes(hash_bytes[:8], byteorder="big")
     if global_steps is not None:
         seed += global_steps
-    return seed
+    return seed & 0xFFFFFFFFFFFFFFFF
