@@ -418,25 +418,25 @@ def compute_score_hpsv3(
     device: str = "npu",
     **kwargs,
 ) -> dict:
-    with _lock:
-        checkpoint_path = os.getenv("custom_reward_model_path", model_name)
-        assert checkpoint_path is not None, "HPSv3 checkpoint path must be provided via reward.reward_model.model_path"
+    checkpoint_path = os.getenv("custom_reward_model_path", model_name)
+    assert checkpoint_path is not None, "HPSv3 checkpoint path must be provided via reward.reward_model.model_path"
 
-        inferencer = _get_inferencer(checkpoint_path, device)
+    inferencer = _get_inferencer(checkpoint_path, device)
 
-        frame_interval = extra_info.get("frame_interval", 4)
-        pil_images = _extract_frames(solution_image, frame_interval=frame_interval)
+    frame_interval = extra_info.get("frame_interval", 4)
+    pil_images = _extract_frames(solution_image, frame_interval=frame_interval)
 
-        prompt = ground_truth if ground_truth else ""
-        scores = []
-        raw_reward_values = []
-        for pil_image in pil_images:
+    prompt = ground_truth if ground_truth else ""
+    scores = []
+    raw_reward_values = []
+    for pil_image in pil_images:
+        with _lock:
             raw_rewards = inferencer.reward([pil_image], [prompt])
             raw_value = raw_rewards[0][0].item()
-            scores.append(raw_value * reward_scale)
-            raw_reward_values.append(raw_value)
+        scores.append(raw_value * reward_scale)
+        raw_reward_values.append(raw_value)
 
-        score = sum(scores) / len(scores)
-        avg_raw = sum(raw_reward_values) / len(raw_reward_values)
+    score = sum(scores) / len(scores)
+    avg_raw = sum(raw_reward_values) / len(raw_reward_values)
 
-        return {"score": score, "hpsv3_raw": avg_raw}
+    return {"score": score, "hpsv3_raw": avg_raw}
