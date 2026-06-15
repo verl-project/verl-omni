@@ -379,7 +379,7 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageEditPlusPipeline):
         custom_prompt = req.prompts[0] if req.prompts else {}
         condition_images = _pick_condition_images(custom_prompt)
         if isinstance(custom_prompt, dict):
-            prompt_ids = custom_prompt.get("prompt_ids", prompt_ids)
+            prompt_ids = custom_prompt.get("prompt_ids", custom_prompt.get("prompt_token_ids", prompt_ids))
             prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
             negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
             negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)
