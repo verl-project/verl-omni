@@ -468,8 +468,7 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
             generator = torch.Generator(device=device).manual_seed(sampling_params.seed)
         if init_same_noise:
             latents_seed = seed_from_prompt_ids(
-                prompt_ids=prompt_ids,
-                global_steps=sampling_params.extra_args.get("global_steps")
+                prompt_ids=prompt_ids, global_steps=sampling_params.extra_args.get("global_steps")
             )
             latents_generator = torch.Generator(device=device).manual_seed(latents_seed)
         else:

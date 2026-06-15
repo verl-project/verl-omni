@@ -42,16 +42,12 @@ if __name__ == "__main__":
     parser.add_argument("--hdfs_dir", default=None)
     parser.add_argument(
         "--train_path",
-        default=os.path.join(
-            os.path.dirname(__file__), "video_prompts", "train.txt"
-        ),
+        default=os.path.join(os.path.dirname(__file__), "video_prompts", "train.txt"),
         help="Path to the train prompts file.",
     )
     parser.add_argument(
         "--test_path",
-        default=os.path.join(
-            os.path.dirname(__file__), "video_prompts", "test.txt"
-        ),
+        default=os.path.join(os.path.dirname(__file__), "video_prompts", "test.txt"),
         help="Path to the test prompts file.",
     )
     parser.add_argument(

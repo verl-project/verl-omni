@@ -432,7 +432,7 @@ def compute_score_hpsv3(
     for pil_image in pil_images:
         with _lock:
             raw_rewards = inferencer.reward([pil_image], [prompt])
-        raw_value = raw_rewards[0][0].item() 
+        raw_value = raw_rewards[0][0].item()
         scores.append(raw_value * reward_scale)
         raw_reward_values.append(raw_value)
 
