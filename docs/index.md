@@ -43,6 +43,7 @@ start/http_scorer.md
 :caption: Algorithms
 
 algo/flowgrpo.md
+algo/flowdppo.md
 algo/diffusion_dpo.md
 algo/diffusionnft.md
 algo/grpo_guard.md
