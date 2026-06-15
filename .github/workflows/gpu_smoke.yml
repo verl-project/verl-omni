@@ -77,13 +77,15 @@ jobs:
           fetch-depth: 0
       - name: Install dependencies
         run: |
-          pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@c7178d89bb7a70817f239febc84c3b21a714dae7"
+          pip3 install vllm==0.22.0
+          pip3 install vllm-omni==0.22.0
           pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
           pip3 install -r requirements.txt
           pip3 install -r requirements-test.txt
+          pip3 install kernels==0.14.1
           pip3 install --no-deps -e .
-          # --no-deps keeps the vllm 0.20.2 / torch stack intact; veomni's [gpu] extra pins
-          # torch 2.9 and would conflict. See docs/start/install.md "Optional engine backends".
+          # --no-deps keeps veomni from overriding the vllm/torch stack pulled in above.
+          # See docs/start/install.md "Optional engine backends".
           # TODO: rm --no-deps when VeOmni support torch2.11
           pip3 install veomni==0.1.11 --no-deps
           pip3 install torchcodec librosa soundfile av
