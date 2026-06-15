@@ -54,14 +54,11 @@ If possible, please add CI test(s) for your new feature:
 ## Building the Docs
 
 ```bash
-# Ensure verl-omni is on your PYTHONPATH, e.g.:
+cd verl-omni
 pip install -e .
+pip install -r docs/requirements-docs.txt
 
-# Install documentation dependencies
 cd docs
-pip install -r requirements-docs.txt
-
-# Generate HTML docs
 make clean
 make html
 
@@ -70,6 +67,8 @@ python -m http.server -d _build/html/
 ```
 
 Open your browser at http://localhost:8000 to explore the docs.
+
+If autodoc fails on missing `vllm` / `vllm_omni` imports, install the runtime stack from [docs/start/install.md](docs/start/install.md) first.
 
 ## Model & Algorithm Integrations
 
