@@ -429,12 +429,12 @@ def compute_score_hpsv3(
     prompt = ground_truth if ground_truth else ""
     scores = []
     raw_reward_values = []
-    for pil_image in pil_images:
-        with _lock:
+    with _lock:
+        for pil_image in pil_images:
             raw_rewards = inferencer.reward([pil_image], [prompt])
             raw_value = raw_rewards[0][0].item()
-        scores.append(raw_value * reward_scale)
-        raw_reward_values.append(raw_value)
+            scores.append(raw_value * reward_scale)
+            raw_reward_values.append(raw_value)
 
     score = sum(scores) / len(scores)
     avg_raw = sum(raw_reward_values) / len(raw_reward_values)
