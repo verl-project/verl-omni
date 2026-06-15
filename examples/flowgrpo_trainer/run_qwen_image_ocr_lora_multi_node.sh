@@ -14,14 +14,14 @@ reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
 # ---- Cluster topology --------------------------------------------------------
 NNODES=${NNODES:-2}
 GPUS_PER_NODE=${GPUS_PER_NODE:-4}
-TOTAL_GPUS=$((NNODES * GPUS_PER_NODE))     # 8
+TOTAL_GPUS=$((NNODES * GPUS_PER_NODE))  
 
 # ---- Parallelism -------------------------------------------------------------
-# Rollout: TP=1, DP=1 -> 16 independent vLLMOmniReplica instances (one per GPU).
+# Rollout: TP=1, DP=1.
 # Each replica's nnodes = (TP*DP)/GPUS_PER_NODE = 1, so run_headless is bypassed.
 ROLLOUT_TP=1
 # Reward: keep TP=4 so one reward server fits on 4 GPUs on a single node.
-# With TOTAL_GPUS=16 this yields 4 reward replicas (2 per node).
+# With TOTAL_GPUS=8 this yields 2 reward replicas (1 per node).
 REWARD_TP=4
 
 ENGINE=vllm_omni
@@ -32,15 +32,15 @@ REWARD_ENGINE=vllm
 # ppo_mini=16. Linearly scale by TOTAL_GPUS/4 = 4x to keep per-GPU work the
 # same while increasing global batch size, matching the RFC's "scale-up"
 # validation goal (equivalent per-GPU throughput, larger global batch).
-TRAIN_BATCH_SIZE=$((32 * TOTAL_GPUS / 4))   # 256
-PPO_MINI_BATCH_SIZE=$((16 * TOTAL_GPUS / 4)) # 128
+TRAIN_BATCH_SIZE=$((32 * TOTAL_GPUS / 4))   
+PPO_MINI_BATCH_SIZE=$((16 * TOTAL_GPUS / 4)) 
 PPO_MICRO_BATCH_PER_GPU=16                   # unchanged
 
 # Number of AgentLoopWorker actors that fan out prompts in parallel and call
 # the HTTP servers. Following the existing convention (one client per
 # rollout replica): TOTAL_GPUS / ROLLOUT_TP. NOTE: this knob controls the
 # *clients*, not the number of replicas (replicas = total_gpus / TP / DP).
-ROLLOUT_NUM_WORKERS=$((TOTAL_GPUS / ROLLOUT_TP))   # 16
+ROLLOUT_NUM_WORKERS=$((TOTAL_GPUS / ROLLOUT_TP)) 
 
 # Optional reproducibility (yaml defaults are null / unseeded):
 #   data.seed=42
