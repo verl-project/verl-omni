@@ -23,8 +23,8 @@ model_name=Wan-AI/Wan2.2-TI2V-5B-Diffusers
 export custom_reward_model_path=$WORKSPACE/CKPT/HPSv3/HPSv3.safetensors
 custom_reward_function_path=verl_omni/utils/reward_score/hpsv3_reward.py
 
-# 8-NPU Global Distribution
-NUM_GPUS_ACTOR_ROLLOUT_REWARD=8
+# 16/8-NPU Global Distribution
+NUM_GPUS_ACTOR_ROLLOUT_REWARD=16 # 8
 ROLLOUT_TP=1
 
 ENGINE=vllm_omni
@@ -34,7 +34,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     algorithm.adv_estimator=dance_grpo \
     actor_rollout_ref.model.algorithm=dance_grpo \
     actor_rollout_ref.actor.diffusion_loss.loss_mode=dance_grpo \
-    actor_rollout_ref.actor.diffusion_loss.clip_ratio=1e-5 \
     data.train_files=$hpsv3_train_path \
     data.val_files=$hpsv3_test_path \
     data.train_batch_size=64 \
