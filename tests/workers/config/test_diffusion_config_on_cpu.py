@@ -41,21 +41,28 @@ class TestDiffusionLossConfig:
         assert cfg.mix_beta == pytest.approx(0.5)
         assert cfg.ref_kl_coef == pytest.approx(0.0)
         assert cfg.adaptive_weight_min == pytest.approx(1e-5)
+        assert cfg.kl_mask_threshold == pytest.approx(1e-5)
+        assert cfg.add_kl_coefficient is True
 
     def test_custom_values(self):
         cfg = DiffusionLossConfig(
-            loss_mode="diffusion_nft",
+            loss_mode="flow_dppo",
             clip_ratio=0.01,
             adv_clip_max=10.0,
             mix_beta=0.25,
             ref_kl_coef=0.1,
             adaptive_weight_min=1e-4,
+            kl_mask_threshold=1e-6,
+            add_kl_coefficient=False,
         )
+        assert cfg.loss_mode == "flow_dppo"
         assert cfg.clip_ratio == pytest.approx(0.01)
         assert cfg.adv_clip_max == pytest.approx(10.0)
         assert cfg.mix_beta == pytest.approx(0.25)
         assert cfg.ref_kl_coef == pytest.approx(0.1)
         assert cfg.adaptive_weight_min == pytest.approx(1e-4)
+        assert cfg.kl_mask_threshold == pytest.approx(1e-6)
+        assert cfg.add_kl_coefficient is False
 
     def test_invalid_loss_mode_raises(self):
         with pytest.raises(ValueError, match="Invalid diffusion loss_mode"):
@@ -67,6 +74,7 @@ class TestDiffusionLossConfig:
             ({"adv_clip_max": 0.0}, "adv_clip_max.*positive"),
             ({"mix_beta": 0.0}, "mix_beta.*positive"),
             ({"adaptive_weight_min": 0.0}, "adaptive_weight_min.*positive"),
+            ({"kl_mask_threshold": 0.0}, "kl_mask_threshold.*positive"),
         ],
     )
     def test_invalid_diffusion_nft_loss_values_raise(self, kwargs, match):
