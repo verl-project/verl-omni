@@ -25,14 +25,8 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-# Conditionally include NPUColocateWorkerMixin in the class hierarchy.
-# vLLM v1 multiproc_executor asserts that an extension does not redefine
-# attributes already present on the worker class. On GPU,
-# GPUARWorker already provides ``_maybe_get_memory_pool_context``, ``sleep``,
-# and ``wake_up``, so adding the NPU mixin (which redefines them, even when
-# guarded by ``_is_npu_platform()`` internally) trips that assertion. On NPU
-# the mixin is required because the underlying worker does not implement
-# the NPU-specific memory-pool / sleep / wake_up flow.
+# Add the NPU mixin only on NPU; on GPU it redefines existing worker methods and
+# trips vLLM v1 multiproc_executor's no-attribute-redefinition assertion.
 def _platform_extension_bases():
     # TODO: the NPU (Ascend) path below is not yet verified on real NPU hardware;
     #       only the GPU branch is exercised by current tests / training runs.
@@ -80,10 +74,7 @@ class vLLMOmniColocateWorkerExtension(*_platform_extension_bases()):
         model_runner = getattr(self, "model_runner", None)
         if model_runner is None:
             return None
-        if hasattr(model_runner, "get_model"):
-            model = model_runner.get_model()
-        else:
-            model = getattr(model_runner, "model", None)
+        model = model_runner.get_model() if hasattr(model_runner, "get_model") else getattr(model_runner, "model", None)
         model_config = getattr(model_runner, "model_config", None)
         if model is not None and model_config is not None and hasattr(model, "load_weights"):
             return model, model_config

@@ -118,7 +118,7 @@ def _register_qwen3_omni_automodel() -> None:
     AutoModelForCausalLM.register(Qwen3OmniMoeConfig, Qwen3OmniMoeForConditionalGeneration)
 
 
-def _patch_hf_processor_for_qwen3_omni() -> None:
+def patch_hf_processor_for_qwen3_omni() -> None:
     """Wrap ``verl.utils.tokenizer.hf_processor`` to recognize Qwen3OmniMoeProcessor.
 
     The original uses a ``match`` block that cannot be extended at runtime; we
@@ -170,7 +170,7 @@ def _patch_hf_processor_for_qwen3_omni() -> None:
 def apply_qwen3_omni_thinker_patches() -> None:
     """Apply all Qwen3-Omni Thinker patches (idempotent registrations)."""
     _register_qwen3_omni_automodel()
-    _patch_hf_processor_for_qwen3_omni()
+    patch_hf_processor_for_qwen3_omni()
 
 
 # Apply on import so this module works as a verl ``external_lib`` target.
