@@ -16,6 +16,7 @@ import torch
 
 QWEN_IMAGE_VAE_SCALE_FACTOR = 8
 
+
 def coalesce_not_none(value, default):
     return default if value is None else value
 
