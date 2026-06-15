@@ -283,5 +283,5 @@ The script reads `NNODES` and `GPUS_PER_NODE` from the environment (defaults:
 `NNODES=2`, `GPUS_PER_NODE=4`). Override as needed:
 
 ```bash
-NNODES=4 GPUS_PER_NODE=8 bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_multi_node.sh
+NNODES=2 GPUS_PER_NODE=4 bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_multi_node.sh
 ```
