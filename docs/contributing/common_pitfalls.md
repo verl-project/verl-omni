@@ -59,7 +59,7 @@ inference backends.
 ## RoPE Sequence Length Mismatch
 
 (symptom-rope)=
-### Symptom
+### Symptom (RoPE)
 
 When `step_execution=True`, `actor/ppo_kl` is elevated even at step 1
 compared to the full-forward (`step_execution=False`) path. The effect
@@ -71,7 +71,7 @@ configurations — the root cause is upstream, not specific to stepwise
 mode.
 
 (root-cause-rope)=
-### Root cause
+### Root cause (RoPE)
 
 vllm-omni sets Rotary Position Embedding (RoPE) sequence lengths from
 `mask.sum()` (valid token count), while diffusers sets them from the
@@ -86,7 +86,7 @@ position for token 100 is computed as position 100 of a 200-length
 sequence rather than position 100 of a 1058-length sequence.
 
 (fix-rope)=
-### Fix
+### Fix (RoPE)
 
 In `prepare_encode`, set `txt_seq_lens` from the padded embed width
 instead of from `mask.sum()`:
@@ -104,7 +104,7 @@ The stock vllm-omni path is still affected and tracked as an upstream
 issue.
 
 (verification-rope)=
-### Verification
+### Verification (RoPE)
 
 Compare `actor/ppo_kl` at step 1 between `step_execution=True` and
 `step_execution=False` runs with all other knobs identical. After the
@@ -117,7 +117,7 @@ difference).
 ## Float32 Precision Loss in Stepwise Scheduler
 
 (symptom-fp32-stepwise)=
-### Symptom
+### Symptom (Stepwise Scheduler)
 
 Training metrics show a systematic negative bias **at step 1** when
 `step_execution=True`:
@@ -130,7 +130,7 @@ The same model/config produces correct `ratio_mean ≈ 1.0` when
 `step_execution=False`.
 
 (root-cause-fp32-stepwise)=
-### Root cause
+### Root cause (Stepwise Scheduler)
 
 `step_scheduler` stores `new_latents` in the model's compute dtype (bf16)
 instead of fp32. The trainer later recomputes log-probs on these stored
@@ -141,7 +141,7 @@ a freshly-added request has fp32 latents while stepped requests have
 bf16 latents, producing a "Mixed dtypes in latents batch" error.
 
 (fix-fp32-stepwise)=
-### Fix
+### Fix (Stepwise Scheduler)
 
 Two changes in `step_scheduler`:
 
@@ -162,7 +162,7 @@ The non-CB `diffuse()` path already does this correctly — the stepwise
 override must match.
 
 (verification-fp32-stepwise)=
-### Verification
+### Verification (Stepwise Scheduler)
 
 `ratio_mean ≈ 1.0` at step 1 with `step_execution=True`, matching the
 `step_execution=False` baseline within tolerance.
