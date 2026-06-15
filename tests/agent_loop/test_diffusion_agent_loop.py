@@ -152,11 +152,11 @@ def test_single_turn(init_config):
                 "reward_model": np.array([{"style": "rule", "ground_truth": ""}] * len(raw_prompts)),
             },
         )
-        rollout_n = init_config.actor_rollout_ref.rollout.n
-        batch = batch.repeat(rollout_n)
+        n = init_config.actor_rollout_ref.rollout.n
+        batch = batch.repeat(n)
         batch.meta_info["global_steps"] = 0
         result = agent_loop_manager.generate_sequences(prompts=batch)
-        assert len(result) == len(raw_prompts) * rollout_n
+        assert len(result) == len(raw_prompts) * n
 
         expected_batch_keys = [
             "responses",
