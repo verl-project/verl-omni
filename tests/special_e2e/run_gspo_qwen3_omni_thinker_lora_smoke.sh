@@ -26,7 +26,7 @@ export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 NUM_GPUS=${NUM_GPUS:-2}
 # Tiny model: prefer the community-hosted Hub checkpoint; build one locally if it
 # is not available yet (not uploaded / offline CI). Override with MODEL_PATH.
-MODEL_REPO=${MODEL_REPO:-tiny-random/Qwen3-Omni}
+MODEL_REPO=${MODEL_REPO:-ShowMaker27/Qwen3-Omni-tiny-random}
 MODEL_PATH=${MODEL_PATH:-}
 DATA_DIR=${DATA_DIR:-${HOME}/data/math}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-2}
