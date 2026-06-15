@@ -16,12 +16,6 @@ import torch
 
 QWEN_IMAGE_VAE_SCALE_FACTOR = 8
 
-def maybe_to_cpu(value):
-    """Move a single value to CPU if it is a ``torch.Tensor``; else return unchanged."""
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu()
-    return value
-
 def coalesce_not_none(value, default):
     return default if value is None else value
 

@@ -28,7 +28,7 @@ from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.worker.utils import DiffusionRequestState
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
-from verl_omni.pipelines.qwen_image_flow_grpo.common import build_img_shapes, coalesce_not_none, maybe_to_cpu
+from verl_omni.pipelines.qwen_image_flow_grpo.common import build_img_shapes, coalesce_not_none
 from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
 
 __all__ = ["QwenImagePipelineWithLogProbStepwise"]
@@ -459,14 +459,13 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
             torch.stack(all_timesteps).unsqueeze(0).expand(state.latents.shape[0], -1) if all_timesteps else None
         )
 
-        output.output = maybe_to_cpu(output.output)
         output.custom_output = {
-            "all_latents": maybe_to_cpu(stacked_latents),
-            "all_log_probs": maybe_to_cpu(stacked_log_probs),
-            "all_timesteps": maybe_to_cpu(stacked_timesteps),
-            "prompt_embeds": maybe_to_cpu(state.prompt_embeds),
-            "prompt_embeds_mask": maybe_to_cpu(state.prompt_embeds_mask),
-            "negative_prompt_embeds": maybe_to_cpu(state.negative_prompt_embeds),
-            "negative_prompt_embeds_mask": maybe_to_cpu(state.negative_prompt_embeds_mask),
+            "all_latents": stacked_latents,
+            "all_log_probs": stacked_log_probs,
+            "all_timesteps": stacked_timesteps,
+            "prompt_embeds": state.prompt_embeds,
+            "prompt_embeds_mask": state.prompt_embeds_mask,
+            "negative_prompt_embeds": state.negative_prompt_embeds,
+            "negative_prompt_embeds_mask": state.negative_prompt_embeds_mask,
         }
         return output
