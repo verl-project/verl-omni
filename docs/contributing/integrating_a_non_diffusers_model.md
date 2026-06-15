@@ -347,7 +347,7 @@ implementation is more involved because of the 3-branch CFG:
    `cfg_img_v_t = forward_gen(cfg_img_inputs)`
 4. Combine via `_combine_cfg()` and call `scheduler.sample_previous_step()`
 
-The return signature is always `(log_prob, prev_sample_mean, std_dev_t)`.
+The return signature is always ``(log_prob, prev_sample_mean, std_dev_t, sqrt_dt)``.
 
 ### 3.4 Implement the Scheduler
 

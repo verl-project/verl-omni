@@ -247,10 +247,10 @@ This section helps users migrating from the Qwen-Image FlowGRPO example to BAGEL
 | **Model type** | Diffusers `ModelMixin` | Standalone `nn.Module` (`NonDiffusersModelBase`) |
 | **Text input** | Pre-computed prompt embeddings `(B, L, D)` | Raw token IDs `(B, L)` with internal embedding |
 | **CFG** | True CFG with negative prompt embeddings | 3-branch CFG (gen / text-uncond / img-uncond) with global/channel renormalisation |
-| **Scheduler** | Euler-based → `FlowMatchSDEDiscreteScheduler` | Euler-based → `FlowMatchSDEDiscreteScheduler` with `_BagelSchedulerAdapter` (4-arg `step()` convention) |
+| **Scheduler** | `FlowMatchEulerDiscreteScheduler` → `FlowMatchSDEDiscreteScheduler` | Internal ODE step → `FlowMatchSDEDiscreteScheduler` with `_BagelSchedulerAdapter` (4-arg `step()` convention) |
 | **Timestep convention** | `t/1000` | Raw sigma with SD3-style shift of `3.0` |
 | **Latent shape** | Packed sequence `(B, seq, patch_dim)` | Packed sequence `(B, seq, patch_dim)` |
-| **Position encoding** | 3-D RoPE (frame, H, W) for Qwen-Image | 2-D sincos position embedding for latent patches |
+| **Position encoding** | 2-D RoPE | 2-D sincos position embedding for latent patches |
 | **Architecture registration** | Auto-detected from `model_index.json` | Explicit: `+actor_rollout_ref.model.architecture=OmniBagelForConditionalGeneration` |
 | **Weight loading** | `diffusers.AutoModel.from_pretrained` | `BagelForTraining.from_pretrained` reading `ema.safetensors` directly |
 | **LoRA targets** | Standard transformer `*_proj` layers | MoT dual-pathway layers (`*_proj` + `*_moe_gen`) |
