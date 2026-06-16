@@ -56,12 +56,9 @@ jobs:
         # Informational only — install issues against latest verl must not fail the workflow.
         continue-on-error: true
         run: |
-          pip3 install vllm==0.22.0
-          pip3 install vllm-omni==0.22.0
+          pip3 install ".[gpu,dev]"
+          pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
           pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@main"
-          pip3 install -r requirements.txt
-          pip3 install -r requirements-test.txt
-          pip3 install kernels==0.14.1
           pip3 install --no-deps -e .
       - name: Run GPU smoke tests (verl latest main)
         # Informational only — failures here are expected when latest verl drifts and must not fail the workflow.

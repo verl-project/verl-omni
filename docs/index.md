@@ -43,6 +43,7 @@ start/http_scorer.md
 :caption: Algorithms
 
 algo/flowgrpo.md
+algo/flowdppo.md
 algo/diffusion_dpo.md
 algo/diffusionnft.md
 algo/grpo_guard.md
@@ -83,6 +84,7 @@ api/utils.rst
 
 contributing/editing-agent-instructions.md
 contributing/integrating_a_diffusion_model.md
+contributing/integrating_a_stepwise_continuous_batching_model.md
 contributing/integrating_a_new_policy_gradient_algorithm_for_diffusion_model.md
 contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md
 contributing/common_pitfalls.md
