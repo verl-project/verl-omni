@@ -303,7 +303,8 @@ class BagelPipelineWithLogProb(BagelPipeline):
 
         # Per-request scheduler setup matching training-side sigma schedule.
         assert req.sampling_params.num_inference_steps is not None, "num_inference_steps must be set for RL rollouts"
-        setup_bagel_sigmas(self.scheduler._inner, req.sampling_params.num_inference_steps)
+        bagel_num_timesteps = int(req.sampling_params.num_inference_steps)
+        setup_bagel_sigmas(self.scheduler._inner, bagel_num_timesteps)
 
         # Reset adapter state *after* set_timesteps so inner step_index is None.
         self.scheduler.begin_forward(
@@ -312,7 +313,14 @@ class BagelPipelineWithLogProb(BagelPipeline):
             return_logprobs=logprobs,
         )
 
-        output = super().forward(req)
+        # vllm-omni 0.22+ uses linspace(1, 0, num_timesteps + 1), which runs one
+        # extra denoise step vs official BAGEL.  Pass N-1 so rollout sigmas match
+        # setup_bagel_sigmas / training (see vllm-omni issue #4470).
+        req.sampling_params.num_inference_steps = bagel_num_timesteps - 1
+        try:
+            output = super().forward(req)
+        finally:
+            req.sampling_params.num_inference_steps = bagel_num_timesteps
 
         # Slice trajectory to the SDE window so training only sees noisy steps.
         traj_latents = output.trajectory_latents

@@ -54,12 +54,15 @@ def setup_bagel_sigmas(
 ) -> list[float]:
     """Compute shifted sigmas and configure the scheduler for BAGEL.
 
-    Returns the sigma list (before the terminal zero) for reference.
-    """
-    if num_steps <= 0:
-        raise ValueError(f"num_steps must be positive, got {num_steps}")
+    ``num_steps`` is official BAGEL's ``num_timesteps`` (e.g. 50 → 49 denoise
+    sigmas).  See https://github.com/vllm-project/vllm-omni/issues/4470.
 
-    t = torch.linspace(1, 0, num_steps + 1, dtype=torch.float32, device=device or "cpu")
+    Returns the sigma list (dropping the terminal zero) for reference.
+    """
+    if num_steps <= 1:
+        raise ValueError(f"num_steps must be > 1 for BAGEL denoising, got {num_steps}")
+
+    t = torch.linspace(1, 0, num_steps, dtype=torch.float32, device=device or "cpu")
     t_shifted = bagel_time_shift(shift, t)
     sigmas = t_shifted[:-1].tolist()
 
