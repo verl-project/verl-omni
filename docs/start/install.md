@@ -36,16 +36,12 @@ uv pip install -e ".[gpu]" --torch-backend=auto
 
 It will install `vllm` for the CUDA PyTorch stack and `kernels` for the actor FA3 backend.
 
-For Ascend NPU, install git-pinned `vllm` and `vllm-ascend` manually (there is no pip extra — Ascend needs CANN-specific builds and pins that vary by site):
+For Ascend NPU:
 
 ```bash
-uv pip install "vllm @ git+https://github.com/vllm-project/vllm.git@releases/v0.22.0"
+uv pip install vllm==0.22.0
 uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@bb4d0776eee8fc45c3484a45c971a7049f1a2bbf"
 ```
-
-The `vllm-ascend` commit is tracked in [`.github/vllm_ascend_pin.txt`](https://github.com/verl-project/verl-omni/blob/main/.github/vllm_ascend_pin.txt).
-
-> Note: Install the rollout backend (`vllm` / `vllm-ascend`) before step 3, as it may override your existing PyTorch stack. NPU recipes use `actor_rollout_ref.model.attn_backend=_native_npu` instead of the CUDA FA3 `kernels` package.
 
 3. Install VeRL-Omni:
 
@@ -120,7 +116,6 @@ For Ascend NPU:
 ```bash
 python -c "import torch; import torch_npu; print('torch', torch.__version__, '| NPU', torch.npu.is_available())"
 python -c "import vllm; print('vllm', vllm.__version__)"
-python -c "import vllm_omni; print('vllm-omni OK')"
 python -c "import verl; print('verl', verl.__version__)"
 python -c "import verl_omni; print('VeRL-Omni ready')"
 ```
