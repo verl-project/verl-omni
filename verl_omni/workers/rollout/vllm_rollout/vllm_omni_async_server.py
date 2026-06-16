@@ -235,7 +235,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         multi_modal_data = self._build_multi_modal_data(image_data, video_data)
         lora_request = await self._resolve_lora_request()
         prompt, params = self._preprocess_input(
-            prompt_ids, sampling_params, multi_modal_data, lora_request, negative_prompt_ids
+            prompt_ids, sampling_params, multi_modal_data, lora_request, negative_prompt_ids, prompt_mask
         )
         final_res = await self._run_generation(prompt, params, request_id, lora_request, priority)
         return self._process_output(final_res, params, sampling_params)
@@ -292,6 +292,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         multi_modal_data: dict[str, Any],
         lora_request: Optional[LoRARequest],
         negative_prompt_ids: Optional[list[int]],
+        prompt_mask: torch.BoolTensor | None = None,
     ):
         """Build the engine prompt + sampling params for the active mode.
 

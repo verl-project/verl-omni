@@ -41,9 +41,6 @@ STAGE_CONFIG="${REPO_ROOT}/tests/special_e2e/qwen3_omni_thinker_only_smoke.yaml"
 # Same Thinker-only module filter as the example recipe.
 EXCLUDE_MODULES=".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*"
 
-# This recipe is validated on transformers<5; the CI base image may ship 5.x.
-pip install -q 'transformers<5'
-
 # ── Resolve the tiny model: Hub checkpoint if present, else build locally ──────
 if [ -z "${MODEL_PATH}" ]; then
     if python3 -c "from huggingface_hub import snapshot_download; snapshot_download('${MODEL_REPO}')" 2>/dev/null; then
