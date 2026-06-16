@@ -188,15 +188,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         video_data: Optional[list[Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
         prompt_mask: torch.BoolTensor | None = None,
-        raw_prompt: Optional[str] = None,
-        raw_negative_prompt: Optional[str] = None,
         priority: int = 0,
     ) -> DiffusionOutput:
         """Generate sequence with token-in-image-out."""
         prompt_ids = normalize_token_ids(prompt_ids)
-        sampling_params = sampling_params.copy()
-        raw_prompt = raw_prompt or sampling_params.pop("_raw_prompt", None)
-        raw_negative_prompt = raw_negative_prompt or sampling_params.pop("_raw_negative_prompt", None)
         default_params_list = self.engine.default_sampling_params_list
 
         multi_modal_data = {}
@@ -219,15 +214,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_ids}
         if prompt_mask is not None:
             custom_prompt["prompt_mask"] = prompt_mask
-        if raw_prompt is not None:
-            custom_prompt["prompt"] = raw_prompt
         if len(default_params_list) > 1:
             # Multi-stage pipelines tag the diffusion stage so the orchestrator can route inputs correctly.
             custom_prompt["modalities"] = ["image"]
         if negative_prompt_ids is not None:
             custom_prompt["negative_prompt_ids"] = negative_prompt_ids
-        if raw_negative_prompt is not None:
-            custom_prompt["negative_prompt"] = raw_negative_prompt
         if multi_modal_data:
             custom_prompt["multi_modal_data"] = multi_modal_data
             custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
@@ -277,41 +268,19 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         else:
             log_probs = None
 
-        all_latents = mm_output.get("all_latents")
-        all_timesteps = mm_output.get("all_timesteps")
-        prompt_embeds = mm_output.get("prompt_embeds")
-        prompt_embeds_mask = mm_output.get("prompt_embeds_mask")
-        pooled_prompt_embeds = mm_output.get("pooled_prompt_embeds")
-        text_ids = mm_output.get("text_ids")
-        latent_image_ids = mm_output.get("latent_image_ids")
-        negative_prompt_embeds = mm_output.get("negative_prompt_embeds")
-        negative_prompt_embeds_mask = mm_output.get("negative_prompt_embeds_mask")
-        negative_pooled_prompt_embeds = mm_output.get("negative_pooled_prompt_embeds")
-        negative_text_ids = mm_output.get("negative_text_ids")
-        latents_clean = mm_output.get("latents_clean")
-        train_timesteps = mm_output.get("train_timesteps")
+        def _maybe_unbatch(value: Any) -> Any:
+            if value is None:
+                return None
+            if isinstance(value, torch.Tensor):
+                return value[0] if value.dim() > 0 else value
+            if isinstance(value, np.ndarray):
+                return value[0] if value.ndim > 0 else value
+            if isinstance(value, (list, tuple)):
+                return value[0] if value else None
+            return value
 
-        # TODO(andy): refactor later.
-        extra_fields = {
-            "all_latents": all_latents[0] if all_latents is not None else None,
-            "all_timesteps": all_timesteps[0] if all_timesteps is not None else None,
-            "latents_clean": latents_clean[0] if latents_clean is not None else None,
-            "train_timesteps": train_timesteps[0] if train_timesteps is not None else None,
-            "prompt_embeds": prompt_embeds[0] if prompt_embeds is not None else None,
-            "prompt_embeds_mask": prompt_embeds_mask[0] if prompt_embeds_mask is not None else None,
-            "pooled_prompt_embeds": pooled_prompt_embeds[0] if pooled_prompt_embeds is not None else None,
-            "text_ids": text_ids[0] if text_ids is not None else None,
-            "latent_image_ids": latent_image_ids[0] if latent_image_ids is not None else None,
-            "negative_prompt_embeds": negative_prompt_embeds[0] if negative_prompt_embeds is not None else None,
-            "negative_prompt_embeds_mask": negative_prompt_embeds_mask[0]
-            if negative_prompt_embeds_mask is not None
-            else None,
-            "negative_pooled_prompt_embeds": negative_pooled_prompt_embeds[0]
-            if negative_pooled_prompt_embeds is not None
-            else None,
-            "negative_text_ids": negative_text_ids[0] if negative_text_ids is not None else None,
-            "global_steps": self.global_steps,
-        }
+        extra_fields = {k: _maybe_unbatch(v) for k, v in mm_output.items() if k != "all_log_probs"}
+        extra_fields["global_steps"] = self.global_steps
 
         # Determine stop reason from finish_reason
         if final_res.request_output is not None and hasattr(final_res.request_output, "finish_reason"):

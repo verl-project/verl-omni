@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SD3.5 FlowGRPO training adapter."""
+"""Experimental SD3.5 FlowGRPO training adapter."""
 
 from .diffusers_training_adapter import StableDiffusion3FlowGRPO
 

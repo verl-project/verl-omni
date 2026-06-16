@@ -70,21 +70,22 @@ def _extract_text_prompts(prompts: list) -> tuple[list[str] | None, list[str] | 
     return prompt, negative_prompt
 
 
-def _to_token_list(token_ids: Any) -> list[int]:
-    if token_ids is None:
-        return []
-    if isinstance(token_ids, torch.Tensor):
-        token_ids = token_ids.detach().cpu()
-        if token_ids.ndim > 1:
-            token_ids = token_ids[0]
-        return [int(item) for item in token_ids.tolist()]
-    if isinstance(token_ids, tuple):
-        token_ids = list(token_ids)
-    if isinstance(token_ids, list):
-        if token_ids and isinstance(token_ids[0], list | tuple):
-            token_ids = token_ids[0]
-        return [int(item) for item in token_ids]
-    return []
+def _prompt_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return value
+    return None
+
+
+def _extract_model_prompts(prompts: list, extra_args: dict[str, Any] | None) -> tuple[list[str] | None, list[str] | None]:
+    prompt, negative_prompt = _extract_text_prompts(prompts)
+    extra_args = extra_args or {}
+    prompt = prompt or _prompt_list(extra_args.get("_model_prompt"))
+    negative_prompt = negative_prompt or _prompt_list(extra_args.get("_model_negative_prompt"))
+    return prompt, negative_prompt
 
 
 def _sd3_image_seq_len(height: int, width: int, vae_scale_factor: int = 8) -> int:
@@ -171,28 +172,6 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
     def _model_dtype(self) -> torch.dtype:
         return self.od_config.dtype
 
-    def _decode_token_prompt(self, token_ids: Any) -> str | None:
-        token_list = _to_token_list(token_ids)
-        if not token_list:
-            return None
-        text = self.tokenizer.decode(token_list, skip_special_tokens=True).strip()
-        return text or None
-
-    def _ensure_text_prompts(self, prompts: list | None) -> None:
-        if not prompts or not isinstance(prompts[0], dict):
-            return
-
-        custom_prompt = prompts[0]
-        if not custom_prompt.get("prompt"):
-            prompt = self._decode_token_prompt(custom_prompt.get("prompt_token_ids"))
-            if prompt is not None:
-                custom_prompt["prompt"] = prompt
-
-        if not custom_prompt.get("negative_prompt"):
-            negative_prompt = self._decode_token_prompt(custom_prompt.get("negative_prompt_ids"))
-            if negative_prompt is not None:
-                custom_prompt["negative_prompt"] = negative_prompt
-
     # ------------------------------------------------------------------
     # Step-execution contract
     # ------------------------------------------------------------------
@@ -211,8 +190,7 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
         """
         del kwargs
         sampling = state.sampling
-        self._ensure_text_prompts(state.prompts)
-        prompt, negative_prompt = _extract_text_prompts(state.prompts or [])
+        prompt, negative_prompt = _extract_model_prompts(state.prompts or [], sampling.extra_args)
         if prompt is None:
             raise ValueError(
                 "StableDiffusion3PipelineWithLogProb.prepare_encode requires a text 'prompt' in state.prompts."
@@ -431,38 +409,41 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
         del kwargs
         self._current_timestep = None
 
-        image = self._decode_latents(state.latents)
+        pooled_prompt_embeds = self._pooled_cache.get(state.request_id)
+        negative_pooled_prompt_embeds = self._negative_pooled_cache.get(state.request_id)
+        try:
+            image = self._decode_latents(state.latents)
 
-        all_latents = state.all_latents
-        all_log_probs = state.all_log_probs
-        all_timesteps = state.all_timesteps
+            all_latents = state.all_latents
+            all_log_probs = state.all_log_probs
+            all_timesteps = state.all_timesteps
 
-        stacked_latents = torch.stack(all_latents, dim=1) if all_latents else None
-        stacked_log_probs = (
-            torch.stack(all_log_probs, dim=1) if all_log_probs and all_log_probs[0] is not None else None
-        )
-        stacked_timesteps = (
-            torch.stack(all_timesteps).unsqueeze(0).expand(state.latents.shape[0], -1) if all_timesteps else None
-        )
+            stacked_latents = torch.stack(all_latents, dim=1) if all_latents else None
+            stacked_log_probs = (
+                torch.stack(all_log_probs, dim=1) if all_log_probs and all_log_probs[0] is not None else None
+            )
+            stacked_timesteps = (
+                torch.stack(all_timesteps).unsqueeze(0).expand(state.latents.shape[0], -1) if all_timesteps else None
+            )
 
-        pooled_prompt_embeds = self._pooled_cache.pop(state.request_id, None)
-        negative_pooled_prompt_embeds = self._negative_pooled_cache.pop(state.request_id, None)
-
-        return DiffusionOutput(
-            output=image,
-            custom_output={
-                "all_latents": stacked_latents,
-                "all_log_probs": stacked_log_probs,
-                "all_timesteps": stacked_timesteps,
-                "prompt_embeds": state.prompt_embeds,
-                "prompt_embeds_mask": state.prompt_embeds_mask,
-                "pooled_prompt_embeds": pooled_prompt_embeds,
-                "negative_prompt_embeds": state.negative_prompt_embeds,
-                "negative_prompt_embeds_mask": state.negative_prompt_embeds_mask,
-                "negative_pooled_prompt_embeds": negative_pooled_prompt_embeds,
-            },
-            to_cpu=True,
-        )
+            return DiffusionOutput(
+                output=image,
+                custom_output={
+                    "all_latents": stacked_latents,
+                    "all_log_probs": stacked_log_probs,
+                    "all_timesteps": stacked_timesteps,
+                    "prompt_embeds": state.prompt_embeds,
+                    "prompt_embeds_mask": state.prompt_embeds_mask,
+                    "pooled_prompt_embeds": pooled_prompt_embeds,
+                    "negative_prompt_embeds": state.negative_prompt_embeds,
+                    "negative_prompt_embeds_mask": state.negative_prompt_embeds_mask,
+                    "negative_pooled_prompt_embeds": negative_pooled_prompt_embeds,
+                },
+                to_cpu=True,
+            )
+        finally:
+            self._pooled_cache.pop(state.request_id, None)
+            self._negative_pooled_cache.pop(state.request_id, None)
 
     def _decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
         if self.output_type == "latent":
@@ -588,8 +569,7 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
         logprobs: bool = True,
     ) -> DiffusionOutput:
         """End-to-end SD3.5 generation with rollout trajectory collection."""
-        self._ensure_text_prompts(req.prompts)
-        req_prompt, req_negative_prompt = _extract_text_prompts(req.prompts or [])
+        req_prompt, req_negative_prompt = _extract_model_prompts(req.prompts or [], req.sampling_params.extra_args)
         prompt = req_prompt if req_prompt is not None else prompt
         negative_prompt = req_negative_prompt if req_negative_prompt is not None else negative_prompt
 

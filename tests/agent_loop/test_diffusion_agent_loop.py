@@ -24,8 +24,25 @@ from verl.protocol import DataProto
 from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.agent_loop import DiffusionAgentLoopWorker
+from verl_omni.agent_loop.single_turn_agent_loop import _messages_to_model_prompt
 
 from ..utils.gpu_test_topology import resolve_diffusion_agent_loop_gpu_topology
+
+
+def test_messages_to_model_prompt_extracts_user_text():
+    messages = [
+        {"role": "system", "content": "System instructions"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Read this OCR text"},
+                {"type": "image", "image": "ignored"},
+            ],
+        },
+    ]
+
+    assert _messages_to_model_prompt(messages) == "Read this OCR text"
+    assert _messages_to_model_prompt("plain prompt") == "plain prompt"
 
 
 def _create_tp_compatible_model(parent_dir, src_model_path, num_attention_heads=2):

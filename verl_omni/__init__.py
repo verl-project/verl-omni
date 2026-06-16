@@ -28,6 +28,7 @@ except Exception:
     pass
 
 
+# Import pipelines / rollout / reward loop / engines to auto-register them
 # Apply model patches and auto-register pipelines / rollout / reward loop / engines
 import verl_omni.experimental  # noqa: E402, F401
 import verl_omni.models  # noqa: E402, F401

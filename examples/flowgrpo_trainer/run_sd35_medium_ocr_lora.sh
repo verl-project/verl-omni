@@ -74,6 +74,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.seed=42 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT / ROLLOUT_TP)) \
+    actor_rollout_ref.rollout.agent.pass_model_prompt=True \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.pipeline.height=$IMAGE_RESOLUTION \
     actor_rollout_ref.rollout.pipeline.width=$IMAGE_RESOLUTION \

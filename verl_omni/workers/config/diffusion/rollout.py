@@ -28,6 +28,7 @@ from verl.workers.config.rollout import (
 
 __all__ = [
     "DiffusionRolloutAlgoConfig",
+    "DiffusionAgentLoopConfig",
     "DiffusionPipelineConfig",
     "DiffusionSamplingConfig",
     "DiffusionRolloutConfig",
@@ -53,6 +54,12 @@ class DiffusionRolloutAlgoConfig(BaseConfig):
             raise ValueError(f"Unknown sample_strategy: {self.sample_strategy!r}")
         if self.sample_strategy == "progressive" and self.iters_per_group <= 0:
             raise ValueError(f"iters_per_group must be positive, got {self.iters_per_group}.")
+
+
+@dataclass
+class DiffusionAgentLoopConfig(AgentLoopConfig):
+    # Forward plain prompt text for pipelines with model-native text encoders.
+    pass_model_prompt: bool = False
 
 
 @dataclass
@@ -128,7 +135,7 @@ class DiffusionRolloutConfig(BaseConfig):
     calculate_log_probs: bool = False
     rollout_adapter: str = "default"
 
-    agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
+    agent: DiffusionAgentLoopConfig = field(default_factory=DiffusionAgentLoopConfig)
 
     multi_turn: MultiTurnConfig = field(default_factory=MultiTurnConfig)
 
