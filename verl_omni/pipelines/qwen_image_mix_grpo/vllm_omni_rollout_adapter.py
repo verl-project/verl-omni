@@ -51,20 +51,19 @@ class QwenImageMixGRPOPipelineWithLogProb(QwenImagePipelineWithLogProb):
     """Rollout pipeline for Qwen-Image with the MixGRPO algorithm."""
 
     def forward(self, req: OmniDiffusionRequest, **kwargs: Any):
-        self._maybe_make_progressive_window(req, kwargs)
+        self._maybe_make_progressive_window(req.sampling_params.extra_args, kwargs)
         return super().forward(req, **kwargs)
 
     @staticmethod
-    def _maybe_make_progressive_window(req: OmniDiffusionRequest, kwargs: dict[str, Any]) -> None:
-        """Mutate ``req.sampling_params.extra_args["sde_window_range"]`` in place
-        to fix the window start position.
+    def _maybe_make_progressive_window(extra: dict[str, Any], kwargs: dict[str, Any]) -> None:
+        """Mutate *extra* (``sampling_params.extra_args``) in place to fix the
+        SDE window start position.
 
         * ``progressive``: deterministic from ``global_steps``.
         * ``random`` with ``sde_window_seed`` present: seeded per-step draw so
           all ranks agree on the same window position for each training step.
         * Otherwise: no-op -- the base pipeline's per-call random draw is used.
         """
-        extra = req.sampling_params.extra_args
         strategy = extra.get("sample_strategy", "random")
         size = extra.get("sde_window_size") or kwargs.get("sde_window_size")
 

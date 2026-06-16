@@ -85,6 +85,7 @@ api/utils.rst
 contributing/editing-agent-instructions.md
 contributing/integrating_a_diffusion_model.md
 contributing/integrating_a_non_diffusers_model.md
+contributing/integrating_a_stepwise_continuous_batching_model.md
 contributing/integrating_a_new_policy_gradient_algorithm_for_diffusion_model.md
 contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md
 contributing/common_pitfalls.md
