@@ -43,7 +43,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.lora_dtype=float32 \
     actor_rollout_ref.model.target_modules="['q_proj_moe_gen','k_proj_moe_gen','v_proj_moe_gen','o_proj_moe_gen','mlp_moe_gen.gate_proj','mlp_moe_gen.up_proj','mlp_moe_gen.down_proj']" \
     actor_rollout_ref.model.fsdp_layer_prefixes="['layers.']" \
-    actor_rollout_ref.actor.optim.lr=1e-4 \
+    actor_rollout_ref.actor.optim.lr=1e-5 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 \
@@ -51,8 +51,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.diffusion_loss.clip_ratio=1e-4 \
-    actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.kl_loss_coef=0.1 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.name=$ENGINE \
@@ -81,7 +79,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.project_name=flow_grpo \
     trainer.experiment_name=bagel_ocr_lora \
     trainer.log_val_generations=8 \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
     trainer.nnodes=1 \
     trainer.save_freq=30 \
