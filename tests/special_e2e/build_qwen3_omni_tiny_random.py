@@ -123,21 +123,9 @@ def _build_tiny_config(vocab_size: int):
     text.num_experts_per_tok = 2
     text.moe_intermediate_size = 128
     text.vocab_size = vocab_size
-    # RoPE config moved across transformers versions: 4.x reads ``config.rope_theta``
-    # + ``config.rope_scaling``, while 5.x reads a unified ``config.rope_parameters``
-    # dict that must itself carry ``rope_theta`` (else ``compute_default_rope_parameters``
-    # raises ``KeyError: 'rope_theta'``). Set whichever the installed transformers uses so
-    # the tiny build works on both (CI runs transformers 5.x; 4.57.x for local validation).
-    # mrope_section must sum to head_dim // 2 (= 16 here).
-    existing_rope = getattr(text, "rope_parameters", None) or {}
-    rope_theta = float(existing_rope.get("rope_theta") or getattr(text, "rope_theta", None) or 1_000_000.0)
-    text.rope_theta = rope_theta
-    if hasattr(text, "rope_parameters"):  # transformers 5.x unified dict — merge, keep defaults
-        params = dict(existing_rope)
-        params.update({"rope_type": "default", "mrope_section": [8, 4, 4], "rope_theta": rope_theta})
-        text.rope_parameters = params
-    else:  # transformers 4.x
-        text.rope_scaling = {"rope_type": "default", "mrope_section": [8, 4, 4]}
+    # The default config leaves rope_scaling unset, but the M-RoPE rotary
+    # embedding requires it. mrope_section must sum to head_dim // 2 (= 16 here).
+    text.rope_scaling = {"rope_type": "default", "mrope_section": [8, 4, 4]}
 
     vision = config.thinker_config.vision_config
     # Shrink dims but keep every field vLLM-Omni's vision tower reads (the default
@@ -241,12 +229,10 @@ def build(output_dir: str, *, seed: int = 42, dtype: torch.dtype = torch.bfloat1
 
 def _merge_image_processor_config(output_dir: str, processor) -> None:
     """Re-merge image-processor keys into preprocessor_config.json (save_pretrained lets
-    the audio feature extractor overwrite ``image_processor_type``). No-op if absent."""
+    the audio feature extractor overwrite ``image_processor_type``, which the loader needs)."""
     import json
 
     pc_path = os.path.join(output_dir, "preprocessor_config.json")
-    if not os.path.isfile(pc_path):
-        return
     with open(pc_path) as f:
         merged = json.load(f)
     image_dict = processor.image_processor.to_dict()

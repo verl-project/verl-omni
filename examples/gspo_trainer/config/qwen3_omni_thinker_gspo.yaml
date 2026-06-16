@@ -32,8 +32,7 @@ actor_rollout_ref:
       attn_implementation: sdpa
     lora_rank: 64
     lora_alpha: 32
-    # Explicit list (not "all-linear", which targets nothing on transformers 5.x).
-    target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+    target_modules: all-linear
     exclude_modules: ".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*"
     use_remove_padding: true
     enable_gradient_checkpointing: true
