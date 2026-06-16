@@ -38,6 +38,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.val_files=$hpsv3_test_path \
     data.train_batch_size=64 \
     data.max_prompt_length=1024 \
+    data.seed=42 \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.attn_backend='_native_npu' \
     actor_rollout_ref.model.custom_chat_template='"{% if messages %}{% for message in messages %}{% if message[\"role\"] == \"user\" %}{{ message[\"content\"] }}{% endif %}{% endfor %}{% endif %}</s>"' \
@@ -53,6 +54,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.n=8 \
+    actor_rollout_ref.rollout.seed=42 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
