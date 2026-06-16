@@ -1,5 +1,5 @@
 #!/bin/bash
-# Wan2.2 LoRA RL with DanceGRPO - 8-NPU Global Distribution Strategy
+# Wan2.2 LoRA RL with DanceGRPO
 #
 # Model: Wan-AI/Wan2.2-TI2V-5B-Diffusers (text+image-to-video, used in T2V mode)
 # Algorithm: DanceGRPO (reuses FlowGRPO's advantage estimator and loss)
