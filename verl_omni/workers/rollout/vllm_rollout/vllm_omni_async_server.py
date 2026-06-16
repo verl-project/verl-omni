@@ -155,7 +155,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 engine_args["enable_dummy_pipeline"] = True
                 engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
-        if self.config.step_execution:
+        if getattr(self.config, "step_execution", False):
             engine_args["step_execution"] = True
 
         diffusion_master_port, diffusion_master_sock = get_free_port("127.0.0.1", with_alive_sock=True)
