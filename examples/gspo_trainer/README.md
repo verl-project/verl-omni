@@ -156,7 +156,8 @@ export WANDB_API_KEY=<your_wandb_api_key>
 
 Only the **Thinker** (`Qwen3OmniMoeThinkerForConditionalGeneration`):
 
-- LoRA rank 64, alpha 32, on `target_modules="all-linear"`.
+- LoRA rank 64, alpha 32, on the attention + MLP/MoE-expert projections
+  (`q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj`).
 - `exclude_modules` strips talker / code2wav / code_predictor / visual /
   audio_tower; `freeze_vision_tower=True` keeps the vision encoder cold.
 - The non-Thinker heads are dropped at FSDP-wrap time via `_verl_strip_modules`.
