@@ -86,14 +86,14 @@ Evaluated with `trainer.val_before_train=True`:
 
 ### Full-Model Training - Zero Standard Deviation Ratio and Reward Curve
 
-<img width="1221" height="465" alt="image" src="https://github.com/user-attachments/assets/254ecbde-32eb-4073-b9ea-6025f80a9611" />
+<img width="1221" height="465" alt="zero_std_ratio" src="https://github.com/user-attachments/assets/3ba4db3e-ea26-4528-893f-8fb00feb7fad" />
 
-<img width="1221" height="465" alt="image" src="https://github.com/user-attachments/assets/468f6022-8333-4b63-ab7d-39355b327d8d" />
+<img width="1221" height="465" alt="reward_mean" src="https://github.com/user-attachments/assets/ac828e51-a99d-4b8a-92fb-2c5d3dcbf08a" />
 
 ### Training - Clip Fraction
 
-<img width="1221" height="465" alt="image" src="https://github.com/user-attachments/assets/9e992ac5-c091-4bba-9aef-736a2fa0ab15" />
+<img width="1221" height="465" alt="pg_clip" src="https://github.com/user-attachments/assets/467819cf-f7f5-45b4-bf11-1af359900b0d" />
 
 ### Full-Model Validation Reward Curve
 
-<img width="1221" height="465" alt="image" src="https://github.com/user-attachments/assets/e2fb0d52-2c47-4170-bc0d-d32f0f1da209" />
+<img width="1221" height="465" alt="mean" src="https://github.com/user-attachments/assets/2a85d8d8-703e-4975-9b6e-cc6ad3fcda63" />
