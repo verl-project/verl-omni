@@ -14,12 +14,12 @@ Prepare an Atlas 800T A2 server with 8 NPUs, and install the necessary software 
 
 1. Install CANN by following the [Ascend CANN installation guide](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/900/softwareinst/instg/instg_0003.html?OS=openEuler&InstallType=local).
 
-2. Install VeRL-Omni and its dependencies as described in the [installation guide](install.md#install).
+2. Install VeRL-Omni and its dependencies as described in the [installation guide](install.md#install) (use the **Ascend NPU** backend steps in step 2).
 
 3. Install the FlowGRPO-specific reward dependency:
 
 ```bash
-uv pip install Levenshtein
+uv pip install -e ".[ocr]"
 ```
 
 ## Launch Training
