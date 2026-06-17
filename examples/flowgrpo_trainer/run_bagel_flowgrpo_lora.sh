@@ -37,6 +37,9 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.max_prompt_length=256 \
     data.trust_remote_code=True \
     algorithm.global_std=False \
+    algorithm.rollout_correction.rollout_is=sequence \
+    algorithm.rollout_correction.rollout_is_threshold=2.0 \
+    algorithm.rollout_correction.rollout_is_batch_normalize=True \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.tokenizer_path=$model_name \
     +actor_rollout_ref.model.architecture=OmniBagelForConditionalGeneration \
@@ -53,7 +56,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-    actor_rollout_ref.actor.diffusion_loss.clip_ratio=1e-5 \
+    actor_rollout_ref.actor.diffusion_loss.clip_ratio=1e-4 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.name=$ENGINE \
@@ -61,6 +64,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
+    actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.pipeline.num_inference_steps=15 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=256 \
     actor_rollout_ref.rollout.algo.noise_level=1.3 \
