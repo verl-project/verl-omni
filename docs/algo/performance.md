@@ -1,7 +1,7 @@
 (performance)=
 # Performance Reference
 
-Last updated: 06/05/2026
+Last updated: 06/17/2026
 
 Below are reference benchmark results for VeRL-Omni training runs.
 
@@ -97,3 +97,39 @@ Evaluated with `trainer.val_before_train=True`:
 ### Full-Model Validation Reward Curve
 
 <img width="1221" height="465" alt="mean" src="https://github.com/user-attachments/assets/2a85d8d8-703e-4975-9b6e-cc6ad3fcda63" />
+
+## FlowDPPO: LoRA Training on Qwen-Image OCR
+
+> All experiments used NVIDIA H200 GPUs, LoRA rank 64, `ppo_micro_batch_size_per_gpu` 16, and the full 1k validation set. Training images per step = batch size × images per prompt = 32 × 16 = 512.
+
+| Script | # GPUs | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | Images per Prompt | LR | Throughput (images/GPU/s) | Time per Step (s) |
+|--------|--------|------------------|--------------------|-------------------------|------------|-------------------|----|-----------------------|-------------------|
+| `run_qwen_image_ocr_lora.sh` | 4 | 4 | 4 | 0 (sync) | 32 | 16 | 3e-4 | 0.240 | 540 |
+
+<div align="center">
+<img width="600" alt="FlowDPPO LoRA OCR training zero standard deviation ratio and reward curve" src="https://github.com/user-attachments/assets/7e3405bb-d609-42b0-b563-58e81d428c48" />
+</div>
+
+### LoRA Validation Reward Curve
+
+<div align="center">
+<img width="600" alt="FlowDPPO LoRA OCR training validation curve" src="https://github.com/user-attachments/assets/bd44e0f6-c0f1-4d0d-b5ea-8bade1e9a1c5" />
+</div>
+
+## DiffusionNFT: non-CFG LoRA Training on Qwen-Image OCR
+
+> All experiments used NVIDIA H200 GPUs, LoRA rank 64, `ppo_micro_batch_size_per_gpu` 16, and the full 1k validation set. Training images per step = batch size × images per prompt = 32 × 16 = 512.
+
+| Script | # GPUs | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | Images per Prompt | LR | Throughput (images/GPU/s) | Time per Step (s) |
+|--------|--------|------------------|--------------------|-------------------------|------------|-------------------|----|-----------------------|-------------------|
+| `run_qwen_image_ocr_lora.sh` | 4 | 4 | 4 | 0 (sync) | 24 | 12 | 3e-4 | 0.175 | 550 |
+
+<div align="center">
+<img width="600" alt="DiffusionNFT LoRA OCR training zero standard deviation ratio and reward curve" src="https://github.com/user-attachments/assets/afed8370-c37e-4f7b-9bba-83ef4b28b6c7" />
+</div>
+
+### LoRA Validation Reward Curve
+
+<div align="center">
+<img width="600" alt="DiffusionNFT LoRA OCR training validation curve" src="https://github.com/user-attachments/assets/9cc0e639-58c7-4ef7-ab8a-ee8e8aef2d53" />
+</div>
