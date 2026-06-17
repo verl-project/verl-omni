@@ -13,8 +13,8 @@ set -x
 # Set OCR_WORKSPACE or WORKSPACE to any writable directory; defaults to $HOME.
 WORKSPACE=${OCR_WORKSPACE:-${WORKSPACE:-$HOME}}
 
-ocr_train_path=$WORKSPACE/data/ocr/sd3/train.parquet
-ocr_test_path=$WORKSPACE/data/ocr/sd3/test.parquet
+ocr_train_path=$WORKSPACE/data/ocr/sd3_full/train.parquet
+ocr_test_path=$WORKSPACE/data/ocr/sd3_full/test.parquet
 
 model_name=stabilityai/stable-diffusion-3.5-medium
 reward_model_name=Qwen/Qwen2.5-VL-3B-Instruct
@@ -28,14 +28,10 @@ REWARD_TP=1
 IMAGE_RESOLUTION=384
 TOTAL_TRAINING_STEPS=100
 ATTN_BACKEND=native
-STEP_EXECUTION=True
 MAX_NUM_SEQS=256
 
 if [ "${FA3:-0}" = "1" ]; then
     ATTN_BACKEND="_flash_3_varlen_hub"
-fi
-if [ "${STEPWISE:-1}" = "0" ]; then
-    STEP_EXECUTION=False
 fi
 
 ENGINE=vllm_omni
@@ -57,7 +53,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.lora_rank=32 \
     actor_rollout_ref.model.lora_alpha=64 \
     actor_rollout_ref.model.target_modules="['to_q','to_k','to_v','to_out.0','add_q_proj','add_k_proj','add_v_proj','to_add_out']" \
-    actor_rollout_ref.actor.optim.lr=3e-4 \
+    actor_rollout_ref.actor.optim.lr=1e-4 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=4 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
@@ -74,7 +70,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.seed=42 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT / ROLLOUT_TP)) \
-    actor_rollout_ref.rollout.agent.pass_model_prompt=True \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.pipeline.height=$IMAGE_RESOLUTION \
     actor_rollout_ref.rollout.pipeline.width=$IMAGE_RESOLUTION \
@@ -85,7 +80,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.algo.sde_type="cps" \
     actor_rollout_ref.rollout.algo.sde_window_size=3 \
     actor_rollout_ref.rollout.algo.sde_window_range="[0,5]" \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.step_execution=$STEP_EXECUTION \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs=$MAX_NUM_SEQS \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=28 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \

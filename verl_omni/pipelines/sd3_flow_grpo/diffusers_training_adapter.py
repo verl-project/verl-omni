@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Experimental SD3.5 training-side adapter for diffusers-based FlowGRPO."""
+"""SD3.5 training-side adapter for diffusers-based FlowGRPO."""
 
 from typing import Optional
 
@@ -47,7 +47,7 @@ def _sd3_image_seq_len(height: int, width: int, vae_scale_factor: int = 8) -> in
 
 @DiffusionModelBase.register("StableDiffusion3Pipeline", algorithm="flow_grpo")
 class StableDiffusion3FlowGRPO(DiffusionModelBase):
-    """Training adapter for experimental SD3.5 FlowGRPO.
+    """Training adapter for SD3.5 FlowGRPO.
 
     SD3 conditions the MMDiT transformer on a joint CLIP+T5 prompt-embedding
     sequence plus a pooled CLIP projection. Rollout returns both tensors; the

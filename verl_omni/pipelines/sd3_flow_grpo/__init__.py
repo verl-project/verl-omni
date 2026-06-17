@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .diffusers_training_adapter import StableDiffusion3FlowGRPO
 from .vllm_omni_rollout_adapter import StableDiffusion3PipelineWithLogProb
 
-__all__ = ["StableDiffusion3PipelineWithLogProb"]
+__all__ = ["StableDiffusion3FlowGRPO", "StableDiffusion3PipelineWithLogProb"]

@@ -238,16 +238,13 @@ rollout_adapter: default
 agent:
 
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
-  _target_: verl_omni.workers.config.DiffusionAgentLoopConfig
+  _target_: verl.workers.config.AgentLoopConfig
 
   # Number of agent loop workers
   num_workers: 8
 
   # default agent loop to use if `agent_name` not set in RL dataset
   default_agent_loop: diffusion_single_turn_agent
-
-  # Whether to forward plain model-native prompt text through sampling params.
-  pass_model_prompt: False
 
 # Checkpoint Engine config for update weights from trainer to rollout
 checkpoint_engine:

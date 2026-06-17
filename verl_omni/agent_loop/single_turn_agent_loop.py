@@ -25,42 +25,6 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-def _content_to_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict) and isinstance(item.get("text"), str):
-                parts.append(item["text"])
-        return "\n".join(part for part in parts if part)
-    return ""
-
-
-def _messages_to_model_prompt(messages: Any) -> str | None:
-    if messages is None or isinstance(messages, str):
-        return messages
-    if not isinstance(messages, list):
-        return None
-
-    user_parts = []
-    fallback_parts = []
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        text = _content_to_text(message.get("content"))
-        if not text:
-            continue
-        fallback_parts.append(text)
-        if message.get("role") == "user":
-            user_parts.append(text)
-
-    parts = user_parts or fallback_parts
-    return "\n".join(parts) or None
-
-
 @register("diffusion_single_turn_agent")
 class DiffusionSingleTurnAgentLoop(AgentLoopBase):
     """Agent loop for diffusion model serving."""
@@ -92,15 +56,6 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
             negative_prompt_ids = await self.apply_chat_template(raw_negative_prompt, images=images, videos=videos)
         else:
             negative_prompt_ids = None
-
-        if getattr(self.rollout_config.agent, "pass_model_prompt", False):
-            sampling_params = sampling_params.copy()
-            model_prompt = _messages_to_model_prompt(raw_prompt)
-            model_negative_prompt = _messages_to_model_prompt(raw_negative_prompt)
-            if model_prompt is not None:
-                sampling_params["_model_prompt"] = model_prompt
-            if model_negative_prompt is not None:
-                sampling_params["_model_negative_prompt"] = model_negative_prompt
 
         # 3. generate sequences
         metrics = {}

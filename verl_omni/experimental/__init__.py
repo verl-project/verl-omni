@@ -15,15 +15,9 @@
 from . import (
     qwen_image_flow_grpo_stepwise,
     qwen_image_mix_grpo_stepwise,
-    sd3_flow_grpo,
-    sd3_flow_grpo_stepwise,
 )
 from .qwen_image_flow_grpo_stepwise import *  # noqa: F401, F403
 from .qwen_image_mix_grpo_stepwise import *  # noqa: F401, F403
-from .sd3_flow_grpo import *  # noqa: F401, F403
-from .sd3_flow_grpo_stepwise import *  # noqa: F401, F403
 
 __all__ = list(qwen_image_flow_grpo_stepwise.__all__)
 __all__ += list(qwen_image_mix_grpo_stepwise.__all__)
-__all__ += list(sd3_flow_grpo.__all__)
-__all__ += list(sd3_flow_grpo_stepwise.__all__)
