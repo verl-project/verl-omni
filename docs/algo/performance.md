@@ -104,7 +104,7 @@ Evaluated with `trainer.val_before_train=True`:
 
 | Script | # GPUs | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | Images per Prompt | LR | Throughput (images/GPU/s) | Time per Step (s) |
 |--------|--------|------------------|--------------------|-------------------------|------------|-------------------|----|-----------------------|-------------------|
-| `run_qwen_image_ocr.sh` | 4 | 4 | 4 | 0 (sync) | 32 | 16 | 3e-4 | 0.240 | 540 |
+| `run_qwen_image_ocr_lora.sh` | 4 | 4 | 4 | 0 (sync) | 32 | 16 | 3e-4 | 0.240 | 540 |
 
 <div align="center">
 <img width="600" alt="FlowDPPO LoRA OCR training zero standard deviation ratio and reward curve" src="https://github.com/user-attachments/assets/7e3405bb-d609-42b0-b563-58e81d428c48" />
