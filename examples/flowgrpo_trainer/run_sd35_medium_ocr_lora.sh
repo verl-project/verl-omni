@@ -13,8 +13,8 @@ set -x
 # Set OCR_WORKSPACE or WORKSPACE to any writable directory; defaults to $HOME.
 WORKSPACE=${OCR_WORKSPACE:-${WORKSPACE:-$HOME}}
 
-ocr_train_path=$WORKSPACE/data/ocr/sd3_full/train.parquet
-ocr_test_path=$WORKSPACE/data/ocr/sd3_full/test.parquet
+ocr_train_path=$WORKSPACE/data/ocr/sd3/train.parquet
+ocr_test_path=$WORKSPACE/data/ocr/sd3/test.parquet
 
 model_name=stabilityai/stable-diffusion-3.5-medium
 reward_model_name=Qwen/Qwen2.5-VL-3B-Instruct
