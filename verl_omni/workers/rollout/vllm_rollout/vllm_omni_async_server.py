@@ -275,7 +275,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 return value[0] if value.dim() > 0 else value
             if isinstance(value, np.ndarray):
                 return value[0] if value.ndim > 0 else value
-            if isinstance(value, (list, tuple)):
+            if isinstance(value, list | tuple):
                 return value[0] if value else None
             return value
 
