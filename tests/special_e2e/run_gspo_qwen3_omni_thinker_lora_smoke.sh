@@ -23,6 +23,9 @@ export NCCL_IB_DISABLE=1
 export CPATH=/usr/include${CPATH:+:$CPATH}
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 
+# Load verl_omni on the driver (rollout adapter + processor patch); workers get the model patch via external_lib below.
+export VERL_USE_EXTERNAL_MODULES=verl_omni
+
 NUM_GPUS=${NUM_GPUS:-2}
 # Tiny model: prefer the community-hosted Hub checkpoint; build one locally if it
 # is not available yet (not uploaded / offline CI). Override with MODEL_PATH.

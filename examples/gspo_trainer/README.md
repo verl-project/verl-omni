@@ -20,7 +20,7 @@ following stack (rollout↔actor pearson ≈ 0.993):
 | torch | `2.11.0+cu130` |
 | flash-attn | `2.8.3` |
 | accelerate | `1.12.0` |
-| verl | the companion PR branch (`verl.plugins` loader + FSDP LoRA fixes) |
+| verl | the companion PR branch (FSDP LoRA fixes) |
 
 This pins to the upcoming `vllm 0.22.0` + `vllm-omni 0.22.0` release so the recipe
 stays aligned with what maintainers ship.
@@ -33,7 +33,7 @@ pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@v0.22
 # vllm-omni's CLI entrypoints import pydub at startup but don't declare it
 pip install pydub
 
-# verl (must include the verl.plugins loader + FSDP layered-summon fix)
+# verl (must include the FSDP layered-summon fix)
 pip install "verl @ git+https://github.com/verl-project/verl.git@main"
 
 # verl-omni (this repo)
@@ -57,9 +57,13 @@ Verify:
 
 ```bash
 python -c "import verl, verl_omni, vllm, vllm_omni; print('OK')"
-# verl must discover verl-omni as a plugin:
-python -c "import importlib.metadata as m; print([e.name for e in m.entry_points(group='verl.plugins')])"  # -> ['verl_omni']
 ```
+
+verl_omni is loaded on the driver through verl's `VERL_USE_EXTERNAL_MODULES`
+hook (`export VERL_USE_EXTERNAL_MODULES=verl_omni`, already set in the run
+scripts); this registers its `vllm_omni` rollout adapter and processor patch.
+The GPU workers load the Qwen3-Omni model patch separately via
+`actor_rollout_ref.model.external_lib`.
 
 The provided script is configured for a single node with **4 × H100/H200 80GB**:
 the actor (FSDP, 30B + LoRA r=64 with param/optimizer offload) and the
