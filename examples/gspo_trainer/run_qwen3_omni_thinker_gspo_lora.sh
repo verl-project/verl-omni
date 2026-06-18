@@ -10,8 +10,8 @@ export NCCL_IB_DISABLE=1
 export CPATH=/usr/include${CPATH:+:$CPATH}
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 
-# Load verl_omni on the driver (rollout adapter + processor patch); workers get the model patch via external_lib in the launch args.
-export VERL_USE_EXTERNAL_MODULES=verl_omni
+# Load verl_omni on the driver (rollout adapter) + the Qwen3-Omni patches (processor / automodel); workers also load the model patch via external_lib in the launch args.
+export VERL_USE_EXTERNAL_MODULES=verl_omni,verl_omni.models.transformers.qwen3_omni_thinker
 
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-Omni-30B-A3B-Instruct"}
 TRAIN_FILE=${TRAIN_FILE:-"$HOME/data/math/train.parquet"}

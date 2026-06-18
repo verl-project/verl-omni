@@ -13,13 +13,8 @@
 # limitations under the License.
 
 from .diffusers import apply_flash_attention_3_varlen_hub_fix, apply_qwen_image_ulysses_mask_fix
-from .transformers.qwen3_omni_thinker import patch_hf_processor_for_qwen3_omni
 
 # register diffusers patches
 apply_flash_attention_3_varlen_hub_fix()  # apply FA3 varlen hub fix universally
-
-# Patch hf_processor on import so the driver's dataset loader recognizes
-# Qwen3OmniMoeProcessor (external_lib only patches workers). Processor hook only.
-patch_hf_processor_for_qwen3_omni()
 
 __all__ = ["apply_flash_attention_3_varlen_hub_fix", "apply_qwen_image_ulysses_mask_fix"]

@@ -23,8 +23,8 @@ export NCCL_IB_DISABLE=1
 export CPATH=/usr/include${CPATH:+:$CPATH}
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 
-# Load verl_omni on the driver (rollout adapter + processor patch); workers get the model patch via external_lib below.
-export VERL_USE_EXTERNAL_MODULES=verl_omni
+# Load verl_omni on the driver (rollout adapter) + the Qwen3-Omni patches (processor / automodel); workers also load the model patch via external_lib below.
+export VERL_USE_EXTERNAL_MODULES=verl_omni,verl_omni.models.transformers.qwen3_omni_thinker
 
 NUM_GPUS=${NUM_GPUS:-2}
 # Tiny model: prefer the community-hosted Hub checkpoint; build one locally if it

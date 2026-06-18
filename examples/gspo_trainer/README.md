@@ -59,11 +59,13 @@ Verify:
 python -c "import verl, verl_omni, vllm, vllm_omni; print('OK')"
 ```
 
-verl_omni is loaded on the driver through verl's `VERL_USE_EXTERNAL_MODULES`
-hook (`export VERL_USE_EXTERNAL_MODULES=verl_omni`, already set in the run
-scripts); this registers its `vllm_omni` rollout adapter and processor patch.
-The GPU workers load the Qwen3-Omni model patch separately via
-`actor_rollout_ref.model.external_lib`.
+The run scripts set
+`export VERL_USE_EXTERNAL_MODULES=verl_omni,verl_omni.models.transformers.qwen3_omni_thinker`,
+so verl loads both on the driver via its `VERL_USE_EXTERNAL_MODULES` hook:
+`verl_omni` registers the `vllm_omni` rollout adapter, and the
+`qwen3_omni_thinker` submodule applies the Qwen3-Omni processor / automodel
+patches before the driver's dataset loader runs. The GPU workers load the same
+model patch via `actor_rollout_ref.model.external_lib`.
 
 The provided script is configured for a single node with **4 × H100/H200 80GB**:
 the actor (FSDP, 30B + LoRA r=64 with param/optimizer offload) and the
