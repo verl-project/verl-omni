@@ -27,6 +27,8 @@ from typing import Optional
 
 import torch
 from tensordict import TensorDict
+from tensordict.tensorclass import NonTensorStack
+from verl.utils import tensordict_utils as tu
 from verl.utils.device import get_device_name
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
@@ -37,6 +39,42 @@ from .bagel_model import BagelForTraining, get_flattened_position_ids
 from .common import BAGEL_FLOWGRPO_CFG_DEFAULTS, setup_bagel_sigmas
 
 logger = logging.getLogger(__name__)
+
+
+# batch["prompts"] is chat-template tokenization; old_log_prob should condition on
+# prepare_prompts-style ids from the parquet prompt_token_ids column when present.
+def _bagel_text_token_ids_from_micro_batch(
+    micro_batch: TensorDict, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Use pre-tokenized BAGEL ``prompt_token_ids`` when present in the batch."""
+    prompt_token_ids = micro_batch.get("prompt_token_ids")
+    if prompt_token_ids is None:
+        return (
+            micro_batch["prompts"].to(device),
+            micro_batch["attention_mask"].to(device).bool(),
+        )
+
+    if not isinstance(prompt_token_ids, NonTensorStack):
+        prompt_token_ids = NonTensorStack.from_list([tu.unwrap_non_tensor_data(prompt_token_ids)])
+
+    batch_size = micro_batch.batch_size[0]
+    ids_per_sample: list[list[int]] = []
+    for i in range(batch_size):
+        token_ids = tu.unwrap_non_tensor_data(prompt_token_ids[i])
+        ids_per_sample.append(list(token_ids))
+
+    max_len = max(len(ids) for ids in ids_per_sample)
+    padded_ids: list[list[int]] = []
+    attention_masks: list[list[bool]] = []
+    for ids in ids_per_sample:
+        pad_len = max_len - len(ids)
+        padded_ids.append(ids + [0] * pad_len)
+        attention_masks.append([True] * len(ids) + [False] * pad_len)
+
+    return (
+        torch.tensor(padded_ids, device=device, dtype=torch.long),
+        torch.tensor(attention_masks, device=device, dtype=torch.bool),
+    )
 
 
 @DiffusionModelBase.register("OmniBagelForConditionalGeneration", algorithm="flow_grpo")
@@ -94,8 +132,7 @@ class BagelDiffusion(DiffusionModelBase):
         hidden_states = latents[:, step]
         timestep = timesteps[:, step]
 
-        text_token_ids = micro_batch["prompts"].to(device)
-        text_attention_mask = micro_batch["attention_mask"].to(device).bool()
+        text_token_ids, text_attention_mask = _bagel_text_token_ids_from_micro_batch(micro_batch, device)
 
         # Compute latent position IDs
         latent_pos_ids = cls._get_latent_pos_ids(model_config, module, device)

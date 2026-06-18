@@ -1,14 +1,23 @@
 # Copyright 2026 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
-# ...
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 Preprocess the PickScore dataset for BAGEL FlowGRPO training.
 
-Prompts are stored in standard chat-message format.  The BAGEL tokenizer
-(used by the agent loop and training adapter) produces the correct
-BAGEL-format token IDs automatically via the standard ``prompts`` tensor.
+Captions are tokenized the same way as vllm-omni ``prepare_prompts``:
+``[bos] + tokenizer.encode(caption) + [eos]``.  Stored as ``prompt_token_ids``
+for ``old_log_prob`` recompute (passed through the dataset as a parquet column).
 
 The official PickScore dataset is available from the flow_grpo repository.
 To prepare it::
@@ -27,6 +36,18 @@ import argparse
 import os
 
 import datasets
+from transformers import AutoTokenizer
+
+
+# BAGEL text2img tokenizes captions as [bos] + encode(caption) + [eos] (vllm-omni
+# prepare_prompts), not via the Qwen chat template that fills batch["prompts"].
+def bagel_prepare_prompt_token_ids(tokenizer, caption: str) -> list[int]:
+    """Match vllm-omni BAGEL ``prepare_prompts`` tokenization."""
+    bos_token_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
+    eos_token_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    text_ids = tokenizer.encode(caption.strip(), add_special_tokens=False) if caption.strip() else []
+    return [bos_token_id, *text_ids, eos_token_id]
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Preprocess PickScore dataset for BAGEL FlowGRPO training.")
@@ -40,9 +61,16 @@ if __name__ == "__main__":
         default="~/data/pickscore/bagel",
         help="Directory to save the preprocessed parquet files.",
     )
+    parser.add_argument(
+        "--model_path",
+        default="~/models/ByteDance-Seed/BAGEL-7B-MoT",
+        help="BAGEL tokenizer path (must match training model).",
+    )
     parser.add_argument("--hdfs_dir", default=None, help="Optional HDFS output directory.")
 
     args = parser.parse_args()
+
+    tokenizer = AutoTokenizer.from_pretrained(os.path.expanduser(args.model_path), trust_remote_code=True)
 
     local_dataset_path = os.path.expanduser(args.input_dir)
 
@@ -76,6 +104,7 @@ if __name__ == "__main__":
                 "prompt": [
                     {"role": "user", "content": prompt_text},
                 ],
+                "prompt_token_ids": bagel_prepare_prompt_token_ids(tokenizer, prompt_text),
                 "negative_prompt": [
                     {"role": "user", "content": " "},
                 ],

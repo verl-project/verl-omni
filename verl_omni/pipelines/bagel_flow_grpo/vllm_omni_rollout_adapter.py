@@ -165,19 +165,25 @@ class _BagelSchedulerAdapter:
                 "return_logprobs": cur_return_logprobs,
             }
 
+        # Rollout latents are (tokens, C); the scheduler expects a batch dim and
+        # otherwise averages log-probs over token/channel dims instead of one scalar.
+        sample_in = sample.unsqueeze(0)
+        model_output_in = model_output.unsqueeze(0)
+        if "prev_sample" in kwargs:
+            kwargs = {**kwargs, "prev_sample": kwargs["prev_sample"].unsqueeze(0)}
+
         out = self._inner.step(
-            model_output=model_output.float(),  # cast bf16→fp32 for scheduler precision
+            model_output=model_output_in.float(),  # cast bf16→fp32 for scheduler precision
             timestep=sigma,
-            sample=sample,
+            sample=sample_in,
             return_dict=False,
             **kwargs,
         )
         self._step_counter += 1
         prev_sample, log_prob = out[0], out[1]
-        # Rollout latents are (tokens, channels); reduce to scalar to
-        # match training's batched log_prob shape.
+        prev_sample = prev_sample.squeeze(0)
         if log_prob is not None:
-            log_prob = log_prob.mean()
+            log_prob = log_prob.reshape(())
         return _AdapterStepOutput(prev_sample=prev_sample, log_prob=log_prob)
 
 
