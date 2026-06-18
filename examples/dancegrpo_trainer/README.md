@@ -12,7 +12,7 @@ The provided scripts are configured for a single node with `8` NPUs.
 
 ## Prepare the dataset
 
-The Text-to-Video generation task uses text prompts for video generation. There is a pre-split sample dataset with 1,233 prompts from [LanguageBind/Open-Sora-Plan-v1.2.0](https://huggingface.co/datasets/LanguageBind/Open-Sora-Plan-v1.2.0/blob/main/anno_json/v1.1.0_HQ_part3.json). Pre-split train/test prompt files are available at [Hao7/video_prompts](https://huggingface.co/datasets/Hao7/video_prompts/tree/main):
+The Text-to-Video generation task uses text prompts for video generation. There is a pre-split sample dataset with 1,233 prompts from [LanguageBind/Open-Sora-Plan-v1.2.0](https://huggingface.co/datasets/LanguageBind/Open-Sora-Plan-v1.2.0/blob/main/anno_json/v1.1.0_HQ_part3.json). Pre-split train/test prompt files are available at [video_prompts](https://huggingface.co/datasets/Hao7/video_prompts/tree/main):
 
 - `train.txt` — training prompts
 - `test.txt` — test prompts
