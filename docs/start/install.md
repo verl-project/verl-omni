@@ -99,6 +99,28 @@ python -c "from veomni.distributed.offloading import load_model_to_gpu, load_opt
 
 If you want VeOmni's full `[gpu,dit]` extras (flash-attn variants, liger-kernel, cuda-python, etc.), install them in a separate environment not pinned to vllm 0.22.0; verl-omni does not need them.
 
+### Older CUDA drivers (CUDA 12.8, driver 535)
+
+The `gpu` extra installs `vllm`, whose prebuilt wheels are compiled targeting CUDA >= 12.9 by default. On hosts with CUDA 12.8 / NVIDIA driver 535, importing the stack can fail with:
+
+```text
+RuntimeError: The NVIDIA driver on your system is too old (found version 12080).
+```
+
+The recommended workaround is NVIDIA CUDA forward compatibility, using a conda/micromamba environment (the `cuda-compat` package is distributed on conda-forge): install the [`cuda-compat`](https://anaconda.org/conda-forge/cuda-compat) package, version >= 12.9.0, into the environment, then point the loader at it before running:
+
+```bash
+export LD_LIBRARY_PATH=${CONDA_PREFIX}/cuda-compat:$LD_LIBRARY_PATH
+```
+
+If you followed the `uv venv` flow above rather than conda, replace `${CONDA_PREFIX}/cuda-compat` with the directory where `cuda-compat` was installed.
+
+CUDA forward compatibility works only with the Proprietary (closed) NVIDIA kernel module, not the Open kernel module, and is limited to select datacenter/professional GPUs. This mirrors [vLLM's guidance for older CUDA drivers](https://docs.vllm.ai/en/stable/getting_started/installation/gpu/#running-on-systems-with-older-cuda-drivers).
+
+If forward compatibility cannot be used, for example with the Open kernel module, a community-validated but unofficial alternative is to build vLLM from source against the local CUDA 12.8 toolkit. Set `CUDA_HOME` to the local CUDA install and pass `--no-binary vllm` / `--no-build-isolation` to the install command; see [issue #133](https://github.com/verl-project/verl-omni/issues/133) for the full reference script.
+
+A maintainer-provided alternative is to use an NVIDIA Docker image with the appropriate driver compatibility.
+
 ## Post-Installation Verification
 
 For NVIDIA GPU:
