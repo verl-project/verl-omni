@@ -326,7 +326,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 sampling_params["logprobs"] = logprobs
             else:
                 sampling_params["logprobs"] = None
-            sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
+            sampling_params.setdefault("repetition_penalty", getattr(self.config, "repetition_penalty", 1.0))
             params = SamplingParams(max_tokens=max_tokens, **sampling_params)
 
             prompt = {"prompt_token_ids": prompt_ids}
