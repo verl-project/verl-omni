@@ -71,9 +71,9 @@ ocr = [
     "Levenshtein",
 ]
 
-# Discovered by verl's plugin loader (verl.utils.plugins.load_plugins): importing
-# verl_omni registers its rollout adapters (e.g. vllm_omni) on the driver and Ray
-# workers when training is launched via verl's own entry point (verl.trainer.main_ppo).
+# Discovered by verl's native plugin auto-discovery: verl's __init__ loads every
+# "verl.plugins" entry point at import time, so importing verl_omni registers its
+# rollout adapters (e.g. vllm_omni) and applies its patches on the driver and Ray workers.
 [project.entry-points."verl.plugins"]
 verl_omni = "verl_omni"
 
