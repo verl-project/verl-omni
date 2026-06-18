@@ -146,8 +146,8 @@ To verify the wiring before a full run, use the end-to-end GSPO smoke test
 [`tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_smoke.sh`](../../tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_smoke.sh),
 which trains on a tiny random-weight model built by
 [`build_qwen3_omni_tiny_random.py`](../../tests/special_e2e/build_qwen3_omni_tiny_random.py)
-(no 60 GB download). It is also wired into CI as test 8 of
-[`tests/gpu_smoke/run_gpu_smoke_tests.sh`](../../tests/gpu_smoke/run_gpu_smoke_tests.sh).
+(no 60 GB download). It runs under `transformers<5`; it will be wired into the
+`tests/gpu_smoke` CI suite once the recipe supports transformers 5.x.
 
 ## Logging
 
