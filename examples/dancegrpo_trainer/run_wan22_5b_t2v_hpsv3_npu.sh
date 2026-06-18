@@ -5,7 +5,7 @@
 # Algorithm: DanceGRPO (reuses FlowGRPO's advantage estimator and loss)
 # Reward: HPSv3 (Human Preference Score v3) - custom reward model
 #
-# Reference: https://github.com/XueZeyue/DanceGRPO
+# Reference: https://github.com/XueZeyue/DanceGRPO and https://github.com/verl-project/verl-recipe/blob/main/dance_grpo/dance_grpo_mindspeed_mm/
 #
 set -x
 ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.0.0}
