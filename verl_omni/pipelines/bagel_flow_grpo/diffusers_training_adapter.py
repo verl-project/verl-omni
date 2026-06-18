@@ -41,12 +41,12 @@ from .common import BAGEL_FLOWGRPO_CFG_DEFAULTS, setup_bagel_sigmas
 logger = logging.getLogger(__name__)
 
 
-# batch["prompts"] is chat-template tokenization; old_log_prob should condition on
-# prepare_prompts-style ids from the parquet prompt_token_ids column when present.
+# BAGEL workaround: chat-template batch["prompts"] ≠ prepare_prompts; use
+# pre-tokenized caption ids from parquet when recomputing old_log_prob.
 def _bagel_text_token_ids_from_micro_batch(
     micro_batch: TensorDict, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Use pre-tokenized BAGEL ``prompt_token_ids`` when present in the batch."""
+    """Prefer BAGEL prepare_prompts-style ids from the batch when present."""
     prompt_token_ids = micro_batch.get("prompt_token_ids")
     if prompt_token_ids is None:
         return (

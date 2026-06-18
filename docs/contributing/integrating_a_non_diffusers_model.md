@@ -361,22 +361,23 @@ pass the architecture explicitly on the CLI:
 
 ## Step 6 — Add a Data Preprocessor
 
-The data preprocessor for non-diffusers models must match the tokenisation
-used by the upstream pipeline **and** produce the token-ID format that the
-training adapter expects.
+The data preprocessor must match the tokenisation used by the upstream
+pipeline.  For most models the agent loop's ``prompts`` tensor is enough.
 
-BAGEL's preprocessor (`examples/flowgrpo_trainer/data_process/bagel_pickscore.py`)
-does the following:
+**BAGEL exception:** vllm-omni's ``BagelPipeline`` still expects text
+strings (see rollout adapter ``_ensure_bagel_prompt_text``), while
+``old_log_prob`` must match ``prepare_prompts`` tokenization — not the Qwen
+chat template behind ``batch["prompts"]``.  Until vllm-omni accepts token
+IDs natively, ``bagel_pickscore.py`` stores an extra parquet column and the
+training adapter reads it when recomputing ``old_log_prob``.
+
+BAGEL's preprocessor does the following:
 
 1. Reads raw prompt text from one-caption-per-line files.
 2. Stores prompts in the standard chat-message format (``prompt`` key).
 3. Adds per-sample metadata (reward ground-truth, data source, etc.).
-
-The training adapter reads ``micro_batch["prompts"]`` and
-``micro_batch["attention_mask"]`` — the standard padded token-ID tensors
-that already flow through the TensorDict pipeline from the agent loop.
-No separate token-ID field is needed; the agent loop's tokenizer (the
-BAGEL tokenizer) produces the correct BAGEL-format IDs automatically.
+4. (BAGEL workaround) Pre-tokenizes captions the same way as
+   ``prepare_prompts`` for training-side log-prob recompute.
 
 ---
 
@@ -385,8 +386,8 @@ BAGEL tokenizer) produces the correct BAGEL-format IDs automatically.
 Follow the same pattern as the diffusers guide (Step 6 of
 {doc}`integrating_a_diffusion_model`), but with these additions:
 
-1. The dummy data must include the ``prompts`` tensor and ``attention_mask``
-   tensor (already part of the standard batch; no extra field required).
+1. The dummy data must include the ``prompt`` chat messages (standard batch
+   ``prompts`` / ``attention_mask`` from the agent loop).
 2. The architecture override must be passed explicitly:
    `+actor_rollout_ref.model.architecture=OmniMyModelForConditionalGeneration`.
 
@@ -421,8 +422,9 @@ checklist to verify your implementation against it:
 - [ ] `@VllmOmniPipelineBase.register("OmniBagelForConditionalGeneration", algorithm="flow_grpo")`
 - [ ] Subclasses `BagelPipeline` from vllm-omni
 - [ ] Wraps scheduler in `_BagelSchedulerAdapter` for 4-arg `step()` convention
+- [ ] SDE `step()` passes batched `(1, tokens, C)` tensors so log-probs match training
 - [ ] `_ensure_bagel_prompt_text()` workaround for text-prompt requirement
-- [ ] `forward()` sets up SDE window and returns sliced trajectory
+- [ ] `forward()` sets up SDE window, vllm-omni 0.22 timestep compensation, returns sliced trajectory
 
 ### Shared utilities (`common.py`)
 - [ ] `setup_bagel_sigmas()` — shared sigma schedule for rollout and training
@@ -430,8 +432,8 @@ checklist to verify your implementation against it:
 - [ ] CFG defaults (`BAGEL_FLOWGRPO_CFG_DEFAULTS`) — consistent between adapters
 
 ### Data preprocessor (e.g. ``bagel_pickscore.py``)
-- [ ] Stores prompts in standard chat-message format (``prompt`` key);
-      no separate token-ID field needed
+- [ ] Stores prompts in standard chat-message format (``prompt`` key)
+- [ ] (BAGEL only) Training-side tokenization matches ``prepare_prompts`` for ``old_log_prob``
 
 ### Wiring
 - [ ] `verl_omni/pipelines/bagel_flow_grpo/__init__.py` re-exports all three classes
@@ -445,7 +447,8 @@ checklist to verify your implementation against it:
 
 ### 1. Tokenization mismatch between data prep and rollout pipeline
 
-**Symptom**: Reward collapse, poor image quality, or CFG producing blank
+**Symptom**: Reward collapse, poor image quality, inflated
+``rollout_corr/rollout_is_min`` drift during training, or CFG producing blank
 images.
 
 **Root cause**: The data preprocessor's tokenization differs from what the upstream

@@ -15,9 +15,10 @@
 """
 Preprocess the PickScore dataset for BAGEL FlowGRPO training.
 
-Captions are tokenized the same way as vllm-omni ``prepare_prompts``:
-``[bos] + tokenizer.encode(caption) + [eos]``.  Stored as ``prompt_token_ids``
-for ``old_log_prob`` recompute (passed through the dataset as a parquet column).
+Prompts are stored in standard chat-message format.  Captions are also
+pre-tokenized for BAGEL training-side ``old_log_prob`` (``prepare_prompts``
+convention) — a workaround until vllm-omni ``BagelPipeline`` accepts token
+IDs directly.
 
 The official PickScore dataset is available from the flow_grpo repository.
 To prepare it::
@@ -40,7 +41,7 @@ from transformers import AutoTokenizer
 
 
 # BAGEL text2img tokenizes captions as [bos] + encode(caption) + [eos] (vllm-omni
-# prepare_prompts), not via the Qwen chat template that fills batch["prompts"].
+# prepare_prompts).  Stored in parquet for training-side old_log_prob only.
 def bagel_prepare_prompt_token_ids(tokenizer, caption: str) -> list[int]:
     """Match vllm-omni BAGEL ``prepare_prompts`` tokenization."""
     bos_token_id = tokenizer.convert_tokens_to_ids("<|im_start|>")

@@ -24,8 +24,7 @@ for the integration architecture.
 
 We use the same [PickScore dataset](https://github.com/yuvalkirstain/PickScore)
 as the official flow_grpo BAGEL config.  Prompts are stored in standard
-chat-message format — the BAGEL tokenizer (used by the agent loop) produces
-the correct BAGEL-format token IDs automatically.
+chat-message format for the agent loop (see ``bagel_pickscore.py``).
 
 First, download the raw prompt files from the flow_grpo repository:
 
@@ -43,7 +42,8 @@ export WORKSPACE=${WORKSPACE:-$HOME}
 
 python3 examples/flowgrpo_trainer/data_process/bagel_pickscore.py \
   --input_dir $WORKSPACE/data/pickscore \
-  --output_dir $WORKSPACE/data/pickscore/bagel
+  --output_dir $WORKSPACE/data/pickscore/bagel \
+  --model_path ~/models/ByteDance-Seed/BAGEL-7B-MoT
 ```
 
 This produces ``$WORKSPACE/data/pickscore/bagel/train.parquet`` and
@@ -54,6 +54,9 @@ This produces ``$WORKSPACE/data/pickscore/bagel/train.parquet`` and
 ```bash
 bash examples/flowgrpo_trainer/run_bagel_flowgrpo_lora.sh
 ```
+
+The launch script enables decoupled rollout correction
+(``calculate_log_probs=true``, ``rollout_is=sequence``).
 
 ## Key differences from Qwen-Image
 
