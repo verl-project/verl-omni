@@ -267,6 +267,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         negative_prompt_embeds_mask = mm_output.get("negative_prompt_embeds_mask")
         latents_clean = mm_output.get("latents_clean")
         train_timesteps = mm_output.get("train_timesteps")
+        # Condition-image fields are emitted by I2I rollout adapters (e.g.
+        # QwenImageEditPlusPipelineWithLogProb.forward). Forward them to the
+        # training micro_batch so the training adapter can re-concatenate
+        # ``[hidden_states, image_latents]`` exactly as rollout did — otherwise
+        # the importance ratio ``exp(new_log_prob - old_log_prob)`` is computed
+        # under mismatched transition densities and reward cannot climb.
+        image_latents = mm_output.get("image_latents")
+        img_shapes = mm_output.get("img_shapes")
 
         # TODO(andy): refactor later.
         extra_fields = {
@@ -280,6 +288,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             "negative_prompt_embeds_mask": negative_prompt_embeds_mask[0]
             if negative_prompt_embeds_mask is not None
             else None,
+            "image_latents": image_latents[0] if image_latents is not None else None,
+            "img_shapes": img_shapes[0] if img_shapes is not None else None,
             "global_steps": self.global_steps,
         }
 
