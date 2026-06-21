@@ -145,9 +145,7 @@ Visit our documentation to learn more.
 
 ## Roadmap 🗺
 
-Future work is tracked here:
-
-- [RFC: Multi-modal Generation RL 2026Q2 Roadmap](https://github.com/verl-project/verl/issues/5755)
+Future work is tracked in [VeRL-Omni Q3 Roadmap](https://github.com/verl-project/verl-omni/issues/97)
 
 ## Contributing 🤝
 
