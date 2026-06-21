@@ -87,6 +87,18 @@ def _make_model_config(
 # ---------------------------------------------------------------------------
 
 
+def _make_module_mock(dtype: torch.dtype = torch.float32) -> MagicMock:
+    """Build a module mock whose ``img_in.weight.dtype`` returns a real dtype.
+
+    The training adapter casts ``hidden_states`` / ``image_latents`` to
+    ``module.img_in.weight.dtype`` before concat. A bare ``MagicMock()``
+    returns a MagicMock for that attribute and ``.to(MagicMock())`` raises.
+    """
+    module = MagicMock()
+    module.img_in.weight.dtype = dtype
+    return module
+
+
 def _batch_tensors():
     """Return a dict of realistic test tensors."""
     return {
@@ -152,7 +164,7 @@ class TestQwenImageEditPlusPrepareModelInputs:
         step = 0
 
         model_inputs, negative_model_inputs = QwenImageEditPlus.prepare_model_inputs(
-            module=MagicMock(),
+            module=_make_module_mock(),
             model_config=_make_model_config(),
             latents=tensors["all_latents"],
             timesteps=tensors["all_timesteps"],
@@ -174,7 +186,7 @@ class TestQwenImageEditPlusPrepareModelInputs:
         step = 0
 
         model_inputs, _ = QwenImageEditPlus.prepare_model_inputs(
-            module=MagicMock(),
+            module=_make_module_mock(),
             model_config=_make_model_config(),
             latents=tensors["all_latents"],
             timesteps=tensors["all_timesteps"],
@@ -196,7 +208,7 @@ class TestQwenImageEditPlusPrepareModelInputs:
         step = 1
 
         model_inputs, negative_model_inputs = QwenImageEditPlus.prepare_model_inputs(
-            module=MagicMock(),
+            module=_make_module_mock(),
             model_config=_make_model_config(),
             latents=tensors["all_latents"],
             timesteps=tensors["all_timesteps"],
@@ -220,7 +232,7 @@ class TestQwenImageEditPlusPrepareModelInputs:
         step = 2
 
         model_inputs, _ = QwenImageEditPlus.prepare_model_inputs(
-            module=MagicMock(),
+            module=_make_module_mock(),
             model_config=_make_model_config(),
             latents=tensors["all_latents"],
             timesteps=tensors["all_timesteps"],
@@ -241,7 +253,7 @@ class TestQwenImageEditPlusPrepareModelInputs:
         micro_batch = _make_micro_batch(tensors)
 
         model_inputs, negative_model_inputs = QwenImageEditPlus.prepare_model_inputs(
-            module=MagicMock(),
+            module=_make_module_mock(),
             model_config=_make_model_config(),
             latents=tensors["all_latents"],
             timesteps=tensors["all_timesteps"],
@@ -262,7 +274,7 @@ class TestQwenImageEditPlusPrepareModelInputs:
         micro_batch = _make_micro_batch(tensors)
 
         model_inputs, _ = QwenImageEditPlus.prepare_model_inputs(
-            module=MagicMock(),
+            module=_make_module_mock(),
             model_config=_make_model_config(),
             latents=tensors["all_latents"],
             timesteps=tensors["all_timesteps"],
@@ -284,7 +296,7 @@ class TestQwenImageEditPlusPrepareModelInputs:
         micro_batch["img_shapes"] = NonTensorData(custom_shapes)
 
         model_inputs, _ = QwenImageEditPlus.prepare_model_inputs(
-            module=MagicMock(),
+            module=_make_module_mock(),
             model_config=_make_model_config(),
             latents=tensors["all_latents"],
             timesteps=tensors["all_timesteps"],

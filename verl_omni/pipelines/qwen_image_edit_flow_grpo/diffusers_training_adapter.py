@@ -137,8 +137,19 @@ class QwenImageEditPlus(DiffusionModelBase):
         hidden_states = latents[:, step]
         timestep = timesteps[:, step] / 1000.0
 
-        # Concatenate condition image latents if available
+        # Concatenate condition image latents if available. Cast both operands
+        # to the transformer's weight dtype before concat, mirroring rollout
+        # (vllm_omni_rollout_adapter.py:280 — ``latent_model_input.to(
+        # self.transformer.img_in.weight.dtype)``). Without this, all_latents
+        # (fp32, from rollout's ``.float()`` calls at lines 266/335) and
+        # image_latents (bf16, from rollout's ``prompt_embeds.dtype`` cast at
+        # line 475) would either raise a dtype error on cat or silently
+        # promote to fp32 — diverging from rollout's bf16 concat path and
+        # corrupting the importance ratio.
         if image_latents is not None:
+            model_dtype = module.img_in.weight.dtype
+            hidden_states = hidden_states.to(model_dtype)
+            image_latents = image_latents.to(model_dtype)
             latent_model_input = torch.cat([hidden_states, image_latents], dim=1)
         else:
             latent_model_input = hidden_states
