@@ -15,6 +15,7 @@ It originated from the multi-modal generation RL effort in `verl`, and now has a
 
 ## News 🔥
 
+- **[2026-06]** [Qwen3-Omni GSPO Trainer](verl-omni/examples/gspo_trainer) is available! [Flow-DPPO](https://verl-omni.readthedocs.io/en/latest/algo/flowdppo.html) is integrated. vLLM-Omni rollout backend is upgraded to v0.22 for higher throughput, with default actor attn backend switched to FA3.
 - **[2026-06]** [DiffusionNFT](https://verl-omni.readthedocs.io/en/latest/algo/diffusionnft.html) and [Diffusion DPO](https://verl-omni.readthedocs.io/en/latest/algo/diffusion_dpo.html) are integrated with verified recipes on Qwen-Image/SD3.5. [Wan2.2](examples/dancegrpo_trainer/README.md) is now supported for video generation tasks.  
 
 ## Why `VeRL-Omni`
@@ -125,7 +126,7 @@ Visit our documentation to learn more.
     <td>Omni-modality</td>
     <td>Text / Image / Video / Audio</td>
     <td>GSPO</td>
-    <td>WIP</td>
+    <td>✅</td>
   </tr>
   <tr>
     <td>SD3.5</td>
@@ -144,9 +145,7 @@ Visit our documentation to learn more.
 
 ## Roadmap 🗺
 
-Future work is tracked here:
-
-- [RFC: Multi-modal Generation RL 2026Q2 Roadmap](https://github.com/verl-project/verl/issues/5755)
+Future work is tracked in [VeRL-Omni Q3 Roadmap](https://github.com/verl-project/verl-omni/issues/97)
 
 ## Contributing 🤝
 
@@ -160,7 +159,7 @@ See the [contribution guide](CONTRIBUTING.md).
 
 ## Citation 📚
 
-If you find the project helpful, please cite:
+If you find the project helpful, please cite and star ⭐
 
 ```bibtex
 @misc{verlomni_github,

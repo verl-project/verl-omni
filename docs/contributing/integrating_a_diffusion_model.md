@@ -334,6 +334,7 @@ The data preprocessor's tokenisation **must match the upstream
 same `enable_thinking` flag, etc. Mismatches here cause silent reward
 collapse.
 
+(53-use-the-veomni-backend-optional)=
 ### 5.3 Use the VeOmni Backend
 
 Backend selection is **orthogonal** to model integration: the adapters you wrote in Steps 3–4 work unchanged regardless of whether the actor runs on the default diffusers + FSDP2 engine or on [VeOmni](https://github.com/ByteDance-Seed/VeOmni). Switching is a configuration concern handled by a few Hydra overrides at launch time.

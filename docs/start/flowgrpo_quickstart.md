@@ -163,3 +163,5 @@ For the algorithm background, detailed configuration notes, async reward, and ru
 reward training (e.g. JPEG incompressibility), see:
 
 - {doc}`../algo/flowgrpo`
+
+To scale training across multiple nodes, follow the {doc}`multi-node guide <multi_node_training>`.

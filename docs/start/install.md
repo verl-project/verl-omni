@@ -1,6 +1,6 @@
 # Installation
 
-Last updated: 06/10/2026
+Last updated: 06/15/2026
 
 ## Requirements
 
@@ -26,13 +26,22 @@ uv venv --python 3.12 --seed
 source .venv/bin/activate
 ```
 
-2. Install the platform backend:
+2. Install the platform backend.
+
+For NVIDIA GPU:
 
 ```bash
 uv pip install -e ".[gpu]" --torch-backend=auto
 ```
 
-It will install `vllm` for CUDA PyTorch stack and `kernels` for the actor FA3 backend.
+It will install `vllm` for the CUDA PyTorch stack and `kernels` for the actor FA3 backend.
+
+For Ascend NPU:
+
+```bash
+uv pip install vllm==0.22.0
+uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@bb4d0776eee8fc45c3484a45c971a7049f1a2bbf"
+```
 
 3. Install VeRL-Omni:
 

@@ -1,11 +1,11 @@
 #!/bin/bash
-# Wan2.2 LoRA RL with DanceGRPO - 8-NPU Global Distribution Strategy (TP8)
+# Wan2.2 LoRA RL with DanceGRPO
 #
 # Model: Wan-AI/Wan2.2-TI2V-5B-Diffusers (text+image-to-video, used in T2V mode)
 # Algorithm: DanceGRPO (reuses FlowGRPO's advantage estimator and loss)
 # Reward: HPSv3 (Human Preference Score v3) - custom reward model
 #
-# Reference: https://github.com/XueZeyue/DanceGRPO
+# Reference: https://github.com/XueZeyue/DanceGRPO and https://github.com/verl-project/verl-recipe/blob/main/dance_grpo/dance_grpo_mindspeed_mm/
 #
 set -x
 ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.0.0}
@@ -23,8 +23,8 @@ model_name=Wan-AI/Wan2.2-TI2V-5B-Diffusers
 export custom_reward_model_path=$WORKSPACE/CKPT/HPSv3/HPSv3.safetensors
 custom_reward_function_path=verl_omni/utils/reward_score/hpsv3_reward.py
 
-# 8-NPU Global Distribution
-NUM_GPUS_ACTOR_ROLLOUT_REWARD=8
+# 16/8-NPU Global Distribution
+NUM_GPUS_ACTOR_ROLLOUT_REWARD=16 # 8
 ROLLOUT_TP=1
 
 ENGINE=vllm_omni
@@ -38,6 +38,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.val_files=$hpsv3_test_path \
     data.train_batch_size=64 \
     data.max_prompt_length=1024 \
+    data.seed=42 \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.attn_backend='_native_npu' \
     actor_rollout_ref.model.custom_chat_template='"{% if messages %}{% for message in messages %}{% if message[\"role\"] == \"user\" %}{{ message[\"content\"] }}{% endif %}{% endfor %}{% endif %}</s>"' \
@@ -49,13 +50,15 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.fsdp_config.wrap_policy.min_num_params=10000 \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.n=8 \
+    actor_rollout_ref.rollout.seed=42 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
+    actor_rollout_ref.rollout.pipeline.true_cfg_scale=5.0 \
     actor_rollout_ref.rollout.pipeline.height=704 \
     actor_rollout_ref.rollout.pipeline.width=1280 \
     actor_rollout_ref.rollout.pipeline.num_frames=8 \
@@ -68,7 +71,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.algo.sde_window_range="[0,5]" \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=50 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
     reward.num_workers=1 \
     reward.reward_model.enable=False \
     reward.custom_reward_function.path=$custom_reward_function_path \
@@ -77,7 +80,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.project_name=dance_grpo_npu \
     trainer.experiment_name=wan22_5b_t2v_hpsv3_npu \
     trainer.log_val_generations=8 \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
     trainer.nnodes=1 \
     trainer.save_freq=30 \
