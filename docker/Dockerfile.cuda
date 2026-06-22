@@ -8,11 +8,9 @@
 #
 # Run:
 #   docker run --gpus all --shm-size=16g -it verl-omni:gpu
-#
-# If the host NVIDIA driver is older than the image CUDA toolkit, add:
-#   -e VLLM_ENABLE_CUDA_COMPATIBILITY=1
 
-ARG CUDA_VERSION=12.9.1
+
+ARG CUDA_VERSION=13.0.2
 ARG UBUNTU_VERSION=22.04
 
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu${UBUNTU_VERSION} AS base
