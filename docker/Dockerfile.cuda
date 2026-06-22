@@ -1,10 +1,10 @@
 # verl-omni GPU image — dependency versions aligned with docs/start/install.md
 #
 # Build (from repo root):
-#   docker build -f docker/Dockerfile -t verl-omni:gpu .
+#   docker build -f docker/Dockerfile.cuda -t verl-omni:gpu .
 #
 # Build with dev extras (pytest, pre-commit, …):
-#   docker build -f docker/Dockerfile --target dev -t verl-omni:gpu-dev .
+#   docker build -f docker/Dockerfile.cuda --target dev -t verl-omni:gpu-dev .
 #
 # Run:
 #   docker run --gpus all --shm-size=16g -it verl-omni:gpu
@@ -12,7 +12,7 @@
 # If the host NVIDIA driver is older than the image CUDA toolkit, add:
 #   -e VLLM_ENABLE_CUDA_COMPATIBILITY=1
 
-ARG CUDA_VERSION=12.8.1
+ARG CUDA_VERSION=12.9.1
 ARG UBUNTU_VERSION=22.04
 
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu${UBUNTU_VERSION} AS base
@@ -23,7 +23,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
-    UV_PYTHON_DOWNLOADS=never \
+    UV_PYTHON_DOWNLOADS=manual \
     VIRTUAL_ENV=/opt/venv \
     PATH="/root/.local/bin:/opt/venv/bin:${PATH}" \
     LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}

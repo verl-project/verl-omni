@@ -1,4 +1,4 @@
-# Docker build context exclusions (used by: docker build -f docker/Dockerfile .)
+# Docker build context exclusions (used by: docker build -f docker/Dockerfile.cuda .)
 # NOTE: .dockerignore must live at the build context root, not under docker/.
 
 # VCS / IDE
