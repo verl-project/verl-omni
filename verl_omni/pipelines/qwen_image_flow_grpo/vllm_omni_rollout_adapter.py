@@ -181,9 +181,6 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
                 all_log_probs.append(log_prob)
                 all_timesteps.append(timestep_value)
 
-            # Cast back to model dtype for next transformer forward.
-            latents = latents.to(x.dtype)
-
         all_latents = torch.stack(all_latents, dim=1)
         all_log_probs = torch.stack(all_log_probs, dim=1) if all_log_probs and all_log_probs[0] is not None else None
         all_timesteps = torch.stack(all_timesteps).unsqueeze(0).expand(latents.shape[0], -1)
