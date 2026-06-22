@@ -122,7 +122,7 @@ python -c "import verl_omni; print('VeRL-Omni ready')"
 
 ## Build Your Own Docker Image
 
-The repository has a CUDA Dockerfile at [`docker/Dockerfile.cuda`](https://github.com/verl-project/verl-omni/blob/main/docker/Dockerfile.cuda). The default base image uses **CUDA 13.0.2** on Ubuntu 22.04 (override with `--build-arg CUDA_VERSION=…` if needed). Build context is controlled by the repo-root [`.dockerignore`](https://github.com/verl-project/verl-omni/blob/main/.dockerignore); keep large local folders such as `.venv`, `data/`, and `checkpoints/` out of the context.
+The repository has a CUDA Dockerfile at [`docker/Dockerfile.cuda`](https://github.com/verl-project/verl-omni/blob/main/docker/Dockerfile.cuda). The default base image uses **CUDA 12.9.1** on Ubuntu 22.04 (override with `--build-arg CUDA_VERSION=…` if needed). Build context is controlled by the repo-root [`.dockerignore`](https://github.com/verl-project/verl-omni/blob/main/.dockerignore); keep large local folders such as `.venv`, `data/`, and `checkpoints/` out of the context.
 
 ### Prerequisites
 
