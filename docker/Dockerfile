@@ -1,0 +1,78 @@
+# verl-omni GPU image — dependency versions aligned with docs/start/install.md
+#
+# Build (from repo root):
+#   docker build -f docker/Dockerfile -t verl-omni:gpu .
+#
+# Build with dev extras (pytest, pre-commit, …):
+#   docker build -f docker/Dockerfile --target dev -t verl-omni:gpu-dev .
+#
+# Run:
+#   docker run --gpus all --shm-size=16g -it verl-omni:gpu
+#
+# If the host NVIDIA driver is older than the image CUDA toolkit, add:
+#   -e VLLM_ENABLE_CUDA_COMPATIBILITY=1
+
+ARG CUDA_VERSION=12.8.1
+ARG UBUNTU_VERSION=22.04
+
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu${UBUNTU_VERSION} AS base
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# install.md: Python >= 3.10 (3.12 recommended), CUDA >= 12.8
+ENV PYTHONUNBUFFERED=1 \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
+    UV_PYTHON_DOWNLOADS=never \
+    VIRTUAL_ENV=/opt/venv \
+    PATH="/root/.local/bin:/opt/venv/bin:${PATH}" \
+    LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Same toolchain as install.md (`uv venv --python 3.12 --seed`)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && uv python install 3.12 \
+    && uv venv "${VIRTUAL_ENV}" --python 3.12 --seed
+
+WORKDIR /workspace/verl-omni
+
+COPY pyproject.toml setup.py README.md ./
+COPY verl_omni ./verl_omni
+
+# Step 1 — gpu extra: vllm==0.22.0, kernels==0.14.1, liger-kernel
+RUN uv pip install -e ".[gpu]" --torch-backend=auto
+
+# Step 2 — vllm-omni + train: vllm-omni==0.22.0, verl==0.8.0
+RUN uv pip install -e ".[vllm-omni,train]"
+
+# Post-install verification from install.md
+RUN python -c "import torch; print('torch', torch.__version__, '| CUDA', torch.version.cuda)" \
+    && python -c "import vllm; print('vllm', vllm.__version__)" \
+    && python -c "import vllm_omni; print('vllm-omni OK')" \
+    && python -c "import verl; print('verl', verl.__version__)" \
+    && python -c "import verl_omni; print('VeRL-Omni ready')"
+
+FROM base AS runtime
+WORKDIR /workspace/verl-omni
+CMD ["/bin/bash"]
+
+# Optional: install.md dev extra (pytest, pre-commit, Levenshtein, …)
+FROM base AS dev
+RUN uv pip install -e ".[dev]"
+
+# Optional: install.md ocr extra (FlowGRPO OCR reward)
+FROM base AS ocr
+RUN uv pip install -e ".[ocr]"
+
+# Optional: VeOmni engine backend (install.md "Optional engine backends")
+FROM base AS veomni
+RUN uv pip install veomni==0.1.11 --no-deps \
+    && uv pip install torchcodec librosa soundfile av \
+    && python -c "import veomni; print('veomni', veomni.__version__)" \
+    && python -c "from veomni.distributed.offloading import load_model_to_gpu, load_optimizer, offload_model_to_cpu, offload_optimizer; print('VeOmni offloading helpers OK')"
