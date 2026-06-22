@@ -353,7 +353,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             num_channels_latents,
             height,
             width,
-            torch.float32,
+            prompt_embeds.dtype,
             self.device,
             generator,
             latents,
@@ -372,14 +372,10 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         if self.attention_kwargs is None:
             self._attention_kwargs = {}
 
-        # Set RoPE length from padded embed width (match diffusers text_seq_len),
-        # not from mask.sum() (valid token count).
-        txt_seq_lens = [int(prompt_embeds.shape[1])] * int(prompt_embeds.shape[0])
-        if negative_prompt_embeds is not None:
-            neg_seq_len = int(negative_prompt_embeds.shape[1])
-            negative_txt_seq_lens = [neg_seq_len] * int(negative_prompt_embeds.shape[0])
-        else:
-            negative_txt_seq_lens = None
+        txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist() if prompt_embeds_mask is not None else None
+        negative_txt_seq_lens = (
+            negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
+        )
 
         if sde_window_size is not None:
             start = torch.randint(
