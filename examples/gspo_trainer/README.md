@@ -20,7 +20,7 @@ following stack (rollout↔actor pearson ≈ 0.993):
 | torch | `2.11.0+cu130` |
 | flash-attn | `2.8.3` |
 | accelerate | `1.12.0` |
-| verl | commit: 8a69493027 (w/ FSDP LoRA fixes) |
+| verl | commit: `8a69493027` (w/ FSDP LoRA fixes) |
 
 This pins to the upcoming `vllm 0.22.0` + `vllm-omni 0.22.0` release so the recipe
 stays aligned with what maintainers ship.
