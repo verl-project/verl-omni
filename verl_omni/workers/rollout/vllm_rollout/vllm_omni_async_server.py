@@ -165,6 +165,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         os.environ["MASTER_PORT"] = str(diffusion_master_port)
         logger.info("Using MASTER_PORT=%s for vLLM-Omni workers", os.environ["MASTER_PORT"])
 
+        engine_args["diffusion_attention_backend"] = self.config.rollout_attn_backend
+        logger.info("Setting diffusion_attention_backend=%s from rollout config", self.config.rollout_attn_backend)
+
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
         await omni_init_app_state(engine_client, app.state, args)

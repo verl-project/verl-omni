@@ -93,3 +93,47 @@ def _set_ray_env(config: Any, key: str, value: str) -> None:
         value,
         force_add=True,
     )
+
+
+def validate_attention_consistency(config: Any) -> None:
+    """Validate that rollout and training attention backends match.
+
+    Called after ``fallback_fa3_if_unavailable`` so any FA3→native downgrade
+    has already updated both config fields.
+
+    Rules:
+        - If the training engine is VeOmni, skip validation.
+        - If ``attn_backend`` is ``_flash_3_varlen_hub`` (FA2/FA3), rollout
+          must be ``FLASH_ATTN``.
+        - If ``attn_backend`` is ``native`` or ``_native_npu``, rollout must be
+          ``TORCH_SDPA``.
+
+    Raises:
+        ValueError: If the rollout attention backend does not match the training
+            attention backend.
+    """
+    actor_cfg = config.actor_rollout_ref.actor
+    strategy = actor_cfg.get("strategy") if hasattr(actor_cfg, "get") else None
+    if strategy == "veomni":
+        return  # VeOmni engine manages its own attention independently
+
+    model_cfg = config.actor_rollout_ref.model
+    attn_backend = model_cfg.get("attn_backend", ACTOR_FA3_BACKEND)
+    rollout_backend = config.actor_rollout_ref.rollout.get("rollout_attn_backend")
+
+    if attn_backend == ACTOR_FA3_BACKEND:
+        expected = ROLLOUT_FA3_BACKEND
+    elif attn_backend in (ACTOR_NATIVE_BACKEND, "_native_npu"):
+        expected = ROLLOUT_NATIVE_BACKEND
+    else:
+        logger.warning("Unknown attn_backend=%r; skipping attention consistency check.", attn_backend)
+        return
+
+    if rollout_backend != expected:
+        raise ValueError(
+            f"Attention backend mismatch: attn_backend={attn_backend!r} requires "
+            f"rollout_attn_backend={expected!r}, but got {rollout_backend!r}. "
+            "Both must use the same attention implementation. "
+            "Set rollout_attn_backend via --diffusion-attention-backend flag "
+            "or in the rollout config."
+        )

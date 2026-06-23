@@ -98,6 +98,13 @@ class DiffusionRolloutConfig(BaseConfig):
     gpu_memory_utilization: float = 0.5
     enforce_eager: bool = False
     cudagraph_capture_sizes: Optional[list] = None
+
+    # vLLM-omni diffusion attention backend.  Must be consistent with
+    # ``actor_rollout_ref.model.attn_backend`` so that rollout log-probs and
+    # training recomputed log-probs are numerically equivalent.
+    #   _flash_3_varlen_hub → FLASH_ATTN
+    #   native / _native_npu → TORCH_SDPA
+    rollout_attn_backend: str = "FLASH_ATTN"
     free_cache_engine: bool = True
     data_parallel_size: int = 1
     expert_parallel_size: int = 1
