@@ -4,6 +4,7 @@
 
 ### Easy, fast, and stable RL training for diffusion and omni-modality models
 
+<a href="https://deepwiki.com/verl-project/verl-omni"><img src="https://devin.ai/assets/deepwiki-badge.png" alt="Ask DeepWiki.com" style="height:20px;"></a>
 [![Docs](https://img.shields.io/badge/docs-Read%20the%20Docs-8A2BE2)](https://verl-omni.readthedocs.io/en/latest/index.html)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE) <a href="docs/assets/WeChat.jpg"><img src="https://img.shields.io/badge/微信-green?logo=wechat&amp"></a>
 
