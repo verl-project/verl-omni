@@ -55,13 +55,7 @@ autosectionlabel_prefix_document = True
 suppress_warnings = ["ref.duplicate", "ref.myst"]
 
 autodoc_mock_imports = [
+    "verl.utils.vllm",
     "verl.workers.rollout.vllm_rollout",
-    "vllm_omni.diffusion.worker",
-    "vllm_omni.diffusion.models.diffusers_adapter",
-    "vllm_omni.diffusion.models.diffusers_adapter.pipeline_diffusers_adapter",
-    "vllm_omni.diffusion.model_loader.diffusers_loader",
-    "vllm_omni.diffusion.lora.manager",
-    "vllm_omni.diffusion.data",
-    "vllm_omni.diffusion.registry",
-    "vllm_omni.lora.request",
+    "vllm_omni",
 ]
