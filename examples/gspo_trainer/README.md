@@ -20,7 +20,7 @@ following stack (rollout↔actor pearson ≈ 0.993):
 | torch | `2.11.0+cu130` |
 | flash-attn | `2.8.3` |
 | accelerate | `1.12.0` |
-| verl | the companion PR branch (FSDP LoRA fixes) |
+| verl | commit: `8a69493027` (w/ FSDP LoRA fixes) |
 
 This pins to the upcoming `vllm 0.22.0` + `vllm-omni 0.22.0` release so the recipe
 stays aligned with what maintainers ship.
@@ -34,7 +34,7 @@ pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@v0.22
 pip install pydub
 
 # verl (must include the FSDP layered-summon fix)
-pip install "verl @ git+https://github.com/verl-project/verl.git@main"
+pip install "verl @ git+https://github.com/verl-project/verl.git@8a69493027"
 
 # verl-omni (this repo)
 pip install -e .
