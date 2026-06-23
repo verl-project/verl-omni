@@ -50,6 +50,8 @@ Evaluated with `trainer.val_before_train=True`:
 |--------|--------|------------------|--------------------|-------------------------|------------|-------------------|----|-----------------------|-------------------|
 | `run_qwen_image_ocr.sh` | 4 | 4 | 4 | 0 (sync) | 32 | 16 | 3e-5 | 0.510 | 250 |
 
+Reference wandb curve [here](https://wandb.ai/andyzhou/VeRL-Omni-demo/runs/8p8y9olb).
+
 ### Full-Model Training - Zero Standard Deviation Ratio and Reward Curve
 
 <div align="center">
@@ -123,6 +125,8 @@ Evaluated with `trainer.val_before_train=True`:
 | Script | # GPUs | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | Images per Prompt | LR | Throughput (images/GPU/s) | Time per Step (s) |
 |--------|--------|------------------|--------------------|-------------------------|------------|-------------------|----|-----------------------|-------------------|
 | `run_qwen_image_ocr_lora.sh` | 4 | 4 | 4 | 0 (sync) | 24 | 12 | 3e-4 | 0.175 | 550 |
+
+Reference wandb curve [here](https://wandb.ai/andyzhou/VeRL-Omni-demo/runs/djrzzibt). 
 
 <div align="center">
 <img width="600" alt="DiffusionNFT LoRA OCR training zero standard deviation ratio and reward curve" src="https://github.com/user-attachments/assets/afed8370-c37e-4f7b-9bba-83ef4b28b6c7" />
