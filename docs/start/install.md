@@ -1,16 +1,18 @@
 # Installation
 
-Last updated: 06/22/2026
+Last updated: 06/24/2026
 
 ## Requirements
 
 For NVIDIA GPU:
-- **Python**: Version >= 3.10
-- **CUDA**: Version >= 12.8
+
+* **Python**: Version >= 3.10
+* **CUDA**: Version >= 12.8
 
 For Ascend NPU:
-- **Python**: Version >= 3.10
-- **CANN**: Version >= 8.5.0
+
+* **Python**: Version >= 3.10
+* **CANN**: Version >= 8.5.0
 
 ## Install
 
@@ -53,21 +55,21 @@ It will install vllm-omni, verl, and verl-omni.
 
 ### Extras
 
-| Extra | Adds | When |
-|---|---|---|
-| `gpu` | `vllm==0.22.0`, `kernels==0.14.1`, `liger-kernel` | CUDA rollout + actor FA3 |
-| `vllm-omni` | `vllm-omni==0.22.0` | vLLM-Omni rollout |
-| `train` | `verl==0.8.0` | RL training |
-| `dev` | `pytest`, `pre-commit`, `Levenshtein`, … | Local development / CI |
-| `ocr` | `Levenshtein` | OCR reward (FlowGRPO) |
+| Extra       | Adds                                              | When                     |
+| ----------- | ------------------------------------------------- | ------------------------ |
+| `gpu`       | `vllm==0.22.0`, `kernels==0.14.1`, `liger-kernel` | CUDA rollout + actor FA3 |
+| `vllm-omni` | `vllm-omni==0.22.0`                               | vLLM-Omni rollout        |
+| `train`     | `verl==0.8.0`                                     | RL training              |
+| `dev`       | `pytest`, `pre-commit`, `Levenshtein`, …          | Local development / CI   |
+| `ocr`       | `Levenshtein`                                     | OCR reward (FlowGRPO)    |
 
 ## Optional Dependencies
 
-| Extra | Install | When needed |
-|---|---|---|
-| OCR reward | `uv pip install -e ".[ocr]"` | FlowGRPO training with OCR-based reward |
-| Dev tools | `uv pip install -e ".[dev]"` | Linting and unit tests |
-| VeOmni engine backend | See [Optional engine backends](#optional-engine-backends) | VeOmni instead of default FSDP2 |
+| Extra                 | Install                                                   | When needed                             |
+| --------------------- | --------------------------------------------------------- | --------------------------------------- |
+| OCR reward            | `uv pip install -e ".[ocr]"`                              | FlowGRPO training with OCR-based reward |
+| Dev tools             | `uv pip install -e ".[dev]"`                              | Linting and unit tests                  |
+| VeOmni engine backend | See [Optional engine backends](#optional-engine-backends) | VeOmni instead of default FSDP2         |
 
 ### Flash Attention 3
 
@@ -122,12 +124,20 @@ python -c "import verl_omni; print('VeRL-Omni ready')"
 
 ## Build Your Own Docker Image
 
-The repository has a CUDA Dockerfile at [`docker/Dockerfile.cuda`](https://github.com/verl-project/verl-omni/blob/main/docker/Dockerfile.cuda). The default base image uses **CUDA 13.0.2** on Ubuntu 22.04 (override with `--build-arg CUDA_VERSION=…` if needed). Build context is controlled by the repo-root [`.dockerignore`](https://github.com/verl-project/verl-omni/blob/main/.dockerignore); keep large local folders such as `.venv`, `data/`, and `checkpoints/` out of the context.
+The repository provides Dockerfiles for both NVIDIA GPU and Ascend NPU environments:
+
+* CUDA Dockerfile: [`docker/Dockerfile.cuda`](https://github.com/verl-project/verl-omni/blob/main/docker/Dockerfile.cuda)
+* Ascend NPU Dockerfile: `docker/Dockerfile.npu`
+
+The CUDA image is intended for NVIDIA GPU training and rollout. The NPU image is intended for Ascend 910B / 910C environments with CANN, `torch-npu`, `vllm-ascend`, and `vllm-omni`.
+
+Build context is controlled by the repo-root [`.dockerignore`](https://github.com/verl-project/verl-omni/blob/main/.dockerignore); keep large local folders such as `.venv`, `data/`, and `checkpoints/` out of the context.
+
+## CUDA Docker Image
 
 ### Prerequisites
 
-- Docker with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
-
+* Docker with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
 
 ### Build commands
 
@@ -143,7 +153,6 @@ docker build -f docker/Dockerfile.cuda --target ocr -t verl-omni:gpu-ocr .
 # Local development tools (adds the `dev` extra)
 docker build -f docker/Dockerfile.cuda --target dev -t verl-omni:gpu-dev .
 ```
-
 
 The image bakes in `verl_omni` and its Python dependencies. Recipe scripts under `examples/` are **not** copied into the image — mount the repository at runtime (see below).
 
@@ -169,23 +178,156 @@ docker run --gpus all --shm-size=16g -it --rm \
   /bin/bash
 ```
 
-Inside the container, confirm the installation (same checks as [Post-Installation Verification](#post-installation-verification)).
-
+Inside the container, confirm the installation using the same checks as [Post-Installation Verification](#post-installation-verification).
 
 Notes:
 
-- **`--shm-size=16g`** — Ray and vLLM use shared memory; larger shared memory is needed training.
-- **Mount the repo** — training recipes live in `examples/`; mounting `$REPO` lets you edit scripts locally and run them immediately in the container.
-- **`WORKSPACE`** — example scripts read datasets and write checkpoints under this path (default: `$HOME` inside the container, i.e. `/root` unless overridden).
-- **Hugging Face cache** — mounting `~/.cache/huggingface` avoids re-downloading `Qwen/Qwen-Image` and reward models on every run.
+* **`--shm-size=16g`** — Ray and vLLM use shared memory; larger shared memory is needed for training.
+* **Mount the repo** — training recipes live in `examples/`; mounting `$REPO` lets you edit scripts locally and run them immediately in the container.
+* **`WORKSPACE`** — example scripts read datasets and write checkpoints under this path (default: `$HOME` inside the container, i.e. `/root` unless overridden).
+* **Hugging Face cache** — mounting `~/.cache/huggingface` avoids re-downloading `Qwen/Qwen-Image` and reward models on every run.
 
-### Example: Qwen-Image FlowGRPO training in Docker
+## Ascend NPU Docker Image
 
-This walkthrough follows the [FlowGRPO quickstart](flowgrpo_quickstart.md) using the OCR dataset and `examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh`. Use the **`ocr` image target** (`verl-omni:gpu-ocr`) so the `Levenshtein` dependency is present.
+### Prerequisites
 
-**1. Launch the interactive container** (command above).
+The Ascend NPU Docker image expects the host machine to provide the Ascend driver and device files.
 
-**2. Prepare the OCR dataset** inside the container:
+Before launching the container, make sure the host has:
+
+* Ascend driver installed.
+* CANN-compatible runtime environment.
+* `npu-smi` available on the host.
+* Ascend device nodes under `/dev`, such as `/dev/davinci0`, `/dev/davinci_manager`, `/dev/devmm_svm`, and `/dev/hisi_hdc`.
+* Docker permission to pass NPU devices into the container.
+
+The NPU container mounts the host driver directory:
+
+```bash
+-v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+```
+
+This allows the containerized CANN / `torch-npu` runtime to use the host Ascend driver.
+
+### Build command
+
+From the repository root:
+
+```bash
+docker build \
+  -f docker/Dockerfile.npu \
+  -t verl-omni:npu \
+  .
+```
+
+If you want to use the 910B launch command below without changing the image name, build the image with the matching tag:
+
+```bash
+docker build \
+  -f docker/Dockerfile.npu \
+  -t verl-omni-npu:v0.22 \
+  .
+```
+
+Alternatively, keep a single image tag and replace the image name in the `docker run` command.
+
+### Launch on Ascend 910C, 16 NPU
+
+Use this command on a 16-card Ascend 910C machine:
+
+```bash
+DEVICES=""
+for i in $(seq 0 15); do
+  DEVICES="$DEVICES --device=/dev/davinci$i"
+done
+
+docker run -it --rm \
+  --name verl_omni_16npu \
+  --network host \
+  --ipc host \
+  --privileged \
+  $DEVICES \
+  --device=/dev/davinci_manager \
+  --device=/dev/devmm_svm \
+  --device=/dev/hisi_hdc \
+  -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+  -v /mnt/data:/mnt/data \
+  verl-omni:npu \
+  bash
+```
+
+### Launch on Ascend 910B, 8 NPU
+
+Use this command on an 8-card Ascend 910B machine:
+
+```bash
+DEVICES=""
+for i in $(seq 0 7); do
+  DEVICES="$DEVICES --device=/dev/davinci$i"
+done
+
+docker run -it --rm \
+  --name verl_omni_8npu \
+  --network host \
+  --ipc host \
+  --privileged \
+  $DEVICES \
+  --device=/dev/davinci_manager \
+  --device=/dev/devmm_svm \
+  --device=/dev/hisi_hdc \
+  -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+  -v /home:/home \
+  verl-omni-npu:v0.22 \
+  bash
+```
+
+If you built the image as `verl-omni:npu`, replace the last image name with:
+
+```bash
+verl-omni:npu
+```
+
+### Notes for NPU containers
+
+* **`--network host`** — useful for Ray, distributed training, and multi-process communication.
+* **`--ipc host`** — avoids shared-memory limitations during training and rollout.
+* **`--privileged`** — commonly required for Ascend device access inside containers.
+* **`/dev/davinci*` devices** — expose Ascend NPU cards to the container.
+* **`/dev/davinci_manager`**, **`/dev/devmm_svm`**, and **`/dev/hisi_hdc`** — required Ascend runtime device files.
+* **`/usr/local/Ascend/driver`** — mounted read-only from the host so the container can use the installed Ascend driver.
+* **`npu-smi`** — mounted from the host to inspect device status inside the container.
+* **910C 16 NPU** — exposes `/dev/davinci0` through `/dev/davinci15`.
+* **910B 8 NPU** — exposes `/dev/davinci0` through `/dev/davinci7`.
+
+Inside the container, confirm the NPU environment:
+
+```bash
+npu-smi info
+python -c "import torch; import torch_npu; print('torch', torch.__version__, '| NPU', torch.npu.is_available())"
+python -c "import vllm; print('vllm', vllm.__version__)"
+python -c "import verl; print('verl', verl.__version__)"
+python -c "import verl_omni; print('VeRL-Omni ready')"
+```
+
+## Example: Qwen-Image FlowGRPO training in Docker
+
+This walkthrough follows the [FlowGRPO quickstart](flowgrpo_quickstart.md) using the OCR dataset and `examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh`.
+
+For CUDA, use the **`ocr` image target** (`verl-omni:gpu-ocr`) so the `Levenshtein` dependency is present.
+
+For Ascend NPU, use the NPU image and the NPU-specific recipe options. NPU recipes should override the attention backend with:
+
+```bash
+actor_rollout_ref.model.attn_backend=_native_npu
+```
+
+### 1. Launch the interactive container
+
+Use either the CUDA or NPU launch command above.
+
+### 2. Prepare the OCR dataset inside the container
 
 ```bash
 export WORKSPACE=${WORKSPACE:-$HOME}
@@ -200,16 +342,24 @@ python3 examples/flowgrpo_trainer/data_process/qwenimage_ocr.py \
   --output_dir $WORKSPACE/data/ocr/qwen_image
 ```
 
-**3. (Optional) Set W&B credentials:**
+### 3. Optional: Set W&B credentials
 
 ```bash
 export WANDB_API_KEY=<your_wandb_api_key>
 ```
 
-**4. Run FlowGRPO training** (4 GPUs by default in the script):
+### 4. Run FlowGRPO training
+
+For CUDA, the default OCR LoRA script uses 4 GPUs by default:
 
 ```bash
 bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh
+```
+
+For Ascend NPU, use the corresponding NPU recipe script if available in your checkout, or run the training command with NPU-specific Hydra overrides, especially:
+
+```bash
+actor_rollout_ref.model.attn_backend=_native_npu
 ```
 
 The script launches `python3 -m verl_omni.trainer.main_diffusion` with FlowGRPO + `vllm_omni` rollout and OCR reward (`compute_score_ocr`). Checkpoints are written to:
@@ -217,5 +367,3 @@ The script launches `python3 -m verl_omni.trainer.main_diffusion` with FlowGRPO 
 ```bash
 checkpoints/flow_grpo/qwen_image_ocr_lora
 ```
-
-
