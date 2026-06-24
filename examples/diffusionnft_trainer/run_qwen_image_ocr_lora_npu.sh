@@ -47,6 +47,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
+    actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.n=16 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \

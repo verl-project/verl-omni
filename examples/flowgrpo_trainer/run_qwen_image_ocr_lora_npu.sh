@@ -48,6 +48,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_grpo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
+    actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.n=16 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / ROLLOUT_TP)) \

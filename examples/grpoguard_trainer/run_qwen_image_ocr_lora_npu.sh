@@ -60,6 +60,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=50 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
+    actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA \
     reward.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / REWARD_TP)) \
     reward.reward_model.enable=True \
     reward.reward_model.model_path=$reward_model_name \
