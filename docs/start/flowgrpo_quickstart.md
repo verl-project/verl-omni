@@ -143,9 +143,14 @@ checkpoints/${trainer.project_name}/${trainer.experiment_name}
 | Actor loss forward/backward OOM | Decrease `actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu` | Splits each actor mini-batch into smaller per-GPU chunks and accumulates gradients across chunks. This lowers activation memory without changing the effective batch size, but can reduce throughput. |
 | Old log-prob recomputation OOM | Decrease `actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu` | Splits actor-side log-prob inference into smaller per-GPU chunks during the `old_log_prob` step. |
 | Reference log-prob OOM | Decrease `actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu` | Splits reference-policy log-prob inference into smaller per-GPU chunks. In LoRA runs where the reference is served by the actor with adapters disabled, the actor log-prob path is used instead. |
-| Attention kernel unavailable (rollout errors) | Set `actor_rollout_ref.rollout.attn_backend=TORCH_SDPA` | When Flash-Attention 3 is not installed or the kernel is unavailable, the trainer attention backend falls back to SDPA automatically, but the rollout engine does not — it must be set explicitly to `TORCH_SDPA` to avoid kernel-not-found errors. |
 
 If rollout OOM persists after increasing `ROLLOUT_TP`, reduce memory-heavy rollout settings such as `actor_rollout_ref.rollout.n`, image `height` / `width`, or `actor_rollout_ref.rollout.pipeline.max_sequence_length`. If reward-model OOM persists after increasing `REWARD_TP`, consider the async reward script, which places the reward model on its own resource pool via `reward.reward_model.enable_resource_pool=True`.
+
+## FAQ: common errors
+
+| Error | Fix | What it changes |
+| --- | --- | --- |
+| Attention kernel unavailable (rollout errors) | Set `actor_rollout_ref.rollout.attn_backend=TORCH_SDPA` | When Flash-Attention 3 is not installed or the kernel is unavailable, the trainer attention backend falls back to SDPA automatically, but the rollout engine does not — it must be set explicitly to `TORCH_SDPA` to avoid kernel-not-found errors. |
 
 ## Wandb logging
 
