@@ -286,13 +286,18 @@ class BagelMoTAttention(nn.Module):
         v = v.transpose(1, 2)
 
         if L_ctx > 0:
-            text_out = F.scaled_dot_product_attention(
-                q_normed[:, :, :L_ctx],
-                k_normed[:, :, :L_ctx],
-                v[:, :, :L_ctx],
-                is_causal=True,
-            )
             if key_padding_mask is not None and not key_padding_mask.all():
+                # Official BAGEL packs prompts, so padded prompt keys do not exist there.
+                # Mask them in both branches to match packed attention semantics.
+                text_key_mask = key_padding_mask[:, :L_ctx].view(B, 1, 1, L_ctx)
+                causal_mask = torch.ones(L_ctx, L_ctx, dtype=torch.bool, device=hidden_states.device).tril()
+                text_out = F.scaled_dot_product_attention(
+                    q_normed[:, :, :L_ctx],
+                    k_normed[:, :, :L_ctx],
+                    v[:, :, :L_ctx],
+                    attn_mask=text_key_mask & causal_mask.view(1, 1, L_ctx, L_ctx),
+                    is_causal=False,
+                )
                 # key_padding_mask: True = valid key, broadcast as (B,1,1,L).
                 img_attn_mask = key_padding_mask.view(B, 1, 1, L)
                 img_out = F.scaled_dot_product_attention(
@@ -303,6 +308,12 @@ class BagelMoTAttention(nn.Module):
                     is_causal=False,
                 )
             else:
+                text_out = F.scaled_dot_product_attention(
+                    q_normed[:, :, :L_ctx],
+                    k_normed[:, :, :L_ctx],
+                    v[:, :, :L_ctx],
+                    is_causal=True,
+                )
                 img_out = F.scaled_dot_product_attention(
                     q_normed[:, :, L_ctx:],
                     k_normed,

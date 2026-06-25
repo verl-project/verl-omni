@@ -46,6 +46,11 @@ def bagel_time_shift(shift: float, t):
     return (shift * t) / (1 + (shift - 1) * t)
 
 
+def vllm_omni_num_timesteps(bagel_num_timesteps: int) -> int:
+    """Map official BAGEL step count to vllm-omni 0.22 generate_image input."""
+    return bagel_num_timesteps - 1 if bagel_num_timesteps > 1 else bagel_num_timesteps
+
+
 def setup_bagel_sigmas(
     scheduler: FlowMatchSDEDiscreteScheduler,
     num_steps: int,
@@ -56,7 +61,12 @@ def setup_bagel_sigmas(
 
     Returns the sigma list (dropping terminal 0) for reference.
     """
-    t = torch.linspace(1, 0, num_steps, dtype=torch.float32, device=device or "cpu")
+    if num_steps <= 0:
+        raise ValueError(f"num_steps must be positive, got {num_steps}")
+
+    # Warmup may pass one step; keep one non-terminal sigma for dummy runs.
+    schedule_points = max(num_steps, 2)
+    t = torch.linspace(1, 0, schedule_points, dtype=torch.float32, device=device or "cpu")
     t_shifted = bagel_time_shift(shift, t)
     sigmas = t_shifted[:-1].tolist()
 

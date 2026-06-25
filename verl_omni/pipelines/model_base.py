@@ -98,6 +98,11 @@ class DiffusionModelBase(ABC):
         return None
 
     @classmethod
+    def configure_train_mode(cls, module: torch.nn.Module) -> None:
+        """Hook called after ``module.train()`` for architecture-specific overrides."""
+        return
+
+    @classmethod
     @abstractmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig) -> SchedulerMixin:
         """Build and configure the diffusion scheduler for this model.
