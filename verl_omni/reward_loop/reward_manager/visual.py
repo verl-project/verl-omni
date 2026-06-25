@@ -58,11 +58,23 @@ class VisualRewardManager(RewardManagerBase):
         extra_info["num_turns"] = num_turns
         extra_info["rollout_reward_scores"] = rollout_reward_scores
 
+        rm_rollout = self.config.reward.reward_model.rollout
+        sampling_params = {
+            "temperature": rm_rollout.temperature,
+            "do_sample": rm_rollout.do_sample,
+            "top_k": rm_rollout.top_k,
+            "top_p": rm_rollout.top_p,
+        }
+        deterministic = self.config.reward.reward_model.get("deterministic", False)
+        if deterministic:
+            sampling_params["seed"] = self.config.reward.reward_model.get("seed", 42)
+
         extra_reward_kwargs = (
             {
                 "reward_router_address": self.reward_router_address,
                 "reward_model_tokenizer": self.reward_model_tokenizer,
                 "model_name": self.config.reward.reward_model.model_path,
+                "sampling_params": sampling_params,
             }
             if self.reward_router_address is not None
             else {}

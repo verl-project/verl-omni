@@ -370,6 +370,8 @@ reward:
       path: pkg://verl_omni.reward_loop.reward_manager
   reward_model:
     enable: false
+    deterministic: false
+    seed: 42
     enable_resource_pool: false
     n_gpus_per_node: 8
     nnodes: 0

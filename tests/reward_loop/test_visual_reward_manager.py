@@ -108,6 +108,63 @@ def test_reward_model_genrm():
     ray.shutdown()
 
 
+def test_deterministic_reward_reproducibility():
+    ray.init(
+        runtime_env={
+            "env_vars": {
+                "TOKENIZERS_PARALLELISM": "true",
+                "NCCL_DEBUG": "WARN",
+                "VLLM_LOGGING_LEVEL": "INFO",
+                "VLLM_USE_V1": "1",
+            }
+        }
+    )
+    with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config")):
+        config = compose(config_name="diffusion_trainer")
+
+    rollout_model_name = os.path.expanduser("~/models/tiny-random/Qwen-Image")
+    reward_model_name = os.path.expanduser("~/models/tiny-random/qwen3-vl")
+    reward_model_gpus, tp_size = resolve_reward_loop_gpu_topology()
+
+    config.actor_rollout_ref.model.path = rollout_model_name
+    config.actor_rollout_ref.model.tokenizer_path = os.path.join(rollout_model_name, "tokenizer")
+    config.reward.custom_reward_function.path = "verl_omni/utils/reward_score/genrm_ocr.py"
+    config.reward.custom_reward_function.name = "compute_score_ocr"
+    config.reward.num_workers = 1
+    config.reward.reward_model.enable = True
+    config.reward.reward_model.enable_resource_pool = True
+    config.reward.reward_model.n_gpus_per_node = reward_model_gpus
+    config.reward.reward_model.nnodes = 1
+    config.reward.reward_model.model_path = reward_model_name
+    config.reward.reward_model.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
+    config.reward.reward_model.rollout.gpu_memory_utilization = 0.9
+    config.reward.reward_model.rollout.tensor_model_parallel_size = tp_size
+    config.reward.reward_model.rollout.skip_tokenizer_init = False
+    config.reward.reward_model.rollout.prompt_length = 2048
+    config.reward.reward_model.rollout.response_length = 32
+    config.reward.reward_model.deterministic = True
+
+    reward_loop_manager = RewardLoopManager(config)
+
+    rollout_tokenizer = hf_tokenizer(config.actor_rollout_ref.model.tokenizer_path)
+    torch.manual_seed(42)
+    data = create_data_samples(rollout_tokenizer)
+
+    run1 = reward_loop_manager.compute_rm_score(data)
+    run2 = reward_loop_manager.compute_rm_score(data)
+
+    for o1, o2 in zip(run1, run2, strict=False):
+        assert torch.equal(o1.batch["rm_scores"], o2.batch["rm_scores"]), (
+            f"rm_scores differ: {o1.batch['rm_scores']} vs {o2.batch['rm_scores']}"
+        )
+        assert o1.non_tensor_batch["genrm_response"] == o2.non_tensor_batch["genrm_response"], (
+            f"genrm_response differs: "
+            f"{o1.non_tensor_batch['genrm_response']} vs {o2.non_tensor_batch['genrm_response']}"
+        )
+
+    ray.shutdown()
+
+
 def test_rule_reward():
     ray.init(
         runtime_env={
