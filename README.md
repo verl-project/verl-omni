@@ -130,10 +130,14 @@ Visit our documentation to learn more.
     <td>✅</td>
   </tr>
   <tr>
-    <td>SD3.5</td>
-    <td>Diffusion generator</td>
-    <td>Text → Image</td>
+    <td rowspan="2">SD3.5</td>
+    <td rowspan="2">Diffusion generator</td>
+    <td rowspan="2">Text → Image</td>
     <td>DPO</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>FlowGRPO</td>
     <td>✅</td>
   </tr>
 </table>
