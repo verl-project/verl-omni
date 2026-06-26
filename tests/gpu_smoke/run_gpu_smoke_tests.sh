@@ -183,7 +183,7 @@ run_selected_test() {
 
 # ── Determine which tests to run ───────────────────────────────────────────────
 declare -A RUN_TEST=(
-    [0]=1 [1]=1 [2]=1 [3]=1 [4]=1 [5]=1 [6]=1 [7]=1
+    [0]=1 [1]=1 [2]=1 [3]=1 [4]=1 [5]=1 [6]=1 [7]=1 [8]=1
 )
 
 # If explicit IDs were passed on the CLI, override to run only those.
@@ -256,6 +256,13 @@ run_selected_test 6 "Qwen-Image online DPO trainer e2e" \
 run_selected_test 7 "diffusers VeOmni engine" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
     pytest -s tests/workers/test_diffusers_veomni_engine.py
+
+# ── Test 8: Qwen3-Omni Thinker GSPO LoRA e2e (vllm_omni AR rollout) ────────────
+# Fixed at 2 GPUs: the smoke stage config pins tensor_parallel_size=2 and FSDP
+# needs >1 GPU to shard (NO_SHARD can't run the offload_to_cpu LoRA-sync summon).
+run_selected_test 8 "Qwen3-Omni Thinker GSPO LoRA e2e" \
+    env CUDA_VISIBLE_DEVICES="0,1" NUM_GPUS=2 \
+    bash tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_smoke.sh
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SUMMARY

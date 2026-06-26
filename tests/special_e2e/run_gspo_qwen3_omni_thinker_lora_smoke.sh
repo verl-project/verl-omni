@@ -26,6 +26,9 @@ export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 # Load verl_omni on the driver (rollout adapter) + the Qwen3-Omni patches (processor / automodel); workers also load the model patch via external_lib below.
 export VERL_USE_EXTERNAL_MODULES=verl_omni,verl_omni.models.transformers.qwen3_omni_thinker
 
+# verl's V1 trainer imports TransferQueue at startup; the shared gpu_smoke image doesn't ship it.
+pip install --no-cache-dir TransferQueue==0.1.8
+
 NUM_GPUS=${NUM_GPUS:-2}
 # Tiny model: prefer the community-hosted Hub checkpoint; build one locally if it
 # is not available yet (not uploaded / offline CI). Override with MODEL_PATH.
@@ -76,7 +79,7 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \
-    actor_rollout_ref.model.target_modules="all-linear" \
+    'actor_rollout_ref.model.target_modules="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"' \
     actor_rollout_ref.model.exclude_modules="${EXCLUDE_MODULES}" \
     actor_rollout_ref.model.use_remove_padding=True \
     ++actor_rollout_ref.actor.freeze_vision_tower=True \
@@ -90,6 +93,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \
+    actor_rollout_ref.actor.fsdp_config.use_orig_params=True \
+    actor_rollout_ref.actor.fsdp_config.wrap_policy.min_num_params=100000000 \
     actor_rollout_ref.actor.policy_loss.loss_mode=gspo \
     actor_rollout_ref.actor.clip_ratio_low=3e-4 \
     actor_rollout_ref.actor.clip_ratio_high=4e-4 \
