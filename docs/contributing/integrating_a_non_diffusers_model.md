@@ -441,7 +441,7 @@ checklist to verify your implementation against it:
 - [ ] `verl_omni/pipelines/bagel_flow_grpo/__init__.py` re-exports the two adapter classes
       (``BagelDiffusion`` and ``BagelPipelineWithLogProb``)
 - [ ] `verl_omni/pipelines/__init__.py` imports `bagel_flow_grpo`
-- [ ] Example launch script at `examples/flowgrpo_trainer/run_bagel_flowgrpo_lora.sh`
+- [ ] Example launch script at `examples/flowgrpo_trainer/run_bagel_ocr_lora.sh`
 - [ ] Deploy config at `examples/flowgrpo_trainer/bagel_deploy_config.yaml`
 
 ---
