@@ -1,0 +1,48 @@
+# Docker build context exclusions (used by: docker build -f docker/Dockerfile.cuda .)
+# NOTE: .dockerignore must live at the build context root, not under docker/.
+
+# VCS / IDE
+.git
+.github
+.cursor
+.vscode
+.idea
+
+# Python env & caches
+.venv
+venv
+ENV
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+.cache
+.hypothesis
+
+# Docs build output (not needed in image)
+docs/_build
+
+# Training artifacts & datasets
+dataset
+data
+checkpoints
+outputs
+output
+logs
+log
+wandb
+playground
+**/*.pt
+**/*.ckpt
+**/*.safetensors
+**/*.bin
+**/*.tar.gz
+**/*.parquet
+
+# Hugging Face / model caches
+.huggingface
+**/huggingface
+
+

@@ -1,6 +1,6 @@
 # Installation
 
-Last updated: 06/10/2026
+Last updated: 06/22/2026
 
 ## Requirements
 
@@ -26,13 +26,22 @@ uv venv --python 3.12 --seed
 source .venv/bin/activate
 ```
 
-2. Install the platform backend:
+2. Install the platform backend.
+
+For NVIDIA GPU:
 
 ```bash
 uv pip install -e ".[gpu]" --torch-backend=auto
 ```
 
-It will install `vllm` for CUDA PyTorch stack and `kernels` for the actor FA3 backend.
+It will install `vllm` for the CUDA PyTorch stack and `kernels` for the actor FA3 backend.
+
+For Ascend NPU:
+
+```bash
+uv pip install vllm==0.22.0
+uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@bb4d0776eee8fc45c3484a45c971a7049f1a2bbf"
+```
 
 3. Install VeRL-Omni:
 
@@ -110,3 +119,103 @@ python -c "import vllm; print('vllm', vllm.__version__)"
 python -c "import verl; print('verl', verl.__version__)"
 python -c "import verl_omni; print('VeRL-Omni ready')"
 ```
+
+## Build Your Own Docker Image
+
+The repository has a CUDA Dockerfile at [`docker/Dockerfile.cuda`](https://github.com/verl-project/verl-omni/blob/main/docker/Dockerfile.cuda). The default base image uses **CUDA 13.0.2** on Ubuntu 22.04 (override with `--build-arg CUDA_VERSION=…` if needed). Build context is controlled by the repo-root [`.dockerignore`](https://github.com/verl-project/verl-omni/blob/main/.dockerignore); keep large local folders such as `.venv`, `data/`, and `checkpoints/` out of the context.
+
+### Prerequisites
+
+- Docker with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+
+
+### Build commands
+
+From the repository root:
+
+```bash
+# Standard GPU training image (runtime target)
+docker build -f docker/Dockerfile.cuda -t verl-omni:gpu .
+
+# OCR reward (adds the `ocr` extra / Levenshtein)
+docker build -f docker/Dockerfile.cuda --target ocr -t verl-omni:gpu-ocr .
+
+# Local development tools (adds the `dev` extra)
+docker build -f docker/Dockerfile.cuda --target dev -t verl-omni:gpu-dev .
+```
+
+
+The image bakes in `verl_omni` and its Python dependencies. Recipe scripts under `examples/` are **not** copied into the image — mount the repository at runtime (see below).
+
+### Launch with interactive session for development
+
+Start an interactive shell with GPU access, shared memory for Ray/vLLM, and common host directories mounted:
+
+```bash
+export REPO=/path/to/verl-omni          # this repository
+export WORKSPACE=$HOME                  # data, checkpoints, HF cache root
+
+docker run --gpus all --shm-size=16g -it --rm \
+  --name verl-omni-ocr \
+  -v "$REPO:/workspace/verl-omni" \
+  -v "$WORKSPACE/data:$WORKSPACE/data" \
+  -v "$WORKSPACE/checkpoints:$WORKSPACE/checkpoints" \
+  -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+  -e WORKSPACE="$WORKSPACE" \
+  -e HF_HOME=/root/.cache/huggingface \
+  -e WANDB_API_KEY="${WANDB_API_KEY:-}" \
+  -w /workspace/verl-omni \
+  verl-omni:gpu-ocr \
+  /bin/bash
+```
+
+Inside the container, confirm the installation (same checks as [Post-Installation Verification](#post-installation-verification)).
+
+
+Notes:
+
+- **`--shm-size=16g`** — Ray and vLLM use shared memory; larger shared memory is needed training.
+- **Mount the repo** — training recipes live in `examples/`; mounting `$REPO` lets you edit scripts locally and run them immediately in the container.
+- **`WORKSPACE`** — example scripts read datasets and write checkpoints under this path (default: `$HOME` inside the container, i.e. `/root` unless overridden).
+- **Hugging Face cache** — mounting `~/.cache/huggingface` avoids re-downloading `Qwen/Qwen-Image` and reward models on every run.
+
+### Example: Qwen-Image FlowGRPO training in Docker
+
+This walkthrough follows the [FlowGRPO quickstart](flowgrpo_quickstart.md) using the OCR dataset and `examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh`. Use the **`ocr` image target** (`verl-omni:gpu-ocr`) so the `Levenshtein` dependency is present.
+
+**1. Launch the interactive container** (command above).
+
+**2. Prepare the OCR dataset** inside the container:
+
+```bash
+export WORKSPACE=${WORKSPACE:-$HOME}
+mkdir -p $WORKSPACE/data/ocr
+
+# Obtain raw train.txt / test.txt from the Flow-GRPO repo:
+# https://github.com/yifan123/flow_grpo/tree/main/dataset/ocr
+# Place them under $WORKSPACE/data/ocr/, then preprocess:
+
+python3 examples/flowgrpo_trainer/data_process/qwenimage_ocr.py \
+  --input_dir $WORKSPACE/data/ocr \
+  --output_dir $WORKSPACE/data/ocr/qwen_image
+```
+
+**3. (Optional) Set W&B credentials:**
+
+```bash
+export WANDB_API_KEY=<your_wandb_api_key>
+```
+
+**4. Run FlowGRPO training** (4 GPUs by default in the script):
+
+```bash
+bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh
+```
+
+The script launches `python3 -m verl_omni.trainer.main_diffusion` with FlowGRPO + `vllm_omni` rollout and OCR reward (`compute_score_ocr`). Checkpoints are written to:
+
+```bash
+checkpoints/flow_grpo/qwen_image_ocr_lora
+```
+
+

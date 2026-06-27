@@ -1,0 +1,93 @@
+# verl-omni GPU image — dependency versions aligned with docs/start/install.md
+#
+# Build (from repo root):
+#   docker build -f docker/Dockerfile.cuda -t verl-omni:gpu .
+#
+# Override pinned versions (defaults match pyproject.toml extras):
+#   docker build -f docker/Dockerfile.cuda -t verl-omni:gpu \
+#     --build-arg VLLM_VERSION=0.22.0 \
+#     --build-arg KERNELS_VERSION=0.14.1 \
+#     --build-arg VLLM_OMNI_VERSION=0.22.0 \
+#     --build-arg VERL_VERSION=0.8.0 .
+#
+# Build with dev extras (pytest, pre-commit, …):
+#   docker build -f docker/Dockerfile.cuda --target dev -t verl-omni:gpu-dev .
+#
+# Run:
+#   docker run --gpus all --shm-size=16g -it verl-omni:gpu
+
+ARG CUDA_VERSION=13.0.2
+ARG UBUNTU_VERSION=22.04
+ARG VLLM_VERSION=0.22.0
+ARG KERNELS_VERSION=0.14.1
+ARG VLLM_OMNI_VERSION=0.22.0
+ARG VERL_VERSION=0.8.0
+
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu${UBUNTU_VERSION} AS base
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG VLLM_VERSION
+ARG KERNELS_VERSION
+ARG VLLM_OMNI_VERSION
+ARG VERL_VERSION
+
+# Python >= 3.10 (3.12 recommended), CUDA >= 12.8
+ENV PYTHONUNBUFFERED=1 \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=0 \
+    UV_PYTHON_DOWNLOADS=manual \
+    VIRTUAL_ENV=/opt/venv \
+    PATH="/root/.local/bin:/opt/venv/bin:${PATH}" \
+    LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Raise nofile limit: uv stdlib bytecode compile opens many files at once.
+RUN ulimit -n 65536 \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && uv python install 3.12 \
+    && uv venv "${VIRTUAL_ENV}" --python 3.12 --seed
+
+WORKDIR /workspace/verl-omni
+
+COPY pyproject.toml setup.py README.md ./
+COPY verl_omni ./verl_omni
+
+# Step 1 — gpu extra: vllm, kernels, liger-kernel
+RUN echo "Installing vllm==${VLLM_VERSION} kernels==${KERNELS_VERSION}" \
+    && uv pip install --torch-backend=auto \
+        "vllm==${VLLM_VERSION}" \
+        "kernels==${KERNELS_VERSION}" \
+        liger-kernel
+
+# Step 2 — vllm-omni + train extras
+RUN echo "Installing vllm-omni==${VLLM_OMNI_VERSION} verl==${VERL_VERSION}" \
+    && uv pip install \
+        "vllm-omni==${VLLM_OMNI_VERSION}" \
+        "verl==${VERL_VERSION}"
+
+# Step 3 — verl-omni core dependencies (editable)
+RUN uv pip install -e .
+
+
+FROM base AS runtime
+WORKDIR /workspace/verl-omni
+CMD ["/bin/bash"]
+
+# Optional: dev extra (pytest, pre-commit, Levenshtein, …)
+FROM base AS dev
+RUN uv pip install -e ".[dev]"
+
+# Optional: ocr extra (FlowGRPO OCR reward)
+FROM base AS ocr
+RUN uv pip install -e ".[ocr]"
+
+# Optional: VeOmni engine backend ("Optional engine backends")
+FROM base AS veomni
+RUN uv pip install veomni==0.1.11 --no-deps \
+    && uv pip install torchcodec librosa soundfile av

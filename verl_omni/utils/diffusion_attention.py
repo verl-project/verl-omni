@@ -17,16 +17,12 @@ from __future__ import annotations
 
 import importlib.util
 import logging
-import os
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 ACTOR_FA3_BACKEND = "_flash_3_varlen_hub"
 ACTOR_NATIVE_BACKEND = "native"
-ROLLOUT_FA3_BACKEND = "FLASH_ATTN"
-ROLLOUT_NATIVE_BACKEND = "TORCH_SDPA"
-DIFFUSION_ATTENTION_ENV = "DIFFUSION_ATTENTION_BACKEND"
 
 
 def actor_fa3_available() -> bool:
@@ -60,36 +56,63 @@ def fa3_available() -> bool:
 
 
 def fallback_fa3_if_unavailable(config: Any) -> None:
-    """Downgrade explicit FA3 settings to native/SDPA when deps are missing."""
+    """Downgrade explicit FA3 settings to native when deps are missing."""
     attn_backend = config.actor_rollout_ref.model.get("attn_backend", ACTOR_FA3_BACKEND)
     if attn_backend != ACTOR_FA3_BACKEND:
         return
 
     if fa3_available():
-        if config.actor_rollout_ref.rollout.get("name") == "vllm_omni":
-            os.environ.setdefault(DIFFUSION_ATTENTION_ENV, ROLLOUT_FA3_BACKEND)
-            _set_ray_env(config, DIFFUSION_ATTENTION_ENV, ROLLOUT_FA3_BACKEND)
         return
 
     logger.warning(
         "FA3 requested but unavailable for matched actor+rollout (kernels=%s, rollout_fa3=%s); "
-        "falling back to actor=%s rollout=%s.",
+        "falling back to actor=%s.",
         actor_fa3_available(),
         rollout_fa3_available(),
         ACTOR_NATIVE_BACKEND,
-        ROLLOUT_NATIVE_BACKEND,
     )
     config.actor_rollout_ref.model.attn_backend = ACTOR_NATIVE_BACKEND
-    os.environ[DIFFUSION_ATTENTION_ENV] = ROLLOUT_NATIVE_BACKEND
-    _set_ray_env(config, DIFFUSION_ATTENTION_ENV, ROLLOUT_NATIVE_BACKEND)
 
 
-def _set_ray_env(config: Any, key: str, value: str) -> None:
-    from omegaconf import OmegaConf
+def validate_attention_consistency(config: Any) -> None:
+    """Validate that rollout and training attention backends match.
 
-    OmegaConf.update(
-        config,
-        f"ray_kwargs.ray_init.runtime_env.env_vars.{key}",
-        value,
-        force_add=True,
-    )
+    Called after ``fallback_fa3_if_unavailable`` so any FA3→native downgrade
+    has already updated both config fields.
+
+    Rules:
+        - If the training engine is VeOmni, skip validation.
+        - If ``attn_backend`` is ``_flash_3_varlen_hub`` (FA2/FA3), rollout
+          must be ``FLASH_ATTN``.
+        - If ``attn_backend`` is ``native`` or ``_native_npu``, rollout must be
+          ``TORCH_SDPA``.
+
+    Raises:
+        ValueError: If the rollout attention backend does not match the training
+            attention backend.
+    """
+    actor_cfg = config.actor_rollout_ref.actor
+    strategy = actor_cfg.get("strategy") if hasattr(actor_cfg, "get") else None
+    if strategy == "veomni":
+        return  # VeOmni engine manages its own attention independently
+
+    model_cfg = config.actor_rollout_ref.model
+    attn_backend = model_cfg.get("attn_backend", ACTOR_FA3_BACKEND)
+    rollout_backend = config.actor_rollout_ref.rollout.get("rollout_attn_backend")
+
+    if attn_backend == ACTOR_FA3_BACKEND:
+        expected = "FLASH_ATTN"
+    elif attn_backend in (ACTOR_NATIVE_BACKEND, "_native_npu"):
+        expected = "TORCH_SDPA"
+    else:
+        logger.warning("Unknown attn_backend=%r; skipping attention consistency check.", attn_backend)
+        return
+
+    if rollout_backend != expected:
+        raise ValueError(
+            f"Attention backend mismatch: attn_backend={attn_backend!r} requires "
+            f"rollout_attn_backend={expected!r}, but got {rollout_backend!r}. "
+            "Both must use the same attention implementation. "
+            "Set rollout_attn_backend via --diffusion-attention-backend flag "
+            "or in the rollout config."
+        )

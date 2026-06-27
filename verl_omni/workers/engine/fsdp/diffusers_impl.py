@@ -1266,9 +1266,12 @@ class EngineTrainModeCtx(BaseEngineCtx):
         super().__init__(engine=engine, mode="train", **kwargs)
 
     def __enter__(self):
+        from verl_omni.pipelines.model_base import DiffusionModelBase
+
         assert isinstance(self.engine, DiffusersFSDPEngine)
         super().__enter__()
         self.engine.module.train()
+        DiffusionModelBase.get_class(self.engine.model_config).configure_train_mode(self.engine.module)
 
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, DiffusersFSDPEngine)

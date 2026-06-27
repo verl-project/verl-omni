@@ -12,19 +12,23 @@ The provided scripts are configured for a single node with `8` NPUs.
 
 ## Prepare the dataset
 
-### HPSv3 dataset
+The Text-to-Video generation task uses text prompts for video generation. There is a pre-split sample dataset with 1,233 prompts from [LanguageBind/Open-Sora-Plan-v1.2.0](https://huggingface.co/datasets/LanguageBind/Open-Sora-Plan-v1.2.0/blob/main/anno_json/v1.1.0_HQ_part3.json). Pre-split train/test prompt files are available at [video_prompts](https://huggingface.co/datasets/Hao7/video_prompts/tree/main):
 
-The HPSv3 task uses text prompts for video generation. You can find an example prompt file at:
+- `train.txt` — training prompts
+- `test.txt` — test prompts
 
-- https://github.com/verl-project/verl-recipe/blob/main/dance_grpo/dance_grpo_mindspeed_mm/data/prompt.txt
+Download them and place under `examples/dancegrpo_trainer/data_process/video_prompts/` before running the conversion script.
 
-Place your prompt file (one prompt per line) under `$WORKSPACE/data/hpsv3/prompt.txt`, then preprocess it into parquet files:
+You can also prepare your own dataset. Create two plain-text files (one for training, one for testing) with one prompt per line. Lines with Chinese characters are automatically filtered out during preprocessing.
+
+### Convert to parquet
 
 ```bash
 python3 examples/dancegrpo_trainer/data_process/wan22_hpsv3.py \
-  --input_path $WORKSPACE/data/hpsv3/prompt.txt \
   --output_dir $WORKSPACE/data/hpsv3
 ```
+
+The script reads `video_prompts/train.txt` and `video_prompts/test.txt` by default. To use custom files, pass `--train_path` and `--test_path` explicitly.
 
 This produces:
 

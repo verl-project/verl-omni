@@ -98,6 +98,10 @@ class DiffusionRolloutConfig(BaseConfig):
     gpu_memory_utilization: float = 0.5
     enforce_eager: bool = False
     cudagraph_capture_sizes: Optional[list] = None
+
+    # vLLM-omni diffusion attention backend.
+    # Allow custom select of attention backend for rollout.
+    rollout_attn_backend: str = "FLASH_ATTN"
     free_cache_engine: bool = True
     data_parallel_size: int = 1
     expert_parallel_size: int = 1
