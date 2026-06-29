@@ -46,11 +46,7 @@ This produces ``$WORKSPACE/data/ocr/bagel/train.parquet`` and
 ### Run training
 
 ```bash
-<<<<<<< HEAD
-bash examples/flowgrpo_trainer/bagel/run_bagel_flowgrpo_lora.sh
-=======
-bash examples/flowgrpo_trainer/run_bagel_ocr_lora.sh
->>>>>>> e2898e1561b0c30791514a45bfc2a04bb90ed456
+bash examples/flowgrpo_trainer/bagel/run_bagel_ocr_lora.sh
 ```
 
 The launch script uses a [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct)
@@ -85,7 +81,7 @@ This produces ``$WORKSPACE/data/pickscore/bagel/train.parquet`` and
 ### Run training
 
 ```bash
-bash examples/flowgrpo_trainer/run_bagel_pickscore_lora.sh
+bash examples/flowgrpo_trainer/bagel/run_bagel_pickscore_lora.sh
 ```
 
 Key configuration differences from OCR:

@@ -123,7 +123,8 @@ The HPSv3 reward is the only validated configuration. Other reward functions
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
-| Flow-GRPO (LoRA) | `examples/flowgrpo_trainer/bagel/run_bagel_flowgrpo_lora.sh` | Configurable |
+| Flow-GRPO (LoRA, OCR) | `examples/flowgrpo_trainer/bagel/run_bagel_ocr_lora.sh` | 4×GPU |
+| Flow-GRPO (LoRA, PickScore) | `examples/flowgrpo_trainer/bagel/run_bagel_pickscore_lora.sh` | 4×GPU |
 
 BAGEL uses a per-stage deploy YAML that overrides top-level vLLM engine arguments
 — tune `gpu_memory_utilization` and batch sizes directly in the stage config file.

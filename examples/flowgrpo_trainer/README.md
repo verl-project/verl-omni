@@ -122,7 +122,8 @@ All example scripts in this directory:
 
 | Variant | Script | GPUs | Notes |
 |---------|--------|------|-------|
-| LoRA | `bagel/run_bagel_flowgrpo_lora.sh` | Configurable | Per-stage deploy YAML |
+| LoRA (OCR) | `bagel/run_bagel_ocr_lora.sh` | 4×GPU | OCR reward (Qwen3-VL) |
+| LoRA (PickScore) | `bagel/run_bagel_pickscore_lora.sh` | 4×GPU | CLIP-based image-text alignment |
 
 ### Engine backends
 
