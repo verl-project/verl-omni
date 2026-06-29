@@ -12,7 +12,7 @@
 # Requires: verl, verl-omni, vllm-omni installed.
 #   * dummy model built at MODEL_PATH (auto-built by this script if missing)
 #   * a small math parquet dataset at DATA_DIR/{train,test}.parquet
-#     (same default location as examples/gspo_trainer/run_qwen3_omni_thinker_gspo_lora.sh)
+#     (same default location as examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora.sh)
 #
 # Override via env: NUM_GPUS, MODEL_PATH, DATA_DIR, TOTAL_TRAIN_STEPS
 set -xeuo pipefail
