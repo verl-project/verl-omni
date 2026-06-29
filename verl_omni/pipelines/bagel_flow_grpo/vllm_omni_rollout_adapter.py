@@ -21,8 +21,8 @@ original flow_grpo BAGEL rollout.
 
 from __future__ import annotations
 
-import hashlib
 import logging
+import os
 import random
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -188,20 +188,20 @@ class _BagelSchedulerAdapter:
 def _pick_sde_window(
     window_size: Optional[int],
     window_range: Optional[Any],
-    seed: Optional[int],
-    request_id: Optional[str],
+    seed: int,
 ) -> Optional[tuple[int, int]]:
     """Pick a random contiguous window ``[begin, begin + window_size)``.
+
+    Uses ``seed`` directly so that all rollouts share the same SDE window,
+    matching the official flow_grpo behaviour of
+    ``random.seed(process_index)`` per GPU.
 
     Args:
         window_size: Number of steps in the window.  ``None`` or 0
             disables windowing.
         window_range: ``(low, high)`` inclusive range for the window
             start.  ``None`` defaults to ``[0, window_size)``.
-        seed: If set, seed the RNG for reproducibility.
-        request_id: If set (and ``seed`` is ``None``), seed the RNG
-            with a hash of the request ID so concurrent requests get
-            different windows.
+        seed: Seed for the RNG.
 
     Returns:
         ``(begin, end_exclusive)`` or ``None`` if windowing is disabled.
@@ -218,13 +218,7 @@ def _pick_sde_window(
         # Window doesn't fit; clamp to the lowest valid begin.
         return (low, low + int(window_size))
 
-    if seed is not None:
-        rng = random.Random(int(seed))
-    elif request_id is not None:
-        h = hashlib.sha256(str(request_id).encode()).digest()
-        rng = random.Random(int.from_bytes(h[:8], "big"))
-    else:
-        rng = random.Random()
+    rng = random.Random(seed)
     begin = rng.randint(low, high_inclusive)
     return (begin, begin + int(window_size))
 
@@ -297,8 +291,7 @@ class BagelPipelineWithLogProb(BagelPipeline):
             sde_window = _pick_sde_window(
                 window_size=int(sde_window_size),
                 window_range=sde_window_range,
-                seed=req.sampling_params.seed,
-                request_id=getattr(req, "request_id", None),
+                seed=int(os.environ["LOCAL_RANK"]),
             )
 
         # Pass scheduler kwargs; _BagelSchedulerAdapter overrides noise_level
