@@ -16,7 +16,7 @@ Preprocess the OCR dataset for BAGEL FlowGRPO training.
 
 BAGEL uses raw ``tokenizer.encode(user_text)`` with BOS/EOS markers
 (no chat template).  This script pre-tokenizes prompts in BAGEL format
-so the training adapter can read ``bagel_prompt_ids`` directly instead
+so the training adapter can read ``prompt_token_ids`` directly instead
 of decoding + re-encoding chat-template tokens at every step.
 
 Usage::
@@ -86,13 +86,6 @@ if __name__ == "__main__":
         help="Max token length for BAGEL prompts.",
     )
     parser.add_argument("--hdfs_dir", default=None, help="Optional HDFS output directory.")
-    parser.add_argument(
-        "--system_prompt",
-        default="Describe the image by detailing the color, shape, size, "
-        "texture, quantity, text, spatial relationships of the objects and background:",
-        help="System prompt prepended before user text.",
-    )
-
     args = parser.parse_args()
     local_dataset_path = os.path.expanduser(args.input_dir)
 
@@ -120,25 +113,21 @@ if __name__ == "__main__":
             text = example.pop("text")
             solution = extract_ocr_solution(text)
 
-            # Build the full user text the same way the rollout does:
-            # system_prompt + "\n" + ocr_prompt + "\n"
-            user_text = f"{args.system_prompt}\n{text}\n"
+            # Official FlowGRPO feeds BAGEL the stripped OCR line as one plain prompt.
+            # Keep rollout text and actor-side token IDs byte-identical.
+            user_text = text.strip()
 
             # Pre-tokenize in BAGEL format so the training adapter
-            # can read bagel_prompt_ids directly (no runtime conversion).
-            bagel_prompt_ids = tokenize_bagel_prompt(tokenizer, user_text, max_length=args.max_prompt_length)
+            # can read prompt_token_ids directly (no runtime conversion).
+            prompt_token_ids = tokenize_bagel_prompt(tokenizer, user_text, max_length=args.max_prompt_length)
 
             return {
                 "data_source": data_source,
-                "prompt": [
-                    {"role": "system", "content": args.system_prompt},
-                    {"role": "user", "content": text},
-                ],
+                "prompt": [{"role": "user", "content": user_text}],
                 "negative_prompt": [
-                    {"role": "system", "content": args.system_prompt},
                     {"role": "user", "content": negative_user_prompt},
                 ],
-                "bagel_prompt_ids": np.array(bagel_prompt_ids, dtype=np.int64),
+                "prompt_token_ids": np.array(prompt_token_ids, dtype=np.int64),
                 "ability": "ocr",
                 "reward_model": {
                     "style": "model",
