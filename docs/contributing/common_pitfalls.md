@@ -1,6 +1,6 @@
 # Common Pitfalls
 
-Last updated: 06/15/2026.
+Last updated: 06/29/2026.
 
 ---
 
@@ -166,3 +166,81 @@ override must match.
 
 `ratio_mean ≈ 1.0` at step 1 with `step_execution=True`, matching the
 `step_execution=False` baseline within tolerance.
+
+---
+
+## SDE Window: Per-Request vs Per-GPU Seeding
+
+(symptom-sde-window)=
+### Symptom
+
+- `critic/rewards/std_mean` grows over training (e.g. 0.07 → 0.10) instead
+  of shrinking.
+- `critic/score/mean` declines or oscillates instead of improving.
+- Training collapses early — the run dies after ~30 steps while a
+  correctly-configured run trains healthily for 180+ steps.
+- `actor/ppo_kl` increases and `actor/loss` becomes unstable.
+
+Most visible with reward functions that produce smooth, fine-grained scores
+(e.g. PickScore) where small differences between rollouts are the signal the
+policy should learn from.
+
+(root-cause-sde-window)=
+### Root cause
+
+The SDE window is the contiguous range of timesteps where stochastic noise
+(exploration) is injected during the diffusion rollout.  When the window is
+chosen **per-request** — e.g. by hashing the request ID or using an unseeded
+RNG — different rollouts for the same prompt inject noise at *different
+timestep ranges*.  The reward scatter combines two sources of variance:
+
+1. **Exploration noise** — intended, the policy should learn from this.
+2. **Timestep bias** — unintended, two rollouts with identical behaviour can
+   score differently purely because noise was applied at different timesteps.
+
+The second source inflates `critic/rewards/std_mean` by ~4×, making GRPO
+advantage estimates unreliable.  The trainer cannot distinguish noise from
+signal, drift dominates, and training collapses.
+
+(fix-sde-window)=
+### Fix
+
+Seed the SDE window RNG with a **per-GPU identifier** so all rollouts on the
+same GPU share the same noise-injection window.  This removes the timestep
+bias from the variance budget — all rollouts for a prompt are evaluated under
+consistent noise structure, and the remaining variance is genuine exploration
+that GRPO can learn from.
+
+```python
+# Wrong — each rollout gets a different SDE window:
+rng = random.Random(hash(request_id))
+
+# Correct — all rollouts on the same GPU share one window:
+rng = random.Random(int(os.environ["LOCAL_RANK"]))
+```
+
+This matches the reference flow_grpo behaviour of
+``random.seed(process_index)``.
+
+```{note}
+Reading ``LOCAL_RANK`` from the environment couples the window to process
+placement, which is opaque and not reproducible across GPU counts.  A better
+approach would pass an explicit seed from the launcher.
+```
+
+(verification-sde-window)=
+### Verification
+
+Two BAGEL PickScore LoRA runs on the same 4-GPU setup, differing only in
+SDE window seeding:
+
+| Metric | Per-request seed (``xfqjs6fm``) | Per-GPU seed (``30xjd535``) |
+|---|---|---|
+| `critic/rewards/std_mean` | 0.07 → 0.10 (diverging) | 0.022 → 0.014 (converging) |
+| `critic/score/mean` trend | 0.78 → 0.62 (collapsing) | 0.82 → 0.85+ (improving) |
+| Steps survived | 28 | 181+ |
+| `actor/ppo_kl` | Growing to 8×10⁻⁴ | Near zero, stable |
+| `val-core/.../reward/mean@1` | N/A | 0.82 → 0.87 (improving) |
+
+The fix brings `critic/rewards/std_mean` into the same ~0.01–0.02 range
+observed in reference flow_grpo PickScore runs.

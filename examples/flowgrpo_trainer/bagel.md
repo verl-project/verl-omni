@@ -20,12 +20,14 @@ for the integration architecture.
   huggingface-cli download ByteDance-Seed/BAGEL-7B-MoT --local-dir ~/models/ByteDance-Seed/BAGEL-7B-MoT
   ```
 
-## Prepare the dataset
+## OCR training
 
 We use an OCR (optical character recognition) dataset that provides
 ground-truth text for evaluating image-generation quality.  Prompts are
 stored in standard chat-message format for the agent loop (see
 ``bagel_ocr.py``).
+
+### Prepare the dataset
 
 Preprocess the raw OCR data into parquet:
 
@@ -41,7 +43,7 @@ python3 examples/flowgrpo_trainer/data_process/bagel_ocr.py \
 This produces ``$WORKSPACE/data/ocr/bagel/train.parquet`` and
 ``test.parquet``.
 
-## Run training
+### Run training
 
 ```bash
 bash examples/flowgrpo_trainer/run_bagel_ocr_lora.sh
@@ -50,6 +52,46 @@ bash examples/flowgrpo_trainer/run_bagel_ocr_lora.sh
 The launch script uses a [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct)
 reward model with vLLM rollout (TP=4) and the ``genrm_ocr.py`` custom reward
 function.
+
+## PickScore training
+
+PickScore evaluates image-text alignment using a
+[CLIP-based model](https://huggingface.co/yuvalkirstain/PickScore_v1).  The
+reward function lives entirely in ``verl_omni/utils/reward_score/pickscore_reward.py``
+— there is **no** separate vLLM reward model deployment, so the GPU is shared
+between the actor and the reward computation.
+
+### Prepare the dataset
+
+The raw PickScore dataset (``train.txt`` / ``test.txt``) should be downloaded
+from the [flow_grpo repository](https://github.com/yifan123/flow_grpo/tree/main/dataset/pickscore).
+
+Preprocess for BAGEL:
+
+```bash
+python3 examples/flowgrpo_trainer/data_process/bagel_pickscore.py \
+  --model_path ~/models/ByteDance-Seed/BAGEL-7B-MoT \
+  --input_dir ~/data/pickscore \
+  --output_dir $WORKSPACE/data/pickscore/bagel
+```
+
+This produces ``$WORKSPACE/data/pickscore/bagel/train.parquet`` and
+``test.parquet``.
+
+### Run training
+
+```bash
+bash examples/flowgrpo_trainer/run_bagel_pickscore_lora.sh
+```
+
+Key configuration differences from OCR:
+- No ``reward.reward_model.*`` flags — PickScore runs as a custom reward
+  function on the rollout GPU.
+- Higher ``noise_level`` (``1.3`` vs ``0.7``) and SDE window
+  (``sde_window_size=2``, ``range=[0,7]``) to provide sufficient exploration
+  for text-alignment learning.
+- ``val_before_train=False`` because PickScore images are evaluated against
+  their own prompt text, so a pre-training baseline is less meaningful.
 
 ## Key differences from Qwen-Image
 
