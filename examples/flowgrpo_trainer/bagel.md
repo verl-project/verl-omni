@@ -90,8 +90,6 @@ Key configuration differences from OCR:
 - Higher ``noise_level`` (``1.3`` vs ``0.7``) and SDE window
   (``sde_window_size=2``, ``range=[0,7]``) to provide sufficient exploration
   for text-alignment learning.
-- ``val_before_train=False`` because PickScore images are evaluated against
-  their own prompt text, so a pre-training baseline is less meaningful.
 
 ## Key differences from Qwen-Image
 

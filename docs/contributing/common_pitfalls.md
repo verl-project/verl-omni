@@ -234,7 +234,7 @@ approach would pass an explicit seed from the launcher.
 Two BAGEL PickScore LoRA runs on the same 4-GPU setup, differing only in
 SDE window seeding:
 
-| Metric | Per-request seed (``xfqjs6fm``) | Per-GPU seed (``30xjd535``) |
+| Metric | Per-request seed | Per-GPU seed |
 |---|---|---|
 | `critic/rewards/std_mean` | 0.07 → 0.10 (diverging) | 0.022 → 0.014 (converging) |
 | `critic/score/mean` trend | 0.78 → 0.62 (collapsing) | 0.82 → 0.85+ (improving) |
