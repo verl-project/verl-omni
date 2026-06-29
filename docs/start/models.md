@@ -143,7 +143,7 @@ BAGEL uses a per-stage deploy YAML that overrides top-level vLLM engine argument
 | **Trainer type** | GSPO — Group Sampling Policy Optimization (verl-native PPO-style) |
 | **FSDP** | Full FSDP with LoRA (rank 64), param and optimizer CPU offload |
 | **Rollout** | vLLM-Omni TP=4 colocated on the same GPUs as the FSDP actor |
-| **Stage config** | `examples/gspo_trainer/qwen3_omni/config/qwen3_omni_thinker_only.yaml` (`gpu_memory_utilization=0.4`) |
+| **Stage config** | `examples/gspo_trainer/qwen3_omni/qwen3_omni_thinker_only.yaml` (`gpu_memory_utilization=0.4`) |
 | **External module** | `verl_omni.models.transformers.qwen3_omni_thinker` |
 
 For version requirements and detailed setup instructions, see
