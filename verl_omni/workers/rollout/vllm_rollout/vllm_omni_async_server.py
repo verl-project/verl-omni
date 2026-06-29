@@ -165,8 +165,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         os.environ["MASTER_PORT"] = str(diffusion_master_port)
         logger.info("Using MASTER_PORT=%s for vLLM-Omni workers", os.environ["MASTER_PORT"])
 
-        engine_args["diffusion_attention_backend"] = self.config.rollout_attn_backend
-        logger.info("Setting diffusion_attention_backend=%s from rollout config", self.config.rollout_attn_backend)
+        # rollout_attn_backend only exists on the diffusion rollout config, not AR text rollouts.
+        attn_backend = getattr(self.config, "rollout_attn_backend", None)
+        if attn_backend is not None:
+            engine_args["diffusion_attention_backend"] = attn_backend
+            logger.info("Setting diffusion_attention_backend=%s from rollout config", attn_backend)
 
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
