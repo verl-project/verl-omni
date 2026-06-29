@@ -59,7 +59,7 @@ idle time inside the rollout/reward phase.
 Run the async reward example:
 
 ```bash
-bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_async_reward.sh
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_async_reward.sh
 ```
 
 The example uses four GPUs for actor/rollout and one GPU for reward inference:

@@ -26,19 +26,19 @@ requirements.
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
-| Flow-GRPO (LoRA) | `examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh` | 4×GPU |
-| Flow-GRPO (full) | `examples/flowgrpo_trainer/run_qwen_image_ocr.sh` | 4×H200 |
-| Flow-GRPO (async) | `examples/flowgrpo_trainer/run_qwen_image_ocr_lora_async_reward.sh` | 5×GPU |
-| Flow-GRPO (multi-node) | `examples/flowgrpo_trainer/run_qwen_image_ocr_lora_multi_node.sh` | 2×4 GPU |
-| Flow-GRPO (SP=2) | `examples/flowgrpo_trainer/run_qwen_image_ocr_lora_sp2.sh` | 4×GPU |
-| Flow-GRPO (rollout-corr) | `examples/flowgrpo_trainer/run_qwen_image_ocr_lora_rollout_corr.sh` | 4×GPU |
-| Flow-GRPO (VeOmni) | `examples/flowgrpo_trainer/run_qwen_image_ocr_veomni.sh` | 64×H100 |
-| Flow-GRPO (NPU) | `examples/flowgrpo_trainer/run_qwen_image_ocr_lora_npu.sh` | 8×NPU |
-| Flow-DPPO | `examples/flowdppo_trainer/run_qwen_image_ocr_lora.sh` | 4×GPU |
-| GRPO-Guard | `examples/grpoguard_trainer/run_qwen_image_ocr_lora.sh` | 4×GPU |
-| Mix-GRPO | `examples/mixgrpo_trainer/run_qwen_image_ocr_lora_mixgrpo.sh` | 4×GPU |
-| Diffusion-DPO | `examples/dpo_trainer/run_qwen_image_online_dpo_lora.sh` | 4×GPU |
-| DiffusionNFT | `examples/diffusionnft_trainer/run_qwen_image_ocr_lora.sh` | 4×GPU |
+| Flow-GRPO (LoRA) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU |
+| Flow-GRPO (full) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr.sh` | 4×H200 |
+| Flow-GRPO (async) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_async_reward.sh` | 5×GPU |
+| Flow-GRPO (multi-node) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_multi_node.sh` | 2×4 GPU |
+| Flow-GRPO (SP=2) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_sp2.sh` | 4×GPU |
+| Flow-GRPO (rollout-corr) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_rollout_corr.sh` | 4×GPU |
+| Flow-GRPO (VeOmni) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh` | 64×H100 |
+| Flow-GRPO (NPU) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_npu.sh` | 8×NPU |
+| Flow-DPPO | `examples/flowdppo_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU |
+| GRPO-Guard | `examples/grpoguard_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU |
+| Mix-GRPO | `examples/mixgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_mixgrpo.sh` | 4×GPU |
+| Diffusion-DPO | `examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora.sh` | 4×GPU |
+| DiffusionNFT | `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU |
 
 **Reward model:** `Qwen/Qwen3-VL-8B-Instruct` (OCR VLM judge, TP=4 colocated).
 
@@ -58,8 +58,8 @@ requirements.
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
-| Flow-GRPO (LoRA) | `examples/flowgrpo_trainer/run_sd35_medium_ocr_lora.sh` | 3×GPU (2 actor+rollout, 1 reward) |
-| Diffusion-DPO (offline) | `examples/dpo_trainer/run_sd35_medium_offline_dpo_lora.sh` | 3×GPU |
+| Flow-GRPO (LoRA) | `examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh` | 3×GPU (2 actor+rollout, 1 reward) |
+| Diffusion-DPO (offline) | `examples/dpo_trainer/sd35/run_sd35_medium_offline_dpo_lora.sh` | 3×GPU |
 
 **Reward model:** `Qwen/Qwen2.5-VL-3B-Instruct` (OCR VLM judge, TP=1, dedicated pool).
 
@@ -97,7 +97,7 @@ is provided, but the framework supports it natively.
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
-| DanceGRPO (HPSv3) | `examples/dancegrpo_trainer/run_wan22_5b_t2v_hpsv3_npu.sh` | 8×NPU (Ascend 800T A2) |
+| DanceGRPO (HPSv3) | `examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_npu.sh` | 8×NPU (Ascend 800T A2) |
 
 **Reward model:** HPSv3 (Human Preference Score v3) — local safetensors checkpoint
 placed at `$WORKSPACE/CKPT/HPSv3/HPSv3.safetensors`.
@@ -116,14 +116,14 @@ The HPSv3 reward is the only validated configuration. Other reward functions
 |----------|--------|
 | **Architecture** | Unified multimodal understanding + generation |
 | **Modality** | Text + Image (understand and generate) |
-| **Deploy config** | `examples/flowgrpo_trainer/bagel_deploy_config.yaml` |
+| **Deploy config** | `examples/flowgrpo_trainer/bagel/bagel_deploy_config.yaml` |
 | **Rollout** | vLLM-Omni with per-stage YAML for engine memory/batching control |
 
 **Supported trainers:**
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
-| Flow-GRPO (LoRA) | `examples/flowgrpo_trainer/run_bagel_flowgrpo_lora.sh` | Configurable |
+| Flow-GRPO (LoRA) | `examples/flowgrpo_trainer/bagel/run_bagel_flowgrpo_lora.sh` | Configurable |
 
 BAGEL uses a per-stage deploy YAML that overrides top-level vLLM engine arguments
 — tune `gpu_memory_utilization` and batch sizes directly in the stage config file.
@@ -136,13 +136,13 @@ BAGEL uses a per-stage deploy YAML that overrides top-level vLLM engine argument
 
 | Property | Detail |
 |----------|--------|
-| **Hugging Face ID** | `Qwen/Qwen3-Omni-30B-A3B` |
+| **Hugging Face ID** | `Qwen/Qwen3-Omni-30B-A3B-Instruct` |
 | **Architecture** | Omni-modality Thinker with Mixture-of-Experts (30B total, 3B active) |
 | **Modality** | Text + Image + Audio + Video (understand and generate) |
 | **Trainer type** | GSPO — Group Sampling Policy Optimization (verl-native PPO-style) |
 | **FSDP** | Full FSDP with LoRA (rank 64), param and optimizer CPU offload |
 | **Rollout** | vLLM-Omni TP=4 colocated on the same GPUs as the FSDP actor |
-| **Stage config** | `examples/gspo_trainer/config/qwen3_omni_thinker_only.yaml` (`gpu_memory_utilization=0.4`) |
+| **Stage config** | `examples/gspo_trainer/qwen3_omni/config/qwen3_omni_thinker_only.yaml` (`gpu_memory_utilization=0.4`) |
 | **External module** | `verl_omni.models.transformers.qwen3_omni_thinker` |
 
 For version requirements and detailed setup instructions, see
@@ -152,7 +152,7 @@ For version requirements and detailed setup instructions, see
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
-| GSPO (math) | `examples/gspo_trainer/run_qwen3_omni_thinker_gspo_lora.sh` | 4×H100/H200 80GB |
+| GSPO (math) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora.sh` | 4×H100/H200 80GB |
 
 The actor (FSDP, 30B + LoRA r=64 with offloading) and vLLM-Omni rollout (TP=4)
 colocate on the same 4 GPUs. `gpu_memory_utilization` is kept at `0.4` in the

@@ -35,20 +35,20 @@ then `examples/flowgrpo_trainer/data_process/qwenimage_ocr.py` to write
 
 ### Run
 
-### NVIDIA GPU
+#### NVIDIA GPU
 
 ```bash
-bash examples/dpo_trainer/run_qwen_image_online_dpo_lora.sh \
+bash examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora.sh \
   data.train_files=$WORKSPACE/data/ocr/qwen_image/train.parquet \
   data.val_files=$WORKSPACE/data/ocr/qwen_image/test.parquet
 ```
 
-### NPU
+#### NPU
 
 For Huawei Ascend NPUs, use the NPU-optimized script:
 
 ```bash
-bash examples/dpo_trainer/run_qwen_image_online_dpo_lora_npu.sh \
+bash examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora_npu.sh \
   data.train_files=$WORKSPACE/data/ocr/qwen_image/train.parquet \
   data.val_files=$WORKSPACE/data/ocr/qwen_image/test.parquet
 ```
@@ -73,8 +73,8 @@ This script uses a 16-NPU global distribution strategy with:
 
 | Script | Model | Algorithm | Hybrid Engine | # Cards | Reward Fn | # Cards for Actor | # Cards for Rollout | # Cards for Async Reward | Batch Size | `rollout.n` | lr   | # Val Samples | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / Card / Seconds) | Time per Step (Seconds) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `run_qwen_image_online_dpo_lora.sh` | Qwen-Image | Online DPO | True | 4 (NVIDIA) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync) | 32 | 16 | 3e-4 | 1k (full set) | 32×2=64 | 8 | 0.040 | 408 |
-| `run_qwen_image_online_dpo_lora_npu.sh` | Qwen-Image | Online DPO | True | 16 (NPU) | qwenvl-ocr-vllm | 16 | 16 | 0 (sync) | 32 | 16 | 3e-4 | 1k (full set) | 32×2=64 | 4 | 0.003 | 1188 |
+| `qwen_image/run_qwen_image_online_dpo_lora.sh` | Qwen-Image | Online DPO | True | 4 (NVIDIA) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync) | 32 | 16 | 3e-4 | 1k (full set) | 32×2=64 | 8 | 0.040 | 408 |
+| `qwen_image/run_qwen_image_online_dpo_lora_npu.sh` | Qwen-Image | Online DPO | True | 16 (NPU) | qwenvl-ocr-vllm | 16 | 16 | 0 (sync) | 32 | 16 | 3e-4 | 1k (full set) | 32×2=64 | 4 | 0.003 | 1188 |
 
 - Colocated actor, vLLM-Omni rollout, and sync OCR reward on 4 NVIDIA GPUs (or 16 NPUs for NPU script); `rollout.n=16` samples candidates, then top/bottom pairing keeps 64 actor-update images per step.
 - Validation uses the full OCR test parquet.
@@ -163,7 +163,7 @@ This writes:
 Train on the offline pairs with:
 
 ```bash
-bash examples/dpo_trainer/run_sd35_medium_offline_dpo_lora.sh \
+bash examples/dpo_trainer/sd35/run_sd35_medium_offline_dpo_lora.sh \
   data.train_files=data/offline_dpo/train.parquet \
   data.val_files=data/offline_dpo/test.parquet
 ```

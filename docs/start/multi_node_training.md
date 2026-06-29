@@ -18,7 +18,7 @@ more nodes.
 Multi-node training in VeRL-Omni distributes the same components across
 multiple machines connected by a high-speed interconnect (InfiniBand or RoCE).
 The reference multi-node script
-(`examples/flowgrpo_trainer/run_qwen_image_ocr_lora_multi_node.sh`) runs on
+(`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_multi_node.sh`) runs on
 `NNODES × GPUS_PER_NODE` GPUs (default: 2 × 4 = 8) and achieves roughly linear
 throughput scaling by increasing the global batch size while keeping per-GPU
 work constant.
@@ -80,9 +80,9 @@ training.
 ## Conversion recipe: single-node → multi-node
 
 The multi-node script at
-`examples/flowgrpo_trainer/run_qwen_image_ocr_lora_multi_node.sh` is a
+`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_multi_node.sh` is a
 mechanical transformation of the single-node baseline at
-`examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh`. The seven changes below
+`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh`. The seven changes below
 cover every line that differs.
 
 ### 1. Topology variables
@@ -232,9 +232,9 @@ trainer.experiment_name=qwen_image_ocr_lora_multinode_${NNODES}x${GPUS_PER_NODE}
 
 ## Full reference script
 
-```{literalinclude} ../../examples/flowgrpo_trainer/run_qwen_image_ocr_lora_multi_node.sh
+```{literalinclude} ../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_multi_node.sh
 :language: bash
-:caption: examples/flowgrpo_trainer/run_qwen_image_ocr_lora_multi_node.sh
+:caption: examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_multi_node.sh
 ```
 
 ## How to run
@@ -276,12 +276,12 @@ share the same `$GPUS_PER_NODE`.
 ### Step 3: Launch training on the master node
 
 ```bash
-bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_multi_node.sh
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_multi_node.sh
 ```
 
 The script reads `NNODES` and `GPUS_PER_NODE` from the environment (defaults:
 `NNODES=2`, `GPUS_PER_NODE=4`). Override as needed:
 
 ```bash
-NNODES=2 GPUS_PER_NODE=4 bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_multi_node.sh
+NNODES=2 GPUS_PER_NODE=4 bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_multi_node.sh
 ```
