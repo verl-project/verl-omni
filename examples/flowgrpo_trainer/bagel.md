@@ -12,7 +12,7 @@ for the integration architecture.
 
 - Install VeRL-Omni (see [docs/start/install.md](../../docs/start/install.md)).
 
-- 4 GPUs.  Run commands from the repository root.
+- 4 GPUs or 8 NPUs. Run commands from the repository root.
 
 - Download the checkpoint:
 
@@ -43,8 +43,14 @@ This produces ``$WORKSPACE/data/ocr/bagel/train.parquet`` and
 
 ## Run training
 
+For GPU:
 ```bash
 bash examples/flowgrpo_trainer/run_bagel_flowgrpo_lora.sh
+```
+
+For NPU:  
+```bash
+bash examples/flowgrpo_trainer/run_bagel_ocr_lora_npu.sh
 ```
 
 The launch script uses a [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct)
