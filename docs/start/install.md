@@ -1,6 +1,6 @@
 # Installation
 
-Last updated: 06/22/2026
+Last updated: 06/29/2026
 
 ## Requirements
 
@@ -49,7 +49,8 @@ uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.gi
 uv pip install -e ".[vllm-omni,train]"
 ```
 
-It will install vllm-omni, verl, and verl-omni.
+It will install vllm-omni, verl (git pin), and verl-omni.
+
 
 ### Extras
 
@@ -57,7 +58,7 @@ It will install vllm-omni, verl, and verl-omni.
 |---|---|---|
 | `gpu` | `vllm==0.22.0`, `kernels==0.14.1`, `liger-kernel` | CUDA rollout + actor FA3 |
 | `vllm-omni` | `vllm-omni==0.22.0` | vLLM-Omni rollout |
-| `train` | `verl==0.8.0` | RL training |
+| `train` | `verl` @ [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | RL training |
 | `dev` | `pytest`, `pre-commit`, `Levenshtein`, … | Local development / CI |
 | `ocr` | `Levenshtein` | OCR reward (FlowGRPO) |
 
