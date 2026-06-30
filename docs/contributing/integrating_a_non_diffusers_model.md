@@ -271,7 +271,28 @@ When `build_module()` returns a non-`None` value, the FSDP engine uses it
 directly. When it returns `None` (the default), the engine falls back to
 `diffusers.AutoModel.from_pretrained`.
 
-### 3.2 Implement `prepare_model_inputs`
+### 3.2 (Optional) `configure_trainable_params`
+
+Override this hook to selectively set ``requires_grad`` for non-LoRA
+full-weight training.  The engine calls it after module build, before
+FSDP wrapping, when ``lora_rank=0``.  When LoRA is enabled this hook
+is **not** called — ``requires_grad`` is managed by the LoRA adapter
+instead.  The default is a no-op (all params trainable).  Note that
+mixed ``requires_grad`` requires ``strategy=fsdp2``.
+
+Example from the BAGEL integration (trains only ``moe_gen``, casts to fp32):
+
+```python
+@classmethod
+def configure_trainable_params(cls, module, model_config):
+    for name, param in module.named_parameters():
+        param.requires_grad = "moe_gen" in name
+    for name, param in module.named_parameters():
+        if param.requires_grad:
+            param.data = param.data.to(torch.float32)
+```
+
+### 3.3 Implement `prepare_model_inputs`
 
 This classmethod receives the training module, model config, latents,
 timesteps, prompt embeddings (plus masks), and the micro-batch from the
@@ -281,7 +302,7 @@ signature.  Note: non-diffusers models often ignore the ``prompt_embeds*``
 parameters and read token IDs directly from ``micro_batch`` instead
 (see the BAGEL integration's ``_prompt_token_ids_to_batch`` for an example).
 
-### 3.3 Implement `forward_and_sample_previous_step`
+### 3.4 Implement `forward_and_sample_previous_step`
 
 This follows the same pattern as the diffusers guide. If your model
 supports classifier-free guidance, implement multi-branch forwarding
@@ -291,7 +312,7 @@ a 3-branch CFG with sigma-interval gating as a reference.
 
 The return signature is always ``(log_prob, prev_sample_mean, std_dev_t, sqrt_dt)``.
 
-### 3.4 Implement the Scheduler
+### 3.5 Implement the Scheduler
 
 Non-diffusers models use ``FlowMatchSDEDiscreteScheduler`` just like
 diffusers models. If your model needs custom sigma schedules (e.g.
@@ -414,6 +435,9 @@ checklist to verify your implementation against it:
 ### Training adapter (`diffusers_training_adapter.py`)
 - [ ] `@DiffusionModelBase.register("OmniBagelForConditionalGeneration", algorithm="flow_grpo")`
 - [ ] `build_module()` returns `BagelForTraining.from_pretrained(...)`
+- [ ] (Optional) `configure_trainable_params()` — selectively freezes / sets
+      ``requires_grad`` for non-LoRA full-weight training (e.g. train only the
+      generation pathway, keep understanding frozen).
 - [ ] `build_scheduler()` and `set_timesteps()` with shifted sigmas
 - [ ] `prepare_model_inputs()` reads ``prompts`` and ``attention_mask``
       from micro-batch (standard tensors, no extra field needed)
