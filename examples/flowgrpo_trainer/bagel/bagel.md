@@ -52,7 +52,7 @@ bash examples/flowgrpo_trainer/bagel/run_bagel_ocr_lora.sh
 
 For NPU:  
 ```bash
-bash examples/flowgrpo_trainer/run_bagel_ocr_lora_npu.sh
+bash examples/flowgrpo_trainer/bagel/run_bagel_ocr_lora_npu.sh
 ```
 
 The launch script uses a [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct)
