@@ -103,6 +103,20 @@ class DiffusionModelBase(ABC):
         return
 
     @classmethod
+    def configure_trainable_params(
+        cls,
+        module: torch.nn.Module,
+        model_config: DiffusionModelConfig,
+    ) -> None:
+        """Hook called after module build to set ``requires_grad`` on trainable params.
+
+        Args:
+            module: The loaded model module (pre-FSDP).
+            model_config: The ``DiffusionModelConfig``.
+        """
+        return
+
+    @classmethod
     @abstractmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig) -> SchedulerMixin:
         """Build and configure the diffusion scheduler for this model.

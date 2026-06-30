@@ -562,6 +562,8 @@ class BagelForTraining(NonDiffusersModelBase):
         else:
             position_ids = torch.zeros(1, L_total, dtype=torch.long, device=dev).expand(B, -1)
         cos, sin = self.rotary_emb(position_ids)
+        cos = cos.to(sequence.dtype)
+        sin = sin.to(sequence.dtype)
 
         # Key padding mask: zero-padded text tokens in uneven micro-batches
         # must not attend to image queries.  ``None`` keeps the flash backend.

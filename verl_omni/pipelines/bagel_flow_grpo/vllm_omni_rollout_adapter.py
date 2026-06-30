@@ -25,7 +25,7 @@ import logging
 import os
 import random
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import torch
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
@@ -232,6 +232,30 @@ class BagelPipelineWithLogProb(BagelPipeline):
         inner = FlowMatchSDEDiscreteScheduler()
         self.scheduler = _BagelSchedulerAdapter(inner)
         logger.info("BagelPipelineWithLogProb: SDE scheduler enabled for RL rollouts")
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Load weights, routing by name prefix.
+
+        Weight-sync from the actor uses ``transformer.`` prefix with separate
+        q/k/v projections; the parent's ``AutoWeightsLoader`` cannot map these
+        to the rollout's fused ``qkv_proj``.  Delegate such weights to
+        ``language_model.load_weights`` which handles stacked-param remapping.
+        Other weights (initial checkpoint load) defer to the parent.
+        """
+        actor_weights: list[tuple[str, torch.Tensor]] = []
+        checkpoint_weights: list[tuple[str, torch.Tensor]] = []
+        for name, tensor in weights:
+            if name.startswith("transformer."):
+                actor_weights.append((f"model.{name[len('transformer.') :]}", tensor))
+            else:
+                checkpoint_weights.append((name, tensor))
+
+        loaded: set[str] = set()
+        if checkpoint_weights:
+            loaded |= super().load_weights(checkpoint_weights)
+        if actor_weights:
+            loaded |= self.language_model.load_weights(actor_weights)
+        return loaded
 
     def _decode_token_prompt(self, token_ids: Any) -> str | None:
         """Decode BAGEL token IDs to a cleaned prompt text string."""
