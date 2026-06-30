@@ -178,12 +178,12 @@ trainer's README in `examples/`.
 ## Which Trainer for Which Model?
 
 | Algorithm | Qwen-Image | SD3.5 | Wan2.2 | BAGEL | Qwen3-Omni |
-|-----------|:---:|:---:|:---:|:---:|:---:|:---:|
-| Flow-GRPO | ✅ | ✅ | — | ✅ | — | ✅ |
-| Flow-DPPO | ✅ | — | — | — | — | — |
-| GRPO-Guard | ✅ | — | — | — | — | — |
-| Mix-GRPO | ✅ | — | — | — | — | — |
-| DanceGRPO | — | — | ✅ | — | — | — |
-| Diffusion-DPO | ✅ | ✅ | — | — | — | — |
-| DiffusionNFT | ✅ | — | — | — | — | — |
-| GSPO | — | — | — | — | ✅ | — |
+|-----------|:---:|:---:|:---:|:---:|:---:|
+| Flow-GRPO | ✅ | ✅ | — | ✅ | — |
+| Flow-DPPO | ✅ | — | — | — | — |
+| GRPO-Guard | ✅ | — | — | — | — |
+| Mix-GRPO | ✅ | — | — | — | — |
+| DanceGRPO | — | — | ✅ | — | — |
+| Diffusion-DPO | ✅ | ✅ | — | — | — |
+| DiffusionNFT | ✅ | — | — | — | — |
+| GSPO | — | — | — | — | ✅ |
