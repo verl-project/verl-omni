@@ -63,19 +63,6 @@ requirements.
 
 **Reward model:** `Qwen/Qwen2.5-VL-3B-Instruct` (OCR VLM judge, TP=1, dedicated pool).
 
-### FLUX
-
-| Property | Detail |
-|----------|--------|
-| **Architecture** | MM-DiT (flow-matching) |
-| **Modality** | Text → Image |
-| **Pipeline** | Flow-matching with distilled guidance |
-| **Text encoder** | T5 + CLIP |
-
-FLUX is supported via the same Flow-GRPO MM-DiT pipeline adapter pattern.
-Adapt from the Qwen-Image or SD3.5 configuration — no dedicated example script
-is provided, but the framework supports it natively.
-
 ---
 
 ## Diffusion Video Models
@@ -170,7 +157,6 @@ stage config to leave headroom for the FSDP actor.
 | Wan2.2-TI2V-5B | Wan DiT | T5 |
 | BAGEL | Unified MM | — |
 | Qwen3-Omni-30B | Omni MoE | Qwen3 |
-| FLUX | MM-DiT | T5 + CLIP |
 
 ---
 
@@ -191,7 +177,7 @@ trainer's README in `examples/`.
 
 ## Which Trainer for Which Model?
 
-| Algorithm | Qwen-Image | SD3.5 | Wan2.2 | BAGEL | Qwen3-Omni | FLUX |
+| Algorithm | Qwen-Image | SD3.5 | Wan2.2 | BAGEL | Qwen3-Omni |
 |-----------|:---:|:---:|:---:|:---:|:---:|:---:|
 | Flow-GRPO | ✅ | ✅ | — | ✅ | — | ✅ |
 | Flow-DPPO | ✅ | — | — | — | — | — |
