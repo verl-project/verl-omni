@@ -267,7 +267,8 @@ def _patch_unfuse_qwen3_omni_thinker_experts() -> None:
         _vi.get_peft_model = _patched_get_peft_model
     _EXPERTS_UNFUSE_APPLIED = True
     logger.info("verl_omni: installed get_peft_model hook for Qwen3-Omni MoE expert unfusing (tf5+)")
-    
+
+
 def patch_hf_tokenizer_for_qwen3_omni() -> None:
     """Wrap ``verl.utils.tokenizer.hf_tokenizer`` to auto-load chat_template from chat_template.json.
 
