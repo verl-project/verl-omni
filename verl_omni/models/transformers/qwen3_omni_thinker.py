@@ -173,10 +173,64 @@ def patch_hf_processor_for_qwen3_omni() -> None:
         _utils_mod.hf_processor = _patched_hf_processor
 
 
+def patch_hf_tokenizer_for_qwen3_omni() -> None:
+    """Wrap ``verl.utils.tokenizer.hf_tokenizer`` to auto-load chat_template from chat_template.json.
+
+    Some models (e.g., Qwen3-Omni) store chat_template in a separate file
+    instead of tokenizer_config.json. This patch ensures the tokenizer
+    has a valid chat_template before returning it.
+    """
+    import functools
+    import json
+    import os
+
+    try:
+        import verl.utils.tokenizer as _vt
+    except ImportError:
+        return
+
+    _original_hf_tokenizer = _vt.hf_tokenizer
+
+    @functools.wraps(_original_hf_tokenizer)
+    def _patched_hf_tokenizer(name_or_path, *args, **kwargs):
+        tokenizer = _original_hf_tokenizer(name_or_path, *args, **kwargs)
+
+        if getattr(tokenizer, "chat_template", None) is None and isinstance(name_or_path, str):
+            chat_template_path = os.path.join(name_or_path, "chat_template.json")
+            if os.path.exists(chat_template_path):
+                try:
+                    with open(chat_template_path) as f:
+                        data = json.load(f)
+                        chat_template = data.get("chat_template")
+                        if chat_template:
+                            tokenizer.chat_template = chat_template
+                except (OSError, json.JSONDecodeError):
+                    pass
+
+        return tokenizer
+
+    _vt.hf_tokenizer = _patched_hf_tokenizer
+
+    # Patch sys.modules entries that already imported hf_tokenizer
+    import sys
+
+    for mod_name in list(sys.modules.keys()):
+        if not mod_name.startswith("verl"):
+            continue
+        mod = sys.modules.get(mod_name)
+        if (
+            mod is not None
+            and hasattr(mod, "hf_tokenizer")
+            and mod.__dict__.get("hf_tokenizer") is _original_hf_tokenizer
+        ):
+            mod.hf_tokenizer = _patched_hf_tokenizer
+
+
 def apply_qwen3_omni_thinker_patches() -> None:
     """Apply all Qwen3-Omni Thinker patches (idempotent registrations)."""
     _register_qwen3_omni_automodel()
     patch_hf_processor_for_qwen3_omni()
+    patch_hf_tokenizer_for_qwen3_omni()
 
 
 # Apply on import so this module works as a verl ``external_lib`` target.

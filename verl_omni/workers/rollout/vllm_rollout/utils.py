@@ -25,24 +25,7 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-# Add the NPU mixin only on NPU; on GPU it redefines existing worker methods and
-# trips vLLM v1 multiproc_executor's no-attribute-redefinition assertion.
-def _platform_extension_bases():
-    # TODO: the NPU (Ascend) path below is not yet verified on real NPU hardware;
-    #       only the GPU branch is exercised by current tests / training runs.
-    try:
-        from vllm.platforms import current_platform
-
-        if current_platform.device_type == "npu":
-            from verl_omni.workers.rollout.vllm_rollout.npu_utils import NPUColocateWorkerMixin
-
-            return (NPUColocateWorkerMixin, CustomPipelineWorkerExtension)
-    except Exception:
-        pass
-    return (CustomPipelineWorkerExtension,)
-
-
-class vLLMOmniColocateWorkerExtension(*_platform_extension_bases()):
+class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     """
     The class for vLLM-Omni's worker to inherit from, in the colocate setting.
     By defining an extension class, the code can work no matter what is
