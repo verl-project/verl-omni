@@ -117,7 +117,7 @@ The provided example script launches `python3 -m verl_omni.trainer.main_diffusio
 Run the training script:
 
 ```bash
-bash examples/flowgrpo_trainer/run_sd35_medium_ocr_lora.sh
+bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh
 ```
 
 Optional KL loss tuning:

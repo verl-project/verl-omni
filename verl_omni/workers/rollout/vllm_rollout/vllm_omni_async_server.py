@@ -103,7 +103,22 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return "vllm_omni"
 
     def _get_worker_extension_cls(self) -> str:
-        return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
+        device_type = ""
+        try:
+            from vllm.platforms import current_platform
+
+            device_type = current_platform.device_type
+        except Exception:
+            pass
+
+        # vLLMOmniColocateWorkerExtension supports LoRA + weight updates for GPU.
+        # vLLMOmniNPUColocateWorkerExtension additionally mixes in NPUColocateWorkerMixin
+        # for NPU memory pool, sleep, and wake_up.
+        # ar_mode uses vllm-ascend which already handles NPU natively, so the base extension suffices.
+        if device_type != "npu" or self._ar_mode:
+            return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
+        else:
+            return "verl_omni.workers.rollout.vllm_rollout.npu_utils.vLLMOmniNPUColocateWorkerExtension"
 
     def _get_cli_modules(self) -> list:
         return [vllm_omni.entrypoints.cli.serve]
@@ -380,7 +395,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if self._ar_mode:
             generator = self.engine.generate(
                 prompt=prompt,
-                sampling_params=params,
+                sampling_params_list=params,
                 request_id=request_id,
                 lora_request=lora_request,
                 priority=priority,

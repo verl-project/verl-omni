@@ -301,7 +301,7 @@ You have two ways out, pick whichever is cleaner for your algorithm:
    ```
 
    This is what
-   [`examples/mixgrpo_trainer/run_qwen_image_ocr_lora_mixgrpo.sh`](../../examples/mixgrpo_trainer/run_qwen_image_ocr_lora_mixgrpo.sh)
+   [`examples/mixgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_mixgrpo.sh`](../../examples/mixgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_mixgrpo.sh)
    does.
 
 2. **Register your name as an alias** in `diffusion_algos.py` (decorate
@@ -314,7 +314,7 @@ You have two ways out, pick whichever is cleaner for your algorithm:
 ## Step 6 — Example Launch Script
 
 Add a runnable example under `examples/<algo>_trainer/`. Copy
-[`examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh`](../../examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh)
+[`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh`](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh)
 and update the algorithm dispatch flags:
 
 ```bash

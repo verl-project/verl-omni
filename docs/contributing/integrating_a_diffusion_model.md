@@ -329,7 +329,7 @@ RL exploration starts from a known-good operating point.
 
 Ship a runnable example so users can launch training without trial and
 error. Use
-[`examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh`](../../examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh)
+[`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh`](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh)
 and
 [`examples/flowgrpo_trainer/data_process/qwenimage_ocr.py`](../../examples/flowgrpo_trainer/data_process/qwenimage_ocr.py)
 as templates.
@@ -368,7 +368,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     ...  # everything else identical to your diffusers/FSDP2 recipe
 ```
 
-See [`examples/flowgrpo_trainer/run_qwen_image_ocr_veomni.sh`](../../examples/flowgrpo_trainer/run_qwen_image_ocr_veomni.sh) for a complete VeOmni recipe that mirrors [`run_qwen_image_ocr.sh`](../../examples/flowgrpo_trainer/run_qwen_image_ocr.sh) line-for-line — the diff is only the engine-selection fields. Install instructions for VeOmni alongside vLLM 0.20.2 are in [`docs/start/install.md`](../start/install.md#optional-engine-backends).
+See [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete VeOmni recipe that mirrors [`run_qwen_image_ocr.sh`](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr.sh) line-for-line — the diff is only the engine-selection fields. Install instructions for VeOmni alongside vLLM 0.20.2 are in [`docs/start/install.md`](../start/install.md#optional-engine-backends).
 
 
 #### Mixing override schemas — don't

@@ -469,8 +469,8 @@ freshly-instantiated tiny model.
 ### Step 5 — Verify on a smoke run
 
 Use any existing diffusion-RL launch script (e.g.
-`examples/flowgrpo_trainer/run_qwen_image_ocr.sh`, or the H200-tuned
-`examples/flowgrpo_trainer/run_qwen_image_ocr_h200_mfu_optimized.sh`
+`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr.sh`, or the H200-tuned
+`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_h200_mfu_optimized.sh`
 with `export VERL_OMNI_DEVICE_FLOPS_TFLOPS=989`). Look for the two keys
 in your logger output:
 

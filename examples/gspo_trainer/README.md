@@ -77,7 +77,7 @@ validated.
 > args verl passes (`gpu_memory_utilization`, `max_num_seqs`, `load_format`,
 > `dtype`, LoRA, …) — the per-stage YAML takes precedence. So the rollout engine
 > runs with the values in
-> [`qwen3_omni_thinker_only.yaml`](qwen3_omni_thinker_only.yaml)
+> [`qwen3_omni/qwen3_omni_thinker_only.yaml`](qwen3_omni/qwen3_omni_thinker_only.yaml)
 > (e.g. `gpu_memory_utilization: 0.4`), kept low because the engine **shares each
 > GPU with the FSDP actor**. To change rollout memory/batching, edit that stage
 > file, not the verl rollout config.
@@ -119,11 +119,11 @@ export MODEL_PATH=/path/to/local/Qwen3-Omni-30B-A3B-Instruct
 Launch from the repository root:
 
 ```bash
-bash examples/gspo_trainer/run_qwen3_omni_thinker_gspo_lora.sh
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora.sh
 ```
 
 The recipe config lives in
-[`config/qwen3_omni_thinker_gspo.yaml`](config/qwen3_omni_thinker_gspo.yaml),
+[`qwen3_omni/config/qwen3_omni_thinker_gspo.yaml`](qwen3_omni/config/qwen3_omni_thinker_gspo.yaml),
 which inherits verl's default `ppo_trainer` config and overrides the GSPO/LoRA
 fields. The launch script passes it via `--config-name` and only sets volatile
 values (data/model paths, GPU/node counts, the vLLM-Omni stage config path) on
@@ -137,7 +137,7 @@ So any field can be overridden from the command line without editing the yaml:
 
 ```bash
 MODEL_PATH=/local/Qwen3-Omni-30B-A3B-Instruct \
-bash examples/gspo_trainer/run_qwen3_omni_thinker_gspo_lora.sh \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora.sh \
     trainer.total_epochs=10 \
     actor_rollout_ref.actor.optim.lr=2e-6
 ```
@@ -205,10 +205,11 @@ binary math reward yields low-variance advantages on a high-baseline policy.
 
 ```
 examples/gspo_trainer/
-├── run_qwen3_omni_thinker_gspo_lora.sh   ← launch script (volatile overrides only)
-├── config/
-│   └── qwen3_omni_thinker_gspo.yaml      ← recipe config (inherits verl ppo_trainer)
-├── qwen3_omni_thinker_only.yaml          ← vllm-omni stage config
+├── qwen3_omni/
+│   ├── run_qwen3_omni_thinker_gspo_lora.sh   ← launch script (volatile overrides only)
+│   ├── config/
+│   │   └── qwen3_omni_thinker_gspo.yaml      ← recipe config (inherits verl ppo_trainer)
+│   └── qwen3_omni_thinker_only.yaml          ← vllm-omni stage config
 ├── reward.png                            ← preliminary reward curve
 └── README.md                             ← (this file)
 ```

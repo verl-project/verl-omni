@@ -45,7 +45,7 @@ This produces:
 Override `WORKSPACE` when launching if your data is elsewhere:
 
 ```bash
-WORKSPACE=/path/to/workspace bash examples/diffusionnft_trainer/run_qwen_image_ocr_lora.sh
+WORKSPACE=/path/to/workspace bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
 ## Prepare the models
@@ -61,7 +61,7 @@ WORKSPACE=/path/to/workspace bash examples/diffusionnft_trainer/run_qwen_image_o
 Launch the example from the repository root:
 
 ```bash
-bash examples/diffusionnft_trainer/run_qwen_image_ocr_lora.sh
+bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
 ### NPU
@@ -69,7 +69,7 @@ bash examples/diffusionnft_trainer/run_qwen_image_ocr_lora.sh
 For Huawei Ascend NPUs, use the NPU-optimized script:
 
 ```bash
-bash examples/diffusionnft_trainer/run_qwen_image_ocr_lora_npu.sh
+bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_npu.sh
 ```
 
 This script uses a 16-NPU global distribution strategy with:
@@ -81,7 +81,7 @@ This script uses a 16-NPU global distribution strategy with:
 The script accepts normal Hydra overrides after the command:
 
 ```bash
-bash examples/diffusionnft_trainer/run_qwen_image_ocr_lora.sh trainer.total_training_steps=100
+bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh trainer.total_training_steps=100
 ```
 
 The script runs `python3 -m verl_omni.trainer.main_diffusion` with DiffusionNFT-specific settings:
@@ -134,8 +134,8 @@ See the [Metrics Documentation](../../docs/start/metrics.md) for a full descript
 
 | Script | Model | Algorithm | Hybrid Engine | # Cards | Reward Fn | # Cards for Actor | # Cards for Rollout | # Cards for Async Reward | Batch Size | `rollout.n` | lr   | # Val Samples | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / Card / Seconds) | Time per Step (Seconds) |
 | --- | --- | --- | --- | --- | --- | --- | --- |-------------------------| --- | --- |------| --- | --- | --- |------------------------------| --------------------------------|
-| `run_qwen_image_ocr_lora.sh` | Qwen-Image | DiffusionNFT | True | 4 (NVIDIA) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.166                        | 570 |
-| `run_qwen_image_ocr_lora_npu.sh` | Qwen-Image | DiffusionNFT | True | 16 (NPU) | qwenvl-ocr-vllm | 16 | 16 | 0 (sync)               | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.049                      | 490 |
+| `qwen_image/run_qwen_image_ocr_lora.sh` | Qwen-Image | DiffusionNFT | True | 4 (NVIDIA) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.166                        | 570 |
+| `qwen_image/run_qwen_image_ocr_lora_npu.sh` | Qwen-Image | DiffusionNFT | True | 16 (NPU) | qwenvl-ocr-vllm | 16 | 16 | 0 (sync)               | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.049                      | 490 |
 
 <table align="center" style="border: none;">
   <tr style="border: none;">

@@ -77,7 +77,7 @@ If FA3 deps are missing at runtime, training falls back to native/SDPA automatic
 
 ## Optional engine backends
 
-VeRL-Omni defaults to **FSDP2** as the training engine for the policy and reference models. The diffusion trainer can alternatively be switched to [**VeOmni**](https://github.com/ByteDance-Seed/VeOmni). The engine is selected at the Hydra command line — see [`examples/flowgrpo_trainer/run_qwen_image_ocr_veomni.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/run_qwen_image_ocr_veomni.sh) for a complete recipe.
+VeRL-Omni defaults to **FSDP2** as the training engine for the policy and reference models. The diffusion trainer can alternatively be switched to [**VeOmni**](https://github.com/ByteDance-Seed/VeOmni). The engine is selected at the Hydra command line — see [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete recipe.
 
 ### Installing VeOmni alongside vLLM 0.22.0
 
@@ -181,7 +181,7 @@ Notes:
 
 ### Example: Qwen-Image FlowGRPO training in Docker
 
-This walkthrough follows the [FlowGRPO quickstart](flowgrpo_quickstart.md) using the OCR dataset and `examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh`. Use the **`ocr` image target** (`verl-omni:gpu-ocr`) so the `Levenshtein` dependency is present.
+This walkthrough follows the [FlowGRPO quickstart](flowgrpo_quickstart.md) using the OCR dataset and `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh`. Use the **`ocr` image target** (`verl-omni:gpu-ocr`) so the `Levenshtein` dependency is present.
 
 **1. Launch the interactive container** (command above).
 
@@ -209,7 +209,7 @@ export WANDB_API_KEY=<your_wandb_api_key>
 **4. Run FlowGRPO training** (4 GPUs by default in the script):
 
 ```bash
-bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
 The script launches `python3 -m verl_omni.trainer.main_diffusion` with FlowGRPO + `vllm_omni` rollout and OCR reward (`compute_score_ocr`). Checkpoints are written to:

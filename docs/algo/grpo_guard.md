@@ -64,7 +64,7 @@ as Flow-GRPO (`actor_rollout_ref.actor.use_kl_loss=True`,
 A 4-card collocated training script is provided:
 
 ```bash
-bash examples/grpoguard_trainer/run_qwen_image_ocr_lora.sh
+bash examples/grpoguard_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
 It reuses the Flow-GRPO Qwen-Image OCR setup and only flips the actor loss
