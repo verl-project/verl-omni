@@ -56,7 +56,8 @@ jobs:
         # Informational only — install issues against latest verl must not fail the workflow.
         continue-on-error: true
         run: |
-          pip3 install ".[gpu,dev]"
+          # vllm020.dev1 image mirror may lag PyPI (e.g. kernels==0.14.1).
+          pip3 install --extra-index-url https://pypi.org/simple ".[gpu,dev]"
           pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
           pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@main"
           pip3 install --no-deps -e .
