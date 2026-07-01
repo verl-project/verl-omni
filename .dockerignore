@@ -4,6 +4,7 @@
 # VCS / IDE
 .git
 .github
+!.github/verl_pin.txt
 .cursor
 .vscode
 .idea

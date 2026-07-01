@@ -16,8 +16,8 @@
 import logging
 
 from omegaconf import DictConfig
-from verl.trainer.main_ppo import create_rl_dataset as _upstream_create_rl_dataset
-from verl.trainer.main_ppo import create_rl_sampler
+from verl.trainer.ppo.utils import create_rl_dataset as _upstream_create_rl_dataset
+from verl.trainer.ppo.utils import create_rl_sampler
 from verl.utils.dataset.rl_dataset import RLHFDataset as _UpstreamRLHFDataset
 from verl.utils.dataset.rl_dataset import collate_fn as _upstream_collate_fn
 from verl.utils.dataset.rl_dataset import get_dataset_class as _upstream_get_dataset_class
