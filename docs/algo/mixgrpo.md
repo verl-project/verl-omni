@@ -132,7 +132,7 @@ the sliding-window settings are irrelevant there.
 ## Reference recipe
 
 A ready-to-run script is provided at
-`examples/mixgrpo_trainer/run_qwen_image_ocr_lora_mixgrpo.sh`. The default
+`examples/mixgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_mixgrpo.sh`. The default
 config uses a **10-step trajectory with a 2-step window** (`random` strategy),
 matching the FlowGRPO baseline's inference budget:
 

@@ -337,7 +337,7 @@ class DiffusionAgentLoopWorker:
         non_tensor_batch = {
             "__num_turns__": np.array([input.num_turns for input in inputs], dtype=np.int32),
         }
-        if self.reward_loop_worker_handles is None and input_non_tensor_batch:
+        if input_non_tensor_batch:
             non_tensor_batch.update(input_non_tensor_batch)
 
         # add reward_extra_info to non_tensor_batch

@@ -219,7 +219,7 @@ Standard LoRA training with OCR reward (Qwen-Image, 4 GPUs) using the current
 `vllm_omni` rollout example:
 
 ```bash
-bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
 ## Variants
@@ -264,7 +264,7 @@ from the default reward config.
 For reward models that are expensive to evaluate (e.g., a VLM judge), the reward model can be allocated its own dedicated GPU resource pool and run asynchronously alongside the policy. This avoids blocking policy training on reward computation.
 
 ```bash
-bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_async_reward.sh
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_async_reward.sh
 ```
 
 ### Full Model Training
@@ -272,7 +272,7 @@ bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_async_reward.sh
 We have provided a script to enable non-cfg full-weight Qwen-Image OCR training. The example is runnable on 4 NVIDIA H200 GPUs; enabling CFG requires more GPU resources.
 
 ```bash
-bash examples/flowgrpo_trainer/run_qwen_image_ocr.sh
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr.sh
 ```
 
 
@@ -296,7 +296,7 @@ For SP training, `num_attention_heads` must be divisible by
 
 A ready-to-use 4-GPU SP=2 example is provided:
 ```bash
-bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_sp2.sh
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_sp2.sh
 ```
 
 

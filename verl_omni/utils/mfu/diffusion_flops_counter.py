@@ -28,6 +28,7 @@ import warnings
 from typing import Any, Mapping, Optional, Sequence
 
 import torch
+from verl.utils.device import is_device_available
 from verl.utils.flops_counter import get_device_flops
 
 __all__ = [
@@ -69,6 +70,9 @@ def get_device_peak_tflops() -> float:
                 "verl.utils.flops_counter.get_device_flops().",
                 stacklevel=2,
             )
+    # verl 0.9+ may call torch.cuda.get_device_name() on CPU-only hosts; pass device_name explicitly.
+    if not is_device_available():
+        return float(get_device_flops("T", device_name="CPU"))
     return float(get_device_flops("T"))
 
 

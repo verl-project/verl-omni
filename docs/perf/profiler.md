@@ -75,7 +75,7 @@ FlowGRPO today).
 ## Quick recipes
 
 The following recipes add CLI overrides on top of
-`examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh`.
+`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh`.
 
 ### 1. PyTorch profiler — end-to-end
 

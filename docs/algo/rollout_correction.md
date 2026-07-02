@@ -46,7 +46,7 @@ algorithm.rollout_correction.rollout_rs_threshold="0.5_2.0"
 > Only ``rollout_rs`` rejection sampling affects the gradient.
 
 A runnable end-to-end example lives at
-[`examples/flowgrpo_trainer/run_qwen_image_ocr_lora_rollout_corr.sh`](../../examples/flowgrpo_trainer/run_qwen_image_ocr_lora_rollout_corr.sh).
+[`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_rollout_corr.sh`](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_rollout_corr.sh).
 
 ## Config reference
 

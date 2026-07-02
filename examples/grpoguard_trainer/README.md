@@ -46,7 +46,7 @@ Launch the example from the repository root:
 **GPU (4 GPUs):**
 
 ```bash
-bash examples/grpoguard_trainer/run_qwen_image_ocr_lora.sh
+bash examples/grpoguard_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
 **NPU (8 NPUs, Atlas 800T A2):**
@@ -54,7 +54,7 @@ bash examples/grpoguard_trainer/run_qwen_image_ocr_lora.sh
 The NPU script requires the CANN software stack. Before running, set the `ASCEND_HOME_PATH` environment variable (defaults to `/usr/local/Ascend/cann-9.0.0`).
 
 ```bash
-bash examples/grpoguard_trainer/run_qwen_image_ocr_lora_npu.sh
+bash examples/grpoguard_trainer/qwen_image/run_qwen_image_ocr_lora_npu.sh
 ```
 
 The scripts run `python3 -m verl_omni.trainer.main_diffusion` with:

@@ -60,7 +60,7 @@ the Flow-SDE log-prob variance used during Qwen-Image training.
 A 4-card collocated training script is provided:
 
 ```bash
-bash examples/flowdppo_trainer/run_qwen_image_ocr_lora.sh
+bash examples/flowdppo_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
 It reuses the Flow-GRPO Qwen-Image OCR setup and only flips the actor loss mode,
