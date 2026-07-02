@@ -3,13 +3,6 @@ FROM quay.io/ascend/cann:9.0.0-a3-ubuntu22.04-py3.12
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG ASCEND_PIP_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
 ARG PYTORCH_CPU_INDEX_URL="https://download.pytorch.org/whl/cpu/"
-# Internal proxy for build-time network access.
-ENV HTTP_PROXY="http://215.253.10.156:30020" \
-    HTTPS_PROXY="http://215.253.10.156:30020" \
-    http_proxy="http://215.253.10.156:30020" \
-    https_proxy="http://215.253.10.156:30020" \
-    NO_PROXY="localhost,127.0.0.1,::1" \
-    no_proxy="localhost,127.0.0.1,::1"
 
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
 ARG VLLM_REF="v0.22.0"
@@ -74,10 +67,6 @@ RUN apt-get update -y && \
 
 RUN python3 -m pip config set global.index-url ${PIP_INDEX_URL} && \
     python3 -m pip config set global.trusted-host "mirrors.tuna.tsinghua.edu.cn mirrors.huaweicloud.com download.pytorch.org download-r2.pytorch.org github.com raw.githubusercontent.com files.pythonhosted.org pypi.org" && \
-    git config --global http.sslVerify false && \
-    git config --global https.sslVerify false && \
-    echo "check_certificate = off" >> /etc/wgetrc && \
-    echo "insecure" >> /root/.curlrc && \
     python3 -m pip install --upgrade pip setuptools wheel packaging
 
 # Match useful runtime dependencies from the official vLLM-Ascend A3 Dockerfile.
