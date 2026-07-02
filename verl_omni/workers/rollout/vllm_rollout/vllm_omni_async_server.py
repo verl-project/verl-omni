@@ -248,15 +248,23 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
         prompt_mask: torch.BoolTensor | None = None,
         priority: int = 0,
     ) -> DiffusionOutput | TokenOutput:
         prompt_ids = normalize_token_ids(prompt_ids)
-        multi_modal_data = self._build_multi_modal_data(image_data, video_data)
+        multi_modal_data = self._build_multi_modal_data(image_data, video_data, audio_data)
         lora_request = await self._resolve_lora_request()
         prompt, params = self._preprocess_input(
-            prompt_ids, sampling_params, multi_modal_data, lora_request, negative_prompt_ids, prompt_mask
+            prompt_ids,
+            sampling_params,
+            multi_modal_data,
+            lora_request,
+            negative_prompt_ids,
+            prompt_mask,
+            mm_processor_kwargs,
         )
         final_res = await self._run_generation(prompt, params, request_id, lora_request, priority)
         return self._process_output(final_res, params, sampling_params)
@@ -266,13 +274,19 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     @staticmethod
-    def _build_multi_modal_data(image_data: Optional[list[Any]], video_data: Optional[list[Any]]) -> dict[str, Any]:
-        """Assemble the vLLM multi_modal_data dict from optional image/video inputs."""
+    def _build_multi_modal_data(
+        image_data: Optional[list[Any]],
+        video_data: Optional[list[Any]],
+        audio_data: Optional[list[Any]] = None,
+    ) -> dict[str, Any]:
+        """Assemble the vLLM multi_modal_data dict from optional image/video/audio inputs."""
         multi_modal_data: dict[str, Any] = {}
         if image_data is not None:
             multi_modal_data["image"] = image_data
         if video_data is not None:
             multi_modal_data["video"] = video_data
+        if audio_data is not None:
+            multi_modal_data["audio"] = audio_data
         return multi_modal_data
 
     async def _resolve_lora_request(self) -> Optional[LoRARequest]:
@@ -314,6 +328,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         lora_request: Optional[LoRARequest],
         negative_prompt_ids: Optional[list[int]],
         prompt_mask: torch.BoolTensor | None = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ):
         """Build the engine prompt + sampling params for the active mode.
 
@@ -353,6 +368,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             prompt = {"prompt_token_ids": prompt_ids}
             if multi_modal_data:
                 prompt["multi_modal_data"] = multi_modal_data
+            if mm_processor_kwargs:
+                prompt["mm_processor_kwargs"] = mm_processor_kwargs
             return prompt, params
 
         # diffusion
