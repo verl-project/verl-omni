@@ -161,8 +161,10 @@ class MultiVisualRewardManager(VisualRewardManager):
                     # Store all sub-result fields under the reward key namespace
                     for rk, rv in result.items():
                         reward_extra_info[f"reward/{key}/{rk}"] = rv
-                else:
+                elif isinstance(result, int | float | bool):
                     score = float(result)
+                else:
+                    score = float(result[0])
 
             except Exception as e:
                 logger.error(f"Sub-reward '{key}' raised an exception: {e}. Contributing 0 to weighted sum.")
