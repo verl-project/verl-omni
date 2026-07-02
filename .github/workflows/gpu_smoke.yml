@@ -65,7 +65,7 @@ jobs:
   gpu_smoke_tests:
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
@@ -76,7 +76,10 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install dependencies
+        env:
+          PIP_EXTRA_INDEX_URL: https://pypi.org/simple
         run: |
+          # vllm020.dev1 image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
           pip3 install ".[gpu,dev]"
           pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
           pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
