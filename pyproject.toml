@@ -19,7 +19,7 @@ license = {text = "Apache-2.0"}
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10"
 dependencies = [
-    "accelerate",
+    "accelerate>=1.14.0",
     "cachetools",
     "codetiming",
     "datasets",
@@ -56,8 +56,9 @@ gpu = [
     "liger-kernel",
 ]
 # Training stack (install in step 2).
+# Git commit must match .github/verl_pin.txt (reports as 0.9.0.dev0 at 8a69493).
 train = [
-    "verl==0.8.0",
+    "verl @ git+https://github.com/verl-project/verl.git@8a694930275061f52ebd538c906ef8819af56dbd",
 ]
 dev = [
     "pytest",
