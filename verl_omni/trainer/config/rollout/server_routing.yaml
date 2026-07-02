@@ -1,0 +1,11 @@
+# Shared rollout replica routing defaults (diffusion + omni LLM async rollouts).
+# Distinct from vllm-omni internal diffusion scheduler ``scheduling_policy``.
+defaults:
+  - _self_
+
+_target_: verl_omni.workers.config.RolloutServerRoutingConfig
+
+# least_inflight | prompt_uid_affinity | prompt_hash_sharding | round_robin
+policy: least_inflight
+
+# routing_key_field defaults to uid (FlowGRPO prompt group id in per-sample kwargs).
