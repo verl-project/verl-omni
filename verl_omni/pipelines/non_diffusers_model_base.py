@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from abc import ABC, abstractmethod
+from abc import ABCMeta, abstractmethod
 from typing import Callable
 
 import torch
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 __all__ = ["NonDiffusersModelBase"]
 
 
-class NonDiffusersModelBase(nn.Module, ABC):
+class NonDiffusersModelBase(nn.Module, metaclass=ABCMeta):
     """ABC for non-diffusers models used in verl-omni FSDP training.
 
     Provides LoRA/PEFT adapter lifecycle (required by ``LoRAAdapterMixin``),
