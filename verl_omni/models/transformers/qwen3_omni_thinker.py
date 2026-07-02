@@ -129,6 +129,7 @@ def patch_hf_processor_for_qwen3_omni() -> None:
             # Token IDs / spatial_merge_size live on thinker_config, not the top-level config.
             processor.config = config.thinker_config
             processor.spatial_merge_size = config.thinker_config.vision_config.spatial_merge_size
+            processor.config.vision_start_token_id = config.talker_config.vision_start_token_id
             model_class = Qwen3OmniMoeThinkerForConditionalGeneration
             processor.get_rope_index = types.MethodType(model_class.get_rope_index, processor)
             processor.get_llm_pos_ids_for_vision = types.MethodType(model_class.get_llm_pos_ids_for_vision, processor)
