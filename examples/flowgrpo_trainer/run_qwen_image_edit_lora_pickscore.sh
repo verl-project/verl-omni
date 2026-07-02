@@ -5,11 +5,20 @@ set -x
 export RAY_DEDUP_LOGS=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# Fix cuDNN version: PyTorch bundles cuDNN 9.19.0, but system has 9.10.2 in
+# /usr/local/cuda/lib64. Remove it from LD_LIBRARY_PATH so PyTorch's bundled
+# cuDNN takes precedence; otherwise vllm-omni diffusion workers crash with
+# "cuDNN version incompatibility".
+export LD_LIBRARY_PATH=$(echo "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -v '/usr/local/cuda/lib64' | tr '\n' ':')
+
+# Pin the correct H200 bf16 dense peak so MFU is reported accurately
+export VERL_OMNI_DEVICE_FLOPS_TFLOPS=989
+
 model_name=${MODEL_PATH:-Qwen/Qwen-Image-Edit-2511}
 reward_function_path=${REWARD_FUNCTION_PATH:-pkg://verl_omni.utils.reward_score.pickscore_http_client}
 reward_server_urls=${PICKSCORE_SERVER_URLS:-http://127.0.0.1:19084,http://127.0.0.1:19085,http://127.0.0.1:19086,http://127.0.0.1:19087}
 
-NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-4}
+NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-8}
 ACTOR_SP=${ACTOR_SP:-1}
 ROLLOUT_TP=${ROLLOUT_TP:-1}
 IMAGE_RESOLUTION=${IMAGE_RESOLUTION:-512}
@@ -88,6 +97,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.max_prompt_length=$MAX_PROMPT_LENGTH \
     data.seed=42 \
     actor_rollout_ref.model.algorithm=flow_grpo \
+    actor_rollout_ref.model.attn_backend=_flash_3_varlen_hub \
     algorithm.global_std=false \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.lora_rank=64 \
@@ -101,7 +111,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=$ACTOR_SP \
-    actor_rollout_ref.actor.diffusion_loss.clip_ratio=0.001 \
+    actor_rollout_ref.actor.diffusion_loss.clip_ratio=0.0001 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.seed=42 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \

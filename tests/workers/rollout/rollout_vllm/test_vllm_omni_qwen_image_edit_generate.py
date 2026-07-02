@@ -100,7 +100,7 @@ def init_server():
             "tensor_model_parallel_size": 1,
             "data_parallel_size": 1,
             "pipeline_model_parallel_size": 1,
-            "gpu_memory_utilization": 0.8,
+            "gpu_memory_utilization": float(os.getenv("TEST_GPU_MEMORY_UTILIZATION", "0.8")),
             "max_num_batched_tokens": 8192,
             "max_num_seqs": 256,
             "max_model_len": 1024,
@@ -154,7 +154,7 @@ def init_server():
         node_rank=0,
         gpus_per_node=1,
         nnodes=1,
-        cuda_visible_devices="0",
+        cuda_visible_devices=os.getenv("TEST_CUDA_VISIBLE_DEVICES", "0"),
     )
 
     ray.get(server.launch_server.remote())
