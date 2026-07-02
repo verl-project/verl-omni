@@ -58,4 +58,4 @@ def compute_score(solution_image):
     if isinstance(solution_image, torch.Tensor) and solution_image.ndim == 3:
         solution_image = solution_image.unsqueeze(0)
     score = jpeg_compressibility()(solution_image, None)[0]
-    return score
+    return float(score[0])
