@@ -154,8 +154,8 @@ RUN python3 -m pip install --force-reinstall \
 
     
 RUN echo "export VLLM_WORKER_MULTIPROC_METHOD=spawn" >> /root/.bashrc && \
-    echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:\$LD_PRELOAD" >> /root/.bashrc && \
-    echo "export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:/usr/local/lib" >> /root/.bashrc
+    echo 'export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD' >> /root/.bashrc && \
+    echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' >> /root/.bashrc
 
 WORKDIR /workspace
 
