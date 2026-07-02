@@ -66,6 +66,7 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         super().__init__(od_config=od_config, prefix=prefix)
         self.device = get_local_device()
         self._interrupt = False
+        self.vae.use_slicing = True
         model = od_config.model
         local_files_only = os.path.exists(model)
 
@@ -298,9 +299,7 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt, 1)
         prompt_embeds = prompt_embeds.view(batch_size * num_videos_per_prompt, seq_len, -1)
 
-        prompt_embeds_mask = (
-            torch.arange(max_sequence_length, device=device).expand(prompt_embeds.shape[0], -1) < seq_lens.unsqueeze(1)
-        ).long()
+        prompt_embeds_mask = torch.ones(prompt_embeds.shape[:2], device=device, dtype=torch.long)
 
         return prompt_embeds, prompt_embeds_mask
 
@@ -468,7 +467,9 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         if generator is None and sampling_params.seed is not None:
             generator = torch.Generator(device=device).manual_seed(sampling_params.seed)
         if init_same_noise:
-            latents_seed = seed_from_prompt_ids(prompt_ids=prompt_ids)
+            latents_seed = seed_from_prompt_ids(
+                prompt_ids=prompt_ids, global_steps=sampling_params.extra_args.get("global_steps")
+            )
             latents_generator = torch.Generator(device=device).manual_seed(latents_seed)
         else:
             latents_generator = generator

@@ -4,8 +4,9 @@
 
 ### Easy, fast, and stable RL training for diffusion and omni-modality models
 
+<a href="https://deepwiki.com/verl-project/verl-omni"><img src="https://devin.ai/assets/deepwiki-badge.png" alt="Ask DeepWiki.com" style="height:20px;"></a>
 [![Docs](https://img.shields.io/badge/docs-Read%20the%20Docs-8A2BE2)](https://verl-omni.readthedocs.io/en/latest/index.html)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE) <a href="docs/assets/WeChat.jpg"><img src="https://img.shields.io/badge/微信-green?logo=wechat&amp"></a>
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE) <a href="docs/assets/WeChat.jpg"><img src="https://img.shields.io/badge/微信-green?logo=wechat"></a> <a href="https://join.slack.com/t/verl-project/shared_invite/zt-41rr0s5g2-Qzy5PuMSNeor3Ksiy45CiQ"><img src="https://img.shields.io/badge/Slack-verl-blueviolet?logo=slack"></a>
 
 </div>
 
@@ -15,6 +16,7 @@ It originated from the multi-modal generation RL effort in `verl`, and now has a
 
 ## News 🔥
 
+- **[2026-06]** [Qwen3-Omni GSPO Trainer](verl-omni/examples/gspo_trainer) is available! [Flow-DPPO](https://verl-omni.readthedocs.io/en/latest/algo/flowdppo.html) is integrated. vLLM-Omni rollout backend is upgraded to v0.22 for higher throughput, with default actor attn backend switched to FA3.
 - **[2026-06]** [DiffusionNFT](https://verl-omni.readthedocs.io/en/latest/algo/diffusionnft.html) and [Diffusion DPO](https://verl-omni.readthedocs.io/en/latest/algo/diffusion_dpo.html) are integrated with verified recipes on Qwen-Image/SD3.5. [Wan2.2](examples/dancegrpo_trainer/README.md) is now supported for video generation tasks.  
 
 ## Why `VeRL-Omni`
@@ -62,10 +64,14 @@ Visit our documentation to learn more.
     <th>Status</th>
   </tr>
   <tr>
-    <td rowspan="5">Qwen-Image</td>
-    <td rowspan="5">Diffusion generator</td>
-    <td rowspan="5">Text → Image</td>
+    <td rowspan="6">Qwen-Image</td>
+    <td rowspan="6">Diffusion generator</td>
+    <td rowspan="6">Text → Image</td>
     <td>FlowGRPO (+ CPS/SDE)</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>Flow-DPPO</td>
     <td>✅</td>
   </tr>
   <tr>
@@ -121,13 +127,17 @@ Visit our documentation to learn more.
     <td>Omni-modality</td>
     <td>Text / Image / Video / Audio</td>
     <td>GSPO</td>
-    <td>WIP</td>
+    <td>✅</td>
   </tr>
   <tr>
-    <td>SD3.5</td>
-    <td>Diffusion generator</td>
-    <td>Text → Image</td>
+    <td rowspan="2">SD3.5</td>
+    <td rowspan="2">Diffusion generator</td>
+    <td rowspan="2">Text → Image</td>
     <td>DPO</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>FlowGRPO</td>
     <td>✅</td>
   </tr>
 </table>
@@ -140,9 +150,7 @@ Visit our documentation to learn more.
 
 ## Roadmap 🗺
 
-Future work is tracked here:
-
-- [RFC: Multi-modal Generation RL 2026Q2 Roadmap](https://github.com/verl-project/verl/issues/5755)
+Future work is tracked in [VeRL-Omni Q3 Roadmap](https://github.com/verl-project/verl-omni/issues/97)
 
 ## Contributing 🤝
 
@@ -156,7 +164,7 @@ See the [contribution guide](CONTRIBUTING.md).
 
 ## Citation 📚
 
-If you find the project helpful, please cite:
+If you find the project helpful, please cite and star ⭐
 
 ```bibtex
 @misc{verlomni_github,

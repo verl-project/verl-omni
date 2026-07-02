@@ -169,7 +169,7 @@ The command writes:
 Launch training from the repository root:
 
 ```bash
-bash examples/diffusionnft_trainer/run_qwen_image_ocr_lora.sh
+bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
 

@@ -57,8 +57,8 @@ def _create_tp_compatible_model(parent_dir, src_model_path, num_attention_heads=
     return dst
 
 
-@pytest.fixture
-def init_config() -> DictConfig:
+@pytest.fixture(params=[False, True], ids=["request_execution", "step_execution"])
+def init_config(request) -> DictConfig:
     from hydra import compose, initialize_config_dir
 
     with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config")):
@@ -73,6 +73,7 @@ def init_config() -> DictConfig:
         config.actor_rollout_ref.rollout.name = "vllm_omni"
         config.actor_rollout_ref.rollout.mode = "async"
         config.actor_rollout_ref.rollout.enforce_eager = True
+        config.actor_rollout_ref.rollout.step_execution = request.param
         config.actor_rollout_ref.rollout.n = 4
         config.actor_rollout_ref.rollout.pipeline.num_inference_steps = 10
         config.actor_rollout_ref.rollout.calculate_log_probs = True

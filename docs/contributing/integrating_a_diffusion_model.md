@@ -13,6 +13,11 @@ for PPO-like policy-gradient algorithms, and
 [`integrating_a_new_direct_preference_algorithm_for_diffusion_model.md`](integrating_a_new_direct_preference_algorithm_for_diffusion_model.md)
 for direct-preference algorithms.
 
+**If diffusers cannot load your model**, use
+[`integrating_a_non_diffusers_model.md`](integrating_a_non_diffusers_model.md)
+instead. That guide covers the `NonDiffusersModelBase` path using BAGEL-7B-MoT as the
+worked example.
+
 We use the **Qwen-Image** integration
 ([`verl_omni/pipelines/qwen_image_flow_grpo/`](../../verl_omni/pipelines/qwen_image_flow_grpo/__init__.py))
 as the worked example throughout. Read the source alongside this guide — the
@@ -324,7 +329,7 @@ RL exploration starts from a known-good operating point.
 
 Ship a runnable example so users can launch training without trial and
 error. Use
-[`examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh`](../../examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh)
+[`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh`](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh)
 and
 [`examples/flowgrpo_trainer/data_process/qwenimage_ocr.py`](../../examples/flowgrpo_trainer/data_process/qwenimage_ocr.py)
 as templates.
@@ -334,6 +339,7 @@ The data preprocessor's tokenisation **must match the upstream
 same `enable_thinking` flag, etc. Mismatches here cause silent reward
 collapse.
 
+(53-use-the-veomni-backend-optional)=
 ### 5.3 Use the VeOmni Backend
 
 Backend selection is **orthogonal** to model integration: the adapters you wrote in Steps 3–4 work unchanged regardless of whether the actor runs on the default diffusers + FSDP2 engine or on [VeOmni](https://github.com/ByteDance-Seed/VeOmni). Switching is a configuration concern handled by a few Hydra overrides at launch time.
@@ -362,7 +368,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     ...  # everything else identical to your diffusers/FSDP2 recipe
 ```
 
-See [`examples/flowgrpo_trainer/run_qwen_image_ocr_veomni.sh`](../../examples/flowgrpo_trainer/run_qwen_image_ocr_veomni.sh) for a complete VeOmni recipe that mirrors [`run_qwen_image_ocr.sh`](../../examples/flowgrpo_trainer/run_qwen_image_ocr.sh) line-for-line — the diff is only the engine-selection fields. Install instructions for VeOmni alongside vLLM 0.20.2 are in [`docs/start/install.md`](../start/install.md#optional-engine-backends).
+See [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete VeOmni recipe that mirrors [`run_qwen_image_ocr.sh`](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr.sh) line-for-line — the diff is only the engine-selection fields. Install instructions for VeOmni alongside vLLM 0.20.2 are in [`docs/start/install.md`](../start/install.md#optional-engine-backends).
 
 
 #### Mixing override schemas — don't

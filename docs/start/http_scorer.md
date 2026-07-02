@@ -89,7 +89,7 @@ Any extra key-value pairs added under the same reward function config are forwar
 
 ## Full example
 
-See the example script: `examples/flowgrpo_trainer/run_qwen_image_ocr_reward_server.sh`
+See the example script: `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_reward_server.sh`
 
 This script trains Qwen-Image with FlowGRPO using an external OCR reward server.
 
@@ -106,7 +106,7 @@ python examples/flowgrpo_trainer/data_process/qwenimage_ocr_http_service.py \
 
 # 3. Run training
 OCR_REWARD_SERVER_URL=http://<server-ip>:19082 \
-    bash examples/flowgrpo_trainer/run_qwen_image_ocr_reward_server.sh
+    bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_reward_server.sh
 ```
 
 ## Notes

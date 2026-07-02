@@ -48,7 +48,7 @@ Launch the example from the repository root:
 **GPU (4 GPUs):**
 
 ```bash
-bash examples/mixgrpo_trainer/run_qwen_image_ocr_lora_mixgrpo.sh
+bash examples/mixgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_mixgrpo.sh
 ```
 
 **NPU (8 NPUs, Atlas 800T A2):**
@@ -56,7 +56,7 @@ bash examples/mixgrpo_trainer/run_qwen_image_ocr_lora_mixgrpo.sh
 The NPU script requires the CANN software stack. Before running, set the `ASCEND_HOME_PATH` environment variable (defaults to `/usr/local/Ascend/cann-9.0.0`).
 
 ```bash
-bash examples/mixgrpo_trainer/run_qwen_image_ocr_lora_mixgrpo_npu.sh
+bash examples/mixgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_mixgrpo_npu.sh
 ```
 
 ### MixGRPO Tuning

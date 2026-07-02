@@ -1,8 +1,4 @@
-# Qwen-Image LoRA RL with MixGRPO sliding-window SDE training (vllm_omni rollout)
-#
-# Reference: MixGRPO (Tencent-Hunyuan), https://arxiv.org/abs/2507.21802
-#            https://github.com/Tencent-Hunyuan/MixGRPO
-#
+# Qwen-Image lora RL with GRPO-Guard (https://arxiv.org/abs/2510.22319), vllm_omni rollout
 set -x
 ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.0.0}
 source $ASCEND_HOME_PATH/set_env.sh
@@ -33,7 +29,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.val_files=$ocr_test_path \
     data.train_batch_size=32 \
     data.max_prompt_length=256 \
-    actor_rollout_ref.model.algorithm=mix_grpo \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
@@ -46,7 +41,9 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-    actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_grpo \
+    actor_rollout_ref.actor.diffusion_loss.loss_mode=grpo_guard \
+    actor_rollout_ref.actor.diffusion_loss.clip_ratio=2e-6 \
+    actor_rollout_ref.actor.diffusion_loss.adv_clip_max=5.0 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.name=$ENGINE \
@@ -56,15 +53,14 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.pipeline.true_cfg_scale=4.0 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=256 \
-    actor_rollout_ref.rollout.algo.sample_strategy=random \
-    actor_rollout_ref.rollout.algo.sde_window_seed=42 \
-    actor_rollout_ref.rollout.algo.sde_window_size=2 \
-    actor_rollout_ref.rollout.algo.sde_window_range="[0,5]" \
     actor_rollout_ref.rollout.algo.noise_level=1.2 \
     actor_rollout_ref.rollout.algo.sde_type="sde" \
+    actor_rollout_ref.rollout.algo.sde_window_size=2 \
+    actor_rollout_ref.rollout.algo.sde_window_range="[0,5]" \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=50 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
+    actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA \
     reward.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / REWARD_TP)) \
     reward.reward_model.enable=True \
     reward.reward_model.model_path=$reward_model_name \
@@ -73,7 +69,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.custom_reward_function.path=$reward_function_path \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.logger='["console", "wandb"]' \
-    trainer.project_name=mix_grpo \
+    trainer.project_name=grpo_guard \
     trainer.experiment_name=qwen_image_ocr_lora \
     trainer.log_val_generations=8 \
     trainer.val_before_train=False \
@@ -82,4 +78,4 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.save_freq=30 \
     trainer.test_freq=30 \
     trainer.total_epochs=15 \
-    trainer.total_training_steps=150 "$@"
+    trainer.total_training_steps=300 "$@"
