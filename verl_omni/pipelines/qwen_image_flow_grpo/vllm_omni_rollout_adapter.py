@@ -24,7 +24,13 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
-from .common import QwenImageTokenIdPromptMixin, apply_true_cfg, build_img_shapes, coalesce_not_none
+from .common import (
+    QwenImageTokenIdPromptMixin,
+    apply_true_cfg,
+    build_img_shapes,
+    coalesce_not_none,
+    get_prompt_batch_size,
+)
 
 __all__ = ["QwenImagePipelineWithLogProb"]
 
@@ -190,9 +196,9 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         self,
         req: OmniDiffusionRequest,
         prompt_token_ids: torch.Tensor | list[int] | None = None,
-        prompt_mask: torch.Tensor | None = None,
+        prompt_mask: torch.Tensor | list[int] | list[list[int]] | None = None,
         negative_prompt_ids: torch.Tensor | list[int] | None = None,
-        negative_prompt_mask: torch.Tensor | None = None,
+        negative_prompt_mask: torch.Tensor | list[int] | list[list[int]] | None = None,
         true_cfg_scale: float = 4.0,
         height: int | None = None,
         width: int | None = None,
@@ -308,18 +314,13 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         self._interrupt = False
 
         if prompt_token_ids is not None:
-            if isinstance(prompt_token_ids, list):
-                prompt_token_ids = torch.tensor(prompt_token_ids, device=self.device)
-            batch_size = prompt_token_ids.shape[0] if prompt_token_ids.ndim == 2 else 1
+            batch_size = get_prompt_batch_size(prompt_token_ids)
         elif prompt_embeds is not None:
             batch_size = prompt_embeds.shape[0]
         else:
             # Both prompt_token_ids and prompt_embeds are None (e.g. during warmup/dummy run).
             # Return a minimal dummy output to avoid crashing.
             return DiffusionOutput(output=None, custom_output={})
-
-        if isinstance(negative_prompt_ids, list):
-            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
 
         has_neg_prompt = negative_prompt_ids is not None or (
             negative_prompt_embeds is not None and negative_prompt_embeds_mask is not None

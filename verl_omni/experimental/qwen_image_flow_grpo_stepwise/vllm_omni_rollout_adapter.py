@@ -28,7 +28,11 @@ from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.worker.utils import DiffusionRequestState
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
-from verl_omni.pipelines.qwen_image_flow_grpo.common import build_img_shapes, coalesce_not_none
+from verl_omni.pipelines.qwen_image_flow_grpo.common import (
+    build_img_shapes,
+    coalesce_not_none,
+    get_prompt_batch_size,
+)
 from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
 
 __all__ = ["QwenImagePipelineWithLogProbStepwise"]
@@ -89,8 +93,8 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
 
     def encode_prompt(
         self,
-        prompt_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        prompt_ids: torch.Tensor | list[int] | list[list[int]],
+        attention_mask: torch.Tensor | list[int] | list[list[int]] | None = None,
         num_images_per_prompt: int = 1,
         prompt_embeds: torch.Tensor | None = None,
         prompt_embeds_mask: torch.Tensor | None = None,
@@ -117,6 +121,10 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
                 ``(B * num_images_per_prompt, L, D)`` and
                 ``(B * num_images_per_prompt, L)`` respectively.
         """
+        if isinstance(prompt_ids, list):
+            prompt_ids = torch.tensor(prompt_ids, device=self.device)
+        if isinstance(attention_mask, list):
+            attention_mask = torch.tensor(attention_mask, device=self.device)
         prompt_ids = prompt_ids.unsqueeze(0) if prompt_ids.ndim == 1 else prompt_ids
         attention_mask = (
             attention_mask.unsqueeze(0) if attention_mask is not None and attention_mask.ndim == 1 else attention_mask
@@ -173,7 +181,7 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
             truncation=True,
             return_tensors="pt",
         ).to(self.device)
-        return tokens.input_ids, tokens.attention_mask
+        return tokens.input_ids.tolist(), tokens.attention_mask.tolist()
 
     def prepare_encode(
         self,
@@ -190,12 +198,6 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
         prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask = self._extract_prompt_ids(
             state.prompts or []
         )
-
-        # Normalize list inputs to tensors on device.
-        if isinstance(prompt_ids, list):
-            prompt_ids = torch.tensor(prompt_ids, device=self.device)
-        if isinstance(negative_prompt_ids, list):
-            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
 
         if prompt_ids is None:
             raise ValueError(
@@ -221,10 +223,7 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
         self._current_timestep = None
         self._interrupt = False
 
-        if prompt_ids is not None:
-            batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
-        else:
-            batch_size = 1
+        batch_size = get_prompt_batch_size(prompt_ids)
 
         has_neg_prompt = negative_prompt_ids is not None
         do_true_cfg = true_cfg_scale > 1 and has_neg_prompt

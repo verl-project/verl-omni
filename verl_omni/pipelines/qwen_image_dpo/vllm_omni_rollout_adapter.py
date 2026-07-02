@@ -23,7 +23,7 @@ from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
-from verl_omni.pipelines.qwen_image_flow_grpo.common import apply_true_cfg, build_img_shapes
+from verl_omni.pipelines.qwen_image_flow_grpo.common import apply_true_cfg, build_img_shapes, get_prompt_batch_size
 
 __all__ = ["QwenImageDPOPipeline"]
 
@@ -75,13 +75,17 @@ class QwenImageDPOPipeline(QwenImagePipeline):
 
     def encode_prompt(
         self,
-        prompt_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        prompt_ids: torch.Tensor | list[int] | list[list[int]],
+        attention_mask: torch.Tensor | list[int] | list[list[int]] | None = None,
         num_images_per_prompt: int = 1,
         prompt_embeds: torch.Tensor | None = None,
         prompt_embeds_mask: torch.Tensor | None = None,
         max_sequence_length: int = 1024,
     ):
+        if isinstance(prompt_ids, list):
+            prompt_ids = torch.tensor(prompt_ids, device=self.device)
+        if isinstance(attention_mask, list):
+            attention_mask = torch.tensor(attention_mask, device=self.device)
         prompt_ids = prompt_ids.unsqueeze(0) if prompt_ids.ndim == 1 else prompt_ids
         attention_mask = (
             attention_mask.unsqueeze(0) if attention_mask is not None and attention_mask.ndim == 1 else attention_mask
@@ -103,9 +107,9 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         self,
         req: OmniDiffusionRequest,
         prompt_ids: torch.Tensor | list[int] | None = None,
-        prompt_mask: torch.Tensor | None = None,
+        prompt_mask: torch.Tensor | list[int] | list[list[int]] | None = None,
         negative_prompt_ids: torch.Tensor | list[int] | None = None,
-        negative_prompt_mask: torch.Tensor | None = None,
+        negative_prompt_mask: torch.Tensor | list[int] | list[list[int]] | None = None,
         true_cfg_scale: float = 4.0,
         height: int | None = None,
         width: int | None = None,
@@ -151,16 +155,11 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         self._interrupt = False
 
         if prompt_ids is not None:
-            if isinstance(prompt_ids, list):
-                prompt_ids = torch.tensor(prompt_ids, device=self.device)
-            batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
+            batch_size = get_prompt_batch_size(prompt_ids)
         elif prompt_embeds is not None:
             batch_size = prompt_embeds.shape[0]
         else:
             return DiffusionOutput(output=None, custom_output={})
-
-        if isinstance(negative_prompt_ids, list):
-            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
 
         has_neg_prompt = negative_prompt_ids is not None or (
             negative_prompt_embeds is not None and negative_prompt_embeds_mask is not None

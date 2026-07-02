@@ -170,6 +170,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 engine_args["enable_dummy_pipeline"] = True
                 engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
+            engine_args["enable_prompt_embed_cache"] = self.config.enable_prompt_embed_cache
+            engine_args["prompt_embed_cache_size"] = self.config.prompt_embed_cache_size
+
         if getattr(self.config, "step_execution", False):
             engine_args["step_execution"] = True
 
@@ -360,7 +363,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_ids}
         if prompt_mask is not None:
-            custom_prompt["prompt_mask"] = prompt_mask
+            custom_prompt["prompt_mask"] = (
+                prompt_mask.tolist() if isinstance(prompt_mask, torch.Tensor) else prompt_mask
+            )
         if len(default_params_list) > 1:
             # Multi-stage pipelines tag the diffusion stage so the orchestrator can route inputs correctly.
             custom_prompt["modalities"] = ["image"]

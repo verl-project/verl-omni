@@ -248,8 +248,8 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
 
     def encode_prompt(
         self,
-        prompt_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        prompt_ids: torch.Tensor | list[int] | list[list[int]],
+        attention_mask: torch.Tensor | list[int] | list[list[int]] | None = None,
         num_videos_per_prompt: int = 1,
         prompt_embeds: torch.Tensor | None = None,
         max_sequence_length: int = 512,
@@ -277,6 +277,10 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         device = self.device
         dtype = self.text_encoder.dtype
 
+        if isinstance(prompt_ids, list):
+            prompt_ids = torch.tensor(prompt_ids, device=device)
+        if isinstance(attention_mask, list):
+            attention_mask = torch.tensor(attention_mask, device=device)
         if prompt_ids.ndim == 1:
             prompt_ids = prompt_ids.unsqueeze(0)
         batch_size = prompt_ids.shape[0]
@@ -307,9 +311,9 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         self,
         req: OmniDiffusionRequest,
         prompt_ids: torch.Tensor | list[int] | None = None,
-        prompt_mask: torch.Tensor | None = None,
+        prompt_mask: torch.Tensor | list[int] | list[list[int]] | None = None,
         negative_prompt_ids: torch.Tensor | list[int] | None = None,
-        negative_prompt_mask: torch.Tensor | None = None,
+        negative_prompt_mask: torch.Tensor | list[int] | list[list[int]] | None = None,
         image: Any = None,
         height: int = 480,
         width: int = 832,
@@ -474,13 +478,19 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         else:
             latents_generator = generator
 
-        if isinstance(prompt_ids, list):
-            prompt_ids = torch.tensor(prompt_ids, device=device, dtype=torch.long)
-        if isinstance(negative_prompt_ids, list):
-            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=device, dtype=torch.long)
-        if negative_prompt_ids is not None and negative_prompt_ids.numel() == 0:
-            negative_prompt_ids = torch.zeros_like(prompt_ids, device=device, dtype=torch.long)
-            negative_prompt_mask = torch.zeros_like(negative_prompt_ids, device=device, dtype=torch.bool)
+        negative_prompt_is_empty = (isinstance(negative_prompt_ids, list) and not negative_prompt_ids) or (
+            isinstance(negative_prompt_ids, torch.Tensor) and negative_prompt_ids.numel() == 0
+        )
+        if negative_prompt_is_empty:
+            if isinstance(prompt_ids, torch.Tensor):
+                negative_prompt_ids = torch.zeros_like(prompt_ids, device=device, dtype=torch.long)
+                negative_prompt_mask = torch.zeros_like(negative_prompt_ids, device=device, dtype=torch.bool)
+            elif prompt_ids and isinstance(prompt_ids[0], list):
+                negative_prompt_ids = [[0] * len(ids) for ids in prompt_ids]
+                negative_prompt_mask = [[False] * len(ids) for ids in prompt_ids]
+            else:
+                negative_prompt_ids = [0] * len(prompt_ids)
+                negative_prompt_mask = [False] * len(prompt_ids)
 
         num_videos_per_prompt = sampling_params.num_outputs_per_prompt or 1
         max_sequence_length = sampling_params.max_sequence_length or 512

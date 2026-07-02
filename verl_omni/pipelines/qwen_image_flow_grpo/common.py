@@ -21,6 +21,12 @@ def coalesce_not_none(value, default):
     return default if value is None else value
 
 
+def get_prompt_batch_size(prompt_ids: torch.Tensor | list[int] | list[list[int]]) -> int:
+    if isinstance(prompt_ids, torch.Tensor):
+        return prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
+    return len(prompt_ids) if prompt_ids and isinstance(prompt_ids[0], list) else 1
+
+
 def build_img_shapes(
     height: int, width: int, batch_size: int, vae_scale_factor: int
 ) -> list[list[tuple[int, int, int]]]:
@@ -80,8 +86,8 @@ class QwenImageTokenIdPromptMixin:
 
     def encode_prompt(
         self,
-        prompt_ids: torch.Tensor | None,
-        attention_mask: torch.Tensor | None = None,
+        prompt_ids: torch.Tensor | list[int] | list[list[int]] | None,
+        attention_mask: torch.Tensor | list[int] | list[list[int]] | None = None,
         num_images_per_prompt: int = 1,
         prompt_embeds: torch.Tensor | None = None,
         prompt_embeds_mask: torch.Tensor | None = None,
@@ -90,6 +96,10 @@ class QwenImageTokenIdPromptMixin:
         if prompt_embeds is None:
             if prompt_ids is None:
                 raise ValueError("`prompt_ids` must be provided when `prompt_embeds` is None.")
+            if isinstance(prompt_ids, list):
+                prompt_ids = torch.tensor(prompt_ids, device=self.device)
+            if isinstance(attention_mask, list):
+                attention_mask = torch.tensor(attention_mask, device=self.device)
             prompt_ids = prompt_ids.unsqueeze(0) if prompt_ids.ndim == 1 else prompt_ids
             attention_mask = (
                 attention_mask.unsqueeze(0)
