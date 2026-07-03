@@ -164,6 +164,30 @@ class TestMultiVisualRewardManagerRunSingle:
 
         assert result["reward_score"] == pytest.approx(0.8)
 
+    def test_jpeg_reward_via_file_path(self):
+        """JPEG reward loaded via file path must not fail on relative imports."""
+        reward_fns = {
+            "jpeg": {
+                "path": "verl_omni/utils/reward_score/jpeg_compressibility.py",
+                "name": "compute_score",
+                "weight": 1.0,
+            },
+        }
+        manager = _build_manager(reward_fns)
+        data = DataProto.from_dict(
+            tensors={"responses": torch.randn(1, 3, 64, 64)},
+            non_tensors={
+                "data_source": ["jpeg_compressibility"],
+                "reward_model": [{"ground_truth": "hello"}],
+                "extra_info": [{}],
+            },
+        )
+
+        result = manager.loop.run_until_complete(manager.run_single(data))
+
+        assert result["reward_score"] != pytest.approx(0.0)
+        assert "reward/jpeg" in result["reward_extra_info"]
+
 
 class TestMultiVisualRewardManagerInit:
     def test_empty_reward_functions_raises(self):
