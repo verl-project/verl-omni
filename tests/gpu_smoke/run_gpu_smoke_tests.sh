@@ -5,12 +5,12 @@
 #   bash tests/gpu_smoke/run_gpu_smoke_tests.sh
 #
 # To run locally on selected CUDA devices:
-#   CUDA_VISIBLE_DEVICES=0,1,2,3NUM_GPUS=4 bash tests/gpu_smoke/run_gpu_smoke_tests.sh
+#   CUDA_VISIBLE_DEVICES=0,1,2,3 NUM_GPUS=4 bash tests/gpu_smoke/run_gpu_smoke_tests.sh
 #
 # To run a smaller resource group directly, execute one of:
 #   bash tests/gpu_smoke/run_gpu_smoke_core.sh
-#   bash tests/gpu_smoke/run_gpu_smoke_e2e.sh
-#   bash tests/gpu_smoke/run_gpu_smoke_reward_e2e.sh
+#   bash tests/gpu_smoke/run_gpu_smoke_omni_e2e.sh
+#   bash tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh
 
 set -euo pipefail
 
@@ -24,12 +24,12 @@ Usage:
   bash tests/gpu_smoke/run_gpu_smoke_tests.sh
 
 To run locally on selected CUDA devices:
-  CUDA_VISIBLE_DEVICES=0,1,2,3NUM_GPUS=4 bash tests/gpu_smoke/run_gpu_smoke_tests.sh
+  CUDA_VISIBLE_DEVICES=0,1,2,3 NUM_GPUS=4 bash tests/gpu_smoke/run_gpu_smoke_tests.sh
 
 To run a smaller resource group directly, execute one of:
   bash tests/gpu_smoke/run_gpu_smoke_core.sh
-  bash tests/gpu_smoke/run_gpu_smoke_e2e.sh
-  bash tests/gpu_smoke/run_gpu_smoke_reward_e2e.sh
+  bash tests/gpu_smoke/run_gpu_smoke_omni_e2e.sh
+  bash tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh
 EOF
     exit 0
 fi
@@ -40,5 +40,5 @@ if [[ $# -gt 0 ]]; then
 fi
 
 bash "${GPU_SMOKE_DIR}/run_gpu_smoke_core.sh"
-bash "${GPU_SMOKE_DIR}/run_gpu_smoke_e2e.sh"
-bash "${GPU_SMOKE_DIR}/run_gpu_smoke_reward_e2e.sh"
+bash "${GPU_SMOKE_DIR}/run_gpu_smoke_omni_e2e.sh"
+bash "${GPU_SMOKE_DIR}/run_gpu_smoke_diffusion_e2e.sh"

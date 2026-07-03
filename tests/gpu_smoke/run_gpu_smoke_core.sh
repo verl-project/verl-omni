@@ -4,7 +4,7 @@
 set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_gpu_smoke.sh"
-gpu_smoke_init "core" 2 "$@"
+gpu_smoke_init "ci-core" 2 "$@"
 
 run_test 0 "vllm-omni rollout" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \

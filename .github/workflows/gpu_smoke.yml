@@ -56,9 +56,9 @@ jobs:
   setup_runner:
     # Pull request label mapping:
     #   ready-for-ci               -> all GPU smoke groups in parallel on one 8-GPU runner
-    #   gpu-smoke-core             -> core group on one 2-GPU runner
-    #   gpu-smoke-e2e              -> e2e group only
-    #   gpu-smoke-reward-e2e       -> reward e2e group only
+    #   ci-core                    -> key module coverage on one 2-GPU runner
+    #   ci-e2e-omni                -> omni trainer e2e coverage on one 2-GPU runner
+    #   ci-e2e-diffusion           -> diffusion trainer e2e coverage on one 4-GPU runner
     # Push events also run all groups on one 8-GPU runner.
     if: github.repository_owner == 'verl-project'
     runs-on: ubuntu-latest
@@ -74,12 +74,12 @@ jobs:
             mode="all"
           elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'ready-for-ci') }}" == "true" ]]; then
             mode="all"
-          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'gpu-smoke-core') }}" == "true" ]]; then
-            mode="core"
-          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'gpu-smoke-e2e') }}" == "true" ]]; then
-            mode="e2e"
-          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'gpu-smoke-reward-e2e') }}" == "true" ]]; then
-            mode="reward-e2e"
+          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'ci-core') }}" == "true" ]]; then
+            mode="ci-core"
+          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'ci-e2e-omni') }}" == "true" ]]; then
+            mode="ci-e2e-omni"
+          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'ci-e2e-diffusion') }}" == "true" ]]; then
+            mode="ci-e2e-diffusion"
           fi
           echo "mode=${mode}" >> "$GITHUB_OUTPUT"
       - id: create-runner
@@ -93,7 +93,7 @@ jobs:
   gpu_smoke:
     needs: setup_runner
     if: needs.setup_runner.outputs.mode != 'none'
-    runs-on: ["${{ needs.setup_runner.outputs.runner-label || (needs.setup_runner.outputs.mode == 'reward-e2e' && 'L20x4' || needs.setup_runner.outputs.mode == 'all' && 'L20x8' || 'L20x2') }}"]
+    runs-on: ["${{ needs.setup_runner.outputs.runner-label || (needs.setup_runner.outputs.mode == 'ci-e2e-diffusion' && 'L20x4' || needs.setup_runner.outputs.mode == 'all' && 'L20x8' || 'L20x2') }}"]
     timeout-minutes: ${{ needs.setup_runner.outputs.mode == 'all' && 90 || 45 }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -128,9 +128,9 @@ jobs:
                 names+=("${name}")
               }
 
-              run_group core "0,1" 2 tests/gpu_smoke/run_gpu_smoke_core.sh
-              run_group e2e "2,3" 2 tests/gpu_smoke/run_gpu_smoke_e2e.sh
-              run_group reward-e2e "4,5,6,7" 4 tests/gpu_smoke/run_gpu_smoke_reward_e2e.sh
+              run_group ci-core "0,1" 2 tests/gpu_smoke/run_gpu_smoke_core.sh
+              run_group ci-e2e-omni "2,3" 2 tests/gpu_smoke/run_gpu_smoke_omni_e2e.sh
+              run_group ci-e2e-diffusion "4,5,6,7" 4 tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh
 
               failed=0
               for i in "${!pids[@]}"; do
@@ -145,14 +145,14 @@ jobs:
               ray stop --force || true
               exit "${failed}"
               ;;
-            core)
+            ci-core)
               bash tests/gpu_smoke/run_gpu_smoke_core.sh --num-gpus 2
               ;;
-            e2e)
-              bash tests/gpu_smoke/run_gpu_smoke_e2e.sh --num-gpus 2
+            ci-e2e-omni)
+              bash tests/gpu_smoke/run_gpu_smoke_omni_e2e.sh --num-gpus 2
               ;;
-            reward-e2e)
-              bash tests/gpu_smoke/run_gpu_smoke_reward_e2e.sh --num-gpus 4
+            ci-e2e-diffusion)
+              bash tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh --num-gpus 4
               ;;
             *)
               echo "Unsupported smoke mode: ${mode}"
