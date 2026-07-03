@@ -4,6 +4,9 @@
 # Usage:
 #   bash tests/gpu_smoke/run_gpu_smoke_tests.sh
 #
+# To run locally on selected CUDA devices:
+#   CUDA_VISIBLE_DEVICES=0,1,2,3NUM_GPUS=4 bash tests/gpu_smoke/run_gpu_smoke_tests.sh
+#
 # To run a smaller resource group directly, execute one of:
 #   bash tests/gpu_smoke/run_gpu_smoke_core.sh
 #   bash tests/gpu_smoke/run_gpu_smoke_e2e.sh
@@ -19,6 +22,9 @@ Run all verl-omni GPU smoke test groups.
 
 Usage:
   bash tests/gpu_smoke/run_gpu_smoke_tests.sh
+
+To run locally on selected CUDA devices:
+  CUDA_VISIBLE_DEVICES=0,1,2,3NUM_GPUS=4 bash tests/gpu_smoke/run_gpu_smoke_tests.sh
 
 To run a smaller resource group directly, execute one of:
   bash tests/gpu_smoke/run_gpu_smoke_core.sh
