@@ -121,8 +121,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.custom_reward_function.name=_multi_reward_placeholder \
     reward.reward_manager.name=MultiVisualRewardManager \
     reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager \
-    "+reward.reward_functions.jpeg.path=verl_omni/utils/reward_score/__init__.py" \
-    '+reward.reward_functions.jpeg.name=default_compute_score_image' \
+    "+reward.reward_functions.jpeg.path=pkg://verl_omni.utils.reward_score.jpeg_compressibility" \
+    '+reward.reward_functions.jpeg.name=compute_score' \
     '+reward.reward_functions.jpeg.weight=0.5' \
     "+reward.reward_functions.ocr.path=verl_omni/utils/reward_score/genrm_ocr.py" \
     '+reward.reward_functions.ocr.name=compute_score_ocr' \
