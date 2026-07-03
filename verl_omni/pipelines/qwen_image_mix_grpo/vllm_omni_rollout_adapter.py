@@ -39,6 +39,7 @@ import random as _random
 from typing import Any
 
 from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
@@ -50,8 +51,12 @@ __all__ = ["QwenImageMixGRPOPipelineWithLogProb"]
 class QwenImageMixGRPOPipelineWithLogProb(QwenImagePipelineWithLogProb):
     """Rollout pipeline for Qwen-Image with the MixGRPO algorithm."""
 
-    def forward(self, req: OmniDiffusionRequest, **kwargs: Any):
-        self._maybe_make_progressive_window(req.sampling_params.extra_args, kwargs)
+    def forward(self, req: OmniDiffusionRequest | DiffusionRequestBatch, **kwargs: Any):
+        if isinstance(req, DiffusionRequestBatch):
+            for sampling_params in req.sampling_params_list:
+                self._maybe_make_progressive_window(sampling_params.extra_args, kwargs)
+        else:
+            self._maybe_make_progressive_window(req.sampling_params.extra_args, kwargs)
         return super().forward(req, **kwargs)
 
     @staticmethod
