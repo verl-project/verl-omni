@@ -56,7 +56,7 @@ jobs:
   setup:
     # Pull request label mapping:
     #   ready-for-ci               -> all GPU smoke groups sequentially on one 4-GPU runner
-    #   gpu-smoke-core             -> core groups only
+    #   gpu-smoke-core             -> core group on one 2-GPU runner
     #   gpu-smoke-e2e              -> e2e group only
     #   gpu-smoke-reward-e2e       -> reward e2e group only
     # Push events also run all groups sequentially on one 4-GPU runner.
@@ -72,10 +72,8 @@ jobs:
     outputs:
       all-runner-label: ${{ steps.create-all-runner.outputs.runner-label }}
       all-mlp-task-id: ${{ steps.create-all-runner.outputs.mlp-task-id }}
-      core-single-runner-label: ${{ steps.create-core-single-runner.outputs.runner-label }}
-      core-single-mlp-task-id: ${{ steps.create-core-single-runner.outputs.mlp-task-id }}
-      core-multi-runner-label: ${{ steps.create-core-multi-runner.outputs.runner-label }}
-      core-multi-mlp-task-id: ${{ steps.create-core-multi-runner.outputs.mlp-task-id }}
+      core-runner-label: ${{ steps.create-core-runner.outputs.runner-label }}
+      core-mlp-task-id: ${{ steps.create-core-runner.outputs.mlp-task-id }}
       e2e-runner-label: ${{ steps.create-e2e-runner.outputs.runner-label }}
       e2e-mlp-task-id: ${{ steps.create-e2e-runner.outputs.mlp-task-id }}
       reward-e2e-runner-label: ${{ steps.create-reward-e2e-runner.outputs.runner-label }}
@@ -91,16 +89,7 @@ jobs:
           mode: "create"
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
           mlp-image: "${{ env.IMAGE }}"
-      - id: create-core-single-runner
-        if: >-
-          github.event_name == 'pull_request' &&
-          github.event.label.name == 'gpu-smoke-core'
-        uses: volcengine/vemlp-github-runner@v1
-        with:
-          mode: "create"
-          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
-          mlp-image: "${{ env.IMAGE }}"
-      - id: create-core-multi-runner
+      - id: create-core-runner
         if: >-
           github.event_name == 'pull_request' &&
           github.event.label.name == 'gpu-smoke-core'
@@ -140,42 +129,25 @@ jobs:
       - name: Run all GPU smoke tests sequentially
         run: |
           ray stop --force
-          bash tests/gpu_smoke/run_gpu_smoke_core_single.sh --num-gpus 1
-          bash tests/gpu_smoke/run_gpu_smoke_core_multi.sh --num-gpus 2
+          bash tests/gpu_smoke/run_gpu_smoke_core.sh --num-gpus 2
           bash tests/gpu_smoke/run_gpu_smoke_e2e.sh --num-gpus 2
           bash tests/gpu_smoke/run_gpu_smoke_reward_e2e.sh --num-gpus 4
       - if: always()
         uses: ./.github/actions/gpu-smoke-upload-logs
 
-  gpu_smoke_core_single_1gpu:
+  gpu_smoke_core_2gpu:
     needs: setup
     if: >-
       github.event_name == 'pull_request' &&
       github.event.label.name == 'gpu-smoke-core'
-    runs-on: ["${{ needs.setup.outputs.core-single-runner-label || 'L20x1' }}"]
-    timeout-minutes: 30
+    runs-on: ["${{ needs.setup.outputs.core-runner-label || 'L20x2' }}"]
+    timeout-minutes: 45
     steps:
       - uses: ./.github/actions/gpu-smoke-prepare
-      - name: Run 1-GPU core smoke tests
+      - name: Run 2-GPU core smoke tests
         run: |
           ray stop --force
-          bash tests/gpu_smoke/run_gpu_smoke_core_single.sh --num-gpus 1
-      - if: always()
-        uses: ./.github/actions/gpu-smoke-upload-logs
-
-  gpu_smoke_core_multi_2gpu:
-    needs: setup
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.label.name == 'gpu-smoke-core'
-    runs-on: ["${{ needs.setup.outputs.core-multi-runner-label || 'L20x2' }}"]
-    timeout-minutes: 30
-    steps:
-      - uses: ./.github/actions/gpu-smoke-prepare
-      - name: Run 2-GPU core multi-worker smoke tests
-        run: |
-          ray stop --force
-          bash tests/gpu_smoke/run_gpu_smoke_core_multi.sh --num-gpus 2
+          bash tests/gpu_smoke/run_gpu_smoke_core.sh --num-gpus 2
       - if: always()
         uses: ./.github/actions/gpu-smoke-upload-logs
 
@@ -213,7 +185,7 @@ jobs:
 
   cleanup:
     runs-on: ubuntu-latest
-    needs: [setup, gpu_smoke_all_4gpu, gpu_smoke_core_single_1gpu, gpu_smoke_core_multi_2gpu, gpu_smoke_e2e_2gpu, gpu_smoke_reward_e2e_4gpu]
+    needs: [setup, gpu_smoke_all_4gpu, gpu_smoke_core_2gpu, gpu_smoke_e2e_2gpu, gpu_smoke_reward_e2e_4gpu]
     if: always()
     steps:
       - id: destroy-all-runner
@@ -223,20 +195,13 @@ jobs:
           mode: "destroy"
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
           mlp-task-id: "${{ needs.setup.outputs.all-mlp-task-id }}"
-      - id: destroy-core-single-runner
-        if: needs.setup.outputs.core-single-mlp-task-id != ''
+      - id: destroy-core-runner
+        if: needs.setup.outputs.core-mlp-task-id != ''
         uses: volcengine/vemlp-github-runner@v1
         with:
           mode: "destroy"
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
-          mlp-task-id: "${{ needs.setup.outputs.core-single-mlp-task-id }}"
-      - id: destroy-core-multi-runner
-        if: needs.setup.outputs.core-multi-mlp-task-id != ''
-        uses: volcengine/vemlp-github-runner@v1
-        with:
-          mode: "destroy"
-          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
-          mlp-task-id: "${{ needs.setup.outputs.core-multi-mlp-task-id }}"
+          mlp-task-id: "${{ needs.setup.outputs.core-mlp-task-id }}"
       - id: destroy-e2e-runner
         if: needs.setup.outputs.e2e-mlp-task-id != ''
         uses: volcengine/vemlp-github-runner@v1

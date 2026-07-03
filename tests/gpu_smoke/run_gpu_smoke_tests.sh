@@ -5,8 +5,7 @@
 #   bash tests/gpu_smoke/run_gpu_smoke_tests.sh
 #
 # To run a smaller resource group directly, execute one of:
-#   bash tests/gpu_smoke/run_gpu_smoke_core_single.sh
-#   bash tests/gpu_smoke/run_gpu_smoke_core_multi.sh
+#   bash tests/gpu_smoke/run_gpu_smoke_core.sh
 #   bash tests/gpu_smoke/run_gpu_smoke_e2e.sh
 #   bash tests/gpu_smoke/run_gpu_smoke_reward_e2e.sh
 
@@ -22,8 +21,7 @@ Usage:
   bash tests/gpu_smoke/run_gpu_smoke_tests.sh
 
 To run a smaller resource group directly, execute one of:
-  bash tests/gpu_smoke/run_gpu_smoke_core_single.sh
-  bash tests/gpu_smoke/run_gpu_smoke_core_multi.sh
+  bash tests/gpu_smoke/run_gpu_smoke_core.sh
   bash tests/gpu_smoke/run_gpu_smoke_e2e.sh
   bash tests/gpu_smoke/run_gpu_smoke_reward_e2e.sh
 EOF
@@ -35,7 +33,6 @@ if [[ $# -gt 0 ]]; then
     exit 2
 fi
 
-bash "${GPU_SMOKE_DIR}/run_gpu_smoke_core_single.sh"
-bash "${GPU_SMOKE_DIR}/run_gpu_smoke_core_multi.sh"
+bash "${GPU_SMOKE_DIR}/run_gpu_smoke_core.sh"
 bash "${GPU_SMOKE_DIR}/run_gpu_smoke_e2e.sh"
 bash "${GPU_SMOKE_DIR}/run_gpu_smoke_reward_e2e.sh"
