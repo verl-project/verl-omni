@@ -34,7 +34,7 @@ gpu_smoke_init() {
         case "$1" in
             -g|--num-gpus)
                 if [[ $# -lt 2 ]]; then
-                    fail "Missing value for $1 (expected one of: 1, 2, 4, 8)"
+                    fail "Missing value for $1 (expected a positive integer)"
                     exit 2
                 fi
                 REQUESTED_NUM_GPUS="$2"
@@ -62,7 +62,7 @@ Usage:
   bash ${BASH_SOURCE[1]:-$0} [--num-gpus N] [--cuda-visible-devices DEVICES]
 
 Options:
-  -g, --num-gpus N              GPU count to run with (allowed: 1, 2, 4, 8)
+  -g, --num-gpus N              GPU count to run with (positive integer)
       --cuda-visible-devices    Comma-separated GPU IDs to expose
   -h, --help                    Show this help message
 EOF
@@ -76,16 +76,13 @@ EOF
     done
 
     if ! [[ "${REQUESTED_NUM_GPUS}" =~ ^[0-9]+$ ]]; then
-        fail "Invalid --num-gpus value '${REQUESTED_NUM_GPUS}' (must be 1, 2, 4, or 8)"
+        fail "Invalid --num-gpus value '${REQUESTED_NUM_GPUS}' (must be a positive integer)"
         exit 2
     fi
-    case "${REQUESTED_NUM_GPUS}" in
-        1|2|4|8) ;;
-        *)
-            fail "Unsupported --num-gpus value '${REQUESTED_NUM_GPUS}' (must be 1, 2, 4, or 8)"
-            exit 2
-            ;;
-    esac
+    if [[ "${REQUESTED_NUM_GPUS}" -lt 1 ]]; then
+        fail "Invalid --num-gpus value '${REQUESTED_NUM_GPUS}' (must be a positive integer)"
+        exit 2
+    fi
 
     export NUM_GPUS="${REQUESTED_NUM_GPUS}"
     if [[ -n "${REQUESTED_CUDA_VISIBLE_DEVICES}" ]]; then
