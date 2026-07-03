@@ -1,0 +1,24 @@
+name: GPU smoke job prepare
+description: Checkout repo and install GPU smoke test dependencies
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        fetch-depth: 0
+    - name: Install dependencies
+      shell: bash
+      env:
+        PIP_EXTRA_INDEX_URL: https://pypi.org/simple
+      run: |
+        # vllm020.dev1 image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
+        pip3 install ".[gpu,dev]"
+        pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
+        pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
+        pip3 install --no-deps -e .
+        # veomni's [gpu] extra pins torch 2.9 and would conflict with the vLLM stack.
+        # See docs/start/install.md "Optional engine backends".
+        # TODO: rm --no-deps when VeOmni support torch2.11
+        pip3 install veomni==0.1.11 --no-deps
+        pip3 install torchcodec librosa soundfile av

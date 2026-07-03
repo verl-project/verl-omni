@@ -15,6 +15,8 @@ on:
       - "pyproject.toml"
       - .github/workflows/gpu_smoke.yml
       - .github/vllm_omni_pin.txt
+      - .github/actions/gpu-smoke-prepare/**
+      - .github/actions/gpu-smoke-upload-logs/**
   pull_request:
     branches:
       - main
@@ -30,6 +32,8 @@ on:
       - "pyproject.toml"
       - .github/workflows/gpu_smoke.yml
       - .github/vllm_omni_pin.txt
+      - .github/actions/gpu-smoke-prepare/**
+      - .github/actions/gpu-smoke-upload-logs/**
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -43,6 +47,10 @@ permissions:
 env:
   IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm023.dev1"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd7upeujs1b9g1a958pn0.apigateway-cn-beijing.volceapi.com/runner"
+  HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+  NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+  HF_ENDPOINT: "https://hf-mirror.com"
+  HF_HUB_ENABLE_HF_TRANSFER: "0"
 
 jobs:
   setup:
@@ -127,29 +135,8 @@ jobs:
       github.event.label.name == 'ready-for-ci'
     runs-on: ["${{ needs.setup.outputs.all-runner-label || 'L20x4' }}"]
     timeout-minutes: 90
-    env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
-      HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0"
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-      - name: Install dependencies
-        env:
-          PIP_EXTRA_INDEX_URL: https://pypi.org/simple
-        run: |
-          # vllm020.dev1 image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
-          pip3 install ".[gpu,dev]"
-          pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-          pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
-          pip3 install --no-deps -e .
-          # veomni's [gpu] extra pins torch 2.9 and would conflict with the vLLM stack.
-          # See docs/start/install.md "Optional engine backends".
-          # TODO: rm --no-deps when VeOmni support torch2.11
-          pip3 install veomni==0.1.11 --no-deps
-          pip3 install torchcodec librosa soundfile av
+      - uses: ./.github/actions/gpu-smoke-prepare
       - name: Run all GPU smoke tests sequentially
         run: |
           ray stop --force
@@ -157,13 +144,8 @@ jobs:
           bash tests/gpu_smoke/run_gpu_smoke_core_multi.sh --num-gpus 2
           bash tests/gpu_smoke/run_gpu_smoke_e2e.sh --num-gpus 2
           bash tests/gpu_smoke/run_gpu_smoke_reward_e2e.sh --num-gpus 4
-      - name: Upload GPU smoke logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gpu-smoke-logs-${{ github.job }}
-          path: logs/gpu_smoke/**
-          if-no-files-found: ignore
+      - if: always()
+        uses: ./.github/actions/gpu-smoke-upload-logs
 
   gpu_smoke_core_single_1gpu:
     needs: setup
@@ -172,40 +154,14 @@ jobs:
       github.event.label.name == 'gpu-smoke-core'
     runs-on: ["${{ needs.setup.outputs.core-single-runner-label || 'L20x1' }}"]
     timeout-minutes: 30
-    env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
-      HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0"
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-      - name: Install dependencies
-        env:
-          PIP_EXTRA_INDEX_URL: https://pypi.org/simple
-        run: |
-          # vllm020.dev1 image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
-          pip3 install ".[gpu,dev]"
-          pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-          pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
-          pip3 install --no-deps -e .
-          # veomni's [gpu] extra pins torch 2.9 and would conflict with the vLLM stack.
-          # See docs/start/install.md "Optional engine backends".
-          # TODO: rm --no-deps when VeOmni support torch2.11
-          pip3 install veomni==0.1.11 --no-deps
-          pip3 install torchcodec librosa soundfile av
+      - uses: ./.github/actions/gpu-smoke-prepare
       - name: Run 1-GPU core smoke tests
         run: |
           ray stop --force
           bash tests/gpu_smoke/run_gpu_smoke_core_single.sh --num-gpus 1
-      - name: Upload GPU smoke logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gpu-smoke-logs-${{ github.job }}
-          path: logs/gpu_smoke/**
-          if-no-files-found: ignore
+      - if: always()
+        uses: ./.github/actions/gpu-smoke-upload-logs
 
   gpu_smoke_core_multi_2gpu:
     needs: setup
@@ -214,40 +170,14 @@ jobs:
       github.event.label.name == 'gpu-smoke-core'
     runs-on: ["${{ needs.setup.outputs.core-multi-runner-label || 'L20x2' }}"]
     timeout-minutes: 30
-    env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
-      HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0"
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-      - name: Install dependencies
-        env:
-          PIP_EXTRA_INDEX_URL: https://pypi.org/simple
-        run: |
-          # vllm020.dev1 image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
-          pip3 install ".[gpu,dev]"
-          pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-          pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
-          pip3 install --no-deps -e .
-          # veomni's [gpu] extra pins torch 2.9 and would conflict with the vLLM stack.
-          # See docs/start/install.md "Optional engine backends".
-          # TODO: rm --no-deps when VeOmni support torch2.11
-          pip3 install veomni==0.1.11 --no-deps
-          pip3 install torchcodec librosa soundfile av
+      - uses: ./.github/actions/gpu-smoke-prepare
       - name: Run 2-GPU core multi-worker smoke tests
         run: |
           ray stop --force
           bash tests/gpu_smoke/run_gpu_smoke_core_multi.sh --num-gpus 2
-      - name: Upload GPU smoke logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gpu-smoke-logs-${{ github.job }}
-          path: logs/gpu_smoke/**
-          if-no-files-found: ignore
+      - if: always()
+        uses: ./.github/actions/gpu-smoke-upload-logs
 
   gpu_smoke_e2e_2gpu:
     needs: setup
@@ -256,41 +186,14 @@ jobs:
       github.event.label.name == 'gpu-smoke-e2e'
     runs-on: ["${{ needs.setup.outputs.e2e-runner-label || 'L20x2' }}"]
     timeout-minutes: 45
-    env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
-      HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0"
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-      - name: Install dependencies
-        env:
-          PIP_EXTRA_INDEX_URL: https://pypi.org/simple
-        run: |
-          # vllm023.dev1 image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
-          pip3 install ".[gpu,dev]"
-          pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-          pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
-          pip3 install --no-deps -e .
-          # veomni's [gpu] extra pins torch 2.9 and would conflict with the vLLM stack.
-          # See docs/start/install.md "Optional engine backends".
-          # TODO: rm --no-deps when VeOmni support torch2.11
-          pip3 install veomni==0.1.11 --no-deps
-          pip3 install torchcodec librosa soundfile av
-          pip3 install "transformers[mistral-common]"
-      - name: Run GPU smoke tests
+      - uses: ./.github/actions/gpu-smoke-prepare
+      - name: Run 2-GPU e2e smoke tests
         run: |
           ray stop --force
           bash tests/gpu_smoke/run_gpu_smoke_e2e.sh --num-gpus 2
-      - name: Upload GPU smoke logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gpu-smoke-logs-${{ github.job }}
-          path: logs/gpu_smoke/**
-          if-no-files-found: ignore
+      - if: always()
+        uses: ./.github/actions/gpu-smoke-upload-logs
 
   gpu_smoke_reward_e2e_4gpu:
     needs: setup
@@ -299,40 +202,14 @@ jobs:
       github.event.label.name == 'gpu-smoke-reward-e2e'
     runs-on: ["${{ needs.setup.outputs.reward-e2e-runner-label || 'L20x4' }}"]
     timeout-minutes: 45
-    env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
-      HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0"
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-      - name: Install dependencies
-        env:
-          PIP_EXTRA_INDEX_URL: https://pypi.org/simple
-        run: |
-          # vllm020.dev1 image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
-          pip3 install ".[gpu,dev]"
-          pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-          pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
-          pip3 install --no-deps -e .
-          # veomni's [gpu] extra pins torch 2.9 and would conflict with the vLLM stack.
-          # See docs/start/install.md "Optional engine backends".
-          # TODO: rm --no-deps when VeOmni support torch2.11
-          pip3 install veomni==0.1.11 --no-deps
-          pip3 install torchcodec librosa soundfile av
+      - uses: ./.github/actions/gpu-smoke-prepare
       - name: Run 4-GPU reward e2e smoke tests
         run: |
           ray stop --force
           bash tests/gpu_smoke/run_gpu_smoke_reward_e2e.sh --num-gpus 4
-      - name: Upload GPU smoke logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gpu-smoke-logs-${{ github.job }}
-          path: logs/gpu_smoke/**
-          if-no-files-found: ignore
+      - if: always()
+        uses: ./.github/actions/gpu-smoke-upload-logs
 
   cleanup:
     runs-on: ubuntu-latest
