@@ -46,7 +46,7 @@ gpu_smoke_init() {
             -h|--help)
                 cat <<EOF
 Usage:
-  bash ${BASH_SOURCE[1]} [--num-gpus N]
+  bash ${BASH_SOURCE[1]:-$0} [--num-gpus N]
 
 Options:
   -g, --num-gpus N    GPU count to run with (allowed: 1, 2, 4, 8)
