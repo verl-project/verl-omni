@@ -110,6 +110,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
+    actor_rollout_ref.model.lora_dtype=float32 \
     actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=$ACTOR_SP \
     actor_rollout_ref.actor.diffusion_loss.clip_ratio=0.0001 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
@@ -122,15 +123,15 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.layered_summon=True \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.mm_processor_cache_gb=0 \
     actor_rollout_ref.rollout.prompt_length=$MAX_PROMPT_LENGTH \
-    actor_rollout_ref.rollout.pipeline.num_inference_steps=10 \
+    actor_rollout_ref.rollout.pipeline.num_inference_steps=12 \
     actor_rollout_ref.rollout.pipeline.true_cfg_scale=4.0 \
     actor_rollout_ref.rollout.pipeline.height=$IMAGE_RESOLUTION \
     actor_rollout_ref.rollout.pipeline.width=$IMAGE_RESOLUTION \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=$MAX_PROMPT_LENGTH \
-    actor_rollout_ref.rollout.algo.noise_level=1.0 \
+    actor_rollout_ref.rollout.algo.noise_level=0.7 \
     actor_rollout_ref.rollout.algo.sde_type="sde" \
-    actor_rollout_ref.rollout.algo.sde_window_size=2 \
-    actor_rollout_ref.rollout.algo.sde_window_range="[0,5]" \
+    actor_rollout_ref.rollout.algo.sde_window_size=3 \
+    actor_rollout_ref.rollout.algo.sde_window_range="[0,6]" \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=40 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \

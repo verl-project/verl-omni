@@ -130,3 +130,8 @@ logs
 log
 outputs
 .history
+
+# local data and scratch
+data/
+.scratch/
+tensorboard_log/
