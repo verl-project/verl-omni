@@ -25,42 +25,9 @@ MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-8192}
 
 ENGINE=vllm_omni
 
-# Qwen-Image-Edit stores its processor in a `processor/` subdirectory that lacks
-# a config.json with `model_type`, causing verl's hf_processor (AutoConfig) to fail.
-# Patch: write a minimal config.json into the processor dir so AutoConfig can
-# resolve the model type. This is idempotent and does not affect model weights.
-python3 - <<'PATCH_PROCESSOR'
-import json, pathlib, subprocess, sys
-
-model_id = "Qwen/Qwen-Image-Edit-2511"
-
-# Resolve the snapshot directory from HF cache
-try:
-    from huggingface_hub import snapshot_download
-    local = snapshot_download(model_id, local_files_only=True)
-except Exception:
-    import os
-    cache = os.path.expanduser("~/.cache/huggingface/hub")
-    slug = "models--" + model_id.replace("/", "--")
-    refs = pathlib.Path(cache) / slug / "refs" / "main"
-    if refs.exists():
-        sha = refs.read_text().strip()
-        local = str(pathlib.Path(cache) / slug / "snapshots" / sha)
-    else:
-        print("WARNING: could not locate Qwen-Image-Edit-2511 in HF cache; skipping processor patch", file=sys.stderr)
-        sys.exit(0)
-
-proc_dir = pathlib.Path(local) / "processor"
-cfg_file = proc_dir / "config.json"
-if proc_dir.exists() and not cfg_file.exists():
-    try:
-        cfg_file.write_text(json.dumps({"model_type": "qwen2_vl"}))
-        print(f"Patched processor config: {cfg_file}")
-    except Exception as e:
-        print(f"WARNING: Failed to patch processor config: {e}. If the cache is read-only, patch manually or ignore if not needed.", file=sys.stderr)
-else:
-    print(f"Processor config already present or processor dir missing: {cfg_file}")
-PATCH_PROCESSOR
+# Qwen-Image-Edit ships its processor without a config.json (missing model_type),
+# which breaks verl's hf_processor (AutoConfig). Patch it idempotently.
+python3 -c "from verl_omni.utils.hf_processor_patch import ensure_processor_config; ensure_processor_config('$model_name')"
 
 # Reproducibility
 #   data.seed=42
