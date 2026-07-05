@@ -135,3 +135,4 @@ outputs
 data/
 .scratch/
 tensorboard_log/
+.mypy_cache/
