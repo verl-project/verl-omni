@@ -40,7 +40,7 @@ def default_compute_score_image(
         NotImplementedError: If no scorer is registered for *data_source*.
     """
     if data_source == "jpeg_compressibility":
-        from . import jpeg_compressibility
+        from verl_omni.utils.reward_score import jpeg_compressibility
 
         res = jpeg_compressibility.compute_score(solution_image)
     else:

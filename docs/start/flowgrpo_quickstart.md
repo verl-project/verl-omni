@@ -1,13 +1,13 @@
 (flowgrpo_quickstart)=
-# Quickstart: FlowGRPO training on Qwen-Image OCR dataset
+# Quickstart: FlowGRPO training on OCR dataset
 
-Last updated: 05/05/2026
+Last updated: 06/24/2026
 
 Post-train a diffusion image generation model with FlowGRPO.
 
 ## Introduction
 
-In this example, we post-train a `Qwen-Image` policy with FlowGRPO for OCR-style image generation tasks. The rollout uses `vllm-omni` for multimodal generation, and the reward is computed by a visual generative reward model (*Qwen3-VL-8B-Instruct* in this example) that compares OCR text extracted from generated images against the dataset ground truth.
+In this example, we post-train a `Stable Diffusion 3.5 Medium` policy with FlowGRPO for OCR-style image generation tasks. The rollout uses `vllm-omni` for multimodal generation, and the reward is computed by a visual generative reward model (*Qwen2.5-VL-3B-Instruct* in this example) that compares OCR text extracted from generated images against the dataset ground truth.
 
 ## Prerequisite
 
@@ -17,7 +17,7 @@ In this example, we post-train a `Qwen-Image` policy with FlowGRPO for OCR-style
 pip install Levenshtein
 ```
 
-- Use a machine with `4` GPUs for the provided example script.
+- Use a machine with `3` GPUs for the provided example script (`2` for actor + rollout, `1` for the reward model in its own resource pool).
 - Run the commands below from the repository root.
 
 ## Dataset Introduction
@@ -36,8 +36,7 @@ An astronaut's boot print on the Martian surface, clearly reading "First Steps",
 
 The preprocessing script converts the raw dataset into parquet files that contain:
 
-- the multimodal prompt used for image generation,
-- a negative prompt for true CFG sampling,
+- the raw prompt text for image generation (SD3.5 uses its own CLIP-L/G + T5 text encoders, so no system prompt or chat template is applied),
 - OCR ground truth stored under `reward_model.ground_truth`,
 - auxiliary metadata such as split and sample index.
 
@@ -52,15 +51,15 @@ export WORKSPACE=${WORKSPACE:-$HOME}
 Obtain the raw OCR dataset from the original Flow-GRPO repository and place it under `$WORKSPACE/data/ocr`. Then preprocess it into `train.parquet` and `test.parquet`:
 
 ```bash
-python3 examples/flowgrpo_trainer/data_process/qwenimage_ocr.py \
+python3 examples/flowgrpo_trainer/data_process/sd3_ocr.py \
   --input_dir $WORKSPACE/data/ocr \
-  --output_dir $WORKSPACE/data/ocr/qwen_image
+  --output_dir $WORKSPACE/data/ocr/sd3
 ```
 
 The command above writes:
 
-- `$WORKSPACE/data/ocr/qwen_image/train.parquet`
-- `$WORKSPACE/data/ocr/qwen_image/test.parquet`
+- `$WORKSPACE/data/ocr/sd3/train.parquet`
+- `$WORKSPACE/data/ocr/sd3/test.parquet`
 
 These parquet files are the inputs consumed by the FlowGRPO training script.
 
@@ -76,22 +75,28 @@ A handwritten sticky note on a refrigerator says "Buy milk" in blue ink.
 Place the files in `$WORKSPACE/data/ocr/` (or any directory you prefer) and run the same preprocessing command, adjusting `--input_dir` and `--output_dir` as needed:
 
 ```bash
-python3 examples/flowgrpo_trainer/data_process/qwenimage_ocr.py \
+python3 examples/flowgrpo_trainer/data_process/sd3_ocr.py \
   --input_dir $WORKSPACE/data/ocr \
-  --output_dir $WORKSPACE/data/ocr/qwen_image
+  --output_dir $WORKSPACE/data/ocr/sd3
 ```
 
-For datasets with a different ground-truth extraction scheme (e.g. a CSV with an explicit label column), modify `extract_solution` and the `process_fn` function in `examples/flowgrpo_trainer/data_process/qwenimage_ocr.py` to match your format, then re-run the script to regenerate the parquet files.
+For datasets with a different ground-truth extraction scheme (e.g. a CSV with an explicit label column), modify `extract_solution` and the `process_fn` function in `examples/flowgrpo_trainer/data_process/sd3_ocr.py` to match your format, then re-run the script to regenerate the parquet files.
 
 ## Step 2: Obtain models for RL training
 
-In this example, we train `Qwen/Qwen-Image` with LoRA and use `Qwen/Qwen3-VL-8B-Instruct` as the OCR reward model.
+In this example, we train `stabilityai/stable-diffusion-3.5-medium` with LoRA and use `Qwen/Qwen2.5-VL-3B-Instruct` as the OCR reward model.
 
-**Policy model (Qwen-Image):** the script uses the Hugging Face Hub ID `Qwen/Qwen-Image` directly — no manual download is required. Hugging Face will cache the weights automatically on first run. To use a local copy instead, edit the `model_name` variable in the script directly.
+**Policy model (SD3.5 Medium):** the script uses the Hugging Face Hub ID `stabilityai/stable-diffusion-3.5-medium` directly — no manual download is required. Hugging Face will cache the weights automatically on first run. To use a local copy instead, edit the `model_name` variable in the script directly.
 
-**Reward model (Qwen3-VL-8B-Instruct):** the script defaults to the Hugging Face Hub ID `Qwen/Qwen3-VL-8B-Instruct`, so no manual download is required — Hugging Face will cache it automatically on first run. To use a local copy instead, edit the `reward_model_name` variable in the script directly.
+**Reward model (Qwen2.5-VL-3B-Instruct):** the script defaults to the Hugging Face Hub ID `Qwen/Qwen2.5-VL-3B-Instruct`, so no manual download is required — Hugging Face will cache it automatically on first run. To use a local copy instead, edit the `reward_model_name` variable in the script directly.
 
-The run script exposes the following environment variable:
+**Custom chat template:** Since SD3.5 runs its own CLIP-L/G + T5 text encoders on the raw prompt text, the script sets a minimal chat template that extracts only the user message content:
+
+```bash
+custom_chat_template='{% for message in messages %}{% if message['\''role'\''] == '\''user'\'' %}{{ message['\''content'\''] }}{% endif %}{% endfor %}'
+```
+
+The run script exposes the following environment variables:
 
 ```bash
 WORKSPACE              # base directory for data (default: $HOME)
@@ -103,14 +108,16 @@ The provided example script launches `python3 -m verl_omni.trainer.main_diffusio
 
 - `algorithm.adv_estimator=flow_grpo`
 - `actor_rollout_ref.rollout.name=vllm_omni`
+- `reward.custom_reward_function.path=verl_omni/utils/reward_score/genrm_ocr.py`
 - `reward.custom_reward_function.name=compute_score_ocr`
-- LoRA fine-tuning on `Qwen-Image`
-- a single-node, `4`-GPU layout
+- LoRA fine-tuning on `stabilityai/stable-diffusion-3.5-medium`
+- a single-node layout: `2` GPUs for actor + rollout, `1` GPU for the reward model in its own dedicated resource pool
+- image resolution `384×384`, `10` inference steps per rollout sample
 
 Run the training script:
 
 ```bash
-bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora.sh
+bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh
 ```
 
 Optional KL loss tuning:
@@ -139,6 +146,12 @@ checkpoints/${trainer.project_name}/${trainer.experiment_name}
 
 If rollout OOM persists after increasing `ROLLOUT_TP`, reduce memory-heavy rollout settings such as `actor_rollout_ref.rollout.n`, image `height` / `width`, or `actor_rollout_ref.rollout.pipeline.max_sequence_length`. If reward-model OOM persists after increasing `REWARD_TP`, consider the async reward script, which places the reward model on its own resource pool via `reward.reward_model.enable_resource_pool=True`.
 
+## FAQ: common errors
+
+| Error | Fix | What it changes |
+| --- | --- | --- |
+| `Attention backend mismatch` | Set `actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA` | When FA3 is unavailable, the trainer falls back `attn_backend` to `native` automatically, but `rollout_attn_backend` stays at `FLASH_ATTN` — raising a mismatch error. Set the rollout backend explicitly to `TORCH_SDPA`, or export `DIFFUSION_ATTENTION_BACKEND=TORCH_SDPA` before launching. |
+
 ## Wandb logging
 
 The provided script already enables:
@@ -146,7 +159,7 @@ The provided script already enables:
 ```bash
 trainer.logger='["console", "wandb"]' \
 trainer.project_name=flow_grpo \
-trainer.experiment_name=qwen_image_ocr_lora
+trainer.experiment_name=sd35_medium_ocr_lora
 ```
 
 Set your W&B credentials before launching if you want remote tracking:

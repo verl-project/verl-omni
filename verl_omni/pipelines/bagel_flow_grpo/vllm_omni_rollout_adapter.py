@@ -21,8 +21,8 @@ original flow_grpo BAGEL rollout.
 
 from __future__ import annotations
 
-import hashlib
 import logging
+import os
 import random
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -36,6 +36,7 @@ from verl_omni.pipelines.bagel_flow_grpo.common import (
     BAGEL_FLOWGRPO_CFG_DEFAULTS,
     maybe_to_cpu,
     setup_bagel_sigmas,
+    vllm_omni_num_timesteps,
 )
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
@@ -164,39 +165,43 @@ class _BagelSchedulerAdapter:
                 "return_logprobs": cur_return_logprobs,
             }
 
+        sample_in = sample.unsqueeze(0)
+        model_output_in = model_output.unsqueeze(0)
+        if "prev_sample" in kwargs:
+            kwargs = {**kwargs, "prev_sample": kwargs["prev_sample"].unsqueeze(0)}
+
         out = self._inner.step(
-            model_output=model_output.float(),  # cast bf16→fp32 for scheduler precision
+            model_output=model_output_in.float(),  # cast bf16→fp32 for scheduler precision
             timestep=sigma,
-            sample=sample,
+            sample=sample_in,
             return_dict=False,
             **kwargs,
         )
         self._step_counter += 1
         prev_sample, log_prob = out[0], out[1]
-        # Rollout latents are (tokens, channels); reduce to scalar to
-        # match training's batched log_prob shape.
+        prev_sample = prev_sample.squeeze(0)
         if log_prob is not None:
-            log_prob = log_prob.mean()
+            log_prob = log_prob.reshape(())
         return _AdapterStepOutput(prev_sample=prev_sample, log_prob=log_prob)
 
 
 def _pick_sde_window(
     window_size: Optional[int],
     window_range: Optional[Any],
-    seed: Optional[int],
-    request_id: Optional[str],
+    seed: int,
 ) -> Optional[tuple[int, int]]:
     """Pick a random contiguous window ``[begin, begin + window_size)``.
+
+    Uses ``seed`` directly so that all rollouts share the same SDE window,
+    matching the official flow_grpo behaviour of
+    ``random.seed(process_index)`` per GPU.
 
     Args:
         window_size: Number of steps in the window.  ``None`` or 0
             disables windowing.
         window_range: ``(low, high)`` inclusive range for the window
             start.  ``None`` defaults to ``[0, window_size)``.
-        seed: If set, seed the RNG for reproducibility.
-        request_id: If set (and ``seed`` is ``None``), seed the RNG
-            with a hash of the request ID so concurrent requests get
-            different windows.
+        seed: Seed for the RNG.
 
     Returns:
         ``(begin, end_exclusive)`` or ``None`` if windowing is disabled.
@@ -213,13 +218,7 @@ def _pick_sde_window(
         # Window doesn't fit; clamp to the lowest valid begin.
         return (low, low + int(window_size))
 
-    if seed is not None:
-        rng = random.Random(int(seed))
-    elif request_id is not None:
-        h = hashlib.sha256(str(request_id).encode()).digest()
-        rng = random.Random(int.from_bytes(h[:8], "big"))
-    else:
-        rng = random.Random()
+    rng = random.Random(seed)
     begin = rng.randint(low, high_inclusive)
     return (begin, begin + int(window_size))
 
@@ -292,18 +291,20 @@ class BagelPipelineWithLogProb(BagelPipeline):
             sde_window = _pick_sde_window(
                 window_size=int(sde_window_size),
                 window_range=sde_window_range,
-                seed=req.sampling_params.seed,
-                request_id=getattr(req, "request_id", None),
+                seed=int(os.environ["LOCAL_RANK"]),
             )
 
         # Pass scheduler kwargs; _BagelSchedulerAdapter overrides noise_level
         # and return_logprobs per-step based on the SDE window.
         self.scheduler_kwargs = {k: extra_args[k] for k in ("noise_level", "sde_type", "generator") if k in extra_args}
         self.scheduler_kwargs["return_logprobs"] = logprobs
+        # BAGEL FlowGRPO compares quadratic log-prob terms only.
+        self.scheduler_kwargs["include_logprob_normalizer"] = False
 
         # Per-request scheduler setup matching training-side sigma schedule.
         assert req.sampling_params.num_inference_steps is not None, "num_inference_steps must be set for RL rollouts"
-        setup_bagel_sigmas(self.scheduler._inner, req.sampling_params.num_inference_steps)
+        bagel_num_timesteps = int(req.sampling_params.num_inference_steps)
+        setup_bagel_sigmas(self.scheduler._inner, bagel_num_timesteps)
 
         # Reset adapter state *after* set_timesteps so inner step_index is None.
         self.scheduler.begin_forward(
@@ -312,7 +313,12 @@ class BagelPipelineWithLogProb(BagelPipeline):
             return_logprobs=logprobs,
         )
 
-        output = super().forward(req)
+        # vllm-omni 0.22 runs one extra denoise step; compensate for BAGEL parity.
+        req.sampling_params.num_inference_steps = vllm_omni_num_timesteps(bagel_num_timesteps)
+        try:
+            output = super().forward(req)
+        finally:
+            req.sampling_params.num_inference_steps = bagel_num_timesteps
 
         # Slice trajectory to the SDE window so training only sees noisy steps.
         traj_latents = output.trajectory_latents

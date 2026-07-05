@@ -16,11 +16,12 @@ following stack (rollout↔actor pearson ≈ 0.993):
 | --- | --- |
 | vLLM | `0.22.0` |
 | vLLM-Omni | `0.22.0` (the `v0.22.0` release tag) |
-| transformers | `4.57.6` (see warning below) |
+| transformers | `5.x` |
 | torch | `2.11.0+cu130` |
 | flash-attn | `2.8.3` |
 | accelerate | `1.12.0` |
-| verl | commit: `8a69493027` (w/ FSDP LoRA fixes) |
+| verl | `05b262b6` (w/ FSDP LoRA fixes) |
+| TransferQueue | `0.1.8` (imported by verl's V1 trainer that runs this recipe) |
 
 This pins to the upcoming `vllm 0.22.0` + `vllm-omni 0.22.0` release so the recipe
 stays aligned with what maintainers ship.
@@ -33,18 +34,21 @@ pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@v0.22
 # vllm-omni's CLI entrypoints import pydub at startup but don't declare it
 pip install pydub
 
-# verl (must include the FSDP layered-summon fix)
-pip install "verl @ git+https://github.com/verl-project/verl.git@8a69493027"
+# verl (pinned to a main commit that includes the FSDP layered-summon fix)
+pip install "verl @ git+https://github.com/verl-project/verl.git@05b262b6"
+
+# verl's V1 trainer (TaskRunnerV1) imports TransferQueue at startup; main_ppo
+# fails with ModuleNotFoundError without it, and it is not always pulled transitively
+pip install TransferQueue==0.1.8
 
 # verl-omni (this repo)
 pip install -e .
 ```
 
-> **Pin transformers to 4.x.** transformers `5.x` rewrote the weight-loading
-> path (`core_model_loading.py`); combined with `accelerate`'s meta-device init
-> it raises `TypeError: Parameter.__new__() got an unexpected keyword argument
-> '_is_hf_initialized'` when loading the 30B checkpoint. Use `transformers<5`
-> (validated on `4.57.6`); vLLM's transformers floor is satisfied either way.
+> **Requires transformers 5.x.** The Thinker MoE experts are stored as fused
+> 3-D tensors that PEFT cannot target directly; the `qwen3_omni_thinker` patch
+> unfuses them into per-expert `nn.Linear` right before LoRA injection so
+> `target_modules` reaches the expert `gate_proj/up_proj/down_proj`.
 
 > **flash-attn needs a CUDA toolkit matching torch.** torch `2.11.0+cu130` is
 > built against CUDA 13; building flash-attn from source against a system CUDA 12.x
@@ -77,7 +81,7 @@ validated.
 > args verl passes (`gpu_memory_utilization`, `max_num_seqs`, `load_format`,
 > `dtype`, LoRA, …) — the per-stage YAML takes precedence. So the rollout engine
 > runs with the values in
-> [`qwen3_omni_thinker_only.yaml`](qwen3_omni_thinker_only.yaml)
+> [`qwen3_omni/qwen3_omni_thinker_only.yaml`](qwen3_omni/qwen3_omni_thinker_only.yaml)
 > (e.g. `gpu_memory_utilization: 0.4`), kept low because the engine **shares each
 > GPU with the FSDP actor**. To change rollout memory/batching, edit that stage
 > file, not the verl rollout config.
@@ -119,25 +123,25 @@ export MODEL_PATH=/path/to/local/Qwen3-Omni-30B-A3B-Instruct
 Launch from the repository root:
 
 ```bash
-bash examples/gspo_trainer/run_qwen3_omni_thinker_gspo_lora.sh
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora.sh
 ```
 
 The recipe config lives in
-[`config/qwen3_omni_thinker_gspo.yaml`](config/qwen3_omni_thinker_gspo.yaml),
+[`qwen3_omni/config/qwen3_omni_thinker_gspo.yaml`](qwen3_omni/config/qwen3_omni_thinker_gspo.yaml),
 which inherits verl's default `ppo_trainer` config and overrides the GSPO/LoRA
 fields. The launch script passes it via `--config-name` and only sets volatile
 values (data/model paths, GPU/node counts, the vLLM-Omni stage config path) on
 the command line. Config precedence, lowest to highest:
 
 ```
-verl ppo_trainer defaults  →  config/qwen3_omni_thinker_gspo.yaml  →  CLI overrides
+verl ppo_trainer defaults  →  qwen3_omni/config/qwen3_omni_thinker_gspo.yaml  →  CLI overrides
 ```
 
 So any field can be overridden from the command line without editing the yaml:
 
 ```bash
 MODEL_PATH=/local/Qwen3-Omni-30B-A3B-Instruct \
-bash examples/gspo_trainer/run_qwen3_omni_thinker_gspo_lora.sh \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora.sh \
     trainer.total_epochs=10 \
     actor_rollout_ref.actor.optim.lr=2e-6
 ```
@@ -146,8 +150,7 @@ To verify the wiring before a full run, use the end-to-end GSPO smoke test
 [`tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_smoke.sh`](../../tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_smoke.sh),
 which trains on a tiny random-weight model built by
 [`build_qwen3_omni_tiny_random.py`](../../tests/special_e2e/build_qwen3_omni_tiny_random.py)
-(no 60 GB download). It runs under `transformers<5`; it will be wired into the
-`tests/gpu_smoke` CI suite once the recipe supports transformers 5.x.
+(no 60 GB download). It is wired into the `tests/gpu_smoke` CI suite as Test 8.
 
 ## Logging
 
@@ -162,19 +165,21 @@ export WANDB_API_KEY=<your_wandb_api_key>
 
 Only the **Thinker** (`Qwen3OmniMoeThinkerForConditionalGeneration`):
 
-- LoRA rank 64, alpha 32, on `target_modules="all-linear"`.
+- LoRA rank 64, alpha 32, on `target_modules="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"`
+  (explicit names so the unfused MoE expert `gate/up/down_proj` are targeted, not just attention).
 - `exclude_modules` strips talker / code2wav / code_predictor / visual /
   audio_tower; `freeze_vision_tower=True` keeps the vision encoder cold.
 - The non-Thinker heads are dropped at FSDP-wrap time via `_verl_strip_modules`.
 
 Reward comes from the `dapo` reward manager (math accuracy on parsed answers).
 
-Healthy signals after one full step (~22 min on 4×H100):
+Healthy signals (one full step takes ~9–21 min on 4×H100, depending on the
+sampled response length):
 
 - `training/rollout_actor_probs_pearson_corr` > 0.95 (actor ↔ rollout agree
   after weight sync) — the primary correctness signal.
 - `actor/loss` ≈ 1e-4…1e-3, `actor/grad_norm` ∈ [1e-3, 1], no OOM
-  (`actor/perf/max_memory_allocated_gb` < 60).
+  (`actor/perf/max_memory_allocated_gb` < 65).
 - `val-core/.../acc/mean@1` rising with steps.
 
 ## Performance
@@ -182,22 +187,25 @@ Healthy signals after one full step (~22 min on 4×H100):
 > Measured on a single node of **4 × H100/H200 80GB**, actor and rollout
 > colocated, MATH-lighteval, `dapo` reward.
 
-| Script | Model | Algorithm | # Cards (colocate) | Batch × `rollout.n` | lr | Throughput (tok/gpu/s) | Time / Step (s) | val acc/mean@1 | rollout↔actor pearson |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `run_qwen3_omni_thinker_gspo_lora.sh` | Qwen3-Omni-30B-A3B Thinker | GSPO + LoRA (r=64) | 4 | 8 × 8 = 64 | 1e-6 | 38.2 | ~1350 | 0.90 | 0.993 |
+| Script | Model | Algorithm | # Cards (colocate) | Batch × `rollout.n` | lr | Steps | Throughput (tok/gpu/s) | Time / Step (s) | val acc/mean@1 | rollout↔actor pearson |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `run_qwen3_omni_thinker_gspo_lora.sh` | Qwen3-Omni-30B-A3B Thinker | GSPO + LoRA (r=64) | 4 | 8 × 8 = 64 | 1e-6 | 60 | ~16–48 | ~530–1260 | 0.90 | 0.993 |
 
-The step time is dominated by rollout generation (~1010 s of ~1350 s) because
-`max_response_length=8192` with `rollout.n=8`; `actor/perf/max_memory_allocated`
-peaks at ~57 GB.
+The step time is dominated by rollout generation and swings with the sampled
+response length (mean `response_length` ranged ~0.7k–3.6k tokens over the run, up
+to `max_response_length=8192` with `rollout.n=8`); `actor/perf/max_memory_allocated`
+peaks at ~64 GB.
 
 ## Preliminary results
 
-Validation accuracy on MATH-lighteval sits around **0.90** with the default
-config. Treat this as a plumbing-correctness signal (finite loss, reasonable
-grad norm, rollout↔actor pearson ≈ 0.99, no OOM) rather than evidence the recipe
-is tuned — gains are slow because the Instruct base is already a strong
-zero-shot solver, LoRA r=64 has limited capacity against a 30B base, and the
-binary math reward yields low-variance advantages on a high-baseline policy.
+Over a 60-step run with the default config, the training reward
+(`critic/rewards/mean`) rises from **~0.75 to ~0.90** and validation accuracy on
+MATH-lighteval is **~0.90**. Treat this
+as a plumbing-correctness signal (finite loss, reasonable grad norm, rollout↔actor
+pearson ≈ 0.99, no OOM) rather than evidence the recipe is tuned — gains are slow
+because the Instruct base is already a strong zero-shot solver, LoRA r=64 has
+limited capacity against a 30B base, and the binary math reward yields
+low-variance advantages on a high-baseline policy.
 
 ![training reward](reward.png)
 
@@ -205,10 +213,11 @@ binary math reward yields low-variance advantages on a high-baseline policy.
 
 ```
 examples/gspo_trainer/
-├── run_qwen3_omni_thinker_gspo_lora.sh   ← launch script (volatile overrides only)
-├── config/
-│   └── qwen3_omni_thinker_gspo.yaml      ← recipe config (inherits verl ppo_trainer)
-├── qwen3_omni_thinker_only.yaml          ← vllm-omni stage config
+├── qwen3_omni/
+│   ├── run_qwen3_omni_thinker_gspo_lora.sh   ← launch script (volatile overrides only)
+│   ├── config/
+│   │   └── qwen3_omni_thinker_gspo.yaml      ← recipe config (inherits verl ppo_trainer)
+│   └── qwen3_omni_thinker_only.yaml          ← vllm-omni stage config
 ├── reward.png                            ← preliminary reward curve
 └── README.md                             ← (this file)
 ```

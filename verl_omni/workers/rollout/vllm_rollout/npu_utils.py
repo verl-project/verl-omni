@@ -19,8 +19,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 import torch
 from vllm.utils.mem_utils import GiB_bytes
 
-__all__ = ["NPUColocateWorkerMixin"]
-
+from verl_omni.workers.rollout.vllm_rollout.utils import vLLMOmniColocateWorkerExtension
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -96,14 +95,8 @@ def _skip_diffusers_npu_empty_cache():
 # ---------------------------------------------------------------------------
 
 
-class NPUColocateWorkerMixin:
+class vLLMOmniNPUColocateWorkerExtension(vLLMOmniColocateWorkerExtension):
     """Mixin that overrides memory-pool, sleep, and wake_up on Ascend NPU.
-
-    Usage::
-
-        class vLLMOmniColocateWorkerExtension(NPUColocateWorkerMixin, CustomPipelineWorkerExtension):
-            ...
-
     The mixin guards every method with ``_is_npu_platform()`` and falls back to
     the super-class implementation on non-NPU hardware, so it is safe to use
     unconditionally in a cross-platform codebase.

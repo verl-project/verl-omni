@@ -24,12 +24,12 @@ uv pip install Levenshtein
 
 ## Launch Training
 
-Refer to [flowgrpo_quickstart](flowgrpo_quickstart.md) for details on the OCR dataset format, preprocessing commands, and general FlowGRPO task descriptions. The launch script for Ascend NPU is located at `examples/flowgrpo_trainer/run_qwen_image_ocr_lora_npu.sh`.
+Refer to [flowgrpo_quickstart](flowgrpo_quickstart.md) for details on the OCR dataset format, preprocessing commands, and general FlowGRPO task descriptions. The launch script for Ascend NPU is located at `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_npu.sh`.
 
 Run the FlowGRPO training script for Ascend NPU from the repository root:
 
 ```bash
-bash examples/flowgrpo_trainer/run_qwen_image_ocr_lora_npu.sh
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_npu.sh
 ```
 
 The script executes:
@@ -50,7 +50,7 @@ TensorBoard logs are saved to:
 tensorboard_log/${trainer.project_name}/${trainer.experiment_name}
 ```
 
-To enable logging with Weights & Biases (WandB), modify `examples/flowgrpo_trainer/run_qwen_image_ocr_lora_npu.sh` and set:
+To enable logging with Weights & Biases (WandB), modify `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_npu.sh` and set:
 
 ```bash
 trainer.logger='["console", "wandb"]'

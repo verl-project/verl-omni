@@ -108,8 +108,8 @@ class NonDiffusersModelBase(nn.Module, ABC):
         self.gradient_checkpointing = True
 
     def _checkpointed_call(self, fn, *args, **ckpt_kwargs):
-        """Call *fn*, wrapping with checkpoint when enabled and training."""
-        if not self.gradient_checkpointing or not self.training:
+        """Call *fn*, wrapping with checkpoint when enabled and grad is required."""
+        if not self.gradient_checkpointing or not torch.is_grad_enabled():
             return fn(*args)
 
         ckpt_kwargs.setdefault("use_reentrant", False)
@@ -191,9 +191,9 @@ class NonDiffusersModelBase(nn.Module, ABC):
         for module in self.modules():
             if module is self:
                 continue
-            disable_adapters_fn = getattr(module, "disable_adapters", None)
-            if callable(disable_adapters_fn):
-                disable_adapters_fn()
+            enable_adapters_fn = getattr(module, "enable_adapters", None)
+            if callable(enable_adapters_fn):
+                enable_adapters_fn(False)
 
     def enable_adapters(self) -> None:
         """Re-enable all PEFT adapters after ``disable_adapters``."""
@@ -202,7 +202,7 @@ class NonDiffusersModelBase(nn.Module, ABC):
                 continue
             enable_adapters_fn = getattr(module, "enable_adapters", None)
             if callable(enable_adapters_fn):
-                enable_adapters_fn()
+                enable_adapters_fn(True)
 
     # Checkpoint persistence
 

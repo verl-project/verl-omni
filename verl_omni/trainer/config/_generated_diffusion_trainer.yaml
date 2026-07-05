@@ -103,7 +103,6 @@ actor_rollout_ref:
       - extra
       load_contents: ${.save_contents}
       async_save: false
-      mbridge_config: {}
     grad_clip: 1.0
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}

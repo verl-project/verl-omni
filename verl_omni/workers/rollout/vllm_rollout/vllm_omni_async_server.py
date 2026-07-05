@@ -103,7 +103,22 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return "vllm_omni"
 
     def _get_worker_extension_cls(self) -> str:
-        return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
+        device_type = ""
+        try:
+            from vllm.platforms import current_platform
+
+            device_type = current_platform.device_type
+        except Exception:
+            pass
+
+        # vLLMOmniColocateWorkerExtension supports LoRA + weight updates for GPU.
+        # vLLMOmniNPUColocateWorkerExtension additionally mixes in NPUColocateWorkerMixin
+        # for NPU memory pool, sleep, and wake_up.
+        # ar_mode uses vllm-ascend which already handles NPU natively, so the base extension suffices.
+        if device_type != "npu" or self._ar_mode:
+            return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
+        else:
+            return "verl_omni.workers.rollout.vllm_rollout.npu_utils.vLLMOmniNPUColocateWorkerExtension"
 
     def _get_cli_modules(self) -> list:
         return [vllm_omni.entrypoints.cli.serve]
@@ -165,8 +180,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         os.environ["MASTER_PORT"] = str(diffusion_master_port)
         logger.info("Using MASTER_PORT=%s for vLLM-Omni workers", os.environ["MASTER_PORT"])
 
-        engine_args["diffusion_attention_backend"] = self.config.rollout_attn_backend
-        logger.info("Setting diffusion_attention_backend=%s from rollout config", self.config.rollout_attn_backend)
+        # rollout_attn_backend only exists on the diffusion rollout config, not AR text rollouts.
+        attn_backend = getattr(self.config, "rollout_attn_backend", None)
+        if attn_backend is not None:
+            engine_args["diffusion_attention_backend"] = attn_backend
+            logger.info("Setting diffusion_attention_backend=%s from rollout config", attn_backend)
 
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
@@ -372,7 +390,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if self._ar_mode:
             generator = self.engine.generate(
                 prompt=prompt,
-                sampling_params=params,
+                sampling_params_list=params,
                 request_id=request_id,
                 lora_request=lora_request,
                 priority=priority,

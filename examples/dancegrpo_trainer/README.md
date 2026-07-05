@@ -48,7 +48,7 @@ This produces:
 Launch the HPSv3 example from the repository root:
 
 ```bash
-bash examples/dancegrpo_trainer/run_wan22_5b_t2v_hpsv3_npu.sh
+bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_npu.sh
 ```
 
 The script runs `python3 -m verl_omni.trainer.main_diffusion` with:

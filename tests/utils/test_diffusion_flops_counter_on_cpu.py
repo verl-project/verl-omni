@@ -216,9 +216,14 @@ class TestDevicePeakOverride:
         assert any("must be positive" in str(w.message) for w in warned)
 
     def test_no_override_matches_upstream(self):
+        from verl.utils.device import is_device_available
         from verl.utils.flops_counter import get_device_flops
 
-        assert get_device_peak_tflops() == pytest.approx(float(get_device_flops("T")))
+        if is_device_available():
+            expected = float(get_device_flops("T"))
+        else:
+            expected = float(get_device_flops("T", device_name="CPU"))
+        assert get_device_peak_tflops() == pytest.approx(expected)
 
 
 # ---------------------------------------------------------------------------

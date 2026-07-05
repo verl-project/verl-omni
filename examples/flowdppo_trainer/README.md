@@ -44,13 +44,13 @@ This produces:
 Launch the example from the repository root:
 
 ```bash
-bash examples/flowdppo_trainer/run_qwen_image_ocr_lora.sh
+bash examples/flowdppo_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
 The script accepts normal Hydra overrides after the command:
 
 ```bash
-bash examples/flowdppo_trainer/run_qwen_image_ocr_lora.sh trainer.total_training_steps=100
+bash examples/flowdppo_trainer/qwen_image/run_qwen_image_ocr_lora.sh trainer.total_training_steps=100
 ```
 
 The script runs `python3 -m verl_omni.trainer.main_diffusion` with Flow-DPPO-specific settings:
