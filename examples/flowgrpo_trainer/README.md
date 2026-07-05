@@ -158,9 +158,9 @@ bash examples/flowgrpo_trainer/run_qwen_image_edit_lora.sh
 Prepare the image-editing dataset with:
 
 ```bash
-python3 examples/flowgrpo_trainer/data_process/qwenimageedit_sharegpt4o.py \
-    --input_dir ~/data/sharegpt4o_image_mini \
-    --output_dir ~/data/sharegpt4o_image_mini_qwen_image_edit
+python3 examples/flowgrpo_trainer/data_process/qwenimageedit_image.py \
+    --input_dir ~/data/image_edit \
+    --output_dir ~/data/qwen_image_edit
 ```
 
 ## Performance

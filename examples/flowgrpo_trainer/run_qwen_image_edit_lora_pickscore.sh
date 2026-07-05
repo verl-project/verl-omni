@@ -77,8 +77,8 @@ fi
 
 # Set WORKSPACE to any writable directory; defaults to the repository root.
 WORKSPACE=${WORKSPACE:-$repo_root}
-train_path=${TRAIN_FILES:-$WORKSPACE/data/sharegpt4o_image_mini_qwen_image_edit/train.parquet}
-test_path=${VAL_FILES:-$WORKSPACE/data/sharegpt4o_image_mini_qwen_image_edit/test.parquet}
+train_path=${TRAIN_FILES:-$WORKSPACE/data/qwen_image_edit/train.parquet}
+test_path=${VAL_FILES:-$WORKSPACE/data/qwen_image_edit/test.parquet}
 
 output_dir=$repo_root/outputs/$script_name
 checkpoint_dir=$output_dir/checkpoints
@@ -142,7 +142,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     "+reward.custom_reward_function.reward_kwargs.server_urls='$reward_server_urls'" \
     trainer.logger='["console", "tensorboard"]' \
     trainer.project_name=flow_grpo \
-    trainer.experiment_name=qwen_image_edit_sharegpt4o_image_mini_lora_pickscore \
+    trainer.experiment_name=qwen_image_edit_lora_pickscore \
     trainer.default_local_dir=$checkpoint_dir \
     +trainer.rollout_data_dir=$rollout_data_dir \
     +trainer.validation_data_dir=$val_data_dir \

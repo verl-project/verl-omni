@@ -4,7 +4,7 @@ Source format (UniRL jsonl):
     {"prompt": str, "media": [{"modality": "image", "role": "condition", "uri": "data/.../xxx.png"}],
      "metadata": {...}}
 
-Output parquet schema matches `qwenimageedit_sharegpt4o.py`:
+Output parquet schema matches the Qwen-Image-Edit training pipeline:
     data_source, prompt (chat messages with <image> placeholder),
     negative_prompt, ability, images ([{"bytes": PNG}]),
     reward_model, extra_info.
