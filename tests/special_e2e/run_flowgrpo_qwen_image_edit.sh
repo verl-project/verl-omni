@@ -9,6 +9,12 @@
 #   tiny qwen-image-edit-plus at ~/models/tiny-random/qwen-image-edit-plus
 set -xeuo pipefail
 
+# Fix cuDNN version: PyTorch bundles cuDNN 9.19.0, but system has 9.10.2 in
+# /usr/local/cuda/lib64. Remove it from LD_LIBRARY_PATH so PyTorch's bundled
+# cuDNN takes precedence; otherwise vllm-omni diffusion workers crash with
+# "cuDNN version incompatibility".
+export LD_LIBRARY_PATH=$(echo "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -v '/usr/local/cuda/lib64' | tr '\n' ':')
+
 NUM_GPUS=${NUM_GPUS:-1}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/qwen-image-edit-plus}
 DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_image_edit}
