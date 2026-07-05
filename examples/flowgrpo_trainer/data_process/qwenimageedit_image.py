@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Preprocess UniRL image-edit dataset into Qwen-Image-Edit parquet format.
-
 Source dataset: UniRL (https://github.com/Tencent-Hunyuan/UniRL), a unified
 reinforcement learning framework from Tencent Hunyuan that provides image-edit
 training data with condition images and edit instructions.
@@ -60,8 +59,6 @@ def _convert_split(
     split: str,
     max_samples: int,
     image_size: int,
-    flush_every: int = 2000,
-    output_dir: Path | None = None,
 ) -> pd.DataFrame:
     jsonl_path = input_dir / f"{split}.jsonl"
     rows = []
@@ -95,13 +92,6 @@ def _convert_split(
             if processed % 500 == 0:
                 print(f"[{split}] processed={processed} kept={len(rows)} missing={missing}", flush=True)
 
-            # Incremental flush: write partial parquet so progress is not lost
-            if output_dir is not None and flush_every > 0 and len(rows) > 0 and len(rows) % flush_every == 0:
-                partial = pd.DataFrame(rows)
-                partial_path = output_dir / f"{split}.partial.parquet"
-                partial.to_parquet(partial_path)
-                print(f"[{split}] flushed {len(rows)} rows to {partial_path}", flush=True)
-
             meta = example.get("metadata", {}) or {}
             rows.append(
                 {
@@ -122,8 +112,6 @@ def _convert_split(
                         "index": len(rows),
                         "instruction": instruction,
                         "image": image_uri,
-                        "source_img": source_img,
-                        "target_img": None,
                         "global_id": meta.get("global_id"),
                         "source": meta.get("source"),
                         "edit_reward_score": meta.get("edit_reward_score"),
@@ -168,14 +156,12 @@ if __name__ == "__main__":
         split="train",
         max_samples=args.train_size,
         image_size=args.image_size,
-        output_dir=output_dir,
     )
     test_df = _convert_split(
         input_dir=input_dir,
         split="test",
         max_samples=args.val_size,
         image_size=args.image_size,
-        output_dir=output_dir,
     )
 
     train_path = output_dir / "train.parquet"

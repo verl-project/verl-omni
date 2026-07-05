@@ -28,7 +28,6 @@ except Exception:
     pass
 
 
-# Import pipelines / rollout / reward loop / engines to auto-register them
 # Apply model patches and auto-register pipelines / rollout / reward loop / engines
 from verl_omni.utils.hf_processor_patch import install_auto_patch  # noqa: E402, F401
 
