@@ -11,9 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Preprocess UniRL image_edit dataset into Qwen-Image-Edit parquet format.
+"""Preprocess image-edit dataset into Qwen-Image-Edit parquet format.
 
-Source format (UniRL jsonl):
+Source dataset: OpenGPT-4o-Image (https://github.com/NROwind/OpenGPT-4o-Image),
+an 80k high-quality instruction-image pair dataset for text-to-image and
+image editing covering 11 major domains and 51 subtasks.
+
+Source format (jsonl):
     {"prompt": str, "media": [{"modality": "image", "role": "condition", "uri": "data/.../xxx.png"}],
      "metadata": {...}}
 
@@ -134,11 +138,11 @@ def _convert_split(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Convert UniRL image_edit dataset to Qwen-Image-Edit parquet format.")
+    parser = argparse.ArgumentParser(description="Convert OpenGPT-4o-Image dataset to Qwen-Image-Edit parquet format.")
     parser.add_argument(
         "--input_dir",
         required=True,
-        help="Path to the UniRL image_edit dataset directory (contains train.jsonl, test.jsonl, data/).",
+        help="Path to the OpenGPT-4o-Image dataset directory (contains train.jsonl, test.jsonl, data/).",
     )
     parser.add_argument(
         "--output_dir",
