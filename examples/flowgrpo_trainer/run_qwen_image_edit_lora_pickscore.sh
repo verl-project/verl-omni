@@ -25,10 +25,6 @@ MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-8192}
 
 ENGINE=vllm_omni
 
-# Qwen-Image-Edit ships its processor without a config.json (missing model_type),
-# which breaks verl's hf_processor (AutoConfig). Patch it idempotently.
-python3 -c "from verl_omni.utils.hf_processor_patch import ensure_processor_config; ensure_processor_config('$model_name')"
-
 # Reproducibility
 #   data.seed=42
 #   actor_rollout_ref.rollout.seed=42

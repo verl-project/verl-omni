@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Patch Hugging Face processor configs that ship without ``model_type``.
+"""Auto-patch Hugging Face processor configs that ship without ``model_type``.
 
 Some multimodal models (e.g. Qwen-Image-Edit-2511) store their processor in a
 ``processor/`` subdirectory that lacks a ``config.json`` with ``model_type``,
 causing ``transformers.AutoConfig`` (and therefore ``verl.utils.hf_processor``)
-to fail. :func:`ensure_processor_config` writes a minimal ``config.json`` into
-the processor directory so AutoConfig can resolve the model type. The patch is
-idempotent and does not affect model weights.
+to fail. :func:`install_auto_patch` wraps ``verl.utils.tokenizer.hf_processor``
+so that the missing config is written idempotently before the original loader
+runs. The patch is installed automatically when ``verl_omni`` is imported.
 """
 
 from __future__ import annotations
@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 _KNOWN_PROCESSOR_MODEL_TYPES: dict[str, str] = {
     "Qwen/Qwen-Image-Edit-2511": "qwen2_vl",
 }
+
+_installed = False
 
 
 def _resolve_snapshot_dir(model_id: str) -> str | None:
@@ -53,29 +55,16 @@ def _resolve_snapshot_dir(model_id: str) -> str | None:
         return None
 
 
-def ensure_processor_config(model_id: str, model_type: str | None = None) -> None:
-    """Ensure the processor directory of *model_id* has a usable ``config.json``.
-
-    Args:
-        model_id: Hugging Face model id (e.g. ``"Qwen/Qwen-Image-Edit-2511"``).
-        model_type: Override ``model_type`` written into the processor config.
-            If ``None``, looks up :data:`_KNOWN_PROCESSOR_MODEL_TYPES`.
-    """
-    if model_type is None:
-        model_type = _KNOWN_PROCESSOR_MODEL_TYPES.get(model_id)
-    if model_type is None:
-        logger.debug("No known processor model_type for %s; skipping patch", model_id)
-        return
-
+def _ensure_processor_config(model_id: str, model_type: str) -> None:
+    """Write a minimal ``config.json`` into the processor dir if missing."""
     local = _resolve_snapshot_dir(model_id)
     if local is None:
-        logger.warning("Could not locate %s in HF cache; skipping processor patch", model_id)
+        logger.debug("Could not locate %s in HF cache; skipping processor patch", model_id)
         return
 
     proc_dir = Path(local) / "processor"
     cfg_file = proc_dir / "config.json"
     if not proc_dir.exists() or cfg_file.exists():
-        logger.debug("Processor config already present or processor dir missing: %s", cfg_file)
         return
 
     try:
@@ -89,3 +78,38 @@ def ensure_processor_config(model_id: str, model_type: str | None = None) -> Non
             model_id,
             e,
         )
+
+
+def install_auto_patch() -> None:
+    """Wrap ``verl.utils.tokenizer.hf_processor`` to auto-patch known models.
+
+    Idempotent: safe to call multiple times. Installed automatically when
+    ``verl_omni`` is imported.
+    """
+    global _installed
+    if _installed:
+        return
+
+    try:
+        import verl.utils.tokenizer as _vt
+    except ImportError:
+        return
+
+    _original = _vt.hf_processor
+
+    def _patched_hf_processor(name_or_path, **kwargs):
+        model_type = _KNOWN_PROCESSOR_MODEL_TYPES.get(str(name_or_path))
+        if model_type is not None:
+            _ensure_processor_config(str(name_or_path), model_type)
+        return _original(name_or_path, **kwargs)
+
+    _vt.hf_processor = _patched_hf_processor
+    # Refresh re-exports in modules that did `from verl.utils import hf_processor`.
+    import sys as _sys
+
+    for _mod_name in ("verl.utils", "verl.workers.config.model"):
+        _mod = _sys.modules.get(_mod_name)
+        if _mod is not None and hasattr(_mod, "hf_processor"):
+            _mod.hf_processor = _patched_hf_processor
+
+    _installed = True

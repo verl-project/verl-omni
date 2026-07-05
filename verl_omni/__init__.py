@@ -30,6 +30,9 @@ except Exception:
 
 # Import pipelines / rollout / reward loop / engines to auto-register them
 # Apply model patches and auto-register pipelines / rollout / reward loop / engines
+from verl_omni.utils.hf_processor_patch import install_auto_patch  # noqa: E402, F401
+
+install_auto_patch()
 import verl_omni.experimental  # noqa: E402, F401
 import verl_omni.models  # noqa: E402, F401
 import verl_omni.pipelines  # noqa: E402, F401
