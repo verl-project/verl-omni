@@ -13,7 +13,6 @@ Output parquet schema matches `qwenimageedit_sharegpt4o.py`:
 import argparse
 import io
 import json
-import os
 from pathlib import Path
 
 import pandas as pd
@@ -39,7 +38,14 @@ def _load_image_bytes(image_path: Path, image_size: int) -> bytes:
     return buffer.getvalue()
 
 
-def _convert_split(input_dir: Path, split: str, max_samples: int, image_size: int, flush_every: int = 2000, output_dir: Path | None = None) -> pd.DataFrame:
+def _convert_split(
+    input_dir: Path,
+    split: str,
+    max_samples: int,
+    image_size: int,
+    flush_every: int = 2000,
+    output_dir: Path | None = None,
+) -> pd.DataFrame:
     jsonl_path = input_dir / f"{split}.jsonl"
     rows = []
     missing = 0
@@ -115,9 +121,7 @@ def _convert_split(input_dir: Path, split: str, max_samples: int, image_size: in
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Convert UniRL image_edit dataset to Qwen-Image-Edit parquet format."
-    )
+    parser = argparse.ArgumentParser(description="Convert UniRL image_edit dataset to Qwen-Image-Edit parquet format.")
     parser.add_argument(
         "--input_dir",
         required=True,
