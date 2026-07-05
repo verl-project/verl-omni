@@ -313,16 +313,16 @@ bash examples/flowgrpo_trainer/run_qwen_image_edit_lora.sh
 Key differences from the text-to-image OCR example:
 
 - `actor_rollout_ref.model.path=Qwen/Qwen-Image-Edit-2511`
-- The parquet data must include a `condition_image` column (source image for editing)
-- Reward is computed by `compute_score_image_edit` in
-  `verl_omni/utils/reward_score/genrm_image_edit.py`
+- The parquet data must include an `images` column (source image for editing)
+- Reward is computed by `compute_score_pickscore` in
+  `verl_omni/utils/reward_score/pickscore_reward.py`
 
-Prepare the image-editing dataset (ShareGPT-4o-Image-Mini) with:
+Prepare the image-editing dataset with:
 
 ```bash
-python3 examples/flowgrpo_trainer/data_process/qwenimageedit_sharegpt4o.py \
-    --input_dir ~/data/sharegpt4o_image_mini \
-    --output_dir ~/data/sharegpt4o_image_mini_qwen_image_edit
+python3 examples/flowgrpo_trainer/data_process/qwenimageedit_image.py \
+    --input_dir ~/data/image_edit \
+    --output_dir ~/data/qwen_image_edit
 ```
 
 

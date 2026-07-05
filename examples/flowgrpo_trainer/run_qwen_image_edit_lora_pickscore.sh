@@ -53,8 +53,11 @@ except Exception:
 proc_dir = pathlib.Path(local) / "processor"
 cfg_file = proc_dir / "config.json"
 if proc_dir.exists() and not cfg_file.exists():
-    cfg_file.write_text(json.dumps({"model_type": "qwen2_vl"}))
-    print(f"Patched processor config: {cfg_file}")
+    try:
+        cfg_file.write_text(json.dumps({"model_type": "qwen2_vl"}))
+        print(f"Patched processor config: {cfg_file}")
+    except Exception as e:
+        print(f"WARNING: Failed to patch processor config: {e}. If the cache is read-only, patch manually or ignore if not needed.", file=sys.stderr)
 else:
     print(f"Processor config already present or processor dir missing: {cfg_file}")
 PATCH_PROCESSOR
