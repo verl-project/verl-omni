@@ -60,15 +60,41 @@ def _resolve_snapshot_dir(model_id: str) -> str | None:
         return None
 
 
+def _is_qwen_image_edit_model(model_id: str, snapshot_dir: str | None) -> bool:
+    """Check whether *model_id* (or its snapshot dir) is a Qwen-Image-Edit variant.
+
+    Qwen-Image-Edit models ship a ``processor/`` subdirectory that lacks
+    ``config.json`` (missing ``model_type``), breaking ``AutoConfig``. We
+    detect them by name pattern (``qwen-image-edit`` or ``qwen_image_edit``,
+    case-insensitive) and confirm the snapshot has a ``processor/`` dir with
+    a ``preprocessor_config.json`` (Qwen2-VL image processor) but no
+    ``config.json``.
+    """
+    name = model_id.lower()
+    if "qwen-image-edit" not in name and "qwen_image_edit" not in name:
+        return False
+    if snapshot_dir is None:
+        return True  # likely a local path; let the caller resolve and re-check
+    proc_dir = Path(snapshot_dir) / "processor"
+    if not proc_dir.is_dir():
+        return False
+    has_preprocessor = (proc_dir / "preprocessor_config.json").exists()
+    has_config = (proc_dir / "config.json").exists()
+    return has_preprocessor and not has_config
+
+
 def _ensure_processor_config(model_id: str, model_type: str = _DEFAULT_PROCESSOR_MODEL_TYPE) -> None:
     """Write a minimal ``config.json`` into the processor dir if missing."""
     local = _resolve_snapshot_dir(model_id)
     if local is None:
         return
 
+    if not _is_qwen_image_edit_model(model_id, local):
+        return
+
     proc_dir = Path(local) / "processor"
     cfg_file = proc_dir / "config.json"
-    if not proc_dir.exists() or cfg_file.exists():
+    if cfg_file.exists():
         return
 
     try:
