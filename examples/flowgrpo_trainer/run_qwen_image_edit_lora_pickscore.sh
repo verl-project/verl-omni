@@ -1,5 +1,5 @@
 # Qwen-Image-Edit-2511 LoRA RL with PickScore reward
-# PickScore: CLIP-based preference model served via HTTP, NO vLLM needed for reward
+# PickScore: CLIP-based preference model loaded locally on training GPU
 set -x
 
 export RAY_DEDUP_LOGS=0
@@ -15,8 +15,7 @@ export LD_LIBRARY_PATH=$(echo "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -v '/usr/l
 export VERL_OMNI_DEVICE_FLOPS_TFLOPS=989
 
 model_name=${MODEL_PATH:-Qwen/Qwen-Image-Edit-2511}
-reward_function_path=${REWARD_FUNCTION_PATH:-pkg://verl_omni.utils.reward_score.pickscore_http_client}
-reward_server_urls=${PICKSCORE_SERVER_URLS:-http://127.0.0.1:19084,http://127.0.0.1:19085,http://127.0.0.1:19086,http://127.0.0.1:19087}
+reward_function_path=${REWARD_FUNCTION_PATH:-pkg://verl_omni.utils.reward_score.pickscore_reward}
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-8}
 ACTOR_SP=${ACTOR_SP:-1}
@@ -138,8 +137,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.num_workers=4 \
     reward.reward_model.enable=False \
     reward.custom_reward_function.path=$reward_function_path \
-    reward.custom_reward_function.name=compute_score \
-    "+reward.custom_reward_function.reward_kwargs.server_urls='$reward_server_urls'" \
+    reward.custom_reward_function.name=compute_score_pickscore \
     trainer.logger='["console", "tensorboard"]' \
     trainer.project_name=flow_grpo \
     trainer.experiment_name=qwen_image_edit_lora_pickscore \
