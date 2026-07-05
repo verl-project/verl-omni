@@ -1,5 +1,5 @@
-# Qwen-Image-Edit-2511 LoRA RL on ShareGPT-4o-Image-Mini, PickScore reward
-# PickScore: local CLIP-based preference model, NO vLLM needed for reward
+# Qwen-Image-Edit-2511 LoRA RL with PickScore reward
+# PickScore: CLIP-based preference model served via HTTP, NO vLLM needed for reward
 set -x
 
 export RAY_DEDUP_LOGS=0

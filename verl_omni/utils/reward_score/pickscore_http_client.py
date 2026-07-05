@@ -89,11 +89,6 @@ def _serialize_image(image: torch.Tensor | np.ndarray | Image.Image | dict) -> b
     return buf.getvalue()
 
 
-def _prepare_image_bytes(image: torch.Tensor | np.ndarray | Image.Image | dict) -> bytes:
-    """Convert image to JPEG bytes (CPU-heavy, run in thread pool)."""
-    return _serialize_image(image)
-
-
 async def compute_score(
     solution_image: torch.Tensor | np.ndarray | Image.Image | dict,
     ground_truth: str,
@@ -116,7 +111,7 @@ async def compute_score(
     server_url = urls[next(_counter) % len(urls)]
 
     loop = asyncio.get_event_loop()
-    image_bytes = await loop.run_in_executor(None, _prepare_image_bytes, solution_image)
+    image_bytes = await loop.run_in_executor(None, _serialize_image, solution_image)
 
     payload = pickle.dumps(
         {
@@ -134,12 +129,12 @@ async def compute_score(
     async with session.post(server_url, data=payload) as resp:
         if resp.status != 200:
             error_text = await resp.text()
-            logger.error("PickScore server %s returned %s: %s", server_url, resp.status, error_text)
+            logger.error(f"PickScore server {server_url} returned {resp.status}: {error_text}")
             return {"score": 0.0}
         response_data = pickle.loads(await resp.read())
 
     if "error" in response_data:
-        logger.error("PickScore server %s error: %s", server_url, response_data["error"])
+        logger.error(f"PickScore server {server_url} error: {response_data['error']}")
         return {"score": 0.0}
 
     scores = response_data.get("scores", [])
