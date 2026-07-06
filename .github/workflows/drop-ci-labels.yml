@@ -1,0 +1,31 @@
+name: drop_ci_labels
+
+on:
+  pull_request_target:
+    types: [synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  drop_label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Remove CI labels
+        run: |
+          gh api /repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels \
+            --jq '.[].name | select(contains("ci"))' | while IFS= read -r label; do
+            encoded_label="$(jq -rn --arg label "$label" '$label|@uri')"
+            echo "Removing label: ${label}"
+            gh api --method DELETE \
+              "/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels/${encoded_label}"
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
