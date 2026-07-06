@@ -25,9 +25,11 @@ from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.models.sd3.pipeline_sd3 import StableDiffusion3Pipeline
 from vllm_omni.diffusion.request import DUMMY_DIFFUSION_REQUEST_ID, OmniDiffusionRequest
+from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
+from verl_omni.pipelines.utils import split_diffusion_output_by_request as _split_diffusion_output_by_request
 
 __all__ = ["StableDiffusion3PipelineWithLogProb"]
 
@@ -121,6 +123,8 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
       default is non-CFG (``guidance_scale <= 1`` skips the negative branch
       entirely, halving the transformer NFE).
     """
+
+    supports_request_batch = True
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
@@ -287,7 +291,7 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
 
     def forward(
         self,
-        req: OmniDiffusionRequest,
+        req: OmniDiffusionRequest | DiffusionRequestBatch,
         prompt: str | list[str] | None = None,
         negative_prompt: str | list[str] | None = None,
         height: int | None = None,
@@ -304,19 +308,22 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
         sde_window_range: tuple[int, int] = (0, 5),
         sde_type: Literal["sde", "cps"] = "sde",
         logprobs: bool = True,
-    ) -> DiffusionOutput:
+    ) -> DiffusionOutput | list[DiffusionOutput]:
         """End-to-end SD3.5 generation with rollout trajectory collection."""
-        req_prompt, req_negative_prompt = self._to_encode_prompt_text(req.prompts or [])
+        request_batch = req if isinstance(req, DiffusionRequestBatch) else DiffusionRequestBatch(requests=[req])
+        return_batch = isinstance(req, DiffusionRequestBatch)
+        req_prompt, req_negative_prompt = self._to_encode_prompt_text(request_batch.prompts or [])
         prompt = req_prompt if req_prompt is not None else prompt
         negative_prompt = req_negative_prompt if req_negative_prompt is not None else negative_prompt
 
         if prompt is None:
             # Engine warm-up / dummy run without a usable prompt.
-            return DiffusionOutput(output=None, custom_output={})
+            outputs = [DiffusionOutput(output=None, custom_output={}) for _ in range(request_batch.num_reqs)]
+            return outputs if return_batch else outputs[0]
         if isinstance(prompt, str):
             prompt = [prompt]
 
-        sampling_params = req.sampling_params
+        sampling_params = request_batch.sampling_params_list[0]
         height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
         num_inference_steps = sampling_params.num_inference_steps or num_inference_steps
@@ -334,12 +341,18 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
         sde_type = _coalesce_not_none(sampling_params.extra_args.get("sde_type", None), sde_type)
         logprobs = _coalesce_not_none(sampling_params.extra_args.get("logprobs", None), logprobs)
 
-        generator = sampling_params.generator or generator
-        if generator is None and sampling_params.seed is not None:
-            generator = torch.Generator(device=self.device).manual_seed(sampling_params.seed)
         req_num_outputs = getattr(sampling_params, "num_outputs_per_prompt", None)
         if req_num_outputs and req_num_outputs > 0:
             num_images_per_prompt = req_num_outputs
+        for request in request_batch.requests:
+            request_sampling_params = request.sampling_params
+            if request_sampling_params.generator is None and request_sampling_params.seed is not None:
+                request_sampling_params.generator = torch.Generator(device=self.device).manual_seed(
+                    request_sampling_params.seed
+                )
+        generator = request_batch.collate_request_generators(num_images_per_prompt, generator)
+        sde_generator = generator[0] if isinstance(generator, list) else generator
+        latents = request_batch.collate_request_tensors("latents", latents)
 
         self._guidance_scale = guidance_scale
         self._current_timestep = None
@@ -394,12 +407,18 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
             sde_window_size,
             sde_window_range,
             len(timesteps),
-            generator if not isinstance(generator, list) else (generator[0] if generator else None),
+            sde_generator,
         )
 
-        if req.request_id == DUMMY_DIFFUSION_REQUEST_ID and sde_window[0] == sde_window[1]:
+        if request_batch.requests[0].request_id == DUMMY_DIFFUSION_REQUEST_ID and sde_window[0] == sde_window[1]:
             image = self._decode_latents(latents)
-            return DiffusionOutput(output=image, custom_output={}, to_cpu=True)
+            result = DiffusionOutput(output=image, custom_output={}, to_cpu=True)
+            outputs = _split_diffusion_output_by_request(
+                result,
+                request_batch,
+                num_outputs_per_prompt=num_images_per_prompt,
+            )
+            return outputs if return_batch else outputs[0]
 
         latents, all_latents, all_log_probs, all_timesteps = self.diffuse(
             prompt_embeds,
@@ -413,14 +432,14 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
             noise_level,
             sde_window,
             sde_type,
-            generator if not isinstance(generator, list) else (generator[0] if generator else None),
+            sde_generator,
             logprobs,
         )
 
         self._current_timestep = None
         image = self._decode_latents(latents)
 
-        return DiffusionOutput(
+        result = DiffusionOutput(
             output=image,
             custom_output={
                 "all_latents": all_latents,
@@ -435,3 +454,9 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
             },
             to_cpu=True,
         )
+        outputs = _split_diffusion_output_by_request(
+            result,
+            request_batch,
+            num_outputs_per_prompt=num_images_per_prompt,
+        )
+        return outputs if return_batch else outputs[0]
