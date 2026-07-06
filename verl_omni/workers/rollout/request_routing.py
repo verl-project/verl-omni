@@ -52,6 +52,7 @@ class OmniRequestLoadBalancer:
         servers: dict[str, ray.actor.ActorHandle],
         policy: str = "least_inflight",
         max_cache_size: int = DEFAULT_ROUTING_CACHE_SIZE,
+        max_imbalance: int | None = None,
     ) -> None:
         if not servers:
             raise ValueError("servers must be non-empty")
@@ -60,6 +61,7 @@ class OmniRequestLoadBalancer:
 
         self._servers: dict[str, ray.actor.ActorHandle] = dict(servers)
         self._policy = policy
+        self._max_imbalance = max_imbalance
         self._inflight_requests: dict[str, int] = {sid: 0 for sid in servers}
         self._request_id_to_server: LRUCache = LRUCache(maxsize=max_cache_size)
         self._round_robin_idx = 0
@@ -100,6 +102,21 @@ class OmniRequestLoadBalancer:
         if sticky_key in self._request_id_to_server:
             server_id = self._request_id_to_server[sticky_key]
             if server_id in self._inflight_requests:
+                # Soft Affinity load check
+                if (
+                    self._policy == "prompt_uid_affinity"
+                    and self._max_imbalance is not None
+                    and self._max_imbalance > 0
+                ):
+                    min_server_id = min(self._inflight_requests, key=self._inflight_requests.get)
+                    if (
+                        self._inflight_requests[server_id] - self._inflight_requests[min_server_id]
+                        > self._max_imbalance
+                    ):
+                        # Divert request to least loaded replica and update stickiness mapping
+                        server_id = min_server_id
+                        self._request_id_to_server[sticky_key] = server_id
+
                 self._inflight_requests[server_id] += 1
                 return server_id, self._servers[server_id]
             del self._request_id_to_server[sticky_key]

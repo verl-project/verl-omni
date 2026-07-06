@@ -75,6 +75,8 @@ ROLLOUT_N = int(os.environ.get("FLOWGRPO_ROUTING_N", "16"))
 ROUTING_POLICY = os.environ.get("FLOWGRPO_ROUTING_POLICY", "prompt_uid_affinity")
 COMPARE_POLICIES = os.environ.get("FLOWGRPO_ROUTING_COMPARE_POLICIES", "1") == "1"
 MAX_NUM_SEQS = int(os.environ.get("FLOWGRPO_REQUEST_BATCH_MAX_NUM_SEQS", "32"))
+STEP_EXECUTION = os.environ.get("FLOWGRPO_ROUTING_STEP_EXECUTION", "0") == "1"
+NUM_INFERENCE_STEPS = int(os.environ.get("FLOWGRPO_ROUTING_NUM_INFERENCE_STEPS", "10"))
 _MIN_PROMPT_TOKENS = 35
 
 _NUM_REQS_RE = re.compile(r"num_reqs=(\d+)")
@@ -89,7 +91,7 @@ def _build_rollout_cfg() -> Any:
             "tensor_model_parallel_size": 1,
             "data_parallel_size": 1,
             "pipeline_model_parallel_size": 1,
-            "gpu_memory_utilization": 0.45,
+            "gpu_memory_utilization": float(os.environ.get("FLOWGRPO_ROUTING_GPU_MEM_UTIL", "0.45")),
             "max_num_batched_tokens": 8192,
             "max_num_seqs": MAX_NUM_SEQS,
             "dtype": "bfloat16",
@@ -101,18 +103,17 @@ def _build_rollout_cfg() -> Any:
             "free_cache_engine": False,
             "disable_log_stats": True,
             "calculate_log_probs": True,
+            "step_execution": STEP_EXECUTION,
             "engine_kwargs": {
                 "vllm_omni": {
-                    "step_execution": False,
-                    "request_batch_max_wait_ms": REQUEST_BATCH_MAX_WAIT_MS,
-                    "request_batch_min_size": REQUEST_BATCH_MIN_SIZE,
+                    "step_execution": STEP_EXECUTION,
                 }
             },
             "pipeline": {
                 "_target_": "verl_omni.workers.config.diffusion.DiffusionPipelineConfig",
                 "height": 512,
                 "width": 512,
-                "num_inference_steps": 10,
+                "num_inference_steps": NUM_INFERENCE_STEPS,
                 "true_cfg_scale": 4.0,
                 "max_sequence_length": 256,
             },
@@ -320,6 +321,7 @@ def test_flowgrpo_routing_policy_performance(multi_server_cluster, policy: str):
         )
 
     final = results[-1]
-    assert final["max_num_reqs"] >= 8, (
-        f"Expected fused batches under {final['policy']}, got max_num_reqs={final['max_num_reqs']}"
-    )
+    if not STEP_EXECUTION:
+        assert final["max_num_reqs"] >= 8, (
+            f"Expected fused batches under {final['policy']}, got max_num_reqs={final['max_num_reqs']}"
+        )

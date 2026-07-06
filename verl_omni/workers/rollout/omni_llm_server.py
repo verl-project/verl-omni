@@ -91,15 +91,18 @@ class OmniLLMServerManager(LLMServerManager):
     async def _init_global_load_balancer(self) -> None:
         policy = OmegaConf.select(self.rollout_config, "server_routing.policy", default="least_inflight")
         routing_key_field = OmegaConf.select(self.rollout_config, "server_routing.routing_key_field", default="uid")
+        max_imbalance = OmegaConf.select(self.rollout_config, "server_routing.max_imbalance", default=8)
         self.global_load_balancer = OmniRequestLoadBalancer.remote(
             servers=dict(zip(self.server_addresses, self.server_handles, strict=True)),
             policy=policy,
             max_cache_size=DEFAULT_ROUTING_CACHE_SIZE,
+            max_imbalance=max_imbalance,
         )
         logger.info(
-            "[OmniLLMServerManager] OmniRequestLoadBalancer policy=%s routing_key_field=%s",
+            "[OmniLLMServerManager] OmniRequestLoadBalancer policy=%s routing_key_field=%s max_imbalance=%s",
             policy,
             routing_key_field,
+            max_imbalance,
         )
 
     def get_client(self, client_cls=OmniLLMServerClient, **kwargs) -> OmniLLMServerClient:

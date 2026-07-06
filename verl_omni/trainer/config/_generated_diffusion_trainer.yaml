@@ -175,6 +175,7 @@ actor_rollout_ref:
     server_routing:
       _target_: verl_omni.workers.config.RolloutServerRoutingConfig
       policy: prompt_uid_affinity
+      max_imbalance: null
     _target_: verl_omni.workers.config.diffusion.DiffusionRolloutConfig
     name: ???
     mode: async

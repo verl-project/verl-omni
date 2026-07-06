@@ -8,4 +8,8 @@ _target_: verl_omni.workers.config.RolloutServerRoutingConfig
 # least_inflight | prompt_uid_affinity | prompt_hash_sharding | round_robin
 policy: least_inflight
 
+# For soft affinity (prompt_uid_affinity), maximum allowed imbalance in queue length
+# before re-routing to an underloaded replica. Set to null or <= 0 for strict affinity.
+max_imbalance: null
+
 # routing_key_field defaults to uid (FlowGRPO prompt group id in per-sample kwargs).

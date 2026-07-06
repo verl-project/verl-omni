@@ -48,6 +48,11 @@ class RolloutServerRoutingConfig(BaseConfig):
     # FlowGRPO rollout.n copies). Ignored when null.
     routing_key_field: Optional[str] = "uid"
 
+    # For soft affinity (prompt_uid_affinity), maximum allowed imbalance in queue length
+    # (inflight requests) between the assigned replica and the least loaded replica
+    # before re-routing. If null or <= 0, strict/hard affinity is used.
+    max_imbalance: Optional[int] = None
+
     def __post_init__(self) -> None:
         if self.policy not in VALID_ROLLOUT_SERVER_ROUTING_POLICIES:
             raise ValueError(
