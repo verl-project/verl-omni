@@ -84,7 +84,7 @@ python3 examples/flowgrpo_trainer/data_process/bagel_pickscore.py \
 This produces ``$WORKSPACE/data/pickscore/bagel/train.parquet`` and
 ``test.parquet``.
 
-### Run training
+### Run LoRA training
 
 ```bash
 bash examples/flowgrpo_trainer/bagel/run_bagel_pickscore_lora.sh
@@ -96,6 +96,34 @@ Key configuration differences from OCR:
 - Higher ``noise_level`` (``1.3`` vs ``0.7``) and SDE window
   (``sde_window_size=2``, ``range=[0,7]``) to provide sufficient exploration
   for text-alignment learning.
+
+### Run full-weight (non-LoRA) training
+
+A full-weight training variant is available that trains the entire
+generation pathway (``moe_gen`` parameters) while keeping the understanding
+pathway frozen:
+
+```bash
+bash examples/flowgrpo_trainer/bagel/run_bagel_pickscore.sh
+```
+
+Key differences from the LoRA variant:
+
+| Aspect | LoRA | Full-weight |
+|---|---|---|
+| Script | ``run_bagel_pickscore_lora.sh`` | ``run_bagel_pickscore.sh`` |
+| Strategy | default | ``fsdp2`` (required for mixed ``requires_grad``) |
+| Trainable params | Low-rank adapters on ``*_moe_gen`` | All ``moe_gen`` parameters (``requires_grad`` set by ``configure_trainable_params``) |
+| ``lora_rank`` / ``lora_alpha`` | 64 / 128 | N/A |
+| ``sde_window_size`` | 2 | 3 (more exploration for full-weight) |
+
+**Why FSDP2 is required.** FSDP1 does not natively support mixed
+``requires_grad`` within a single wrapped module — some parameters frozen,
+others trainable.  FSDP2 handles this correctly and also reshards layer
+parameters after forward, reducing peak memory during gradient
+checkpointing.  The understanding pathway (``moe_und``) is not a LoRA
+wrapper replacement but simply has ``requires_grad=False`` set by the
+``configure_trainable_params`` hook.
 
 ## Key differences from Qwen-Image
 

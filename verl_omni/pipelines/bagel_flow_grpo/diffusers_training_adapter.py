@@ -64,6 +64,17 @@ class BagelDiffusion(DiffusionModelBase):
                 layer_inner.self_attn.training = False
 
     @classmethod
+    def configure_trainable_params(cls, module, model_config):
+        """Freeze all params except the generation (``moe_gen``) pathway."""
+        for name, param in module.named_parameters():
+            param.requires_grad = "moe_gen" in name
+
+        # cast all trainable parameters to fp32
+        for name, param in module.named_parameters():
+            if param.requires_grad:
+                param.data = param.data.to(torch.float32)
+
+    @classmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig):
         # Build on GPU so scheduler buffers are comparable with cuda timesteps in FSDP forward.
         scheduler = FlowMatchSDEDiscreteScheduler()

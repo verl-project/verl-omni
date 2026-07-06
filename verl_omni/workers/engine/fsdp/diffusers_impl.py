@@ -58,6 +58,7 @@ from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.fsdp.utils import create_device_mesh, get_sharding_strategy
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
 
+from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.utils import (
     build_scheduler,
     forward,
@@ -202,8 +203,6 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         Returns ``None`` if the registry has no custom loader, so the
         caller falls back to ``diffusers.AutoModel``.
         """
-        from verl_omni.pipelines.model_base import DiffusionModelBase
-
         model_cls = DiffusionModelBase.get_class(self.model_config)
         module = model_cls.build_module(self.model_config, torch_dtype)
         if module is None:
@@ -448,6 +447,9 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         # Apply LoRA adapters if low-rank adaptation is enabled
         if self._is_lora:
             module = self._build_lora_module(module)
+        else:
+            # configure trainable parameters for non-lora training
+            DiffusionModelBase.get_class(self.model_config).configure_trainable_params(module, self.model_config)
 
         if self.use_ulysses_sp:
             sp_size = self.ulysses_sequence_parallel_size
@@ -1266,8 +1268,6 @@ class EngineTrainModeCtx(BaseEngineCtx):
         super().__init__(engine=engine, mode="train", **kwargs)
 
     def __enter__(self):
-        from verl_omni.pipelines.model_base import DiffusionModelBase
-
         assert isinstance(self.engine, DiffusersFSDPEngine)
         super().__enter__()
         self.engine.module.train()
