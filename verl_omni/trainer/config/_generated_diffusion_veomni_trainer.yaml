@@ -312,6 +312,7 @@ actor_rollout_ref:
     path: ~/models/Qwen/Qwen-Image
     algorithm: flow_grpo
     tokenizer_path: null
+    extra_tokenizers: null
     use_shm: false
     trust_remote_code: false
     custom_chat_template: null

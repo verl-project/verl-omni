@@ -49,6 +49,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.diffusion_loss.clip_ratio=1e-5 \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.custom_chat_template="\"$custom_chat_template\"" \
+    'actor_rollout_ref.model.extra_tokenizers={clip: {path: tokenizer, max_length: 77}, t5: {path: tokenizer_3, max_length: 256}}' \
     actor_rollout_ref.model.attn_backend=$ATTN_BACKEND \
     actor_rollout_ref.model.lora_rank=32 \
     actor_rollout_ref.model.lora_alpha=64 \

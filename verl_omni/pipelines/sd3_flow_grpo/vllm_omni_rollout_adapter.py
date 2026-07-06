@@ -28,6 +28,12 @@ from vllm_omni.diffusion.request import DUMMY_DIFFUSION_REQUEST_ID, OmniDiffusio
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
+from verl_omni.pipelines.sd3_flow_grpo.common import (
+    SD3_CLIP_TOKENS_KEY,
+    SD3_ENCODER_TOKEN_KEYS,
+    SD3_T5_TOKENS_KEY,
+    SD3TokenIdPromptMixin,
+)
 
 __all__ = ["StableDiffusion3PipelineWithLogProb"]
 
@@ -74,30 +80,32 @@ def _to_token_list(value: Any) -> list[int] | None:
     return None
 
 
-def _extract_prompt_ids(prompts: list) -> tuple[list[list[int]] | None, list[list[int]] | None]:
-    if not prompts:
-        return None, None
+def _extract_extra_prompt_ids(prompts: list, key: str = "extra_prompt_ids") -> dict[str, list[list[int]]] | None:
+    """Extract per-text-encoder token ids (agent-loop tokenized) from request prompts.
 
-    prompt_ids_list: list[list[int]] = []
-    negative_prompt_ids_list: list[list[int]] = []
+    Returns ``{encoder_name: [ids_per_prompt, ...]}`` or None when any request
+    prompt lacks the per-encoder ids.
+    """
+    if not prompts:
+        return None
+
+    per_prompt: list[dict] = []
     for prompt in prompts:
         if not isinstance(prompt, dict):
-            continue
-        prompt_ids = _to_token_list(prompt.get("prompt_token_ids"))
-        negative_prompt_ids = _to_token_list(prompt.get("negative_prompt_ids"))
-        if prompt_ids is not None:
-            prompt_ids_list.append(prompt_ids)
-        if negative_prompt_ids is not None:
-            negative_prompt_ids_list.append(negative_prompt_ids)
+            return None
+        extra = prompt.get(key)
+        if not extra:
+            return None
+        per_prompt.append(extra)
 
-    if not prompt_ids_list:
-        return None, None
-    negative_prompt_ids = negative_prompt_ids_list if negative_prompt_ids_list else None
-    return prompt_ids_list, negative_prompt_ids
-
-
-def _decode_prompt_ids(tokenizer, prompt_ids_list: list[list[int]]) -> list[str]:
-    return [tokenizer.decode(ids, skip_special_tokens=True) for ids in prompt_ids_list]
+    missing = [name for name in SD3_ENCODER_TOKEN_KEYS if name not in per_prompt[0]]
+    if missing:
+        raise ValueError(
+            f"SD3 rollout requires {list(SD3_ENCODER_TOKEN_KEYS)} entries in '{key}' but {missing} are missing. "
+            "Configure `actor_rollout_ref.model.extra_tokenizers` with these names "
+            "(see examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh)."
+        )
+    return {name: [_to_token_list(extra[name]) for extra in per_prompt] for name in SD3_ENCODER_TOKEN_KEYS}
 
 
 def _sd3_image_seq_len(height: int, width: int, vae_scale_factor: int = 8) -> int:
@@ -106,7 +114,7 @@ def _sd3_image_seq_len(height: int, width: int, vae_scale_factor: int = 8) -> in
 
 
 @VllmOmniPipelineBase.register("StableDiffusion3Pipeline", algorithm="flow_grpo")
-class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
+class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion3Pipeline):
     """SD3.5 rollout pipeline that returns FlowGRPO trajectory data.
 
     Differences from the upstream pipeline:
@@ -114,6 +122,10 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
     - the Euler flow-match scheduler is replaced by
       :class:`FlowMatchSDEDiscreteScheduler` so SDE-window sampling produces
       per-step log-probabilities;
+    - prompts are encoded from per-text-encoder token ids (CLIP + T5) produced
+      once by the agent loop (``actor_rollout_ref.model.extra_tokenizers``),
+      so no decode/re-encode happens here; plain-text prompts are only used
+      for engine warm-up / serving-style requests;
     - ``forward`` collects ``all_latents`` / ``all_log_probs`` /
       ``all_timesteps`` and ships prompt embeddings (sequence + pooled)
       through ``custom_output`` for training-side log-prob recomputation;
@@ -170,21 +182,6 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
 
     def _model_dtype(self) -> torch.dtype:
         return self.od_config.dtype
-
-    def _to_encode_prompt_text(self, prompts: list) -> tuple[list[str] | None, list[str] | None]:
-        """Convert vLLM-Omni request prompts to plain text for ``encode_prompt()``."""
-        prompt, negative_prompt = _extract_text_prompts(prompts)
-        if prompt is not None:
-            return prompt, negative_prompt
-
-        prompt_ids, negative_prompt_ids = _extract_prompt_ids(prompts)
-        if prompt_ids is None:
-            return None, None
-
-        prompt = _decode_prompt_ids(self.tokenizer, prompt_ids)
-        if negative_prompt_ids is not None:
-            negative_prompt = _decode_prompt_ids(self.tokenizer, negative_prompt_ids)
-        return prompt, negative_prompt
 
     def _decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
         if self.output_type == "latent":
@@ -306,11 +303,26 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
         logprobs: bool = True,
     ) -> DiffusionOutput:
         """End-to-end SD3.5 generation with rollout trajectory collection."""
-        req_prompt, req_negative_prompt = self._to_encode_prompt_text(req.prompts or [])
+        req_prompts = req.prompts or []
+        extra_prompt_ids = _extract_extra_prompt_ids(req_prompts)
+        negative_extra_prompt_ids = (
+            _extract_extra_prompt_ids(req_prompts, key="negative_extra_prompt_ids")
+            if extra_prompt_ids is not None
+            else None
+        )
+
+        req_prompt, req_negative_prompt = _extract_text_prompts(req_prompts)
         prompt = req_prompt if req_prompt is not None else prompt
         negative_prompt = req_negative_prompt if req_negative_prompt is not None else negative_prompt
 
-        if prompt is None:
+        if extra_prompt_ids is None and prompt is None:
+            if any(isinstance(p, dict) and p.get("prompt_token_ids") is not None for p in req_prompts):
+                raise ValueError(
+                    "SD3 rollout received tokenized prompts without per-text-encoder token ids; decoding "
+                    "token ids back to text inside the pipeline is not supported. Configure "
+                    f"`actor_rollout_ref.model.extra_tokenizers` with {list(SD3_ENCODER_TOKEN_KEYS)} entries "
+                    "(see examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh)."
+                )
             # Engine warm-up / dummy run without a usable prompt.
             return DiffusionOutput(output=None, custom_output={})
         if isinstance(prompt, str):
@@ -345,29 +357,46 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
         self._current_timestep = None
         self._interrupt = False
 
-        batch_size = len(prompt)
+        batch_size = len(extra_prompt_ids[SD3_CLIP_TOKENS_KEY]) if extra_prompt_ids is not None else len(prompt)
         do_cfg = guidance_scale > 1
 
-        prompt_embeds, pooled_prompt_embeds = self.encode_prompt(
-            prompt=prompt,
-            prompt_2=None,
-            prompt_3=None,
-            max_sequence_length=max_sequence_length,
-            num_images_per_prompt=num_images_per_prompt,
-        )
-        negative_prompt_embeds = None
-        negative_pooled_prompt_embeds = None
-        if do_cfg:
-            negative_prompt = negative_prompt or [""] * batch_size
-            if isinstance(negative_prompt, str):
-                negative_prompt = [negative_prompt]
-            negative_prompt_embeds, negative_pooled_prompt_embeds = self.encode_prompt(
-                prompt=negative_prompt,
+        if extra_prompt_ids is not None:
+            prompt_embeds, pooled_prompt_embeds = self.encode_prompt_from_token_ids(
+                clip_prompt_ids=extra_prompt_ids[SD3_CLIP_TOKENS_KEY],
+                t5_prompt_ids=extra_prompt_ids[SD3_T5_TOKENS_KEY],
+                max_sequence_length=max_sequence_length,
+                num_images_per_prompt=num_images_per_prompt,
+            )
+        else:
+            prompt_embeds, pooled_prompt_embeds = self.encode_prompt(
+                prompt=prompt,
                 prompt_2=None,
                 prompt_3=None,
                 max_sequence_length=max_sequence_length,
                 num_images_per_prompt=num_images_per_prompt,
             )
+        negative_prompt_embeds = None
+        negative_pooled_prompt_embeds = None
+        if do_cfg:
+            if negative_extra_prompt_ids is not None:
+                negative_prompt_embeds, negative_pooled_prompt_embeds = self.encode_prompt_from_token_ids(
+                    clip_prompt_ids=negative_extra_prompt_ids[SD3_CLIP_TOKENS_KEY],
+                    t5_prompt_ids=negative_extra_prompt_ids[SD3_T5_TOKENS_KEY],
+                    max_sequence_length=max_sequence_length,
+                    num_images_per_prompt=num_images_per_prompt,
+                )
+            else:
+                # Upstream SD3 default: CFG negatives fall back to empty strings.
+                negative_prompt = negative_prompt or [""] * batch_size
+                if isinstance(negative_prompt, str):
+                    negative_prompt = [negative_prompt]
+                negative_prompt_embeds, negative_pooled_prompt_embeds = self.encode_prompt(
+                    prompt=negative_prompt,
+                    prompt_2=None,
+                    prompt_3=None,
+                    max_sequence_length=max_sequence_length,
+                    num_images_per_prompt=num_images_per_prompt,
+                )
 
         prompt_embeds_mask = torch.ones(prompt_embeds.shape[:2], dtype=torch.int64, device=prompt_embeds.device)
         negative_prompt_embeds_mask = (

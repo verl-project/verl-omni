@@ -250,13 +250,22 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         video_data: Optional[list[Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
         prompt_mask: torch.BoolTensor | None = None,
+        extra_prompt_ids: Optional[dict[str, list[int]]] = None,
+        negative_extra_prompt_ids: Optional[dict[str, list[int]]] = None,
         priority: int = 0,
     ) -> DiffusionOutput | TokenOutput:
         prompt_ids = normalize_token_ids(prompt_ids)
         multi_modal_data = self._build_multi_modal_data(image_data, video_data)
         lora_request = await self._resolve_lora_request()
         prompt, params = self._preprocess_input(
-            prompt_ids, sampling_params, multi_modal_data, lora_request, negative_prompt_ids, prompt_mask
+            prompt_ids,
+            sampling_params,
+            multi_modal_data,
+            lora_request,
+            negative_prompt_ids,
+            prompt_mask,
+            extra_prompt_ids,
+            negative_extra_prompt_ids,
         )
         final_res = await self._run_generation(prompt, params, request_id, lora_request, priority)
         return self._process_output(final_res, params, sampling_params)
@@ -314,6 +323,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         lora_request: Optional[LoRARequest],
         negative_prompt_ids: Optional[list[int]],
         prompt_mask: torch.BoolTensor | None = None,
+        extra_prompt_ids: Optional[dict[str, list[int]]] = None,
+        negative_extra_prompt_ids: Optional[dict[str, list[int]]] = None,
     ):
         """Build the engine prompt + sampling params for the active mode.
 
@@ -366,6 +377,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             custom_prompt["modalities"] = ["image"]
         if negative_prompt_ids is not None:
             custom_prompt["negative_prompt_ids"] = negative_prompt_ids
+        # Per-text-encoder token ids for multi-encoder models (e.g. SD3.5),
+        # produced by the agent loop so pipelines never decode/re-encode text.
+        if extra_prompt_ids is not None:
+            custom_prompt["extra_prompt_ids"] = extra_prompt_ids
+        if negative_extra_prompt_ids is not None:
+            custom_prompt["negative_extra_prompt_ids"] = negative_extra_prompt_ids
         if multi_modal_data:
             custom_prompt["multi_modal_data"] = multi_modal_data
             custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
