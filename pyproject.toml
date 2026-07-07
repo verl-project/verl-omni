@@ -156,3 +156,12 @@ verl_omni = [
   "trainer/config/*/*.yaml",
   "trainer/config/*/*/*.yaml",
 ]
+
+# -------------------------------
+# tool.uv - Package resolution overrides
+# -------------------------------
+[tool.uv]
+override-dependencies = [
+    "accelerate>=1.14.0",
+]
+
