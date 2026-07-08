@@ -93,6 +93,8 @@ class VisualRewardManager(RewardManagerBase):
         if isinstance(result, dict):
             score = result["score"]
             for key, value in result.items():
+                if key == "score":
+                    continue
                 reward_extra_info[key] = value
         else:
             score = result
