@@ -40,6 +40,12 @@ import pandas as pd
 
 SYSTEM_PROMPT = "You are a helpful assistant."
 VIDEO_FILE_EXTENSIONS = (".mp4", ".webm", ".mkv", ".mov", ".avi")
+
+
+def _content_item(item_type: str, *, text: str | None = None, image="", video="", audio="") -> dict:
+    return {"type": item_type, "text": text, "image": image, "video": video, "audio": audio}
+
+
 FRAME_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 ANNOTATION_URL = (
     "https://huggingface.co/datasets/ShareGPTVideo/train_video_and_instruction"
@@ -106,6 +112,12 @@ def _first_frame(video_media: str | list[str]) -> str | None:
     if isinstance(video_media, list):
         return video_media[0] if video_media else None
     return None
+
+
+def _video_prompt_path(video_media: str | list[str]) -> str:
+    if isinstance(video_media, list):
+        return os.path.dirname(video_media[0])
+    return video_media
 
 
 def _image_path_for_video(video_rel: str, image_dir: str) -> str:
@@ -235,8 +247,8 @@ def _build_text_row(record: dict, split: str, index: int) -> dict | None:
     if row is None:
         return None
     row["prompt"] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": question},
+        {"role": "system", "content": [_content_item("text", text=SYSTEM_PROMPT)]},
+        {"role": "user", "content": [_content_item("text", text=question)]},
     ]
     return row
 
@@ -251,12 +263,12 @@ def _build_video_row(record: dict, split: str, index: int, video_dir: str) -> di
     if row is None:
         return None
     row["prompt"] = [
-        {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
+        {"role": "system", "content": [_content_item("text", text=SYSTEM_PROMPT)]},
         {
             "role": "user",
             "content": [
-                {"type": "video", "video": video_media},
-                {"type": "text", "text": question},
+                _content_item("video", video=_video_prompt_path(video_media)),
+                _content_item("text", text=question),
             ],
         },
     ]
@@ -299,12 +311,12 @@ def _build_image_row(
     if row is None:
         return None
     row["prompt"] = [
-        {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
+        {"role": "system", "content": [_content_item("text", text=SYSTEM_PROMPT)]},
         {
             "role": "user",
             "content": [
-                {"type": "image", "image": image_path},
-                {"type": "text", "text": question},
+                _content_item("image", image=image_path),
+                _content_item("text", text=question),
             ],
         },
     ]
