@@ -50,8 +50,6 @@ __all__ = ["QwenImageMixGRPOPipelineWithLogProb"]
 class QwenImageMixGRPOPipelineWithLogProb(QwenImagePipelineWithLogProb):
     """Rollout pipeline for Qwen-Image with the MixGRPO algorithm."""
 
-    supports_request_batch = False
-
     def forward(self, req: OmniDiffusionRequest, **kwargs: Any):
         self._maybe_make_progressive_window(req.sampling_params.extra_args, kwargs)
         return super().forward(req, **kwargs)

@@ -122,8 +122,6 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
       entirely, halving the transformer NFE).
     """
 
-    supports_request_batch = False
-
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
         self.device = get_local_device()

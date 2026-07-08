@@ -42,7 +42,6 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
     Registered under ``"QwenImagePipeline"`` for vllm-omni rollout dispatch.
     """
 
-    supports_request_batch = False
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
         self.device = get_local_device()
