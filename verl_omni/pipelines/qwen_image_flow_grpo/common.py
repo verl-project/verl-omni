@@ -90,10 +90,6 @@ class QwenImageTokenIdPromptMixin:
         if prompt_embeds is None:
             if prompt_ids is None:
                 raise ValueError("`prompt_ids` must be provided when `prompt_embeds` is None.")
-            if isinstance(prompt_ids, list):
-                prompt_ids = torch.tensor(prompt_ids, device=self.device)
-            if isinstance(attention_mask, list):
-                attention_mask = torch.tensor(attention_mask, device=self.device)
             prompt_ids = prompt_ids.unsqueeze(0) if prompt_ids.ndim == 1 else prompt_ids
             attention_mask = (
                 attention_mask.unsqueeze(0)
