@@ -227,8 +227,6 @@ def _pick_sde_window(
 class BagelPipelineWithLogProb(BagelPipeline):
     """BAGEL pipeline variant for RL rollouts with verl-omni."""
 
-    supports_request_batch = False
-
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
         inner = FlowMatchSDEDiscreteScheduler()
