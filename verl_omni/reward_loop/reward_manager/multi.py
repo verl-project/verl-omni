@@ -158,8 +158,9 @@ class MultiVisualRewardManager(VisualRewardManager):
 
                 if isinstance(result, dict):
                     score = float(result["score"])
-                    # Store all sub-result fields under the reward key namespace
                     for rk, rv in result.items():
+                        if rk == "score":
+                            continue
                         reward_extra_info[f"reward/{key}/{rk}"] = rv
                 else:
                     score = float(result)
