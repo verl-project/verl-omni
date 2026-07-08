@@ -36,6 +36,8 @@ def _coalesce_not_none(value, default):
 class QwenImageDPOPipeline(QwenImagePipeline):
     """Rollout pipeline that returns DPO training tensors with generated images."""
 
+    supports_request_batch = False
+
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
         self.device = get_local_device()

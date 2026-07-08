@@ -40,6 +40,8 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
     log-probabilities.
     """
 
+    supports_request_batch = False
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.set_progress_bar_config(disable=True)
