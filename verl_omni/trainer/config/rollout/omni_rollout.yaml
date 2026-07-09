@@ -1,0 +1,45 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Load verl's rollout defaults into this config group.
+defaults:
+
+  - rollout
+
+  - _self_
+
+# Target class for omni rollout configuration.
+_target_: verl_omni.workers.config.omni.rollout.OmniRolloutConfig
+
+# actor_rollout_ref.rollout.name.
+name: vllm_omni
+
+# Rollout mode.
+mode: async
+
+# First supported omni rollout topology.
+pipeline_mode: thinker_only
+
+# vLLM-Omni pipeline model type. If null, use vLLM-Omni detection.
+model_type: null
+
+# Optional stage config YAML path.
+stage_configs_path: null
+
+# Optional deploy config YAML path.
+deploy_config: null
+
+# vLLM-Omni engine kwargs.
+engine_kwargs:
+
+  # vLLM-Omni-specific engine kwargs.
+  vllm_omni:
+
+    # Thinker-only mode emits autoregressive text tokens.
+    output_mode: ar
+
+    # Optional stage config YAML path.
+    stage_configs_path: ${oc.select:actor_rollout_ref.rollout.stage_configs_path,null}

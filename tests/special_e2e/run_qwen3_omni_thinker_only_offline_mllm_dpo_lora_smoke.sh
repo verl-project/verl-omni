@@ -49,8 +49,9 @@ TRAIN_FILE="[${DATA_DIR}/image/train.parquet,${DATA_DIR}/text/train.parquet,${DA
 VAL_FILE="[${DATA_DIR}/image/test.parquet,${DATA_DIR}/text/test.parquet,${DATA_DIR}/video/test.parquet]"
 
 # ── Run training (tiny: 2 steps, offline DPO, Thinker-only LoRA) ───────────────
-python3 -m verl.trainer.main_ppo \
-    --config-name=ppo_trainer \
+python3 -m verl_omni.trainer.main_omni \
+    --config-path="${REPO_ROOT}/examples/dpo_trainer/qwen3_omni/config" \
+    --config-name=qwen3_omni_thinker_offline_mllm_dpo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${VAL_FILE}" \
     data.train_batch_size=2 \

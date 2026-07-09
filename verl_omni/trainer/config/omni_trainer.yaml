@@ -1,0 +1,46 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+    - pkg://verl_omni.trainer.config
+
+# Inherit verl's PPO trainer defaults, then replace the model and rollout
+# config dataclasses with omni-aware extensions.
+defaults:
+
+  - ppo_trainer
+
+  - override /model@actor_rollout_ref.model: omni_model
+
+  - override /rollout@actor_rollout_ref.rollout: omni_rollout
+
+  - _self_
+
+# config for actor, rollout and reference model
+actor_rollout_ref:
+
+  # Model config
+  model:
+
+    # Omni thinker-only training still uses verl's language-model engine.
+    model_type: language_model
+
+    # Which stage of the omni model is trainable.
+    model_stage: thinker
+
+    # Hugging Face sub-config used by the trainable stage.
+    hf_config_name: thinker_config
+
+  # Rollout config
+  rollout:
+
+    # Use vLLM-Omni for omni rollout.
+    name: vllm_omni
+
+    # First supported topology is thinker-only autoregressive text generation.
+    pipeline_mode: thinker_only

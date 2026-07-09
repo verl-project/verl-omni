@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import diffusion, omni
-from .diffusion import *  # noqa: F401,F403
-from .omni import *  # noqa: F401,F403
+from . import omni_rollout_adapter, thinker_training_adapter
+from .omni_rollout_adapter import *  # noqa: F401,F403
+from .thinker_training_adapter import *  # noqa: F401,F403
 
-__all__ = list(diffusion.__all__) + list(omni.__all__)
+__all__ = omni_rollout_adapter.__all__ + thinker_training_adapter.__all__

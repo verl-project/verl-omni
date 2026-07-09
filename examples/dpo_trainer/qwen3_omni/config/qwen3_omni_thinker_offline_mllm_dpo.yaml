@@ -1,0 +1,118 @@
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+    - pkg://verl_omni.trainer.config
+
+defaults:
+
+  - ppo_trainer
+
+  - override /model@actor_rollout_ref.model: omni_model
+
+  - override /rollout@actor_rollout_ref.rollout: omni_rollout
+
+  - _self_
+
+data:
+
+  train_files: ???
+  val_files: ???
+  train_batch_size: 4
+  max_prompt_length: 2048
+  max_response_length: 512
+  val_max_samples: 64
+  filter_overlong_prompts: true
+  truncation: left
+  trust_remote_code: true
+  custom_cls:
+    path: pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset
+    collate_fn: offline_mllm_dpo_collate_fn
+
+actor_rollout_ref:
+
+  model:
+    path: Qwen/Qwen3-Omni-30B-A3B-Instruct
+    trust_remote_code: true
+    external_lib: verl_omni.models.transformers.qwen3_omni_thinker
+    architecture: Qwen3OmniMoeForConditionalGeneration
+    model_stage: thinker
+    hf_config_name: thinker_config
+    override_config:
+      attn_implementation: sdpa
+    lora_rank: 16
+    lora_alpha: 16
+    target_modules: all-linear
+    exclude_modules: ".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*"
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+
+  actor:
+    freeze_vision_tower: true
+    ppo_mini_batch_size: 4
+    ppo_micro_batch_size_per_gpu: 1
+    strategy: fsdp
+    policy_loss:
+      loss_mode: dpo
+      dpo_beta: 0.1
+    optim:
+      lr: 5e-6
+      lr_warmup_steps: 5
+      weight_decay: 0.01
+      clip_grad: 1.0
+    fsdp_config:
+      param_offload: true
+      optimizer_offload: true
+      model_dtype: bf16
+      use_orig_params: true
+      wrap_policy:
+        min_num_params: 100000000
+
+  rollout:
+    name: vllm_omni
+    mode: async
+    n: 0
+    tensor_model_parallel_size: 4
+    calculate_log_probs: false
+    load_format: safetensors
+    layered_summon: true
+    log_prob_micro_batch_size_per_gpu: 1
+    pipeline_mode: thinker_only
+    stage_configs_path: examples/gspo_trainer/qwen3_omni/qwen3_omni_thinker_only.yaml
+    engine_kwargs:
+      vllm_omni:
+        output_mode: ar
+        stage_configs_path: ${actor_rollout_ref.rollout.stage_configs_path}
+
+  ref:
+    log_prob_micro_batch_size_per_gpu: 1
+    strategy: fsdp
+    fsdp_config:
+      param_offload: true
+      model_dtype: bf16
+      use_orig_params: true
+      wrap_policy:
+        min_num_params: 100000000
+
+algorithm:
+
+  sample_source: offline
+  adv_estimator: dpo
+  use_kl_in_reward: false
+
+reward:
+
+  reward_manager:
+    name: naive
+
+trainer:
+
+  val_before_train: false
+  critic_warmup: 0
+  logger: ["console", "wandb"]
+  project_name: qwen3_omni_offline_mllm_dpo
+  experiment_name: offline_dpo_lora_llava_hound
+  n_gpus_per_node: 4
+  nnodes: 1
+  save_freq: 50
+  test_freq: 25
+  total_epochs: 3

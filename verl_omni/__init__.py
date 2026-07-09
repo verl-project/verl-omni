@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+import warnings
+from importlib import import_module
 
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/version")) as f:
     __version__ = f.read().strip()
@@ -28,11 +30,27 @@ except Exception:
     pass
 
 
-# Import pipelines / rollout / reward loop / engines to auto-register them
-# Apply model patches and auto-register pipelines / rollout / reward loop / engines
-import verl_omni.experimental  # noqa: E402, F401
-import verl_omni.models  # noqa: E402, F401
-import verl_omni.pipelines  # noqa: E402, F401
-import verl_omni.reward_loop  # noqa: E402, F401
-import verl_omni.workers.engine  # noqa: E402, F401
-import verl_omni.workers.rollout  # noqa: E402, F401
+def _optional_auto_import(module_name: str) -> None:
+    """Import auto-registration modules when optional runtime deps are present."""
+    try:
+        import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name != "vllm":
+            raise
+        warnings.warn(
+            f"Skipping {module_name} auto-registration because optional dependency 'vllm' is not installed.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+
+# Import pipelines / rollout / reward loop / engines to auto-register them.
+for _module_name in (
+    "verl_omni.experimental",
+    "verl_omni.models",
+    "verl_omni.pipelines",
+    "verl_omni.reward_loop",
+    "verl_omni.workers.engine",
+    "verl_omni.workers.rollout",
+):
+    _optional_auto_import(_module_name)

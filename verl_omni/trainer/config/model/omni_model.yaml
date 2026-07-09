@@ -1,0 +1,140 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Target class for omni model configuration.
+_target_: verl_omni.workers.config.omni.model.OmniModelConfig
+
+# Path to the Hugging Face model.
+path: ~/models/Qwen3-Omni-30B-A3B-Instruct
+
+# Config path to the Hugging Face config.
+hf_config_path: null
+
+# Path to the Hugging Face tokenizer.
+tokenizer_path: null
+
+# Whether to use shared memory for model loading.
+use_shm: False
+
+# Whether to trust remote code.
+trust_remote_code: True
+
+# Custom chat template for the model.
+custom_chat_template: null
+
+# External library used to register model-specific hooks.
+external_lib: null
+
+# Override Hugging Face config.
+override_config: {}
+
+# Whether to enable gradient checkpointing.
+enable_gradient_checkpointing: True
+
+# Whether to enable activation offload.
+enable_activation_offload: False
+
+# Whether to use remove padding.
+use_remove_padding: True
+
+# Set to a positive value to enable LoRA.
+lora_rank: 0
+
+# LoRA scaling factor.
+lora_alpha: 16
+
+# Target modules for LoRA adaptation.
+target_modules: all-linear
+
+# Exclude modules from LoRA adaptation.
+exclude_modules: null
+
+# Path to pre-trained LoRA adapter to load for continued training.
+lora_adapter_path: null
+
+# Whether to use liger.
+use_liger: False
+
+# Whether to use fused kernels.
+use_fused_kernels: False
+
+# Fused kernel options.
+fused_kernel_options:
+
+  # Implementation backend for fused kernels.
+  impl_backend: torch
+
+# TiledMLP configuration for memory-efficient MLP computation.
+tiled_mlp:
+
+  # Whether to enable TiledMLP.
+  enabled: False
+
+  # Number of shards to split the input.
+  num_shards: 4
+
+# MTP configuration.
+mtp:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs.
+  _target_: verl.workers.config.MtpConfig
+
+  enable: False
+  enable_train: False
+  enable_rollout: False
+  detach_encoder: False
+  mtp_loss_scaling_factor: 0.1
+  speculative_algorithm: EAGLE
+  speculative_num_steps: 3
+  speculative_eagle_topk: 1
+  speculative_num_draft_tokens: 4
+  method: mtp
+  num_speculative_tokens: 1
+
+# Megatron LoRA config.
+lora:
+
+  type: lora
+  merge: False
+  rank: 0
+  alpha: 32
+  dropout: 0.0
+  target_modules:
+    - linear_qkv
+    - linear_proj
+    - linear_fc1
+    - linear_fc2
+  exclude_modules: []
+  dropout_position: pre
+  lora_A_init_method: xavier
+  lora_B_init_method: zero
+  a2a_experimental: False
+  dtype: null
+  adapter_path: null
+  freeze_vision_model: True
+  freeze_vision_projection: True
+  freeze_language_model: True
+
+# verl engine model type.
+model_type: language_model
+
+# Hugging Face architecture name. If null, read from config.json.
+architecture: null
+
+# Which omni stage to train.
+model_stage: thinker
+
+# Hugging Face sub-config for the trainable stage.
+hf_config_name: thinker_config
+
+# Maximum image tokens expected by the processor.
+max_image_tokens: 1024
+
+# Maximum audio tokens expected by the processor.
+max_audio_tokens: 1500
+
+# Maximum video tokens expected by the processor.
+max_video_tokens: 2304

@@ -12,30 +12,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import (
-    bagel_flow_grpo,
-    qwen_image_diffusion_nft,
-    qwen_image_dpo,
-    qwen_image_flow_grpo,
-    qwen_image_mix_grpo,
-    sd3_dpo,
-    sd3_flow_grpo,
-    wan22_dance_grpo,
-)
-from .bagel_flow_grpo import *  # noqa: F401, F403
-from .qwen_image_diffusion_nft import *  # noqa: F401, F403
-from .qwen_image_dpo import *  # noqa: F401, F403
-from .qwen_image_flow_grpo import *  # noqa: F401, F403
-from .qwen_image_mix_grpo import *  # noqa: F401, F403
-from .sd3_dpo import *  # noqa: F401, F403
-from .sd3_flow_grpo import *  # noqa: F401, F403
-from .wan22_dance_grpo import *  # noqa: F401, F403
+import warnings
+from importlib import import_module
 
-__all__ = list(qwen_image_flow_grpo.__all__)
-__all__ += list(qwen_image_diffusion_nft.__all__)
-__all__ += list(qwen_image_mix_grpo.__all__)
-__all__ += list(bagel_flow_grpo.__all__)
-__all__ += list(sd3_dpo.__all__)
-__all__ += list(sd3_flow_grpo.__all__)
-__all__ += list(wan22_dance_grpo.__all__)
-__all__ += list(qwen_image_dpo.__all__)
+__all__ = []
+
+
+def _import_pipeline(module_name: str) -> None:
+    try:
+        module = import_module(f"{__name__}.{module_name}")
+    except ModuleNotFoundError as exc:
+        if exc.name != "vllm":
+            raise
+        warnings.warn(
+            f"Skipping {module_name} pipeline registration because optional dependency 'vllm' is not installed.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return
+
+    globals()[module_name] = module
+    for exported in getattr(module, "__all__", []):
+        globals()[exported] = getattr(module, exported)
+        __all__.append(exported)
+
+
+for _module_name in (
+    "bagel_flow_grpo",
+    "qwen_image_diffusion_nft",
+    "qwen_image_dpo",
+    "qwen_image_flow_grpo",
+    "qwen_image_mix_grpo",
+    "qwen3_omni",
+    "sd3_dpo",
+    "sd3_flow_grpo",
+    "wan22_dance_grpo",
+):
+    _import_pipeline(_module_name)

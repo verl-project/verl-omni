@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import diffusion, omni
-from .diffusion import *  # noqa: F401,F403
-from .omni import *  # noqa: F401,F403
+from . import model, rollout
+from .model import *  # noqa: F401,F403
+from .rollout import *  # noqa: F401,F403
 
-__all__ = list(diffusion.__all__) + list(omni.__all__)
+__all__ = model.__all__ + rollout.__all__
