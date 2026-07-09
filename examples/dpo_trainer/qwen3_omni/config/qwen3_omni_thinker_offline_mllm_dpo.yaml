@@ -9,8 +9,6 @@ defaults:
 
   - override /model@actor_rollout_ref.model: omni_model
 
-  - override /rollout@actor_rollout_ref.rollout: omni_rollout
-
   - _self_
 
 data:
@@ -68,20 +66,8 @@ actor_rollout_ref:
         min_num_params: 100000000
 
   rollout:
-    name: vllm_omni
-    mode: async
-    n: 0
-    tensor_model_parallel_size: 4
-    calculate_log_probs: false
-    load_format: safetensors
-    layered_summon: true
+    # Offline DPO does not start rollout/vLLM; this is only used for actor log-prob inference.
     log_prob_micro_batch_size_per_gpu: 1
-    pipeline_mode: thinker_only
-    stage_configs_path: examples/gspo_trainer/qwen3_omni/qwen3_omni_thinker_only.yaml
-    engine_kwargs:
-      vllm_omni:
-        output_mode: ar
-        stage_configs_path: ${actor_rollout_ref.rollout.stage_configs_path}
 
   ref:
     log_prob_micro_batch_size_per_gpu: 1
