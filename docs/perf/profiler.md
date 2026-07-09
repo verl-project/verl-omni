@@ -69,16 +69,12 @@ actor_rollout_ref:
 
 The same block exists under `actor_rollout_ref.ref.profiler` and
 `actor_rollout_ref.rollout.profiler`. Generation runs in separate vLLM-Omni
-server processes (not in the actor worker), so the actor profiler never sees
-rollout kernels. `actor_rollout_ref.rollout.profiler` controls profiling of
-those server processes instead: the trainer starts/stops it around the
-generation phase of each profiled step. The server-side profiler only engages
-with `tool=torch` and `tool_config.torch.discrete=True`, and writes traces to
-`{save_path}/agent_loop_rollout_replica_{rank}` (see recipe 5 below).
+server processes, not in the actor worker, so it has its own profiler driven
+by `actor_rollout_ref.rollout.profiler` (see recipe 5).
 
-All the profiler keys below already exist in the composed config, so use plain
-`key=value` overrides. A `+key=value` append fails with "An item is already at
-..." for any key whose default is non-null.
+All the profiler keys below already exist in the composed config, so use
+plain `key=value` overrides — a `+key=value` append fails with "An item is
+already at ...".
 
 ## Quick recipes
 
@@ -200,6 +196,21 @@ ROLLOUT_N=4 NUM_INFERENCE_STEPS=6 PROFILE_STEP=2 \
   bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_profile.sh
 ```
 
+Two of the base recipe's hardcoded values assume the full footprint, so the
+wrapper re-derives them for the smaller one:
+
+- The SDE window (`sde_window_size=3`, `sde_window_range=[0,5]`) assumes 10
+  denoising steps; a window reaching past the last step produces ragged
+  per-sample tensors and fails rollout post-processing. The wrapper pins
+  `sde_window_range=[0,NUM_INFERENCE_STEPS]` (override with
+  `SDE_WINDOW_RANGE`), and `NUM_INFERENCE_STEPS` must stay >= the window
+  size (3).
+- The diffusion engine chunks batches statically, so the per-GPU sample
+  count (`TRAIN_BATCH_SIZE * ROLLOUT_N / num actor GPUs`) must be divisible
+  by the micro batch size. The recipe's micro batch size of 8 assumes 32
+  samples per GPU; the wrapper lowers it to 2 (override with
+  `MICRO_BATCH_SIZE`).
+
 Traces land under `./outputs/profile_sd35` (override with `SAVE_PATH`); view
 them in [Perfetto UI](https://ui.perfetto.dev/). The `TRAIN_BATCH_SIZE`,
 `ROLLOUT_N`, `NUM_INFERENCE_STEPS`, `IMAGE_RESOLUTION` and
@@ -217,11 +228,10 @@ config).
 * `global_profiler.profile_continuous_steps=True` keeps a single profiling
   database open across consecutive steps in `global_profiler.steps`, which is
   helpful for analysing inter-step behaviour.
-* Generation is served by vLLM-Omni server processes launched through the
-  agent loop, so the actor profiler does not capture it. The trainer calls
+* For the rollout servers, the trainer calls
   `llm_server_manager.start_profile()`/`stop_profile()` around the generation
-  phase of profiled steps, and the servers record through vLLM's built-in
-  torch profiler, gated by `actor_rollout_ref.rollout.profiler`.
+  phase of profiled steps; the servers record through vLLM's built-in torch
+  profiler (recipe 5).
 
 ## Further reading
 
