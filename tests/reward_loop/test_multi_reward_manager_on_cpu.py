@@ -135,6 +135,7 @@ class TestMultiVisualRewardManagerRunSingle:
         assert result["reward_extra_info"]["reward/fixed"] == pytest.approx(0.5)
         assert result["reward_extra_info"]["reward/dict_result"] == pytest.approx(1.0)
         assert result["reward_extra_info"]["reward/dict_result/detail"] == "perfect"
+        assert "reward/dict_result/score" not in result["reward_extra_info"]
         assert result["reward_extra_info"]["reward/combined"] == pytest.approx(2.0)
 
     def test_exception_contributes_zero(self):
