@@ -403,7 +403,7 @@ class OmniModelBase(ABC):
         """Configure the model after loading and before FSDP wrapping.
 
         Default implementation strips the submodules returned by
-        :meth:`get_strip_modules`.  Override to also:
+        ``get_strip_modules``.  Override to also:
 
         - Register the model class with ``AutoModelForCausalLM``.
         - Redirect ``forward()`` and embedding accessors to the
@@ -458,7 +458,7 @@ class OmniRolloutPipelineBase:
         """Return the registered rollout adapter for ``model_type``, or ``None``.
 
         Returns ``None`` when the model type is not registered — unlike
-        :meth:`OmniModelBase.get_class`, which raises on miss.
+        ``OmniModelBase.get_class``, which raises on miss.
         Rollout adapters are optional: a model may use default pipeline
         topology or external runner configuration.
         """
@@ -477,8 +477,7 @@ class OmniRolloutPipelineBase:
             pipeline_mode: Model-specific mode selector.
 
         Returns:
-            list[:class:`~vllm_omni.config.stage_config.StagePipelineConfig`]:
-            One frozen topology object per pipeline stage.
+            list: One frozen topology object per pipeline stage.
         """
         pass
 

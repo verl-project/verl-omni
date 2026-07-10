@@ -14,8 +14,8 @@
 """Qwen3-Omni rollout pipeline adapter.
 
 Provides the per-stage pipeline topology for Qwen3-Omni by delegating to
-vLLM-Omni's frozen :class:`~vllm_omni.config.stage_config.PipelineConfig`
-definitions — no duplication of what vLLM-Omni already owns.
+vLLM-Omni's frozen pipeline definitions — no duplication of what vLLM-Omni
+already owns.
 """
 
 from vllm_omni.model_executor.models.qwen3_omni.pipeline import (
@@ -44,7 +44,7 @@ class Qwen3OmniRolloutAdapter(OmniRolloutPipelineBase):
 
     @classmethod
     def build_stage_configs(cls, pipeline_mode="thinker_only"):
-        """Return per-stage :class:`~vllm_omni.config.stage_config.StagePipelineConfig` objects.
+        """Return per-stage pipeline topology objects for Qwen3-Omni.
 
         Args:
             pipeline_mode (str): Pipeline mode selector. One of
@@ -62,7 +62,7 @@ class Qwen3OmniRolloutAdapter(OmniRolloutPipelineBase):
         ================= ============================================
 
         Stages are returned **as-is** from vLLM-Omni.  Call
-        :meth:`rollout_flags` to get model-specific rollout flags per
+        ``rollout_flags`` to get model-specific rollout flags per
         stage.
         """
         if pipeline_mode == "thinker_only":
