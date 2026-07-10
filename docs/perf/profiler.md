@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 07/09/2026.
+Last updated: 07/10/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -179,45 +179,69 @@ same step.
 ## Lightweight profiling recipe
 
 Profiling a full FlowGRPO step produces a large trace that is slow to open.
-`run_sd35_medium_ocr_lora_profile.sh` wraps the SD3.5 recipe with fewer
-rollouts, fewer denoising steps, a smaller train batch and a smaller image,
-profiles a single step (actor train phase + rollout servers, recipes 1 and 5
-combined), and disables wandb, so the traces are quick to capture and small
-to inspect:
+Every recipe script under `examples/` passes `"$@"` through to the same
+`diffusion_trainer` config, and Hydra resolves duplicate overrides
+last-wins — so appending overrides to any recipe shrinks its footprint
+without editing the script. The following profiles a single lightweight step
+of the SD3.5 OCR recipe (2 rollouts instead of 8, 4 denoising steps instead
+of 10, 256px instead of 384px, train batch 4 instead of 8), capturing the
+actor train phase and the rollout servers (recipes 1 and 5 combined):
 
 ```bash
-bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_profile.sh
+bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh \
+    data.train_batch_size=4 \
+    actor_rollout_ref.rollout.n=2 \
+    actor_rollout_ref.rollout.pipeline.num_inference_steps=4 \
+    actor_rollout_ref.rollout.pipeline.height=256 \
+    actor_rollout_ref.rollout.pipeline.width=256 \
+    actor_rollout_ref.rollout.algo.sde_window_range=[0,4] \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
+    trainer.total_training_steps=1 \
+    trainer.save_freq=-1 \
+    trainer.test_freq=-1 \
+    trainer.resume_mode=disable \
+    trainer.logger='["console"]' \
+    global_profiler.tool=torch \
+    global_profiler.steps=[1] \
+    global_profiler.save_path=./outputs/profile_sd35 \
+    actor_rollout_ref.actor.profiler.enable=True \
+    actor_rollout_ref.actor.profiler.ranks=[0] \
+    actor_rollout_ref.actor.profiler.tool=torch \
+    actor_rollout_ref.actor.profiler.tool_config.torch.contents=[cpu,cuda] \
+    actor_rollout_ref.actor.profiler.tool_config.torch.discrete=False \
+    actor_rollout_ref.rollout.profiler.enable=True \
+    actor_rollout_ref.rollout.profiler.ranks=[0] \
+    actor_rollout_ref.rollout.profiler.tool=torch \
+    actor_rollout_ref.rollout.profiler.tool_config.torch.contents=[cpu,cuda] \
+    actor_rollout_ref.rollout.profiler.tool_config.torch.discrete=True
 ```
 
-Every knob is an environment variable, e.g. for a slightly larger trace:
+Measured on 3×RTX 4090 against the recipe defaults: traces 163 MB → 32 MB,
+profiled step 616 s → 70 s.
 
-```bash
-ROLLOUT_N=4 NUM_INFERENCE_STEPS=6 PROFILE_STEP=2 \
-  bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_profile.sh
-```
+The `trainer.*` lines are not optional: the run's last step force-triggers
+checkpoint saving and validation when `save_freq`/`test_freq` > 0, and a
+leftover checkpoint auto-resumes past the profiled step, silently skipping
+profiling.
 
-Two of the base recipe's hardcoded values assume the full footprint, so the
-wrapper re-derives them for the smaller one:
+### Adapting to other recipes
 
-- The SDE window (`sde_window_size=3`, `sde_window_range=[0,5]`) assumes 10
-  denoising steps; a window reaching past the last step produces ragged
-  per-sample tensors and fails rollout post-processing. The wrapper pins
-  `sde_window_range=[0,NUM_INFERENCE_STEPS]` (override with
-  `SDE_WINDOW_RANGE`), and `NUM_INFERENCE_STEPS` must stay >= the window
-  size (3).
-- The diffusion engine chunks batches statically, so the per-GPU sample
-  count (`TRAIN_BATCH_SIZE * ROLLOUT_N / num actor GPUs`) must be divisible
-  by the micro batch size. The recipe's micro batch size of 8 assumes 32
-  samples per GPU; the wrapper lowers it to 2 (override with
-  `MICRO_BATCH_SIZE`).
+The `trainer.*`, `global_profiler.*` and `*.profiler.*` overrides above work
+unchanged for any recipe. Re-derive the footprint overrides from the
+recipe's own values, minding two couplings:
 
-Traces land under `./outputs/profile_sd35` (override with `SAVE_PATH`); view
-them in [Perfetto UI](https://ui.perfetto.dev/). The `TRAIN_BATCH_SIZE`,
-`ROLLOUT_N`, `NUM_INFERENCE_STEPS`, `IMAGE_RESOLUTION` and
-`TOTAL_TRAINING_STEPS` knobs are also honoured directly by
-`run_sd35_medium_ocr_lora.sh`, and the same override pattern works for any
-other recipe under `examples/` (they all share the `diffusion_trainer`
-config).
+- **Denoising steps vs. SDE window**: a window reaching past the last
+  denoising step produces ragged per-sample tensors and fails rollout
+  post-processing. Pin `sde_window_range=[0,<num_inference_steps>]` and keep
+  `num_inference_steps >= sde_window_size` (the SD3.5 recipe's window —
+  size 3, range `[0,5]` — assumes 10 steps).
+- **Batch vs. micro batch**: the diffusion engine chunks batches statically,
+  so the per-GPU sample count (`train_batch_size * rollout.n / num actor
+  GPUs`) must stay divisible by each micro batch size. The SD3.5 recipe's
+  micro batch of 8 assumes 32 samples per GPU; the lightweight footprint
+  leaves 4, hence 2.
 
 ## Implementation notes
 
