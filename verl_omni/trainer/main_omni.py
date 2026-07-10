@@ -74,6 +74,11 @@ class OmniTaskRunner(DiffusionTaskRunner):
             )
 
         # Instantiate the tokenizer and processor.
+        from verl.utils.import_utils import import_external_libs
+
+        import_external_libs(config.actor_rollout_ref.model.get("external_lib", None))
+
+        # Instantiate the tokenizer and processor.
         from verl.utils import hf_processor, hf_tokenizer
 
         trust_remote_code = config.data.get("trust_remote_code", False)

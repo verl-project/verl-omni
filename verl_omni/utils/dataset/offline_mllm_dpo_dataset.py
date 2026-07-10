@@ -14,6 +14,8 @@
 
 """Offline MLLM DPO dataset for Omni-Preference style parquet rows."""
 
+from __future__ import annotations
+
 import json
 import os
 import uuid
@@ -110,7 +112,7 @@ def _build_preference_branch(sample: dict[str, Any], answer: str) -> dict[str, A
         if len(conversation) > 1:
             conversations.append(conversation)
 
-    conversations.append(["assistant", ("text", answer)])
+    conversations.append(["assistant", ("text", str(_as_python(answer)))])
     branch = {
         "conversations": conversations,
         "source_name": sample.get("source_name") or sample.get("data_source"),
@@ -160,6 +162,32 @@ def _register_pass_through_preprocessors(source_names: Sequence[str]) -> None:
             PREPROCESSOR_REGISTRY.register(source_name)(_pass_through)
 
 
+def _prepare_qwen3_omni_processor(processor):
+    class ProcessorProxy:
+        def __getattr__(self, name):
+            return getattr(processor, name)
+
+        def __call__(self, *args, **kwargs):
+            if kwargs.get("audios"):
+                kwargs["audio"] = kwargs.pop("audios")
+            else:
+                kwargs.pop("audios", None)
+            kwargs = {key: value for key, value in kwargs.items() if value != []}
+            return processor(*args, **kwargs)
+
+    def get_rope_index(*args, **kwargs):
+        result = processor.get_rope_index(*args, **kwargs)
+        if isinstance(result, dict):
+            return result
+        position_ids, mrope_position_deltas = result
+        return {"position_ids": position_ids, "mrope_position_deltas": mrope_position_deltas}
+
+    proxy = ProcessorProxy()
+    if hasattr(processor, "get_rope_index"):
+        proxy.get_rope_index = get_rope_index
+    return proxy
+
+
 def _transform_sample(sample: dict[str, Any], base_transform, transform_kwargs: dict[str, Any]) -> dict[str, Any]:
     chosen_sample = _build_preference_branch(sample, sample["chosen"])
     rejected_sample = _build_preference_branch(sample, sample["rejected"])
@@ -196,7 +224,7 @@ class OfflineMLLMDPODataset(Dataset):
         if max_samples is not None and max_samples > 0:
             self.dataframe = self.dataframe.iloc[:max_samples]
         self.config = config
-        self.processor = processor
+        self.processor = _prepare_qwen3_omni_processor(processor)
         self.prompt_key = config.get("prompt_key", "prompt")
         self.chosen_key = config.get("chosen_key", "chosen")
         self.rejected_key = config.get("rejected_key", "rejected")
