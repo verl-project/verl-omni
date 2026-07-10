@@ -325,12 +325,47 @@ def patch_hf_tokenizer_for_qwen3_omni() -> None:
             mod.hf_tokenizer = _patched_hf_tokenizer
 
 
+def patch_register_vllm_moe_model_weight_loader() -> None:
+    """Register Qwen3-Omni Thinker with verl's ``SUPPORTED_MOE_MODELS`` whitelist.
+
+    verl's ``patch_vllm_moe_model_weight_loader`` re-attaches ``weight_loader``
+    on FusedMoE ``w13_weight``/``w2_weight`` before IPC weight sync (the attr
+    that vllm-ascend's ``process_weights_after_loading`` drops when rebuilding
+    the params). But it early-returns unless the model class is in
+    ``SUPPORTED_MOE_MODELS``. Qwen3-Omni Thinker isn't there by default, so we
+    append it.
+    """
+    try:
+        from verl.utils.vllm import patch as _vp
+    except ImportError:
+        return
+
+    added = []
+    for mod_path, cls_name in [
+        (
+            "vllm_omni.model_executor.models.qwen3_omni.qwen3_omni_moe_thinker",
+            "Qwen3OmniMoeThinkerForConditionalGeneration",
+        ),
+    ]:
+        try:
+            import importlib
+
+            mod = importlib.import_module(mod_path)
+            cls = getattr(mod, cls_name, None)
+            if cls is not None and cls not in _vp.SUPPORTED_MOE_MODELS:
+                _vp.SUPPORTED_MOE_MODELS.append(cls)
+                added.append(f"{mod_path}.{cls_name}")
+        except ImportError:
+            continue
+
+
 def apply_qwen3_omni_thinker_patches() -> None:
     """Apply all Qwen3-Omni Thinker patches (idempotent registrations)."""
     _register_qwen3_omni_automodel()
     patch_hf_processor_for_qwen3_omni()
     _patch_unfuse_qwen3_omni_thinker_experts()
     patch_hf_tokenizer_for_qwen3_omni()
+    patch_register_vllm_moe_model_weight_loader()
 
 
 # Apply on import so this module works as a verl ``external_lib`` target.
