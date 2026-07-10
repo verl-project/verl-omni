@@ -33,7 +33,7 @@ from verl.single_controller.base.decorator import Dispatch, make_nd_compute_data
 from verl.trainer.distillation import distillation_ppo_loss, is_distillation_enabled
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_device_name, is_npu_available, set_expandable_segments
+from verl.utils.device import get_device_name, get_torch_device, is_npu_available, set_expandable_segments
 from verl.utils.distributed import initialize_global_process_group_ray, set_numa_affinity
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.import_utils import import_external_libs
@@ -775,6 +775,21 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         assert "actor" in self.role, "ema_update_adapter only supports actor role"
         self.actor.ema_update_adapter(source=source, target=target, decay=decay)
 
+    def _set_worker_thread_device(self):
+        """Pin the current accelerator device to this rank inside a worker thread.
+
+        ``asyncio.to_thread`` runs on the default executor, whose thread does not
+        inherit the per-process default device set during worker init
+        (``get_torch_device().set_device(local_rank)``). On hosts where the
+        process can see multiple devices (e.g. NPU with
+        ``RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1``), tensors
+        materialized by FSDP collectives in the worker thread land on device 0
+        instead of the rank's compute device, triggering
+        ``Expects tensor to be on the compute device npu:N, was on npu:0``.
+        Re-set the device as the first action in every worker-thread entry point.
+        """
+        get_torch_device().set_device(int(self._local_rank))
+
     def _offload_actor_and_empty_cache(self, timings: Optional[dict] = None):
         """Offload actor params to CPU and free cached GPU memory.
 
@@ -783,6 +798,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         tensors live in separate allocations that are unaffected by moving the
         base param storage to CPU.
         """
+        self._set_worker_thread_device()
         start = time.perf_counter()
         if self.actor.engine.is_param_offload_enabled:
             self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
@@ -799,6 +815,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         CPU (independent allocations), so the subsequent actor offload can run
         concurrently with the rollout-side sync without affecting these tensors.
         """
+        # Must precede any FSDP collective: see _set_worker_thread_device.
+        self._set_worker_thread_device()
         gather_start = time.perf_counter()
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
             layered_summon=self.layered_summon,

@@ -324,12 +324,63 @@ def patch_hf_tokenizer_for_qwen3_omni() -> None:
             mod.hf_tokenizer = _patched_hf_tokenizer
 
 
+
+
+def _qwen3_omni_compute_position_ids(
+    self,
+    input_ids,
+    attention_mask,
+    multi_modal_inputs,
+    mm_processor_kwargs=None,
+):
+    """Qwen3-Omni uses **3-component** interleaved mRoPE.
+
+    The model's ``MRotaryEmbedding`` expects ``position_ids`` of shape
+    ``(3, batch, seq)`` (``mrope_section=[24,20,20]``), and vllm-omni's rollout
+    computes 3-component positions. verl's default ``_compute_position_ids``
+    prepends a 1D text-position dim to the 3 mRoPE components, producing
+    ``(batch, 4, seq)`` — wrong for Qwen3-Omni, which mis-applies RoPE.
+
+    Fix: return the ``get_rope_index`` 3-component output directly as
+    ``(batch, 3, seq)`` (verl's batch layout), matching the model and vllm-omni.
+    """
+    from verl.utils.model import compute_position_id_with_mask
+
+    if self.processor is None:
+        return compute_position_id_with_mask(attention_mask)
+
+    multi_modal_inputs.pop("mm_token_type_ids", None)
+    multi_modal_kwargs = {
+        "image_grid_thw": multi_modal_inputs.get("image_grid_thw"),
+        "video_grid_thw": multi_modal_inputs.get("video_grid_thw"),
+    }
+    vision_position_ids, _ = self.processor.get_rope_index(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        **multi_modal_kwargs,
+    )
+    return vision_position_ids.transpose(0, 1)  # (3, batch, seq) => (batch, 3, seq)
+
+
+def _patch_agent_loop_position_ids_for_qwen3_omni() -> None:
+    """Override ``AgentLoopWorker._compute_position_ids`` for Qwen3-Omni's 3-component mRoPE."""
+    try:
+        from verl.experimental.agent_loop.agent_loop import AgentLoopWorker
+    except Exception as e:  # noqa: BLE001 — import may fail during early verl init
+        logger.warning("Could not patch AgentLoopWorker._compute_position_ids: %s", e)
+        return
+    if getattr(AgentLoopWorker, "_qwen3_omni_pos_ids_patched", False):
+        return
+    AgentLoopWorker._qwen3_omni_pos_ids_patched = True
+    AgentLoopWorker._compute_position_ids = _qwen3_omni_compute_position_ids
+
 def apply_qwen3_omni_thinker_patches() -> None:
     """Apply all Qwen3-Omni Thinker patches (idempotent registrations)."""
     _register_qwen3_omni_automodel()
     patch_hf_processor_for_qwen3_omni()
     _patch_unfuse_qwen3_omni_thinker_experts()
     patch_hf_tokenizer_for_qwen3_omni()
+    _patch_agent_loop_position_ids_for_qwen3_omni()
 
 
 # Apply on import so this module works as a verl ``external_lib`` target.
