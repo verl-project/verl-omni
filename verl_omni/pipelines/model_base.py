@@ -290,7 +290,7 @@ class OmniModelBase(ABC):
 
     The registry key is ``(architecture, stage)`` where *architecture*
     matches the HF config ``architectures[0]`` and *stage* is
-    ``"thinker"``, ``"talker"``, or ``"all"``.
+    ``thinker``, ``talker``, or ``all``.
     """
 
     _registry: dict[tuple[str, str], type["OmniModelBase"]] = {}
@@ -312,6 +312,13 @@ class OmniModelBase(ABC):
         Args:
             model_config: An ``OmniModelConfig`` instance (or any config object
                 with ``architecture`` and ``model_stage`` attributes).
+
+        Returns:
+            type[OmniModelBase]: The registered adapter class.
+
+        Raises:
+            NotImplementedError: If no adapter is registered for the given
+                ``(architecture, stage)`` key.
         """
         key = (model_config.architecture, model_config.model_stage)
         if key not in cls._registry and getattr(model_config, "external_lib", None) is not None:
@@ -365,6 +372,9 @@ class OmniModelBase(ABC):
         Args:
             model_path: Local path to the model checkpoint.
             model_config: The ``OmniModelConfig``.
+
+        Returns:
+            The configured processor (model-specific type).
         """
         pass
 
@@ -382,6 +392,9 @@ class OmniModelBase(ABC):
         Args:
             model_path: Local path to the model checkpoint.
             model_config: The ``OmniModelConfig``.
+
+        Returns:
+            The configured tokenizer (model-specific type).
         """
         pass
 
@@ -425,7 +438,7 @@ class OmniRolloutPipelineBase:
             ...
 
     Registration uses a ``model_type`` key matching vLLM-Omni's pipeline
-    registry names (e.g. ``"qwen3_omni_moe"``).
+    registry names (e.g. ``qwen3_omni_moe``).
     """
 
     _registry: dict[str, type["OmniRolloutPipelineBase"]] = {}
@@ -457,8 +470,8 @@ class OmniRolloutPipelineBase:
         """Return per-stage pipeline topology for vLLM-Omni.
 
         Each adapter defines its own *pipeline_mode* vocabulary
-        (e.g. ``"thinker_only"`` / ``"full"`` for omni models,
-        ``"ar_only"`` / ``"dit_only"`` for diffusion hybrids).
+        (e.g. ``thinker_only`` / ``full`` for omni models,
+        ``ar_only`` / ``dit_only`` for diffusion hybrids).
 
         Args:
             pipeline_mode: Model-specific mode selector.

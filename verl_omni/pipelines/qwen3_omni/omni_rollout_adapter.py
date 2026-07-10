@@ -37,23 +37,28 @@ class Qwen3OmniRolloutAdapter(OmniRolloutPipelineBase):
     Three pipeline modes map to subsets of the full 3-stage pipeline
     (thinker → talker → code2wav):
 
-    * ``"thinker_only"`` — stage 0 (text output).
-    * ``"thinker_talker"`` — stages 0-1 (codec output).
-    * ``"full"`` — stages 0-2 (audio waveform output).
+    - ``thinker_only`` — stage 0 (text output).
+    - ``thinker_talker`` — stages 0-1 (codec output).
+    - ``full`` — stages 0-2 (audio waveform output).
     """
 
     @classmethod
     def build_stage_configs(cls, pipeline_mode="thinker_only"):
         """Return per-stage :class:`~vllm_omni.config.stage_config.StagePipelineConfig` objects.
 
-        ``pipeline_mode`` selects which stages to include:
+        Args:
+            pipeline_mode (str): Pipeline mode selector. One of
+                ``thinker_only``, ``thinker_talker``, ``full``.
+
+        Returns:
+            list: Per-stage pipeline topology objects from vLLM-Omni.
 
         ================= ============================================
         pipeline_mode     stages returned
         ================= ============================================
-        ``"thinker_only"`` stage 0 from the thinker-only variant
-        ``"thinker_talker"`` stages 0-1 from the full pipeline
-        ``"full"``         stages 0-2 from the full pipeline
+        ``thinker_only`` stage 0 from the thinker-only variant
+        ``thinker_talker`` stages 0-1 from the full pipeline
+        ``full``         stages 0-2 from the full pipeline
         ================= ============================================
 
         Stages are returned **as-is** from vLLM-Omni.  Call
@@ -80,25 +85,31 @@ class Qwen3OmniRolloutAdapter(OmniRolloutPipelineBase):
     def rollout_flags(cls, pipeline_mode="thinker_only"):
         """Return per-stage rollout flags for *pipeline_mode*.
 
-        Returns a ``dict[int, dict]`` mapping stage IDs to rollout
-        flags that the caller should apply:
+        Args:
+            pipeline_mode (str): Pipeline mode selector.  One of
+                ``thinker_only``, ``thinker_talker``, ``full``.
+
+        Returns:
+            dict[int, dict]: Per-stage flags mapping stage IDs to
+            ``{return_hidden_states, final_output, final_output_type}``.
+            Empty dict for ``thinker_only``.
 
         ================= ==================================================
         pipeline_mode     flags
         ================= ==================================================
-        ``"thinker_only"`` ``{}`` — no flags needed.
-        ``"thinker_talker"`` stage 0: ``return_hidden_states``, non-terminal.
-                            stage 1: terminal ``"codec"`` output.
-        ``"full"``         stage 0: ``return_hidden_states``, non-terminal.
+        ``thinker_only`` ``{}`` — no flags needed.
+        ``thinker_talker`` stage 0: ``return_hidden_states``, non-terminal.
+                            stage 1: terminal ``codec`` output.
+        ``full``         stage 0: ``return_hidden_states``, non-terminal.
         ================= ==================================================
 
         Each per-stage dict contains:
 
-        * ``"return_hidden_states"`` (bool) — whether the stage should
+        - ``return_hidden_states`` (bool) — whether the stage should
           emit hidden states for downstream consumers.
-        * ``"final_output"`` (bool) — terminal output stage.
-        * ``"final_output_type"`` (str | None) — output modality
-          (``"text"``, ``"codec"``, ``"audio"``).
+        - ``final_output`` (bool) — terminal output stage.
+        - ``final_output_type`` (str | None) — output modality
+          (``text``, ``codec``, ``audio``).
         """
         if pipeline_mode == "thinker_only":
             return {}

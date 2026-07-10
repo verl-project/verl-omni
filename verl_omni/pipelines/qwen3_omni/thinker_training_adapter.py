@@ -43,7 +43,16 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
 
     @classmethod
     def configure_model(cls, module, model_config):
-        """Strip non-training stages and redirect forward to thinker."""
+        """Strip non-training stages and redirect forward to thinker.
+
+        Args:
+            module: The loaded Qwen3-Omni model before FSDP wrapping.
+            model_config: The ``OmniModelConfig``.
+
+        Returns:
+            The configured module with talker/codec stripped and
+            forward/embedding accessors redirected to thinker.
+        """
         module = super().configure_model(module, model_config)
         module.forward = module.thinker.forward
         module.get_input_embeddings = module.thinker.get_input_embeddings
@@ -59,6 +68,13 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         ``get_rope_index`` and ``get_llm_pos_ids_for_vision`` to the
         processor — the omni agent loop calls these on the processor,
         but they are model methods.
+
+        Args:
+            model_path: Local path to the model checkpoint.
+            model_config: The ``OmniModelConfig``.
+
+        Returns:
+            The configured processor with RoPE helpers bound.
         """
         import types
 
@@ -79,8 +95,16 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
 
     @classmethod
     def configure_tokenizer(cls, model_path: str, model_config) -> Any:
-        """Load the tokenizer. Qwen3-Omni stores its chat template in
-        ``chat_template.json`` instead of ``tokenizer_config.json``."""
+        """Load the tokenizer with chat template from ``chat_template.json``.
+
+        Args:
+            model_path: Local path to the model checkpoint.
+            model_config: The ``OmniModelConfig``.
+
+        Returns:
+            The configured tokenizer with ``chat_template`` loaded from
+            ``chat_template.json``.
+        """
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(model_path)
