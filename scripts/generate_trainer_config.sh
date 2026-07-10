@@ -6,6 +6,7 @@ set -euox pipefail
 CONFIG_SPECS=(
     "diffusion_trainer:_generated_diffusion_trainer.yaml:--config-name=diffusion_trainer.yaml"
     "diffusion_trainer:_generated_diffusion_veomni_trainer.yaml:--config-name=diffusion_trainer.yaml diffusion/model_engine=veomni_diffusion"
+    "omni_trainer:_generated_omni_trainer.yaml:--config-name=omni_trainer.yaml"
 )
 
 generate_config() {

@@ -14,7 +14,6 @@
 """Configuration dataclass for omni (thinker/talker) model training."""
 
 import json
-import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -27,8 +26,6 @@ from verl.utils.import_utils import import_external_libs
 from verl_omni.utils.fs import resolve_model_local_dir
 
 __all__ = ["OmniModelConfig"]
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -62,7 +59,7 @@ class OmniModelConfig(BaseConfig):
     override_config: dict = field(default_factory=dict)
     lora_rank: int = 0
     lora_alpha: int = 16
-    target_modules: str = "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
+    target_modules: Optional[Any] = "all-linear"  # "all-linear" or ["q_proj", "k_proj", ...]
     exclude_modules: Optional[str] = None
     enable_gradient_checkpointing: bool = True
     use_remove_padding: bool = True
@@ -95,10 +92,10 @@ class OmniModelConfig(BaseConfig):
     # Force ``tie_word_embeddings=False`` for FSDP compatibility.
     tie_word_embeddings_override: Optional[bool] = None
 
-    # Multimodal token budget.
-    max_image_tokens: int = 1024
-    max_audio_tokens: int = 1500
-    max_video_tokens: int = 2304
+    # Multimodal token budget
+    max_image_tokens: Optional[int] = None
+    max_audio_tokens: Optional[int] = None
+    max_video_tokens: Optional[int] = None
 
     def __post_init__(self):
         import_external_libs(self.external_lib)
@@ -118,3 +115,7 @@ class OmniModelConfig(BaseConfig):
             self.local_tokenizer_path = copy_to_local(self.tokenizer_path, use_shm=self.use_shm)
             # Tokenizer/processor are loaded by the omni trainer via
             # OmniModelBase.configure_tokenizer / configure_processor.
+
+    def get_processor(self):
+        """Return the processor, or fall back to the tokenizer."""
+        return self.processor if self.processor is not None else self.tokenizer

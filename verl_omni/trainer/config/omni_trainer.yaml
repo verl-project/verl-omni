@@ -10,6 +10,7 @@ hydra:
 
 defaults:
   - ppo_trainer
+  - omni/model@actor_rollout_ref.model: omni_model
   - _self_
 
 actor_rollout_ref:

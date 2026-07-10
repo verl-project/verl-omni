@@ -1,0 +1,66 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Target class for this configuration
+_target_: verl_omni.workers.config.omni.OmniModelConfig
+
+# path to the huggingface model
+path: ???
+
+# HuggingFace config architectures[0] (auto-detected from config.json if unset)
+architecture: ???
+
+# Which stage to train: "thinker" (default), "talker", or "all"
+model_stage: thinker
+
+# Sub-config key for the trainable component (e.g. "thinker_config", "talker_config")
+hf_config_name: null
+
+# FSDP layer class names (auto-populated by the training adapter if empty)
+no_split_modules: []
+
+# Force tie_word_embeddings=False for FSDP compatibility (null = model default)
+tie_word_embeddings_override: null
+
+# path to the huggingface tokenizer (defaults to <path>/tokenizer or <path>)
+tokenizer_path: null
+
+# whether to use shared memory for model loading
+use_shm: False
+
+# whether to trust remote code
+trust_remote_code: False
+
+# custom chat template for the model
+custom_chat_template: null
+
+# external library for model-specific patches
+external_lib: null
+
+# whether to enable gradient checkpointing
+enable_gradient_checkpointing: True
+
+# Set to positive value to enable LoRA (e.g., 32)
+lora_rank: 0
+
+# LoRA scaling factor
+lora_alpha: 16
+
+# Target modules for LoRA adaptation ("all-linear" or a list of module names)
+target_modules: all-linear
+
+# Exclude modules from LoRA adaptation
+exclude_modules: null
+
+# Multimodal token budget
+max_image_tokens: null
+
+max_audio_tokens: null
+
+max_video_tokens: null
+
+# whether to use remove padding
+use_remove_padding: True
