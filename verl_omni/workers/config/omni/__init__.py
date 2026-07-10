@@ -12,7 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .diffusion_impl import VeOmniDiffusionEngine
-from .omni_impl import VeOmniOmniEngine
+from .actor import (
+    OmniLossConfig,
+    VeOmniOmniActorConfig,
+    VeOmniOmniEngineConfig,
+    VeOmniOmniOptimizerConfig,
+)
+from .model import OmniModelConfig
 
-__all__ = ["VeOmniDiffusionEngine", "VeOmniOmniEngine"]
+__all__ = [
+    "OmniLossConfig",
+    "OmniModelConfig",
+    "VeOmniOmniActorConfig",
+    "VeOmniOmniEngineConfig",
+    "VeOmniOmniOptimizerConfig",
+]
