@@ -44,10 +44,7 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
     @classmethod
     def configure_model(cls, module, model_config):
         """Strip non-training stages and redirect forward to thinker."""
-        for submod_name in cls.get_strip_modules(model_config):
-            if hasattr(module, submod_name):
-                delattr(module, submod_name)
-
+        module = super().configure_model(module, model_config)
         module.forward = module.thinker.forward
         module.get_input_embeddings = module.thinker.get_input_embeddings
         module.set_input_embeddings = module.thinker.set_input_embeddings

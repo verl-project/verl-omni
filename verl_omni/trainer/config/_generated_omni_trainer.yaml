@@ -438,7 +438,6 @@ actor_rollout_ref:
     max_image_tokens: null
     max_audio_tokens: null
     max_video_tokens: null
-    model_type: language_model
   hybrid_engine: true
   nccl_timeout: 600
 data:

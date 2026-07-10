@@ -13,8 +13,3 @@ defaults:
   - omni/model@actor_rollout_ref.model: omni_model
   - _self_
 
-actor_rollout_ref:
-  model:
-    model_type: language_model
-    architecture: ???
-    model_stage: thinker

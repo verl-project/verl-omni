@@ -441,8 +441,14 @@ class OmniRolloutPipelineBase:
         return decorator
 
     @classmethod
-    def get_class(cls, model_type: str) -> type | None:
-        """Return the registered rollout adapter for ``model_type``, or ``None``."""
+    def get_class(cls, model_type: str) -> type["OmniRolloutPipelineBase"] | None:
+        """Return the registered rollout adapter for ``model_type``, or ``None``.
+
+        Returns ``None`` when the model type is not registered — unlike
+        :meth:`OmniModelBase.get_class`, which raises on miss.
+        Rollout adapters are optional: a model may use default pipeline
+        topology or external runner configuration.
+        """
         return cls._registry.get(model_type)
 
     @classmethod
@@ -464,13 +470,13 @@ class OmniRolloutPipelineBase:
         pass
 
     @classmethod
-    def rollout_flags(cls, pipeline_mode="thinker_only"):
+    def rollout_flags(cls, pipeline_mode="thinker_only") -> dict[int, dict]:
         """Return per-stage rollout flags for *pipeline_mode*.
 
         Returns a ``dict[int, dict]`` mapping stage IDs to flags the
         rollout engine should apply (e.g. ``return_hidden_states``,
-        ``final_output``).  Default returns ``{}`` — models that don't
-        need rollout-specific flags get this for free.
+        ``final_output``).  Default returns an empty dict — models that
+        don't need rollout-specific flags get this for free.
 
         Subclasses override to add model-specific flags like
         ``return_hidden_states`` on intermediate AR stages in omni
