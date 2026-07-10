@@ -40,12 +40,6 @@ model_stage: thinker
 # Sub-config key for the trainable component (e.g. "thinker_config", "talker_config")
 hf_config_name: null
 
-# FSDP layer class names (auto-populated by the training adapter if empty)
-no_split_modules: []
-
-# Force tie_word_embeddings=False for FSDP compatibility (null = model default)
-tie_word_embeddings_override: null
-
 # whether to enable gradient checkpointing
 enable_gradient_checkpointing: True
 

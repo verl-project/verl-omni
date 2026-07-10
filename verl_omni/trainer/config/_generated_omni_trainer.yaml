@@ -433,8 +433,6 @@ actor_rollout_ref:
     architecture: ???
     model_stage: thinker
     hf_config_name: null
-    no_split_modules: []
-    tie_word_embeddings_override: null
     max_image_tokens: null
     max_audio_tokens: null
     max_video_tokens: null

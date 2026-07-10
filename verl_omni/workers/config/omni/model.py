@@ -56,7 +56,6 @@ class OmniModelConfig(BaseConfig):
         "local_path",
         "local_tokenizer_path",
         "local_hf_config_path",
-        "no_split_modules",
         "hf_config",
         "generation_config",
         "architectures",
@@ -132,12 +131,6 @@ class OmniModelConfig(BaseConfig):
     # MTP (multi-token prediction / speculative decoding)
     mtp: MtpConfig = field(default_factory=MtpConfig)
 
-    # FSDP layer class names (auto-populated by the training adapter if empty)
-    no_split_modules: list[str] = field(default_factory=list)
-
-    # force tie_word_embeddings=False for FSDP compatibility (None = model default)
-    tie_word_embeddings_override: Optional[bool] = None
-
     # multimodal token budgets
     max_image_tokens: Optional[int] = None
     max_audio_tokens: Optional[int] = None
@@ -171,11 +164,6 @@ class OmniModelConfig(BaseConfig):
             trust_remote_code=self.trust_remote_code,
             attn_implementation=attn_implementation,
         )
-
-        # Apply the tie_word_embeddings override for FSDP compatibility before
-        # downstream code reads it from hf_config.
-        if self.tie_word_embeddings_override is not None:
-            self.hf_config.tie_word_embeddings = self.tie_word_embeddings_override
 
         self.share_embeddings_and_output_weights = getattr(self.hf_config, "tie_word_embeddings", False)
         self.architectures = getattr(self.hf_config, "architectures", None)
