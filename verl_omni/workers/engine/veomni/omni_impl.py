@@ -53,6 +53,8 @@ _NON_MODEL_KEYS = {
     "micro_batch_size_per_gpu",
     "mini_batch_size",
     "num_mini_batch",
+    "sample_level_rewards",
+    "sample_level_scores",
     "sp_size",
     "update_lr_scheduler",
     "use_dynamic_bsz",

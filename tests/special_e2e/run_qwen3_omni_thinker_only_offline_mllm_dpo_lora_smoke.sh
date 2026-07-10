@@ -42,6 +42,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.val_files="['${DATA_DIR}/image/test.parquet','${DATA_DIR}/video/test.parquet','${DATA_DIR}/audio/test.parquet']" \
     data.train_batch_size=3 \
     data.max_prompt_length=512 \
+    data.trust_remote_code=true \
+    data.filter_overlong_prompts=false \
     data.custom_cls.path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset \
     data.custom_cls.name=OfflineMLLMDPODataset \
     data.custom_cls.collate_fn=offline_mllm_dpo_collate_fn \
@@ -54,6 +56,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.trust_remote_code=true \
     actor_rollout_ref.model.external_lib=verl_omni.models.transformers.qwen3_omni_thinker \
     actor_rollout_ref.model.lora_rank=0 \
+    actor_rollout_ref.model.lora_alpha=64 \
+    actor_rollout_ref.model.target_modules=all-linear \
     actor_rollout_ref.actor.omni_loss.loss_mode=dpo \
     actor_rollout_ref.actor.omni_loss.beta=0.1 \
     actor_rollout_ref.actor.omni_loss.label_smoothing=0.0 \
@@ -65,10 +69,12 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.ppo_mini_batch_size=1 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.veomni_config.model_dtype=bfloat16 \
+    actor_rollout_ref.actor.veomni_config.init_device=cuda \
     actor_rollout_ref.actor.veomni_config.param_offload=false \
     actor_rollout_ref.actor.veomni_config.optimizer_offload=false \
     actor_rollout_ref.actor.use_kl_loss=false \
     actor_rollout_ref.rollout.name=vllm_omni \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     trainer.resume_mode=disable \
     trainer.logger='["console"]' \
     trainer.project_name=verl-test \

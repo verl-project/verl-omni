@@ -26,6 +26,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.val_files="${VAL_FILES}" \
     data.train_batch_size=4 \
     data.max_prompt_length=512 \
+    data.trust_remote_code=true \
+    data.filter_overlong_prompts=false \
     data.custom_cls.path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset \
     data.custom_cls.name=OfflineMLLMDPODataset \
     data.custom_cls.collate_fn=offline_mllm_dpo_collate_fn \
@@ -52,10 +54,12 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU}" \
     actor_rollout_ref.actor.veomni_config.model_dtype=bfloat16 \
+    actor_rollout_ref.actor.veomni_config.init_device=cuda \
     actor_rollout_ref.actor.veomni_config.param_offload=false \
     actor_rollout_ref.actor.veomni_config.optimizer_offload=false \
     actor_rollout_ref.actor.use_kl_loss=false \
     actor_rollout_ref.rollout.name=vllm_omni \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     trainer.resume_mode=disable \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=qwen3_omni_offline_dpo \
