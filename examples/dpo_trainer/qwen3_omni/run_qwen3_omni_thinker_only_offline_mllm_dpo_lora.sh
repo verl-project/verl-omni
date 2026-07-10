@@ -17,8 +17,7 @@ DPO_BETA=${DPO_BETA:-0.1}
 
 export PYTHONPATH="${SCRIPT_DIR}/../../..${PYTHONPATH:+:${PYTHONPATH}}"
 
-python3 -m verl_omni.trainer.main_diffusion \
-    --config-name=omni_trainer \
+python3 -m verl_omni.trainer.main_omni \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=offline \
     algorithm.paired_preference=true \

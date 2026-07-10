@@ -17,9 +17,9 @@
 import logging
 
 from verl.protocol import DataProto
-from verl.trainer.ppo.metric_utils import rename_dict
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils import tensordict_utils as tu
+from verl.utils.py_functional import rename_dict
 
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     BaseRayDiffusionTrainer,

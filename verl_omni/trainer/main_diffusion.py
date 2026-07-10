@@ -27,7 +27,6 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
 )
-from verl_omni.trainer.omni.ray_omni_trainer import OmniDirectPreferenceRayTrainer
 from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
 
 
@@ -105,8 +104,6 @@ def _get_trainer_cls(config):
     if trainer_type == "policy_gradient":
         return PolicyGradientRayTrainer
     if trainer_type == "direct_preference":
-        if config.actor_rollout_ref.model.get("model_type", "language_model") == "omni_model":
-            return OmniDirectPreferenceRayTrainer
         return DirectPreferenceRayTrainer
     raise ValueError(
         f"Unsupported diffusion trainer_type {trainer_type!r}. Expected one of: 'policy_gradient', 'direct_preference'."
