@@ -1,6 +1,6 @@
 # Installation
 
-Last updated: 07/02/2026
+Last updated: 07/13/2026
 
 ## Requirements
 
@@ -21,14 +21,14 @@ git clone https://github.com/verl-project/verl-omni.git
 cd verl-omni
 ```
 
-1. Create a Python virtual environment:
+1. Create a Python virtual environment
 
 ```bash
 uv venv --python 3.12 --seed
 source .venv/bin/activate
 ```
 
-2. Install the platform backend.
+2. Install the platform backend
 
 For NVIDIA GPU:
 
@@ -36,23 +36,23 @@ For NVIDIA GPU:
 uv pip install -e ".[gpu]" --torch-backend=auto
 ```
 
-It will install `vllm` for the CUDA PyTorch stack and `kernels` for the actor FA3 backend.
+This installs `vllm` for the CUDA PyTorch stack and `kernels` for FA3 backend.
 
 For Ascend NPU:
 
 ```bash
-uv pip install vllm==0.22.0
-uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@bb4d0776eee8fc45c3484a45c971a7049f1a2bbf"
+uv pip install vllm==0.24.0
+uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@$(cat .github/vllm_ascend_pin.txt)"
 ```
 
-3. Install VeRL-Omni and the pinned vLLM-Omni commit:
+3. Install vLLM-Omni and VeRL-Omni
 
 ```bash
-uv pip install -e ".[train]"
 uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
+uv pip install -e ".[train]"
 ```
 
-It will install verl (git pin), verl-omni, and vLLM-Omni once from [`.github/vllm_omni_pin.txt`](../../.github/vllm_omni_pin.txt) (`fe478a95ab39e80085da06e3401c3ed471898a57` at time of writing). Prefer this over `.[vllm-omni]` so you do not install PyPI `0.24.0` and then overwrite it.
+This installs `vllm-omni`, then `verl` and `verl-omni`.
 
 ### Extras
 
