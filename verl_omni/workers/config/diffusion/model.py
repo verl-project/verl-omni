@@ -160,7 +160,11 @@ class DiffusionModelConfig(BaseConfig):
             if os.path.exists(processor_path):
                 from verl_omni.pipelines.model_base import DiffusionModelBase
 
-                DiffusionModelBase.get_class(self).prepare_processor_files(self.local_path)
+                DiffusionModelBase.get_class_by_name(
+                    self.architecture,
+                    self.algorithm,
+                    self.external_lib,
+                ).prepare_processor_files(self.local_path)
                 self.processor = hf_processor(processor_path, trust_remote_code=self.trust_remote_code)
             else:
                 self.processor = None

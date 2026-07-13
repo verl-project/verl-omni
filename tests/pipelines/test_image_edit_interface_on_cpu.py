@@ -16,6 +16,7 @@ import json
 from unittest.mock import patch
 
 import pytest
+from omegaconf import OmegaConf
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.utils import ImageGenerationRequest
@@ -177,3 +178,42 @@ class TestProcessorPreparationHook:
 
         assert cfg.processor == "processor"
         assert events == [("hook", str(model_dir)), ("processor", str(processor_dir))]
+
+    def test_driver_prepares_processor_before_loading_it(self, tmp_path):
+        from verl_omni.trainer.main_diffusion import _prepare_processor_files
+
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        (model_dir / "model_index.json").write_text(json.dumps({"_class_name": "_DriverHookPipeline"}))
+        events = []
+
+        @DiffusionModelBase.register("_DriverHookPipeline", algorithm="flow_grpo")
+        class _DriverHookModel(DiffusionModelBase):
+            @classmethod
+            def prepare_processor_files(cls, model_path: str) -> None:
+                events.append(("hook", model_path))
+
+            @classmethod
+            def build_scheduler(cls, model_config):
+                pass
+
+            @classmethod
+            def set_timesteps(cls, scheduler, model_config, device):
+                pass
+
+            @classmethod
+            def prepare_model_inputs(cls, module, model_config, *args, **kwargs):
+                pass
+
+            @classmethod
+            def forward_and_sample_previous_step(cls, *args, **kwargs):
+                pass
+
+        model_config = OmegaConf.create({"architecture": None, "algorithm": "flow_grpo", "external_lib": None})
+        _prepare_processor_files(str(model_dir), model_config)
+        events.append(("processor", str(model_dir / "processor")))
+
+        assert events == [
+            ("hook", str(model_dir)),
+            ("processor", str(model_dir / "processor")),
+        ]

@@ -93,6 +93,12 @@ class TestDiffusionI2IModelBase:
         with pytest.raises(ValueError, match="must be 3-D"):
             DiffusionI2IModelBase.inject_condition(model_inputs, None, condition)
 
+    def test_inject_condition_rejects_missing_latents(self):
+        model_inputs = {"hidden_states": torch.zeros(1, 2, 4)}
+
+        with pytest.raises(ValueError, match=r"requires condition\['image_latents'\]"):
+            DiffusionI2IModelBase.inject_condition(model_inputs, None, {"img_shapes": [[(1, 2, 2)]]})
+
     def test_inject_condition_validates_sequence_parallel_alignment(self):
         model_inputs = {"hidden_states": torch.zeros(1, 2, 4)}
 

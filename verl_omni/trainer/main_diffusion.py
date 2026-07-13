@@ -13,6 +13,7 @@
 # limitations under the License.
 """Entrypoint for diffusion model RL training."""
 
+import json
 import os
 import socket
 
@@ -28,6 +29,22 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     PolicyGradientRayTrainer,
 )
 from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
+
+
+def _prepare_processor_files(local_path: str, model_config) -> None:
+    """Run the registered model hook before the driver loads its processor."""
+    architecture = model_config.get("architecture")
+    if architecture is None:
+        with open(os.path.join(local_path, "model_index.json")) as model_index_file:
+            architecture = json.load(model_index_file)["_class_name"]
+
+    from verl_omni.pipelines.model_base import DiffusionModelBase
+
+    DiffusionModelBase.get_class_by_name(
+        architecture,
+        model_config.algorithm,
+        model_config.get("external_lib"),
+    ).prepare_processor_files(local_path)
 
 
 @hydra.main(config_path="./config", config_name="diffusion_trainer", version_base=None)
@@ -242,6 +259,7 @@ class TaskRunner:
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(config.actor_rollout_ref.model.tokenizer_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
+        _prepare_processor_files(local_path, config.actor_rollout_ref.model)
         processor_path = os.path.join(local_path, "processor")
         if not os.path.exists(processor_path):
             processor_path = local_path

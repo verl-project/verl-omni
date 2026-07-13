@@ -63,23 +63,32 @@ class DiffusionModelBase(ABC):
         """Return the registered subclass for ``(architecture, algorithm)``."""
         architecture = model_config.architecture
         algorithm = model_config.algorithm
-        key = (architecture, algorithm)
 
-        if key not in cls._registry and model_config.external_lib is not None:
+        if architecture == "QwenImagePipeline":
+            logger.info(
+                "Applying monkey-patch for QwenImageTransformer2DModel Ulysses SP "
+                "This workaround will be removed once we upgrade to a diffusers release that "
+                "includes the upstream fix."
+            )
+            from verl_omni.models.diffusers.qwen_image import apply_qwen_image_ulysses_mask_fix
+
+            apply_qwen_image_ulysses_mask_fix()
+        return cls.get_class_by_name(architecture, algorithm, model_config.external_lib)
+
+    @classmethod
+    def get_class_by_name(
+        cls,
+        architecture: str,
+        algorithm: str,
+        external_lib: Optional[str] = None,
+    ) -> type["DiffusionModelBase"]:
+        """Resolve an adapter before a full ``DiffusionModelConfig`` exists."""
+        key = (architecture, algorithm)
+        if key not in cls._registry and external_lib is not None:
             from verl.utils.import_utils import import_external_libs
 
-            import_external_libs(model_config.external_lib)
-
+            import_external_libs(external_lib)
         try:
-            if architecture == "QwenImagePipeline":
-                logger.info(
-                    "Applying monkey-patch for QwenImageTransformer2DModel Ulysses SP "
-                    "This workaround will be removed once we upgrade to a diffusers release that "
-                    "includes the upstream fix."
-                )
-                from verl_omni.models.diffusers.qwen_image import apply_qwen_image_ulysses_mask_fix
-
-                apply_qwen_image_ulysses_mask_fix()
             return cls._registry[key]
         except KeyError:
             registered = sorted(cls._registry.keys())
@@ -321,8 +330,10 @@ class DiffusionI2IModelBase(DiffusionModelBase):
 
         T2I default returns ``None``. I2I adapters override this to pull
         model-specific condition tensors from the micro-batch and return them
-        under the keys that :meth:`inject_condition` expects (e.g.
-        ``image_latents``, ``image_latent_ids``, ``img_shapes``).
+        under the keys that :meth:`inject_condition` expects. The default
+        concat-crop implementation requires ``image_latents``. Adapters that
+        need position metadata or non-concat conditioning must override
+        :meth:`inject_condition`.
 
         Note: the *micro-batch* keys carrying condition tensors must not
         collide with keys the MFU FLOPs counter interprets as the denoised
@@ -374,7 +385,7 @@ class DiffusionI2IModelBase(DiffusionModelBase):
 
         image_latents = condition.get("image_latents")
         if image_latents is None:
-            return model_inputs, negative_model_inputs
+            raise ValueError("inject_condition requires condition['image_latents']")
 
         # Guard: "image_latents" is reserved by the MFU FLOPs counter.
         if "image_latents" in model_inputs:
