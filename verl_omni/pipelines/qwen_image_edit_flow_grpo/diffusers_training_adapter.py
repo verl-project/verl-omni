@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -79,6 +80,7 @@ class QwenImageEditPlusFlowGRPO(DiffusionI2IModelBase, QwenImage):
         temporary_processor = temporary_root / "processor"
         try:
             shutil.copytree(processor_dir, temporary_processor)
+            temporary_processor.chmod(stat.S_IMODE(temporary_processor.stat().st_mode) | stat.S_IWUSR)
             with open(temporary_processor / "config.json", "w") as config_file:
                 json.dump({"model_type": "qwen2_vl"}, config_file)
             try:

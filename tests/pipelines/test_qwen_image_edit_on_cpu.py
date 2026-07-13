@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+import stat
 from pathlib import Path
 from unittest.mock import patch
 
@@ -71,6 +72,7 @@ def test_processor_hook_accepts_read_only_model_directory(tmp_path):
         with patch.dict("os.environ", {"VERL_OMNI_PROCESSOR_CACHE": str(cache_dir)}):
             prepared_dir = QwenImageEditPlusFlowGRPO.prepare_processor_files(str(tmp_path))
         assert (Path(prepared_dir) / "config.json").is_file()
+        assert stat.S_IMODE(Path(prepared_dir).stat().st_mode) & stat.S_IWUSR
     finally:
         processor_dir.chmod(0o755)
 
@@ -179,6 +181,24 @@ def test_inject_condition_validates_qwen_sequence_parallel_alignment():
 
     with pytest.raises(ValueError, match="sequence-parallel size"):
         QwenImageEditPlusFlowGRPO.inject_condition(model_inputs, None, condition)
+
+
+def test_non_tensor_sp_size_preserves_sequence_parallel_validation():
+    micro_batch = TensorDict(
+        {
+            "condition_image_latents": torch.zeros(1, 3, 4),
+            "sp_size": NonTensorData(2),
+        },
+        batch_size=[1],
+    )
+    condition = QwenImageEditPlusFlowGRPO.prepare_condition(
+        micro_batch,
+        latents=torch.zeros(1, 1, 4, 4),
+        step=0,
+    )
+
+    with pytest.raises(ValueError, match="sequence-parallel size"):
+        QwenImageEditPlusFlowGRPO.inject_condition({"hidden_states": torch.zeros(1, 2, 4)}, None, condition)
 
 
 def test_true_cfg_requires_negative_prompt_inputs():

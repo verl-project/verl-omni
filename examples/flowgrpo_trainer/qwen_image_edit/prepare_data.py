@@ -31,12 +31,13 @@ SYSTEM_PROMPT = (
 
 
 def _load_image(image_path: Path, image_size: int) -> bytes:
-    image = Image.open(image_path).convert("RGB")
-    image = ImageOps.contain(image, (image_size, image_size), method=Image.Resampling.LANCZOS)
-    canvas = Image.new("RGB", (image_size, image_size), color=(255, 255, 255))
-    canvas.paste(image, ((image_size - image.width) // 2, (image_size - image.height) // 2))
-    buffer = io.BytesIO()
-    canvas.save(buffer, format="PNG")
+    with Image.open(image_path) as source:
+        image = source.convert("RGB")
+        image = ImageOps.contain(image, (image_size, image_size), method=Image.Resampling.LANCZOS)
+        canvas = Image.new("RGB", (image_size, image_size), color=(255, 255, 255))
+        canvas.paste(image, ((image_size - image.width) // 2, (image_size - image.height) // 2))
+        buffer = io.BytesIO()
+        canvas.save(buffer, format="PNG")
     return buffer.getvalue()
 
 
@@ -44,7 +45,7 @@ def _convert_split(input_dir: Path, split: str, max_samples: int, image_size: in
     jsonl_path = input_dir / f"{split}.jsonl"
     image_dir = input_dir / "images"
     rows = []
-    with open(jsonl_path) as source:
+    with open(jsonl_path, encoding="utf-8") as source:
         for index, line in enumerate(source):
             if max_samples >= 0 and index >= max_samples:
                 break
