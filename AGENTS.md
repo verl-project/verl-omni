@@ -44,7 +44,8 @@ If work is duplicate/trivial busywork, **do not proceed**. Return a short explan
 ```bash
 # GPU (two steps — engine stack first, then rollout + train)
 uv pip install -e ".[gpu]" --torch-backend=auto
-uv pip install -e ".[vllm-omni,train,dev]"
+uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
+uv pip install -e ".[train,dev]"
 
 pre-commit install
 ```
