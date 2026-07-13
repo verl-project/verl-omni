@@ -243,7 +243,6 @@ class DiffusionModelBase(ABC):
         reverse-sampling algorithms (FlowGRPO et al.). Model adapters only need to
         override this when prediction requires extra handling such as CFG, negative
         inputs, or output conversion.
-
         """
         return module(**model_inputs)[0]
 
@@ -264,7 +263,7 @@ class DiffusionI2IModelBase(DiffusionModelBase):
     The default ``inject_condition`` implements a common concat-crop pattern:
     concatenate ``image_latents`` onto ``hidden_states``
     along the token dimension and set ``_target_seq_len`` so that
-    :meth:`DiffusionModelBase.forward` slices the prediction back to the
+    :meth:`DiffusionI2IModelBase.forward` slices the prediction back to the
     noise segment. Models with non-concat conditioning (Wan I2V, LTX2 I2AV)
     override ``inject_condition``.
     """
@@ -280,6 +279,16 @@ class DiffusionI2IModelBase(DiffusionModelBase):
         """Run concat-conditioned I2I prediction and keep the target-token prefix."""
         model_inputs = dict(model_inputs)
         target_seq_len = model_inputs.pop("_target_seq_len", None)
+        if negative_model_inputs is not None:
+            negative_model_inputs = dict(negative_model_inputs)
+            negative_target_seq_len = negative_model_inputs.pop("_target_seq_len", None)
+            if target_seq_len is None:
+                target_seq_len = negative_target_seq_len
+            elif negative_target_seq_len is not None and negative_target_seq_len != target_seq_len:
+                raise ValueError(
+                    "Positive and negative I2I inputs have different target sequence lengths: "
+                    f"{target_seq_len} and {negative_target_seq_len}."
+                )
         noise_pred = super().forward(module, model_config, model_inputs, negative_model_inputs)
         if target_seq_len is None:
             return noise_pred
@@ -337,20 +346,12 @@ class DiffusionI2IModelBase(DiffusionModelBase):
         Default implementation: concatenate ``image_latents`` onto
         ``hidden_states`` along the token dimension and set
         ``_target_seq_len`` so that
-        :meth:`DiffusionModelBase.forward` slices the prediction back.
+        :meth:`DiffusionI2IModelBase.forward` slices the prediction back.
 
         When ``condition`` is ``None`` or empty, this is a no-op (T2I
         degenerate path). Models with non-concat conditioning (Wan I2V,
         LTX2 I2AV) override this method.
 
-        Sequence-parallel note: Ulysses SP splits ``hidden_states`` along the
-        token dimension with ``chunk(sp_size)``, so the concatenated
-        ``noise + condition`` token count must be divisible by ``sp_size``.
-        When ``condition`` carries ``sp_size`` (> 1), this method asserts the
-        combined sequence length is aligned and raises otherwise, so the
-        condition latent resolution must be chosen upstream (rollout-side VAE
-        encode) rather than zero-padded here (padding would inject unmasked
-        condition tokens).
         """
         if not condition:
             return model_inputs, negative_model_inputs
@@ -383,20 +384,7 @@ class DiffusionI2IModelBase(DiffusionModelBase):
                 f"(batch, seq, dim), got shape {image_latents.shape}"
             )
 
-        # SP alignment: combined seq_len must be divisible by sp_size.
         target_seq_len = hidden_states.shape[1]
-        combined_seq_len = target_seq_len + image_latents.shape[1]
-        sp_size = condition.get("sp_size")
-        if isinstance(sp_size, int) and sp_size > 1 and combined_seq_len % sp_size != 0:
-            raise ValueError(
-                "inject_condition: combined noise+condition token length "
-                f"({combined_seq_len} = {target_seq_len} + {image_latents.shape[1]}) "
-                f"is not divisible by sequence-parallel size ({sp_size}). "
-                "Choose a condition image resolution whose packed latent length keeps "
-                "the combined sequence divisible by sp_size (align at rollout-side VAE "
-                "encode); do not zero-pad the condition here."
-            )
-
         for inputs in (model_inputs, negative_model_inputs):
             if inputs is None:
                 continue

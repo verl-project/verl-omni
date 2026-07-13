@@ -189,16 +189,19 @@ class TestProcessorPreparationHook:
             patch("verl_omni.workers.config.diffusion.model.copy_to_local", return_value=str(model_dir)),
             patch("verl_omni.workers.config.diffusion.model.hf_tokenizer", return_value="tokenizer"),
             patch("verl_omni.workers.config.diffusion.model.hf_processor", side_effect=_fake_hf_processor),
+            patch("verl_omni.workers.config.diffusion.model.import_external_libs") as import_external_mock,
         ):
             cfg = DiffusionModelConfig(
                 path=str(model_dir),
                 tokenizer_path=str(model_dir),
                 algorithm="flow_grpo",
                 attn_backend="native",
+                external_lib="external_adapter",
             )
 
         assert cfg.processor == "processor"
         assert events == [("hook", str(model_dir)), ("processor", str(processor_dir))]
+        import_external_mock.assert_called_once_with("external_adapter")
 
     def test_driver_prepares_processor_before_loading_alternate_path(self, tmp_path):
         from verl_omni.trainer.main_diffusion import TaskRunner

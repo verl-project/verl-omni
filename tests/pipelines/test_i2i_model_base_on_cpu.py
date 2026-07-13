@@ -53,6 +53,31 @@ class TestDiffusionI2IModelBase:
         assert prediction.shape == (1, 2, 4)
         assert "_target_seq_len" not in module.last_kwargs
 
+    def test_forward_strips_private_keys_from_positive_and_negative_inputs(self):
+        class _StrictModule(torch.nn.Module):
+            def forward(self, hidden_states):
+                return (hidden_states,)
+
+        class _CfgAdapter(DiffusionModelBase):
+            @classmethod
+            def forward(cls, module, model_config, model_inputs, negative_model_inputs=None):
+                positive = module(**model_inputs)[0]
+                negative = module(**negative_model_inputs)[0]
+                return negative + 2 * (positive - negative)
+
+        class _I2ICfgAdapter(DiffusionI2IModelBase, _CfgAdapter):
+            pass
+
+        prediction = _I2ICfgAdapter.forward(
+            _StrictModule(),
+            model_config=None,
+            model_inputs={"hidden_states": torch.ones(1, 5, 4), "_target_seq_len": 2},
+            negative_model_inputs={"hidden_states": torch.zeros(1, 5, 4), "_target_seq_len": 2},
+        )
+
+        assert prediction.shape == (1, 2, 4)
+        torch.testing.assert_close(prediction, torch.full((1, 2, 4), 2.0))
+
     def test_inject_condition_is_noop_without_condition(self):
         model_inputs = {"hidden_states": torch.zeros(1, 2, 4)}
 
@@ -92,16 +117,6 @@ class TestDiffusionI2IModelBase:
 
         with pytest.raises(ValueError, match=r"requires condition\['image_latents'\]"):
             DiffusionI2IModelBase.inject_condition(model_inputs, None, {"img_shapes": [[(1, 2, 2)]]})
-
-    def test_inject_condition_validates_sequence_parallel_alignment(self):
-        model_inputs = {"hidden_states": torch.zeros(1, 2, 4)}
-
-        with pytest.raises(ValueError, match="sequence-parallel size"):
-            DiffusionI2IModelBase.inject_condition(
-                model_inputs,
-                None,
-                {"image_latents": torch.zeros(1, 3, 4), "sp_size": 2},
-            )
 
 
 class TestPrepareModelInputsConditionDispatch:
@@ -199,7 +214,22 @@ class TestPrepareModelInputsConditionDispatch:
             def forward_and_sample_previous_step(cls, *args, **kwargs):
                 pass
 
-        with pytest.raises(ValueError, match="prepare_condition returned None"):
+        with pytest.raises(ValueError, match=r"Available micro-batch keys: \['other'\]"):
+            prepare_model_inputs(
+                module=None,
+                model_config=_model_config("_GeneralInterfaceMissingI2I"),
+                latents=torch.zeros(1, 2, 4),
+                timesteps=torch.zeros(1),
+                prompt_embeds=torch.zeros(1, 1, 4),
+                prompt_embeds_mask=None,
+                negative_prompt_embeds=None,
+                negative_prompt_embeds_mask=None,
+                micro_batch={"other": torch.zeros(1)},
+                step=0,
+            )
+
+        _MissingI2I.prepare_condition = classmethod(lambda cls, micro_batch, latents, step: torch.ones(1024))
+        with pytest.raises(TypeError, match="keys=None") as exc_info:
             prepare_model_inputs(
                 module=None,
                 model_config=_model_config("_GeneralInterfaceMissingI2I"),
@@ -212,3 +242,4 @@ class TestPrepareModelInputsConditionDispatch:
                 micro_batch={},
                 step=0,
             )
+        assert "tensor(" not in str(exc_info.value)

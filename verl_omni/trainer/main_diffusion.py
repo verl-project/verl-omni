@@ -246,8 +246,15 @@ class TaskRunner:
         model_config = config.actor_rollout_ref.model
         architecture = model_config.get("architecture")
         if architecture is None:
-            with open(os.path.join(local_path, "model_index.json")) as model_index_file:
-                architecture = json.load(model_index_file)["_class_name"]
+            model_index_path = os.path.join(local_path, "model_index.json")
+            try:
+                with open(model_index_path) as model_index_file:
+                    architecture = json.load(model_index_file)["_class_name"]
+            except (OSError, KeyError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"Unable to infer the diffusion architecture from {model_index_path}. "
+                    "Set actor_rollout_ref.model.architecture explicitly."
+                ) from exc
 
         from verl_omni.pipelines.model_base import DiffusionModelBase
 

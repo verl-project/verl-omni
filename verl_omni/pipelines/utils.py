@@ -170,19 +170,17 @@ def prepare_model_inputs(
     if issubclass(model_cls, DiffusionI2IModelBase):
         condition = model_cls.prepare_condition(micro_batch, latents, step)
         if condition is None:
-            # I2I adapter must have condition; None means rollout didn't forward it.
+            available_keys = [str(key) for key in micro_batch.keys()]
             raise ValueError(
-                f"{model_cls.__name__}.prepare_condition returned None: "
-                "no 'condition_image_latents' found in micro_batch. The rollout "
-                "adapter likely did not output this field, or it was dropped "
-                "during data transport. I2I training requires condition images; "
-                "check the rollout adapter's custom_output keys and the "
-                "async_server extra_fields forwarding."
+                f"{model_cls.__name__}.prepare_condition returned None. "
+                f"Available micro-batch keys: {available_keys}. Check that the "
+                "rollout output contains the condition fields expected by this adapter."
             )
         if not isinstance(condition, dict) or len(condition) == 0:
+            condition_keys = list(condition) if isinstance(condition, dict) else None
             raise TypeError(
-                f"prepare_condition returned {type(condition).__name__} "
-                f"(value={condition!r}); I2I adapters must return a non-empty dict."
+                f"prepare_condition returned {type(condition).__name__}; "
+                f"expected a non-empty dict, keys={condition_keys}."
             )
         model_inputs, negative_model_inputs = model_cls.inject_condition(model_inputs, negative_model_inputs, condition)
 
@@ -246,6 +244,7 @@ def _validate_adjacent_pair_values(values: torch.Tensor, name: str) -> None:
 
 
 def get_sigmas(noise_scheduler, timesteps, device, n_dim=4, dtype=torch.float32):
+    """Gather scheduler sigmas for the requested timesteps and output rank."""
     sigmas = noise_scheduler.sigmas.to(device=device, dtype=dtype)
     schedule_timesteps = noise_scheduler.timesteps.to(device)
     timesteps = timesteps.to(device)
