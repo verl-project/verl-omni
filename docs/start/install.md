@@ -49,19 +49,22 @@ uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.gi
 
 ```bash
 uv pip install -e ".[vllm-omni,train]"
+uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
 ```
 
-It will install vllm-omni, verl (git pin), and verl-omni.
+It will install vllm-omni (PyPI `0.24.0` baseline, then the pinned git commit), verl (git pin), and verl-omni.
 
 ### Extras
 
 | Extra       | Adds                                                          | When                     |
 | ----------- | ------------------------------------------------------------- | ------------------------ |
-| `gpu`       | `vllm==0.22.0`, `kernels==0.14.1`, `liger-kernel`             | CUDA rollout + actor FA3 |
-| `vllm-omni` | `vllm-omni==0.22.0`                                           | vLLM-Omni rollout        |
+| `gpu`       | `vllm==0.24.0`, `kernels==0.14.1`, `liger-kernel`             | CUDA rollout + actor FA3 |
+| `vllm-omni` | `vllm-omni==0.24.0`                                           | vLLM-Omni rollout        |
 | `train`     | `verl` @ [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | RL training              |
 | `dev`       | `pytest`, `pre-commit`, `Levenshtein`, …                      | Local development / CI   |
 | `ocr`       | `Levenshtein`                                                 | OCR reward (FlowGRPO)    |
+
+CI and validated e2e recipes pin vLLM-Omni to [`.github/vllm_omni_pin.txt`](../../.github/vllm_omni_pin.txt) (`fe478a95ab39e80085da06e3401c3ed471898a57` at time of writing).
 
 ## Optional Dependencies
 
@@ -81,9 +84,9 @@ If FA3 deps are missing at runtime, training falls back to native/SDPA automatic
 
 VeRL-Omni defaults to **FSDP2** as the training engine for the policy and reference models. The diffusion trainer can alternatively be switched to [**VeOmni**](https://github.com/ByteDance-Seed/VeOmni). The engine is selected at the Hydra command line — see [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete recipe.
 
-### Installing VeOmni alongside vLLM 0.22.0
+### Installing VeOmni alongside vLLM 0.24.0
 
-VeOmni 0.1.11's `gpu` extra pins `torch==2.9.1+cu129`, which may conflict with the torch version pulled in by `vllm==0.22.0`. A plain `uv pip install veomni[gpu,dit]==0.1.11` therefore fails dependency resolution.
+VeOmni 0.1.11's `gpu` extra pins `torch==2.9.1+cu129`, which may conflict with the torch version pulled in by `vllm==0.24.0`. A plain `uv pip install veomni[gpu,dit]==0.1.11` therefore fails dependency resolution.
 
 VeOmni itself runs correctly on torch 2.11 — only the `[gpu]` extra's pin is too strict. Install it without dependency resolution so the existing torch/vllm stack is preserved, and add the small set of runtime extras that the verl-omni VeOmni engine actually needs:
 
@@ -99,7 +102,7 @@ python -c "import veomni; print('veomni', veomni.__version__)"
 python -c "from veomni.distributed.offloading import load_model_to_gpu, load_optimizer, offload_model_to_cpu, offload_optimizer; print('VeOmni offloading helpers OK')"
 ```
 
-If you want VeOmni's full `[gpu,dit]` extras (flash-attn variants, liger-kernel, cuda-python, etc.), install them in a separate environment not pinned to vllm 0.22.0; verl-omni does not need them.
+If you want VeOmni's full `[gpu,dit]` extras (flash-attn variants, liger-kernel, cuda-python, etc.), install them in a separate environment not pinned to vllm 0.24.0; verl-omni does not need them.
 
 ## Post-Installation Verification
 
