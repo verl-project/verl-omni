@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm020.dev1"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm023.dev1"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd7upeujs1b9g1a958pn0.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -58,7 +58,7 @@ jobs:
         env:
           PIP_EXTRA_INDEX_URL: https://pypi.org/simple
         run: |
-          # vllm020.dev1 image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
+          # vllm023.dev1 image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
           pip3 install ".[gpu,dev]"
           pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
           pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@main"

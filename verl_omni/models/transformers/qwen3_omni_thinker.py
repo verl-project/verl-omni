@@ -11,8 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Qwen3-Omni Thinker patches: register with AutoModelForCausalLM, fix FSDP-init blockers,
-unfuse MoE experts for PEFT LoRA (tf5+), and extend verl's hf_processor for Qwen3-Omni."""
+"""Qwen3-Omni Thinker patches: route via AutoModelForMultimodalLM, fix FSDP-init
+blockers, unfuse MoE experts for PEFT LoRA (tf5+), and extend verl's hf_processor
+for Qwen3-Omni."""
 
 import logging
 
@@ -20,9 +21,9 @@ logger = logging.getLogger(__name__)
 
 
 def _register_qwen3_omni_automodel() -> None:
-    """Register the Thinker with AutoModelForCausalLM and patch FSDP-init blockers."""
+    """Point Omni at AutoModelForMultimodalLM and patch FSDP-init blockers."""
     try:
-        from transformers import AutoModelForCausalLM
+        from transformers import AutoModelForMultimodalLM
         from transformers.models.qwen3_omni_moe import (
             Qwen3OmniMoeConfig,
             Qwen3OmniMoeForConditionalGeneration,
@@ -32,7 +33,8 @@ def _register_qwen3_omni_automodel() -> None:
 
     from verl.utils.model import _architecture_to_auto_class
 
-    _architecture_to_auto_class.setdefault("Qwen3OmniMoeForConditionalGeneration", AutoModelForCausalLM)
+    # Official HF mapping for qwen3_omni_moe (not AutoModelForCausalLM).
+    _architecture_to_auto_class["Qwen3OmniMoeForConditionalGeneration"] = AutoModelForMultimodalLM
 
     def _qwen3_omni_get_input_embeddings(self):
         return self.thinker.get_input_embeddings()
@@ -94,7 +96,6 @@ def _register_qwen3_omni_automodel() -> None:
             pass
 
     Qwen3OmniMoeConfig.tie_word_embeddings = _FalseTieDescriptor()
-    AutoModelForCausalLM.register(Qwen3OmniMoeConfig, Qwen3OmniMoeForConditionalGeneration)
 
 
 def patch_hf_processor_for_qwen3_omni() -> None:

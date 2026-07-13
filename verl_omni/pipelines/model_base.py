@@ -62,23 +62,32 @@ class DiffusionModelBase(ABC):
         """Return the registered subclass for ``(architecture, algorithm)``."""
         architecture = model_config.architecture
         algorithm = model_config.algorithm
-        key = (architecture, algorithm)
 
-        if key not in cls._registry and model_config.external_lib is not None:
+        if architecture == "QwenImagePipeline":
+            logger.info(
+                "Applying monkey-patch for QwenImageTransformer2DModel Ulysses SP "
+                "This workaround will be removed once we upgrade to a diffusers release that "
+                "includes the upstream fix."
+            )
+            from verl_omni.models.diffusers.qwen_image import apply_qwen_image_ulysses_mask_fix
+
+            apply_qwen_image_ulysses_mask_fix()
+        return cls.get_class_by_name(architecture, algorithm, model_config.external_lib)
+
+    @classmethod
+    def get_class_by_name(
+        cls,
+        architecture: str,
+        algorithm: str,
+        external_lib: Optional[str] = None,
+    ) -> type["DiffusionModelBase"]:
+        """Resolve an adapter before a full ``DiffusionModelConfig`` exists."""
+        key = (architecture, algorithm)
+        if external_lib is not None:
             from verl.utils.import_utils import import_external_libs
 
-            import_external_libs(model_config.external_lib)
-
+            import_external_libs(external_lib)
         try:
-            if architecture == "QwenImagePipeline":
-                logger.info(
-                    "Applying monkey-patch for QwenImageTransformer2DModel Ulysses SP "
-                    "This workaround will be removed once we upgrade to a diffusers release that "
-                    "includes the upstream fix."
-                )
-                from verl_omni.models.diffusers.qwen_image import apply_qwen_image_ulysses_mask_fix
-
-                apply_qwen_image_ulysses_mask_fix()
             return cls._registry[key]
         except KeyError:
             registered = sorted(cls._registry.keys())
@@ -101,6 +110,17 @@ class DiffusionModelBase(ABC):
     def configure_train_mode(cls, module: torch.nn.Module) -> None:
         """Hook called after ``module.train()`` for architecture-specific overrides."""
         return
+
+    @classmethod
+    def prepare_processor_files(cls, model_path: str) -> Optional[str]:
+        """Prepare model-specific processor files before ``hf_processor()`` loads them.
+
+        Override this when a model ships a ``processor`` directory that needs
+        adapter-owned config fixes before Hugging Face can load it. Return an
+        alternate processor path when the model directory should not be
+        modified in place.
+        """
+        return None
 
     @classmethod
     def configure_trainable_params(
@@ -227,6 +247,162 @@ class DiffusionModelBase(ABC):
         return module(**model_inputs)[0]
 
 
+class DiffusionI2IModelBase(DiffusionModelBase):
+    """Base class for image-conditioned diffusion model training helpers.
+
+    Inherits all T2I logic from :class:`DiffusionModelBase`. Adds a two-step
+    condition injection hook:
+
+    1. ``prepare_condition`` extracts condition tensors from ``micro_batch``.
+    2. ``inject_condition`` merges condition tensors into ``model_inputs``.
+
+    The training dispatcher requires I2I adapters to return a non-empty
+    condition. ``inject_condition`` itself remains a no-op for direct callers
+    that pass ``None``.
+
+    The default ``inject_condition`` implements a common concat-crop pattern:
+    concatenate ``image_latents`` onto ``hidden_states``
+    along the token dimension and set ``_target_seq_len`` so that
+    :meth:`DiffusionI2IModelBase.forward` slices the prediction back to the
+    noise segment. Models with non-concat conditioning (Wan I2V, LTX2 I2AV)
+    override ``inject_condition``.
+    """
+
+    @classmethod
+    def forward(
+        cls,
+        module: ModelMixin,
+        model_config: DiffusionModelConfig,
+        model_inputs: dict[str, torch.Tensor],
+        negative_model_inputs: Optional[dict[str, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        """Run concat-conditioned I2I prediction and keep the target-token prefix."""
+        model_inputs = dict(model_inputs)
+        target_seq_len = model_inputs.pop("_target_seq_len", None)
+        if negative_model_inputs is not None:
+            negative_model_inputs = dict(negative_model_inputs)
+            negative_target_seq_len = negative_model_inputs.pop("_target_seq_len", None)
+            if target_seq_len is None:
+                target_seq_len = negative_target_seq_len
+            elif negative_target_seq_len is not None and negative_target_seq_len != target_seq_len:
+                raise ValueError(
+                    "Positive and negative I2I inputs have different target sequence lengths: "
+                    f"{target_seq_len} and {negative_target_seq_len}."
+                )
+        noise_pred = super().forward(module, model_config, model_inputs, negative_model_inputs)
+        if target_seq_len is None:
+            return noise_pred
+        if noise_pred.shape[1] < target_seq_len:
+            raise ValueError(
+                f"forward: model output seq_len ({noise_pred.shape[1]}) < "
+                f"target_seq_len ({target_seq_len}). The condition concat may "
+                f"have been dropped or the model truncated the output."
+            )
+        return noise_pred[:, :target_seq_len]
+
+    @classmethod
+    def prepare_condition(
+        cls,
+        micro_batch: TensorDict,
+        latents: torch.Tensor,
+        step: int,
+    ) -> Optional[dict]:
+        """Extract condition fields from ``micro_batch``.
+
+        T2I default returns ``None``. I2I adapters override this to pull
+        model-specific condition tensors from the micro-batch and return them
+        under the keys that :meth:`inject_condition` expects. The default
+        concat-crop implementation requires ``image_latents``. Adapters that
+        need position metadata or non-concat conditioning must override
+        :meth:`inject_condition`.
+
+        Note: the *micro-batch* keys carrying condition tensors must not
+        collide with keys the MFU FLOPs counter interprets as the denoised
+        latent (``image_latents``, ``latents_clean``, ``all_latents``,
+        ``audio_latents``). Use a distinct key such as
+        ``condition_image_latents`` on the micro-batch, then map it to the
+        ``image_latents`` slot in the returned condition dict.
+
+        Args:
+            micro_batch (TensorDict): the full micro-batch.
+            latents (torch.Tensor): the latent tensor for the current step.
+            step (int): the current denoising step index.
+
+        Returns:
+            Optional[dict]: a flat dict of condition tensors, or ``None``
+            when no condition is present (T2I degenerate path).
+        """
+        return None
+
+    @classmethod
+    def inject_condition(
+        cls,
+        model_inputs: dict,
+        negative_model_inputs: Optional[dict],
+        condition: Optional[dict],
+    ) -> tuple[dict, Optional[dict]]:
+        """Merge condition tensors into ``model_inputs``.
+
+        Default implementation: concatenate ``image_latents`` onto
+        ``hidden_states`` along the token dimension and set
+        ``_target_seq_len`` so that
+        :meth:`DiffusionI2IModelBase.forward` slices the prediction back.
+
+        When ``condition`` is ``None`` or empty, this is a no-op (T2I
+        degenerate path). Models with non-concat conditioning (Wan I2V,
+        LTX2 I2AV) override this method.
+
+        """
+        if not condition:
+            return model_inputs, negative_model_inputs
+
+        image_latents = condition.get("image_latents")
+        if image_latents is None:
+            raise ValueError("inject_condition requires condition['image_latents']")
+
+        # Guard: "image_latents" is reserved by the MFU FLOPs counter.
+        if "image_latents" in model_inputs:
+            raise ValueError(
+                "inject_condition: 'image_latents' found in model_inputs; "
+                "this key is reserved by the MFU FLOPs counter for the denoised "
+                "latent. The rollout adapter likely output 'image_latents' instead "
+                "of 'condition_image_latents'. Check the rollout adapter's "
+                "custom_output keys."
+            )
+
+        hidden_states = model_inputs["hidden_states"]
+        if image_latents.shape[0] != hidden_states.shape[0]:
+            raise ValueError(
+                "inject_condition: condition image_latents batch size "
+                f"({image_latents.shape[0]}) does not match hidden_states batch size "
+                f"({hidden_states.shape[0]})."
+            )
+
+        if image_latents.dim() != 3:
+            raise ValueError(
+                f"inject_condition: condition image_latents must be 3-D "
+                f"(batch, seq, dim), got shape {image_latents.shape}"
+            )
+
+        target_seq_len = hidden_states.shape[1]
+        for inputs in (model_inputs, negative_model_inputs):
+            if inputs is None:
+                continue
+            inputs["hidden_states"] = torch.cat(
+                [
+                    inputs["hidden_states"],
+                    image_latents.to(
+                        device=inputs["hidden_states"].device,
+                        dtype=inputs["hidden_states"].dtype,
+                    ),
+                ],
+                dim=1,
+            )
+            inputs["_target_seq_len"] = target_seq_len
+
+        return model_inputs, negative_model_inputs
+
+
 class VllmOmniPipelineBase:
     """Registry base for vllm-omni custom diffusion pipeline classes.
 
@@ -250,6 +426,8 @@ class VllmOmniPipelineBase:
         """Class decorator that registers a pipeline for ``(architecture, algorithm)``."""
 
         def decorator(subclass: type) -> type:
+            if "supports_request_batch" not in subclass.__dict__:
+                subclass.supports_request_batch = False
             cls._registry[(architecture, algorithm)] = subclass
             return subclass
 

@@ -187,8 +187,10 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
         matching the input contract of ``QwenImagePipelineWithLogProb``.
         """
         sampling = state.sampling
+        # vllm-omni >=0.24 stores a single prompt on DiffusionRequestState.prompt
+        # (not .prompts). Match upstream QwenImagePipeline.prepare_encode.
         prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask = self._extract_prompt_ids(
-            state.prompts or []
+            [state.prompt] if state.prompt is not None else []
         )
 
         # Normalize list inputs to tensors on device.
@@ -200,7 +202,7 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
         if prompt_ids is None:
             raise ValueError(
                 "QwenImagePipelineWithLogProbStepwise.prepare_encode requires either "
-                "'prompt_ids' or a text 'prompt' in state.prompts[0]."
+                "'prompt_ids'/'prompt_token_ids' or a text 'prompt' on state.prompt."
             )
 
         height = sampling.height or self.default_sample_size * self.vae_scale_factor
