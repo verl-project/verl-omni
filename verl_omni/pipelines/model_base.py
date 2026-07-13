@@ -14,12 +14,11 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 from diffusers import ModelMixin, SchedulerMixin
 from tensordict import TensorDict
-from verl.utils import tensordict_utils as tu
 
 from verl_omni.workers.config import DiffusionModelConfig
 
@@ -245,23 +244,8 @@ class DiffusionModelBase(ABC):
         override this when prediction requires extra handling such as CFG, negative
         inputs, or output conversion.
 
-        When ``_target_seq_len`` is present in ``model_inputs`` (set by
-        :meth:`DiffusionI2IModelBase.inject_condition`), it is popped before
-        the forward call and used to slice the output back to the noise
-        segment, dropping the condition-image token predictions.
         """
-        model_inputs = dict(model_inputs)
-        target_seq_len = model_inputs.pop("_target_seq_len", None)
-        noise_pred = module(**model_inputs)[0]
-        if target_seq_len is not None:
-            if noise_pred.shape[1] < target_seq_len:
-                raise ValueError(
-                    f"forward: model output seq_len ({noise_pred.shape[1]}) < "
-                    f"target_seq_len ({target_seq_len}). The condition concat may "
-                    f"have been dropped or the model truncated the output."
-                )
-            noise_pred = noise_pred[:, :target_seq_len]
-        return noise_pred
+        return module(**model_inputs)[0]
 
 
 class DiffusionI2IModelBase(DiffusionModelBase):
@@ -285,41 +269,27 @@ class DiffusionI2IModelBase(DiffusionModelBase):
     override ``inject_condition``.
     """
 
-    @staticmethod
-    def unwrap_i2i_metadata(value: Any) -> Any:
-        """Convert TensorDict non-tensor wrappers back to plain Python metadata."""
-        if hasattr(value, "tolist"):
-            return value.tolist()
-        return value
-
     @classmethod
-    def get_i2i_metadata(cls, micro_batch: TensorDict, key: str, default: Any = None) -> Any:
-        """Read and unwrap I2I metadata carried through ``DataProto.non_tensor_batch``."""
-        value = tu.get_non_tensor_data(micro_batch, key, default=default)
-        return cls.unwrap_i2i_metadata(value)
-
-    @classmethod
-    def get_i2i_scalar_metadata(cls, micro_batch: TensorDict, key: str, default: Any = None) -> Any:
-        """Read scalar I2I metadata, requiring it to be constant across the micro-batch."""
-        value = cls.get_i2i_metadata(micro_batch, key, default=default)
-        if value is None:
-            return default
-
-        def _to_scalar(item):
-            if hasattr(item, "item") and not isinstance(item, str | bytes):
-                return item.item()
-            return item
-
-        if isinstance(value, list | tuple):
-            if len(value) == 0:
-                return default
-            values = [_to_scalar(item) for item in value]
-            first = values[0]
-            if any(item != first for item in values[1:]):
-                raise ValueError(f"I2I metadata {key!r} differs across the micro-batch: {values!r}")
-            return first
-
-        return _to_scalar(value)
+    def forward(
+        cls,
+        module: ModelMixin,
+        model_config: DiffusionModelConfig,
+        model_inputs: dict[str, torch.Tensor],
+        negative_model_inputs: Optional[dict[str, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        """Run concat-conditioned I2I prediction and keep the target-token prefix."""
+        model_inputs = dict(model_inputs)
+        target_seq_len = model_inputs.pop("_target_seq_len", None)
+        noise_pred = super().forward(module, model_config, model_inputs, negative_model_inputs)
+        if target_seq_len is None:
+            return noise_pred
+        if noise_pred.shape[1] < target_seq_len:
+            raise ValueError(
+                f"forward: model output seq_len ({noise_pred.shape[1]}) < "
+                f"target_seq_len ({target_seq_len}). The condition concat may "
+                f"have been dropped or the model truncated the output."
+            )
+        return noise_pred[:, :target_seq_len]
 
     @classmethod
     def prepare_condition(

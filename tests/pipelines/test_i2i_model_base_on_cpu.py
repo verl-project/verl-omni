@@ -15,8 +15,6 @@
 
 import pytest
 import torch
-from tensordict import TensorDict
-from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 from verl_omni.pipelines.model_base import DiffusionI2IModelBase, DiffusionModelBase
 from verl_omni.pipelines.utils import prepare_model_inputs
@@ -29,10 +27,6 @@ def _model_config(architecture: str) -> DiffusionModelConfig:
     object.__setattr__(config, "external_lib", None)
     object.__setattr__(config, "algorithm", "flow_grpo")
     return config
-
-
-def _non_tensor_stack(values):
-    return NonTensorStack.from_list([NonTensorData(value) for value in values])
 
 
 class _EchoModule(torch.nn.Module):
@@ -50,7 +44,7 @@ class TestDiffusionI2IModelBase:
         module = _EchoModule()
         hidden_states = torch.arange(12, dtype=torch.float32).view(1, 3, 4)
 
-        prediction = DiffusionModelBase.forward(
+        prediction = DiffusionI2IModelBase.forward(
             module,
             model_config=None,
             model_inputs={"hidden_states": hidden_states, "_target_seq_len": 2},
@@ -108,28 +102,6 @@ class TestDiffusionI2IModelBase:
                 None,
                 {"image_latents": torch.zeros(1, 3, 4), "sp_size": 2},
             )
-
-    def test_metadata_helpers_unwrap_non_tensor_values(self):
-        image_shapes = [[(1, 16, 16)], [(1, 16, 16)]]
-        micro_batch = TensorDict(
-            {
-                "img_shapes": _non_tensor_stack(image_shapes),
-                "sp_size": _non_tensor_stack([2, 2]),
-            },
-            batch_size=[2],
-        )
-
-        assert DiffusionI2IModelBase.get_i2i_metadata(micro_batch, "img_shapes") == image_shapes
-        assert DiffusionI2IModelBase.get_i2i_scalar_metadata(micro_batch, "sp_size") == 2
-
-    def test_scalar_metadata_rejects_mixed_micro_batch_values(self):
-        micro_batch = TensorDict(
-            {"sp_size": _non_tensor_stack([1, 2])},
-            batch_size=[2],
-        )
-
-        with pytest.raises(ValueError, match="differs across the micro-batch"):
-            DiffusionI2IModelBase.get_i2i_scalar_metadata(micro_batch, "sp_size")
 
 
 class TestPrepareModelInputsConditionDispatch:
