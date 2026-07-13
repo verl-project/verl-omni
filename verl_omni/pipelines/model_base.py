@@ -14,11 +14,12 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from diffusers import ModelMixin, SchedulerMixin
 from tensordict import TensorDict
+from verl.utils import tensordict_utils as tu
 
 from verl_omni.workers.config import DiffusionModelConfig
 
@@ -100,6 +101,15 @@ class DiffusionModelBase(ABC):
     @classmethod
     def configure_train_mode(cls, module: torch.nn.Module) -> None:
         """Hook called after ``module.train()`` for architecture-specific overrides."""
+        return
+
+    @classmethod
+    def prepare_processor_files(cls, model_path: str) -> None:
+        """Prepare model-specific processor files before ``hf_processor()`` loads them.
+
+        Override this when a model ships a ``processor`` directory that needs
+        adapter-owned config fixes before Hugging Face can load it.
+        """
         return
 
     @classmethod
@@ -223,8 +233,203 @@ class DiffusionModelBase(ABC):
         reverse-sampling algorithms (FlowGRPO et al.). Model adapters only need to
         override this when prediction requires extra handling such as CFG, negative
         inputs, or output conversion.
+
+        When ``_target_seq_len`` is present in ``model_inputs`` (set by
+        :meth:`DiffusionI2IModelBase.inject_condition`), it is popped before
+        the forward call and used to slice the output back to the noise
+        segment, dropping the condition-image token predictions.
         """
-        return module(**model_inputs)[0]
+        model_inputs = dict(model_inputs)
+        target_seq_len = model_inputs.pop("_target_seq_len", None)
+        noise_pred = module(**model_inputs)[0]
+        if target_seq_len is not None:
+            if noise_pred.shape[1] < target_seq_len:
+                raise ValueError(
+                    f"forward: model output seq_len ({noise_pred.shape[1]}) < "
+                    f"target_seq_len ({target_seq_len}). The condition concat may "
+                    f"have been dropped or the model truncated the output."
+                )
+            noise_pred = noise_pred[:, :target_seq_len]
+        return noise_pred
+
+
+class DiffusionI2IModelBase(DiffusionModelBase):
+    """Base class for image-conditioned diffusion model training helpers.
+
+    Inherits all T2I logic from :class:`DiffusionModelBase`. Adds a two-step
+    condition injection hook:
+
+    1. ``prepare_condition`` extracts condition tensors from ``micro_batch``.
+    2. ``inject_condition`` merges condition tensors into ``model_inputs``.
+
+    The training dispatcher requires I2I adapters to return a non-empty
+    condition. ``inject_condition`` itself remains a no-op for direct callers
+    that pass ``None``.
+
+    The default ``inject_condition`` implements a common concat-crop pattern:
+    concatenate ``image_latents`` onto ``hidden_states``
+    along the token dimension and set ``_target_seq_len`` so that
+    :meth:`DiffusionModelBase.forward` slices the prediction back to the
+    noise segment. Models with non-concat conditioning (Wan I2V, LTX2 I2AV)
+    override ``inject_condition``.
+    """
+
+    @staticmethod
+    def unwrap_i2i_metadata(value: Any) -> Any:
+        """Convert TensorDict non-tensor wrappers back to plain Python metadata."""
+        if hasattr(value, "tolist"):
+            return value.tolist()
+        return value
+
+    @classmethod
+    def get_i2i_metadata(cls, micro_batch: TensorDict, key: str, default: Any = None) -> Any:
+        """Read and unwrap I2I metadata carried through ``DataProto.non_tensor_batch``."""
+        value = tu.get_non_tensor_data(micro_batch, key, default=default)
+        return cls.unwrap_i2i_metadata(value)
+
+    @classmethod
+    def get_i2i_scalar_metadata(cls, micro_batch: TensorDict, key: str, default: Any = None) -> Any:
+        """Read scalar I2I metadata, requiring it to be constant across the micro-batch."""
+        value = cls.get_i2i_metadata(micro_batch, key, default=default)
+        if value is None:
+            return default
+
+        def _to_scalar(item):
+            if hasattr(item, "item") and not isinstance(item, str | bytes):
+                return item.item()
+            return item
+
+        if isinstance(value, list | tuple):
+            if len(value) == 0:
+                return default
+            values = [_to_scalar(item) for item in value]
+            first = values[0]
+            if any(item != first for item in values[1:]):
+                raise ValueError(f"I2I metadata {key!r} differs across the micro-batch: {values!r}")
+            return first
+
+        return _to_scalar(value)
+
+    @classmethod
+    def prepare_condition(
+        cls,
+        micro_batch: TensorDict,
+        latents: torch.Tensor,
+        step: int,
+    ) -> Optional[dict]:
+        """Extract condition fields from ``micro_batch``.
+
+        T2I default returns ``None``. I2I adapters override this to pull
+        model-specific condition tensors from the micro-batch and return them
+        under the keys that :meth:`inject_condition` expects (e.g.
+        ``image_latents``, ``image_latent_ids``, ``img_shapes``).
+
+        Note: the *micro-batch* keys carrying condition tensors must not
+        collide with keys the MFU FLOPs counter interprets as the denoised
+        latent (``image_latents``, ``latents_clean``, ``all_latents``,
+        ``audio_latents``). Use a distinct key such as
+        ``condition_image_latents`` on the micro-batch, then map it to the
+        ``image_latents`` slot in the returned condition dict.
+
+        Args:
+            micro_batch (TensorDict): the full micro-batch.
+            latents (torch.Tensor): the latent tensor for the current step.
+            step (int): the current denoising step index.
+
+        Returns:
+            Optional[dict]: a flat dict of condition tensors, or ``None``
+            when no condition is present (T2I degenerate path).
+        """
+        return None
+
+    @classmethod
+    def inject_condition(
+        cls,
+        model_inputs: dict,
+        negative_model_inputs: Optional[dict],
+        condition: Optional[dict],
+    ) -> tuple[dict, Optional[dict]]:
+        """Merge condition tensors into ``model_inputs``.
+
+        Default implementation: concatenate ``image_latents`` onto
+        ``hidden_states`` along the token dimension and set
+        ``_target_seq_len`` so that
+        :meth:`DiffusionModelBase.forward` slices the prediction back.
+
+        When ``condition`` is ``None`` or empty, this is a no-op (T2I
+        degenerate path). Models with non-concat conditioning (Wan I2V,
+        LTX2 I2AV) override this method.
+
+        Sequence-parallel note: Ulysses SP splits ``hidden_states`` along the
+        token dimension with ``chunk(sp_size)``, so the concatenated
+        ``noise + condition`` token count must be divisible by ``sp_size``.
+        When ``condition`` carries ``sp_size`` (> 1), this method asserts the
+        combined sequence length is aligned and raises otherwise, so the
+        condition latent resolution must be chosen upstream (rollout-side VAE
+        encode) rather than zero-padded here (padding would inject unmasked
+        condition tokens).
+        """
+        if not condition:
+            return model_inputs, negative_model_inputs
+
+        image_latents = condition.get("image_latents")
+        if image_latents is None:
+            return model_inputs, negative_model_inputs
+
+        # Guard: "image_latents" is reserved by the MFU FLOPs counter.
+        if "image_latents" in model_inputs:
+            raise ValueError(
+                "inject_condition: 'image_latents' found in model_inputs; "
+                "this key is reserved by the MFU FLOPs counter for the denoised "
+                "latent. The rollout adapter likely output 'image_latents' instead "
+                "of 'condition_image_latents'. Check the rollout adapter's "
+                "custom_output keys."
+            )
+
+        hidden_states = model_inputs["hidden_states"]
+        if image_latents.shape[0] != hidden_states.shape[0]:
+            raise ValueError(
+                "inject_condition: condition image_latents batch size "
+                f"({image_latents.shape[0]}) does not match hidden_states batch size "
+                f"({hidden_states.shape[0]})."
+            )
+
+        if image_latents.dim() != 3:
+            raise ValueError(
+                f"inject_condition: condition image_latents must be 3-D "
+                f"(batch, seq, dim), got shape {image_latents.shape}"
+            )
+
+        # SP alignment: combined seq_len must be divisible by sp_size.
+        target_seq_len = hidden_states.shape[1]
+        combined_seq_len = target_seq_len + image_latents.shape[1]
+        sp_size = condition.get("sp_size")
+        if isinstance(sp_size, int) and sp_size > 1 and combined_seq_len % sp_size != 0:
+            raise ValueError(
+                "inject_condition: combined noise+condition token length "
+                f"({combined_seq_len} = {target_seq_len} + {image_latents.shape[1]}) "
+                f"is not divisible by sequence-parallel size ({sp_size}). "
+                "Choose a condition image resolution whose packed latent length keeps "
+                "the combined sequence divisible by sp_size (align at rollout-side VAE "
+                "encode); do not zero-pad the condition here."
+            )
+
+        for inputs in (model_inputs, negative_model_inputs):
+            if inputs is None:
+                continue
+            inputs["hidden_states"] = torch.cat(
+                [
+                    inputs["hidden_states"],
+                    image_latents.to(
+                        device=inputs["hidden_states"].device,
+                        dtype=inputs["hidden_states"].dtype,
+                    ),
+                ],
+                dim=1,
+            )
+            inputs["_target_seq_len"] = target_seq_len
+
+        return model_inputs, negative_model_inputs
 
 
 class VllmOmniPipelineBase:

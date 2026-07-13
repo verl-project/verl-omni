@@ -156,10 +156,12 @@ class DiffusionModelConfig(BaseConfig):
             self.tokenizer = hf_tokenizer(
                 self.local_tokenizer_path, trust_remote_code=self.trust_remote_code, use_fast=True
             )
-            if os.path.exists(os.path.join(self.local_path, "processor")):
-                self.processor = hf_processor(
-                    os.path.join(self.local_path, "processor"), trust_remote_code=self.trust_remote_code
-                )
+            processor_path = os.path.join(self.local_path, "processor")
+            if os.path.exists(processor_path):
+                from verl_omni.pipelines.model_base import DiffusionModelBase
+
+                DiffusionModelBase.get_class(self).prepare_processor_files(self.local_path)
+                self.processor = hf_processor(processor_path, trust_remote_code=self.trust_remote_code)
             else:
                 self.processor = None
 
