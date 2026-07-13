@@ -250,6 +250,8 @@ class VllmOmniPipelineBase:
         """Class decorator that registers a pipeline for ``(architecture, algorithm)``."""
 
         def decorator(subclass: type) -> type:
+            if "supports_request_batch" not in subclass.__dict__:
+                subclass.supports_request_batch = False
             cls._registry[(architecture, algorithm)] = subclass
             return subclass
 

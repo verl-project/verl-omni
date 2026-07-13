@@ -10,6 +10,7 @@ on:
       - "tests/**/*_on_cpu.py"
       - "pyproject.toml"
       - .github/workflows/cpu_unit_tests.yml
+      - .github/vllm_omni_pin.txt
   pull_request:
     branches:
       - main
@@ -20,6 +21,7 @@ on:
       - "tests/**/*_on_cpu.py"
       - "pyproject.toml"
       - .github/workflows/cpu_unit_tests.yml
+      - .github/vllm_omni_pin.txt
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -51,8 +53,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: |
-          pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.22.0/vllm-0.22.0+cpu-cp38-abi3-manylinux_2_34_x86_64.whl"
-          pip install "vllm-omni==0.22.0"
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.24.0/vllm-0.24.0+cpu-cp38-abi3-manylinux_2_34_x86_64.whl"
+          pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
           pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
           pip install ".[dev]"
           pip install --no-deps -e .
