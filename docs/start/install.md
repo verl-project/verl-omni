@@ -45,26 +45,24 @@ uv pip install vllm==0.22.0
 uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@bb4d0776eee8fc45c3484a45c971a7049f1a2bbf"
 ```
 
-3. Install VeRL-Omni:
+3. Install VeRL-Omni and the pinned vLLM-Omni commit:
 
 ```bash
-uv pip install -e ".[vllm-omni,train]"
+uv pip install -e ".[train]"
 uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
 ```
 
-It will install vllm-omni (PyPI `0.24.0` baseline, then the pinned git commit), verl (git pin), and verl-omni.
+It will install verl (git pin), verl-omni, and vLLM-Omni once from [`.github/vllm_omni_pin.txt`](../../.github/vllm_omni_pin.txt) (`fe478a95ab39e80085da06e3401c3ed471898a57` at time of writing). Prefer this over `.[vllm-omni]` so you do not install PyPI `0.24.0` and then overwrite it.
 
 ### Extras
 
 | Extra       | Adds                                                          | When                     |
 | ----------- | ------------------------------------------------------------- | ------------------------ |
 | `gpu`       | `vllm==0.24.0`, `kernels==0.14.1`, `liger-kernel`             | CUDA rollout + actor FA3 |
-| `vllm-omni` | `vllm-omni==0.24.0`                                           | vLLM-Omni rollout        |
+| `vllm-omni` | `vllm-omni==0.24.0`                                           | Optional PyPI baseline only; CI/docs use the git pin above |
 | `train`     | `verl` @ [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | RL training              |
 | `dev`       | `pytest`, `pre-commit`, `Levenshtein`, …                      | Local development / CI   |
 | `ocr`       | `Levenshtein`                                                 | OCR reward (FlowGRPO)    |
-
-CI and validated e2e recipes pin vLLM-Omni to [`.github/vllm_omni_pin.txt`](../../.github/vllm_omni_pin.txt) (`fe478a95ab39e80085da06e3401c3ed471898a57` at time of writing).
 
 ## Optional Dependencies
 
