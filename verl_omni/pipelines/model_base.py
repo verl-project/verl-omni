@@ -113,13 +113,15 @@ class DiffusionModelBase(ABC):
         return
 
     @classmethod
-    def prepare_processor_files(cls, model_path: str) -> None:
+    def prepare_processor_files(cls, model_path: str) -> Optional[str]:
         """Prepare model-specific processor files before ``hf_processor()`` loads them.
 
         Override this when a model ships a ``processor`` directory that needs
-        adapter-owned config fixes before Hugging Face can load it.
+        adapter-owned config fixes before Hugging Face can load it. Return an
+        alternate processor path when the model directory should not be
+        modified in place.
         """
-        return
+        return None
 
     @classmethod
     def configure_trainable_params(

@@ -217,3 +217,37 @@ class TestProcessorPreparationHook:
             ("hook", str(model_dir)),
             ("processor", str(model_dir / "processor")),
         ]
+
+    def test_driver_accepts_alternate_processor_path(self, tmp_path):
+        from verl_omni.trainer.main_diffusion import _prepare_processor_files
+
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        alternate_processor = tmp_path / "prepared-processor"
+        (model_dir / "model_index.json").write_text(json.dumps({"_class_name": "_AlternateProcessorPipeline"}))
+
+        @DiffusionModelBase.register("_AlternateProcessorPipeline", algorithm="flow_grpo")
+        class _AlternateProcessorModel(DiffusionModelBase):
+            @classmethod
+            def prepare_processor_files(cls, model_path: str) -> str:
+                return str(alternate_processor)
+
+            @classmethod
+            def build_scheduler(cls, model_config):
+                pass
+
+            @classmethod
+            def set_timesteps(cls, scheduler, model_config, device):
+                pass
+
+            @classmethod
+            def prepare_model_inputs(cls, module, model_config, *args, **kwargs):
+                pass
+
+            @classmethod
+            def forward_and_sample_previous_step(cls, *args, **kwargs):
+                pass
+
+        model_config = OmegaConf.create({"architecture": None, "algorithm": "flow_grpo", "external_lib": None})
+
+        assert _prepare_processor_files(str(model_dir), model_config) == str(alternate_processor)
