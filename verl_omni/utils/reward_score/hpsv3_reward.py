@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from transformers import AutoConfig, AutoProcessor, Qwen2VLForConditionalGeneration
+from verl.utils.device import get_device_name
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -415,12 +416,12 @@ def compute_score_hpsv3(
     extra_info: dict,
     model_name: str = None,
     reward_scale: float = 0.1,
-    device: str = "npu",
+    device: str = None,
     **kwargs,
 ) -> dict:
     checkpoint_path = os.getenv("custom_reward_model_path", model_name)
     assert checkpoint_path is not None, "HPSv3 checkpoint path must be provided via reward.reward_model.model_path"
-
+    device = device or get_device_name()
     inferencer = _get_inferencer(checkpoint_path, device)
 
     frame_interval = extra_info.get("frame_interval", 4)
