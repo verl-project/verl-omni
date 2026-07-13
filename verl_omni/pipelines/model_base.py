@@ -84,7 +84,7 @@ class DiffusionModelBase(ABC):
     ) -> type["DiffusionModelBase"]:
         """Resolve an adapter before a full ``DiffusionModelConfig`` exists."""
         key = (architecture, algorithm)
-        if key not in cls._registry and external_lib is not None:
+        if external_lib is not None:
             from verl.utils.import_utils import import_external_libs
 
             import_external_libs(external_lib)

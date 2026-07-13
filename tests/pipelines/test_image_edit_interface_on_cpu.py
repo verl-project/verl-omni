@@ -131,6 +131,27 @@ class TestImageGenerationRequest:
 
 
 class TestProcessorPreparationHook:
+    def test_external_library_can_override_registered_adapter(self):
+        @DiffusionModelBase.register("_ExternalOverridePipeline", algorithm="flow_grpo")
+        class _BuiltinModel(DiffusionModelBase):
+            pass
+
+        class _ExternalModel(DiffusionModelBase):
+            pass
+
+        def import_external(_external_lib):
+            DiffusionModelBase._registry[("_ExternalOverridePipeline", "flow_grpo")] = _ExternalModel
+
+        with patch("verl.utils.import_utils.import_external_libs", side_effect=import_external) as import_mock:
+            model_cls = DiffusionModelBase.get_class_by_name(
+                "_ExternalOverridePipeline",
+                "flow_grpo",
+                "external_adapter",
+            )
+
+        assert model_cls is _ExternalModel
+        import_mock.assert_called_once_with("external_adapter")
+
     def test_diffusion_model_config_calls_registered_processor_hook(self, tmp_path):
         model_dir = tmp_path / "model"
         processor_dir = model_dir / "processor"
