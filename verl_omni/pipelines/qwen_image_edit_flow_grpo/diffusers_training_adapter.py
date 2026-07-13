@@ -24,6 +24,7 @@ from typing import Optional
 
 import torch
 from tensordict import TensorDict
+from verl.utils import tensordict_utils as tu
 
 from verl_omni.pipelines.model_base import DiffusionI2IModelBase, DiffusionModelBase
 from verl_omni.pipelines.qwen_image_flow_grpo.diffusers_training_adapter import QwenImage
@@ -111,8 +112,8 @@ class QwenImageEditPlusFlowGRPO(DiffusionI2IModelBase, QwenImage):
             return None
         return {
             "image_latents": image_latents,
-            "img_shapes": cls.get_i2i_metadata(micro_batch, "img_shapes", default=None),
-            "sp_size": cls.get_i2i_scalar_metadata(micro_batch, "sp_size", default=None),
+            "img_shapes": tu.get(micro_batch, "img_shapes"),
+            "sp_size": tu.get(micro_batch, "sp_size"),
         }
 
     @classmethod

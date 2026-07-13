@@ -96,7 +96,7 @@ def test_prepare_condition_unwraps_metadata():
         {
             "condition_image_latents": torch.zeros(2, 64, 8),
             "img_shapes": _non_tensor_stack(image_shapes),
-            "sp_size": _non_tensor_stack([1, 1]),
+            "sp_size": NonTensorData(1),
         },
         batch_size=[2],
     )
@@ -110,6 +110,30 @@ def test_prepare_condition_unwraps_metadata():
     assert condition["image_latents"].shape == (2, 64, 8)
     assert condition["img_shapes"] == image_shapes
     assert condition["sp_size"] == 1
+
+
+def test_forward_crops_condition_predictions_through_qwen_mro():
+    class _EchoModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.last_kwargs = None
+
+        def forward(self, **kwargs):
+            self.last_kwargs = kwargs
+            return (kwargs["hidden_states"],)
+
+    module = _EchoModule()
+    prediction = QwenImageEditPlusFlowGRPO.forward(
+        module,
+        _model_config(),
+        {
+            "hidden_states": torch.zeros(1, 5, 4),
+            "_target_seq_len": 2,
+        },
+    )
+
+    assert prediction.shape == (1, 2, 4)
+    assert "_target_seq_len" not in module.last_kwargs
 
 
 def test_prepare_condition_rejects_reserved_rollout_key():
