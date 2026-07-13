@@ -166,6 +166,17 @@ def test_inject_condition_updates_qwen_image_shapes():
     assert output["hidden_states"].shape == (1, 5, 4)
 
 
+def test_inject_condition_validates_qwen_sequence_parallel_alignment():
+    model_inputs = {"hidden_states": torch.zeros(1, 2, 4)}
+    condition = {
+        "image_latents": torch.zeros(1, 3, 4),
+        "sp_size": 2,
+    }
+
+    with pytest.raises(ValueError, match="sequence-parallel size"):
+        QwenImageEditPlusFlowGRPO.inject_condition(model_inputs, None, condition)
+
+
 def test_true_cfg_requires_negative_prompt_inputs():
     assert not _use_true_cfg(1.0, None, None, None)
     assert _use_true_cfg(4.0, [1], None, None)

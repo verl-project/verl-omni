@@ -123,6 +123,15 @@ class QwenImageEditPlusFlowGRPO(DiffusionI2IModelBase, QwenImage):
         negative_model_inputs: Optional[dict],
         condition: Optional[dict],
     ) -> tuple[dict, Optional[dict]]:
+        if condition and condition.get("image_latents") is not None:
+            target_seq_len = model_inputs["hidden_states"].shape[1]
+            condition_seq_len = condition["image_latents"].shape[1]
+            sp_size = condition.get("sp_size")
+            if isinstance(sp_size, int) and sp_size > 1 and (target_seq_len + condition_seq_len) % sp_size:
+                raise ValueError(
+                    "Qwen-Image-Edit target and condition token lengths must be divisible by "
+                    f"the sequence-parallel size: ({target_seq_len} + {condition_seq_len}) % {sp_size} != 0."
+                )
         model_inputs, negative_model_inputs = super().inject_condition(model_inputs, negative_model_inputs, condition)
         if not condition:
             return model_inputs, negative_model_inputs
