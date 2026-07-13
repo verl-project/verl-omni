@@ -126,3 +126,6 @@ veomni_config:
 
   # Target class for this configuration
   _target_: verl_omni.workers.config.omni.VeOmniOmniEngineConfig
+
+  # Maximum parameter size in GB for rank0 load-and-broadcast weight loading.
+  max_load_broadcast_size: 1.0

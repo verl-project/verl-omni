@@ -60,6 +60,7 @@ class VeOmniOmniEngineConfig(EngineConfig):
     ulysses_parallel_size: int = 1
     expert_parallel_size: int = 1
     init_device: str = "meta"
+    max_load_broadcast_size: float = 1.0
     reshard_after_forward: bool = True
     forward_prefetch: bool = True
     model_dtype: str = "bfloat16"
