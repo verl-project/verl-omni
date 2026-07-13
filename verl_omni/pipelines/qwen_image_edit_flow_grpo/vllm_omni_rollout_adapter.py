@@ -33,7 +33,11 @@ from typing import Any, Literal
 import torch
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
-from vllm_omni.diffusion.models.qwen_image.pipeline_qwen_image_edit_plus import QwenImageEditPlusPipeline
+from vllm_omni.diffusion.models.qwen_image.pipeline_qwen_image_edit_plus import (
+    VAE_IMAGE_SIZE,
+    QwenImageEditPlusPipeline,
+    calculate_dimensions,
+)
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
@@ -71,7 +75,7 @@ def _use_true_cfg(
     return enabled
 
 
-def _validate_condition_image_sizes(condition_images, vae_image_sizes) -> None:
+def _validate_condition_image_sizes(condition_images, vae_image_sizes, target_size=None) -> None:
     if not condition_images or len(condition_images) != 1:
         count = 0 if not condition_images else len(condition_images)
         raise ValueError(f"Qwen-Image-Edit training requires exactly one condition image; got {count}")
@@ -79,11 +83,37 @@ def _validate_condition_image_sizes(condition_images, vae_image_sizes) -> None:
         raise ValueError(
             f"got {len(condition_images)} condition images but {len(vae_image_sizes)} vae_image_sizes entries"
         )
-    if vae_image_sizes and any(width != height for width, height in vae_image_sizes):
+    if not vae_image_sizes:
+        return
+
+    # Every sample in a training batch must resolve to the SAME condition VAE
+    # size; otherwise the cross-sample concatenation of ``condition_image_latents``
+    # in the agent loop (and the FSDP micro-batch) fails on mismatched sequence
+    # lengths. When the pipeline target height/width are known we anchor every
+    # sample to their aspect ratio through the same upstream
+    # ``calculate_dimensions`` that produced ``vae_image_sizes``, so any fixed
+    # aspect ratio (e.g. 16:9, 4:3) is allowed as long as every source image
+    # shares it. A square target reduces to the historical 1024x1024
+    # requirement. When the target size is unknown we fall back to requiring
+    # square conditions.
+    if target_size is not None and all(target_size):
+        target_height, target_width = target_size
+        expected = calculate_dimensions(VAE_IMAGE_SIZE, target_width / target_height)
+        if any((width, height) != expected for width, height in vae_image_sizes):
+            raise ValueError(
+                "Qwen-Image-Edit training requires every condition image to match the target "
+                f"aspect ratio: expected VAE size {expected} for target {target_width}x{target_height}, "
+                f"got {vae_image_sizes}. Letterbox or resize all source images to the target aspect "
+                "ratio so condition latent lengths stay constant across a batch."
+            )
+        return
+
+    if any(width != height for width, height in vae_image_sizes):
         raise ValueError(
-            "Qwen-Image-Edit training currently requires square condition images so "
-            "condition latent lengths stay constant across a batch. Use prepare_data.py "
-            "or pad source images to a square before training."
+            "Qwen-Image-Edit training requires square condition images when the pipeline target "
+            "size is unspecified so condition latent lengths stay constant across a batch. Set the "
+            "pipeline target height/width to your aspect ratio to train on non-square (e.g. 16:9, "
+            "4:3) images, or pad source images to a square."
         )
 
 
@@ -397,11 +427,10 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
             vae_images = None
             vae_image_sizes = None
 
-        _validate_condition_image_sizes(condition_images, vae_image_sizes)
-
         sampling_params = req.sampling_params
         height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
+        _validate_condition_image_sizes(condition_images, vae_image_sizes, target_size=(height, width))
         num_inference_steps = sampling_params.num_inference_steps or num_inference_steps
         sigmas = sampling_params.sigmas or sigmas
         max_sequence_length = sampling_params.max_sequence_length or max_sequence_length

@@ -57,11 +57,11 @@ def _create_dummy_image(width: int = 256, height: int = 256, seed: int = 0) -> b
     return buf.getvalue()
 
 
-def build_rows(split: str, n: int):
+def build_rows(split: str, n: int, image_width: int = 256, image_height: int = 256):
     rows = []
     for i in range(n):
         prompt_text = USER_PROMPTS[i % len(USER_PROMPTS)]
-        condition_img_bytes = _create_dummy_image(256, 256, seed=i)
+        condition_img_bytes = _create_dummy_image(image_width, image_height, seed=i)
         rows.append(
             {
                 "data_source": "jpeg_compressibility",
@@ -90,12 +90,14 @@ def main():
     )
     parser.add_argument("--train_size", type=int, default=4, help="Number of training samples")
     parser.add_argument("--val_size", type=int, default=4, help="Number of validation samples")
+    parser.add_argument("--image-width", type=int, default=256, help="Condition image width (px)")
+    parser.add_argument("--image-height", type=int, default=256, help="Condition image height (px)")
     args = parser.parse_args()
 
     os.makedirs(args.local_save_dir, exist_ok=True)
 
-    train_df = pd.DataFrame(build_rows("train", args.train_size))
-    val_df = pd.DataFrame(build_rows("test", args.val_size))
+    train_df = pd.DataFrame(build_rows("train", args.train_size, args.image_width, args.image_height))
+    val_df = pd.DataFrame(build_rows("test", args.val_size, args.image_width, args.image_height))
 
     train_path = os.path.join(args.local_save_dir, "train.parquet")
     val_path = os.path.join(args.local_save_dir, "test.parquet")

@@ -20,6 +20,10 @@ import pytest
 import torch
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
+from vllm_omni.diffusion.models.qwen_image.pipeline_qwen_image_edit_plus import (
+    VAE_IMAGE_SIZE,
+    calculate_dimensions,
+)
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.qwen_image_edit_flow_grpo.diffusers_training_adapter import (
@@ -192,3 +196,21 @@ def test_condition_images_require_fixed_square_latents():
         _validate_condition_image_sizes(["image"], [(1024, 1024), (1024, 1024)])
     with pytest.raises(ValueError, match="square condition images"):
         _validate_condition_image_sizes(["image"], [(1344, 768)])
+
+
+def test_condition_images_allow_fixed_nonsquare_target():
+    # (height, width) targets for 16:9 and 4:3 aspect ratios.
+    for target in [(720, 1280), (768, 1024)]:
+        expected = calculate_dimensions(VAE_IMAGE_SIZE, target[1] / target[0])
+        # A condition image whose VAE size matches the target aspect ratio is accepted.
+        _validate_condition_image_sizes(["image"], [expected], target_size=target)
+
+    # A square condition under a non-square target is rejected early with a
+    # clear message instead of failing later in the cross-sample concat.
+    with pytest.raises(ValueError, match="target aspect ratio"):
+        _validate_condition_image_sizes(["image"], [(1024, 1024)], target_size=(720, 1280))
+
+    # A square target still requires square conditions (backward compatible).
+    _validate_condition_image_sizes(["image"], [(1024, 1024)], target_size=(512, 512))
+    with pytest.raises(ValueError, match="target aspect ratio"):
+        _validate_condition_image_sizes(["image"], [(1344, 768)], target_size=(512, 512))

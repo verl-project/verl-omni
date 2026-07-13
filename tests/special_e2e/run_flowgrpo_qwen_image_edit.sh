@@ -16,14 +16,36 @@ dummy_train_path=${TRAIN_FILES:-${DATA_DIR}/train.parquet}
 dummy_test_path=${VAL_FILES:-${DATA_DIR}/test.parquet}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-1}
 ROLLOUT_TP=${ROLLOUT_TP:-1}
+ACTOR_SP=${ACTOR_SP:-1}
 ROLLOUT_WORKERS=${ROLLOUT_WORKERS:-$((NUM_GPUS / ROLLOUT_TP))}
 if [[ "${ROLLOUT_WORKERS}" -lt 1 ]]; then
     echo "ROLLOUT_WORKERS must be >= 1 (NUM_GPUS=${NUM_GPUS}, ROLLOUT_TP=${ROLLOUT_TP})" >&2
     exit 2
 fi
 
+# Ulysses sequence parallelism needs the SP-capable native attention on both
+# actor and rollout; FA3 (_flash_3_varlen_hub) does not support SP. Keep FA3 as
+# the default for SP=1 (backward compatible).
+if [[ "${ACTOR_SP}" -gt 1 ]]; then
+    ATTN_BACKEND=${ATTN_BACKEND:-native}
+    ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-TORCH_SDPA}
+else
+    ATTN_BACKEND=${ATTN_BACKEND:-_flash_3_varlen_hub}
+    ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-FLASH_ATTN}
+fi
+
 ENGINE=vllm_omni
 max_prompt_length=512
+
+# Target output resolution and condition-image resolution. Defaults are square
+# (backward compatible); set both to a matching non-square aspect ratio (e.g.
+# IMAGE_HEIGHT=144 IMAGE_WIDTH=256 COND_HEIGHT=288 COND_WIDTH=512 for 16:9) to
+# exercise the fixed non-square condition path.
+IMAGE_HEIGHT=${IMAGE_HEIGHT:-512}
+IMAGE_WIDTH=${IMAGE_WIDTH:-512}
+COND_HEIGHT=${COND_HEIGHT:-256}
+COND_WIDTH=${COND_WIDTH:-256}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.5}
 
 n_resp_per_prompt=2
 micro_bsz_per_gpu=1
@@ -34,7 +56,9 @@ train_batch_size=$((mini_bsz * n_resp_per_prompt))
 python3 tests/special_e2e/create_dummy_image_edit_data.py \
     --local_save_dir "${DATA_DIR}" \
     --train_size "${train_batch_size}" \
-    --val_size 4
+    --val_size 4 \
+    --image-width "${COND_WIDTH}" \
+    --image-height "${COND_HEIGHT}"
 
 # FlowGRPO with jpeg_compressibility rule reward and no reward model.
 python3 -m verl_omni.trainer.main_diffusion \
@@ -47,6 +71,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \
     actor_rollout_ref.model.target_modules="['to_q','to_k','to_v','to_out.0','add_q_proj','add_k_proj','add_v_proj','to_add_out']" \
+    actor_rollout_ref.model.attn_backend=${ATTN_BACKEND} \
     actor_rollout_ref.actor.optim.lr=1e-4 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${mini_bsz} \
@@ -54,18 +79,21 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
+    actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${ACTOR_SP} \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.04 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${micro_bsz_per_gpu} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \
+    actor_rollout_ref.rollout.rollout_attn_backend=${ROLLOUT_ATTN_BACKEND} \
     actor_rollout_ref.rollout.name=${ENGINE} \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     actor_rollout_ref.rollout.agent.num_workers=${ROLLOUT_WORKERS} \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.pipeline.num_inference_steps=4 \
-    actor_rollout_ref.rollout.pipeline.height=512 \
-    actor_rollout_ref.rollout.pipeline.width=512 \
+    actor_rollout_ref.rollout.pipeline.height=${IMAGE_HEIGHT} \
+    actor_rollout_ref.rollout.pipeline.width=${IMAGE_WIDTH} \
+    actor_rollout_ref.rollout.gpu_memory_utilization=${GPU_MEMORY_UTILIZATION} \
     actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.rollout.pipeline.true_cfg_scale=4.0 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=${max_prompt_length} \
