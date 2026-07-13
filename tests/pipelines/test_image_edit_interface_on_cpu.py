@@ -200,57 +200,24 @@ class TestProcessorPreparationHook:
         assert cfg.processor == "processor"
         assert events == [("hook", str(model_dir)), ("processor", str(processor_dir))]
 
-    def test_driver_prepares_processor_before_loading_it(self, tmp_path):
-        from verl_omni.trainer.main_diffusion import _prepare_processor_files
+    def test_driver_prepares_processor_before_loading_alternate_path(self, tmp_path):
+        from verl_omni.trainer.main_diffusion import TaskRunner
 
-        model_dir = tmp_path / "model"
-        model_dir.mkdir()
-        (model_dir / "model_index.json").write_text(json.dumps({"_class_name": "_DriverHookPipeline"}))
-        events = []
-
-        @DiffusionModelBase.register("_DriverHookPipeline", algorithm="flow_grpo")
-        class _DriverHookModel(DiffusionModelBase):
-            @classmethod
-            def prepare_processor_files(cls, model_path: str) -> None:
-                events.append(("hook", model_path))
-
-            @classmethod
-            def build_scheduler(cls, model_config):
-                pass
-
-            @classmethod
-            def set_timesteps(cls, scheduler, model_config, device):
-                pass
-
-            @classmethod
-            def prepare_model_inputs(cls, module, model_config, *args, **kwargs):
-                pass
-
-            @classmethod
-            def forward_and_sample_previous_step(cls, *args, **kwargs):
-                pass
-
-        model_config = OmegaConf.create({"architecture": None, "algorithm": "flow_grpo", "external_lib": None})
-        _prepare_processor_files(str(model_dir), model_config)
-        events.append(("processor", str(model_dir / "processor")))
-
-        assert events == [
-            ("hook", str(model_dir)),
-            ("processor", str(model_dir / "processor")),
-        ]
-
-    def test_driver_accepts_alternate_processor_path(self, tmp_path):
-        from verl_omni.trainer.main_diffusion import _prepare_processor_files
+        class _StopAfterProcessor(Exception):
+            pass
 
         model_dir = tmp_path / "model"
         model_dir.mkdir()
         alternate_processor = tmp_path / "prepared-processor"
+        alternate_processor.mkdir()
         (model_dir / "model_index.json").write_text(json.dumps({"_class_name": "_AlternateProcessorPipeline"}))
+        events = []
 
         @DiffusionModelBase.register("_AlternateProcessorPipeline", algorithm="flow_grpo")
         class _AlternateProcessorModel(DiffusionModelBase):
             @classmethod
             def prepare_processor_files(cls, model_path: str) -> str:
+                events.append(("hook", model_path))
                 return str(alternate_processor)
 
             @classmethod
@@ -269,6 +236,40 @@ class TestProcessorPreparationHook:
             def forward_and_sample_previous_step(cls, *args, **kwargs):
                 pass
 
-        model_config = OmegaConf.create({"architecture": None, "algorithm": "flow_grpo", "external_lib": None})
+        config = OmegaConf.create(
+            {
+                "actor_rollout_ref": {
+                    "model": {
+                        "path": str(model_dir),
+                        "tokenizer_path": str(model_dir),
+                        "architecture": None,
+                        "algorithm": "flow_grpo",
+                        "external_lib": None,
+                        "use_shm": False,
+                    }
+                },
+                "data": {"trust_remote_code": False},
+            }
+        )
 
-        assert _prepare_processor_files(str(model_dir), model_config) == str(alternate_processor)
+        def _fake_hf_processor(path, **kwargs):
+            events.append(("processor", path))
+            return "processor"
+
+        runner = TaskRunner()
+        with (
+            patch.object(runner, "add_actor_rollout_worker", return_value=(object(), object())),
+            patch.object(runner, "add_reward_model_resource_pool"),
+            patch.object(runner, "add_ref_policy_worker"),
+            patch.object(runner, "init_resource_pool_mgr", side_effect=_StopAfterProcessor),
+            patch("verl_omni.utils.fs.resolve_model_local_dir", return_value=str(model_dir)),
+            patch("verl.utils.hf_tokenizer", return_value="tokenizer"),
+            patch("verl.utils.hf_processor", side_effect=_fake_hf_processor),
+            pytest.raises(_StopAfterProcessor),
+        ):
+            runner.run(config)
+
+        assert events == [
+            ("hook", str(model_dir)),
+            ("processor", str(alternate_processor)),
+        ]

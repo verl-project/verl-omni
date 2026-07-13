@@ -27,6 +27,18 @@ from verl_omni.workers.config import DiffusionModelConfig
 
 from .model_base import DiffusionI2IModelBase, DiffusionModelBase
 
+__all__ = [
+    "ImageGenerationRequest",
+    "build_scheduler",
+    "forward",
+    "forward_and_sample_previous_step",
+    "get_sigmas",
+    "prepare_model_inputs",
+    "prepare_noisy_latents",
+    "sample_noise_and_timesteps",
+    "set_timesteps",
+]
+
 
 @dataclass
 class ImageGenerationRequest:
@@ -70,6 +82,7 @@ class ImageGenerationRequest:
             additional_information.get("condition_images") if isinstance(additional_information, Mapping) else None,
         ]
         images = []
+        # Select the first image source explicitly present in the request.
         for candidate in image_candidates:
             if candidate is not None:
                 images = candidate
@@ -85,6 +98,7 @@ class ImageGenerationRequest:
             additional_information,
         ]
         metadata = None
+        # Select the first metadata source explicitly present in the request.
         for candidate in metadata_candidates:
             if candidate is not None:
                 metadata = candidate
@@ -98,19 +112,6 @@ class ImageGenerationRequest:
             negative_prompt=request_payload.get("negative_prompt"),
             metadata=metadata,
         )
-
-
-__all__ = [
-    "ImageGenerationRequest",
-    "build_scheduler",
-    "forward",
-    "forward_and_sample_previous_step",
-    "get_sigmas",
-    "prepare_model_inputs",
-    "prepare_noisy_latents",
-    "sample_noise_and_timesteps",
-    "set_timesteps",
-]
 
 
 def prepare_model_inputs(
