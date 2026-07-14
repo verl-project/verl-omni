@@ -1,8 +1,6 @@
 # Qwen-Image-Edit-2511 LoRA RL with PickScore reward.
 set -x
 
-export RAY_DEDUP_LOGS=0
-
 # Enable reward model on GPU: Ray num_gpus=0 actors can still see CUDA devices.
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 
