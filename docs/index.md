@@ -87,6 +87,8 @@ api/utils.rst
 :caption: Developer Guide
 
 contributing/editing-agent-instructions.md
+contributing/ci_cd.md
+contributing/testing_guide.md
 contributing/integrating_a_diffusion_model.md
 contributing/integrating_a_non_diffusers_model.md
 contributing/integrating_a_stepwise_continuous_batching_model.md
@@ -120,7 +122,9 @@ pre-commit run
 
 ### Adding CI tests
 
-If possible, please add CI test(s) for your new feature. Pick the most relevant workflow from [`.github/workflows/`](https://github.com/verl-project/verl-omni/tree/main/.github/workflows):
+If possible, please add CI test(s) for your new feature. See {doc}`contributing/testing_guide` for the L1-L4 test taxonomy, placement rules, and coverage policy.
+
+Pick the most relevant workflow from [`.github/workflows/`](https://github.com/verl-project/verl-omni/tree/main/.github/workflows):
 
 | Workflow | When to use |
 |---|---|

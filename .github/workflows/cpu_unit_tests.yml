@@ -60,4 +60,28 @@ jobs:
         run: |
           echo '[pytest]' > pytest.ini
           echo 'python_files = *_on_cpu.py' >> pytest.ini
-          pytest -s -x --asyncio-mode=auto tests/
+          set -o pipefail
+          pytest -s -x --asyncio-mode=auto \
+            --cov=verl_omni \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            tests/ | tee pytest-coverage.txt
+      - name: Add coverage summary
+        if: always()
+        run: |
+          {
+            echo "## CPU unit test coverage"
+            echo
+            echo '```text'
+            python -c 'from pathlib import Path; output = Path("pytest-coverage.txt"); text = output.read_text() if output.exists() else "Coverage output was not generated."; lines = text.splitlines(); start = next((idx for idx, line in enumerate(lines) if line.startswith("Name")), None); print(text if start is None else "\n".join(lines[start:]))'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-unit-test-coverage
+          path: |
+            coverage.xml
+            pytest-coverage.txt
+          if-no-files-found: ignore

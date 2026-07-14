@@ -62,6 +62,7 @@ train = [
 ]
 dev = [
     "pytest",
+    "pytest-cov",
     "pre-commit",
     "py-spy",
     "pytest-asyncio",
@@ -131,6 +132,25 @@ module = [
 "verl_omni.trainer.config.algorithm",
 ]
 ignore_errors = false
+
+# -------------------------------
+# tool.coverage - Test coverage
+# -------------------------------
+[tool.coverage.run]
+branch = true
+source = ["verl_omni"]
+omit = [
+    "verl_omni/version/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
 
 # -------------------------------
 # tool.setuptools - Additional config
