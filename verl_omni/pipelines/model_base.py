@@ -14,7 +14,7 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from diffusers import ModelMixin, SchedulerMixin
@@ -445,3 +445,237 @@ class VllmOmniPipelineBase:
         if pipeline_cls is None:
             return None
         return f"{pipeline_cls.__module__}.{pipeline_cls.__qualname__}"
+
+
+class OmniModelBase(ABC):
+    """Abstract base class for omni model training adapters.
+
+    Different omni models (Qwen3-Omni, future models) have multi-stage
+    architectures with thinker, talker, and codec components.  Subclass
+    this ABC and implement the abstract methods to plug your model into
+    the verl RL training loop.
+
+    Unlike diffusion models, omni models are AR language models — the
+    adapter is **algorithm-agnostic**.  RL algorithm selection (GSPO,
+    GRPO, RLOO, etc.) is handled by verl's existing config fields
+    ``actor.policy_loss.loss_mode`` and ``algorithm.adv_estimator``.
+
+    To register, decorate your subclass with::
+
+        @OmniModelBase.register("Qwen3OmniMoeForConditionalGeneration", stage="thinker")
+        class Qwen3OmniThinkerAdapter(OmniModelBase):
+            ...
+
+    The registry key is ``(architecture, stage)`` where *architecture*
+    matches the HF config ``architectures[0]`` and *stage* is
+    ``thinker``, ``talker``, or ``all``.
+    """
+
+    _registry: dict[tuple[str, str], type["OmniModelBase"]] = {}
+
+    @classmethod
+    def register(cls, architecture: str, stage: str = "thinker"):
+        """Class decorator that registers a subclass for ``(architecture, stage)``."""
+
+        def decorator(subclass: type["OmniModelBase"]) -> type["OmniModelBase"]:
+            cls._registry[(architecture, stage)] = subclass
+            return subclass
+
+        return decorator
+
+    @classmethod
+    def get_class(cls, model_config) -> type["OmniModelBase"]:
+        """Return the registered subclass for ``(architecture, model_stage)``.
+
+        Args:
+            model_config: An ``OmniModelConfig`` instance (or any config object
+                with ``architecture`` and ``model_stage`` attributes).
+
+        Returns:
+            type[OmniModelBase]: The registered adapter class.
+
+        Raises:
+            NotImplementedError: If no adapter is registered for the given
+                ``(architecture, stage)`` key.
+        """
+        key = (model_config.architecture, model_config.model_stage)
+        if key not in cls._registry and getattr(model_config, "external_lib", None) is not None:
+            from verl.utils.import_utils import import_external_libs
+
+            import_external_libs(model_config.external_lib)
+
+        try:
+            return cls._registry[key]
+        except KeyError:
+            registered = sorted(cls._registry.keys())
+            raise NotImplementedError(
+                f"No omni model registered for (architecture={model_config.architecture!r}, "
+                f"stage={model_config.model_stage!r}). Registered: {registered}. "
+                f"Set ``external_lib`` to load your training adapter."
+            ) from None
+
+    @classmethod
+    @abstractmethod
+    def get_strip_modules(cls, model_config) -> list[str]:
+        """Return submodule prefixes to strip before FSDP init.
+
+        Multi-stage omni models contain components that are not trained
+        in every run (e.g. the talker and codec are dead weight during
+        thinker-only training).  Stripping them before FSDP wrapping
+        saves memory and avoids sharding unused parameters.
+
+        Args:
+            model_config: The ``OmniModelConfig``.
+
+        Returns:
+            list[str]: Submodule attribute names to delete.  For
+            thinker-only training this is typically ``["talker",
+            "code2wav", "code_predictor"]``; for all-stage training an
+            empty list.
+        """
+        pass
+
+    @classmethod
+    @abstractmethod
+    def configure_processor(cls, model_path: str, model_config) -> Any:
+        """Load and configure the multimodal processor.
+
+        Returns a processor object that handles text, image, audio, and
+        video inputs.  Must provide ``apply_chat_template``, ``__call__``,
+        ``tokenizer``, and ``chat_template``.
+
+        Called by the omni trainer at init time instead of verl's
+        default ``hf_processor`` helper.
+
+        Args:
+            model_path: Local path to the model checkpoint.
+            model_config: The ``OmniModelConfig``.
+
+        Returns:
+            The configured processor (model-specific type).
+        """
+        pass
+
+    @classmethod
+    @abstractmethod
+    def configure_tokenizer(cls, model_path: str, model_config) -> Any:
+        """Load and configure the tokenizer.
+
+        Handles model-specific setup such as loading ``chat_template``
+        from a separate JSON file.
+
+        Called by the omni trainer at init time instead of verl's
+        default ``hf_tokenizer`` helper.
+
+        Args:
+            model_path: Local path to the model checkpoint.
+            model_config: The ``OmniModelConfig``.
+
+        Returns:
+            The configured tokenizer (model-specific type).
+        """
+        pass
+
+    @classmethod
+    def configure_model(cls, module, model_config):
+        """Configure the model after loading and before FSDP wrapping.
+
+        Default implementation strips the submodules returned by
+        ``get_strip_modules``.  Override to also:
+
+        - Register the model class with ``AutoModelForCausalLM``.
+        - Redirect ``forward()`` and embedding accessors to the
+          trainable sub-component.
+        - Force ``tie_word_embeddings=False`` for FSDP compatibility.
+        - Unfuse MoE experts for PEFT / LoRA.
+
+        Args:
+            module: The loaded model (before FSDP wrapping).
+            model_config: The ``OmniModelConfig``.
+
+        Returns:
+            The configured module.
+        """
+        for submod_name in cls.get_strip_modules(model_config):
+            if hasattr(module, submod_name):
+                delattr(module, submod_name)
+
+        return module
+
+
+class OmniRolloutPipelineBase:
+    """Registry for omni model vLLM-Omni pipeline topologies.
+
+    Each registered entry provides model-specific topology defaults for
+    running the model as a multi-stage pipeline in vLLM-Omni.
+
+    To register, decorate your subclass with::
+
+        @OmniRolloutPipelineBase.register("qwen3_omni_moe")
+        class Qwen3OmniRolloutAdapter(OmniRolloutPipelineBase):
+            ...
+
+    Registration uses a ``model_type`` key matching vLLM-Omni's pipeline
+    registry names (e.g. ``qwen3_omni_moe``).
+    """
+
+    _registry: dict[str, type["OmniRolloutPipelineBase"]] = {}
+
+    @classmethod
+    def register(cls, model_type: str):
+        """Class decorator that registers a rollout adapter for ``model_type``."""
+
+        def decorator(subclass: type["OmniRolloutPipelineBase"]) -> type["OmniRolloutPipelineBase"]:
+            cls._registry[model_type] = subclass
+            return subclass
+
+        return decorator
+
+    @classmethod
+    def get_class(cls, model_type: str) -> type["OmniRolloutPipelineBase"] | None:
+        """Return the registered rollout adapter for ``model_type``, or ``None``.
+
+        Returns ``None`` when the model type is not registered — unlike
+        ``OmniModelBase.get_class``, which raises on miss.
+        Rollout adapters are optional: a model may use default pipeline
+        topology or external runner configuration.
+        """
+        return cls._registry.get(model_type)
+
+    @classmethod
+    @abstractmethod
+    def build_stage_configs(cls, pipeline_mode: str = "thinker_only") -> list:
+        """Return per-stage pipeline topology for vLLM-Omni.
+
+        Each adapter defines its own *pipeline_mode* vocabulary
+        (e.g. ``thinker_only`` / ``full`` for omni models,
+        ``ar_only`` / ``dit_only`` for diffusion hybrids).
+
+        Args:
+            pipeline_mode: Model-specific mode selector.
+
+        Returns:
+            list: One frozen topology object per pipeline stage.
+        """
+        pass
+
+    @classmethod
+    def rollout_flags(cls, pipeline_mode="thinker_only") -> dict[int, dict]:
+        """Return per-stage rollout flags for *pipeline_mode*.
+
+        Returns a ``dict[int, dict]`` mapping stage IDs to flags the
+        rollout engine should apply (e.g. ``return_hidden_states``,
+        ``final_output``).  Default returns an empty dict — models that
+        don't need rollout-specific flags get this for free.
+
+        Subclasses override to add model-specific flags like
+        ``return_hidden_states`` on intermediate AR stages in omni
+        pipelines.
+
+        Args:
+            pipeline_mode: The mode used to build the stages.
+
+        Returns:
+            dict[int, dict]: Per-stage flags (empty dict by default).
+        """
+        return {}
