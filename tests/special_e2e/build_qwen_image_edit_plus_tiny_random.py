@@ -11,22 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Build a tiny local Qwen-Image-Edit-Plus checkpoint with random weights.
+"""Build a tiny Qwen-Image-Edit-Plus checkpoint for smoke tests.
 
-No tiny-random Qwen-Image-Edit checkpoint is published on the Hub, so the
-FlowGRPO image-edit smoke test builds one locally. Following
-``build_sd3_tiny_random.py`` and ``build_qwen3_omni_tiny_random.py``, the
-diffusion components (transformer, VAE, Qwen2.5-VL text encoder) are constructed
-in memory with random weights and shrunk to a couple of layers. The tokenizer,
-Qwen2VLProcessor and scheduler are re-serialized from a cached source checkpoint
-(``Qwen/Qwen-Image-Edit-2511`` by default) because the ``<image>`` placeholder
-expansion depends on the exact special-token ids and image-processor geometry;
-tokenization quality is irrelevant for a plumbing smoke test.
-
-The shared hidden size ties three interfaces together and MUST stay consistent:
-  transformer ``joint_attention_dim`` == text ``hidden_size`` == vision
-  ``out_hidden_size`` (the text encoder feeds cross-attention context to the
-  transformer, and the vision tower projects into the text hidden size).
+The tokenizer and processor come from the source checkpoint because image
+placeholder expansion depends on their special-token IDs and geometry.
 
 Usage:
     python tests/special_e2e/build_qwen_image_edit_plus_tiny_random.py \

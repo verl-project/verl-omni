@@ -2,7 +2,6 @@
 set -x
 
 export RAY_DEDUP_LOGS=0
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Enable reward model on GPU: Ray num_gpus=0 actors can still see CUDA devices.
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0

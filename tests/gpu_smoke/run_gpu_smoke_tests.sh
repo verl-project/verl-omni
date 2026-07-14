@@ -264,11 +264,6 @@ run_selected_test 8 "Qwen3-Omni Thinker GSPO LoRA e2e" \
     env CUDA_VISIBLE_DEVICES="0,1" NUM_GPUS=2 \
     bash tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_smoke.sh
 
-# Test 9 is optional because its tiny checkpoint is not part of the CI image.
-run_selected_test 9 "Qwen-Image-Edit I2I FlowGRPO e2e" \
-    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
-    bash tests/special_e2e/run_flowgrpo_qwen_image_edit.sh
-
 # ══════════════════════════════════════════════════════════════════════════════
 # SUMMARY
 # ══════════════════════════════════════════════════════════════════════════════

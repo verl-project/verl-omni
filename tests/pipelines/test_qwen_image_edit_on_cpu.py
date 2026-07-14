@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import json
-import stat
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,11 +26,9 @@ from vllm_omni.diffusion.models.qwen_image.pipeline_qwen_image_edit_plus import 
 )
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
-from verl_omni.pipelines.qwen_image_edit_flow_grpo.diffusers_training_adapter import (
-    QwenImageEditPlusFlowGRPO,
-    _processor_cache_key,
-)
+from verl_omni.pipelines.qwen_image_edit_flow_grpo.diffusers_training_adapter import QwenImageEditPlusFlowGRPO
 from verl_omni.pipelines.qwen_image_edit_flow_grpo.vllm_omni_rollout_adapter import (
+    QwenImageEditPlusPipelineWithLogProb,
     _use_true_cfg,
     _validate_condition_image_sizes,
 )
@@ -53,40 +50,23 @@ def _non_tensor_stack(values):
 def test_processor_hook_creates_missing_config(tmp_path):
     processor_dir = tmp_path / "processor"
     processor_dir.mkdir()
-    cache_dir = tmp_path / "cache"
 
-    with patch.dict("os.environ", {"VERL_OMNI_PROCESSOR_CACHE": str(cache_dir)}):
-        prepared_dir = QwenImageEditPlusFlowGRPO.prepare_processor_files(str(tmp_path))
+    prepared_dir = QwenImageEditPlusFlowGRPO.prepare_processor_files(str(tmp_path))
 
-    assert not (processor_dir / "config.json").exists()
-    assert json.loads((Path(prepared_dir) / "config.json").read_text()) == {"model_type": "qwen2_vl"}
+    assert prepared_dir == str(processor_dir)
+    assert json.loads((Path(prepared_dir) / "config.json").read_text(encoding="utf-8")) == {"model_type": "qwen2_vl"}
 
 
-def test_processor_hook_accepts_read_only_model_directory(tmp_path):
+def test_processor_hook_preserves_existing_config(tmp_path):
     processor_dir = tmp_path / "processor"
     processor_dir.mkdir()
-    (processor_dir / "preprocessor_config.json").write_text("{}")
-    processor_dir.chmod(0o555)
-    cache_dir = tmp_path / "cache"
-    try:
-        with patch.dict("os.environ", {"VERL_OMNI_PROCESSOR_CACHE": str(cache_dir)}):
-            prepared_dir = QwenImageEditPlusFlowGRPO.prepare_processor_files(str(tmp_path))
-        assert (Path(prepared_dir) / "config.json").is_file()
-        assert stat.S_IMODE(Path(prepared_dir).stat().st_mode) & stat.S_IWUSR
-    finally:
-        processor_dir.chmod(0o755)
+    config_path = processor_dir / "config.json"
+    config_path.write_text('{"model_type": "custom"}', encoding="utf-8")
 
+    prepared_dir = QwenImageEditPlusFlowGRPO.prepare_processor_files(str(tmp_path))
 
-def test_processor_cache_key_changes_when_local_files_change(tmp_path):
-    processor_dir = tmp_path / "processor"
-    processor_dir.mkdir()
-    config_path = processor_dir / "preprocessor_config.json"
-    config_path.write_text("{}")
-    original_key = _processor_cache_key(processor_dir)
-
-    config_path.write_text('{"updated": true}')
-
-    assert _processor_cache_key(processor_dir) != original_key
+    assert prepared_dir == str(processor_dir)
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {"model_type": "custom"}
 
 
 def test_get_class_applies_qwen_ulysses_patch():
@@ -208,8 +188,19 @@ def test_true_cfg_requires_negative_prompt_inputs():
         _use_true_cfg(4.0, None, None, None)
 
 
+def test_prompt_encoding_requires_condition_images():
+    with pytest.raises(AssertionError, match="requires condition images"):
+        QwenImageEditPlusPipelineWithLogProb._get_qwen_prompt_embeds(
+            None,
+            torch.tensor([1]),
+            condition_images=None,
+        )
+
+
 def test_condition_images_require_fixed_square_latents():
     _validate_condition_image_sizes(["image"], [(1024, 1024)])
+    with pytest.raises(ValueError, match="vae_image_sizes"):
+        _validate_condition_image_sizes(["image"], None)
     with pytest.raises(ValueError, match="exactly one condition image"):
         _validate_condition_image_sizes(["image", "image"], [(1024, 1024), (1024, 1024)])
     with pytest.raises(ValueError, match="vae_image_sizes"):

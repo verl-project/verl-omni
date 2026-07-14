@@ -12,20 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Qwen-Image-Edit-Plus rollout adapter for vllm-omni with SDE log-prob collection.
-
-Extends the upstream :class:`QwenImageEditPlusPipeline` to:
-1. Replace the scheduler with :class:`FlowMatchSDEDiscreteScheduler`.
-2. Collect per-step latents, log-probs, and timesteps during the SDE window.
-3. Return prompt embeddings and condition image latents in
-   :class:`DiffusionOutput.custom_output` for the agent loop / trainer.
-
-Condition images are parsed from the rollout request payload via
-:class:`ImageGenerationRequest`, which checks ``multi_modal_data["image"]``
-first (the raw PIL list the agent loop produced) and falls back to
-``additional_information["condition_images"]``.
-"""
+"""Qwen-Image-Edit-Plus rollout adapter with SDE log-prob collection."""
 
 import os
 from typing import Any, Literal
@@ -84,18 +71,9 @@ def _validate_condition_image_sizes(condition_images, vae_image_sizes, target_si
             f"got {len(condition_images)} condition images but {len(vae_image_sizes)} vae_image_sizes entries"
         )
     if not vae_image_sizes:
-        return
+        raise ValueError("Qwen-Image-Edit requires non-empty additional_information['vae_image_sizes']")
 
-    # Every sample in a training batch must resolve to the SAME condition VAE
-    # size; otherwise the cross-sample concatenation of ``condition_image_latents``
-    # in the agent loop (and the FSDP micro-batch) fails on mismatched sequence
-    # lengths. When the pipeline target height/width are known we anchor every
-    # sample to their aspect ratio through the same upstream
-    # ``calculate_dimensions`` that produced ``vae_image_sizes``, so any fixed
-    # aspect ratio (e.g. 16:9, 4:3) is allowed as long as every source image
-    # shares it. A square target reduces to the historical 1024x1024
-    # requirement. When the target size is unknown we fall back to requiring
-    # square conditions.
+    # Condition and target aspect ratios must match so batched latent lengths stay constant.
     if target_size is not None and all(target_size):
         target_height, target_width = target_size
         expected = calculate_dimensions(VAE_IMAGE_SIZE, target_width / target_height)
@@ -119,17 +97,7 @@ def _validate_condition_image_sizes(condition_images, vae_image_sizes, target_si
 
 @VllmOmniPipelineBase.register("QwenImageEditPlusPipeline", algorithm="flow_grpo")
 class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImageEditPlusPipeline):
-    """Rollout pipeline for Qwen-Image-Edit-Plus that captures per-step log-probabilities.
-
-    Extends :class:`~vllm_omni.diffusion.models.qwen_image.pipeline_qwen_image_edit_plus.QwenImageEditPlusPipeline`
-    with a custom SDE-based scheduler and additional output fields required
-    for RL training (e.g. FlowGRPO).  In addition to the final generated image
-    the pipeline returns all intermediate latents, their log-probabilities,
-    the corresponding timesteps, and the condition image latents.
-
-    Registered under ``"QwenImageEditPlusPipeline"`` for vllm-omni rollout
-    dispatch.
-    """
+    """Qwen-Image-Edit-Plus rollout pipeline for FlowGRPO."""
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
@@ -151,24 +119,8 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
         condition_images: list | None = None,
         dtype: torch.dtype | None = None,
     ):
-        """Encode pre-tokenized prompt IDs with optional condition images.
-
-        The agent loop expanded every ``<image>`` placeholder in the prompt
-        text into a long run of ``<|vision_start|><|image_pad|>...<|vision_end|>``
-        tokens by calling ``processor(text=..., images=raw_images, ...)`` on
-        the same raw PIL list.  Without ``pixel_values`` / ``image_grid_thw``
-        the Qwen2.5-VL text_encoder treats every ``<|image_pad|>`` as an empty
-        word embedding, prompt features become garbage, and the diffusion
-        transformer denoises noise into noise.  With them, the encoder fuses
-        real image features in.
-
-        IMPORTANT: ``condition_images`` here MUST be the raw PIL images
-        forwarded by the agent loop (i.e. ``multi_modal_data["image"]``),
-        NOT the resized list that vllm-omni's ``pre_process_func`` writes to
-        ``additional_information["condition_images"]``.  The latter is already
-        resized to ``CONDITION_IMAGE_SIZE`` (384x384) and would produce a
-        mismatched patch grid.
-        """
+        """Encode prompt IDs and their condition-image features."""
+        assert condition_images, "Qwen-Image-Edit prompt encoding requires condition images"
         dtype = dtype or self.text_encoder.dtype
 
         if attention_mask is None:
@@ -179,12 +131,9 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
         attention_mask = attention_mask.to(self.device)
         drop_idx = self.prompt_template_encode_start_idx
 
-        pixel_values = None
-        image_grid_thw = None
-        if condition_images is not None and len(condition_images) > 0:
-            image_inputs = self.processor.image_processor(images=condition_images, return_tensors="pt")
-            pixel_values = image_inputs["pixel_values"].to(device=self.device, dtype=self.text_encoder.dtype)
-            image_grid_thw = image_inputs["image_grid_thw"].to(self.device)
+        image_inputs = self.processor.image_processor(images=condition_images, return_tensors="pt")
+        pixel_values = image_inputs["pixel_values"].to(device=self.device, dtype=self.text_encoder.dtype)
+        image_grid_thw = image_inputs["image_grid_thw"].to(self.device)
 
         encoder_hidden_states = self.text_encoder(
             input_ids=prompt_ids.to(self.device),
@@ -303,10 +252,7 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
             timestep = timestep_value.expand(latents.shape[0]).to(device=latents.device, dtype=torch.float32)
 
             # Concatenate condition image latents and cast to model dtype for transformer forward.
-            if condition_image_latents is not None:
-                latent_model_input = torch.cat([latents, condition_image_latents], dim=1)
-            else:
-                latent_model_input = latents
+            latent_model_input = torch.cat([latents, condition_image_latents], dim=1)
             latent_model_input = latent_model_input.to(self.transformer.img_in.weight.dtype)
 
             # Forward pass for positive prompt
@@ -382,7 +328,6 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
         prompt_embeds_mask: torch.Tensor | None = None,
         negative_prompt_embeds: torch.Tensor | None = None,
         negative_prompt_embeds_mask: torch.Tensor | None = None,
-        image_latents: torch.Tensor | None = None,
         output_type: str | None = "pil",
         attention_kwargs: dict[str, Any] | None = None,
         max_sequence_length: int = 512,
@@ -419,7 +364,6 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
             prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
             negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
             negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)
-            image_latents = custom_prompt.get("image_latents", image_latents)
             additional_information = custom_prompt.get("additional_information", {})
             vae_images = additional_information.get("vae_images")
             vae_image_sizes = additional_information.get("vae_image_sizes")
@@ -497,7 +441,7 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
 
         # Prepare target latents
         num_channels_latents = self.transformer.in_channels // 4
-        latents, prepared_image_latents = self.prepare_latents(
+        latents, condition_image_latents = self.prepare_latents(
             vae_images,
             batch_size * num_images_per_prompt,
             num_channels_latents,
@@ -509,42 +453,17 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
             latents,
         )
 
-        # Use pre-encoded image_latents from the request if provided, otherwise
-        # fall back to what prepare_latents returned (None when images=None).
-        # Rename to condition_image_latents to distinguish from the MFU FLOPs
-        # counter's "image_latents" key (which denotes the denoised latent).
-        condition_image_latents = prepared_image_latents if image_latents is None else image_latents
-        if condition_image_latents is not None:
-            condition_image_latents = condition_image_latents.to(device=self.device, dtype=prompt_embeds.dtype)
+        if condition_image_latents is None:
+            raise ValueError("Qwen-Image-Edit requires preprocessed condition images")
+        condition_image_latents = condition_image_latents.to(device=self.device, dtype=prompt_embeds.dtype)
 
         # Build img_shapes (includes both target and condition image shapes).
         target_shape = (1, height // self.vae_scale_factor // 2, width // self.vae_scale_factor // 2)
-        if condition_image_latents is not None:
-            if not vae_image_sizes:
-                # ``vae_image_sizes`` is populated by the upstream
-                # ``pre_process_func`` whenever ``vae_images`` are encoded.
-                # Without it we cannot recover the condition image's aspect
-                # ratio from the packed sequence length alone (sqrt(seq_len)
-                # only equals the side for perfect squares and otherwise
-                # silently produces wrong RoPE positions). Fail closed for
-                # both ``None`` and the empty-list case. An empty list
-                # would still pass the old ``is None`` check and produce
-                # an ``img_shapes`` entry with no condition regions, which
-                # silently corrupts the transformer's RoPE positions.
-                raise ValueError(
-                    "QwenImageEditPlusPipelineWithLogProb.forward() requires a "
-                    "non-empty additional_information['vae_image_sizes'] when "
-                    f"condition_image_latents is provided; got {vae_image_sizes!r}. The "
-                    "upstream pre_process_func sets this field; bypass it only "
-                    "if you also supply matching vae_image_sizes."
-                )
-            condition_shapes = [
-                (1, vae_height // self.vae_scale_factor // 2, vae_width // self.vae_scale_factor // 2)
-                for vae_width, vae_height in vae_image_sizes
-            ]
-            img_shapes = [[target_shape, *condition_shapes] for _ in range(batch_size)]
-        else:
-            img_shapes = [[target_shape] for _ in range(batch_size)]
+        condition_shapes = [
+            (1, vae_height // self.vae_scale_factor // 2, vae_width // self.vae_scale_factor // 2)
+            for vae_width, vae_height in vae_image_sizes
+        ]
+        img_shapes = [[target_shape, *condition_shapes] for _ in range(batch_size)]
 
         # Prepare timesteps
         timesteps, num_inference_steps = self.prepare_timesteps(num_inference_steps, sigmas, latents.shape[1])
