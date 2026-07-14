@@ -160,13 +160,7 @@ class OmniModelConfig(BaseConfig):
         self.architectures = getattr(self.hf_config, "architectures", None)
 
         if self.load_tokenizer:
-            from verl_omni.pipelines.model_base import OmniModelBase
-
             self.local_tokenizer_path = copy_to_local(self.tokenizer_path, use_shm=self.use_shm)
-
-            adapter_cls = OmniModelBase.get_class(self)
-            self.tokenizer = adapter_cls.configure_tokenizer(self.local_tokenizer_path, self)
-            self.processor = adapter_cls.configure_processor(self.local_path, self)
 
     def get_processor(self):
         """Return the processor, or fall back to the tokenizer."""
