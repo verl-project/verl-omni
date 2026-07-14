@@ -16,12 +16,6 @@ detect_device() {
         echo "gpu"
     else
         echo "npu"
-        ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.0.0}
-        source $ASCEND_HOME_PATH/set_env.sh
-        source $ASCEND_HOME_PATH/../nnal/atb/set_env.sh
-        export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-        export PYTORCH_NPU_ALLOC_CONF=${PYTORCH_NPU_ALLOC_CONF:='expandable_segments:True'}
-        export MULTI_STREAM_MEMORY_REUSE=${MULTI_STREAM_MEMORY_REUSE:=2}
     fi
 }
 
@@ -29,6 +23,13 @@ DEVICE=$(detect_device)
 echo "Detected device: $DEVICE"
 
 if [ "$DEVICE" = "npu" ]; then
+    ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.0.0}
+    source $ASCEND_HOME_PATH/set_env.sh
+    source $ASCEND_HOME_PATH/../nnal/atb/set_env.sh
+    export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+    export PYTORCH_NPU_ALLOC_CONF=${PYTORCH_NPU_ALLOC_CONF:='expandable_segments:True'}
+    export MULTI_STREAM_MEMORY_REUSE=${MULTI_STREAM_MEMORY_REUSE:=2}
+
     ATTENTION_BACKEND='_native_npu'
     ROLLOUT_ATTN_BACKEND='TORCH_SDPA'
     NUM_GPUS_ACTOR_ROLLOUT_REWARD=8
