@@ -10,7 +10,7 @@ TRAIN_FILES=${TRAIN_FILES:-"['${DATA_DIR}/image/train.parquet','${DATA_DIR}/vide
 VAL_FILES=${VAL_FILES:-"['${DATA_DIR}/image/test.parquet','${DATA_DIR}/video/test.parquet','${DATA_DIR}/audio/test.parquet']"}
 NUM_GPUS_ACTOR=${NUM_GPUS_ACTOR:-8}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-1000}
-PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-4}
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-1}
 PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
 LR=${LR:-1.0e-6}
 DPO_BETA=${DPO_BETA:-0.1}
@@ -27,7 +27,7 @@ python3 -m verl_omni.trainer.main_omni \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \
     data.train_batch_size=4 \
-    data.max_prompt_length=512 \
+    data.max_prompt_length=256 \
     data.trust_remote_code=true \
     data.filter_overlong_prompts=false \
     data.custom_cls.path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset \
@@ -38,7 +38,7 @@ python3 -m verl_omni.trainer.main_omni \
     data.sampler.modality_ratios.image="${IMAGE_RATIO}" \
     data.sampler.modality_ratios.video="${VIDEO_RATIO}" \
     data.sampler.modality_ratios.audio="${AUDIO_RATIO}" \
-    +data.mm_configs="{scale_factor:28,image_min_pixels:3136,image_max_pixels:12845056,video_min_pixels:3136,video_max_pixels:602112,max_ratio:200,min_frames:2,max_frames:4,frame_factor:1,sample_rate:16000,fps:2.0,use_audio_in_video:false}" \
+    +data.mm_configs="{scale_factor:28,image_min_pixels:3136,image_max_pixels:524288,video_min_pixels:3136,video_max_pixels:262144,max_ratio:200,min_frames:2,max_frames:2,frame_factor:1,sample_rate:16000,fps:1.0,use_audio_in_video:false}" \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.architecture=Qwen3OmniMoeForConditionalGeneration \
     actor_rollout_ref.model.algorithm=dpo \
@@ -62,7 +62,10 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.veomni_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.veomni_config.init_device=meta \
     actor_rollout_ref.actor.veomni_config.param_offload=true \
+    actor_rollout_ref.actor.veomni_config.reshard_after_forward=false \
     actor_rollout_ref.actor.veomni_config.optimizer_offload=true \
+    actor_rollout_ref.actor.veomni_config.enable_activation_offload=true \
+    actor_rollout_ref.actor.veomni_config.activation_gpu_limit=4.0 \
     actor_rollout_ref.actor.use_kl_loss=false \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     trainer.resume_mode=disable \
