@@ -11,9 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Qwen3-Omni pipeline adapters (Thinker training + rollout pipeline topology)."""
 
-from . import diffusion, omni
-from .diffusion import *  # noqa: F401,F403
-from .omni import *  # noqa: F401,F403
+from .omni_rollout_adapter import Qwen3OmniRolloutAdapter
+from .thinker_training_adapter import Qwen3OmniThinkerAdapter
 
-__all__ = list(diffusion.__all__) + list(omni.__all__)
+__all__ = [
+    "Qwen3OmniThinkerAdapter",
+    "Qwen3OmniRolloutAdapter",
+]
