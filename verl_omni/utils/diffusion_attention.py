@@ -21,11 +21,12 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+ACTOR_FA2_BACKEND = "flash_varlen_hub"
 ACTOR_FA3_BACKEND = "_flash_3_varlen_hub"
 ACTOR_NATIVE_BACKEND = "native"
 
 
-def actor_fa3_available() -> bool:
+def actor_fa_available() -> bool:
     return importlib.util.find_spec("kernels") is not None
 
 
@@ -52,13 +53,13 @@ def rollout_fa3_available() -> bool:
 
 
 def fa3_available() -> bool:
-    return actor_fa3_available() and rollout_fa3_available()
+    return actor_fa_available() and rollout_fa3_available()
 
 
-def fallback_fa3_if_unavailable(config: Any) -> None:
+def fallback_fa_if_unavailable(config: Any) -> None:
     """Downgrade explicit FA3 settings to native when deps are missing."""
     attn_backend = config.actor_rollout_ref.model.get("attn_backend", ACTOR_FA3_BACKEND)
-    if attn_backend != ACTOR_FA3_BACKEND:
+    if attn_backend not in (ACTOR_FA2_BACKEND, ACTOR_FA3_BACKEND):
         return
 
     if fa3_available():
@@ -67,7 +68,7 @@ def fallback_fa3_if_unavailable(config: Any) -> None:
     logger.warning(
         "FA3 requested but unavailable for matched actor+rollout (kernels=%s, rollout_fa3=%s); "
         "falling back to actor=%s.",
-        actor_fa3_available(),
+        actor_fa_available(),
         rollout_fa3_available(),
         ACTOR_NATIVE_BACKEND,
     )
@@ -82,7 +83,7 @@ def validate_attention_consistency(config: Any) -> None:
 
     Rules:
         - If the training engine is VeOmni, skip validation.
-        - If ``attn_backend`` is ``_flash_3_varlen_hub`` (FA2/FA3), rollout
+        - If ``attn_backend`` is ``flash_varlen_hub`` or ``_flash_3_varlen_hub`` (FA2/FA3), rollout
           must be ``FLASH_ATTN``.
         - If ``attn_backend`` is ``native`` or ``_native_npu``, rollout must be
           ``TORCH_SDPA``.
@@ -100,7 +101,7 @@ def validate_attention_consistency(config: Any) -> None:
     attn_backend = model_cfg.get("attn_backend", ACTOR_FA3_BACKEND)
     rollout_backend = config.actor_rollout_ref.rollout.get("rollout_attn_backend")
 
-    if attn_backend == ACTOR_FA3_BACKEND:
+    if attn_backend in (ACTOR_FA2_BACKEND, ACTOR_FA3_BACKEND):
         expected = "FLASH_ATTN"
     elif attn_backend in (ACTOR_NATIVE_BACKEND, "_native_npu"):
         expected = "TORCH_SDPA"

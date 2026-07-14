@@ -190,13 +190,6 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
-        # TODO (mike): we will drop this after it supports in diffusers.
-        if self.use_ulysses_sp and self.model_config.attn_backend == "_flash_3_varlen_hub":
-            raise ValueError(
-                "_flash_3_varlen_hub does not support sequence parallelism. "
-                "Set fsdp_config.ulysses_sequence_parallel_size=1 or switch to a different attn_backend."
-            )
-
     def _build_module_from_registry(self, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
         """Try loading via ``DiffusionModelBase.build_module()``.
 
@@ -272,7 +265,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             try:
                 module.set_attention_backend(self.model_config.attn_backend)
             except Exception as e:
-                if self.model_config.attn_backend == "_flash_3_varlen_hub":
+                if self.model_config.attn_backend in ["flash_varlen_hub", "_flash_3_varlen_hub"]:
                     logger.warning(
                         "Failed to set attention backend to %s (%s). Falling back to 'native' attention backend.",
                         self.model_config.attn_backend,

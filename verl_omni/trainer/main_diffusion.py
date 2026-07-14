@@ -28,7 +28,7 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
 )
-from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
+from verl_omni.utils.diffusion_attention import fallback_fa_if_unavailable, validate_attention_consistency
 
 
 @hydra.main(config_path="./config", config_name="diffusion_trainer", version_base=None)
@@ -41,7 +41,7 @@ def main(config):
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
     OmegaConf.resolve(config)
-    fallback_fa3_if_unavailable(config)
+    fallback_fa_if_unavailable(config)
     validate_attention_consistency(config)
     run_diffusion(config)
 

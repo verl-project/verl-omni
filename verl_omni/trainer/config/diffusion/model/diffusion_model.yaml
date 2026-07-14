@@ -38,7 +38,7 @@ config_path: null
 transformer_subfolder: transformer
 
 # Diffusers attention backend.
-# Supported: "native", "_native_npu", "_flash_3_varlen_hub"
+# Supported: "native", "_native_npu", "flash_varlen_hub", "_flash_3_varlen_hub"
 # GPU default; NPU recipes override with _native_npu. Falls back to native when FA3 deps are missing.
 attn_backend: _flash_3_varlen_hub
 
