@@ -78,7 +78,6 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.veomni_config.param_offload=false \
     actor_rollout_ref.actor.veomni_config.optimizer_offload=false \
     actor_rollout_ref.actor.use_kl_loss=false \
-    actor_rollout_ref.rollout.name=vllm_omni \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     trainer.resume_mode=disable \
     trainer.logger='["console"]' \
