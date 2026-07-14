@@ -63,6 +63,7 @@ from verl_omni.utils.mfu import (
 from verl_omni.workers.config import (
     DiffusionActorConfig,
     DiffusionModelConfig,
+    OmniModelConfig,
 )
 from verl_omni.workers.utils.losses import diffusion_loss
 
@@ -567,7 +568,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        model_config: HFModelConfig | DiffusionModelConfig = omega_conf_to_dataclass(self.config.model)
+        model_config: HFModelConfig | DiffusionModelConfig | OmniModelConfig = omega_conf_to_dataclass(
+            self.config.model
+        )
         is_diffusion = model_config.get("model_type", "language_model") in (
             "diffusion_model",
             "diffusion_dpo_model",
