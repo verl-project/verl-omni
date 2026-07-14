@@ -183,7 +183,7 @@ run_selected_test() {
 
 # ── Determine which tests to run ───────────────────────────────────────────────
 declare -A RUN_TEST=(
-    [0]=1 [1]=1 [2]=1 [3]=1 [4]=1 [5]=1 [6]=1 [7]=1 [8]=1 [9]=0
+    [0]=1 [1]=1 [2]=1 [3]=1 [4]=1 [5]=1 [6]=1 [7]=1 [8]=1
 )
 
 # If explicit IDs were passed on the CLI, override to run only those.
