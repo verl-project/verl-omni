@@ -346,6 +346,9 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
         custom_prompt = req.prompts[0] if req.prompts else {}
 
         # Parse the condition images via the shared ImageGenerationRequest interface.
+        # NOTE: only this image-edit pipeline consumes ImageGenerationRequest for now;
+        # migrating the existing T2I pipelines onto it is left to a follow-up PR to keep
+        # this change focused.
         request_payload = custom_prompt
         if (
             isinstance(custom_prompt, dict)
