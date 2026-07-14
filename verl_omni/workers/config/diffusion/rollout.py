@@ -100,7 +100,7 @@ class DiffusionRolloutConfig(BaseConfig):
     cudagraph_capture_sizes: Optional[list] = None
 
     # vLLM-omni diffusion attention backend.
-    # Allow custom select of attention backend for rollout.
+    # Prefer FLASH_ATTN_3_HUB with actor attn_backend=_flash_3_varlen_hub.
     rollout_attn_backend: str = "FLASH_ATTN"
     free_cache_engine: bool = True
     data_parallel_size: int = 1
