@@ -12,10 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Entrypoint for omni (thinker/talker) model RL training.
-
-Thin Hydra wrapper around verl's ``verl.trainer.main_ppo``.  Sets omni-specific
-Hydra defaults (``omni_trainer.yaml``) and delegates orchestration to verl's
-V1 ``TaskRunnerV1`` / ``run_ppo`` framework.
 """
 
 import hydra
