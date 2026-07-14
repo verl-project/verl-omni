@@ -81,8 +81,8 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         from transformers import AutoConfig, AutoProcessor
         from transformers.models.qwen3_omni_moe import Qwen3OmniMoeThinkerForConditionalGeneration
 
-        processor = AutoProcessor.from_pretrained(model_path)
-        config = AutoConfig.from_pretrained(model_path)
+        processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=model_config.trust_remote_code)
+        config = AutoConfig.from_pretrained(model_path, trust_remote_code=model_config.trust_remote_code)
 
         processor.config = config.thinker_config
         processor.spatial_merge_size = config.thinker_config.vision_config.spatial_merge_size
@@ -107,7 +107,7 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         """
         from transformers import AutoTokenizer
 
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=model_config.trust_remote_code)
         chat_template_path = os.path.join(model_path, "chat_template.json")
         if not os.path.isfile(chat_template_path):
             raise FileNotFoundError(

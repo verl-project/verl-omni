@@ -142,7 +142,7 @@ class OmniModelConfig(BaseConfig):
             tokenizer_path = os.path.join(self.local_path, "tokenizer")
             self.tokenizer_path = tokenizer_path if os.path.exists(tokenizer_path) else self.local_path
 
-        if self.architecture is MISSING:
+        if self.architecture == MISSING:
             config_path = os.path.join(self.local_path, "config.json")
             with open(config_path) as f:
                 self.architecture = json.load(f)["architectures"][0]
