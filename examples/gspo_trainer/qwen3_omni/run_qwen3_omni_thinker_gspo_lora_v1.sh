@@ -23,6 +23,8 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=32 \
+    actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.exclude_modules=".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*" \
     actor_rollout_ref.actor.freeze_vision_tower=true \
     actor_rollout_ref.actor.optim.lr=1e-6 \
@@ -32,7 +34,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.ppo_mini_batch_size=32 \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=30720 \
-    actor_rollout_ref.actor.use_kl_loss=true \
+    actor_rollout_ref.actor.use_kl_loss=false \
     actor_rollout_ref.actor.policy_loss.loss_mode=gspo \
     actor_rollout_ref.actor.clip_ratio_low=3e-4 \
     actor_rollout_ref.actor.clip_ratio_high=4e-4 \
@@ -60,6 +62,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.ref.fsdp_config.model_dtype=bf16 \
     actor_rollout_ref.ref.fsdp_config.use_orig_params=true \
     algorithm.adv_estimator=grpo \
+    algorithm.use_kl_in_reward=False \
     trainer.val_before_train=false \
     trainer.balance_batch=True \
     trainer.critic_warmup=0 \
