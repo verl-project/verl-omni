@@ -29,6 +29,7 @@ See {doc}`start/models` for the full model catalogue and which algorithms run on
 start/install.md
 start/models.md
 start/flowgrpo_quickstart.md
+start/qwen_image_edit.md
 start/multi_node_training.md
 start/metrics.md
 ```
@@ -88,6 +89,7 @@ api/utils.rst
 
 contributing/editing-agent-instructions.md
 contributing/integrating_a_diffusion_model.md
+contributing/integrating_an_i2i_diffusion_model.md
 contributing/integrating_a_non_diffusers_model.md
 contributing/integrating_a_stepwise_continuous_batching_model.md
 contributing/integrating_a_new_policy_gradient_algorithm_for_diffusion_model.md
