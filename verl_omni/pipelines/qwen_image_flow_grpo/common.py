@@ -36,11 +36,7 @@ def apply_true_cfg(
 ) -> torch.Tensor:
     comb_pred = negative_noise_pred + true_cfg_scale * (noise_pred - negative_noise_pred)
     cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
-    # Clamp the denominator: when comb_pred collapses to near-zero under bf16
-    # + few-inference-steps the unclamped form produces inf/NaN that downstream
-    # get cached as the rollout's old_log_prob and silently NaN out the FSDP
-    # grad. Harmless for T2I (noise_norm is never near-zero there).
-    noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True).clamp_min(1e-6)
+    noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
     return comb_pred * (cond_norm / noise_norm)
 
 
