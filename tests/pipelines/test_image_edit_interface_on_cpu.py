@@ -152,7 +152,7 @@ class TestProcessorPreparationHook:
         assert model_cls is _ExternalModel
         import_mock.assert_called_once_with("external_adapter")
 
-    def test_diffusion_model_config_calls_registered_processor_hook(self, tmp_path):
+    def test_diffusion_model_config_loads_processor_without_preparing_files(self, tmp_path):
         model_dir = tmp_path / "model"
         processor_dir = model_dir / "processor"
         processor_dir.mkdir(parents=True)
@@ -163,7 +163,7 @@ class TestProcessorPreparationHook:
         class _HookModel(DiffusionModelBase):
             @classmethod
             def prepare_processor_files(cls, model_path: str) -> None:
-                events.append(("hook", model_path))
+                raise AssertionError("processor preparation must run on the driver")
 
             @classmethod
             def build_scheduler(cls, model_config):
@@ -200,7 +200,7 @@ class TestProcessorPreparationHook:
             )
 
         assert cfg.processor == "processor"
-        assert events == [("hook", str(model_dir)), ("processor", str(processor_dir))]
+        assert events == [("processor", str(processor_dir))]
         import_external_mock.assert_called_once_with("external_adapter")
 
     def test_driver_prepares_processor_before_loading_alternate_path(self, tmp_path):
