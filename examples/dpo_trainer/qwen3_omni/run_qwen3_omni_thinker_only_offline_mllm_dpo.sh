@@ -19,6 +19,7 @@ DPO_BETA=${DPO_BETA:-0.1}
 IMAGE_RATIO=${IMAGE_RATIO:-1.0}
 VIDEO_RATIO=${VIDEO_RATIO:-1.0}
 AUDIO_RATIO=${AUDIO_RATIO:-1.0}
+IMAGE_MAX_PIXELS=${IMAGE_MAX_PIXELS:-262144}
 
 export PYTHONPATH="${SCRIPT_DIR}/../../..${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -41,7 +42,7 @@ python3 -m verl_omni.trainer.main_omni \
     data.sampler.modality_ratios.image="${IMAGE_RATIO}" \
     data.sampler.modality_ratios.video="${VIDEO_RATIO}" \
     data.sampler.modality_ratios.audio="${AUDIO_RATIO}" \
-    +data.mm_configs="{scale_factor:28,image_min_pixels:3136,image_max_pixels:524288,video_min_pixels:3136,video_max_pixels:262144,max_ratio:200,min_frames:2,max_frames:2,frame_factor:1,sample_rate:16000,fps:1.0,use_audio_in_video:false}" \
+    +data.mm_configs="{scale_factor:28,image_min_pixels:3136,image_max_pixels:${IMAGE_MAX_PIXELS},video_min_pixels:3136,video_max_pixels:262144,max_ratio:200,min_frames:2,max_frames:2,frame_factor:1,sample_rate:16000,fps:1.0,use_audio_in_video:false}" \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.architecture=Qwen3OmniMoeForConditionalGeneration \
     actor_rollout_ref.model.algorithm=dpo \

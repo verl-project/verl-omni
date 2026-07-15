@@ -76,9 +76,9 @@ class ModalityBatchSampler:
         ratios = modality_ratios or {}
         self.modalities = sorted(self.groups)
         self.weights = [float(ratios.get(modality, 1.0)) for modality in self.modalities]
-        if any(weight <= 0 for weight in self.weights):
+        if any(weight < 0 for weight in self.weights):
             raise ValueError(
-                "modality_ratios must be positive for present modalities, "
+                "modality_ratios must be non-negative for present modalities, "
                 f"got {dict(zip(self.modalities, self.weights, strict=True))}"
             )
 
