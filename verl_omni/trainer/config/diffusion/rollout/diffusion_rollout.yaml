@@ -158,6 +158,9 @@ val_kwargs:
     # Wan2.2 number of frames (validation)
     num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
 
+    # Audio-video frame rate (validation)
+    frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
+
 # Rollout Algorithm configuration for validation
   algo:
 
@@ -176,6 +179,12 @@ val_kwargs:
     # [start, end] envelope of valid window-start positions; null = entire trajectory
     sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
 
+    # Eligible non-contiguous SDE transition indices; null uses window sampling
+    sde_steps: ${oc.select:actor_rollout_ref.rollout.algo.sde_steps,null}
+
+    # Number of transitions sampled from sde_steps; null uses the full eligible set
+    num_sde_steps: ${oc.select:actor_rollout_ref.rollout.algo.num_sde_steps,null}
+
 # Rollout Algorithm configuration
 algo:
 
@@ -193,6 +202,12 @@ algo:
 
   # [start, end) range for random window start-index sampling
   sde_window_range: null
+
+  # Eligible non-contiguous SDE transition indices; null uses window sampling
+  sde_steps: null
+
+  # Number of transitions sampled from sde_steps; null uses the full eligible set
+  num_sde_steps: null
 
   # MixGRPO sliding-window scheduler configs
 
@@ -232,6 +247,9 @@ pipeline:
 
   # Wan2.2 number of frames
   num_frames: 1
+
+  # Audio-video frame rate
+  frame_rate: 24.0
 
 # support logging rollout prob for debugging purpose
 calculate_log_probs: False
