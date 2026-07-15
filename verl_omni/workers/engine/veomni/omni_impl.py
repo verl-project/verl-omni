@@ -17,6 +17,7 @@ import logging
 import os
 from contextlib import nullcontext
 from dataclasses import fields
+from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 import torch
@@ -156,6 +157,54 @@ class VeOmniOmniEngine(BaseEngine):
             cast_forward_inputs=self.engine_config.mixed_precision_cast_forward_inputs,
         )
 
+    def _build_fsdp_config(self):
+        from veomni.arguments import FSDPConfig
+
+        return FSDPConfig(
+            fsdp_mode="fsdp2",
+            reshard_after_forward=self.engine_config.reshard_after_forward,
+            forward_prefetch=self.engine_config.forward_prefetch,
+            offload=getattr(self.engine_config, "offload", False),
+            max_load_broadcast_size=self.engine_config.max_load_broadcast_size,
+            mixed_precision=self._build_mixed_precision_config(),
+        )
+
+    def _build_accelerator_config(self):
+        from veomni.arguments import AcceleratorConfig, OffloadConfig
+
+        return AcceleratorConfig(
+            dp_replicate_size=self.dp_replicate_size,
+            dp_shard_size=self.dp_shard_size,
+            ep_size=self.engine_config.expert_parallel_size,
+            ulysses_size=self.engine_config.ulysses_parallel_size,
+            fsdp_config=self._build_fsdp_config(),
+            offload_config=OffloadConfig(
+                enable_activation=self.engine_config.enable_activation_offload,
+                activation_gpu_limit=self.engine_config.activation_gpu_limit,
+            ),
+        )
+
+    def _build_veomni_omni_args(self):
+        from veomni.arguments import GradientCheckpointingConfig
+
+        return SimpleNamespace(
+            train=SimpleNamespace(
+                accelerator=self._build_accelerator_config(),
+                gradient_checkpointing=GradientCheckpointingConfig(
+                    enable=self.model_config.enable_gradient_checkpointing,
+                    enable_reentrant=self.engine_config.enable_reentrant,
+                ),
+            )
+        )
+
+    def _build_veomni_omni_trainer(self):
+        from veomni.trainer.base import BaseTrainer
+
+        trainer = SimpleNamespace(base=BaseTrainer.__new__(BaseTrainer))
+        trainer.base.args = self._build_veomni_omni_args()
+        trainer.base.device = torch.device(device_name)
+        return trainer
+
     def _build_model(self):
         from veomni.models import build_foundation_model
 
@@ -174,6 +223,7 @@ class VeOmniOmniEngine(BaseEngine):
     def _parallelize_model(self, model, *, mixed_precision, enable_gradient_checkpointing: bool):
         from veomni.distributed.torch_parallelize import build_parallelize_model
 
+        fsdp_config = self._build_fsdp_config()
         cpu_load_param_name = None
         if hasattr(model, "get_parallel_plan"):
             cpu_load_param_name = getattr(model.get_parallel_plan(), "cpu_load_param_name", None)
@@ -182,28 +232,28 @@ class VeOmniOmniEngine(BaseEngine):
             model,
             init_device=self.engine_config.init_device,
             weights_path=self.model_config.model_path,
-            enable_reshard_after_forward=self.engine_config.reshard_after_forward,
+            enable_reshard_after_forward=fsdp_config.reshard_after_forward,
             mixed_precision=mixed_precision,
             enable_gradient_checkpointing=enable_gradient_checkpointing,
             basic_modules=list(
                 set(getattr(model, "_no_split_modules", None) or []) | set(self.model_config.basic_modules)
             ),
             enable_reentrant=self.engine_config.enable_reentrant,
-            enable_forward_prefetch=self.engine_config.forward_prefetch,
-            enable_fsdp_offload=getattr(self.engine_config, "offload", False),
+            enable_forward_prefetch=fsdp_config.forward_prefetch,
+            enable_fsdp_offload=fsdp_config.offload,
             broadcast_model_weights_from_rank0=True,
             cpu_load_param_name=cpu_load_param_name,
-            max_load_broadcast_size=getattr(self.engine_config, "max_load_broadcast_size", None),
+            max_load_broadcast_size=fsdp_config.max_load_broadcast_size,
         )
 
     def _build_model_optimizer(self):
+        from veomni.trainer.base import BaseTrainer
+
         self.module = self._parallelize_model(
             self._build_model(),
             mixed_precision=self._build_mixed_precision_config(),
             enable_gradient_checkpointing=self.model_config.enable_gradient_checkpointing,
         )
-        self.model_fwd_context = nullcontext()
-        self.model_bwd_context = nullcontext()
 
         if self.engine_config.forward_only:
             self.optimizer = None
@@ -222,6 +272,11 @@ class VeOmniOmniEngine(BaseEngine):
         from veomni.data.data_collator import PostCollator
 
         self.post_forward = PostCollator()
+        self.veomni_trainer = self._build_veomni_omni_trainer()
+        veomni_base = self.veomni_trainer.base
+        BaseTrainer._build_training_context(veomni_base)
+        self.model_fwd_context = veomni_base.model_fwd_context
+        self.model_bwd_context = veomni_base.model_bwd_context
 
     def initialize(self):
         self._build_model_optimizer()
