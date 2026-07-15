@@ -140,7 +140,10 @@ class RayTrainerTaskRunner:
         """Hook invoked before tokenizer/processor loading."""
         external_lib = config.actor_rollout_ref.model.get("external_lib", None)
         if external_lib is not None:
-            external_lib = OmegaConf.to_container(external_lib, resolve=True)
+            if isinstance(external_lib, str) and external_lib.strip().startswith("["):
+                external_lib = OmegaConf.create(external_lib)
+            if OmegaConf.is_config(external_lib):
+                external_lib = OmegaConf.to_container(external_lib, resolve=True)
             from verl.utils.import_utils import import_external_libs
 
             import_external_libs(external_lib)
