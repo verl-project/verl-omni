@@ -28,10 +28,12 @@ REWARD_TP=1
 IMAGE_RESOLUTION=384
 TOTAL_TRAINING_STEPS=100
 ATTN_BACKEND=native
+ROLLOUT_ATTN_BACKEND=TORCH_SDPA
 MAX_NUM_SEQS=256
 
 if [ "${FA3:-0}" = "1" ]; then
     ATTN_BACKEND="_flash_3_varlen_hub"
+    ROLLOUT_ATTN_BACKEND=FLASH_ATTN
 fi
 
 ENGINE=vllm_omni
@@ -68,6 +70,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.name=$ENGINE \
+    actor_rollout_ref.rollout.rollout_attn_backend=$ROLLOUT_ATTN_BACKEND \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.seed=42 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT / ROLLOUT_TP)) \
