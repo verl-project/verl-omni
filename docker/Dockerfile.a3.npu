@@ -5,13 +5,13 @@ ARG ASCEND_PIP_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
 ARG PYTORCH_CPU_INDEX_URL="https://download.pytorch.org/whl/cpu/"
 
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
-ARG VLLM_REF="v0.22.0"
+ARG VLLM_REF="v0.24.0"
 
 ARG VLLM_ASCEND_REPO="https://github.com/vllm-project/vllm-ascend.git"
-ARG VLLM_ASCEND_REF="bb4d0776eee8fc45c3484a45c971a7049f1a2bbf"
+ARG VLLM_ASCEND_REF=""
 
 ARG VLLM_OMNI_REPO="https://github.com/vllm-project/vllm-omni.git"
-ARG VLLM_OMNI_REF="v0.22.0"
+ARG VLLM_OMNI_REF=""
 
 ARG VERL_REPO="https://github.com/verl-project/verl.git"
 # Default: read from .github/verl_pin.txt at build time.
@@ -40,8 +40,7 @@ WORKDIR /workspace
 
 RUN mkdir -p /workspace/src /workspace/pins
 
-# .dockerignore only allows .github/verl_pin.txt, matching Dockerfile.cuda behavior.
-COPY .github/verl_pin.txt /workspace/pins/verl_pin.txt
+COPY .github/verl_pin.txt .github/vllm_ascend_pin.txt .github/vllm_omni_pin.txt /workspace/pins/
 
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
@@ -97,7 +96,9 @@ RUN git clone --depth 1 -b ${VLLM_REF} ${VLLM_REPO} /workspace/src/vllm && \
     python3 -m pip uninstall -y triton || true
 
 # Install vLLM-Ascend.
-RUN git clone ${VLLM_ASCEND_REPO} /workspace/src/vllm-ascend && \
+RUN VLLM_ASCEND_REF="${VLLM_ASCEND_REF:-$(tr -d '[:space:]' < /workspace/pins/vllm_ascend_pin.txt)}" && \
+    echo "Installing vLLM-Ascend from ${VLLM_ASCEND_REPO}@${VLLM_ASCEND_REF}" && \
+    git clone ${VLLM_ASCEND_REPO} /workspace/src/vllm-ascend && \
     cd /workspace/src/vllm-ascend && \
     git checkout ${VLLM_ASCEND_REF} && \
     git submodule update --init --recursive && \
@@ -113,8 +114,11 @@ RUN git clone ${VLLM_ASCEND_REPO} /workspace/src/vllm-ascend && \
         --extra-index-url ${ASCEND_PIP_INDEX_URL}
 
 # Install vLLM-Omni.
-RUN git clone --depth 1 -b ${VLLM_OMNI_REF} ${VLLM_OMNI_REPO} /workspace/src/vllm-omni && \
+RUN VLLM_OMNI_REF="${VLLM_OMNI_REF:-$(tr -d '[:space:]' < /workspace/pins/vllm_omni_pin.txt)}" && \
+    echo "Installing vLLM-Omni from ${VLLM_OMNI_REPO}@${VLLM_OMNI_REF}" && \
+    git clone ${VLLM_OMNI_REPO} /workspace/src/vllm-omni && \
     cd /workspace/src/vllm-omni && \
+    git checkout ${VLLM_OMNI_REF} && \
     VLLM_OMNI_TARGET_DEVICE=npu python3 -m pip install -e . \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} \
         --extra-index-url ${PYTORCH_CPU_INDEX_URL}
