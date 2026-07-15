@@ -84,6 +84,7 @@ class OmniDirectPreferenceRayTrainer(DirectPreferenceRayTrainer):
             batch_td,
             compute_loss=False,
             average_log_prob=self.config.actor_rollout_ref.actor.omni_loss.average_log_prob,
+            use_dynamic_bsz=False,
         )
         if self.ref_in_actor:
             output = self.actor_rollout_wg.infer_actor_batch(batch_td)

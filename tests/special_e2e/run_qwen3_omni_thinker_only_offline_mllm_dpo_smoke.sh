@@ -2,7 +2,7 @@
 # Smoke test for Qwen3-Omni offline MLLM DPO through verl-omni entrypoint.
 set -xeuo pipefail
 
-NUM_GPUS=${NUM_GPUS:-1}
+NUM_GPUS=${NUM_GPUS:-2}
 MODEL_PATH=${MODEL_PATH:-}
 DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_omni_preference_dpo}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-2}
