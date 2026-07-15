@@ -42,7 +42,7 @@ python3 -m verl_omni.trainer.main_omni \
     algorithm.paired_preference=true \
     data.train_files="['${DATA_DIR}/image/train.parquet','${DATA_DIR}/video/train.parquet','${DATA_DIR}/audio/train.parquet']" \
     data.val_files="['${DATA_DIR}/image/test.parquet','${DATA_DIR}/video/test.parquet','${DATA_DIR}/audio/test.parquet']" \
-    data.train_batch_size=3 \
+    data.train_batch_size=2 \
     data.max_prompt_length=512 \
     data.trust_remote_code=true \
     data.filter_overlong_prompts=false \
@@ -50,7 +50,6 @@ python3 -m verl_omni.trainer.main_omni \
     data.custom_cls.name=OfflineMLLMDPODataset \
     data.custom_cls.collate_fn=offline_mllm_dpo_collate_fn \
     data.sampler.class_name=ModalityBatchSampler \
-    data.sampler.batch_size=3 \
     data.sampler.drop_last=true \
     data.sampler.modality_ratios.image="${IMAGE_RATIO}" \
     data.sampler.modality_ratios.video="${VIDEO_RATIO}" \
@@ -71,7 +70,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.omni_loss.average_log_prob=false \
     actor_rollout_ref.actor.omni_loss.refer_model_precision=bfloat16 \
     actor_rollout_ref.actor.optim.lr=1.0e-6 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=1 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=2 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.veomni_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.veomni_config.init_device=meta \
