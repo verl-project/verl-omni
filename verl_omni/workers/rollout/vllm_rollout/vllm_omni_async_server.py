@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
+import json
 import logging
 import os
 import tempfile
@@ -47,7 +48,7 @@ from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
 
-from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.model_base import OmniRolloutPipelineBase, VllmOmniPipelineBase
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig, OmniModelConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
 
@@ -79,6 +80,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_kwargs = getattr(self.config, "engine_kwargs", None) or {}
         omni_kwargs = engine_kwargs.get("vllm_omni", {}) or {}
         self._ar_mode = omni_kwargs.get("output_mode", "diffusion") == "ar"
+        self._rollout_flags: dict[int, dict] = {}
 
         if self._ar_mode:
             return omega_conf_to_dataclass(model_config, dataclass_type=OmniModelConfig)
@@ -139,24 +141,35 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_kwargs.pop("output_mode", None)
         if self._ar_mode:
             engine_kwargs.pop("custom_pipeline", None)
-            # Generate a deploy config from pipeline_name if provided.
             pipeline_name = engine_kwargs.pop("pipeline_name", None)
-            if pipeline_name is not None:
-                self._write_deploy_config(engine_kwargs, pipeline_name)
+            pipeline_mode = engine_kwargs.pop("pipeline_mode", "thinker_only")
+
+            adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
+            # Generate deploy config using the adapter's stage topology.
+            self._write_deploy_config(engine_kwargs, pipeline_name, adapter_cls, pipeline_mode)
+            # Store per-stage rollout flags for downstream use.
+            self._rollout_flags = adapter_cls.rollout_flags(pipeline_mode=pipeline_mode)
+            # Merge pipeline-specific HF config overrides.
+            adapter_overrides = adapter_cls.get_engine_hf_overrides(pipeline_mode=pipeline_mode)
+            if adapter_overrides:
+                hf_overrides = engine_kwargs.get("hf_overrides", {})
+                if isinstance(hf_overrides, str):
+                    hf_overrides = json.loads(hf_overrides)
+                hf_overrides.update(adapter_overrides)
+                engine_kwargs["hf_overrides"] = hf_overrides
+
             for underscore_key in ("stage_configs_path", "deploy_config", "stage_overrides", "async_chunk"):
                 if underscore_key in engine_kwargs:
                     engine_kwargs[underscore_key.replace("_", "-")] = engine_kwargs.pop(underscore_key)
 
-    def _write_deploy_config(self, engine_kwargs: dict, pipeline_name: str) -> None:
-        """Generate a deploy config YAML for the pipeline variant (e.g. thinker-only)."""
-        from vllm_omni.config.omni_config import _resolve_registered_pipeline
-
+    def _write_deploy_config(self, engine_kwargs: dict, pipeline_name: str, adapter_cls, pipeline_mode: str) -> None:
+        """Write a deploy config YAML from the adapter's stage topology and visible devices."""
         device_control_env = get_visible_devices_keyword()
         devices = os.environ.get(device_control_env, "")
         deploy_dict = {"pipeline": pipeline_name}
         if devices:
-            pipeline = _resolve_registered_pipeline(pipeline_name)
-            stage_ids = [topology.stage_id for topology in pipeline.stages] if pipeline is not None else [0]
+            stages = adapter_cls.build_stage_configs(pipeline_mode=pipeline_mode)
+            stage_ids = [s.stage_id for s in stages]
             deploy_dict["stages"] = [{"stage_id": sid, "devices": devices} for sid in stage_ids]
         yaml_str = yaml.dump(deploy_dict).strip()
         logger.info("Generated deploy config:\n%s", yaml_str)

@@ -704,3 +704,15 @@ class OmniRolloutPipelineBase:
             dict[int, dict]: Per-stage flags (empty dict by default).
         """
         return {}
+
+    @classmethod
+    def get_engine_hf_overrides(cls, pipeline_mode: str = "thinker_only") -> dict:
+        """Return HF config overrides per *pipeline_mode*.
+
+        Args:
+            pipeline_mode: The mode used to build the stages.
+
+        Returns:
+            dict: HF config key-value overrides.
+        """
+        return {}
