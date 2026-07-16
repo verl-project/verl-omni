@@ -15,18 +15,6 @@ For implementation details or support for another image-edit architecture, see
 
 ## Prerequisites
 
-Follow the [installation guide](install.md). For an NVIDIA GPU environment, the
-relevant commands are:
-
-```bash
-uv pip install -e ".[gpu]" --torch-backend=auto
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train]"
-```
-
-Use the repository's vLLM-Omni pin. The rollout adapter depends on the matching
-Qwen-Image-Edit pipeline and request preprocessing behavior in vLLM-Omni.
-
 The example reward is PickScore. Its model weights are downloaded from Hugging
 Face the first time the reward workers start.
 
