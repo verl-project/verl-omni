@@ -219,18 +219,23 @@ actor_rollout_ref:
         max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
         guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
         num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
+        frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
       algo:
         _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
         noise_level: 0.0
         sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
         sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
         sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
+        sde_steps: ${oc.select:actor_rollout_ref.rollout.algo.sde_steps,null}
+        num_sde_steps: ${oc.select:actor_rollout_ref.rollout.algo.num_sde_steps,null}
     algo:
       _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
       noise_level: 1.0
       sde_type: sde
       sde_window_size: null
       sde_window_range: null
+      sde_steps: null
+      num_sde_steps: null
       sample_strategy: random
       iters_per_group: 1
       sde_window_seed: 0
@@ -243,6 +248,7 @@ actor_rollout_ref:
       max_sequence_length: 512
       guidance_scale: null
       num_frames: 1
+      frame_rate: 24.0
     calculate_log_probs: false
     rollout_adapter: default
     agent:
@@ -303,12 +309,15 @@ actor_rollout_ref:
       max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
       guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
       num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
+      frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
     algo:
       _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
       noise_level: ${oc.select:actor_rollout_ref.rollout.algo.noise_level,1.0}
       sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
       sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
       sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
+      sde_steps: ${oc.select:actor_rollout_ref.rollout.algo.sde_steps,null}
+      num_sde_steps: ${oc.select:actor_rollout_ref.rollout.algo.num_sde_steps,null}
     model_type: diffusion_model
   hybrid_engine: true
   nccl_timeout: 600

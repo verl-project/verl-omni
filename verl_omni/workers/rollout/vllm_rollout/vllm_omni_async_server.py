@@ -470,6 +470,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return value
 
         extra_fields = {k: _maybe_unbatch(v) for k, v in mm_output.items() if k != "all_log_probs"}
+        multimodal_output = final_res.multimodal_output or {}
+        if isinstance(multimodal_output, dict):
+            for key, value in multimodal_output.items():
+                extra_fields.setdefault(key, _maybe_unbatch(value))
         extra_fields["global_steps"] = self.global_steps
 
         if final_res.request_output is not None and hasattr(final_res.request_output, "finish_reason"):
