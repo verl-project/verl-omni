@@ -224,8 +224,8 @@ python examples/dpo_trainer/data_process/omni_preference_dpo_multisource.py \
 
 ## 6. Offline DPO Parquet Schema
 
-Parquet rows follow the preference schema consumed by the Qwen3-Omni VeOmni
-VLM DPO smoke task.
+Parquet rows follow the preference schema consumed by verl-omni's offline MLLM
+DPO pipeline.
 
 ### 6.1 Columns
 
@@ -243,30 +243,23 @@ VLM DPO smoke task.
 
 ---
 
-## 7. Training Configuration (VeOmni)
+## 7. Training Configuration
 
-Point the VeOmni VLM DPO data config at the generated parquet files:
+Point the verl-omni offline MLLM DPO data config at the generated parquet
+files. For all three modalities:
 
-```yaml
-sources:
-  - /path/to/Omni-Preference/parquet_dpo/image/train.parquet
-  - /path/to/Omni-Preference/parquet_dpo/video/train.parquet
-  - /path/to/Omni-Preference/parquet_dpo/audio/train.parquet
-names:
-  - Omni-Preference-Image
-  - Omni-Preference-Video
-  - Omni-Preference-Audio
-schedule:
-  - schedule_type: const
-    weights: [0.34, 0.33, 0.33]
+```bash
+data.train_files="['/path/to/Omni-Preference/parquet_dpo/image/train.parquet','/path/to/Omni-Preference/parquet_dpo/video/train.parquet','/path/to/Omni-Preference/parquet_dpo/audio/train.parquet']"
+data.val_files="['/path/to/Omni-Preference/parquet_dpo/image/test.parquet','/path/to/Omni-Preference/parquet_dpo/video/test.parquet','/path/to/Omni-Preference/parquet_dpo/audio/test.parquet']"
+data.custom_cls.path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset
+data.custom_cls.name=OfflineMLLMDPODataset
+data.custom_cls.collate_fn=offline_mllm_dpo_collate_fn
 ```
 
-To train on a single modality, list only that modality's parquet path and set
-the corresponding source name/weight. Configure the custom dataset with
-`verl_omni.utils.dataset.offline_mllm_dpo_dataset.OfflineMLLMDPODataset` and
-`offline_mllm_dpo_collate_fn`; the dataset consumes the parquet schema above and
-uses `verl_omni.utils.dataset.qwen3_omni_transform` for Qwen3-Omni multimodal
-sample processing.
+To train on a single modality, list only that modality's parquet paths. The
+dataset consumes the parquet schema above and uses
+`verl_omni.utils.dataset.qwen3_omni_transform` for Qwen3-Omni multimodal sample
+processing.
 
 ---
 
