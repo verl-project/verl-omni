@@ -237,8 +237,9 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
             model_inputs["input_features"] = cls._drop_zero_rows(input_features.reshape(-1, input_features.shape[-1]))
 
         audio_feature_lengths = model_inputs.get("audio_feature_lengths")
-        if isinstance(audio_feature_lengths, torch.Tensor) and audio_feature_lengths.ndim > 1:
-            audio_feature_lengths = audio_feature_lengths.reshape(-1)
+        if isinstance(audio_feature_lengths, torch.Tensor):
+            if audio_feature_lengths.ndim > 1:
+                audio_feature_lengths = audio_feature_lengths.reshape(-1)
             model_inputs["audio_feature_lengths"] = audio_feature_lengths[audio_feature_lengths != 0]
 
         if dtype is not None:
