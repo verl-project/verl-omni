@@ -65,7 +65,7 @@ class OmniModelConfig(BaseConfig):
     model_type: str = "omni"
 
     # HF config architectures[0] (auto-detected from config.json if unset)
-    architecture: str = MISSING
+    architecture: Optional[str] = None
     architectures: Optional[list[str]] = None
 
     # which stage to train: "thinker", "talker", or "all"
@@ -142,7 +142,7 @@ class OmniModelConfig(BaseConfig):
             tokenizer_path = os.path.join(self.local_path, "tokenizer")
             self.tokenizer_path = tokenizer_path if os.path.exists(tokenizer_path) else self.local_path
 
-        if self.architecture == MISSING:
+        if not self.architecture:
             config_path = os.path.join(self.local_path, "config.json")
             with open(config_path) as f:
                 self.architecture = json.load(f)["architectures"][0]

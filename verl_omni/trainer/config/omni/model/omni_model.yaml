@@ -32,7 +32,7 @@ external_lib: null
 override_config: {}
 
 # HuggingFace config architectures[0] (auto-detected from config.json if unset)
-architecture: ???
+architecture: null
 
 # Which stage to train: "thinker" (default), "talker", or "all"
 model_stage: thinker

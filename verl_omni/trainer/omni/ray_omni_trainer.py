@@ -13,6 +13,9 @@
 # limitations under the License.
 """Omni trainer — a PPOTrainerSync subclass registered via ``@register_trainer("omni_sync")``."""
 
+import json
+import os
+
 from verl.trainer.ppo.v1.trainer_base import register_trainer
 from verl.trainer.ppo.v1.trainer_sync import PPOTrainerSync
 from verl.utils.fs import copy_to_local
@@ -34,9 +37,20 @@ class OmniPPOTrainerSync(PPOTrainerSync):
 
         local_model_path = copy_to_local(model_path, use_shm=use_shm)
 
+        # Auto-detect architecture from config.json (follows diffusion pattern).
+        architecture = model_config.get("architecture")
+        if not architecture:
+            config_json = os.path.join(local_model_path, "config.json")
+            with open(config_json) as f:
+                architecture = json.load(f)["architectures"][0]
+
         tokenizer_path = model_config.get("tokenizer_path") or local_model_path
         local_tokenizer_path = copy_to_local(tokenizer_path, use_shm=use_shm)
 
-        adapter_cls = OmniModelBase.get_class(model_config)
+        adapter_cls = OmniModelBase.get_class_by_name(
+            architecture,
+            model_config.model_stage,
+            model_config.get("external_lib"),
+        )
         self.tokenizer = adapter_cls.configure_tokenizer(local_tokenizer_path, model_config)
         self.processor = adapter_cls.configure_processor(local_model_path, model_config)

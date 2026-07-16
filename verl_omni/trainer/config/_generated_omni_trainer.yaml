@@ -431,7 +431,7 @@ actor_rollout_ref:
       freeze_vision_model: true
       freeze_vision_projection: true
       freeze_language_model: true
-    architecture: ???
+    architecture: null
     model_stage: thinker
     hf_config_name: null
     max_image_tokens: null

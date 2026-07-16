@@ -498,19 +498,44 @@ class OmniModelBase(ABC):
             NotImplementedError: If no adapter is registered for the given
                 ``(architecture, stage)`` key.
         """
-        key = (model_config.architecture, model_config.model_stage)
-        if key not in cls._registry and getattr(model_config, "external_lib", None) is not None:
+        return cls.get_class_by_name(
+            model_config.architecture,
+            model_config.model_stage,
+            getattr(model_config, "external_lib", None),
+        )
+
+    @classmethod
+    def get_class_by_name(
+        cls,
+        architecture: str,
+        stage: str,
+        external_lib: Optional[str] = None,
+    ) -> type["OmniModelBase"]:
+        """Return the registered subclass for ``(architecture, stage)``.
+
+        Args:
+            architecture: HF config ``architectures[0]`` value.
+            stage: ``thinker``, ``talker``, or ``all``.
+            external_lib: Optional external library to import before lookup.
+
+        Returns:
+            type[OmniModelBase]: The registered adapter class.
+
+        Raises:
+            NotImplementedError: If no adapter is registered for the given key.
+        """
+        key = (architecture, stage)
+        if external_lib is not None:
             from verl.utils.import_utils import import_external_libs
 
-            import_external_libs(model_config.external_lib)
-
+            import_external_libs(external_lib)
         try:
             return cls._registry[key]
         except KeyError:
             registered = sorted(cls._registry.keys())
             raise NotImplementedError(
-                f"No omni model registered for (architecture={model_config.architecture!r}, "
-                f"stage={model_config.model_stage!r}). Registered: {registered}. "
+                f"No omni model registered for (architecture={architecture!r}, "
+                f"stage={stage!r}). Registered: {registered}. "
                 f"Set ``external_lib`` to load your training adapter."
             ) from None
 
