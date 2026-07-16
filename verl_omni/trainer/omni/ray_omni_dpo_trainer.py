@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Offline omni direct-preference Ray trainer (Qwen3-Omni DPO)."""
+"""Omni direct-preference Ray trainer."""
 
 from __future__ import annotations
 
@@ -45,9 +45,11 @@ class OmniDirectPreferenceRayTrainer(DirectPreferenceRayTrainer):
         BaseRayDiffusionTrainer.__init__(self, config, *args, **kwargs)
         self.is_offline = config.algorithm.get("sample_source", "online") == "offline"
         if not self.is_offline:
-            raise NotImplementedError("OmniDirectPreferenceRayTrainer currently supports offline DPO only.")
-        if config.actor_rollout_ref.model.get("model_type", "language_model") != "omni_model":
-            raise ValueError("OmniDirectPreferenceRayTrainer requires actor_rollout_ref.model.model_type=omni_model.")
+            raise NotImplementedError(
+                "OmniDirectPreferenceRayTrainer currently supports algorithm.sample_source=offline only."
+            )
+        if config.actor_rollout_ref.model.get("model_type", "language_model") != "omni":
+            raise ValueError("OmniDirectPreferenceRayTrainer requires actor_rollout_ref.model.model_type=omni.")
         loss_mode = config.actor_rollout_ref.actor.omni_loss.loss_mode
         if loss_mode != "dpo":
             raise NotImplementedError("OmniDirectPreferenceRayTrainer currently supports omni_loss.loss_mode=dpo only.")
@@ -56,7 +58,7 @@ class OmniDirectPreferenceRayTrainer(DirectPreferenceRayTrainer):
             config.actor_rollout_ref.model.get("policy_state_adapters", ("default",))
         )
         if self._has_old_adapter:
-            raise NotImplementedError("Omni DPO does not support old-policy adapters yet.")
+            raise NotImplementedError("OmniDirectPreferenceRayTrainer does not support old-policy adapters yet.")
         self._loss_fn = None
 
     def _infer_reference_policy(self, batch: DataProto) -> Optional[DataProto]:
