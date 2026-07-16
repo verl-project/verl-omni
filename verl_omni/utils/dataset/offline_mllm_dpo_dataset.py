@@ -34,7 +34,7 @@ from verl_omni.utils.dataset.qwen3_omni_transform import process_qwen3_omni_samp
 
 
 def _read_dataframe(data_files: str | Sequence[str]) -> pd.DataFrame:
-    paths = [data_files] if isinstance(data_files, str) else list(data_files)
+    paths = [data_files] if isinstance(data_files, (str, Path)) else list(data_files)
     frames = []
     for data_file in paths:
         path = Path(os.path.expanduser(data_file))
