@@ -28,7 +28,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import import_external_libs
 from verl.utils.net_utils import get_free_port
 from verl.utils.tokenizer import normalize_token_ids
-from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.config import RolloutConfig
 from verl.workers.rollout.replica import TokenOutput
 from verl.workers.rollout.utils import run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
@@ -47,7 +47,7 @@ from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
-from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
+from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig, OmniModelConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
 
 logger = logging.getLogger(__file__)
@@ -66,7 +66,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     def _init_model_config(self, model_config):
-        """AR mode uses HFModelConfig; diffusion uses DiffusionModelConfig.
+        """AR mode uses OmniModelConfig; diffusion uses DiffusionModelConfig.
 
         Mode is selected by ``engine_kwargs.vllm_omni.output_mode`` ("ar" vs the
         default "diffusion").
@@ -76,7 +76,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._ar_mode = omni_kwargs.get("output_mode", "diffusion") == "ar"
 
         if self._ar_mode:
-            return omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
+            return omega_conf_to_dataclass(model_config, dataclass_type=OmniModelConfig)
         return omega_conf_to_dataclass(model_config, dataclass_type=DiffusionModelConfig)
 
     def _validate_configs(self) -> None:
@@ -517,7 +517,7 @@ class vLLMOmniReplica(vLLMReplica):
         self,
         replica_rank: int,
         config: DiffusionRolloutConfig | RolloutConfig,
-        model_config: DiffusionModelConfig | HFModelConfig,
+        model_config: DiffusionModelConfig | OmniModelConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
     ):

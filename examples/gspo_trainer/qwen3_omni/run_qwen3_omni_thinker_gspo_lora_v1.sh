@@ -47,13 +47,13 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
     actor_rollout_ref.rollout.n=16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=true \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=30720 \
-    "+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode=ar" \
-    "+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name=qwen3_omni_moe_thinker_only" \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode="ar" \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name="qwen3_omni_moe_thinker_only" \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.7 \
@@ -70,8 +70,8 @@ python3 -m verl_omni.trainer.main_omni \
     trainer.balance_batch=True \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \
-    trainer.project_name=qwen3_omni_thinker_rl \
-    trainer.experiment_name=gspo_lora_math \
+    trainer.project_name=qwen3_omni_thinker_lora \
+    trainer.experiment_name=gspo \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=50 \
