@@ -67,6 +67,7 @@ actor_rollout_ref:
 # Trainer configuration.
 trainer:
 
+  # V1 trainer settings.
   v1:
 
     # Use the omni trainer mode for omni models.
