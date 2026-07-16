@@ -64,7 +64,7 @@ actor_rollout_ref:
     # Shuffle training data across PPO epochs.
     shuffle: false
 
-    
+# Trainer configuration.
 trainer:
 
   v1:
