@@ -8,7 +8,7 @@
 # Default owner for everything in the repo
 *                @samithuang
 
-/verl_omni/      @zhtmike @samithuang
+/verl_omni/      @zhtmike @wtomin @knlnguyen1802 @AndyZhou952 @samithuang
 /examples/       @knlnguyen1802
 
 /docker/         @wtomin
