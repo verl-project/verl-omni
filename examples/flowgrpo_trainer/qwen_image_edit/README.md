@@ -11,7 +11,7 @@ checkpoint must use that value in `model_index.json::_class_name`. The older
 `QwenImageEditPipeline` architecture is not supported by this recipe.
 
 For implementation details or support for another image-edit architecture, see
-[How to Integrate an Image-to-Image Diffusion Model](../contributing/integrating_an_i2i_diffusion_model.md).
+[How to Integrate an Image-to-Image Diffusion Model](../../../docs/contributing/integrating_an_i2i_diffusion_model.md).
 
 ## Prerequisites
 

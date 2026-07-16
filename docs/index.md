@@ -29,7 +29,6 @@ See {doc}`start/models` for the full model catalogue and which algorithms run on
 start/install.md
 start/models.md
 start/flowgrpo_quickstart.md
-start/qwen_image_edit.md
 start/multi_node_training.md
 start/metrics.md
 ```
