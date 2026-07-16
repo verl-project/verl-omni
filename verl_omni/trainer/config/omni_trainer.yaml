@@ -16,18 +16,6 @@ defaults:
 # Config for actor, rollout and reference model.
 actor_rollout_ref:
 
-  # Model config.
-  model:
-
-    # Select Omni trainer and OmniModelConfig.
-    model_type: omni_model
-
-    # HuggingFace config architectures[0].
-    architecture: Qwen3OmniMoeForConditionalGeneration
-
-    # Which stage to train.
-    model_stage: thinker
-
   # Rollout config.
   rollout:
 
