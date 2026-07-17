@@ -401,6 +401,7 @@ class LTX23PipelineWithLogProb(LTX23Pipeline):
             "negative_prompt_embeds": prompt_context.negative_connector_prompt_embeds,
             "negative_audio_prompt_embeds": prompt_context.negative_connector_audio_prompt_embeds,
             "negative_prompt_embeds_mask": prompt_context.negative_connector_attention_mask,
+            "audio_sample_rate": self.vocoder.config.output_sampling_rate,
         }
         output.custom_output = {
             key: value.detach().cpu() if isinstance(value, torch.Tensor) else value

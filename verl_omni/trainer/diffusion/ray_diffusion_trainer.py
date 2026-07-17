@@ -277,17 +277,18 @@ class BaseRayDiffusionTrainer(ABC):
     def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
         """Dump rollout/validation samples as JSONL."""
         os.makedirs(dump_path, exist_ok=True)
+        output_paths = ["skipped_image"] * len(inputs)
 
-        visual_folder = os.path.join(dump_path, f"{self.global_steps}")
-        os.makedirs(visual_folder, exist_ok=True)
+        # visual_folder = os.path.join(dump_path, f"{self.global_steps}")
+        # os.makedirs(visual_folder, exist_ok=True)
 
-        output_paths = []
-        images_pil = outputs.cpu().float().permute(0, 2, 3, 1).numpy()
-        images_pil = (images_pil * 255).round().clip(0, 255).astype("uint8")
-        for i, image in enumerate(images_pil):
-            image_path = os.path.join(visual_folder, f"{i}.jpg")
-            Image.fromarray(image).save(image_path)
-            output_paths.append(image_path)
+        # output_paths = []
+        # images_pil = outputs.cpu().float().permute(0, 2, 3, 1).numpy()
+        # images_pil = (images_pil * 255).round().clip(0, 255).astype("uint8")
+        # for i, image in enumerate(images_pil):
+        #     image_path = os.path.join(visual_folder, f"{i}.jpg")
+        #     Image.fromarray(image).save(image_path)
+        #     output_paths.append(image_path)
 
         filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
 
@@ -309,7 +310,7 @@ class BaseRayDiffusionTrainer(ABC):
             entry = {k: v[i] for k, v in base_data.items()}
             lines.append(json.dumps(entry, ensure_ascii=False))
 
-        with open(filename, "w") as f:
+        with open(filename, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 
         print(f"Dumped generations to {filename}")

@@ -18,7 +18,7 @@ from typing import Any
 
 from verl.experimental.agent_loop.agent_loop import register
 from verl.utils.tokenizer import normalize_token_ids
-
+from verl.utils.ray_utils import get_event_loop
 from verl_omni.agent_loop.single_turn_agent_loop import DiffusionSingleTurnAgentLoop
 
 
@@ -49,6 +49,32 @@ def _messages_to_text(messages: Any) -> str:
 class LTX2DiffusionSingleTurnAgentLoop(DiffusionSingleTurnAgentLoop):
     """Tokenize raw LTX prompts exactly as ``LTX2Pipeline.encode_prompt`` does."""
 
+    def __init__(
+        self,
+        trainer_config,
+        server_manager,
+        tokenizer,
+        processor,
+        dataset_cls,
+        data_config,
+        **kwargs,
+    ) -> None:
+        # LTX-2 uses its text encoder tokenizer as a raw-text tokenizer. Calling
+        # AgentLoopBase.__init__ would probe its optional chat template with two
+        # consecutive user messages, which strict templates reject before the
+        # LTX-specific raw-text path gets a chance to run.
+        del kwargs
+        self.config = trainer_config.config
+        self.rollout_config = self.config.actor_rollout_ref.rollout
+        self.server_manager = server_manager
+        self.tokenizer = tokenizer
+        self.processor = processor
+        self.dataset_cls = dataset_cls
+        self.data_config = data_config.config
+        self.apply_chat_template_kwargs = self.data_config.get("apply_chat_template_kwargs", {})
+        self.mm_processor_kwargs = self.data_config.get("mm_processor_kwargs", {})
+        self.system_prompt = []
+        self.loop = get_event_loop()
     async def apply_chat_template(
         self,
         messages: list[dict],

@@ -38,7 +38,7 @@ def _get_audio(extra_info: dict) -> tuple[torch.Tensor, int]:
     elif audio.ndim != 1:
         raise ValueError(f"Expected audio shape (T,) or (C,T), got {tuple(audio.shape)}.")
 
-    sample_rate = extra_info.get("audio_sample_rate")
+    sample_rate = extra_info.get("audio_sample_rate", _CLAP_SAMPLE_RATE)
     if isinstance(sample_rate, torch.Tensor):
         sample_rate = sample_rate.item()
     if sample_rate is None:

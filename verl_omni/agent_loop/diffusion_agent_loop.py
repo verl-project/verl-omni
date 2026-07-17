@@ -342,7 +342,8 @@ class DiffusionAgentLoopWorker:
 
         # add reward_extra_info to non_tensor_batch
         reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]
-        reward_extra_keys = list(reward_extra_infos[0].keys())
+        # reward_extra_keys = list(reward_extra_infos[0].keys())
+        reward_extra_keys = sorted(set.intersection(*(set(info) for info in reward_extra_infos)))
         for key in reward_extra_keys:
             non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
 

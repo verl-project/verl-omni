@@ -173,7 +173,7 @@ def compute_score_imagebind_audio_video(
     audio = extra_info.get("audio")
     if audio is None:
         raise KeyError("ImageBind reward requires decoded audio in extra_info['audio'].")
-    sample_rate = extra_info.get("audio_sample_rate")
+    sample_rate = extra_info.get("audio_sample_rate", _AUDIO_CLIP_SAMPLES)
     if isinstance(sample_rate, torch.Tensor):
         sample_rate = sample_rate.item()
     if sample_rate is None:

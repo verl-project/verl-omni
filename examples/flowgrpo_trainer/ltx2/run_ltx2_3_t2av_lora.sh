@@ -52,7 +52,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.lora_alpha=128 \
     actor_rollout_ref.model.target_modules="$ltx_lora_targets" \
     actor_rollout_ref.model.fsdp_layer_prefixes="['transformer_blocks.']" \
-    actor_rollout_ref.actor.strategy=fsdp2 \
+    actor_rollout_ref.actor.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap=[LTX2VideoTransformerBlock] \
+    actor_rollout_ref.actor.strategy=fsdp \
     actor_rollout_ref.actor.optim.lr=3e-4 \
     actor_rollout_ref.actor.optim.weight_decay=1e-4 \
     actor_rollout_ref.actor.optim.betas="[0.9,0.999]" \
@@ -113,7 +114,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     '+reward.reward_functions.imagebind.weight=1.0' \
     '+reward.reward_functions.imagebind.device=cuda' \
     reward.aggregation=weighted_sum \
-    trainer.logger='["console","wandb"]' \
+    trainer.logger='["console","tensorboard"]' \
     trainer.project_name=flow_grpo \
     trainer.experiment_name=ltx2_3_t2av_lora \
     trainer.default_local_dir=$checkpoint_dir \
