@@ -397,26 +397,30 @@ data:
     name: null
   apply_chat_template_kwargs: {}
 reward:
-  num_workers: 8
-  custom_reward_function:
-    path: null
-    name: compute_score
-  reward_functions: {}
-  aggregation: weighted_sum
-  reward_manager:
-    _target_: verl.workers.config.reward_model.RewardManagerConfig
-    source: importlib
-    name: VisualRewardManager
-    module:
-      _target_: verl.trainer.config.config.ModuleConfig
-      path: pkg://verl_omni.reward_loop.reward_manager
   reward_model:
-    enable: false
-    enable_resource_pool: false
-    n_gpus_per_node: 8
-    nnodes: 0
-    model_path: null
     rollout:
+      profiler:
+        _target_: verl.utils.profiler.ProfilerConfig
+        tool: torch
+        enable: false
+        all_ranks: false
+        ranks: []
+        save_path: ${oc.select:global_profiler.save_path,outputs/profile}/reward_model
+        tool_config:
+          nsys:
+            _target_: verl.utils.profiler.config.NsightToolConfig
+            discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
+            name: nsight
+          torch:
+            _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+            contents: []
+            discrete: false
+            name: torch
+          torch_memory:
+            _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+            trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+            stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+            name: torch_memory
       _target_: verl.workers.config.RolloutConfig
       name: ???
       dtype: bfloat16
@@ -460,6 +464,24 @@ reward:
         transfer_backend: nixl
         bootstrap_port: null
         ib_device: null
+    enable: false
+    enable_resource_pool: false
+    n_gpus_per_node: 8
+    nnodes: 0
+    model_path: null
+  num_workers: 8
+  custom_reward_function:
+    path: null
+    name: compute_score
+  reward_functions: {}
+  aggregation: weighted_sum
+  reward_manager:
+    _target_: verl.workers.config.reward_model.RewardManagerConfig
+    source: importlib
+    name: VisualRewardManager
+    module:
+      _target_: verl.trainer.config.config.ModuleConfig
+      path: pkg://verl_omni.reward_loop.reward_manager
   sandbox_fusion:
     url: null
     max_concurrent: 64
