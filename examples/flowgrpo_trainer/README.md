@@ -47,9 +47,9 @@ Launch the example from the repository root:
 bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
-GPU training defaults to matched FA3 in config (`attn_backend: _flash_3_varlen_hub`; rollout
-`DIFFUSION_ATTENTION_BACKEND=FLASH_ATTN` is set by `main_diffusion` when FA3 is available).
-Training falls back to native/SDPA if FA3 deps are unavailable.
+GPU training defaults to matched kernels FA3 in config (`attn_backend: _flash_3_varlen_hub`;
+`rollout_attn_backend: FLASH_ATTN_3_HUB`). Training falls back to native/SDPA if FA3 deps
+are unavailable.
 
 Optional KL loss tuning:
 

@@ -100,8 +100,8 @@ class DiffusionRolloutConfig(BaseConfig):
     cudagraph_capture_sizes: Optional[list] = None
 
     # vLLM-omni diffusion attention backend.
-    # Prefer FLASH_ATTN_3_HUB with actor attn_backend=_flash_3_varlen_hub.
-    rollout_attn_backend: str = "FLASH_ATTN"
+    # Default FLASH_ATTN_3_HUB pairs with actor attn_backend=_flash_3_varlen_hub.
+    rollout_attn_backend: str = "FLASH_ATTN_3_HUB"
     free_cache_engine: bool = True
     data_parallel_size: int = 1
     expert_parallel_size: int = 1

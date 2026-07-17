@@ -150,7 +150,7 @@ If rollout OOM persists after increasing `ROLLOUT_TP`, reduce memory-heavy rollo
 
 | Error | Fix | What it changes |
 | --- | --- | --- |
-| `Attention backend mismatch` | Pair backends: FA3 actor with `FLASH_ATTN_3_HUB` (or `FLASH_ATTN` / `FLASH_ATTN_HUB`); native/`_native_npu` with `TORCH_SDPA` | Actor `attn_backend=_flash_3_varlen_hub` must use a FA rollout backend. Prefer `FLASH_ATTN_3_HUB` for kernels FA3 train/rollout consistency. If FA3 deps are missing, both actor and rollout fall back to native/SDPA automatically. |
+| `Attention backend mismatch` | Pair backends: FA3 actor with `FLASH_ATTN_3_HUB` (or `FLASH_ATTN` / `FLASH_ATTN_HUB`); native/`_native_npu` with `TORCH_SDPA` | Actor `attn_backend=_flash_3_varlen_hub` must use a FA rollout backend. Default is `FLASH_ATTN_3_HUB` for kernels FA3 train/rollout consistency. If FA3 deps are missing, both actor and rollout fall back to native/SDPA automatically. |
 
 ## Wandb logging
 

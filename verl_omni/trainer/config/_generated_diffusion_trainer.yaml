@@ -179,7 +179,7 @@ actor_rollout_ref:
     n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
     prompt_length: ${oc.select:data.max_prompt_length,512}
     dtype: bfloat16
-    rollout_attn_backend: FLASH_ATTN
+    rollout_attn_backend: FLASH_ATTN_3_HUB
     gpu_memory_utilization: 0.5
     enforce_eager: false
     cudagraph_capture_sizes: null
