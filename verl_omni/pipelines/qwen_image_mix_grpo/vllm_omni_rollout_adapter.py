@@ -39,6 +39,7 @@ import random as _random
 from typing import Any
 
 from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.worker.utils import DiffusionRequestState
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
@@ -49,6 +50,25 @@ __all__ = ["QwenImageMixGRPOPipelineWithLogProb"]
 @VllmOmniPipelineBase.register("QwenImagePipeline", algorithm="mix_grpo")
 class QwenImageMixGRPOPipelineWithLogProb(QwenImagePipelineWithLogProb):
     """Rollout pipeline for Qwen-Image with the MixGRPO algorithm."""
+
+    def prepare_encode(
+        self,
+        state: DiffusionRequestState,
+        **kwargs: Any,
+    ) -> DiffusionRequestState:
+        """Override to fix the SDE window before the stepwise prepare_encode draws it.
+
+        In step-execution mode ``forward()`` is never called, so
+        ``_maybe_make_progressive_window`` would never run.  Calling it here,
+        against ``state.sampling.extra_args``, ensures that all rollouts in a
+        batch receive the same deterministic / seeded window regardless of
+        whether the pipeline runs in full-forward or step-execution mode.
+        """
+        if state.sampling is not None:
+            if state.sampling.extra_args is None:
+                state.sampling.extra_args = {}
+            self._maybe_make_progressive_window(state.sampling.extra_args, kwargs)
+        return super().prepare_encode(state, **kwargs)
 
     def forward(self, req: OmniDiffusionRequest, **kwargs: Any):
         self._maybe_make_progressive_window(req.sampling_params.extra_args, kwargs)
