@@ -89,6 +89,7 @@ jobs:
           # TODO: rm --no-deps when VeOmni support torch2.11
           pip3 install veomni==0.1.11 --no-deps
           pip3 install torchcodec librosa soundfile av
+          pip3 install "transformers[mistral-common]"
       - name: Run GPU smoke tests
         run: |
           ray stop --force
