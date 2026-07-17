@@ -177,7 +177,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if devices:
             stage_ids = [s.stage_id for s in stages]
             deploy_dict["stages"] = [
-                {"stage_id": sid, "devices": devices, "tensor_parallel_size": tp_size} for sid in stage_ids
+                {
+                    "stage_id": sid,
+                    "devices": devices,
+                    "tensor_parallel_size": tp_size,
+                    "engine_extras": adapter_cls.get_stage_engine_extras(sid, pipeline_mode=pipeline_mode),
+                }
+                for sid in stage_ids
             ]
         else:
             raise RuntimeError(

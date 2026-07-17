@@ -125,3 +125,10 @@ class Qwen3OmniRolloutAdapter(OmniRolloutPipelineBase):
         if pipeline_mode == "thinker_only":
             return {"enable_audio_output": False}
         return {}
+
+    @classmethod
+    def get_stage_engine_extras(cls, stage_id: int, pipeline_mode: str = "thinker_only") -> dict:
+        """Override model_arch to the thinker-only class when in thinker_only mode."""
+        if pipeline_mode == "thinker_only" and stage_id == 0:
+            return {"model_arch": "Qwen3OmniMoeThinkerForConditionalGeneration"}
+        return {}

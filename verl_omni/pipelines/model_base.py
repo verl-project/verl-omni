@@ -746,3 +746,16 @@ class OmniRolloutPipelineBase:
             dict: HF config key-value overrides.
         """
         return {}
+
+    @classmethod
+    def get_stage_engine_extras(cls, stage_id: int, pipeline_mode: str = "thinker_only") -> dict:
+        """Return per-stage ``engine_extras`` to inject into the deploy config.
+
+        Args:
+            stage_id: The pipeline stage ID.
+            pipeline_mode: The mode used to build the stages.
+
+        Returns:
+            dict: Extra key-value pairs merged into the stage's engine args.
+        """
+        return {}
