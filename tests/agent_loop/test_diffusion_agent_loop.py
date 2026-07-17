@@ -99,6 +99,13 @@ def init_config(request) -> DictConfig:
 
         config.actor_rollout_ref.rollout.tensor_model_parallel_size = tp_size
 
+        # Smoke: prefer local FLASH_ATTN over product-default Hub FA3 (cf. FSDP engine test).
+        from tests.utils.smoke_attention import resolve_smoke_attention_backends
+
+        attn_backend, rollout_attn_backend = resolve_smoke_attention_backends()
+        config.actor_rollout_ref.model.attn_backend = attn_backend
+        config.actor_rollout_ref.rollout.rollout_attn_backend = rollout_attn_backend
+
         yield config
 
 

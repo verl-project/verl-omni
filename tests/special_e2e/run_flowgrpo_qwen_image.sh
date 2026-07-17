@@ -25,6 +25,10 @@ TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-2}
 ENGINE=vllm_omni
 max_prompt_length=256
 
+# Smoke: local FLASH_ATTN when FA available; native/SDPA otherwise (cf. FSDP engine test).
+# Product default remains FLASH_ATTN_3_HUB for real training.
+read -r ATTN_BACKEND ROLLOUT_ATTN_BACKEND <<< "$(python3 -c 'from tests.utils.smoke_attention import resolve_smoke_attention_backends; a, r = resolve_smoke_attention_backends(); print(a, r)')"
+
 # This helper runs nvidia-smi in a background loop during training and
 # fails if any vLLMOmniHttpServer process appears.
 _LEAK_FILE=$(mktemp)
@@ -77,6 +81,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.algorithm=flow_grpo \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.model.tokenizer_path=${TOKENIZER_PATH} \
+    actor_rollout_ref.model.attn_backend=${ATTN_BACKEND} \
+    actor_rollout_ref.rollout.rollout_attn_backend=${ROLLOUT_ATTN_BACKEND} \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \
     actor_rollout_ref.model.target_modules=all-linear \

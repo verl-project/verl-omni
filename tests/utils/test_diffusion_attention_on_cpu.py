@@ -14,6 +14,7 @@
 
 from omegaconf import OmegaConf
 
+from tests.utils.smoke_attention import resolve_smoke_attention_backends
 from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
 
 
@@ -77,3 +78,13 @@ def test_fallback_hub_fa3_without_kernels_sets_sdpa(monkeypatch):
     fallback_fa3_if_unavailable(config)
     assert config.actor_rollout_ref.model.attn_backend == "native"
     assert config.actor_rollout_ref.rollout.rollout_attn_backend == "TORCH_SDPA"
+
+
+def test_resolve_smoke_attention_backends_prefers_local_fa(monkeypatch):
+    monkeypatch.setattr("tests.utils.smoke_attention.fa3_available", lambda: True)
+    assert resolve_smoke_attention_backends() == ("_flash_3_varlen_hub", "FLASH_ATTN")
+
+
+def test_resolve_smoke_attention_backends_falls_back_without_fa3(monkeypatch):
+    monkeypatch.setattr("tests.utils.smoke_attention.fa3_available", lambda: False)
+    assert resolve_smoke_attention_backends() == ("native", "TORCH_SDPA")

@@ -26,6 +26,10 @@ ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 max_prompt_length=256
 
+# Smoke: local FLASH_ATTN when FA available; native/SDPA otherwise (cf. FSDP engine test).
+# Product default remains FLASH_ATTN_3_HUB for real training.
+read -r ATTN_BACKEND ROLLOUT_ATTN_BACKEND <<< "$(python3 -c 'from tests.utils.smoke_attention import resolve_smoke_attention_backends; a, r = resolve_smoke_attention_backends(); print(a, r)')"
+
 # Online DPO needs at least two candidates per prompt for win/reject pairing.
 n_resp_per_prompt=2
 micro_bsz_per_gpu=2
@@ -48,6 +52,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.max_prompt_length=${max_prompt_length} \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.model.tokenizer_path=${TOKENIZER_PATH} \
+    actor_rollout_ref.model.attn_backend=${ATTN_BACKEND} \
+    actor_rollout_ref.rollout.rollout_attn_backend=${ROLLOUT_ATTN_BACKEND} \
     actor_rollout_ref.model.algorithm=dpo \
     actor_rollout_ref.model.model_type=diffusion_dpo_model \
     actor_rollout_ref.model.external_lib=verl_omni.pipelines.qwen_image_dpo \

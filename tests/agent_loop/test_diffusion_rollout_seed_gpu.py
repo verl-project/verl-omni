@@ -130,6 +130,13 @@ def _build_seed_rollout_config(tmp_dir: str, *, default_num_gpus: int, num_worke
     config.data.max_prompt_length = max_length
     config.actor_rollout_ref.rollout.max_model_len = max_length
     config.actor_rollout_ref.rollout.tensor_model_parallel_size = tp_size
+
+    # Smoke: prefer local FLASH_ATTN over product-default Hub FA3 (cf. FSDP engine test).
+    from tests.utils.smoke_attention import resolve_smoke_attention_backends
+
+    attn_backend, rollout_attn_backend = resolve_smoke_attention_backends()
+    config.actor_rollout_ref.model.attn_backend = attn_backend
+    config.actor_rollout_ref.rollout.rollout_attn_backend = rollout_attn_backend
     return config
 
 
