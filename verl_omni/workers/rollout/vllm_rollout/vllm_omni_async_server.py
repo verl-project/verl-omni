@@ -108,8 +108,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """Diffusion needs a PIL→tensor converter; AR does not."""
         if not self._ar_mode:
             self._to_tensor = T.PILToTensor()
-        # A codec-emitting AR stage is the TTS talker; detect it from the stage output type so the
-        # codec handling does not depend on a speaker x-vector being set.
+        # A codec-emitting AR stage is the TTS talker; detect it from the stage output type
         self._is_tts = self._ar_mode and _read_stage_output_type(getattr(self.config, "engine_kwargs", None)) == "codec"
         super()._post_init(cuda_visible_devices)
 
@@ -420,8 +419,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 sampling_params["logprobs"] = None
             sampling_params.setdefault("repetition_penalty", getattr(self.config, "repetition_penalty", 1.0))
             if self._is_tts:
-                # Stop at codec eos: without it the talker emits eos and then generates garbage
-                # to max_tokens.
+                # Stop at codec eos: without it the talker emits eos and then generates garbage to max_tokens.
                 se = list(sampling_params.get("stop_token_ids") or [])
                 if self._tts_codec_eos not in se:
                     sampling_params["stop_token_ids"] = se + [self._tts_codec_eos]
@@ -493,10 +491,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # only the last output, so accumulate the per-step chunks to recover the full sequence
         # and attach them to the final output for _process_output.
         acc_codes = None
-        for_tts = self._is_tts
+
         async for output in generator:
             final_res = output
-            if for_tts:
+            if self._is_tts:
                 try:
                     mm = output.multimodal_output
                     chunk = mm.get("codes", {}).get("audio") if mm is not None else None
@@ -527,13 +525,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
             extra_fields = {"global_steps": self.global_steps}
             token_ids = req_output.outputs[0].token_ids
-            # Surface the talker's full (T, 16) sampled codes for the actor's teacher-forced
-            # recompute. The accumulated stream starts with zero placeholder frames written during
-            # prefill; the real decode frames are the suffix. Align with a short probe so that
-            # codes[k, 0] == token_ids[k]: a short probe matters because the stream is usually one
-            # frame short of len(token_ids) (the eos frame is not emitted), and a long probe with
-            # a full-window bound would then exclude the true start, leaving every sub-codebook
-            # shifted one frame against the actor. No-op for non-TTS AR.
+            # Surface the talker's (T, 16) codes for the actor's teacher-forced recompute, trimming the
+            # leading prefill placeholders so codes[k, 0] == token_ids[k]. The probe is short because the
+            # stream is often one frame short of len(token_ids), so a long probe would shift the codebooks.
             audio_codes = getattr(final_res, "verl_tts_codes", None)
             if audio_codes is not None:
                 L = len(token_ids)
