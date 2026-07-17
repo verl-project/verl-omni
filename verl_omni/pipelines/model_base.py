@@ -706,6 +706,36 @@ class OmniRolloutPipelineBase:
         return {}
 
     @classmethod
+    def get_pipeline_id(cls, pipeline_mode: str = "thinker_only") -> str:
+        """Return the vLLM-Omni pipeline model_type for *pipeline_mode*.
+
+        The returned string is used as the ``pipeline`` field in the
+        generated deploy-config YAML so that the engine resolves the
+        same :class:`~vllm_omni.config.stage_config.PipelineConfig` that
+        the stages returned by :meth:`build_stage_configs` belong to.
+
+        Args:
+            pipeline_mode: The mode used to build the stages.
+
+        Returns:
+            str: vLLM-Omni pipeline ``model_type``.
+        """
+        for model_type, cls_ref in cls._registry.items():
+            if cls_ref is cls:
+                return model_type
+        return ""
+
+    @classmethod
+    def ensure_pipeline_registered(cls, pipeline_mode: str = "thinker_only") -> None:
+        """Ensure the pipeline for *pipeline_mode* is in vLLM-Omni's registry.
+
+        Called before the deploy-config YAML is consumed so the engine
+        can look up the correct :class:`PipelineConfig` by its
+        ``model_type``.
+        """
+        return
+
+    @classmethod
     def get_engine_hf_overrides(cls, pipeline_mode="thinker_only") -> dict:
         """Return HF config overrides per *pipeline_mode*.
 

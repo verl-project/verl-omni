@@ -164,11 +164,16 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
     def _write_deploy_config(self, engine_kwargs: dict, pipeline_name: str, adapter_cls, pipeline_mode: str) -> None:
         """Write a deploy config YAML from the adapter's stage topology."""
+        adapter_cls.ensure_pipeline_registered(pipeline_mode)
         stages = adapter_cls.build_stage_configs(pipeline_mode=pipeline_mode)
+        pipeline_id = adapter_cls.get_pipeline_id(pipeline_mode)
+
         device_control_env = get_visible_devices_keyword()
         devices = os.environ.get(device_control_env, "")
         tp_size = self.config.tensor_model_parallel_size
-        deploy_dict: dict[str, object] = {"pipeline": pipeline_name}
+
+        deploy_dict: dict[str, object] = {"pipeline": pipeline_id}
+
         if devices:
             stage_ids = [s.stage_id for s in stages]
             deploy_dict["stages"] = [
@@ -178,6 +183,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             raise RuntimeError(
                 f"Environment variable `{device_control_env}` is not set, cannot generate deploy config."
             )
+
         yaml_str = yaml.dump(deploy_dict).strip()
         logger.info("Generated deploy config:\n%s", yaml_str)
         self._temp_deploy_ctx = tempfile.TemporaryDirectory(prefix="verl_omni_deploy_")
@@ -194,17 +200,16 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
 
+        deploy_config = getattr(args, "deploy_config", None)
+        if deploy_config:
+            engine_args["deploy_config"] = deploy_config
+
         if self._ar_mode:
             # AR mode: no diffusion pipeline. Drop None entries from
             # compilation_config that OmniEngineArgs may leave behind.
             if isinstance(engine_args.get("compilation_config"), dict):
                 engine_args["compilation_config"] = _strip_none(engine_args["compilation_config"])
         else:
-            # inject multi-stage yaml config
-            deploy_config = getattr(args, "deploy_config", None)
-            if deploy_config:
-                engine_args["deploy_config"] = deploy_config
-
             import_external_libs(self.config.external_lib)
 
             self.config.resolve_algorithm(self.model_config)
