@@ -16,7 +16,7 @@
 import pytest
 
 from verl_omni.trainer.config.algorithm import OmniAlgoConfig
-from verl_omni.workers.config.omni import OmniLossConfig
+from verl_omni.workers.config.omni import OmniActorConfig, OmniLossConfig
 
 
 class TestOmniAlgoConfig:
@@ -62,3 +62,47 @@ class TestOmniLossConfig:
     def test_invalid_values_raise(self, kwargs):
         with pytest.raises(ValueError):
             OmniLossConfig(**kwargs)
+
+
+class TestOmniActorConfig:
+    def test_includes_omni_loss(self):
+        cfg = OmniActorConfig(
+            strategy="fsdp",
+            rollout_n=1,
+            ppo_micro_batch_size_per_gpu=1,
+        )
+        assert isinstance(cfg.omni_loss, OmniLossConfig)
+        assert cfg.omni_loss.loss_mode == "dpo"
+        assert cfg.trainer_type == "direct_preference"
+
+    def test_rejects_policy_gradient_trainer_type(self):
+        with pytest.raises(ValueError, match="OmniActorConfig is only valid"):
+            OmniActorConfig(
+                strategy="fsdp",
+                rollout_n=1,
+                ppo_micro_batch_size_per_gpu=1,
+                trainer_type="policy_gradient",
+            )
+
+    def test_instantiate_via_hydra(self):
+        import os
+
+        from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
+
+        import verl_omni
+
+        config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            cfg = compose(
+                config_name="omni_trainer",
+                overrides=[
+                    "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1",
+                    "actor_rollout_ref.actor.omni_loss.beta=0.2",
+                ],
+            )
+        actor_cfg: OmniActorConfig = omega_conf_to_dataclass(cfg.actor_rollout_ref.actor)
+
+        assert isinstance(actor_cfg, OmniActorConfig)
+        assert isinstance(actor_cfg.omni_loss, OmniLossConfig)
+        assert actor_cfg.omni_loss.beta == pytest.approx(0.2)

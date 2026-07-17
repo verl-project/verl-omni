@@ -62,7 +62,7 @@ class OmniModelConfig(BaseConfig):
     local_tokenizer_path: Optional[str] = None
 
     # model type
-    model_type: str = "language_model"
+    model_type: str = "omni_model"
 
     # HF config architectures[0] (auto-detected from config.json if unset)
     architecture: str = MISSING

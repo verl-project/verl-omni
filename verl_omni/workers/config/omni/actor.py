@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from verl.base_config import BaseConfig
+from verl.workers.config import FSDPActorConfig
 
 __all__ = [
     "OmniLossConfig",
+    "OmniActorConfig",
 ]
 
 
@@ -78,3 +80,20 @@ class OmniLossConfig(BaseConfig):
             raise ValueError(f"Invalid omni DPO loss_type={self.loss_type!r}; expected 'sigmoid' or 'ipo'.")
         if self.beta <= 0:
             raise ValueError(f"Omni DPO beta must be positive, got {self.beta}.")
+
+
+@dataclass
+class OmniActorConfig(FSDPActorConfig):
+    """FSDP actor config for omni model training."""
+
+    trainer_type: str = "direct_preference"  # "direct_preference" or "policy_gradient"
+    omni_loss: OmniLossConfig = field(default_factory=OmniLossConfig)
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.trainer_type not in ["direct_preference", "policy_gradient"]:
+            raise ValueError(
+                f"Invalid omni trainer_type={self.trainer_type}; expected ['direct_preference', 'policy_gradient']."
+            )
+        if self.trainer_type == "direct_preference" and self.omni_loss is None:
+            raise ValueError("OmniActorConfig.omni_loss is required for direct_preference training.")
