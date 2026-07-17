@@ -26,9 +26,14 @@ ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 max_prompt_length=256
 
-# Smoke: local FLASH_ATTN when FA available; native/SDPA otherwise (cf. FSDP engine test).
-# Product default remains FLASH_ATTN_3_HUB for real training.
-read -r ATTN_BACKEND ROLLOUT_ATTN_BACKEND <<< "$(python3 -c 'from tests.utils.smoke_attention import resolve_smoke_attention_backends; a, r = resolve_smoke_attention_backends(); print(a, r)')"
+# Smoke: pin local FLASH_ATTN (product default remains FLASH_ATTN_3_HUB).
+# Use exit-code checks only — importing verl/vllm may print INFO lines on stdout.
+ATTN_BACKEND=_flash_3_varlen_hub
+ROLLOUT_ATTN_BACKEND=FLASH_ATTN
+if ! python3 -c 'from verl_omni.utils.diffusion_attention import fa3_available; raise SystemExit(0 if fa3_available() else 1)' >/dev/null 2>&1; then
+    ATTN_BACKEND=native
+    ROLLOUT_ATTN_BACKEND=TORCH_SDPA
+fi
 
 # Online DPO needs at least two candidates per prompt for win/reject pairing.
 n_resp_per_prompt=2
