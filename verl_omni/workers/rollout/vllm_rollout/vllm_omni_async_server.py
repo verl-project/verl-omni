@@ -165,13 +165,19 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _write_deploy_config(self, engine_kwargs: dict, pipeline_name: str, adapter_cls, pipeline_mode: str) -> None:
         """Write a deploy config YAML from the adapter's stage topology."""
         stages = adapter_cls.build_stage_configs(pipeline_mode=pipeline_mode)
+        device_control_env = get_visible_devices_keyword()
+        devices = os.environ.get(device_control_env, "")
+        tp_size = self.config.tensor_model_parallel_size
         deploy_dict: dict[str, object] = {"pipeline": pipeline_name}
-        if len(stages) > 1:
-            device_control_env = get_visible_devices_keyword()
-            devices = os.environ.get(device_control_env, "")
-            if devices:
-                stage_ids = [s.stage_id for s in stages]
-                deploy_dict["stages"] = [{"stage_id": sid, "devices": devices} for sid in stage_ids]
+        if devices:
+            stage_ids = [s.stage_id for s in stages]
+            deploy_dict["stages"] = [
+                {"stage_id": sid, "devices": devices, "tensor_parallel_size": tp_size} for sid in stage_ids
+            ]
+        else:
+            raise RuntimeError(
+                f"Environment variable `{device_control_env}` is not set, cannot generate deploy config."
+            )
         yaml_str = yaml.dump(deploy_dict).strip()
         logger.info("Generated deploy config:\n%s", yaml_str)
         self._temp_deploy_ctx = tempfile.TemporaryDirectory(prefix="verl_omni_deploy_")
