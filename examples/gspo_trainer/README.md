@@ -1,9 +1,10 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
-**GSPO** on a math-reasoning task, using FSDP for the actor and `vllm-omni` as
-the async rollout backend. Two input modalities are supported: **text → text**
-(e.g. `MATH-lighteval`) and **image → text** (e.g. `MMK12`).
+**GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
+the async rollout backend. Three input recipes are supported: **text → text**
+(`MATH-lighteval`), **image → text** (`MMK12`), and
+**text + image + audio → text** (`AVQA-R1-6K`).
 
 Both **GPU** and **NPU** training platforms are supported via two launch scripts:
 
@@ -11,7 +12,6 @@ Both **GPU** and **NPU** training platforms are supported via two launch scripts
   — **GPU**, **LoRA (r=64)** on a single node with **4 × H100/H200 80GB**.
 - [`run_qwen3_omni_thinker_gspo_npu.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh)
   — **NPU**, **full-parameter** on a single **Atlas 800T A3** node with **16 NPUs**.
-
 For the base environment setup, see the [installation guide](../../docs/start/install.md).
 
 ## Installation
@@ -277,6 +277,61 @@ the `<answer>…\boxed{}…</answer>` template; see
 [`verl_omni/utils/reward_score/mmk12_reward.py`](../../verl_omni/utils/reward_score/mmk12_reward.py)
 for the full formula.
 
+## Training with `AVQA-R1-6K`
+
+The AVQA recipe trains the Qwen3-Omni Thinker to answer a four-way question
+from question text, one image, and one WAV clip. The output is text ending in a
+single option tag such as `<answer>B</answer>`.
+
+### Prepare the dataset
+
+```bash
+python examples/gspo_trainer/data_process/avqa.py \
+    --input_dir /path/to/AVQA_R1 \
+    --output_dir ~/data/avqa_r1_6k
+```
+
+This writes `train.parquet` and `validation.parquet`. The parquet stores
+absolute image/audio paths, so the AVQA media directory must be mounted at the
+same path on every Ray worker. The converter validates modalities, options,
+labels, and media existence and prints kept/dropped counts for each split.
+
+Standalone audio is decoded to a 16 kHz waveform by
+[`OmniRLHFDataset`](../../verl_omni/utils/dataset/omni_rl_datasets.py). Install
+the audio loader without changing the NPU engine stack with
+`pip install -e ".[audio]"`.
+
+### Run NPU training
+
+Use the shared NPU launcher with AVQA-specific data, dataset, reward, and
+sequence-length overrides. It keeps the full-parameter FSDP, 16-NPU, rollout
+TP=2, eight-agent-worker topology from `run_qwen3_omni_thinker_gspo_npu.sh`.
+
+```bash
+TRAIN_FILE=$HOME/data/avqa_r1_6k/train.parquet \
+VAL_FILE=$HOME/data/avqa_r1_6k/validation.parquet \
+MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh \
+    data.max_prompt_length=2048 \
+    data.max_response_length=512 \
+    data.val_max_samples=512 \
+    data.custom_cls.path=verl_omni/utils/dataset/omni_rl_datasets.py \
+    data.custom_cls.name=OmniRLHFDataset \
+    ++data.mm_processor_kwargs.sampling_rate=16000 \
+    reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py \
+    reward.custom_reward_function.name=compute_score \
+    trainer.project_name=qwen3_omni_avqa \
+    trainer.experiment_name=gspo_avqa_npu \
+    trainer.test_freq=20 \
+    trainer.total_epochs=3
+```
+
+These overrides use a 2048-token multimodal prompt budget and a 512-token
+response budget, register the audio-aware dataset class, and wire
+[`choice_reward.py`](../../verl_omni/utils/reward_score/choice_reward.py). It
+extracts the first `<answer>...</answer>` payload and returns a binary exact-match
+reward against the tagged dataset label.
+
 ## Logging
 
 W&B logging is enabled by default:
@@ -294,11 +349,12 @@ examples/gspo_trainer/
 │   ├── run_qwen3_omni_thinker_gspo_lora.sh   ← launch script (GPU, LoRA r=64)
 │   ├── run_qwen3_omni_thinker_gspo_npu.sh    ← launch script (NPU, full-parameter)
 │   ├── config/
-│   │   └── qwen3_omni_thinker_gspo.yaml      ← recipe config (inherits verl ppo_trainer)
+│   │   └── qwen3_omni_thinker_gspo.yaml      ← shared recipe config
 │   ├── qwen3_omni_thinker_only.yaml          ← vllm-omni stage config (GPU)
 │   └── qwen3_omni_thinker_only_npu.yaml      ← vllm-omni stage config (NPU)
 ├── data_process/
-│   └── mmk12.py                              ← MMK12 → verl RL parquet converter
+│   ├── mmk12.py                              ← MMK12 → verl RL parquet converter
+│   └── avqa.py                               ← AVQA → verl RL parquet converter
 ├── reward.png                                ← preliminary reward curve
 └── README.md                                 ← (this file)
 ```
