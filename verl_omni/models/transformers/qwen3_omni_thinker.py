@@ -74,7 +74,10 @@ def _register_qwen3_omni_automodel() -> None:
     Qwen3OmniMoeForConditionalGeneration.get_input_embeddings = _qwen3_omni_get_input_embeddings
     Qwen3OmniMoeForConditionalGeneration.set_input_embeddings = _qwen3_omni_set_input_embeddings
     # Upstream lists Qwen3OmniMoeDecoderLayer which does not exist; fix to the real class.
-    Qwen3OmniMoeForConditionalGeneration._no_split_modules = ["Qwen3OmniMoeThinkerTextDecoderLayer"]
+    Qwen3OmniMoeForConditionalGeneration._no_split_modules = [
+        "Qwen3OmniMoeThinkerTextDecoderLayer",
+        "Qwen3OmniMoeVisionBlock",
+    ]
     # _verl_strip_modules: verl's FSDPEngine drops these sub-modules for Thinker-only training.
     Qwen3OmniMoeForConditionalGeneration._verl_strip_modules = [
         "talker",
@@ -132,7 +135,15 @@ def patch_hf_processor_for_qwen3_omni() -> None:
             processor.spatial_merge_size = config.thinker_config.vision_config.spatial_merge_size
             processor.config.vision_start_token_id = config.talker_config.vision_start_token_id
             model_class = Qwen3OmniMoeThinkerForConditionalGeneration
-            processor.get_rope_index = types.MethodType(model_class.get_rope_index, processor)
+
+            # cast to int64 to avoid BF16 large-int rounding in fsdp.
+            _ori_get_rope_index = types.MethodType(model_class.get_rope_index, processor)
+
+            def _get_rope_index_long(*args, **kwargs):
+                vision_position_ids, deltas = _ori_get_rope_index(*args, **kwargs)
+                return vision_position_ids.long(), deltas
+
+            processor.get_rope_index = _get_rope_index_long
             processor.get_llm_pos_ids_for_vision = types.MethodType(model_class.get_llm_pos_ids_for_vision, processor)
             return processor
         except Exception:
