@@ -146,7 +146,6 @@ class LTX23PipelineWithLogProb(LTX23Pipeline):
         self._flow_grpo_seed = scheduler_seed + max(global_step - 1, 0)
 
     def _select_sde_steps(self, num_steps: int, device: torch.device) -> list[int]:
-        """Select Flow-Factory-compatible random transitions from the eligible pool."""
         del device
         if self._flow_grpo_sde_steps is not None:
             eligible = sorted({int(step) for step in self._flow_grpo_sde_steps if 0 <= int(step) < num_steps})
@@ -193,7 +192,6 @@ class LTX23PipelineWithLogProb(LTX23Pipeline):
         latent_height: int,
         latent_width: int,
     ) -> tuple[Any, Any, torch.Tensor]:
-        """Use Flow-Factory's resolution-dependent LTX sigma shift."""
         sigmas = (
             np.linspace(1.0, 1.0 / request_inputs.num_inference_steps, request_inputs.num_inference_steps)
             if sigmas is None

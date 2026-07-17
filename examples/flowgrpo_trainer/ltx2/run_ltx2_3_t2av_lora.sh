@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # LTX-2.3 text-to-audio-video LoRA FlowGRPO recipe.
-# Hyperparameters and rewards mirror Flow-Factory/examples/grpo/lora/ltx2/t2av.yaml.
 set -x
 
 WORKSPACE=${WORKSPACE:-$HOME}

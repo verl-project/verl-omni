@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Convert Flow-Factory's vid_prompt data to verl-omni parquet files."""
-
 import argparse
 import json
 from pathlib import Path
