@@ -75,15 +75,16 @@ jobs:
       - id: resolve-mode
         run: |
           mode="none"
+          pr_labels="${{ github.event_name == 'pull_request' && join(github.event.pull_request.labels.*.name, ',') || '' }}"
           if [[ "${{ github.event_name }}" != "pull_request" ]]; then
             mode="all"
-          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'ready-for-ci') }}" == "true" ]]; then
+          elif [[ ",${pr_labels}," == *",ready-for-ci,"* ]]; then
             mode="all"
-          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'ci-core') }}" == "true" ]]; then
+          elif [[ ",${pr_labels}," == *",ci-core,"* ]]; then
             mode="ci-core"
-          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'ci-e2e-omni') }}" == "true" ]]; then
+          elif [[ ",${pr_labels}," == *",ci-e2e-omni,"* ]]; then
             mode="ci-e2e-omni"
-          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'ci-e2e-diffusion') }}" == "true" ]]; then
+          elif [[ ",${pr_labels}," == *",ci-e2e-diffusion,"* ]]; then
             mode="ci-e2e-diffusion"
           fi
           echo "mode=${mode}" >> "$GITHUB_OUTPUT"

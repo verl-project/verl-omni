@@ -9,7 +9,7 @@ runs:
       env:
         PIP_EXTRA_INDEX_URL: https://pypi.org/simple
       run: |
-        # vllm020.dev1 image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
+        # vllm023.dev1 image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
         pip3 install ".[gpu,dev]"
         pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
         pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
@@ -19,3 +19,4 @@ runs:
         # TODO: rm --no-deps when VeOmni support torch2.11
         pip3 install veomni==0.1.11 --no-deps
         pip3 install torchcodec librosa soundfile av
+        pip3 install "transformers[mistral-common]"
