@@ -12,7 +12,45 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Visual (image) reward scoring functions for VeRL-Omni."""
+"""Visual (image) and audio reward scoring functions for VeRL-Omni."""
+
+
+def default_compute_score_audio(
+    data_source,
+    solution_audio,
+    ground_truth,
+    extra_info=None,
+    **kwargs,
+):
+    """Compute the reward score for an audio response.
+
+    Args:
+        data_source (str): Dataset identifier that determines the scoring method.
+        solution_audio: The generated audio as a ``(wav, sr)`` tuple with a float32
+            waveform, or ``None`` when synthesis failed.
+        ground_truth (str): Ground-truth answer (for TTS, the text the audio should speak).
+        extra_info (dict, optional): Additional metadata passed by the reward
+            manager.
+
+    Returns:
+        float or dict: The computed score (or a dict with a ``"score"`` key).
+
+    Raises:
+        NotImplementedError: If no scorer is registered for *data_source*.
+    """
+    if data_source == "tts":
+        from verl_omni.utils.reward_score import tts
+
+        res = tts.compute_score(solution_audio, ground_truth, extra_info, **kwargs)
+    else:
+        raise NotImplementedError(f"Reward function is not implemented for {data_source=}")
+
+    if isinstance(res, dict):
+        return res
+    elif isinstance(res, int | float | bool):
+        return float(res)
+    else:
+        return float(res[0])
 
 
 def default_compute_score_image(
@@ -54,4 +92,4 @@ def default_compute_score_image(
         return float(res[0])
 
 
-__all__ = ["default_compute_score_image"]
+__all__ = ["default_compute_score_audio", "default_compute_score_image"]

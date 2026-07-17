@@ -73,6 +73,19 @@ dev = [
 ocr = [
     "Levenshtein",
 ]
+# TTS reward backends (whisper ASR, ERes2Net speaker-sim, emotion2vec) for the tts reward modules.
+# NOTE: qwen-tts (reward-side code2wav + the trainable Qwen3-TTS classes) is not listed; it
+# hard-pins transformers==4.57.3, so install it separately with --no-deps; see
+# examples/qwen3_tts_gspo_trainer/README.md.
+tts = [
+    "librosa",
+    "soundfile",
+    "faster-whisper",
+    "modelscope",
+    "addict",
+    "funasr",
+    "simplejson",  # undeclared modelscope import; without it the ERes2Net load fails silently
+]
 
 # -------------------------------
 # tool.ruff - Linting configuration
