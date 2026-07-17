@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
+import functools
 import logging
 import os
 from dataclasses import asdict
@@ -88,6 +89,27 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if not self._ar_mode:
             self._to_tensor = T.PILToTensor()
         super()._post_init(cuda_visible_devices)
+
+    @functools.cached_property
+    def _tts_spk_embedding(self):
+        """The clone voice x-vector (list of floats), or None when this is not a TTS rollout.
+
+        Set via actor_rollout_ref.model.override_config.tts_spk_embed_path; the same vector
+        feeds the actor's speaker slot so generation and the teacher-forced recompute condition
+        on an identical speaker.
+        """
+        path = getattr(getattr(self.model_config, "hf_config", None), "tts_spk_embed_path", None)
+        if not path:
+            return None
+        from verl_omni.models.transformers.qwen3_tts_forward import load_speaker_xvector
+
+        logger.info("Qwen3-TTS rollout mode: voice-clone x-vector from %s", path)
+        return load_speaker_xvector(path).reshape(-1).tolist()
+
+    @functools.cached_property
+    def _tts_codec_eos(self) -> int:
+        talker_cfg = getattr(getattr(self.model_config, "hf_config", None), "talker_config", None)
+        return int(getattr(talker_cfg, "codec_eos_token_id", 2150))
 
     # -----------------------------------------------------------------------
     # launch_server hooks
@@ -306,6 +328,32 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # Mode-specific pipeline steps
     # -----------------------------------------------------------------------
 
+    def generate_tts(self, prompt_ids: list[int], spk_embedding: list[float]):
+        """Build the Qwen3-TTS voice-clone generation request for a prompt.
+
+        Returns (additional_information, placeholder_prompt_ids). Generation must run in
+        non-streaming mode (full text in the prefill), the layout the actor reconstructs in
+        build_talker_batch; streaming log-probs cannot be on-policy with the actor's
+        full-context recompute. The talker overwrites all prompt embeddings, so only the
+        placeholder's length matters, and it must equal the talker's real prompt length or
+        every codec frame's RoPE shifts against the actor.
+        """
+        from verl_omni.models.transformers.qwen3_tts_forward import build_assistant_text
+
+        tok = self.model_config.tokenizer
+        text = tok.decode(prompt_ids, skip_special_tokens=True).strip()
+        additional_information = {
+            "task_type": ["Base"],
+            "text": [text],
+            "language": ["Auto"],
+            "x_vector_only_mode": [True],
+            "non_streaming_mode": [True],
+            "voice_clone_prompt": [{"ref_spk_embedding": spk_embedding}],
+        }
+        assistant_len = len(tok(build_assistant_text(text))["input_ids"])
+        placeholder = [0] * (assistant_len + 2)
+        return additional_information, placeholder
+
     def _preprocess_input(
         self,
         prompt_ids: list[int],
@@ -348,9 +396,19 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             else:
                 sampling_params["logprobs"] = None
             sampling_params.setdefault("repetition_penalty", getattr(self.config, "repetition_penalty", 1.0))
+            spk_embedding = self._tts_spk_embedding
+            if spk_embedding is not None:
+                # Stop at codec eos: without it the talker emits eos and then generates garbage
+                # to max_tokens.
+                se = list(sampling_params.get("stop_token_ids") or [])
+                if self._tts_codec_eos not in se:
+                    sampling_params["stop_token_ids"] = se + [self._tts_codec_eos]
             params = SamplingParams(max_tokens=max_tokens, **sampling_params)
 
             prompt = {"prompt_token_ids": prompt_ids}
+            if spk_embedding is not None:
+                tts_ai, ar_prompt_ids = self.generate_tts(prompt_ids, spk_embedding)
+                prompt = {"prompt_token_ids": ar_prompt_ids, "additional_information": tts_ai}
             if multi_modal_data:
                 prompt["multi_modal_data"] = multi_modal_data
             return prompt, params
@@ -402,8 +460,30 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 sampling_params_list=params,
             )
         final_res: Optional[OmniRequestOutput] = None
+        # The TTS talker streams its (T, 16) codes one frame per decode step and the engine keeps
+        # only the last output, so accumulate the per-step chunks to recover the full sequence
+        # and attach them to the final output for _process_output.
+        acc_codes = None
+        for_tts = self._ar_mode and self._tts_spk_embedding is not None
         async for output in generator:
             final_res = output
+            if for_tts:
+                try:
+                    mm = output.multimodal_output
+                    chunk = mm.get("codes", {}).get("audio") if mm is not None else None
+                    if chunk is not None:
+                        chunk = torch.as_tensor(chunk)
+                        if chunk.ndim == 2 and chunk.shape[0] > 0:
+                            if acc_codes is None:
+                                acc_codes = chunk
+                            elif chunk.shape[0] > acc_codes.shape[0]:
+                                acc_codes = chunk  # cumulative snapshot
+                            else:
+                                acc_codes = torch.cat([acc_codes, chunk], dim=0)  # per-step delta
+                except (AttributeError, KeyError, TypeError, ValueError):
+                    pass  # not a codes chunk
+        if acc_codes is not None and final_res is not None:
+            final_res.verl_tts_codes = acc_codes
         return final_res
 
     def _process_output(self, final_res, params, sampling_params: dict[str, Any]):
@@ -418,6 +498,35 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
             extra_fields = {"global_steps": self.global_steps}
             token_ids = req_output.outputs[0].token_ids
+            # Surface the talker's full (T, 16) sampled codes for the actor's teacher-forced
+            # recompute. The accumulated stream starts with zero placeholder frames written during
+            # prefill; the real decode frames are the suffix. Align with a short probe so that
+            # codes[k, 0] == token_ids[k]: a short probe matters because the stream is usually one
+            # frame short of len(token_ids) (the eos frame is not emitted), and a long probe with
+            # a full-window bound would then exclude the true start, leaving every sub-codebook
+            # shifted one frame against the actor. No-op for non-TTS AR.
+            audio_codes = getattr(final_res, "verl_tts_codes", None)
+            if audio_codes is not None:
+                L = len(token_ids)
+                tid_t = torch.as_tensor(list(token_ids), dtype=audio_codes.dtype)
+                A = audio_codes.shape[0]
+                probe = min(L, 16)
+                best_o, best_m = max(0, A - L), -1.0
+                for o in range(0, max(1, A - probe + 1)):
+                    m = (audio_codes[o : o + probe, 0] == tid_t[:probe]).float().mean().item()
+                    if m > best_m:
+                        best_m, best_o = m, o
+                        if best_m >= 0.999:
+                            break
+                audio_codes = audio_codes[best_o : best_o + L]
+                if audio_codes.shape[0] < L:
+                    # Pad a short tail so the code count stays equal to the response length; the
+                    # padded frames are never used as context for an in-response token.
+                    pad_n = L - audio_codes.shape[0]
+                    pad = audio_codes.new_zeros((pad_n, audio_codes.shape[1]))
+                    pad[:, 0] = tid_t[L - pad_n : L]
+                    audio_codes = torch.cat([audio_codes, pad], dim=0)
+                extra_fields["tts_audio_codes"] = audio_codes
             log_probs = None
             if params.logprobs is not None:
                 log_probs = [
