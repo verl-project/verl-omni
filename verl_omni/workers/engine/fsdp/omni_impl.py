@@ -28,6 +28,24 @@ from verl_omni.workers.config import OmniModelConfig
 class OmniFSDPEngine(FSDPEngineWithLMHead):
     """FSDP engine for omni models"""
 
+    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
+        """Like parent, but normalises LoRA weight keys for vLLM-Omni consumption."""
+        per_tensor_param, peft_config = super().get_per_tensor_param(
+            layered_summon=layered_summon, base_sync_done=base_sync_done, **kwargs
+        )
+        if peft_config is not None and base_sync_done:
+            adapter = kwargs.get("adapter_name", "default")
+            per_tensor_param = (
+                (
+                    name.replace("_fsdp_wrapped_module.", "")
+                    .replace(f"lora_A.{adapter}.weight", "lora_A.weight")
+                    .replace(f"lora_B.{adapter}.weight", "lora_B.weight"),
+                    tensor,
+                )
+                for name, tensor in per_tensor_param
+            )
+        return per_tensor_param, peft_config
+
     def _build_module(self):
         from verl.utils.torch_dtypes import PrecisionType
 

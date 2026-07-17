@@ -20,3 +20,24 @@ __all__ = [
     "Qwen3OmniThinkerAdapter",
     "Qwen3OmniRolloutAdapter",
 ]
+
+
+# TODO (mike): remove after upstream vllm-omni fix lands.
+# Qwen3OmniMoeThinkerForConditionalGeneration is missing ``is_3d_moe_weight=True``,
+# so vLLM routes fused-MoE LoRA through the 2-D ``FusedMoEWithLoRA`` instead of
+# the 3-D ``FusedMoE3DWithLoRA``.  PEFT ``ParamWrapper`` produces expert-stacked
+# tensors; only the 3-D wrapper's ``_stack_moe_lora_weights`` reshapes them into
+# the per-expert list that ``set_lora`` expects.  Without the flag, ``set_lora``
+# hits ``assert isinstance(lora_a, list)``.
+def _patch_qwen3_omni_moe_is_3d_moe_weight() -> None:
+    try:
+        from vllm_omni.model_executor.models.qwen3_omni.qwen3_omni_moe_thinker import (
+            Qwen3OmniMoeThinkerForConditionalGeneration,
+        )
+    except ImportError:
+        return
+    if not getattr(Qwen3OmniMoeThinkerForConditionalGeneration, "is_3d_moe_weight", False):
+        Qwen3OmniMoeThinkerForConditionalGeneration.is_3d_moe_weight = True
+
+
+_patch_qwen3_omni_moe_is_3d_moe_weight()
