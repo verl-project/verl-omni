@@ -1,0 +1,56 @@
+# vLLM-Omni stage config for the Qwen3-TTS RL rollout: a single AR talker stage.
+#
+# The talker emits codec tokens, the (T, 16) codes via multimodal_output, and processed logprobs.
+# Audio for the reward is decoded reward-side by AudioRewardManager, not as a rollout stage: the
+# orchestrator has no code2wav worker type and a 2-stage connector deadlocks colocated.
+#
+# NOTE: a single codec-emitting AR stage needs vLLM-Omni's per-step postprocess to also fire for
+# engine_output_type "codec" (it fires only for "audio" up to vllm-omni 0.24.0). See the README
+# install section for the one-line fix until it lands upstream.
+#
+# devices is relative to each rollout server and must list exactly tensor_parallel_size indices.
+stage_args:
+  - stage_id: 0
+    runtime:
+      devices: "0"
+    engine_args:
+      model_stage: talker
+      model_arch: Qwen3TTSTalkerForConditionalGeneration
+      worker_type: ar
+      scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
+      engine_output_type: codec
+      hf_config_name: talker_config
+
+      # The 1.7B talker fits one GPU; tp=1 avoids all-reduce overhead and gives one rollout
+      # replica per GPU (data_parallel = gpus_per_node // tp).
+      tensor_parallel_size: 1
+      distributed_executor_backend: "mp"
+
+      gpu_memory_utilization: 0.35
+      max_num_seqs: 64
+      max_num_batched_tokens: 4096
+      max_model_len: 4096
+      enable_chunked_prefill: true
+
+      dtype: bfloat16
+      load_format: safetensors
+      trust_remote_code: true
+      enable_prefix_caching: false
+      enforce_eager: true
+
+      enable_sleep_mode: true
+      logprobs_mode: processed_logprobs   # talker codec logprobs for the importance ratio
+      disable_log_stats: true
+
+      # Neutralize the model's deploy sampling defaults (top_k=50, repetition_penalty=1.05) so
+      # the sampler agrees with the full-softmax logprob and generation stays on-policy.
+      default_sampling_params:
+        temperature: 1.0
+        top_k: -1
+        top_p: 1.0
+        repetition_penalty: 1.0
+        # The untrained talker does not stop at codec eos and rambles to the ceiling; 384 frames
+        # (about 32s) bounds reward cost while stab_reward teaches it to stop earlier.
+        max_tokens: 384
+    final_output: true
+    final_output_type: codec
