@@ -637,6 +637,16 @@ class BaseRayDiffusionTrainer(ABC):
 
     def _init_online_rollout_stack(self, actor_rollout_resource_pool):
         """Initialize rollout, reward, and checkpoint engines (online sampling only)."""
+        # Auto-set VLM scoring function when RM enabled + no custom_reward_function provided
+        if self.use_rm:
+            custom_fn_cfg = self.config.reward.custom_reward_function
+            if custom_fn_cfg.path is None:
+                from omegaconf import OmegaConf
+
+                with OmegaConf.open_dict(custom_fn_cfg):
+                    custom_fn_cfg.path = "verl_omni/utils/reward_score/genrm_ocr.py"
+                    custom_fn_cfg.name = "compute_score_ocr"
+
         # create reward loop manager
         from verl.experimental.reward_loop import RewardLoopManager
 
