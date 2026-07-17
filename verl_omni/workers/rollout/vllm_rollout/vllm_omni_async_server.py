@@ -53,6 +53,26 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 
+def _read_stage_output_type(engine_kwargs: dict) -> Optional[str]:
+    """The terminal stage's output type from the vLLM-Omni stage config, or None.
+
+    Read once at init to tell a codec (TTS) rollout apart from a plain text AR rollout, without
+    depending on whether a speaker x-vector is configured.
+    """
+    omni_kwargs = (engine_kwargs or {}).get("vllm_omni", {}) or {}
+    path = omni_kwargs.get("stage_configs_path") or omni_kwargs.get("stage-configs-path")
+    if not path:
+        return None
+    import yaml
+
+    with open(path) as f:
+        stages = (yaml.safe_load(f) or {}).get("stage_args") or []
+    if not stages:
+        return None
+    terminal = next((s for s in stages if s.get("final_output")), stages[-1])
+    return terminal.get("final_output_type") or (terminal.get("engine_args") or {}).get("engine_output_type")
+
+
 class vLLMOmniHttpServer(vLLMHttpServer):
     """vLLM-Omni http server in single node, this is equivalent to launch server with command line:
     ```
@@ -88,11 +108,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """Diffusion needs a PIL→tensor converter; AR does not."""
         if not self._ar_mode:
             self._to_tensor = T.PILToTensor()
+        # A codec-emitting AR stage is the TTS talker; detect it from the stage output type so the
+        # codec handling does not depend on a speaker x-vector being set.
+        self._is_tts = self._ar_mode and _read_stage_output_type(getattr(self.config, "engine_kwargs", None)) == "codec"
         super()._post_init(cuda_visible_devices)
 
     @functools.cached_property
     def _tts_spk_embedding(self):
-        """The clone voice x-vector (list of floats), or None when this is not a TTS rollout.
+        """The clone voice x-vector (list of floats), or None when unset.
 
         Set via actor_rollout_ref.model.override_config.tts_spk_embed_path; the same vector
         feeds the actor's speaker slot so generation and the teacher-forced recompute condition
@@ -396,8 +419,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             else:
                 sampling_params["logprobs"] = None
             sampling_params.setdefault("repetition_penalty", getattr(self.config, "repetition_penalty", 1.0))
-            spk_embedding = self._tts_spk_embedding
-            if spk_embedding is not None:
+            if self._is_tts:
                 # Stop at codec eos: without it the talker emits eos and then generates garbage
                 # to max_tokens.
                 se = list(sampling_params.get("stop_token_ids") or [])
@@ -406,7 +428,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             params = SamplingParams(max_tokens=max_tokens, **sampling_params)
 
             prompt = {"prompt_token_ids": prompt_ids}
-            if spk_embedding is not None:
+            if self._is_tts:
+                spk_embedding = self._tts_spk_embedding
+                if spk_embedding is None:
+                    raise RuntimeError(
+                        "codec TTS rollout requires a speaker x-vector; set "
+                        "actor_rollout_ref.model.override_config.tts_spk_embed_path "
+                        "(default-voice TTS is not supported)."
+                    )
                 tts_ai, ar_prompt_ids = self.generate_tts(prompt_ids, spk_embedding)
                 prompt = {"prompt_token_ids": ar_prompt_ids, "additional_information": tts_ai}
             if multi_modal_data:
@@ -464,7 +493,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # only the last output, so accumulate the per-step chunks to recover the full sequence
         # and attach them to the final output for _process_output.
         acc_codes = None
-        for_tts = self._ar_mode and self._tts_spk_embedding is not None
+        for_tts = self._is_tts
         async for output in generator:
             final_res = output
             if for_tts:
