@@ -194,8 +194,22 @@ jobs:
             fi
           done
 
+          echo ""
+          echo "===== GPU smoke parallel logs ====="
+          for name in "${names[@]}"; do
+            logfile="logs/gpu_smoke/parallel/${name}.log"
+            if [[ -f "${logfile}" ]]; then
+              echo "::group::${logfile}"
+              cat "${logfile}"
+              echo "::endgroup::"
+            else
+              echo "::warning::Missing GPU smoke log: ${logfile}"
+            fi
+          done
+
           ray stop --force || true
           exit "${failed}"
+
       - if: always()
         uses: ./.github/actions/gpu-smoke-upload-logs
 
