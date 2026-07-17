@@ -1,7 +1,7 @@
 (async_reward)=
 # Async Reward for Diffusion Training
 
-Last updated: 06/09/2026
+Last updated: 07/17/2026
 
 Async reward lets VeRL-Omni score completed rollout samples through reward-loop
 workers while other samples are still being generated. It is useful when reward
@@ -146,6 +146,16 @@ if self.use_rm and "rm_scores" not in batch.batch.keys():
 
 This is why async reward can reduce the measured `reward` section in the trainer
 timer: the reward work has already been streamed during generation.
+
+## Profiling the reward servers
+
+The reward-model servers support the same per-server torch profiler as the actor
+rollout servers, enabled via `reward.reward_model.rollout.profiler.*` (see the
+[profiler guide](../perf/profiler.md) for the recipe). The trainer profiles the
+phase where the servers actually score: with async reward that is the generation
+window — so expect a near-zero `reward` timer while the reward-server trace still
+captures the scoring compute. Without `enable_resource_pool`, the window is the
+colocated `reward` phase instead.
 
 ## External HTTP scorers
 
