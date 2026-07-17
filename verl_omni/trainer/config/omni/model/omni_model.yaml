@@ -7,6 +7,9 @@
 # Target class for this configuration
 _target_: verl_omni.workers.config.omni.OmniModelConfig
 
+# verl-omni dispatch key for engine and trainer routing
+model_type: omni_model
+
 # path to the huggingface model
 path: ???
 

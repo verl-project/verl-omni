@@ -25,6 +25,12 @@ actor_rollout_ref:
   # Actor config.
   actor:
 
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl_omni.workers.config.omni.OmniActorConfig
+
+    # Mirrors algorithm.trainer_type; used by OmniActorConfig.__post_init__ and worker loss dispatch.
+    trainer_type: ${algorithm.trainer_type}
+
     # Omni loss config.
     omni_loss:
 

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from . import model
-from .actor import OmniLossConfig
+from .actor import OmniActorConfig, OmniLossConfig
 from .model import *  # noqa: F401
 
-__all__ = list(model.__all__) + ["OmniLossConfig"]
+__all__ = list(model.__all__) + ["OmniLossConfig", "OmniActorConfig"]
