@@ -13,7 +13,14 @@
 # limitations under the License.
 
 from .audio import AudioRewardManager
+from .audio_judge import AudioJudgeRewardManager
 from .multi import MultiAudioRewardManager, MultiVisualRewardManager
 from .visual import VisualRewardManager
 
-__all__ = ["VisualRewardManager", "MultiVisualRewardManager", "AudioRewardManager", "MultiAudioRewardManager"]
+__all__ = [
+    "VisualRewardManager",
+    "MultiVisualRewardManager",
+    "AudioRewardManager",
+    "MultiAudioRewardManager",
+    "AudioJudgeRewardManager",
+]
