@@ -23,21 +23,35 @@ __all__ = [
 
 
 # TODO (mike): remove after upstream vllm-omni fix lands.
-# Qwen3OmniMoeThinkerForConditionalGeneration is missing ``is_3d_moe_weight=True``,
-# so vLLM routes fused-MoE LoRA through the 2-D ``FusedMoEWithLoRA`` instead of
-# the 3-D ``FusedMoE3DWithLoRA``.  PEFT ``ParamWrapper`` produces expert-stacked
-# tensors; only the 3-D wrapper's ``_stack_moe_lora_weights`` reshapes them into
-# the per-expert list that ``set_lora`` expects.  Without the flag, ``set_lora``
-# hits ``assert isinstance(lora_a, list)``.
-def _patch_qwen3_omni_moe_is_3d_moe_weight() -> None:
+# 1. Qwen3OmniMoeThinkerForConditionalGeneration is missing ``is_3d_moe_weight=True``,
+#    so vLLM routes fused-MoE LoRA through the 2-D ``FusedMoEWithLoRA`` instead of the
+#    3-D ``FusedMoE3DWithLoRA``, hitting ``assert isinstance(lora_a, list)``.
+# 2. The thinker sub-config has no ``architectures`` (the umbrella config owns it).
+#    ``FusedMoE3DWithLoRA.create_lora_weights`` requires ``model_config.architectures``
+#    to be non-empty.  Setting a class default is too late (config instances are
+#    already created), so we monkey-patch ``__init__`` to inject it.
+def _patch_qwen3_omni_thinker_vllm_omni() -> None:
     try:
+        from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
+            Qwen3OmniMoeThinkerConfig,
+        )
         from vllm_omni.model_executor.models.qwen3_omni.qwen3_omni_moe_thinker import (
             Qwen3OmniMoeThinkerForConditionalGeneration,
         )
     except ImportError:
         return
+
     if not getattr(Qwen3OmniMoeThinkerForConditionalGeneration, "is_3d_moe_weight", False):
         Qwen3OmniMoeThinkerForConditionalGeneration.is_3d_moe_weight = True
 
+    _orig_init = Qwen3OmniMoeThinkerConfig.__init__
 
-_patch_qwen3_omni_moe_is_3d_moe_weight()
+    def _patched_init(self_, **kwargs):
+        _orig_init(self_, **kwargs)
+        if not self_.architectures:
+            self_.architectures = ["Qwen3OmniMoeThinkerForConditionalGeneration"]
+
+    Qwen3OmniMoeThinkerConfig.__init__ = _patched_init
+
+
+_patch_qwen3_omni_thinker_vllm_omni()
