@@ -84,6 +84,7 @@ tts = [
     "modelscope",
     "addict",
     "funasr",
+    "langdetect",  # optional --lid language filter in the data-process script
     "simplejson",  # undeclared modelscope import; without it the ERes2Net load fails silently
 ]
 

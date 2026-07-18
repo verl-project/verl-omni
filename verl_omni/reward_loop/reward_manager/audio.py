@@ -112,7 +112,7 @@ class AudioRewardManager(RewardManagerBase):
         if codes.shape[0] == 0:
             return None
         decode = self._get_decoder()
-        return decode(codes.clamp_(0, self._codebook_max))
+        return decode(codes.clamp(0, self._codebook_max))
 
     def _extract_audio(self, data_item, extra_info):
         """The generated audio as a (wav, sr) tuple, or None when nothing decodes."""

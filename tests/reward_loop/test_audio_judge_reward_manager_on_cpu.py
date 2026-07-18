@@ -89,3 +89,21 @@ def test_judge_receives_both_blobs():
     manager.loop.run_until_complete(asyncio.gather(manager.run_single(d0), manager.run_single(d1)))
     assert seen["n"] == 2  # the group's two candidates judged in one call
     assert seen["text"] == "hello world"
+
+
+def test_group_freed_after_rendezvous():
+    manager = AudioJudgeRewardManager(_make_config(n=2), MagicMock(), compute_score=None)
+    manager._judge_group = lambda text, blobs: [1.0, 0.0]
+    d0, d1 = _make_item(), _make_item()
+    manager.loop.run_until_complete(asyncio.gather(manager.run_single(d0), manager.run_single(d1)))
+    assert manager._groups == {}  # scored groups are dropped, not accumulated (no memory leak)
+
+
+def test_group_freed_after_timeout():
+    cfg = _make_config(n=2)
+    cfg.reward.judge_timeout_s = 0.05  # a sibling never arrives; the lone candidate self-judges fast
+    manager = AudioJudgeRewardManager(cfg, MagicMock(), compute_score=None)
+    manager._judge_group = lambda text, blobs: [1.0] * len(blobs)
+    r0 = manager.loop.run_until_complete(manager.run_single(_make_item()))
+    assert r0["reward_extra_info"]["sj_score"] == 1.0
+    assert manager._groups == {}

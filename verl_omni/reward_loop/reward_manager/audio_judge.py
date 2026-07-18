@@ -87,7 +87,9 @@ class AudioJudgeRewardManager(AudioRewardManager):
         req = urllib.request.Request(url + "/rank", data=body, headers={"Content-Type": "application/json"})
         try:
             r = json.loads(urllib.request.urlopen(req, timeout=self._judge_timeout_s).read())
-            for j, sc in zip(idxs, r["scores"], strict=False):
+            # strict: a score-count mismatch raises here and falls through to the neutral 0.0 below,
+            # rather than silently mis-assigning candidates.
+            for j, sc in zip(idxs, r["scores"], strict=True):
                 scores[j] = float(sc)
         except Exception as e:  # noqa: BLE001
             logger.warning("audio judge call failed (%s); group gives no signal this step", e)
@@ -124,6 +126,8 @@ class AudioJudgeRewardManager(AudioRewardManager):
             g["scores"] = await self.loop.run_in_executor(
                 self._score_executor, self._judge_group, g["text"], g["blobs"]
             )
+            # Drop the group so its wav bytes are freed; every sibling already holds its own g ref.
+            self._groups.pop(uid, None)
             g["event"].set()
         else:
             try:
@@ -135,6 +139,7 @@ class AudioJudgeRewardManager(AudioRewardManager):
                             self._score_executor, self._judge_group, g["text"], g["blobs"]
                         )
                         g["event"].set()
+                    self._groups.pop(uid, None)
 
         scores = g["scores"] or []
         my_score = float(scores[my_idx]) if my_idx < len(scores) else 0.0
