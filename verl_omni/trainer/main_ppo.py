@@ -11,13 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PPO entrypoint for omni recipes that bind a worker-level loss the base entry cannot select.
+"""PPO entrypoint for online DPO, needed because base verl cannot select this loss from config.
 
-Mirrors verl/trainer/main_ppo_v0.py::TaskRunner (the legacy V0 flow the recipe runs) exactly, but
-runs a DPORayPPOTrainer that binds tts_dpo_loss on the actor after init_workers via the public
-set_loss_fn seam (the same seam base verl uses to bind the critic loss in
-ray_trainer.py::init_workers). Non-DPO configs are a pass-through, so this stays a drop-in for the
-plain PPO/GSPO path. Launch: python3 -m verl_omni.trainer.main_ppo.
+The DPO loss is sequence-level and pairwise (it needs ref_log_prob and the uid grouping), so it
+cannot be a registered policy-loss `loss_mode` like gspo (base verl's ppo_loss drops `data` before
+dispatching to the registry). It must be bound on the actor worker, which base verl only does for
+the critic, through the public set_loss_fn seam (ray_trainer.py::init_workers). To insert that one
+call we run our own trainer, but base verl's TaskRunner is a @ray.remote actor that hard-codes
+RayPPOTrainer and cannot be subclassed, so OmniTaskRunner below is a verbatim copy of
+verl/trainer/main_ppo_v0.py::TaskRunner (the legacy V0 flow the recipe runs; use_v1 defaults false),
+following the existing verl_omni/trainer/main_diffusion.py precedent. The ONLY departure from base
+is the marked set_loss_fn block in run(). Launch: python3 -m verl_omni.trainer.main_ppo.
 """
 
 import os
@@ -34,29 +38,8 @@ from verl.utils.config import omega_conf_to_dataclass, validate_config
 from verl.utils.device import auto_set_device
 
 
-class DPORayPPOTrainer(RayPPOTrainer):
-    """RayPPOTrainer that binds the online-DPO loss on the actor after the workers come up.
-
-    The base trainer binds ppo_loss inside init_workers; here we re-bind tts_dpo_loss through the
-    same public set_loss_fn worker method the base trainer uses for the critic. No-op unless the
-    actor's policy_loss.loss_mode is "dpo", so the plain PPO/GSPO path is unchanged.
-    """
-
-    def init_workers(self):
-        super().init_workers()
-        actor_cfg = self.config.actor_rollout_ref.actor
-        if actor_cfg.policy_loss.get("loss_mode", None) == "dpo":
-            from verl_omni.workers.utils.losses import tts_dpo_loss
-
-            self.actor_rollout_wg.set_loss_fn(partial(tts_dpo_loss, config=omega_conf_to_dataclass(actor_cfg)))
-
-
 class OmniTaskRunner:
-    """Ray remote class for omni PPO/DPO training.
-
-    Mirrors verl/trainer/main_ppo_v0.py::TaskRunner; the only change is instantiating
-    DPORayPPOTrainer instead of RayPPOTrainer in run().
-    """
+    """Copy of verl/trainer/main_ppo_v0.py::TaskRunner; see the module docstring for why."""
 
     def __init__(self):
         self.role_worker_mapping = {}
@@ -166,7 +149,7 @@ class OmniTaskRunner:
         )
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
-        trainer = DPORayPPOTrainer(
+        trainer = RayPPOTrainer(
             config=config,
             tokenizer=tokenizer,
             processor=processor,
@@ -179,6 +162,17 @@ class OmniTaskRunner:
             train_sampler=train_sampler,
         )
         trainer.init_workers()
+
+        # --- the only departure from base verl's TaskRunner.run ---
+        # Bind the online-DPO loss on the actor through the same public set_loss_fn seam base verl
+        # uses for the critic (ray_trainer.py::init_workers). No-op for non-DPO configs.
+        actor_cfg = config.actor_rollout_ref.actor
+        if actor_cfg.policy_loss.get("loss_mode", None) == "dpo":
+            from verl_omni.workers.utils.losses import tts_dpo_loss
+
+            trainer.actor_rollout_wg.set_loss_fn(partial(tts_dpo_loss, config=omega_conf_to_dataclass(actor_cfg)))
+        # --- end departure ---
+
         trainer.fit()
 
 
