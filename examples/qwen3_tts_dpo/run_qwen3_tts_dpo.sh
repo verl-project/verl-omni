@@ -26,7 +26,7 @@ JUDGE_URL=${JUDGE_URL:-"http://localhost:8901"}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE_CONFIG="${SCRIPT_DIR}/../qwen3_tts_gspo_trainer/qwen3_tts_stages.yaml"
 
-python3 -m verl_omni.trainer.main_ppo \
+python3 -m verl_omni.trainer.main_tts \
     --config-path="${SCRIPT_DIR}/config" \
     --config-name=qwen3_tts_dpo \
     data.train_files="${TRAIN_FILE}" \

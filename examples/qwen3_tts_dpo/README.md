@@ -11,15 +11,16 @@ recipe's talker actor, vLLM-Omni AR rollout, stage config and dependency patches
 - **Rollout**: `rollout.n=2` candidates per prompt (the vLLM-Omni AR talker, same stage config as GSPO).
 - **Reward**: `AudioJudgeRewardManager` decodes both candidates reward-side, buffers them by `uid`, and
   sends the pair to a judge `/rank` endpoint in one call. Each candidate's rating becomes `sj_score`.
-- **Loss**: `verl_omni.trainer.main_ppo` binds `tts_dpo_loss` on the actor (via the same `set_loss_fn`
+- **Loss**: `verl_omni.trainer.main_tts` binds `tts_dpo_loss` on the actor (via the same `set_loss_fn`
   seam base verl uses for the critic). Per sequence it sums the current and reference log-probs over
   the response, forms the implicit reward `r = sum(log pi_theta - log pi_ref)`, and minimizes
   `-logsigmoid(dpo_beta * (r_chosen - r_rejected))` plus an optional `dpo_nll_lambda * NLL(chosen)`.
   Pairing is internal to the loss (group by `uid`, best vs worst by `sj_score`); a judge tie yields a
   zero-gradient pair. No base-verl patch is involved.
 
-Launch with `python3 -m verl_omni.trainer.main_ppo` (not `verl.trainer.main_ppo`): the omni entry is
-the only difference, adding the DPO loss binding; every other recipe still runs on the base entry.
+Launch with `python3 -m verl_omni.trainer.main_tts`, the shared Qwen3-TTS entry (the GSPO recipe uses
+it too). It is base verl's PPO flow verbatim; the only addition is the DPO loss binding, a no-op
+unless `loss_mode` is dpo.
 
 ## Load-bearing invariants (baked into the config)
 
@@ -88,7 +89,7 @@ examples/qwen3_tts_dpo/
 ├── run_qwen3_tts_dpo.sh        launch (reuses ../qwen3_tts_gspo_trainer stage yaml + patches)
 └── judge_server.py             generic /rank judge (Gemini or OpenAI-compatible)
 
-verl_omni/trainer/main_ppo.py                        omni PPO/DPO entry (binds tts_dpo_loss)
+verl_omni/trainer/main_tts.py                        omni PPO/DPO entry (binds tts_dpo_loss)
 verl_omni/workers/utils/losses.py                    tts_dpo_loss (pairwise codec-0 DPO)
 verl_omni/workers/config/tts/actor.py                DPOPolicyLossConfig (dpo_beta / dpo_nll_lambda)
 verl_omni/reward_loop/reward_manager/audio_judge.py  AudioJudgeRewardManager

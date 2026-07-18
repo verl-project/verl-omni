@@ -9,7 +9,7 @@
 # only the loss, reward, and batch invariants differ.
 #
 # Launch (verl_omni entry binds tts_dpo_loss on the actor via set_loss_fn):
-#   python3 -m verl_omni.trainer.main_ppo --config-path=<this dir> --config-name=qwen3_tts_dpo <overrides>
+#   python3 -m verl_omni.trainer.main_tts --config-path=<this dir> --config-name=qwen3_tts_dpo <overrides>
 
 hydra:
   searchpath:

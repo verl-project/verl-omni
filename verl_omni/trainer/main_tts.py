@@ -11,17 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PPO entrypoint for online DPO, needed because base verl cannot select this loss from config.
+"""The Qwen3-TTS talker training entrypoint (GSPO and online DPO), analogous to main_diffusion.py.
 
-The DPO loss is sequence-level and pairwise (it needs ref_log_prob and the uid grouping), so it
-cannot be a registered policy-loss `loss_mode` like gspo (base verl's ppo_loss drops `data` before
-dispatching to the registry). It must be bound on the actor worker, which base verl only does for
-the critic, through the public set_loss_fn seam (ray_trainer.py::init_workers). To insert that one
-call we run our own trainer, but base verl's TaskRunner is a @ray.remote actor that hard-codes
-RayPPOTrainer and cannot be subclassed, so OmniTaskRunner below is a verbatim copy of
+Both TTS recipes launch through here. For GSPO it behaves exactly like base verl's PPO entry. For
+DPO it additionally binds the pairwise tts_dpo_loss on the actor, which base verl cannot select from
+config: the DPO loss is sequence-level and needs ref_log_prob and the uid grouping, so it cannot be
+a registered policy-loss `loss_mode` like gspo (base verl's ppo_loss drops `data` before dispatching
+to the registry). It must be bound on the actor worker, which base verl only does for the critic,
+through the public set_loss_fn seam (ray_trainer.py::init_workers). To insert that one call we run
+our own trainer, but base verl's TaskRunner is a @ray.remote actor that hard-codes RayPPOTrainer and
+cannot be subclassed, so OmniTaskRunner below is a verbatim copy of
 verl/trainer/main_ppo_v0.py::TaskRunner (the legacy V0 flow the recipe runs; use_v1 defaults false),
-following the existing verl_omni/trainer/main_diffusion.py precedent. The ONLY departure from base
-is the marked set_loss_fn block in run(). Launch: python3 -m verl_omni.trainer.main_ppo.
+following the existing verl_omni/trainer/main_diffusion.py precedent. The ONLY departure from base is
+the marked set_loss_fn block in run() (a no-op unless loss_mode is dpo). Launch:
+python3 -m verl_omni.trainer.main_tts.
 """
 
 import os
@@ -180,7 +183,7 @@ class OmniTaskRunner:
 def main(config):
     auto_set_device(config)
     if config.trainer.get("use_v1", False):
-        raise ValueError("verl_omni.trainer.main_ppo supports the legacy V0 trainer only; set trainer.use_v1=false.")
+        raise ValueError("verl_omni.trainer.main_tts supports the legacy V0 trainer only; set trainer.use_v1=false.")
     run_ppo(config, task_runner_class=ray.remote(num_cpus=1)(OmniTaskRunner))
 
 

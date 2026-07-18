@@ -25,7 +25,7 @@ SPK_EMBED=${SPK_EMBED:-"$HOME/data/tts_voice_synth/spk_embed.json"}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE_CONFIG="${SCRIPT_DIR}/qwen3_tts_stages.yaml"
 
-python3 -m verl.trainer.main_ppo \
+python3 -m verl_omni.trainer.main_tts \
     --config-path="${SCRIPT_DIR}/config" \
     --config-name=qwen3_tts_gspo \
     data.train_files="${TRAIN_FILE}" \
