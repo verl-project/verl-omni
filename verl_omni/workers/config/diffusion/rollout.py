@@ -42,6 +42,8 @@ class DiffusionRolloutAlgoConfig(BaseConfig):
     sde_type: str = "sde"
     sde_window_size: Optional[int] = None
     sde_window_range: Optional[list[int]] = None
+    sde_steps: Optional[list[int]] = None
+    num_sde_steps: Optional[int] = None
 
     # MixGRPO-only configs
     sample_strategy: str = "random"
@@ -67,6 +69,9 @@ class DiffusionPipelineConfig(BaseConfig):
 
     # Wan2.2 video generation: number of frames (81 = ~3s at 24fps)
     num_frames: int = 1
+
+    # Audio-video generation frame rate.
+    frame_rate: float = 24.0
 
 
 @dataclass

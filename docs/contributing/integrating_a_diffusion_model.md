@@ -238,6 +238,13 @@ inputs. The typical steps are:
    **negative** input dict (same latent + timestep, negative text
    features).
 
+The usual rollout contract stores a contiguous trajectory in
+`all_latents`, so the next state for slot `step` is
+`all_latents[:, step + 1]`. If a model samples non-contiguous SDE
+transitions, return an aligned `all_next_latents` tensor instead and consume
+`all_next_latents[:, step]` here. This prevents two unrelated sparse
+transitions from being treated as adjacent states.
+
 The dict keys must match the kwargs of the diffusers transformer
 class verbatim — the FSDP engine calls `module(**model_inputs)`.
 
