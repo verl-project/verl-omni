@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 06/02/2026.
+Last updated: 07/19/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -85,6 +85,109 @@ The two adapters must agree on:
   the training adapter is free to convert to whatever the transformer
   needs.
 - **Scheduler choice** so log-probs computed on each side are comparable.
+- **Prompt tokenisation contract** — who tokenises, who encodes, and which
+  tensor keys cross the agent loop boundary (see
+  [Prompt Tokenisation](#prompt-tokenisation-agent-loop--rollout) below).
+
+---
+
+## Prompt Tokenisation (Agent Loop → Rollout)
+
+verl-omni follows the verl design: **tokenisation happens once, in the agent
+loop**. The rollout pipeline must not decode token ids back to text and
+re-tokenise. Training never re-encodes prompts — it consumes the
+`prompt_embeds` (and model-specific extras such as SD3's
+`pooled_prompt_embeds`) that rollout cached in the batch.
+
+Rollout is configured with `skip_tokenizer_init=True`; the vLLM-Omni engine
+expects pre-tokenised input on every request.
+
+### Single text encoder (Qwen-Image and similar)
+
+One tokenizer, one text encoder. The agent loop sends `prompt_token_ids`; your
+rollout adapter overrides `encode_prompt` to accept `prompt_ids=` (and an
+optional attention mask) and runs the text encoder directly — see
+[`qwen_image_flow_grpo/common.py`](../../verl_omni/pipelines/qwen_image_flow_grpo/common.py).
+
+No `extra_tokenizers` config is needed.
+
+### Multiple text encoders (SD3.5 and similar)
+
+Some pipelines combine several text encoders with **more than one tokenizer
+vocabulary** (SD3.5: CLIP-L + CLIP-G share one vocab; T5 uses a separate
+vocab). Configure one entry per **distinct tokenizer**, not per encoder:
+
+```yaml
+# actor_rollout_ref.model.extra_tokenizers
+clip: {path: tokenizer, max_length: 77}      # feeds CLIP-L and CLIP-G
+t5:   {path: tokenizer_3, max_length: 256}   # feeds T5; align max_length with pipeline.max_sequence_length
+```
+
+**Agent loop behaviour**
+
+1. Render the chat template to plain text once (`custom_chat_template` +
+   `data.apply_chat_template_kwargs` must match your data preprocessor).
+2. Tokenise that text with each entry in `extra_tokenizers` (HF
+   `truncation=True`, `max_length` per entry). Result:
+   `extra_prompt_ids = {name: token_ids, ...}` (unpadded, with special
+   tokens).
+3. Also tokenise with the **primary** tokenizer (see below) into
+   `prompt_token_ids` for batch bookkeeping.
+
+**Rollout transport**
+
+[`vLLMOmniHttpServer`](../../verl_omni/workers/rollout/vllm_rollout/vllm_omni_async_server.py)
+forwards `extra_prompt_ids` / `negative_extra_prompt_ids` on the diffusion
+custom prompt dict alongside `prompt_token_ids`.
+
+**Rollout adapter behaviour**
+
+Read `req.prompts[0]["extra_prompt_ids"]`, pad each id list to the encoder's
+fixed length using **that tokenizer's** `pad_token_id` (SD3 CLIP-L and CLIP-G
+use different pad tokens even though they share a vocab), run the text
+encoders on `input_ids`, and concatenate embeddings exactly as the upstream
+`encode_prompt(text=...)` path would. Do **not** decode ids to strings.
+
+SD3.5 reference:
+[`sd3_flow_grpo/common.py`](../../verl_omni/pipelines/sd3_flow_grpo/common.py)
+(`SD3TokenIdPromptMixin`) and
+[`sd3_flow_grpo/vllm_omni_rollout_adapter.py`](../../verl_omni/pipelines/sd3_flow_grpo/vllm_omni_rollout_adapter.py).
+Recipe:
+[`examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh`](../../examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh).
+Parity test:
+[`tests/pipelines/test_sd3_token_id_prompt_on_cpu.py`](../../tests/pipelines/test_sd3_token_id_prompt_on_cpu.py).
+
+**Why `primary` vs `extra` tokenizers?**
+
+This is not a semantic split between "main" and "secondary" encoders.
+
+- **`extra_tokenizers`** — the general mechanism for multi-vocab models. Add
+  as many named entries as you have distinct tokenizers (`clip`, `t5`, …).
+  Your rollout adapter defines which keys it reads (SD3 expects `clip` and
+  `t5`).
+- **Primary tokenizer** (`tokenizer_path`, default `<model>/tokenizer`) —
+  legacy verl batch field `prompts` (`[bsz, prompt_length]`), logging, and
+  single-encoder models (Qwen-Image). For SD3.5 RL training the rollout path
+  uses `extra_prompt_ids`; the primary ids are kept for compatibility only.
+
+For a future model with three or more tokenizers, list all of them under
+`extra_tokenizers` — there is no hard cap of two. Shared-vocab encoders reuse
+one entry (SD3 CLIP-L/G both consume the `clip` ids).
+
+**Truncation vs padding**
+
+- Truncate in the agent loop (preserves EOS semantics per tokenizer).
+- Pad to fixed encoder length in the rollout adapter (matches diffusers
+  `padding="max_length"` behaviour and per-encoder pad tokens).
+
+**Anti-patterns**
+
+- Decoding `prompt_token_ids` inside the rollout adapter and calling
+  `encode_prompt(text=...)` — acceptable only as a temporary bridge; not for
+  merged integrations.
+- Tokenising only one vocab and hoping another encoder can reuse those ids
+  (T5 cannot consume CLIP token ids).
+- Re-encoding prompts on the training side.
 
 ---
 
@@ -245,8 +348,8 @@ class verbatim — the FSDP engine calls `module(**model_inputs)`.
 
 Call the transformer once for the positive prompt; if CFG is active,
 call it again for the negative prompt and combine them. Always finish with
-`scheduler.sample_previous_step(...)` and return the triple
-`(log_prob, prev_sample_mean, std_dev_t)` — that is what
+`scheduler.sample_previous_step(..., return_sqrt_dt=True)` and return the
+4-tuple `(log_prob, prev_sample_mean, std_dev_t, sqrt_dt)` — that is what
 [`PPODiffusersFSDPEngine.prepare_model_outputs`](../../verl_omni/workers/engine/fsdp/diffusers_impl.py)
 consumes.
 
@@ -271,10 +374,15 @@ Your subclass must do four things:
 
 1. **Replace the upstream scheduler** (typically Euler-based) with
    `FlowMatchSDEDiscreteScheduler`.
-2. **Override `encode_prompt`** to accept pre-tokenised `prompt_ids` and
-   the tokenizer attention mask (the agent loop ships these — never raw
-   strings). Always return a padded `(B, L, D)` tensor and a `(B, L)`
-   mask so the agent loop can ferry them as plain tensors.
+2. **Implement a token-id-native prompt encoder** (see
+   [Prompt Tokenisation](#prompt-tokenisation-agent-loop--rollout)):
+   - *Single encoder:* override `encode_prompt` to accept `prompt_ids=` and
+     an attention mask; never require raw strings on the RL path.
+   - *Multiple encoders:* read `extra_prompt_ids` from the request, pad per
+     tokenizer, run each text encoder on `input_ids`, and fuse embeddings
+     like upstream `encode_prompt(text=...)`. Never decode ids to text.
+   Always return padded `(B, L, D)` tensors (plus model-specific extras
+   such as SD3 `pooled_prompt_embeds`) and masks where applicable.
 3. **Implement `diffuse(...)`** — the SDE loop that optionally applies
    CFG and collects `all_latents`, `all_log_probs`, and
    `all_timesteps`.
@@ -322,6 +430,7 @@ RL exploration starts from a known-good operating point.
 | `pipeline.true_cfg_scale` | For Qwen-Image-style true CFG (e.g. `4.0`). Default `1.0` (disabled). |
 | `pipeline.guidance_scale` | For pipelines whose upstream uses `guidance_scale`. Default `null` defers to the pipeline. |
 | `pipeline.max_sequence_length` | Must accommodate the templated prompt length your tokenizer produces. |
+| `model.extra_tokenizers` | For multi-encoder models only. One entry per distinct tokenizer vocab; keys must match what your rollout adapter expects. |
 
 > **Config hygiene.** Any new field on
 > [`DiffusionPipelineConfig`](../../verl_omni/workers/config/diffusion/rollout.py)
@@ -427,6 +536,10 @@ third model demands the same code, then unify.
 
 Before opening the PR, confirm every box:
 
+- [ ] Prompt tokenisation follows [Prompt Tokenisation](#prompt-tokenisation-agent-loop--rollout):
+      single-encoder models use `prompt_token_ids` only; multi-encoder models
+      configure `extra_tokenizers` and a token-id-native rollout encoder
+      (no decode-and-re-encode in the pipeline).
 - [ ] `verl_omni/pipelines/<model>_flow_grpo/` contains `__init__.py`,
       `diffusers_training_adapter.py`, and `vllm_omni_rollout_adapter.py`.
 - [ ] [`verl_omni/pipelines/__init__.py`](../../verl_omni/pipelines/__init__.py)
