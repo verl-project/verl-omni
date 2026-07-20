@@ -1,0 +1,168 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Target class for this configuration
+_target_: verl_omni.workers.config.omni.OmniModelConfig
+
+# path to the huggingface model
+path: ???
+
+# config to the huggingface config. In case it is not the same as path
+hf_config_path: null
+
+# path to the huggingface tokenizer (defaults to <path>/tokenizer or <path>)
+tokenizer_path: null
+
+# whether to use shared memory for model loading
+use_shm: False
+
+# whether to trust remote code
+trust_remote_code: False
+
+# custom chat template for the model
+custom_chat_template: null
+
+# external library for model-specific patches
+external_lib: null
+
+# override hf config
+override_config: {}
+
+# HuggingFace config architectures[0] (auto-detected from config.json if unset)
+architecture: ???
+
+# Which stage to train: "thinker" (default), "talker", or "all"
+model_stage: thinker
+
+# Sub-config key for the trainable component (e.g. "thinker_config", "talker_config")
+hf_config_name: null
+
+# whether to enable gradient checkpointing
+enable_gradient_checkpointing: True
+
+# whether to enable activation offload
+enable_activation_offload: False
+
+# whether to use remove padding
+use_remove_padding: True
+
+# Set to positive value to enable LoRA (e.g., 32)
+lora_rank: 0
+
+# LoRA scaling factor
+lora_alpha: 16
+
+# Target modules for LoRA adaptation ("all-linear" or a list of module names)
+target_modules: all-linear
+
+# Exclude modules from LoRA adaptation
+exclude_modules: null
+
+# Path to pre-trained LoRA adapter to load for continued training
+lora_adapter_path: null
+
+# whether to use liger
+use_liger: False
+
+# whether to use fused kernels
+use_fused_kernels: False
+
+# fused kernel options
+fused_kernel_options:
+
+  # the implementation backend for fused kernels
+  impl_backend: torch
+
+# TiledMLP configuration for memory-efficient MLP computation
+tiled_mlp:
+
+  # whether to enable TiledMLP
+  enabled: False
+
+  # number of shards to split the input
+  num_shards: 4
+
+# MTP (multi-token prediction / speculative decoding)
+mtp:
+
+  _target_: verl.workers.config.MtpConfig
+
+  enable: False
+  enable_train: False
+  enable_rollout: False
+
+  detach_encoder: False
+  mtp_loss_scaling_factor: 0.1
+
+  speculative_algorithm: EAGLE
+  speculative_num_steps: 3
+  speculative_eagle_topk: 1
+  speculative_num_draft_tokens: 4
+
+  method: mtp
+  num_speculative_tokens: 1
+
+# LoRA (Low-Rank Adaptation) configuration
+lora:
+
+  # LoRA type: "lora", "dora", etc.
+  type: lora
+
+  # whether to merge LoRA into base weights before transferring to vLLM
+  merge: False
+
+  # LoRA rank (set to 0 to disable)
+  rank: 0
+
+  # LoRA alpha scaling factor
+  alpha: 32
+
+  # LoRA dropout rate
+  dropout: 0.0
+
+  # A list of module names to apply LoRA to
+  target_modules:
+    - linear_qkv
+    - linear_proj
+    - linear_fc1
+    - linear_fc2
+
+  # A list of module names not to apply LoRA to
+  exclude_modules: []
+
+  # Position for applying dropout: "pre" or "post"
+  dropout_position: pre
+
+  # Initialization method for LoRA A
+  lora_A_init_method: xavier
+
+  # Initialization method for LoRA B
+  lora_B_init_method: zero
+
+  # Enables experimental All-to-All communication strategy
+  a2a_experimental: False
+
+  # Parameter dtype for LoRA weights (null = use model dtype)
+  dtype: null
+
+  # Path to pre-trained LoRA adapter weights
+  adapter_path: null
+
+  # VLMLoRA: whether to freeze the vision model
+  freeze_vision_model: True
+
+  # VLMLoRA: whether to freeze the vision projection
+  freeze_vision_projection: True
+
+  # VLMLoRA: whether to freeze the language model
+  freeze_language_model: True
+
+# Multimodal token budget
+max_image_tokens: null
+
+max_audio_tokens: null
+
+max_video_tokens: null

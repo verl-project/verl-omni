@@ -8,15 +8,24 @@ compressibility) and model-based generative reward models (e.g. OCR via a
 vision-language model served behind an OpenAI-compatible router). Reward
 computation is dispatched per sample by the
 :class:`~verl_omni.reward_loop.reward_manager.VisualRewardManager`, which
-plugs into the standard :class:`verl.experimental.reward_loop.RewardLoopManager`.
+plugs into :class:`~verl_omni.reward_loop.reward_loop.OmniRewardLoopManager` —
+verl's :class:`~verl.experimental.reward_loop.RewardLoopManager` extended with
+profiler control over the reward-model rollout servers.
 
 .. autosummary::
    :nosignatures:
 
+   verl_omni.reward_loop.reward_loop.OmniRewardLoopManager
    verl_omni.reward_loop.reward_manager.VisualRewardManager
    verl_omni.utils.reward_score.default_compute_score_image
    verl_omni.utils.reward_score.http_scorer_client.compute_score
    verl_omni.utils.reward_score.unified_reward.compute_score_unified_reward
+
+Reward Loop Manager
+~~~~~~~~~~~~~~~~~~~~
+
+.. autoclass:: verl_omni.reward_loop.reward_loop.OmniRewardLoopManager
+   :members: start_profile, stop_profile
 
 Reward Manager
 ~~~~~~~~~~~~~~~~~

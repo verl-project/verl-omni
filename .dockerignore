@@ -5,6 +5,8 @@
 .git
 .github
 !.github/verl_pin.txt
+!.github/vllm_ascend_pin.txt
+!.github/vllm_omni_pin.txt
 .cursor
 .vscode
 .idea
@@ -45,5 +47,4 @@ playground
 # Hugging Face / model caches
 .huggingface
 **/huggingface
-
 

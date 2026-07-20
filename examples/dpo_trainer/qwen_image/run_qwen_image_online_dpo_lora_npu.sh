@@ -1,5 +1,6 @@
 # Qwen-Image Diffusion DPO LoRA RL, vllm_omni rollout
 set -x
+export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
 
 # Set WORKSPACE to any writable directory; defaults to $HOME
 WORKSPACE=${WORKSPACE:-$HOME}

@@ -48,6 +48,7 @@ dependencies = [
 # Rollout engine (install in step 2, after gpu step 1).
 vllm-omni = [
     "vllm-omni==0.24.0",
+    "qwen-vl-utils>=0.0.14",
 ]
 # CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
 gpu = [
@@ -62,6 +63,7 @@ train = [
 ]
 dev = [
     "pytest",
+    "pytest-cov",
     "pre-commit",
     "py-spy",
     "pytest-asyncio",
@@ -133,6 +135,25 @@ module = [
 ignore_errors = false
 
 # -------------------------------
+# tool.coverage - Test coverage
+# -------------------------------
+[tool.coverage.run]
+branch = true
+source = ["verl_omni"]
+omit = [
+    "verl_omni/version/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == '__main__':",
+]
+
+# -------------------------------
 # tool.setuptools - Additional config
 # -------------------------------
 [tool.setuptools]
@@ -164,4 +185,3 @@ verl_omni = [
 override-dependencies = [
     "accelerate>=1.14.0",
 ]
-

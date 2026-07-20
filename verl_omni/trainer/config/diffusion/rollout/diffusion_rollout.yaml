@@ -32,8 +32,10 @@ dtype: bfloat16
 
 # vLLM-omni diffusion attention backend.  Must be consistent with
 # ``actor_rollout_ref.model.attn_backend`` (validated at startup).
-# Available options: ["FLASH_ATTN", "TORCH_SDPA"]
-rollout_attn_backend: FLASH_ATTN
+# Available options: ["FLASH_ATTN", "FLASH_ATTN_HUB", "FLASH_ATTN_3_HUB", "TORCH_SDPA"]
+# Default FLASH_ATTN_3_HUB pairs with actor attn_backend=_flash_3_varlen_hub for
+# kernels FA3 train/rollout consistency. Use FLASH_ATTN for the legacy local FA path.
+rollout_attn_backend: FLASH_ATTN_3_HUB
 
 # Fraction of GPU memory used by vLLM-Omni for cache.
 gpu_memory_utilization: 0.5
