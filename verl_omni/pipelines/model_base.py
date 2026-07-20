@@ -63,7 +63,7 @@ class DiffusionModelBase(ABC):
         architecture = model_config.architecture
         algorithm = model_config.algorithm
 
-        if architecture == "QwenImagePipeline":
+        if architecture in {"QwenImagePipeline", "QwenImageEditPlusPipeline"}:
             logger.info(
                 "Applying monkey-patch for QwenImageTransformer2DModel Ulysses SP "
                 "This workaround will be removed once we upgrade to a diffusers release that "

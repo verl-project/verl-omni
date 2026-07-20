@@ -28,10 +28,12 @@ REWARD_TP=1
 IMAGE_RESOLUTION=384
 TOTAL_TRAINING_STEPS=100
 ATTN_BACKEND=native
+ROLLOUT_ATTN_BACKEND=TORCH_SDPA
 MAX_NUM_SEQS=256
 
 if [ "${FA3:-0}" = "1" ]; then
     ATTN_BACKEND="_flash_3_varlen_hub"
+    ROLLOUT_ATTN_BACKEND=FLASH_ATTN_3_HUB
 fi
 
 ENGINE=vllm_omni
@@ -50,6 +52,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.custom_chat_template="\"$custom_chat_template\"" \
     actor_rollout_ref.model.attn_backend=$ATTN_BACKEND \
+    actor_rollout_ref.rollout.rollout_attn_backend=$ROLLOUT_ATTN_BACKEND \
     actor_rollout_ref.model.lora_rank=32 \
     actor_rollout_ref.model.lora_alpha=64 \
     actor_rollout_ref.model.target_modules="['to_q','to_k','to_v','to_out.0','add_q_proj','add_k_proj','add_v_proj','to_add_out']" \
