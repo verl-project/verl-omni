@@ -28,8 +28,8 @@ REWARD_TP=1
 IMAGE_RESOLUTION=384
 TOTAL_TRAINING_STEPS=100
 ATTN_BACKEND=native
-MAX_NUM_SEQS=256
-
+MAX_NUM_SEQS=${MAX_NUM_SEQS:-256}
+REQUEST_BATCH_MAX_WAIT_MS=${REQUEST_BATCH_MAX_WAIT_MS:-10}
 if [ "${FA3:-0}" = "1" ]; then
     ATTN_BACKEND="_flash_3_varlen_hub"
 fi
@@ -80,7 +80,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.algo.sde_type="cps" \
     actor_rollout_ref.rollout.algo.sde_window_size=3 \
     actor_rollout_ref.rollout.algo.sde_window_range="[0,5]" \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs=$MAX_NUM_SEQS \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs=${MAX_NUM_SEQS} \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.request_batch_max_wait_ms=${REQUEST_BATCH_MAX_WAIT_MS} \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=28 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
@@ -107,4 +108,5 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.save_freq=100 \
     trainer.test_freq=20 \
     trainer.total_epochs=15 \
-    trainer.total_training_steps=$TOTAL_TRAINING_STEPS "$@"
+    trainer.total_training_steps=$TOTAL_TRAINING_STEPS \
+    "$@"
