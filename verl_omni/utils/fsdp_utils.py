@@ -88,8 +88,11 @@ def _layered_summon_lora_params(fsdp_module) -> OrderedDict:
         summon_ctx = FSDP.summon_full_params(submodule, writeback=False) if is_fsdp1 else nullcontext()
 
         with summon_ctx:
+            # DIFF vs upstream: prefix keys with clean_prefix so
+            # get_peft_model_state_dict can match them (it checks for "lora_"
+            # in keys, but FSDP1 lambda-wrap gives flat names like "weight").
             sub_state_dict = {
-                n: p
+                f"{clean_prefix}.{n}": p
                 for n, p in submodule.named_parameters()
                 if not any(n.startswith(f"{nn}.") for nn in nested_fsdp_names)
             }
@@ -97,9 +100,7 @@ def _layered_summon_lora_params(fsdp_module) -> OrderedDict:
             if not sub_lora_params:
                 continue
             sub_lora_params = {
-                f"{clean_prefix}.{key}": (
-                    param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
-                )
+                key: (param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu())
                 for key, param in sub_lora_params.items()
             }
             lora_params.update(sub_lora_params)
