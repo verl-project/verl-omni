@@ -79,6 +79,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """
         engine_kwargs = getattr(self.config, "engine_kwargs", None) or {}
         omni_kwargs = engine_kwargs.get("vllm_omni", {}) or {}
+        # TODO (mike): drop this once the legacy omni training script is removed.
+        # It should be automatically inferred from the model config
         self._ar_mode = omni_kwargs.get("output_mode", "diffusion") == "ar"
         self._rollout_flags: dict[int, dict] = {}
 
@@ -141,6 +143,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_kwargs.pop("output_mode", None)
         if self._ar_mode:
             engine_kwargs.pop("custom_pipeline", None)
+            # TODO (mike): drop this once the legacy omni training script is removed.
+            # It should be automatically inferred from the model config
             pipeline_name = engine_kwargs.pop("pipeline_name", None)
             pipeline_mode = engine_kwargs.pop("pipeline_mode", "thinker_only")
 
