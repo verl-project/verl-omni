@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
+import asyncio
 import logging
 import os
 from dataclasses import asdict
@@ -51,6 +52,9 @@ from verl_omni.workers.rollout.replica import DiffusionOutput
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
+# Sentinel: ``None`` is a valid cached value (LoRA not loaded).
+_LORA_REQUEST_CACHE_MISS = object()
+
 
 class vLLMOmniHttpServer(vLLMHttpServer):
     """vLLM-Omni http server in single node, this is equivalent to launch server with command line:
@@ -87,6 +91,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """Diffusion needs a PIL→tensor converter; AR does not."""
         if not self._ar_mode:
             self._to_tensor = T.PILToTensor()
+        self._lora_request_cache: LoRARequest | None | object = _LORA_REQUEST_CACHE_MISS
+        self._lora_resolve_lock = asyncio.Lock()
         super()._post_init(cuda_visible_devices)
 
     # -----------------------------------------------------------------------
@@ -221,6 +227,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         await self.engine.collective_rpc(
             "wake_up", kwargs={"tags": tags if tags is not None else self._get_wake_up_tags()}
         )
+        self._invalidate_lora_request_cache()
+
+    async def set_global_steps(self, global_steps: int):
+        if global_steps != self.global_steps:
+            self._invalidate_lora_request_cache()
+        await super().set_global_steps(global_steps)
 
     async def _sleep_hybrid(self):
         """Preserve non-actor pipeline weights during hybrid training sleep.
@@ -233,6 +245,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """
         # TODO (andy): use `sleep_level=2` in the future when the
         #  trainer side incorporates the whole components of the model.
+        self._invalidate_lora_request_cache()
         await self.engine.collective_rpc("sleep", kwargs={"level": 1})
         await self.engine.reset_encoder_cache()
 
@@ -275,23 +288,39 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             multi_modal_data["video"] = video_data
         return multi_modal_data
 
-    async def _resolve_lora_request(self) -> Optional[LoRARequest]:
-        """Build the actor LoRA request if a LoRA adapter is currently loaded.
+    def _invalidate_lora_request_cache(self) -> None:
+        """Drop cached LoRA state after weight sync or engine sleep/wake."""
+        self._lora_request_cache = _LORA_REQUEST_CACHE_MISS
 
-        Wraps ``list_loras`` in ``try/except TypeError`` (a strict superset of the
-        plain membership check): some engine backends return a non-iterable, in
-        which case we assume the adapter is loaded. The diffusion path is unchanged
-        in the normal (iterable) case.
+    async def _resolve_lora_request(self) -> Optional[LoRARequest]:
+        """Return the actor LoRA request when a LoRA adapter is loaded.
+
+        ``list_loras`` is a diffusion busy-loop RPC serialized behind
+        ``execute_fn``. Calling it on every ``generate`` blocks concurrent
+        ``add_request`` calls until the current forward finishes, collapsing
+        request batching to B≈1. Resolve once per weight version and cache.
+        Invalidate via :meth:`_invalidate_lora_request_cache` on wake/sleep/step.
         """
         if not self.lora_as_adapter:
             return None
-        try:
-            lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
-        except TypeError:
-            lora_loaded = True
-        if not lora_loaded:
-            return None
-        return LoRARequest(lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH)
+
+        if self._lora_request_cache is not _LORA_REQUEST_CACHE_MISS:
+            return self._lora_request_cache  # type: ignore[return-value]
+
+        async with self._lora_resolve_lock:
+            if self._lora_request_cache is not _LORA_REQUEST_CACHE_MISS:
+                return self._lora_request_cache  # type: ignore[return-value]
+            try:
+                lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
+            except TypeError:
+                # Some engine backends return a non-iterable; treat as loaded.
+                lora_loaded = True
+            self._lora_request_cache = (
+                LoRARequest(lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH)
+                if lora_loaded
+                else None
+            )
+            return self._lora_request_cache  # type: ignore[return-value]
 
     @staticmethod
     def _map_stop_reason(finish_reason: Optional[str]) -> Optional[str]:
