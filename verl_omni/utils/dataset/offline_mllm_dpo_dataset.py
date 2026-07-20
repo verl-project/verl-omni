@@ -460,6 +460,20 @@ class ModalityGroupedBatchSampler(Sampler[int]):
 
 
 def offline_mllm_dpo_collate_fn(features):
+    """Collate Offline MLLM DPO samples into a single-modality batch.
+
+    The collator requires every sample in the batch to share the same modality,
+    stacks tensor fields with modality-aware padding, and stores non-tensor
+    fields in object arrays.
+
+    Args:
+        features: Sequence of dataset samples produced by
+            ``OfflineMLLMDPODataset``.
+
+    Returns:
+        Batch dictionary containing collated tensor fields and object arrays for
+        non-tensor fields.
+    """
     modalities = {feature.get("modality") for feature in features}
     if len(modalities) != 1:
         raise ValueError(f"Offline MLLM DPO batches must contain a single modality, got {sorted(modalities)}")
