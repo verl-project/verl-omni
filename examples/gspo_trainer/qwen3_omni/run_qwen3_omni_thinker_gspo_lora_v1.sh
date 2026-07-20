@@ -26,8 +26,8 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.exclude_modules=".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*" \
-    actor_rollout_ref.model.target_modules="['q_proj','k_proj','v_proj','o_proj','down_proj']" \
-    actor_rollout_ref.model.target_parameters="['gate_up_proj']" \
+    actor_rollout_ref.model.target_modules="['q_proj','k_proj','v_proj','o_proj']" \
+    actor_rollout_ref.model.target_parameters="['gate_up_proj','down_proj']" \
     +actor_rollout_ref.model.override_config.attn_implementation="sdpa" \
     actor_rollout_ref.actor.freeze_vision_tower=true \
     actor_rollout_ref.actor.optim.lr=1e-5 \
