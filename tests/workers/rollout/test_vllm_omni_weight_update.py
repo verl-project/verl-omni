@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from verl.utils.vllm import TensorLoRARequest
+from vllm.lora.request import LoRARequest as BaseLoRARequest
 
 
 def _install_module(name: str, **attrs):
@@ -30,6 +31,10 @@ def _install_module(name: str, **attrs):
 
 def _install_lightweight_imports():
     repo_root = Path(__file__).resolve().parents[3]
+
+    for module_name in list(sys.modules):
+        if module_name == "verl_omni.utils.vllm_omni" or module_name.startswith("verl_omni.utils.vllm_omni."):
+            del sys.modules[module_name]
 
     for package_name, package_path in {
         "verl_omni": repo_root / "verl_omni",
@@ -70,6 +75,8 @@ def _install_lightweight_imports():
     _install_module("vllm.utils.torch_utils", set_default_torch_dtype=set_default_torch_dtype)
 
     _install_module("vllm_omni")
+    _install_module("vllm_omni.lora")
+    _install_module("vllm_omni.lora.request", LoRARequest=BaseLoRARequest)
     _install_module("vllm_omni.diffusion")
     _install_module("vllm_omni.diffusion.data", OmniDiffusionConfig=FakeOmniDiffusionConfig)
     _install_module(
@@ -96,6 +103,7 @@ _install_lightweight_imports()
 
 from verl_omni.utils.vllm_omni import OmniTensorLoRARequest
 from verl_omni.workers.rollout.vllm_rollout import utils as rollout_utils
+from vllm_omni.lora.request import LoRARequest as OmniLoRARequest
 
 pytestmark = pytest.mark.cpu
 
@@ -109,8 +117,9 @@ def _make_worker(*, lora_enabled: bool = True):
     return worker
 
 
-def test_omni_tensor_lora_request_uses_verl_tensor_request():
-    assert issubclass(OmniTensorLoRARequest, TensorLoRARequest)
+def test_omni_tensor_lora_request_uses_vllm_omni_request():
+    assert issubclass(OmniTensorLoRARequest, OmniLoRARequest)
+    assert not issubclass(OmniTensorLoRARequest, TensorLoRARequest)
 
 
 def test_update_weights_from_ipc_accumulates_lora_buckets(monkeypatch):
@@ -130,16 +139,18 @@ def test_update_weights_from_ipc_accumulates_lora_buckets(monkeypatch):
 
     worker = _make_worker()
     worker.remove_lora = lambda _adapter_id: None
-    worker._update_weights = lambda weights, peft_config, base_sync_done: received.append(
-        (list(weights), peft_config, base_sync_done)
-    )
+
+    def add_lora(request):
+        received.append((dict(request.lora_tensors), request.peft_config, type(request)))
+
+    worker.add_lora = add_lora
 
     worker.update_weights_from_ipc(peft_config={"r": 16}, base_sync_done=True)
 
     assert len(received) == 1
-    assert [name for name, _ in received[0][0]] == ["a", "b"]
+    assert list(received[0][0]) == ["a", "b"]
     assert received[0][1] == {"r": 16}
-    assert received[0][2] is True
+    assert received[0][2] is OmniTensorLoRARequest
 
 
 def test_update_weights_from_ipc_drains_adapter_update_when_lora_disabled(monkeypatch):
@@ -159,20 +170,32 @@ def test_update_weights_from_ipc_drains_adapter_update_when_lora_disabled(monkey
 
     worker = _make_worker(lora_enabled=False)
     worker.remove_lora = lambda _adapter_id: pytest.fail("disabled LoRA should not remove adapters")
-    worker._update_weights = lambda *_args, **_kwargs: pytest.fail("disabled LoRA should drain without loading")
+    worker.add_lora = lambda *_args, **_kwargs: pytest.fail("disabled LoRA should drain without loading")
 
     worker.update_weights_from_ipc(peft_config={"r": 16}, base_sync_done=True)
 
     assert drained == [True]
 
 
-def test_update_weights_releases_lora_tensor_reference():
+def test_update_weights_from_ipc_releases_lora_tensor_reference(monkeypatch):
     requests = []
+
+    class FakeReceiver:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received([("a", torch.tensor([1])), ("b", torch.tensor([2]))])
+
+    import verl.workers.rollout.vllm_rollout.bucketed_weight_transfer as transfer_mod
+
+    monkeypatch.setattr(transfer_mod, "BucketedWeightReceiver", FakeReceiver)
+
     worker = _make_worker()
+    worker.remove_lora = lambda _adapter_id: None
     worker.add_lora = requests.append
 
-    weights = [("a", torch.tensor([1])), ("b", torch.tensor([2]))]
-    worker._update_weights(weights, peft_config={"r": 16}, base_sync_done=True)
+    worker.update_weights_from_ipc(peft_config={"r": 16}, base_sync_done=True)
 
     assert len(requests) == 1
     assert requests[0].peft_config == {"r": 16}

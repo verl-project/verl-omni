@@ -25,6 +25,15 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _topo_debug_enabled() -> bool:
+    return os.environ.get("VERL_OMNI_WEIGHT_SYNC_TOPO_DEBUG", "0").lower() in {"1", "true", "yes", "on"}
+
+
+def _topo_debug(message: str):
+    if _topo_debug_enabled():
+        print(f"[weight-sync-topo][vllm-omni-worker] {message}", flush=True)
+
+
 # Add the NPU mixin only on NPU; on GPU it redefines existing worker methods and
 # trips vLLM v1 multiproc_executor's no-attribute-redefinition assertion.
 def _platform_extension_bases():
@@ -80,6 +89,44 @@ class vLLMOmniColocateWorkerExtension(*_platform_extension_bases()):
             return model, model_config
         return None
 
+    def _load_standard_weight_bucket(self, model, weights, bucket_idx: int):
+        _topo_debug(
+            "load_standard_weight_bucket begin "
+            f"worker_rank={getattr(self, 'rank', None)} local_rank={getattr(self, 'local_rank', None)} "
+            f"bucket={bucket_idx} params={len(weights)}"
+        )
+        loaded = model.load_weights(weights)
+        _topo_debug(
+            "load_standard_weight_bucket end "
+            f"worker_rank={getattr(self, 'rank', None)} local_rank={getattr(self, 'local_rank', None)} "
+            f"bucket={bucket_idx} loaded={len(loaded) if loaded is not None else -1}"
+        )
+        if os.environ.get("VERL_OMNI_WEIGHT_ROUTE_DEBUG", "0") != "1":
+            return loaded
+
+        max_buckets = int(os.environ.get("VERL_OMNI_WEIGHT_ROUTE_DEBUG_BUCKETS", "4"))
+        if bucket_idx > max_buckets:
+            return loaded
+
+        sample_limit = int(os.environ.get("VERL_OMNI_WEIGHT_ROUTE_DEBUG_SAMPLE", "12"))
+        sample = [
+            f"{name}:{tuple(tensor.shape)}:{tensor.dtype}"
+            for name, tensor in weights[:sample_limit]
+        ]
+        logger.info(
+            "vLLM standard weight bucket loaded: worker_rank=%s local_rank=%s "
+            "bucket=%d params=%d loaded=%d model=%s stage=%s sample=%s",
+            getattr(self, "rank", None),
+            getattr(self, "local_rank", None),
+            bucket_idx,
+            len(weights),
+            len(loaded) if loaded is not None else -1,
+            type(model).__qualname__,
+            getattr(model, "model_stage", None),
+            sample,
+        )
+        return loaded
+
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model.
 
@@ -92,13 +139,28 @@ class vLLMOmniColocateWorkerExtension(*_platform_extension_bases()):
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
         assert self.device is not None
+        zmq_handle = self._get_zmq_handle()
+        _topo_debug(
+            "update_weights_from_ipc begin "
+            f"worker_rank={getattr(self, 'rank', None)} local_rank={getattr(self, 'local_rank', None)} "
+            f"replica_rank={os.environ.get('VERL_REPLICA_RANK', '0')} "
+            f"job_id={os.environ.get('VERL_RAY_JOB_ID', '0')} "
+            f"use_shm={use_shm} peft={bool(peft_config)} base_sync_done={base_sync_done} "
+            f"zmq_handle={zmq_handle}"
+        )
         receiver = BucketedWeightReceiver(
-            zmq_handle=self._get_zmq_handle(),
+            zmq_handle=zmq_handle,
             device=self.device,
             use_shm=use_shm,
         )
 
         if peft_config and base_sync_done:
+            if getattr(getattr(self, "vllm_config", None), "lora_config", None) is None:
+                logger.info("LoRA config is disabled; draining adapter weights without loading")
+                receiver.receive_weights(on_bucket_received=lambda _weights: None)
+                _topo_debug("update_weights_from_ipc drained lora weights because lora_config disabled")
+                return
+
             # In async mode, make sure the old lora is removed before adding the new one
             t0 = time.perf_counter()
             self.remove_lora(VLLM_LORA_INT_ID)
@@ -143,6 +205,8 @@ class vLLMOmniColocateWorkerExtension(*_platform_extension_bases()):
                 )
             t2 = time.perf_counter()
             self.add_lora(lora_request)
+            if hasattr(lora_request, "lora_tensors"):
+                lora_request.lora_tensors = None
             t3 = time.perf_counter()
             logger.debug("add_lora took %.3f ms", (t3 - t2) * 1000)
             logger.debug(
@@ -151,6 +215,11 @@ class vLLMOmniColocateWorkerExtension(*_platform_extension_bases()):
                 (t1 - t0) * 1000,
                 (t_recv_end - t_recv_start) * 1000,
                 (t3 - t2) * 1000,
+            )
+            _topo_debug(
+                "update_weights_from_ipc lora end "
+                f"worker_rank={getattr(self, 'rank', None)} local_rank={getattr(self, 'local_rank', None)} "
+                f"params={len(accumulated_weights)} elapsed={(t3 - t0):.2f}s"
             )
         else:
             # Full-weight path: stream bucket-by-bucket to bound GPU memory.
@@ -161,13 +230,37 @@ class vLLMOmniColocateWorkerExtension(*_platform_extension_bases()):
                 # model.load_weights (no per-bucket finalize), then run the single
                 # post-load processing pass once all buckets are received.
                 model, model_config = standard
-                receiver.receive_weights(on_bucket_received=lambda weights: model.load_weights(weights))
+                bucket_idx = 0
+
+                def _on_bucket_received(weights):
+                    nonlocal bucket_idx
+                    bucket_idx += 1
+                    return self._load_standard_weight_bucket(model, weights, bucket_idx)
+
+                receiver.receive_weights(on_bucket_received=_on_bucket_received)
+                _topo_debug(
+                    "update_weights_from_ipc standard receive done "
+                    f"worker_rank={getattr(self, 'rank', None)} local_rank={getattr(self, 'local_rank', None)} "
+                    f"buckets={bucket_idx}"
+                )
                 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
                 process_weights_after_loading(model, model_config, self.device)
+                _topo_debug(
+                    "update_weights_from_ipc process_weights_after_loading done "
+                    f"worker_rank={getattr(self, 'rank', None)} local_rank={getattr(self, 'local_rank', None)}"
+                )
             else:
                 # Diffusion pipeline worker: use its own loader.
                 receiver.receive_weights(on_bucket_received=lambda weights: self.load_weights(weights))
+                _topo_debug(
+                    "update_weights_from_ipc diffusion receive done "
+                    f"worker_rank={getattr(self, 'rank', None)} local_rank={getattr(self, 'local_rank', None)}"
+                )
+        _topo_debug(
+            "update_weights_from_ipc end "
+            f"worker_rank={getattr(self, 'rank', None)} local_rank={getattr(self, 'local_rank', None)}"
+        )
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.
@@ -178,6 +271,23 @@ class vLLMOmniColocateWorkerExtension(*_platform_extension_bases()):
         job id is forwarded by the vLLMHttpServer actor as VERL_RAY_JOB_ID and
         inherited by this vLLM worker subprocess.
         """
+        fixed_handles = os.environ.get("VERL_VLLM_WEIGHT_SYNC_ZMQ_HANDLES")
+        if fixed_handles:
+            handles = [handle.strip() for handle in fixed_handles.split(",") if handle.strip()]
+            rank = int(getattr(self, "rank", self.local_rank))
+            if rank >= len(handles):
+                raise IndexError(
+                    f"VERL_VLLM_WEIGHT_SYNC_ZMQ_HANDLES has {len(handles)} handles, "
+                    f"but worker rank is {rank}"
+                )
+            return handles[rank]
+
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
         job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
-        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{self.local_rank}.sock"
+        handle = f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{self.local_rank}.sock"
+        _topo_debug(
+            "_get_zmq_handle "
+            f"worker_rank={getattr(self, 'rank', None)} local_rank={getattr(self, 'local_rank', None)} "
+            f"replica_rank={replica_rank} job_id={job_id} handle={handle}"
+        )
+        return handle
