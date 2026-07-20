@@ -41,7 +41,7 @@ This installs `vllm` for the CUDA PyTorch stack and `kernels` for FA3 backend.
 For Ascend NPU:
 
 ```bash
-uv pip install vllm==0.24.0 --no-deps
+uv pip install vllm==0.24.0
 uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@$(cat .github/vllm_ascend_pin.txt)"
 ```
 
