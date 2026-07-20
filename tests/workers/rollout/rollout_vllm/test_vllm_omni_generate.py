@@ -74,6 +74,11 @@ def init_server():
         ignore_reinit_error=True,
     )
 
+    # Smoke: prefer local FLASH_ATTN over product-default Hub FA3 (cf. FSDP engine test).
+    from tests.utils.smoke_attention import resolve_smoke_attention_backends
+
+    _, rollout_attn_backend = resolve_smoke_attention_backends()
+
     rollout_cfg = OmegaConf.create(
         {
             "_target_": "verl_omni.workers.config.diffusion.DiffusionRolloutConfig",
@@ -95,6 +100,7 @@ def init_server():
             "free_cache_engine": True,
             "disable_log_stats": True,
             "n": 4,
+            "rollout_attn_backend": rollout_attn_backend,
             "pipeline": {
                 "_target_": "verl_omni.workers.config.diffusion.rollout.DiffusionPipelineConfig",
                 "height": 512,

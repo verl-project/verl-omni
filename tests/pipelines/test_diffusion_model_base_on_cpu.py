@@ -83,6 +83,7 @@ class TestDiffusionModelBaseRegistry:
 
 class TestVllmOmniPipelineBaseRegistry:
     def test_builtin_qwen_rollout_algorithms_registered(self):
+        pytest.importorskip("vllm_omni")
         from verl_omni.pipelines.qwen_image_diffusion_nft.vllm_omni_rollout_adapter import (
             QwenImageDiffusionNFTPipeline,
         )
@@ -92,6 +93,7 @@ class TestVllmOmniPipelineBaseRegistry:
         assert VllmOmniPipelineBase.get_class("QwenImagePipeline", "diffusion_nft") is QwenImageDiffusionNFTPipeline
 
     def test_diffusion_nft_rollout_does_not_override_sde_trajectory_loop(self):
+        pytest.importorskip("vllm_omni")
         from verl_omni.pipelines.qwen_image_diffusion_nft.vllm_omni_rollout_adapter import (
             QwenImageDiffusionNFTPipeline,
         )
