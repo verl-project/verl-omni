@@ -58,8 +58,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=20480 \
     actor_rollout_ref.ref.fsdp_config.param_offload=true \
-    actor_rollout_ref.ref.fsdp_config.model_dtype=bf16 \
-    actor_rollout_ref.ref.fsdp_config.use_orig_params=true \
+    actor_rollout_ref.ref.fsdp_config.model_dtype=bfloat16 \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=False \
     reward.reward_manager.source=register \
