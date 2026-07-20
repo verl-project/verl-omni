@@ -13,13 +13,11 @@ VAL_FILE=${VAL_FILE:-"$HOME/data/gsm8k/test.parquet"}
 python3 -m verl_omni.trainer.main_omni \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${VAL_FILE}" \
-    data.train_batch_size=256 \
+    data.train_batch_size=128 \
     data.max_prompt_length=2048 \
     data.max_response_length=8192 \
     data.truncation='error' \
     data.filter_overlong_prompts=true \
-    data.val_max_samples=1000 \
-    data.validation_shuffle=true \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.lora_rank=32 \
     actor_rollout_ref.model.lora_alpha=16 \
@@ -31,10 +29,9 @@ python3 -m verl_omni.trainer.main_omni \
     +actor_rollout_ref.model.override_config.attn_implementation="sdpa" \
     actor_rollout_ref.actor.freeze_vision_tower=true \
     actor_rollout_ref.actor.optim.lr=1e-5 \
-    actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
     actor_rollout_ref.actor.optim.clip_grad=1.0 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=16 \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=30720 \
     actor_rollout_ref.actor.use_kl_loss=false \
