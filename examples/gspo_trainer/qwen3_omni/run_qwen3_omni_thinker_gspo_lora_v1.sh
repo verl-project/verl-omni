@@ -69,8 +69,8 @@ python3 -m verl_omni.trainer.main_omni \
     trainer.balance_batch=True \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \
-    trainer.project_name=qwen3_omni_thinker_lora \
-    trainer.experiment_name=gspo \
+    trainer.project_name=gspo \
+    trainer.experiment_name=qwen3_omni_thinker_lora \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=50 \
