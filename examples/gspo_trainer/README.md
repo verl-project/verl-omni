@@ -318,6 +318,7 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh \
     data.custom_cls.path=pkg://verl_omni.utils.dataset.omni_rl_datasets \
     data.custom_cls.name=OmniRLHFDataset \
     ++data.mm_processor_kwargs.sampling_rate=16000 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py \
     reward.custom_reward_function.name=compute_score \
     trainer.project_name=qwen3_omni_avqa \
@@ -328,7 +329,8 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh \
 
 These overrides use a 2048-token multimodal prompt budget and a 512-token
 response budget, register the audio-aware dataset class by importable package
-path so multiprocessing preserves its `RLHFDataset` base class, and wire
+path so multiprocessing preserves its `RLHFDataset` base class, raise rollout
+GPU/NPU memory utilization from the launcher's `0.6` default to `0.8`, and wire
 [`choice_reward.py`](../../verl_omni/utils/reward_score/choice_reward.py). It
 extracts the first `<answer>...</answer>` payload and returns a binary exact-match
 reward against the tagged dataset label.
