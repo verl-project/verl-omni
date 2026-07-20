@@ -14,11 +14,30 @@
 
 import numpy as np
 import pytest
+from datasets.utils._dill import dumps
+from dill import loads
 
 pytest.importorskip("cachetools")
 pytest.importorskip("vllm")
 
+from verl.utils.dataset.rl_dataset import RLHFDataset
+from verl.utils.import_utils import load_extern_object
+
 from verl_omni.utils.dataset.omni_rl_datasets import OmniRLHFDataset
+
+
+def test_package_loaded_dataset_preserves_base_class_after_serialization():
+    dataset_cls = load_extern_object(
+        "pkg://verl_omni.utils.dataset.omni_rl_datasets",
+        "OmniRLHFDataset",
+    )
+    dataset = dataset_cls.__new__(dataset_cls)
+    dataset.serialize_dataset = False
+
+    restored = loads(dumps(dataset))
+
+    assert isinstance(restored, RLHFDataset)
+    assert hasattr(restored, "_build_messages")
 
 
 def test_extract_audio_info_loads_path_at_configured_sampling_rate(tmp_path, monkeypatch):

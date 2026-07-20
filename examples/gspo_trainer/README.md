@@ -47,7 +47,7 @@ pip install "verl @ git+https://github.com/verl-project/verl.git@05b262b6"
 
 # verl's V1 trainer (TaskRunnerV1) imports TransferQueue at startup; main_ppo
 # fails with ModuleNotFoundError without it, and it is not always pulled transitively
-pip install TransferQueue==0.1.8
+pip install TransferQueue==0.1.8 librosa qwen_vl_utils
 
 # verl-omni (this repo)
 pip install -e .
@@ -315,7 +315,7 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh \
     data.max_prompt_length=2048 \
     data.max_response_length=512 \
     data.val_max_samples=512 \
-    data.custom_cls.path=verl_omni/utils/dataset/omni_rl_datasets.py \
+    data.custom_cls.path=pkg://verl_omni.utils.dataset.omni_rl_datasets \
     data.custom_cls.name=OmniRLHFDataset \
     ++data.mm_processor_kwargs.sampling_rate=16000 \
     reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py \
@@ -327,7 +327,8 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh \
 ```
 
 These overrides use a 2048-token multimodal prompt budget and a 512-token
-response budget, register the audio-aware dataset class, and wire
+response budget, register the audio-aware dataset class by importable package
+path so multiprocessing preserves its `RLHFDataset` base class, and wire
 [`choice_reward.py`](../../verl_omni/utils/reward_score/choice_reward.py). It
 extracts the first `<answer>...</answer>` payload and returns a binary exact-match
 reward against the tagged dataset label.
