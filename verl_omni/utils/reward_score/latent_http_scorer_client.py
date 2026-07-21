@@ -70,10 +70,15 @@ def _serialize_request(
 
 
 async def _session() -> aiohttp.ClientSession:
+    loop = asyncio.get_running_loop()
     session = getattr(compute_score, "_session", None)
-    if session is None or session.closed:
+    session_loop = getattr(compute_score, "_session_loop", None)
+    if session is None or session.closed or session_loop is not loop:
+        if session is not None and not session.closed:
+            await session.close()
         session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None))
         compute_score._session = session
+        compute_score._session_loop = loop
     return session
 
 
