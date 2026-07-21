@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SD3.5-Medium LoRA Flow-GRPO on PickScore-SFW prompts.
 # Seven GPUs run training; physical GPU 7 is reserved for the DRM server.
+# See docs/start/sd35_drm_flow_grpo.md for the complete setup.
 set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME.

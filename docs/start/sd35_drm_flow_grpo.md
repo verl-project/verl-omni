@@ -106,7 +106,7 @@ source .venv/bin/activate
 export WORKSPACE=${WORKSPACE:-$HOME}
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6
 
-bash examples/flowgrpo_trainer/sd35/run_sd35_medium_drm_pickscore_8gpu.sh
+bash examples/flowgrpo_trainer/sd35/run_sd35_medium_drm_lora.sh
 ```
 
 Edit the paths and principal training variables at the top of the script when
