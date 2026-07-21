@@ -6,19 +6,30 @@ set -euox pipefail
 CONFIG_SPECS=(
     "diffusion_trainer:_generated_diffusion_trainer.yaml:--config-name=diffusion_trainer.yaml"
     "diffusion_trainer:_generated_diffusion_veomni_trainer.yaml:--config-name=diffusion_trainer.yaml diffusion/model_engine=veomni_diffusion"
+    "omni_trainer:_generated_omni_trainer.yaml:--config-name=omni_trainer.yaml"
 )
+
+VERL_CONFIG_DIR=$(python3 -c "import verl.trainer.config; print(verl.trainer.config.__path__[0])" 2>/dev/null || echo "")
+if [ -n "$VERL_CONFIG_DIR" ]; then
+    OMNI_EXTRA_ARG="++hydra.searchpath=[file://${VERL_CONFIG_DIR}]"
+else
+    OMNI_EXTRA_ARG=""
+fi
 
 generate_config() {
     local config_name="$1"
     local output_file="$2"
     local config_arg="$3"
+    # For header display, strip local file:// paths that vary per machine
+    local display_arg
+    display_arg=$(echo "$config_arg" | sed 's/ *++hydra\.searchpath=\[file:\/\/[^]]*\]//g')
 
     local target_cfg="verl_omni/trainer/config/${output_file}"
     local tmp_header=$(mktemp)
     local tmp_cfg=$(mktemp)
 
     echo "# This reference configration yaml is automatically generated via 'scripts/generate_trainer_config.sh'" > "$tmp_header"
-    echo "# in which it invokes 'python3 scripts/print_cfg.py --cfg job ${config_arg}' to flatten the 'verl_omni/trainer/config/${config_name}.yaml' config fields into a single file." >> "$tmp_header"
+    echo "# in which it invokes 'python3 scripts/print_cfg.py --cfg job ${display_arg}' to flatten the 'verl_omni/trainer/config/${config_name}.yaml' config fields into a single file." >> "$tmp_header"
     echo "# Do not modify this file directly." >> "$tmp_header"
     echo "# The file is usually only for reference and never used." >> "$tmp_header"
     echo "" >> "$tmp_header"
@@ -35,7 +46,16 @@ generate_config() {
 
 for spec in "${CONFIG_SPECS[@]}"; do
     IFS=':' read -r config_name output_file config_arg <<< "$spec"
-    generate_config "$config_name" "$output_file" "$config_arg"
+    extra_arg=""
+    if [ "$config_name" = "omni_trainer" ]; then
+        if [ -n "$VERL_CONFIG_DIR" ]; then
+            extra_arg=" $OMNI_EXTRA_ARG"
+        else
+            echo "Skipping ${config_name}: verl is not installed; run 'pip install verl' to enable this check."
+            continue
+        fi
+    fi
+    generate_config "$config_name" "$output_file" "${config_arg}${extra_arg}"
 done
 
 for spec in "${CONFIG_SPECS[@]}"; do
