@@ -26,7 +26,11 @@ from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.pipelines.utils import (
     collate_prompt_mask as _collate_prompt_mask,
+)
+from verl_omni.pipelines.utils import (
     collate_prompt_rows as _collate_prompt_rows,
+)
+from verl_omni.pipelines.utils import (
     split_diffusion_output_by_request as _split_diffusion_output_by_request,
 )
 

@@ -1,6 +1,6 @@
 # Welcome to VeRL-Omni's documentation!
 
-Last updated: 06/05/2026
+Last updated: 07/20/2026
 
 [VeRL-Omni](https://github.com/verl-project/verl-omni) is a general RL training framework focused on multimodal generative models, built on top of [verl](https://github.com/verl-project/verl). It originated from the multi-modal generation RL effort in `verl`, and now has a dedicated home so it can evolve in a more focused way.
 
@@ -39,6 +39,7 @@ start/metrics.md
 
 algo/async_reward.md
 algo/rollout_correction.md
+start/request_level_batching.md
 start/http_scorer.md
 ```
 
