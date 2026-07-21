@@ -39,7 +39,7 @@ from verl_omni.workers.config import OmniModelConfig
 logger = logging.getLogger(__name__)
 
 
-@EngineRegistry.register(model_type="omni", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+@EngineRegistry.register(model_type="omni_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class OmniFSDPEngine(FSDPEngineWithLMHead):
     """FSDP engine for omni models"""
 
