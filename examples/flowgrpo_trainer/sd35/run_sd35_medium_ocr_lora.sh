@@ -71,7 +71,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.name=$ENGINE \
-    actor_rollout_ref.rollout.rollout_attn_backend=$ROLLOUT_ATTN_BACKEND \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.seed=42 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT / ROLLOUT_TP)) \
