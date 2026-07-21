@@ -23,6 +23,7 @@ from typing import Any, Literal
 import torch
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
+from vllm_omni.diffusion.models.sd3 import pipeline_sd3
 from vllm_omni.diffusion.models.sd3.pipeline_sd3 import StableDiffusion3Pipeline
 from vllm_omni.diffusion.request import DUMMY_DIFFUSION_REQUEST_ID, OmniDiffusionRequest
 
@@ -119,6 +120,26 @@ def _resolve_output_type(sampling_params, default: str) -> Literal["image", "lat
     if output_type is None:
         output_type = sampling_params.extra_args.get("output_type", None)
     return _validate_output_type(_coalesce_not_none(output_type, default))
+
+
+_SD3_IMAGE_POST_PROCESS_FUNC = pipeline_sd3.get_sd3_image_post_process_func
+
+
+def get_latent_post_process_func(od_config):
+    """Keep SD3 latents untouched while normally postprocessing decoded images."""
+    image_postprocess = _SD3_IMAGE_POST_PROCESS_FUNC(od_config)
+
+    def postprocess(output):
+        if isinstance(output, torch.Tensor) and output.ndim >= 3 and output.shape[-3] == 16:
+            return output
+        return image_postprocess(output)
+
+    return postprocess
+
+
+# vLLM-Omni resolves this module-level factory before initializing the custom
+# pipeline, so install the SD3-specific override while registering this adapter.
+pipeline_sd3.get_sd3_image_post_process_func = get_latent_post_process_func
 
 
 @VllmOmniPipelineBase.register("StableDiffusion3Pipeline", algorithm="flow_grpo")

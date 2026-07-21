@@ -52,18 +52,6 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 
-def _build_sd3_latent_aware_postprocess(postprocess_factory, od_config):
-    """Keep SD3 latents untouched while normally postprocessing decoded images."""
-    image_postprocess = postprocess_factory(od_config)
-
-    def postprocess(output):
-        if isinstance(output, torch.Tensor) and output.ndim >= 3 and output.shape[-3] == 16:
-            return output
-        return image_postprocess(output)
-
-    return postprocess
-
-
 class vLLMOmniHttpServer(vLLMHttpServer):
     """vLLM-Omni http server in single node, this is equivalent to launch server with command line:
     ```
@@ -181,28 +169,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             if pipeline_path is not None:
                 engine_args["enable_dummy_pipeline"] = True
                 engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
-
-            # The pinned vLLM-Omni SD3 default stage does not propagate
-            # output_type into its postprocessor config. Bypass its image
-            # postprocessor when the custom pipeline returns latent tensors.
-            pipeline_output_type = getattr(getattr(self.config, "pipeline", None), "output_type", None)
-            if (
-                self.model_config.architecture == "StableDiffusion3Pipeline"
-                and pipeline_output_type in {"latent", "both"}
-            ):
-                from vllm_omni.diffusion.models.sd3 import pipeline_sd3
-
-                postprocess_factory = getattr(pipeline_sd3, "get_sd3_image_post_process_func", None)
-                if not callable(postprocess_factory):
-                    raise RuntimeError(
-                        "The pinned vLLM-Omni SD3 pipeline no longer exposes "
-                        "get_sd3_image_post_process_func; latent output is incompatible with this version."
-                    )
-
-                def get_latent_post_process_func(od_config):
-                    return _build_sd3_latent_aware_postprocess(postprocess_factory, od_config)
-
-                pipeline_sd3.get_sd3_image_post_process_func = get_latent_post_process_func
 
         if getattr(self.config, "step_execution", False):
             engine_args["step_execution"] = True
