@@ -20,32 +20,3 @@ __all__ = [
     "Qwen3OmniThinkerAdapter",
     "Qwen3OmniRolloutAdapter",
 ]
-
-
-# TODO (mike): remove after next vllm-omni release,
-# see https://github.com/vllm-project/vllm-omni/pull/5191/
-def _patch_qwen3_omni_thinker_vllm_omni() -> None:
-    try:
-        from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
-            Qwen3OmniMoeThinkerConfig,
-        )
-        from vllm_omni.model_executor.models.qwen3_omni.qwen3_omni_moe_thinker import (
-            Qwen3OmniMoeThinkerForConditionalGeneration,
-        )
-    except ImportError:
-        return
-
-    if not getattr(Qwen3OmniMoeThinkerForConditionalGeneration, "is_3d_moe_weight", False):
-        Qwen3OmniMoeThinkerForConditionalGeneration.is_3d_moe_weight = True
-
-    _orig_init = Qwen3OmniMoeThinkerConfig.__init__
-
-    def _patched_init(self_, **kwargs):
-        _orig_init(self_, **kwargs)
-        if not self_.architectures:
-            self_.architectures = ["Qwen3OmniMoeThinkerForConditionalGeneration"]
-
-    Qwen3OmniMoeThinkerConfig.__init__ = _patched_init
-
-
-_patch_qwen3_omni_thinker_vllm_omni()

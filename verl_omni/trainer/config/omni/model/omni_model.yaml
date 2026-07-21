@@ -55,6 +55,9 @@ lora_rank: 0
 # LoRA scaling factor
 lora_alpha: 16
 
+# Optional dtype for LoRA parameters (e.g., "float32"); null = use model dtype
+lora_dtype: null
+
 # Target modules for LoRA adaptation ("all-linear" or a list of module names)
 target_modules: all-linear
 

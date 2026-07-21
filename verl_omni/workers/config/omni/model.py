@@ -106,6 +106,9 @@ class OmniModelConfig(BaseConfig):
     target_parameters: Optional[list[str]] = None  # for lora adapter on nn.Parameter
     exclude_modules: Optional[str] = None
 
+    # optional dtype for LoRA parameters (e.g. "float32"); None = use model dtype
+    lora_dtype: Optional[str] = None
+
     # megatron lora config
     lora: dict[str, Any] = field(default_factory=dict)
 

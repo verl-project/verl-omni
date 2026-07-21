@@ -21,11 +21,11 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.lora_rank=32 \
     actor_rollout_ref.model.lora_alpha=64 \
+    actor_rollout_ref.model.lora_dtype=float32 \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.exclude_modules=".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*|.*audio_tower.*" \
     actor_rollout_ref.model.target_modules="['q_proj','k_proj','v_proj','o_proj']" \
-    actor_rollout_ref.model.target_parameters="['gate_up_proj', 'down_proj']" \
     +actor_rollout_ref.model.override_config.attn_implementation="sdpa" \
     actor_rollout_ref.actor.freeze_vision_tower=true \
     actor_rollout_ref.actor.optim.lr=1e-5 \
@@ -40,6 +40,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.clip_ratio_high=4e-4 \
     actor_rollout_ref.actor.clip_ratio_c=10.0 \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
+    actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.fsdp_config.param_offload=true \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
     actor_rollout_ref.rollout.n=16 \
@@ -57,6 +58,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=20480 \
     actor_rollout_ref.ref.fsdp_config.param_offload=true \
+    actor_rollout_ref.ref.fsdp_config.model_dtype=bfloat16 \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=False \
     reward.reward_manager.source=register \
