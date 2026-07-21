@@ -638,13 +638,13 @@ class BaseRayDiffusionTrainer(ABC):
     def _init_online_rollout_stack(self, actor_rollout_resource_pool):
         """Initialize rollout, reward, and checkpoint engines (online sampling only)."""
         # create reward loop manager
-        from verl.experimental.reward_loop import RewardLoopManager
+        from verl_omni.reward_loop import OmniRewardLoopManager
 
         # initalize reward loop manager
         # reward model (colocate or standalone): get resource_pool
         # no reward model: resource_pool = None
         resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
-        self.reward_loop_manager = RewardLoopManager(
+        self.reward_loop_manager = OmniRewardLoopManager(
             config=self.config,
             rm_resource_pool=resource_pool,
         )
@@ -667,11 +667,13 @@ class BaseRayDiffusionTrainer(ABC):
         # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
         # agent_reward_loop: streaming reward computation with actor rollout
         # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
-        enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
+        self.enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
 
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
-        reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
+        reward_loop_worker_handles = (
+            self.reward_loop_manager.reward_loop_workers if self.enable_agent_reward_loop else None
+        )
 
         self.llm_server_manager = LLMServerManager.create(
             config=self.config,
@@ -985,8 +987,17 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
+                        if curr_step_profile:
+                            self.llm_server_manager.start_profile()
+                            # streaming reward scores inside the gen window; colocate in the reward phase
+                            if self.enable_agent_reward_loop:
+                                self.reward_loop_manager.start_profile()
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
                         self.checkpoint_manager.sleep_replicas()
+                        if curr_step_profile:
+                            self.llm_server_manager.stop_profile()
+                            if self.enable_agent_reward_loop:
+                                self.reward_loop_manager.stop_profile()
 
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
@@ -998,7 +1009,11 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
+                            if curr_step_profile:
+                                self.reward_loop_manager.start_profile()
                             batch_reward = self._compute_reward_colocate(batch)
+                            if curr_step_profile:
+                                self.reward_loop_manager.stop_profile()
                             batch = batch.union(batch_reward)
 
                         # extract reward_tensor and reward_extra_infos_dict for training
@@ -1199,6 +1214,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         if self.is_offline:
             self.reward_loop_manager = None
             self.llm_server_manager = None
+            self.enable_agent_reward_loop = False
             self.checkpoint_manager = NoOpCheckpointManager()
             return
         self._init_online_rollout_stack(actor_rollout_resource_pool)
@@ -1418,8 +1434,17 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                         )
 
                         with marked_timer("gen", timing_raw, color="red"):
+                            if curr_step_profile:
+                                self.llm_server_manager.start_profile()
+                                # streaming reward scores inside the gen window; colocate in the reward phase
+                                if self.enable_agent_reward_loop:
+                                    self.reward_loop_manager.start_profile()
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
                             self.checkpoint_manager.sleep_replicas()
+                            if curr_step_profile:
+                                self.llm_server_manager.stop_profile()
+                                if self.enable_agent_reward_loop:
+                                    self.reward_loop_manager.stop_profile()
                             timing_raw.update(gen_batch_output.meta_info["timing"])
                             gen_batch_output.meta_info.pop("timing", None)
 
@@ -1428,7 +1453,11 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
                         with marked_timer("reward", timing_raw, color="yellow"):
                             if self.use_rm and "rm_scores" not in batch.batch.keys():
+                                if curr_step_profile:
+                                    self.reward_loop_manager.start_profile()
                                 batch_reward = self._compute_reward_colocate(batch)
+                                if curr_step_profile:
+                                    self.reward_loop_manager.stop_profile()
                                 batch = batch.union(batch_reward)
                             reward_tensor, reward_extra_infos_dict = extract_reward(batch)
 

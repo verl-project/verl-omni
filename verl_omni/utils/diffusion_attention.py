@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 
 ACTOR_FA3_BACKEND = "_flash_3_varlen_hub"
 ACTOR_NATIVE_BACKEND = "native"
+ROLLOUT_SDPA_BACKEND = "TORCH_SDPA"
+
+# Keep in sync with vllm-omni diffusion attention backends for FA train/rollout pairs.
+FA3_ROLLOUT_BACKENDS = ("FLASH_ATTN", "FLASH_ATTN_HUB", "FLASH_ATTN_3_HUB")
+KERNELS_HUB_ROLLOUT_BACKENDS = ("FLASH_ATTN_HUB", "FLASH_ATTN_3_HUB")
 
 
 def actor_fa3_available() -> bool:
@@ -43,6 +48,7 @@ def _cuda_supports_rollout_fa3() -> bool:
 
 
 def rollout_fa3_available() -> bool:
+    """True when local FA packages can back ``FLASH_ATTN`` rollout."""
     if not _cuda_supports_rollout_fa3():
         return False
     for module_name in ("fa3_fwd_interface", "flash_attn"):
@@ -56,22 +62,29 @@ def fa3_available() -> bool:
 
 
 def fallback_fa3_if_unavailable(config: Any) -> None:
-    """Downgrade explicit FA3 settings to native when deps are missing."""
+    """Downgrade explicit FA3 settings to native/SDPA when deps are missing."""
     attn_backend = config.actor_rollout_ref.model.get("attn_backend", ACTOR_FA3_BACKEND)
     if attn_backend != ACTOR_FA3_BACKEND:
         return
 
-    if fa3_available():
+    rollout_backend = config.actor_rollout_ref.rollout.get("rollout_attn_backend")
+    if rollout_backend in KERNELS_HUB_ROLLOUT_BACKENDS:
+        if actor_fa3_available():
+            return
+    elif fa3_available():
         return
 
     logger.warning(
         "FA3 requested but unavailable for matched actor+rollout (kernels=%s, rollout_fa3=%s); "
-        "falling back to actor=%s.",
+        "falling back to actor=%s, rollout=%s.",
         actor_fa3_available(),
         rollout_fa3_available(),
         ACTOR_NATIVE_BACKEND,
+        ROLLOUT_SDPA_BACKEND,
     )
     config.actor_rollout_ref.model.attn_backend = ACTOR_NATIVE_BACKEND
+    if rollout_backend in FA3_ROLLOUT_BACKENDS:
+        config.actor_rollout_ref.rollout.rollout_attn_backend = ROLLOUT_SDPA_BACKEND
 
 
 def validate_attention_consistency(config: Any) -> None:
@@ -82,8 +95,9 @@ def validate_attention_consistency(config: Any) -> None:
 
     Rules:
         - If the training engine is VeOmni, skip validation.
-        - If ``attn_backend`` is ``_flash_3_varlen_hub`` (FA2/FA3), rollout
-          must be ``FLASH_ATTN``.
+        - If ``attn_backend`` is ``_flash_3_varlen_hub``, rollout must be one of
+          ``FA3_ROLLOUT_BACKENDS`` (default ``FLASH_ATTN_3_HUB`` for kernels FA3
+          train/rollout consistency).
         - If ``attn_backend`` is ``native`` or ``_native_npu``, rollout must be
           ``TORCH_SDPA``.
 
@@ -101,9 +115,11 @@ def validate_attention_consistency(config: Any) -> None:
     rollout_backend = config.actor_rollout_ref.rollout.get("rollout_attn_backend")
 
     if attn_backend == ACTOR_FA3_BACKEND:
-        expected = "FLASH_ATTN"
+        if rollout_backend in FA3_ROLLOUT_BACKENDS:
+            return
+        expected = ", ".join(FA3_ROLLOUT_BACKENDS)
     elif attn_backend in (ACTOR_NATIVE_BACKEND, "_native_npu"):
-        expected = "TORCH_SDPA"
+        expected = ROLLOUT_SDPA_BACKEND
     else:
         logger.warning("Unknown attn_backend=%r; skipping attention consistency check.", attn_backend)
         return

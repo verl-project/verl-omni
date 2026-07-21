@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 05/11/2026.
+Last updated: 07/10/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -68,9 +68,13 @@ actor_rollout_ref:
 ```
 
 The same block exists under `actor_rollout_ref.ref.profiler` and
-`actor_rollout_ref.rollout.profiler`. The rollout profiler is only active when
-the rollout role is colocated with the actor (the hybrid engine setup used by
-FlowGRPO today).
+`actor_rollout_ref.rollout.profiler`. Generation runs in separate vLLM-Omni
+server processes, not in the actor worker, so it has its own profiler driven
+by `actor_rollout_ref.rollout.profiler` (see recipe 5).
+
+All the profiler keys below already exist in the composed config, so use
+plain `key=value` overrides — a `+key=value` append fails with "An item is
+already at ...".
 
 ## Quick recipes
 
@@ -82,14 +86,14 @@ The following recipes add CLI overrides on top of
 Capture a single trace per profiled step (combined CPU + CUDA activities).
 
 ```bash
-+global_profiler.tool=torch \
-+global_profiler.steps=[1,2,5] \
-+global_profiler.save_path=./outputs/profile \
-+actor_rollout_ref.actor.profiler.enable=True \
-+actor_rollout_ref.actor.profiler.all_ranks=True \
-+actor_rollout_ref.actor.profiler.tool=torch \
-+actor_rollout_ref.actor.profiler.tool_config.torch.contents=[cpu,cuda] \
-+actor_rollout_ref.actor.profiler.tool_config.torch.discrete=False
+global_profiler.tool=torch \
+global_profiler.steps=[1,2,5] \
+global_profiler.save_path=./outputs/profile \
+actor_rollout_ref.actor.profiler.enable=True \
+actor_rollout_ref.actor.profiler.all_ranks=True \
+actor_rollout_ref.actor.profiler.tool=torch \
+actor_rollout_ref.actor.profiler.tool_config.torch.contents=[cpu,cuda] \
+actor_rollout_ref.actor.profiler.tool_config.torch.discrete=False
 ```
 
 The traces land under `outputs/profile`. View them in
@@ -101,13 +105,13 @@ Discrete mode produces one database per `@DistProfiler.annotate`-decorated
 function within a step, which is useful when zooming into a specific phase.
 
 ```bash
-+global_profiler.tool=torch \
-+global_profiler.steps=[3] \
-+actor_rollout_ref.actor.profiler.enable=True \
-+actor_rollout_ref.actor.profiler.ranks=[0] \
-+actor_rollout_ref.actor.profiler.tool=torch \
-+actor_rollout_ref.actor.profiler.tool_config.torch.discrete=True \
-+actor_rollout_ref.actor.profiler.tool_config.torch.contents=[cpu,cuda]
+global_profiler.tool=torch \
+global_profiler.steps=[3] \
+actor_rollout_ref.actor.profiler.enable=True \
+actor_rollout_ref.actor.profiler.ranks=[0] \
+actor_rollout_ref.actor.profiler.tool=torch \
+actor_rollout_ref.actor.profiler.tool_config.torch.discrete=True \
+actor_rollout_ref.actor.profiler.tool_config.torch.contents=[cpu,cuda]
 ```
 
 ### 3. CUDA memory snapshots (`torch_memory`)
@@ -117,11 +121,11 @@ end of each profiled step. Visualize the resulting JSON files at
 [pytorch.org/memory_viz](https://pytorch.org/memory_viz).
 
 ```bash
-+global_profiler.tool=torch_memory \
-+global_profiler.steps=[1,2] \
-+actor_rollout_ref.actor.profiler.enable=True \
-+actor_rollout_ref.actor.profiler.all_ranks=True \
-+actor_rollout_ref.actor.profiler.tool=torch_memory
+global_profiler.tool=torch_memory \
+global_profiler.steps=[1,2] \
+actor_rollout_ref.actor.profiler.enable=True \
+actor_rollout_ref.actor.profiler.all_ranks=True \
+actor_rollout_ref.actor.profiler.tool=torch_memory
 ```
 
 ### 4. NVIDIA Nsight Systems (`nsys`)
@@ -130,12 +134,12 @@ Nsight requires `nsys` to be installed on every node and the `nvtx` Python
 package available in the training environment (`pip install nvtx`).
 
 ```bash
-+global_profiler.tool=nsys \
-+global_profiler.steps=[1,2] \
-+global_profiler.profile_continuous_steps=True \
-+actor_rollout_ref.actor.profiler.enable=True \
-+actor_rollout_ref.actor.profiler.all_ranks=True \
-+actor_rollout_ref.actor.profiler.tool=nsys
+global_profiler.tool=nsys \
+global_profiler.steps=[1,2] \
+global_profiler.profile_continuous_steps=True \
+actor_rollout_ref.actor.profiler.enable=True \
+actor_rollout_ref.actor.profiler.all_ranks=True \
+actor_rollout_ref.actor.profiler.tool=nsys
 ```
 
 When `global_profiler.tool=nsys` and `steps` is non-empty, the FlowGRPO
@@ -148,6 +152,126 @@ Workers are launched with `worker_nsight_options`, including the required
 `/tmp/ray/session_latest/logs/nsight/` on each node (this path is fixed by
 Ray). Open them with `nsys-ui`.
 
+### 5. Rollout servers (vLLM-Omni)
+
+Generation runs in vLLM-Omni server processes, so it needs its own profiler,
+driven by `actor_rollout_ref.rollout.profiler`. The trainer starts/stops it
+around the generation phase of each step in `global_profiler.steps`, and the
+servers record through vLLM's built-in torch profiler (`discrete=True` is
+required — the server rejects continuous mode):
+
+```bash
+global_profiler.tool=torch \
+global_profiler.steps=[1] \
+actor_rollout_ref.rollout.profiler.enable=True \
+actor_rollout_ref.rollout.profiler.ranks=[0] \
+actor_rollout_ref.rollout.profiler.tool=torch \
+actor_rollout_ref.rollout.profiler.tool_config.torch.contents=[cpu,cuda] \
+actor_rollout_ref.rollout.profiler.tool_config.torch.discrete=True
+```
+
+`ranks` selects rollout replicas (one replica per
+`rollout.agent.num_workers`). Each profiled replica writes its trace to
+`{save_path}/agent_loop_rollout_replica_{rank}`, next to the actor traces.
+Combine with recipe 1 to capture the actor train phase and the rollout in the
+same step.
+
+### 6. Reward-model servers
+
+When `reward.reward_model.enable=True`, the reward model runs in its own
+vLLM server processes — the same server stack as recipe 5, driven by
+`reward.reward_model.rollout.profiler`:
+
+```bash
+global_profiler.tool=torch \
+global_profiler.steps=[1] \
+reward.reward_model.rollout.profiler.enable=True \
+reward.reward_model.rollout.profiler.ranks=[0] \
+reward.reward_model.rollout.profiler.tool=torch \
+reward.reward_model.rollout.profiler.tool_config.torch.contents=[cpu,cuda] \
+reward.reward_model.rollout.profiler.tool_config.torch.discrete=True
+```
+
+The trainer starts/stops it around the phase where the servers actually
+score: the generation phase when reward computation streams with the rollout
+(`reward.reward_model.enable_resource_pool=True`), or the reward phase in
+colocate mode. Each profiled replica writes to
+`{save_path}/reward_model/agent_loop_rollout_replica_{rank}`, keeping reward
+traces apart from the actor rollout ones.
+
+## Lightweight profiling recipe
+
+Profiling a full FlowGRPO step produces a large trace that is slow to open.
+Every recipe script under `examples/` passes `"$@"` through to the same
+`diffusion_trainer` config, and Hydra resolves duplicate overrides
+last-wins — so appending overrides to any recipe shrinks its footprint
+without editing the script. The following profiles a single lightweight step
+of the SD3.5 OCR recipe (2 rollouts instead of 8, 4 denoising steps instead
+of 10, 256px instead of 384px, train batch 4 instead of 8), capturing the
+actor train phase, the rollout servers and the reward-model servers
+(recipes 1, 5 and 6 combined):
+
+```bash
+bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh \
+    data.train_batch_size=4 \
+    actor_rollout_ref.rollout.n=2 \
+    actor_rollout_ref.rollout.pipeline.num_inference_steps=4 \
+    actor_rollout_ref.rollout.pipeline.height=256 \
+    actor_rollout_ref.rollout.pipeline.width=256 \
+    actor_rollout_ref.rollout.algo.sde_window_range=[0,4] \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
+    trainer.total_training_steps=1 \
+    trainer.save_freq=-1 \
+    trainer.test_freq=-1 \
+    trainer.resume_mode=disable \
+    trainer.logger='["console"]' \
+    global_profiler.tool=torch \
+    global_profiler.steps=[1] \
+    global_profiler.save_path=./outputs/profile_sd35 \
+    actor_rollout_ref.actor.profiler.enable=True \
+    actor_rollout_ref.actor.profiler.ranks=[0] \
+    actor_rollout_ref.actor.profiler.tool=torch \
+    actor_rollout_ref.actor.profiler.tool_config.torch.contents=[cpu,cuda] \
+    actor_rollout_ref.actor.profiler.tool_config.torch.discrete=False \
+    actor_rollout_ref.rollout.profiler.enable=True \
+    actor_rollout_ref.rollout.profiler.ranks=[0] \
+    actor_rollout_ref.rollout.profiler.tool=torch \
+    actor_rollout_ref.rollout.profiler.tool_config.torch.contents=[cpu,cuda] \
+    actor_rollout_ref.rollout.profiler.tool_config.torch.discrete=True \
+    reward.reward_model.rollout.profiler.enable=True \
+    reward.reward_model.rollout.profiler.ranks=[0] \
+    reward.reward_model.rollout.profiler.tool=torch \
+    reward.reward_model.rollout.profiler.tool_config.torch.contents=[cpu,cuda] \
+    reward.reward_model.rollout.profiler.tool_config.torch.discrete=True
+```
+
+Measured on 3×RTX 4090 against the recipe defaults: traces 163 MB → 32 MB,
+profiled step 616 s → 70 s.
+
+The `trainer.*` lines are not optional: the run's last step force-triggers
+checkpoint saving and validation when `save_freq`/`test_freq` > 0, and a
+leftover checkpoint auto-resumes past the profiled step, silently skipping
+profiling.
+
+### Adapting to other recipes
+
+The `trainer.*`, `global_profiler.*` and `*.profiler.*` overrides above work
+unchanged for any recipe. Re-derive the footprint overrides from the
+recipe's own values, minding two couplings:
+
+- **Denoising steps vs. SDE window**: a window reaching past the last
+  denoising step produces ragged per-sample tensors and fails rollout
+  post-processing. Pin `sde_window_range=[0,<num_inference_steps>]` and keep
+  `num_inference_steps >= sde_window_size` (the SD3.5 recipe's window —
+  size 3, range `[0,5]` — assumes 10 steps).
+- **Batch vs. micro batch**: the diffusion engine chunks batches statically,
+  so the per-GPU sample count (`train_batch_size * rollout.n / num actor
+  GPUs`) must stay divisible by each micro batch size. The SD3.5 recipe's
+  micro batch of 8 assumes 32 samples per GPU; the lightweight footprint
+  leaves 4, hence 2.
+
 ## Implementation notes
 
 * Workers are wrapped with `verl.utils.profiler.DistProfilerExtension`, which
@@ -157,9 +281,11 @@ Ray). Open them with `nsys-ui`.
 * `global_profiler.profile_continuous_steps=True` keeps a single profiling
   database open across consecutive steps in `global_profiler.steps`, which is
   helpful for analysing inter-step behaviour.
-* In hybrid-engine FlowGRPO (the default), the rollout shares the actor
-  worker, so configuring `actor_rollout_ref.actor.profiler` is usually enough
-  to capture the full step.
+* For the rollout servers, the trainer calls
+  `llm_server_manager.start_profile()`/`stop_profile()` around the generation
+  phase of profiled steps; the servers record through vLLM's built-in torch
+  profiler (recipe 5). The reward-model servers are driven the same way
+  through `verl_omni.reward_loop.OmniRewardLoopManager` (recipe 6).
 
 ## Further reading
 

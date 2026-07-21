@@ -102,7 +102,7 @@ def test_reward_model_genrm():
 
     for idx, output in enumerate(outputs):
         print(f"GRM Response {idx}:\n{output.non_tensor_batch['genrm_response']}\n")
-        print(f"Score:\n{output.non_tensor_batch['score']}\n")
+        print(f"Score:\n{output.batch['rm_scores']}\n")
         print("=" * 50 + "\n")
 
     ray.shutdown()

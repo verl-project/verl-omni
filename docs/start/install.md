@@ -1,16 +1,18 @@
 # Installation
 
-Last updated: 06/29/2026
+Last updated: 07/13/2026
 
 ## Requirements
 
 For NVIDIA GPU:
-- **Python**: Version >= 3.10
-- **CUDA**: Version >= 12.8
+
+* **Python**: Version >= 3.10
+* **CUDA**: Version >= 12.8
 
 For Ascend NPU:
-- **Python**: Version >= 3.10
-- **CANN**: Version >= 8.5.0
+
+* **Python**: Version >= 3.10
+* **CANN**: Version >= 8.5.0
 
 ## Install
 
@@ -19,14 +21,14 @@ git clone https://github.com/verl-project/verl-omni.git
 cd verl-omni
 ```
 
-1. Create a Python virtual environment:
+1. Create a Python virtual environment
 
 ```bash
 uv venv --python 3.12 --seed
 source .venv/bin/activate
 ```
 
-2. Install the platform backend.
+2. Install the platform backend
 
 For NVIDIA GPU:
 
@@ -34,45 +36,54 @@ For NVIDIA GPU:
 uv pip install -e ".[gpu]" --torch-backend=auto
 ```
 
-It will install `vllm` for the CUDA PyTorch stack and `kernels` for the actor FA3 backend.
+This installs `vllm` for the CUDA PyTorch stack and `kernels` for FA3 backend.
 
 For Ascend NPU:
 
 ```bash
-uv pip install vllm==0.22.0
-uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@bb4d0776eee8fc45c3484a45c971a7049f1a2bbf"
+uv pip install vllm==0.24.0
+uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@$(cat .github/vllm_ascend_pin.txt)"
 ```
 
-3. Install VeRL-Omni:
+3. Install vLLM-Omni and VeRL-Omni
 
 ```bash
-uv pip install -e ".[vllm-omni,train]"
+uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
+uv pip install -e ".[train]"
 ```
 
-It will install vllm-omni, verl (git pin), and verl-omni.
-
+This installs `vllm-omni`, then `verl` and `verl-omni`.
 
 ### Extras
 
-| Extra | Adds | When |
-|---|---|---|
-| `gpu` | `vllm==0.22.0`, `kernels==0.14.1`, `liger-kernel` | CUDA rollout + actor FA3 |
-| `vllm-omni` | `vllm-omni==0.22.0` | vLLM-Omni rollout |
-| `train` | `verl` @ [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | RL training |
-| `dev` | `pytest`, `pre-commit`, `Levenshtein`, … | Local development / CI |
-| `ocr` | `Levenshtein` | OCR reward (FlowGRPO) |
+| Extra       | Adds                                                          | When                     |
+| ----------- | ------------------------------------------------------------- | ------------------------ |
+| `gpu`       | `vllm==0.24.0`, `kernels==0.14.1`, `liger-kernel`             | CUDA rollout + actor FA3 |
+| `vllm-omni` | `vllm-omni==0.24.0`                                           | Optional PyPI baseline only; CI/docs use the git pin above |
+| `train`     | `verl` @ [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | RL training              |
+| `dev`       | `pytest`, `pre-commit`, `Levenshtein`, …                      | Local development / CI   |
+| `ocr`       | `Levenshtein`                                                 | OCR reward (FlowGRPO)    |
 
 ## Optional Dependencies
 
-| Extra | Install | When needed |
-|---|---|---|
-| OCR reward | `uv pip install -e ".[ocr]"` | FlowGRPO training with OCR-based reward |
-| Dev tools | `uv pip install -e ".[dev]"` | Linting and unit tests |
-| VeOmni engine backend | See [Optional engine backends](#optional-engine-backends) | VeOmni instead of default FSDP2 |
+| Extra                 | Install                                                   | When needed                             |
+| --------------------- | --------------------------------------------------------- | --------------------------------------- |
+| OCR reward            | `uv pip install -e ".[ocr]"`                              | FlowGRPO training with OCR-based reward |
+| Dev tools             | `uv pip install -e ".[dev]"`                              | Linting and unit tests                  |
+| VeOmni engine backend | See [Optional engine backends](#optional-engine-backends) | VeOmni instead of default FSDP2         |
 
 ### Flash Attention 3
 
-The `gpu` extra pulls `kernels==0.14.1` for the Diffusers **actor** FA3 backend. Rollout FA3 comes from `vllm-omni` (`fa3-fwd`), not from `kernels`.
+The `gpu` extra pulls `kernels==0.14.1` for Diffusers actor FA3 (`attn_backend=_flash_3_varlen_hub`).
+Defaults pair actor and rollout on the same Hub kernel backend:
+
+```bash
+actor_rollout_ref.model.attn_backend=_flash_3_varlen_hub
+actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN_3_HUB
+```
+
+`FLASH_ATTN_3_HUB` is provided by vLLM-Omni (`kernels-community/flash-attn3`). The legacy
+`FLASH_ATTN` rollout path still uses local FA packages (`fa3-fwd` / `flash-attn`).
 
 If FA3 deps are missing at runtime, training falls back to native/SDPA automatically. NPU recipes override with `actor_rollout_ref.model.attn_backend=_native_npu`.
 
@@ -80,9 +91,9 @@ If FA3 deps are missing at runtime, training falls back to native/SDPA automatic
 
 VeRL-Omni defaults to **FSDP2** as the training engine for the policy and reference models. The diffusion trainer can alternatively be switched to [**VeOmni**](https://github.com/ByteDance-Seed/VeOmni). The engine is selected at the Hydra command line — see [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete recipe.
 
-### Installing VeOmni alongside vLLM 0.22.0
+### Installing VeOmni alongside vLLM 0.24.0
 
-VeOmni 0.1.11's `gpu` extra pins `torch==2.9.1+cu129`, which may conflict with the torch version pulled in by `vllm==0.22.0`. A plain `uv pip install veomni[gpu,dit]==0.1.11` therefore fails dependency resolution.
+VeOmni 0.1.11's `gpu` extra pins `torch==2.9.1+cu129`, which may conflict with the torch version pulled in by `vllm==0.24.0`. A plain `uv pip install veomni[gpu,dit]==0.1.11` therefore fails dependency resolution.
 
 VeOmni itself runs correctly on torch 2.11 — only the `[gpu]` extra's pin is too strict. Install it without dependency resolution so the existing torch/vllm stack is preserved, and add the small set of runtime extras that the verl-omni VeOmni engine actually needs:
 
@@ -98,7 +109,7 @@ python -c "import veomni; print('veomni', veomni.__version__)"
 python -c "from veomni.distributed.offloading import load_model_to_gpu, load_optimizer, offload_model_to_cpu, offload_optimizer; print('VeOmni offloading helpers OK')"
 ```
 
-If you want VeOmni's full `[gpu,dit]` extras (flash-attn variants, liger-kernel, cuda-python, etc.), install them in a separate environment not pinned to vllm 0.22.0; verl-omni does not need them.
+If you want VeOmni's full `[gpu,dit]` extras (flash-attn variants, liger-kernel, cuda-python, etc.), install them in a separate environment not pinned to vllm 0.24.0; verl-omni does not need them.
 
 ## Post-Installation Verification
 
@@ -123,12 +134,23 @@ python -c "import verl_omni; print('VeRL-Omni ready')"
 
 ## Build Your Own Docker Image
 
-The repository has a CUDA Dockerfile at [`docker/Dockerfile.cuda`](https://github.com/verl-project/verl-omni/blob/main/docker/Dockerfile.cuda). The default base image uses **CUDA 13.0.2** on Ubuntu 22.04 (override with `--build-arg CUDA_VERSION=…` if needed). Build context is controlled by the repo-root [`.dockerignore`](https://github.com/verl-project/verl-omni/blob/main/.dockerignore); keep large local folders such as `.venv`, `data/`, and `checkpoints/` out of the context.
+The repository provides Dockerfiles for both NVIDIA GPU and Ascend NPU environments:
+
+* CUDA Dockerfile: [`docker/Dockerfile.cuda`](https://github.com/verl-project/verl-omni/blob/main/docker/Dockerfile.cuda)
+* Ascend Atlas A2 NPU Dockerfile: [`docker/Dockerfile.a2.npu`](https://github.com/verl-project/verl-omni/blob/main/docker/Dockerfile.a2.npu)
+* Ascend Atlas A3 NPU Dockerfile: [`docker/Dockerfile.a3.npu`](https://github.com/verl-project/verl-omni/blob/main/docker/Dockerfile.a3.npu)
+
+The CUDA image is intended for NVIDIA GPU training and rollout. The default CUDA base image uses **CUDA 13.0.2** on Ubuntu 22.04. You can override the CUDA version with `--build-arg CUDA_VERSION=...` if needed.
+
+The NPU images are split by Ascend hardware generation: `Dockerfile.a2.npu` is intended for Ascend 910B / Atlas A2, and `Dockerfile.a3.npu` is intended for Ascend Atlas A3. Both NPU images include CANN, `torch-npu`, `vllm-ascend`, and `vllm-omni`.
+
+Build context is controlled by the repo-root [`.dockerignore`](https://github.com/verl-project/verl-omni/blob/main/.dockerignore); keep large local folders such as `.venv`, `data/`, and `checkpoints/` out of the context.
+
+## CUDA Docker Image
 
 ### Prerequisites
 
-- Docker with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
-
+* Docker with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
 
 ### Build commands
 
@@ -145,8 +167,7 @@ docker build -f docker/Dockerfile.cuda --target ocr -t verl-omni:gpu-ocr .
 docker build -f docker/Dockerfile.cuda --target dev -t verl-omni:gpu-dev .
 ```
 
-
-The image bakes in `verl_omni` and its Python dependencies. Recipe scripts under `examples/` are **not** copied into the image — mount the repository at runtime (see below).
+The image bakes in `verl_omni` and its Python dependencies. Recipe scripts under `examples/` are **not** copied into the image — mount the repository at runtime.
 
 ### Launch with interactive session for development
 
@@ -170,23 +191,165 @@ docker run --gpus all --shm-size=16g -it --rm \
   /bin/bash
 ```
 
-Inside the container, confirm the installation (same checks as [Post-Installation Verification](#post-installation-verification)).
-
+Inside the container, confirm the installation using the same checks as [Post-Installation Verification](#post-installation-verification).
 
 Notes:
 
-- **`--shm-size=16g`** — Ray and vLLM use shared memory; larger shared memory is needed training.
-- **Mount the repo** — training recipes live in `examples/`; mounting `$REPO` lets you edit scripts locally and run them immediately in the container.
-- **`WORKSPACE`** — example scripts read datasets and write checkpoints under this path (default: `$HOME` inside the container, i.e. `/root` unless overridden).
-- **Hugging Face cache** — mounting `~/.cache/huggingface` avoids re-downloading `Qwen/Qwen-Image` and reward models on every run.
+* **`--shm-size=16g`** — Ray and vLLM use shared memory; larger shared memory is needed for training.
+* **Mount the repo** — training recipes live in `examples/`; mounting `$REPO` lets you edit scripts locally and run them immediately in the container.
+* **`WORKSPACE`** — example scripts read datasets and write checkpoints under this path. The default is `$HOME` inside the container, i.e. `/root` unless overridden.
+* **Hugging Face cache** — mounting `~/.cache/huggingface` avoids re-downloading `Qwen/Qwen-Image` and reward models on every run.
 
-### Example: Qwen-Image FlowGRPO training in Docker
+## Ascend NPU Docker Image
 
-This walkthrough follows the [FlowGRPO quickstart](flowgrpo_quickstart.md) using the OCR dataset and `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh`. Use the **`ocr` image target** (`verl-omni:gpu-ocr`) so the `Levenshtein` dependency is present.
+### Prerequisites
 
-**1. Launch the interactive container** (command above).
+The Ascend NPU Docker image expects the host machine to provide the Ascend driver and device files.
 
-**2. Prepare the OCR dataset** inside the container:
+Before launching the container, make sure the host has:
+
+* Ascend driver installed.
+* CANN-compatible runtime environment.
+* `npu-smi` available on the host.
+* Ascend device nodes under `/dev`, such as `/dev/davinci0`, `/dev/davinci_manager`, `/dev/devmm_svm`, and `/dev/hisi_hdc`.
+* Docker permission to pass NPU devices into the container.
+
+The NPU container mounts the host driver directory:
+
+```bash
+-v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+```
+
+This allows the containerized CANN / `torch-npu` runtime to use the host Ascend driver.
+
+### Build commands
+
+From the repository root, choose the Dockerfile that matches your Ascend hardware.
+
+For Ascend Atlas A3:
+
+```bash
+docker build \
+  -f docker/Dockerfile.a3.npu \
+  -t verl-omni:npu-a3 \
+  .
+```
+
+For Ascend Atlas A2 / 910B:
+
+```bash
+docker build \
+  -f docker/Dockerfile.a2.npu \
+  -t verl-omni:npu-a2 \
+  .
+```
+
+When debugging dependency installation or making sure no old Docker layer is reused, add `--no-cache`:
+
+```bash
+# Atlas A3
+docker build --no-cache \
+  -f docker/Dockerfile.a3.npu \
+  -t verl-omni:npu-a3 \
+  .
+
+# Atlas A2 / 910B
+docker build --no-cache \
+  -f docker/Dockerfile.a2.npu \
+  -t verl-omni:npu-a2 \
+  .
+```
+
+You may choose different image tags locally. If you do so, replace the image name in the `docker run` command accordingly.
+
+### Launch on Ascend Atlas A3, 16 NPU
+
+Use this command on a 16-card Ascend Atlas A3 machine:
+
+```bash
+DEVICES=""
+for i in $(seq 0 15); do
+  DEVICES="$DEVICES --device=/dev/davinci$i"
+done
+
+docker run -it --rm \
+  --name verl_omni_16npu \
+  --network host \
+  --ipc host \
+  $DEVICES \
+  --device=/dev/davinci_manager \
+  --device=/dev/devmm_svm \
+  --device=/dev/hisi_hdc \
+  -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+  -v /mnt/data:/mnt/data \
+  verl-omni:npu-a3 \
+  bash
+```
+
+### Launch on Ascend Atlas A2 / 910B, 8 NPU
+
+Use this command on an 8-card Ascend Atlas A2 / 910B machine:
+
+```bash
+DEVICES=""
+for i in $(seq 0 7); do
+  DEVICES="$DEVICES --device=/dev/davinci$i"
+done
+
+docker run -it --rm \
+  --name verl_omni_8npu \
+  --network host \
+  --ipc host \
+  $DEVICES \
+  --device=/dev/davinci_manager \
+  --device=/dev/devmm_svm \
+  --device=/dev/hisi_hdc \
+  -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+  -v /home:/home \
+  verl-omni:npu-a2 \
+  bash
+```
+
+### Notes for NPU containers
+
+* **`--network host`** — useful for Ray, distributed training, and multi-process communication.
+* **`--ipc host`** — avoids shared-memory limitations during training and rollout.
+* **`/dev/davinci*` devices** — expose Ascend NPU cards to the container.
+* **`/dev/davinci_manager`**, **`/dev/devmm_svm`**, and **`/dev/hisi_hdc`** — required Ascend runtime device files.
+* **`/usr/local/Ascend/driver`** — mounted read-only from the host so the container can use the installed Ascend driver.
+* **`npu-smi`** — mounted from the host to inspect device status inside the container.
+* **Atlas A3 16 NPU** — exposes `/dev/davinci0` through `/dev/davinci15`.
+* **Atlas A2 / 910B 8 NPU** — exposes `/dev/davinci0` through `/dev/davinci7`.
+
+Inside the container, confirm the NPU environment:
+
+```bash
+npu-smi info
+python -c "import torch; import torch_npu; print('torch', torch.__version__, '| NPU', torch.npu.is_available())"
+python -c "import vllm; print('vllm', vllm.__version__)"
+python -c "import verl; print('verl', verl.__version__)"
+python -c "import verl_omni; print('VeRL-Omni ready')"
+```
+
+## Example: Qwen-Image FlowGRPO training in Docker
+
+This walkthrough follows the [FlowGRPO quickstart](flowgrpo_quickstart.md) using the OCR dataset and `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh`.
+
+For CUDA, use the **`ocr` image target** (`verl-omni:gpu-ocr`) so the `Levenshtein` dependency is present.
+
+For Ascend NPU, use the NPU image and the NPU-specific recipe options. NPU recipes should override the attention backend with:
+
+```bash
+actor_rollout_ref.model.attn_backend=_native_npu
+```
+
+### 1. Launch the interactive container
+
+Use either the CUDA or NPU launch command above.
+
+### 2. Prepare the OCR dataset inside the container
 
 ```bash
 export WORKSPACE=${WORKSPACE:-$HOME}
@@ -201,16 +364,30 @@ python3 examples/flowgrpo_trainer/data_process/qwenimage_ocr.py \
   --output_dir $WORKSPACE/data/ocr/qwen_image
 ```
 
-**3. (Optional) Set W&B credentials:**
+### 3. Optional: Set W&B credentials
 
 ```bash
 export WANDB_API_KEY=<your_wandb_api_key>
 ```
 
-**4. Run FlowGRPO training** (4 GPUs by default in the script):
+### 4. Run FlowGRPO training
+
+For CUDA, the default OCR LoRA script uses 4 GPUs by default:
 
 ```bash
 bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh
+```
+
+For Ascend NPU, use the corresponding NPU recipe script if available in your checkout:
+
+```bash
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_npu.sh
+```
+
+If you run the training command manually, make sure to include the NPU-specific Hydra override:
+
+```bash
+actor_rollout_ref.model.attn_backend=_native_npu
 ```
 
 The script launches `python3 -m verl_omni.trainer.main_diffusion` with FlowGRPO + `vllm_omni` rollout and OCR reward (`compute_score_ocr`). Checkpoints are written to:
@@ -218,5 +395,3 @@ The script launches `python3 -m verl_omni.trainer.main_diffusion` with FlowGRPO 
 ```bash
 checkpoints/flow_grpo/qwen_image_ocr_lora
 ```
-
-

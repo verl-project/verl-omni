@@ -13,6 +13,7 @@
 # limitations under the License.
 """Entrypoint for diffusion model RL training."""
 
+import json
 import os
 import socket
 
@@ -242,7 +243,29 @@ class TaskRunner:
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(config.actor_rollout_ref.model.tokenizer_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
+        model_config = config.actor_rollout_ref.model
+        architecture = model_config.get("architecture")
+        if architecture is None:
+            model_index_path = os.path.join(local_path, "model_index.json")
+            try:
+                with open(model_index_path) as model_index_file:
+                    architecture = json.load(model_index_file)["_class_name"]
+            except (OSError, KeyError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"Unable to infer the diffusion architecture from {model_index_path}. "
+                    "Set actor_rollout_ref.model.architecture explicitly."
+                ) from exc
+
+        from verl_omni.pipelines.model_base import DiffusionModelBase
+
+        prepared_processor_path = DiffusionModelBase.get_class_by_name(
+            architecture,
+            model_config.algorithm,
+            model_config.get("external_lib"),
+        ).prepare_processor_files(local_path)
         processor_path = os.path.join(local_path, "processor")
+        if prepared_processor_path is not None:
+            processor_path = prepared_processor_path
         if not os.path.exists(processor_path):
             processor_path = local_path
         processor = hf_processor(processor_path, trust_remote_code=trust_remote_code, use_fast=True)
