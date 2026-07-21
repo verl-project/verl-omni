@@ -65,7 +65,7 @@ from verl_omni.workers.config import (
     DiffusionModelConfig,
     OmniModelConfig,
 )
-from verl_omni.workers.utils.losses import diffusion_loss
+from verl_omni.workers.utils.losses import diffusion_loss, omni_loss
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -344,9 +344,18 @@ class TrainingWorker(Worker, DistProfilerExtension):
             total_num_iterations = data.shape[0] // mini_batch_size_per_gpu * epochs
 
             for batch_idx, mini_batch_td in enumerate(dataloader):
-                # add global token num
+                # Per-sequence token counts for MFU (``FlopsCounter`` in ``_postprocess_output``).
+                # Batch layout depends on the dataloader / engine path:
+                #   - Packed remove-padding (NestedTensor): ``input_ids.offsets().diff()``.
+                #   - Dense padded batches (with attention mask): ``attention_mask.sum(-1)``.
                 if "input_ids" in mini_batch_td:
-                    global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()  # (total_nnz,)
+                    input_ids = mini_batch_td["input_ids"]
+                    if hasattr(input_ids, "offsets"):
+                        global_token_num = input_ids.offsets().diff().tolist()  # (total_nnz,)
+                    elif "attention_mask" in mini_batch_td:
+                        global_token_num = mini_batch_td["attention_mask"].sum(dim=-1).tolist()
+                    else:
+                        raise ValueError(f"input_ids has no offsets or attention_mask: {mini_batch_td}")
                     # allgather from dp rank
                     global_token_num_output = [None] * torch.distributed.get_world_size(
                         self.engine.get_data_parallel_group()
@@ -374,11 +383,14 @@ class TrainingWorker(Worker, DistProfilerExtension):
                     for key, val in output.items():
                         # flattn dp and micro batch
                         if isinstance(val, list):
+                            flattened_val = list(chain.from_iterable(val)) if val and isinstance(val[0], list) else val
                             output[key] = (
-                                Metric.aggregate_dp(val)
-                                if isinstance(val[0], Metric)
-                                else list(chain.from_iterable(val))
+                                Metric.aggregate_dp(flattened_val)
+                                if flattened_val and isinstance(flattened_val[0], Metric)
+                                else flattened_val
                             )
+                        elif isinstance(val, Metric):
+                            output[key] = val.aggregate()
                     append_to_dict(metrics, output)
 
                 output = tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": metrics}).cpu()
@@ -595,6 +607,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             # The ref model does not need to enable MTP; force it to false.
             ref_config.model_config = deepcopy(model_config)
+            if ref_config.model_config.get("model_type", "language_model") == "omni_model":
+                ref_config.model_config.trainer_type = self.config.actor.get("trainer_type", "policy_gradient")
             ref_config.model_config.mtp = MtpConfig(enable=False)
 
             # construct TrainingWorkerConfig
@@ -632,6 +646,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if "actor" in self.role:
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
             actor_config.model_config = model_config
+            if actor_config.model_config.get("model_type", "language_model") == "omni_model":
+                actor_config.model_config.trainer_type = getattr(actor_config, "trainer_type", "policy_gradient")
             distillation_config: Optional[DistillationConfig] = (
                 omega_conf_to_dataclass(self.distillation_config) if self.distillation_enabled else None
             )
@@ -695,6 +711,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 "diffusion_nft_model",
             ):
                 self.loss_fn = partial(diffusion_loss, config=actor_config)
+            elif (
+                model_config.get("model_type", "language_model") == "omni_model"
+                and getattr(actor_config, "trainer_type", "policy_gradient") == "direct_preference"
+            ):
+                self.loss_fn = partial(omni_loss, config=actor_config)
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
             self.actor = TrainingWorker(config=actor_training_config)

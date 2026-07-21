@@ -232,29 +232,65 @@ def _patch_unfuse_qwen3_omni_thinker_experts() -> None:
     _orig_get_peft_model = _peft.get_peft_model
 
     # No-op PEFT's gate_proj/up_proj → gate_up_proj remap for Qwen3-Omni, else expert LoRA won't attach.
+    def _is_qwen3_omni_model(model):
+        visited = set()
+        stack = [model]
+        while stack:
+            current = stack.pop()
+            if current is None or id(current) in visited:
+                continue
+            visited.add(id(current))
+            if type(current).__name__ == "Qwen3OmniMoeForConditionalGeneration":
+                return True
+            config = getattr(current, "config", None)
+            if getattr(config, "model_type", None) == "qwen3_omni_moe":
+                return True
+            stack.extend(
+                child
+                for child in (
+                    getattr(current, "base_model", None),
+                    getattr(current, "model", None),
+                )
+                if child is not None
+            )
+        return False
+
     try:
         import peft.utils.transformers_weight_conversion as _twc
 
         _orig_get_mapping = _twc.get_model_conversion_mapping
         _orig_convert = _twc.convert_peft_config_for_transformers
+        _orig_convert_state_dict = _twc.convert_peft_adapter_state_dict_for_transformers
 
         def _patched_get_mapping(model):
-            if type(model).__name__ == "Qwen3OmniMoeForConditionalGeneration":
+            if _is_qwen3_omni_model(model):
                 return []
             return _orig_get_mapping(model)
 
         def _patched_convert(peft_config, model=None, conversions=None):
-            if model is not None and type(model).__name__ == "Qwen3OmniMoeForConditionalGeneration":
+            if model is not None and _is_qwen3_omni_model(model):
                 return
             return _orig_convert(peft_config, model=model, conversions=conversions)
 
+        def _patched_convert_state_dict(model, peft_config, adapter_state_dict, adapter_name="default"):
+            if _is_qwen3_omni_model(model):
+                return adapter_state_dict
+            return _orig_convert_state_dict(model, peft_config, adapter_state_dict, adapter_name=adapter_name)
+
         _twc.get_model_conversion_mapping = _patched_get_mapping
         _twc.convert_peft_config_for_transformers = _patched_convert
+        _twc.convert_peft_adapter_state_dict_for_transformers = _patched_convert_state_dict
+        try:
+            import peft.utils.save_and_load as _psl
+
+            _psl.convert_peft_adapter_state_dict_for_transformers = _patched_convert_state_dict
+        except (ImportError, AttributeError):
+            pass
     except (ImportError, AttributeError) as e:
         logger.warning("verl_omni: could not patch PEFT tf5 name remapping (%s); MoE expert LoRA may not attach", e)
 
     def _patched_get_peft_model(model, peft_config, **kwargs):
-        if type(model).__name__ == "Qwen3OmniMoeForConditionalGeneration":
+        if _is_qwen3_omni_model(model):
             _convert_model_experts(model)
             # verl passes target_modules as a comma-separated string; PEFT treats it as regex — split to set.
             if isinstance(peft_config.target_modules, str) and "," in peft_config.target_modules:

@@ -20,6 +20,8 @@ import torch
 from peft import LoraConfig
 from verl.utils.py_functional import convert_to_regular_types
 
+from verl_omni.models.transformers.qwen3_omni_moe_lora import unfuse_qwen3_omni_thinker_moe_experts
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,6 +29,9 @@ class LoRAAdapterMixin:
     """Backend-agnostic helpers for named PEFT/LoRA policy adapters."""
 
     def _build_lora_module(self, module):
+        if type(module).__name__ == "Qwen3OmniMoeForConditionalGeneration":
+            unfuse_qwen3_omni_thinker_moe_experts(module)
+
         lora_adapter_path = getattr(self.model_config, "lora_adapter_path", None)
         policy_state_adapters = tuple(getattr(self.model_config, "policy_state_adapters", ("default",)))
         extra_adapters = tuple(adapter for adapter in policy_state_adapters if adapter not in ("default", "reference"))
