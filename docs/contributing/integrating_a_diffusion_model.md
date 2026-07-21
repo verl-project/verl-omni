@@ -128,7 +128,10 @@ code — the answers determine every helper you need:
 
 Anything model-specific belongs inside the model's own package;
 anything reusable belongs in
-[`pipelines/utils.py`](../../verl_omni/pipelines/utils.py) or
+[`pipelines/utils.py`](../../verl_omni/pipelines/utils.py)
+(training dispatch),
+[`pipelines/request_batch.py`](../../verl_omni/pipelines/request_batch.py)
+(request-level batching collate/split), or
 [`pipelines/model_base.py`](../../verl_omni/pipelines/model_base.py).
 
 ---
@@ -303,7 +306,7 @@ and
 3. Normalize with
    `request_batch = req if isinstance(req, DiffusionRequestBatch) else DiffusionRequestBatch(requests=[req])`.
 4. Collate per-request tensors/prompts (use helpers in
-   [`verl_omni/pipelines/utils.py`](../../verl_omni/pipelines/utils.py)
+   [`verl_omni/pipelines/request_batch.py`](../../verl_omni/pipelines/request_batch.py)
    such as `collate_prompt_rows` / `collate_prompt_mask`, and
    `request_batch.collate_request_tensors` /
    `collate_request_generators`).

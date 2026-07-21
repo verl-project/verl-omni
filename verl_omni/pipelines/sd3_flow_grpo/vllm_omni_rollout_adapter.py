@@ -28,8 +28,10 @@ from vllm_omni.diffusion.request import DUMMY_DIFFUSION_REQUEST_ID, OmniDiffusio
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.request_batch import (
+    split_diffusion_output_by_request as _split_diffusion_output_by_request,
+)
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
-from verl_omni.pipelines.utils import split_diffusion_output_by_request as _split_diffusion_output_by_request
 
 __all__ = ["StableDiffusion3PipelineWithLogProb"]
 

@@ -23,16 +23,16 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
-from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
-from verl_omni.pipelines.utils import (
+from verl_omni.pipelines.request_batch import (
     collate_prompt_mask as _collate_prompt_mask,
 )
-from verl_omni.pipelines.utils import (
+from verl_omni.pipelines.request_batch import (
     collate_prompt_rows as _collate_prompt_rows,
 )
-from verl_omni.pipelines.utils import (
+from verl_omni.pipelines.request_batch import (
     split_diffusion_output_by_request as _split_diffusion_output_by_request,
 )
+from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import QwenImageTokenIdPromptMixin, apply_true_cfg, build_img_shapes, coalesce_not_none
 
