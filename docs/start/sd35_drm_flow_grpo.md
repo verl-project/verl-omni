@@ -1,4 +1,3 @@
-(sd35_drm_flow_grpo)=
 # Quickstart: SD3.5 FlowGRPO with a latent reward model
 
 Last updated: 07/20/2026
@@ -71,7 +70,9 @@ Start the scorer from its separate `diffusion-rm` environment. This example
 reserves physical GPU 7 for the server:
 
 ```bash
-cd ../diffusion-rm
+cd ../
+git clone https://github.com/HKUST-C4G/diffusion-rm.git
+cd diffusion-rm
 conda activate diffusion-rm-server
 
 CUDA_VISIBLE_DEVICES=7 python -m diffusion_rm.server \
