@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
+import asyncio
 import logging
 import os
 from dataclasses import asdict
@@ -33,20 +34,27 @@ from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
     VLLM_LORA_PATH,
+    SuppressSignalInThread,
 )
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
 from vllm import SamplingParams
 from vllm.entrypoints.openai.api_server import build_app
 from vllm_omni.engine.arg_utils import OmniEngineArgs
 from vllm_omni.entrypoints import AsyncOmni
+from vllm_omni.entrypoints.cli.serve import run_headless as run_omni_headless
 from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
 from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
+from vllm_omni.utils.tracking_parser import TrackingNamespace
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
+from verl_omni.workers.rollout.vllm_rollout.placement_guard import (
+    estimate_outer_rollout_replicas,
+    validate_vllm_omni_rollout_placement,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -82,6 +90,24 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if self._ar_mode:
             if self.config.max_model_len is None:
                 self.config.max_model_len = self.config.prompt_length + self.config.response_length
+            logprobs_mode = (
+                self.config.get("logprobs_mode", "processed_logprobs")
+                if isinstance(self.config, dict)
+                else getattr(self.config, "logprobs_mode", "processed_logprobs")
+            )
+            calculate_log_probs = (
+                self.config.get("calculate_log_probs", False)
+                if isinstance(self.config, dict)
+                else getattr(self.config, "calculate_log_probs", False)
+            )
+            if calculate_log_probs and logprobs_mode not in {
+                "raw_logprobs",
+                "processed_logprobs",
+            }:
+                raise ValueError(
+                    "vLLM-Omni AR rollout requires an explicit raw_logprobs or "
+                    f"processed_logprobs mode, got {logprobs_mode!r}"
+                )
 
     def _post_init(self, cuda_visible_devices: str) -> None:
         """Diffusion needs a PIL→tensor converter; AR does not."""
@@ -117,7 +143,22 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_kwargs.pop("output_mode", None)
         if self._ar_mode:
             engine_kwargs.pop("custom_pipeline", None)
-            for underscore_key in ("stage_configs_path", "deploy_config", "stage_overrides", "async_chunk"):
+            stage_init_timeout = engine_kwargs.get("stage_init_timeout") or engine_kwargs.get("stage-init-timeout")
+            init_timeout = engine_kwargs.get("init_timeout") or engine_kwargs.get("init-timeout")
+            if stage_init_timeout is not None:
+                stage_init_timeout = int(stage_init_timeout)
+                os.environ.setdefault("VLLM_OMNI_STARTUP_HANDSHAKE_TIMEOUT", str(stage_init_timeout))
+                if init_timeout is None:
+                    engine_kwargs["init_timeout"] = max(stage_init_timeout, 600)
+
+            for underscore_key in (
+                "stage_configs_path",
+                "deploy_config",
+                "stage_overrides",
+                "async_chunk",
+                "stage_init_timeout",
+                "init_timeout",
+            ):
                 if underscore_key in engine_kwargs:
                     engine_kwargs[underscore_key.replace("_", "-")] = engine_kwargs.pop(underscore_key)
 
@@ -125,11 +166,92 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # Server lifecycle
     # -----------------------------------------------------------------------
 
+    @staticmethod
+    def _env_flag(name: str) -> bool:
+        return os.environ.get(name, "0").lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _ensure_tracking_namespace(args: argparse.Namespace) -> argparse.Namespace:
+        if hasattr(args, "get_explicit_kwargs_dict"):
+            return args
+        return TrackingNamespace(unfiltered_ns=args, explicit_keys=frozenset(vars(args)))
+
+    @staticmethod
+    def _visible_device_count() -> int | None:
+        raw_devices = os.environ.get("CUDA_VISIBLE_DEVICES") or os.environ.get("ROCR_VISIBLE_DEVICES")
+        if not raw_devices:
+            return None
+        return len([device for device in raw_devices.split(",") if device.strip()])
+
+    @staticmethod
+    def _config_int(config: Any, name: str, default: int = 1) -> int:
+        try:
+            value = getattr(config, name)
+        except (AttributeError, KeyError):
+            value = config.get(name, default) if isinstance(config, dict) else default
+        return int(value or default)
+
+    def _run_ar_placement_preflight(self, args: argparse.Namespace):
+        outer_replicas = estimate_outer_rollout_replicas(
+            nnodes=int(getattr(self, "nnodes", 1) or 1),
+            gpus_per_node=int(getattr(self, "gpus_per_node", 1) or 1),
+            tensor_model_parallel_size=self._config_int(self.config, "tensor_model_parallel_size"),
+            data_parallel_size=self._config_int(self.config, "data_parallel_size"),
+            pipeline_model_parallel_size=self._config_int(self.config, "pipeline_model_parallel_size"),
+        )
+        preflight = validate_vllm_omni_rollout_placement(
+            stage_configs_path=getattr(args, "stage_configs_path", None),
+            outer_replicas=outer_replicas,
+            visible_device_count=self._visible_device_count(),
+            allow_physical_stage_devices=self._env_flag("VERL_OMNI_ALLOW_PHYSICAL_STAGE_DEVICES"),
+        )
+        logger.info("vLLM-Omni rollout placement preflight: %s", preflight)
+        return preflight
+
+    def _configure_omni_distributed_args(self, args: argparse.Namespace, *, headless: bool) -> None:
+        """Map verl's multi-node replica contract onto vLLM-Omni launch args."""
+        if self.nnodes <= 1 or not self._ar_mode:
+            return
+
+        omni_master_port = int(os.environ.get("VERL_OMNI_MASTER_ZMQ_PORT", self._master_port))
+        dist_master_port = os.environ.get("VLLM_OMNI_DIST_MASTER_PORT")
+        if dist_master_port:
+            args.master_addr = self._master_address
+            args.master_port = int(dist_master_port)
+
+        args.stage_id = 0
+        args.omni_master_address = self._master_address
+        args.omni_master_port = omni_master_port
+        args.omni_dp_size_local = 1
+        args.worker_backend = "multi_process"
+        args.headless = headless
+        if getattr(args, "omni_lb_policy", None) is None:
+            args.omni_lb_policy = "random"
+        if getattr(args, "omni_heartbeat_timeout", None) is None:
+            args.omni_heartbeat_timeout = 30.0
+
+    def _release_omni_master_port_reservation(self) -> None:
+        sock = getattr(self, "_master_sock", None)
+        if sock is not None:
+            sock.close()
+            self._master_sock = None
+
     async def run_server(self, args: argparse.Namespace):
+        args = self._ensure_tracking_namespace(args)
+        self._configure_omni_distributed_args(args, headless=False)
+        if self.nnodes > 1 and self._ar_mode:
+            self._release_omni_master_port_reservation()
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
 
         if self._ar_mode:
+            self._run_ar_placement_preflight(args)
+            os.environ.setdefault("VLLM_OMNI_USE_MASTER_PORT_FOR_STAGE_CORE_TCPSTORE", "1")
+            for timeout_key in ("stage_init_timeout", "init_timeout"):
+                timeout_value = getattr(args, timeout_key, None)
+                if timeout_value is not None:
+                    engine_args[timeout_key] = int(timeout_value)
+            engine_args["logprobs_mode"] = getattr(self.config, "logprobs_mode", "processed_logprobs")
             # AR mode: no diffusion pipeline. Drop None entries from
             # compilation_config that OmniEngineArgs may leave behind.
             if isinstance(engine_args.get("compilation_config"), dict):
@@ -173,9 +295,30 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
 
     async def run_headless(self, args: argparse.Namespace):
-        """Run headless server in a separate thread."""
-        # TODO (mike): support multi node
-        raise NotImplementedError("vLLM-Omni headless mode is not implemented yet.")
+        """Run a remote vLLM-Omni stage replica in a background thread."""
+        args = self._ensure_tracking_namespace(args)
+        self._configure_omni_distributed_args(args, headless=True)
+        if self._ar_mode:
+            self._run_ar_placement_preflight(args)
+            os.environ.setdefault("VLLM_OMNI_USE_MASTER_PORT_FOR_STAGE_CORE_TCPSTORE", "1")
+        args.api_server_count = 0
+
+        def run_headless_wrapper():
+            with SuppressSignalInThread():
+                run_omni_headless(args)
+
+        def on_run_headless_done(future: asyncio.Future):
+            try:
+                exc = future.exception()
+                if exc is not None:
+                    logger.exception("vLLM-Omni headless server failed: %s", exc)
+                else:
+                    logger.error("vLLM-Omni headless server exited unexpectedly")
+            finally:
+                os._exit(1)
+
+        self.task = asyncio.create_task(asyncio.to_thread(run_headless_wrapper))
+        self.task.add_done_callback(on_run_headless_done)
 
     # -----------------------------------------------------------------------
     # wake_up hook: Omni does not restore KV cache on wake-up
@@ -215,6 +358,38 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         await self.engine.collective_rpc("sleep", kwargs={"level": 1})
         await self.engine.reset_encoder_cache()
 
+    async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
+        """Abort every in-flight AsyncOmni request owned by the head replica."""
+        if self.node_rank != 0:
+            return {"aborted_count": 0, "request_ids": []}
+
+        request_ids = list(getattr(self.engine, "request_states", {}))
+        if request_ids:
+            await self.engine._abort_internal_requests(request_ids)
+        if reset_prefix_cache:
+            await self.engine.reset_prefix_cache()
+        return {"aborted_count": len(request_ids), "request_ids": request_ids}
+
+    async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
+        """Abort one AsyncOmni request by internal or external request id."""
+        if self.node_rank != 0:
+            return {"aborted": False, "request_id": request_id}
+
+        request_states = getattr(self.engine, "request_states", {})
+        if request_id in request_states:
+            await self.engine._abort_internal_requests([request_id])
+        elif any(getattr(state, "external_request_id", None) == request_id for state in request_states.values()):
+            await self.engine.abort(request_id)
+        else:
+            return {"aborted": False, "request_id": request_id, "error": "request not found"}
+        if reset_prefix_cache:
+            await self.engine.reset_prefix_cache()
+        return {"aborted": True, "request_id": request_id}
+
+    async def resume_generation(self):
+        """AsyncOmni aborts requests directly and does not pause the engine."""
+        return
+
     # -----------------------------------------------------------------------
     # generate: shared pipeline; mode-specific steps branch on self._ar_mode
     # (_preprocess_input / _run_generation / _process_output).
@@ -227,11 +402,19 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
         prompt_mask: torch.BoolTensor | None = None,
         priority: int = 0,
     ) -> DiffusionOutput | TokenOutput:
         prompt_ids = normalize_token_ids(prompt_ids)
+        self._validate_generate_multimodal_args(
+            image_data=image_data,
+            video_data=video_data,
+            audio_data=audio_data,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
         multi_modal_data = self._build_multi_modal_data(image_data, video_data)
         lora_request = await self._resolve_lora_request()
         prompt, params = self._preprocess_input(
@@ -243,6 +426,28 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
     # Shared helpers for the AR and diffusion generate paths
     # -----------------------------------------------------------------------
+
+    def _validate_generate_multimodal_args(
+        self,
+        *,
+        image_data: Optional[list[Any]],
+        video_data: Optional[list[Any]],
+        audio_data: Optional[list[Any]],
+        mm_processor_kwargs: Optional[dict[str, Any]],
+    ) -> None:
+        provided = {
+            "image_data": image_data,
+            "video_data": video_data,
+            "audio_data": audio_data,
+            "mm_processor_kwargs": mm_processor_kwargs,
+        }
+        if self._ar_mode:
+            unsupported = [name for name, value in provided.items() if value]
+        else:
+            unsupported = [name for name in ("audio_data", "mm_processor_kwargs") if provided[name]]
+        if unsupported:
+            mode = "AR text" if self._ar_mode else "diffusion"
+            raise NotImplementedError(f"vLLM-Omni {mode} rollout does not support: {', '.join(unsupported)}")
 
     @staticmethod
     def _build_multi_modal_data(image_data: Optional[list[Any]], video_data: Optional[list[Any]]) -> dict[str, Any]:
@@ -399,9 +604,29 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             token_ids = req_output.outputs[0].token_ids
             log_probs = None
             if params.logprobs is not None:
-                log_probs = [
-                    logprobs[token_ids[i]].logprob for i, logprobs in enumerate(req_output.outputs[0].logprobs)
-                ]
+                output_logprobs = req_output.outputs[0].logprobs
+                if output_logprobs is None:
+                    raise RuntimeError("AR mode requested logprobs, but vLLM-Omni returned none")
+                if len(output_logprobs) != len(token_ids):
+                    raise RuntimeError(
+                        "AR mode logprob rows do not match generated tokens: "
+                        f"logprobs={len(output_logprobs)} tokens={len(token_ids)}"
+                    )
+                log_probs = []
+                for index, token_logprobs in enumerate(output_logprobs):
+                    token_id = token_ids[index]
+                    if token_id not in token_logprobs:
+                        raise RuntimeError(
+                            "AR mode sampled-token logprob is missing from vLLM-Omni output: "
+                            f"index={index} token_id={token_id}"
+                        )
+                    log_prob = float(token_logprobs[token_id].logprob)
+                    if not np.isfinite(log_prob):
+                        raise RuntimeError(
+                            "AR mode sampled-token logprob is non-finite: "
+                            f"index={index} token_id={token_id} value={log_prob}"
+                        )
+                    log_probs.append(log_prob)
 
             finish_reason = req_output.outputs[0].finish_reason
             stop_reason = self._map_stop_reason(finish_reason)
