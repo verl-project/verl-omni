@@ -248,6 +248,8 @@ actor_rollout_ref:
       enable: false
     engine_kwargs:
       vllm_omni: {}
+    enable_prompt_embed_cache: false
+    prompt_embed_cache_size: 32
     val_kwargs:
       _target_: verl_omni.workers.config.diffusion.DiffusionSamplingConfig
       'n': 1

@@ -307,10 +307,15 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         self._current_timestep = None
         self._interrupt = False
 
+        prompt_embed_cache = getattr(self, "_prompt_embed_cache", None)
+        prompt_embed_cache_enabled = bool(prompt_embed_cache is not None and prompt_embed_cache.enabled)
         if prompt_token_ids is not None:
-            if isinstance(prompt_token_ids, list):
+            if not prompt_embed_cache_enabled and isinstance(prompt_token_ids, list):
                 prompt_token_ids = torch.tensor(prompt_token_ids, device=self.device)
-            batch_size = prompt_token_ids.shape[0] if prompt_token_ids.ndim == 2 else 1
+            if isinstance(prompt_token_ids, torch.Tensor):
+                batch_size = prompt_token_ids.shape[0] if prompt_token_ids.ndim == 2 else 1
+            else:
+                batch_size = len(prompt_token_ids) if prompt_token_ids and isinstance(prompt_token_ids[0], list) else 1
         elif prompt_embeds is not None:
             batch_size = prompt_embeds.shape[0]
         else:
@@ -318,7 +323,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             # Return a minimal dummy output to avoid crashing.
             return DiffusionOutput(output=None, custom_output={})
 
-        if isinstance(negative_prompt_ids, list):
+        if not prompt_embed_cache_enabled and isinstance(negative_prompt_ids, list):
             negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
 
         has_neg_prompt = negative_prompt_ids is not None or (

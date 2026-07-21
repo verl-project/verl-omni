@@ -120,6 +120,9 @@ class DiffusionRolloutConfig(BaseConfig):
     # the *_stepwise variant of the pipeline (e.g. flow_grpo_stepwise).
     step_execution: bool = False
 
+    enable_prompt_embed_cache: bool = False
+    prompt_embed_cache_size: int = 32
+
     # note that the logprob computation should belong to the actor
     log_prob_micro_batch_size_per_gpu: Optional[int] = None
 
@@ -179,6 +182,8 @@ class DiffusionRolloutConfig(BaseConfig):
             raise ValueError(
                 f"Invalid diffusion rollout rollout_adapter: {self.rollout_adapter}. Must be one of ['default', 'old']."
             )
+        if self.prompt_embed_cache_size <= 0:
+            raise ValueError(f"prompt_embed_cache_size must be positive, got {self.prompt_embed_cache_size}.")
 
         if self.pipeline_model_parallel_size > 1:
             if self.name == "vllm_omni":

@@ -72,13 +72,19 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         self._current_timestep = None
         self._interrupt = False
 
-        if isinstance(prompt_ids, list):
-            prompt_ids = torch.tensor(prompt_ids, device=self.device)
-        if isinstance(negative_prompt_ids, list):
-            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
+        prompt_embed_cache = getattr(self, "_prompt_embed_cache", None)
+        prompt_embed_cache_enabled = bool(prompt_embed_cache is not None and prompt_embed_cache.enabled)
+        if not prompt_embed_cache_enabled:
+            if isinstance(prompt_ids, list):
+                prompt_ids = torch.tensor(prompt_ids, device=self.device)
+            if isinstance(negative_prompt_ids, list):
+                negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
 
         if prompt_ids is not None:
-            batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
+            if isinstance(prompt_ids, torch.Tensor):
+                batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
+            else:
+                batch_size = len(prompt_ids) if prompt_ids and isinstance(prompt_ids[0], list) else 1
         elif prompt_embeds is not None:
             batch_size = prompt_embeds.shape[0]
         else:

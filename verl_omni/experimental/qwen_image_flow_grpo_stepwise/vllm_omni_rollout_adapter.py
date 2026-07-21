@@ -117,6 +117,10 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
                 ``(B * num_images_per_prompt, L, D)`` and
                 ``(B * num_images_per_prompt, L)`` respectively.
         """
+        if isinstance(prompt_ids, list):
+            prompt_ids = torch.tensor(prompt_ids, device=self.device)
+        if isinstance(attention_mask, list):
+            attention_mask = torch.tensor(attention_mask, device=self.device)
         prompt_ids = prompt_ids.unsqueeze(0) if prompt_ids.ndim == 1 else prompt_ids
         attention_mask = (
             attention_mask.unsqueeze(0) if attention_mask is not None and attention_mask.ndim == 1 else attention_mask
@@ -173,7 +177,7 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
             truncation=True,
             return_tensors="pt",
         ).to(self.device)
-        return tokens.input_ids, tokens.attention_mask
+        return tokens.input_ids.tolist(), tokens.attention_mask.tolist()
 
     def prepare_encode(
         self,
@@ -192,12 +196,6 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
         prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask = self._extract_prompt_ids(
             [state.prompt] if state.prompt is not None else []
         )
-
-        # Normalize list inputs to tensors on device.
-        if isinstance(prompt_ids, list):
-            prompt_ids = torch.tensor(prompt_ids, device=self.device)
-        if isinstance(negative_prompt_ids, list):
-            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
 
         if prompt_ids is None:
             raise ValueError(
@@ -223,10 +221,18 @@ class QwenImagePipelineWithLogProbStepwise(QwenImagePipelineWithLogProb):
         self._current_timestep = None
         self._interrupt = False
 
-        if prompt_ids is not None:
+        prompt_embed_cache = getattr(self, "_prompt_embed_cache", None)
+        prompt_embed_cache_enabled = bool(prompt_embed_cache is not None and prompt_embed_cache.enabled)
+        if not prompt_embed_cache_enabled:
+            if isinstance(prompt_ids, list):
+                prompt_ids = torch.tensor(prompt_ids, device=self.device)
+            if isinstance(negative_prompt_ids, list):
+                negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
+
+        if isinstance(prompt_ids, torch.Tensor):
             batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
         else:
-            batch_size = 1
+            batch_size = len(prompt_ids) if prompt_ids and isinstance(prompt_ids[0], list) else 1
 
         has_neg_prompt = negative_prompt_ids is not None
         do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
