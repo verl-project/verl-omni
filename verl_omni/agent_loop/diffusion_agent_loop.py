@@ -208,6 +208,7 @@ class DiffusionAgentLoopWorker:
             processor=self.processor,
             dataset_cls=self.dataset_cls,
             data_config=DictConfigWrap(self.config.data),
+            extra_tokenizer_map=self.model_config.extra_tokenizer_map,
         )
         output: DiffusionAgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
         return await self._agent_loop_postprocess(output, **kwargs)
