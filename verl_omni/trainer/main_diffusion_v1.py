@@ -64,7 +64,7 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
     if task_runner_class is None:
-        task_runner_class = ray.remote(num_cpus=1)(DiffusionTaskRunnerV1)
+        task_runner_class = DiffusionTaskRunnerV1.options(num_cpus=1)
 
     if (
         is_cuda_available
