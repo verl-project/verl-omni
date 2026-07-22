@@ -15,6 +15,8 @@ on:
       - "pyproject.toml"
       - .github/workflows/gpu_smoke.yml
       - .github/vllm_omni_pin.txt
+      - .github/actions/gpu-smoke-prepare/**
+      - .github/actions/gpu-smoke-upload-logs/**
   pull_request:
     branches:
       - main
@@ -30,81 +32,206 @@ on:
       - "pyproject.toml"
       - .github/workflows/gpu_smoke.yml
       - .github/vllm_omni_pin.txt
+      - .github/actions/gpu-smoke-prepare/**
+      - .github/actions/gpu-smoke-upload-logs/**
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# Declare permissions just read content.
+# Declare permissions just read content and PR file metadata.
 permissions:
   contents: read
+  pull-requests: read
 
 env:
   IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm023.dev1"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd7upeujs1b9g1a958pn0.apigateway-cn-beijing.volceapi.com/runner"
+  HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+  NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+  HF_ENDPOINT: "https://hf-mirror.com"
+  HF_HUB_ENABLE_HF_TRANSFER: "0"
 
 jobs:
-  setup:
-    if: >-
-      github.repository_owner == 'verl-project' && (
-        github.event_name != 'pull_request' ||
-        contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
-      )
+  setup_runner:
+    # Pull request label mapping:
+    #   ready-for-ci               -> diff-selected GPU smoke groups in parallel, up to 8 GPUs
+    #   ci-core                    -> key module coverage on one 2-GPU runner
+    #   ci-e2e-omni                -> omni trainer e2e coverage on one 2-GPU runner
+    #   ci-e2e-diffusion           -> diffusion trainer e2e coverage on one 4-GPU runner
+    # Push events also run all groups on one 8-GPU runner.
+    if: github.repository_owner == 'verl-project'
     runs-on: ubuntu-latest
     outputs:
+      mode: ${{ steps.resolve-mode.outputs.mode }}
+      groups-json: ${{ steps.resolve-groups.outputs.groups-json }}
+      group-count: ${{ steps.resolve-groups.outputs.group-count }}
+      total-gpus: ${{ steps.resolve-groups.outputs.total-gpus }}
+      runner-size: ${{ steps.resolve-groups.outputs.runner-size }}
       runner-label: ${{ steps.create-runner.outputs.runner-label }}
       mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
     steps:
+      - id: resolve-mode
+        run: |
+          mode="none"
+          pr_labels="${{ github.event_name == 'pull_request' && join(github.event.pull_request.labels.*.name, ',') || '' }}"
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            mode="all"
+          elif [[ ",${pr_labels}," == *",ready-for-ci,"* ]]; then
+            mode="all"
+          elif [[ ",${pr_labels}," == *",ci-core,"* ]]; then
+            mode="ci-core"
+          elif [[ ",${pr_labels}," == *",ci-e2e-omni,"* ]]; then
+            mode="ci-e2e-omni"
+          elif [[ ",${pr_labels}," == *",ci-e2e-diffusion,"* ]]; then
+            mode="ci-e2e-diffusion"
+          fi
+          echo "mode=${mode}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: steps.resolve-mode.outputs.mode != 'none'
+      - id: resolve-groups
+        if: steps.resolve-mode.outputs.mode != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mode="${{ steps.resolve-mode.outputs.mode }}"
+
+          if [[ "${mode}" == "all" && "${{ github.event_name }}" == "pull_request" ]]; then
+            gh api \
+              "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+              --paginate \
+              --jq '.[].filename' > changed_files.txt
+            plan_json="$(python tests/gpu_smoke/select_gpu_smoke_groups.py --changed-files-file changed_files.txt)"
+          elif [[ "${mode}" == "all" ]]; then
+            plan_json="$(python tests/gpu_smoke/select_gpu_smoke_groups.py --all)"
+          else
+            plan_json="$(python tests/gpu_smoke/select_gpu_smoke_groups.py --groups "${mode}")"
+          fi
+
+          echo "Resolved GPU smoke plan: ${plan_json}"
+          echo "groups-json=${plan_json}" >> "$GITHUB_OUTPUT"
+          PLAN_JSON="${plan_json}" python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          plan = json.loads(os.environ["PLAN_JSON"])
+          print(f"group-count={plan['group_count']}")
+          print(f"total-gpus={plan['total_gpus']}")
+          print(f"runner-size={plan['runner_size']}")
+          PY
       - id: create-runner
+        if: steps.resolve-mode.outputs.mode != 'none'
         uses: volcengine/vemlp-github-runner@v1
         with:
           mode: "create"
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
           mlp-image: "${{ env.IMAGE }}"
 
-  gpu_smoke_tests:
-    needs: setup
-    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
-    timeout-minutes: 45
-    env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
-      HF_ENDPOINT: "https://hf-mirror.com"
-      HF_HUB_ENABLE_HF_TRANSFER: "0"
+  gpu_smoke:
+    needs: setup_runner
+    if: needs.setup_runner.outputs.mode != 'none'
+    runs-on: ["${{ needs.setup_runner.outputs.runner-label || needs.setup_runner.outputs.runner-size || 'L20x8' }}"]
+    timeout-minutes: ${{ needs.setup_runner.outputs.group-count == '1' && 45 || 90 }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
-      - name: Install dependencies
+      - uses: ./.github/actions/gpu-smoke-prepare
+      - name: Run selected GPU smoke tests
         env:
-          PIP_EXTRA_INDEX_URL: https://pypi.org/simple
+          GPU_SMOKE_GROUPS_JSON: ${{ needs.setup_runner.outputs.groups-json }}
         run: |
-          # vllm023.dev1 image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
-          pip3 install ".[gpu,dev]"
-          pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-          pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
-          pip3 install --no-deps -e .
-          # veomni's [gpu] extra pins torch 2.9 and would conflict with the vLLM stack.
-          # See docs/start/install.md "Optional engine backends".
-          # TODO: rm --no-deps when VeOmni support torch2.11
-          pip3 install veomni==0.1.11 --no-deps
-          pip3 install torchcodec librosa soundfile av
-          pip3 install "transformers[mistral-common]"
-      - name: Run GPU smoke tests
-        run: |
-          ray stop --force
-          bash tests/gpu_smoke/run_gpu_smoke_tests.sh --num-gpus 8
+          mode="${{ needs.setup_runner.outputs.mode }}"
+          ray stop --force || true
+          set -euo pipefail
+          mkdir -p logs/gpu_smoke/parallel
+
+          python - <<'PY' > /tmp/gpu_smoke_groups.tsv
+          import json
+          import os
+
+          plan = json.loads(os.environ["GPU_SMOKE_GROUPS_JSON"])
+          for group in plan["groups"]:
+              print(f"{group['name']}\t{group['devices']}\t{group['num_gpus']}\t{group['script']}")
+          PY
+
+          if [[ ! -s /tmp/gpu_smoke_groups.tsv ]]; then
+            echo "No GPU smoke groups selected for mode: ${mode}"
+            exit 1
+          fi
+
+          pids=()
+          names=()
+
+          run_group() {
+            local name="$1"
+            local devices="$2"
+            local num_gpus="$3"
+            local script="$4"
+            local logfile="logs/gpu_smoke/parallel/${name}.log"
+
+            echo "Starting ${name} on CUDA_VISIBLE_DEVICES=${devices}; log=${logfile}"
+            GPU_SMOKE_SKIP_RAY_STOP=1 bash "${script}" \
+              --num-gpus "${num_gpus}" \
+              --cuda-visible-devices "${devices}" \
+              > "${logfile}" 2>&1 &
+            pids+=("$!")
+            names+=("${name}")
+          }
+
+          while IFS=$'\t' read -r name devices num_gpus script; do
+            run_group "${name}" "${devices}" "${num_gpus}" "${script}"
+          done < /tmp/gpu_smoke_groups.tsv
+
+          failed=0
+          failed_names=()
+          for i in "${!pids[@]}"; do
+            if wait "${pids[$i]}"; then
+              echo "[PASS] ${names[$i]}"
+            else
+              echo "[FAIL] ${names[$i]}"
+              failed=1
+              failed_names+=("${names[$i]}")
+            fi
+          done
+
+          echo ""
+          if [[ "${failed}" -eq 0 ]]; then
+            echo "===== All GPU smoke groups passed; skipping parallel logs ====="
+            echo "Full logs are uploaded as workflow artifacts under logs/gpu_smoke/"
+          else
+            echo "===== GPU smoke logs (failed groups only) ====="
+            for name in "${failed_names[@]}"; do
+              logfile="logs/gpu_smoke/parallel/${name}.log"
+              if [[ -f "${logfile}" ]]; then
+                echo "::group::${logfile}"
+                cat "${logfile}" || true
+                echo "::endgroup::"
+              else
+                echo "::warning::Missing GPU smoke log: ${logfile}"
+              fi
+            done
+            echo "Full logs for all groups are uploaded as workflow artifacts under logs/gpu_smoke/"
+          fi
+
+          ray stop --force || true
+          exit "${failed}"
+
+      - if: always()
+        uses: ./.github/actions/gpu-smoke-upload-logs
 
   cleanup:
     runs-on: ubuntu-latest
-    needs: [setup, gpu_smoke_tests]
+    needs:
+      - setup_runner
+      - gpu_smoke
     if: always()
     steps:
       - id: destroy-runner
+        if: needs.setup_runner.outputs.mlp-task-id != ''
         uses: volcengine/vemlp-github-runner@v1
         with:
           mode: "destroy"
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
-          mlp-task-id: "${{ needs.setup.outputs.mlp-task-id }}"
+          mlp-task-id: "${{ needs.setup_runner.outputs.mlp-task-id }}"
