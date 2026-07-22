@@ -178,7 +178,9 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             sampling_params, agent_name=agent_name, **kwargs
         )
         uid = kwargs["uid"]
-        non_uid_kwargs = {k: v for k, v in kwargs.items() if k != "uid"}
+        non_conflicting_kwargs = {
+            k: v for k, v in kwargs.items() if k not in {"uid", "global_steps"}
+        }
         await self._write_trajectory_to_tq(
             internal,
             uid=uid,
@@ -186,7 +188,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             trajectory=trajectory,
             validate=trajectory["validate"] if trajectory else False,
             global_steps=sampling_params.get("global_steps"),
-            **non_uid_kwargs,
+            **non_conflicting_kwargs,
         )
 
     async def _write_trajectory_to_tq(
