@@ -65,7 +65,7 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
-from verl.workers.engine_workers import ActorRolloutRefWorker
+from verl_omni.workers.engine_workers import ActorRolloutRefWorker
 from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
