@@ -75,9 +75,15 @@ def _stack_field(value: Any, padding: float = 0.0) -> torch.Tensor | None:
     """
     if value is None:
         return None
+    # Nested/jagged tensors returned by some TransferQueue backends must be
+    # converted to dense padded tensors BEFORE the generic torch.Tensor check
+    # below, since nested tensors are also instances of torch.Tensor. Leaving
+    # them nested would expose symbolic ``NestedIntNode`` shapes downstream
+    # (e.g. ``range(tensor.shape[1])`` raises ``AttributeError``).
+    if isinstance(value, torch.Tensor) and value.is_nested:
+        return value.to_padded_tensor(padding=padding)
     if isinstance(value, torch.Tensor):
         return value
-    # Nested/jagged tensors or lists returned by some TransferQueue backends.
     if hasattr(value, "to_padded_tensor"):
         return value.to_padded_tensor(padding=padding)
     if isinstance(value, (list, tuple)):
