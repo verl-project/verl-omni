@@ -20,6 +20,7 @@ minimal multimodal media helpers it relies on.
 
 from __future__ import annotations
 
+import copy
 import math
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -285,6 +286,125 @@ def _get_omni_token_ids(processor) -> tuple[int, int, int]:
     return image_token_id, video_token_id, audio_token_id
 
 
+def _mark_assistant_content(messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
+    marked_messages = copy.deepcopy(messages)
+    markers: list[tuple[str, str]] = []
+    for index, message in enumerate(marked_messages):
+        if message.get("role") != "assistant":
+            continue
+        start_marker = f"__verl_omni_assistant_start_{index}__"
+        end_marker = f"__verl_omni_assistant_end_{index}__"
+        markers.append((start_marker, end_marker))
+        content = message.get("content", "")
+        if isinstance(content, str):
+            message["content"] = f"{start_marker}{content}{end_marker}"
+        else:
+            message["content"] = [
+                {"type": "text", "text": start_marker},
+                *content,
+                {"type": "text", "text": end_marker},
+            ]
+    return marked_messages, markers
+
+
+def _assistant_char_spans_from_template(
+    input_conversations: list[dict[str, Any]],
+    processor,
+    rendered_text: str,
+) -> list[tuple[int, int]]:
+    """Locate assistant content spans from the structured chat template."""
+    marked_conversations, markers = _mark_assistant_content(input_conversations)
+    if not markers:
+        return []
+
+    marked_text = processor.apply_chat_template(marked_conversations, tokenize=False)
+    spans: list[tuple[int, int]] = []
+    stripped_text = marked_text
+    for start_marker, end_marker in markers:
+        start = stripped_text.find(start_marker)
+        if start < 0:
+            raise ValueError("Cannot locate assistant start marker in rendered Qwen3-Omni chat template.")
+        stripped_text = stripped_text[:start] + stripped_text[start + len(start_marker) :]
+        end = stripped_text.find(end_marker, start)
+        if end < 0:
+            raise ValueError("Cannot locate assistant end marker in rendered Qwen3-Omni chat template.")
+        spans.append((start, end))
+        stripped_text = stripped_text[:end] + stripped_text[end + len(end_marker) :]
+
+    if stripped_text != rendered_text:
+        raise ValueError("Marked Qwen3-Omni chat template rendering does not match the unmarked rendering.")
+    return spans
+
+
+def _assistant_token_mask_from_template(
+    input_conversations: list[dict[str, Any]],
+    processor,
+    rendered_text: str,
+    input_ids: torch.Tensor,
+    media_token_ids: tuple[int, int, int],
+) -> torch.Tensor:
+    tokenizer = getattr(processor, "tokenizer", processor)
+    char_spans = _assistant_char_spans_from_template(input_conversations, processor, rendered_text)
+    loss_mask = torch.zeros(input_ids.shape, dtype=torch.bool, device=input_ids.device)
+    if not char_spans:
+        return loss_mask
+
+    tokenized = tokenizer(
+        rendered_text,
+        add_special_tokens=False,
+        return_offsets_mapping=True,
+    )
+    offsets = tokenized["offset_mapping"]
+    token_ids = tokenized["input_ids"]
+    token_to_processor_pos = _align_template_tokens_to_processor_tokens(token_ids, input_ids, set(media_token_ids))
+
+    span_i = 0
+    for token_i, (start, end) in enumerate(offsets):
+        if start == end:
+            continue
+        while span_i < len(char_spans) and end > char_spans[span_i][1]:
+            span_i += 1
+        if span_i >= len(char_spans):
+            break
+        span_start, span_end = char_spans[span_i]
+        if start < span_end and end > span_start:
+            loss_mask[token_to_processor_pos[token_i]] = True
+    return loss_mask
+
+
+def _align_template_tokens_to_processor_tokens(
+    token_ids: Sequence[int],
+    processor_input_ids: torch.Tensor,
+    media_token_ids: set[int],
+) -> list[int]:
+    """Map chat-template token positions to processor-expanded input positions."""
+    token_to_processor_pos: list[int] = []
+    processor_ids = processor_input_ids.tolist()
+    processor_i = 0
+    for token_i, token_id in enumerate(token_ids):
+        if processor_i >= len(processor_ids):
+            raise ValueError(
+                "Tokenizer chat-template tokens are longer than processor input_ids while building assistant labels."
+            )
+        if processor_ids[processor_i] != token_id:
+            raise ValueError(
+                "Cannot align tokenizer chat-template tokens with processor input_ids at "
+                f"token index {token_i}: tokenizer id {token_id}, processor id {processor_ids[processor_i]}."
+            )
+        token_to_processor_pos.append(processor_i)
+        processor_i += 1
+        if token_id in media_token_ids:
+            while processor_i < len(processor_ids) and processor_ids[processor_i] == token_id:
+                processor_i += 1
+
+    if processor_i != len(processor_ids):
+        raise ValueError(
+            "Processor input_ids contain trailing tokens that are not present in the rendered chat template "
+            f"({len(processor_ids) - processor_i} extra token(s))."
+        )
+    return token_to_processor_pos
+
+
 def process_qwen3_omni_sample(
     sample: dict[str, Any],
     processor,
@@ -342,6 +462,7 @@ def process_qwen3_omni_sample(
         audio_feature_lengths = None
 
     input_ids = model_inputs["input_ids"].squeeze(0)
+    raw_input_ids = input_ids.clone()
     image_mask = input_ids == image_token_id
     video_mask = input_ids == video_token_id
     audio_mask = input_ids == audio_token_id
@@ -368,19 +489,13 @@ def process_qwen3_omni_sample(
     model_inputs["attention_mask"] = model_inputs["attention_mask"].squeeze(0)
 
     labels = torch.full_like(input_ids, fill_value=IGNORE_INDEX)
-    tokenizer = getattr(processor, "tokenizer", processor)
-    vocab = tokenizer.get_vocab()
-    user_token_id = vocab.get("user")
-    assistant_token_id = vocab.get("assistant")
-    if user_token_id is None or assistant_token_id is None:
-        raise ValueError("Cannot find user/assistant tokens in tokenizer vocab.")
-    user_start_index = torch.where(input_ids == user_token_id)[0].tolist()
-    assistant_start_index = torch.where(input_ids == assistant_token_id)[0].tolist()
-    user_start_index.append(len(input_ids) + 1)
-    user_i = 0
-    for assis_i in assistant_start_index:
-        while user_start_index[user_i] < assis_i:
-            user_i += 1
-        labels[assis_i + 2 : user_start_index[user_i] - 1] = input_ids[assis_i + 2 : user_start_index[user_i] - 1]
+    assistant_loss_mask = _assistant_token_mask_from_template(
+        input_conversations,
+        processor,
+        text,
+        raw_input_ids,
+        (image_token_id, video_token_id, audio_token_id),
+    )
+    labels[assistant_loss_mask] = input_ids[assistant_loss_mask]
     model_inputs["labels"] = labels
     return [model_inputs]
