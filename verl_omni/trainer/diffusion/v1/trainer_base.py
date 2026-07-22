@@ -722,7 +722,13 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         dp_size = 1
         if hasattr(self.actor_rollout_wg, "_query_dispatch_info"):
             info = self.actor_rollout_wg._query_dispatch_info("actor")
-            dp_size = max(info.values()) + 1 if info else 1
+            if isinstance(info, dict):
+                dp_size = max(info.values()) + 1 if info else 1
+            elif isinstance(info, (list, tuple, set)):
+                dp_size = max(info) + 1 if info else 1
+            else:
+                # ONE_TO_ALL dispatch may return a scalar dp rank per worker.
+                dp_size = int(info) + 1 if info is not None else 1
         actor_global_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         actor_global_mini_batch_size *= self.config.actor_rollout_ref.rollout.n
         batch_multiple = math.lcm(dp_size, actor_global_mini_batch_size)
