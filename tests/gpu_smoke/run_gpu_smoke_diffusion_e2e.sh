@@ -28,4 +28,8 @@ run_test 3 "FlowGRPO v1 separate_async trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_flowgrpo_qwen_image_v1_separate_async.sh
 
+run_test 3 "FlowGRPO Boogu-Image trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
+    bash tests/special_e2e/run_flowgrpo_boogu_image.sh
+
 gpu_smoke_summary
