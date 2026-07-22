@@ -1,4 +1,4 @@
-# Copyright 2026 Bytedance Ltd. and/or its affiliates
+# Copyright 2026 Gulp AI Inc and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,9 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import diffusion, omni, tts
-from .diffusion import *  # noqa: F401,F403
-from .omni import *  # noqa: F401,F403
-from .tts import *  # noqa: F401,F403
+from . import actor
+from .actor import *  # noqa: F401,F403
 
-__all__ = list(diffusion.__all__) + list(omni.__all__) + list(tts.__all__)
+__all__ = list(actor.__all__)

@@ -1,0 +1,152 @@
+# Qwen3-TTS talker GSPO training config (FSDP actor + vLLM-Omni AR rollout, reward on decoded audio).
+#
+# Inherits verl's default ppo_trainer config. Volatile values (data/model paths, the stage config
+# path, the speaker x-vector path) are set via CLI in the run script.
+#
+# Recipe: GSPO token-level clip-higher policy loss + GDPO per-dimension advantage estimator (both
+# from base verl). Mirrors examples/gspo_trainer/config/qwen3_omni_thinker_gspo.yaml, but inverts
+# what is trained: here we train the talker / codec head, freeze the rest, and the reward scores
+# the decoded waveform (AudioRewardManager).
+#
+# Launch:
+#   python3 -m verl_omni.trainer.main_tts --config-path=<this dir> --config-name=qwen3_tts_gspo <overrides>
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  train_batch_size: 32
+  max_prompt_length: 512
+  max_response_length: 2048       # codec tokens at 12Hz
+  filter_overlong_prompts: false  # the filter's per-sample try/except hides real errors
+  truncation: left
+
+actor_rollout_ref:
+
+  model:
+    # Qwen3-TTS-Base has no chat_template; passthrough emits each message's content verbatim
+    # so apply_chat_template returns the raw TTS text.
+    custom_chat_template: "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+    override_config:
+      attn_implementation: sdpa
+      # Clone-voice x-vector JSON from data_process/precompute_spk_embed.py; read by both the
+      # actor forward and the rollout so generation and the teacher-forced recompute condition
+      # on the same speaker. Set the real path via CLI.
+      tts_spk_embed_path: null
+    use_remove_padding: false
+    enable_gradient_checkpointing: true
+
+  actor:
+    optim:
+      lr: 1e-6
+      lr_warmup_steps: 10
+      weight_decay: 0.0
+      clip_grad: 1.0
+    ppo_mini_batch_size: 32
+    ppo_micro_batch_size_per_gpu: 4
+    use_kl_loss: true
+    kl_loss_coef: 0.04
+    kl_loss_type: low_var_kl
+    entropy_coeff: 0
+    strategy: fsdp
+    fsdp_config:
+      # The 1.7B talker fits one GPU; sharding or offloading only costs step time.
+      fsdp_size: 1
+      param_offload: false
+      optimizer_offload: false
+      model_dtype: bf16
+      use_orig_params: true
+      wrap_policy:
+        min_num_params: 100000000
+    policy_loss:
+      loss_mode: gspo
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.3
+    loss_agg_mode: seq-mean-token-mean
+
+  rollout:
+    name: vllm_omni
+    mode: async
+    n: 8                        # rollouts per prompt (the group size)
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    # tp=1: sharding the 1.7B talker makes all-reduce dominate generation time, and
+    # data_parallel = gpus_per_node // tp gives one rollout replica per GPU.
+    tensor_model_parallel_size: 1
+    calculate_log_probs: true
+    load_format: safetensors
+    layered_summon: true
+    log_prob_micro_batch_size_per_gpu: 4
+    engine_kwargs:
+      vllm_omni:
+        output_mode: ar
+        # stage_configs_path is set on the CLI (qwen3_tts_stages.yaml).
+
+  ref:
+    log_prob_micro_batch_size_per_gpu: 4
+    strategy: fsdp
+    fsdp_config:
+      fsdp_size: 1
+      param_offload: false
+      model_dtype: bf16
+      use_orig_params: true
+      wrap_policy:
+        min_num_params: 100000000
+
+algorithm:
+  # GDPO z-scores each reward dimension within the group before fusing, so one noisy dimension
+  # cannot dominate the fused score. The keys are emitted by MultiAudioRewardManager, one per
+  # reward.reward_functions entry (plus reward/asr/stab from the asr extras).
+  adv_estimator: gdpo
+  gdpo_reward_keys: [reward/asr, reward/sim, reward/emo, reward/asr/stab]
+  gdpo_reward_weights: [1.0, 1.0, 1.0, 1.0]
+  use_kl_in_reward: false
+
+reward:
+  num_workers: 2
+  reward_manager:
+    name: MultiAudioRewardManager
+    source: importlib
+    module:
+      path: pkg://verl_omni.reward_loop.reward_manager
+  audio:
+    codec: qwen_tts             # reward-side decoder for surfaced codec tokens
+    codec_eos_token_id: 2150
+    decoder_model_path: null    # null uses the actor model path
+    # One scoring thread per reward worker: the decode path is not thread-safe under CUDA;
+    # parallelism comes from reward.num_workers processes.
+    score_threads: 1
+  # Each entry loads a reward function and owns its model; extra fields beyond path/name/weight
+  # are passed to the function as kwargs (e.g. whisper_model, spk_model, emo_model, device).
+  # GPU backends are the defaults.
+  reward_functions:
+    asr:
+      path: pkg://verl_omni.utils.reward_score.tts.asr_reward
+      name: compute_score
+      weight: 1.0
+    sim:
+      path: pkg://verl_omni.utils.reward_score.tts.spk_sim_reward
+      name: compute_score
+      weight: 1.0
+    emo:
+      path: pkg://verl_omni.utils.reward_score.tts.emo_reward
+      name: compute_score
+      weight: 1.0
+
+trainer:
+  val_before_train: false
+  critic_warmup: 0
+  logger: ["console", "mlflow"]
+  project_name: qwen3_tts_gspo
+  experiment_name: tts_gspo_voice_synth
+  nnodes: 1
+  n_gpus_per_node: 8
+  save_freq: 20
+  test_freq: 0
+  total_epochs: 1

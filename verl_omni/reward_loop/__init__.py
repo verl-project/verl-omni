@@ -12,6 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from .reward_loop import OmniRewardLoopManager  # noqa: F401
-from .reward_manager import VisualRewardManager  # noqa: F401
+from .reward_manager import AudioRewardManager, VisualRewardManager  # noqa: F401
 
-__all__ = ["OmniRewardLoopManager", "VisualRewardManager"]
+__all__ = ["OmniRewardLoopManager", "VisualRewardManager", "AudioRewardManager"]

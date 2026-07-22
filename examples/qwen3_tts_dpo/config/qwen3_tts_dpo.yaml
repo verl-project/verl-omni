@@ -1,0 +1,137 @@
+# Qwen3-TTS talker online-DPO config (FSDP actor + vLLM-Omni AR rollout, LLM-audio-judge reward).
+#
+# Inherits verl's default ppo_trainer config. Volatile values (data/model paths, the stage config
+# path, the speaker x-vector path, the judge url) are set via CLI in the run script.
+#
+# Recipe: for each prompt, generate rollout.n=2 candidates; a remote LLM audio judge picks the
+# winner; the actor trains with the pairwise tts_dpo_loss on the talker codec-0 sequence log-prob
+# vs a frozen reference. Shares the GSPO recipe's model, rollout server, stage yaml and patches;
+# only the loss, reward, and batch invariants differ.
+#
+# Launch (verl_omni entry binds tts_dpo_loss on the actor via set_loss_fn):
+#   python3 -m verl_omni.trainer.main_tts --config-path=<this dir> --config-name=qwen3_tts_dpo <overrides>
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+data:
+  train_batch_size: 16            # prompts; x rollout.n=2 = 32 candidates
+  max_prompt_length: 512
+  max_response_length: 2048       # codec tokens at 12Hz
+  filter_overlong_prompts: false  # the filter's per-sample try/except hides real errors
+  truncation: left
+
+actor_rollout_ref:
+
+  model:
+    # Qwen3-TTS-Base has no chat_template; passthrough emits each message's content verbatim.
+    custom_chat_template: "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+    override_config:
+      attn_implementation: sdpa
+      tts_spk_embed_path: null    # clone-voice x-vector JSON; set the real path via CLI
+    use_remove_padding: false
+    enable_gradient_checkpointing: true
+
+  actor:
+    optim:
+      lr: 3e-6                    # DPO is sensitive; keep it low
+      lr_warmup_steps: 10
+      weight_decay: 0.0
+      clip_grad: 1.0
+    ppo_mini_batch_size: 16       # prompts; == train_batch_size so one mini-batch per step
+    ppo_micro_batch_size_per_gpu: 4  # = candidates per DP rank so DPO sees one in-order micro-batch
+    ppo_epochs: 1
+    use_dynamic_bsz: false        # a uid group must stay in one micro-batch (adjacent pairs)
+    use_kl_loss: true             # builds the ref worker so ref_log_prob exists; the KL term is unused
+    kl_loss_coef: 0.0
+    strategy: fsdp
+    fsdp_config:
+      fsdp_size: 1                # DDP; the 1.7B talker fits one GPU
+      param_offload: false
+      optimizer_offload: false
+      model_dtype: bf16
+      use_orig_params: true
+      wrap_policy:
+        min_num_params: 100000000
+    policy_loss:
+      _target_: verl_omni.workers.config.DPOPolicyLossConfig
+      loss_mode: dpo
+      dpo_beta: 0.1               # implicit-KL strength of the pairwise loss
+      dpo_nll_lambda: 0.0         # RPO/DPOP anchor on the chosen sequence; raise to 0.1-0.5 if logp collapses
+
+  rollout:
+    name: vllm_omni
+    mode: async
+    n: 2                          # two candidates per prompt to pair chosen/rejected
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    tensor_model_parallel_size: 1
+    calculate_log_probs: true
+    log_prob_use_dynamic_bsz: false
+    load_format: safetensors
+    layered_summon: true
+    log_prob_micro_batch_size_per_gpu: 4
+    engine_kwargs:
+      vllm_omni:
+        output_mode: ar
+        # stage_configs_path is set on the CLI (reuses ../qwen3_tts_gspo_trainer/qwen3_tts_stages.yaml).
+
+  ref:
+    log_prob_micro_batch_size_per_gpu: 4
+    log_prob_use_dynamic_bsz: false
+    strategy: fsdp
+    fsdp_config:
+      fsdp_size: 1
+      param_offload: false
+      model_dtype: bf16
+      use_orig_params: true
+      wrap_policy:
+        min_num_params: 100000000
+
+algorithm:
+  # grpo groups candidates by uid (which tts_dpo_loss also pairs on); advantages are computed but the
+  # DPO loss ignores them.
+  adv_estimator: grpo
+  use_kl_in_reward: false
+
+reward:
+  # Single reward worker: a prompt's two candidates rendezvous in one worker's event loop for the
+  # pairwise judge call. More than one worker splits the group and breaks the rendezvous.
+  num_workers: 1
+  reward_manager:
+    name: AudioJudgeRewardManager
+    source: importlib
+    module:
+      path: pkg://verl_omni.reward_loop.reward_manager
+  audio:
+    codec: qwen_tts               # reward-side decoder for the surfaced codec tokens
+    codec_eos_token_id: 2150
+    decoder_model_path: null      # null uses the actor model path
+    # Bounds concurrent judge POSTs (and the shared codec decode); the network judge dominates, so
+    # more threads mostly buys judge concurrency. Lower it if concurrent CUDA decode misbehaves.
+    score_threads: 8
+  # Any server speaking the /rank contract; examples/qwen3_tts_dpo/judge_server.py is the default.
+  judge_urls: ["http://localhost:8901"]
+  judge_debias: true              # average A-vs-B with B-vs-A to cancel position bias
+  judge_timeout_s: 1800
+
+trainer:
+  val_before_train: false
+  critic_warmup: 0
+  logger: ["console", "mlflow"]
+  project_name: qwen3_tts_dpo
+  experiment_name: tts_dpo_audiojudge
+  nnodes: 1
+  n_gpus_per_node: 8
+  # Off so a prompt's two candidates stay contiguous on one DP rank (seqlen balancing would scatter
+  # them and the pairing would find no complete group).
+  balance_batch: false
+  save_freq: 20
+  test_freq: 0
+  total_epochs: 1

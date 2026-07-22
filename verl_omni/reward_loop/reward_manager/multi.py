@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Multi-reward manager that aggregates multiple reward functions via weighted sum."""
+"""Multi-reward managers that aggregate multiple reward functions via weighted sum."""
 
 import inspect
 import logging
@@ -19,6 +19,7 @@ import logging
 from verl import DataProto
 from verl.utils.import_utils import load_extern_object
 
+from .audio import AudioRewardManager
 from .visual import VisualRewardManager
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 def _multi_reward_placeholder(**kwargs):
     """Sentinel function used as the upstream custom_reward_function placeholder.
 
-    This is never called directly; MultiVisualRewardManager overrides run_single.
+    This is never called directly; the multi reward managers override run_single.
     """
     raise RuntimeError("_multi_reward_placeholder should never be called directly")
 
@@ -46,6 +47,89 @@ def _filter_kwargs(all_kwargs: dict, sig: inspect.Signature) -> dict:
     return {k: v for k, v in all_kwargs.items() if k in params}
 
 
+def _load_sub_rewards(reward_functions_cfg):
+    """Load the sub-reward functions declared under reward.reward_functions."""
+    if not reward_functions_cfg:
+        raise ValueError("Multi reward managers require non-empty reward.reward_functions config")
+
+    sub_rewards = []
+    total_weight = 0.0
+    _reserved_keys = {"path", "name", "weight"}
+    for key, entry in reward_functions_cfg.items():
+        path = entry["path"]
+        name = entry["name"]
+        weight = float(entry.get("weight", 1.0))
+        total_weight += weight
+
+        # Collect extra config fields (beyond path/name/weight) to pass to compute_score
+        extra_args = {k: v for k, v in entry.items() if k not in _reserved_keys}
+
+        fn = load_extern_object(path, name)
+        sig = inspect.signature(fn)
+        is_async = inspect.iscoroutinefunction(fn)
+
+        sub_rewards.append(
+            {
+                "key": key,
+                "fn": fn,
+                "weight": weight,
+                "sig": sig,
+                "is_async": is_async,
+                "extra_args": extra_args,
+            }
+        )
+        logger.info(f"Loaded sub-reward '{key}': {path}:{name} (weight={weight}, async={is_async})")
+
+    if total_weight <= 0:
+        raise ValueError(
+            f"Total weight of reward functions must be > 0, got {total_weight}. Check reward.reward_functions config."
+        )
+    return sub_rewards
+
+
+async def _run_sub_rewards(loop, sub_rewards, all_kwargs, executor=None):
+    """Run every sub-reward with filtered kwargs and return (weighted sum, extra info)."""
+    combined_score = 0.0
+    reward_extra_info = {}
+
+    for sub in sub_rewards:
+        key = sub["key"]
+        fn = sub["fn"]
+        weight = sub["weight"]
+        sig = sub["sig"]
+        is_async = sub["is_async"]
+        extra_args = sub["extra_args"]
+
+        # Merge per-reward extra config fields into kwargs
+        sub_kwargs = {**all_kwargs, **extra_args}
+        filtered_kwargs = _filter_kwargs(sub_kwargs, sig)
+
+        try:
+            if is_async:
+                result = await fn(**filtered_kwargs)
+            else:
+                result = await loop.run_in_executor(executor, lambda f=fn, kw=filtered_kwargs: f(**kw))
+
+            if isinstance(result, dict):
+                score = float(result["score"])
+                for rk, rv in result.items():
+                    if rk == "score":
+                        continue
+                    reward_extra_info[f"reward/{key}/{rk}"] = rv
+            else:
+                score = float(result)
+
+        except Exception as e:
+            logger.error(f"Sub-reward '{key}' raised an exception: {e}. Contributing 0 to weighted sum.")
+            score = 0.0
+
+        reward_extra_info[f"reward/{key}"] = score
+        combined_score += weight * score
+
+    reward_extra_info["reward/combined"] = combined_score
+    return combined_score, reward_extra_info
+
+
 class MultiVisualRewardManager(VisualRewardManager):
     """Reward manager that loads and aggregates multiple reward functions.
 
@@ -62,43 +146,7 @@ class MultiVisualRewardManager(VisualRewardManager):
         # Initialize parent with the placeholder (never actually called)
         super().__init__(config, tokenizer, _multi_reward_placeholder, reward_router_address, reward_model_tokenizer)
 
-        reward_functions_cfg = config.reward.reward_functions
-        if not reward_functions_cfg:
-            raise ValueError("MultiVisualRewardManager requires non-empty reward.reward_functions config")
-
-        self._sub_rewards = []
-        total_weight = 0.0
-        _reserved_keys = {"path", "name", "weight"}
-        for key, entry in reward_functions_cfg.items():
-            path = entry["path"]
-            name = entry["name"]
-            weight = float(entry.get("weight", 1.0))
-            total_weight += weight
-
-            # Collect extra config fields (beyond path/name/weight) to pass to compute_score
-            extra_args = {k: v for k, v in entry.items() if k not in _reserved_keys}
-
-            fn = load_extern_object(path, name)
-            sig = inspect.signature(fn)
-            is_async = inspect.iscoroutinefunction(fn)
-
-            self._sub_rewards.append(
-                {
-                    "key": key,
-                    "fn": fn,
-                    "weight": weight,
-                    "sig": sig,
-                    "is_async": is_async,
-                    "extra_args": extra_args,
-                }
-            )
-            logger.info(f"Loaded sub-reward '{key}': {path}:{name} (weight={weight}, async={is_async})")
-
-        if total_weight <= 0:
-            raise ValueError(
-                f"Total weight of reward functions must be > 0, got {total_weight}. "
-                f"Check reward.reward_functions config."
-            )
+        self._sub_rewards = _load_sub_rewards(config.reward.reward_functions)
 
     async def run_single(self, data: DataProto) -> dict:
         assert len(data) == 1, "Only support single data item"
@@ -135,42 +183,62 @@ class MultiVisualRewardManager(VisualRewardManager):
             **extra_reward_kwargs,
         }
 
-        combined_score = 0.0
-        reward_extra_info = {}
+        combined_score, reward_extra_info = await _run_sub_rewards(self.loop, self._sub_rewards, all_kwargs)
+        return {"reward_score": combined_score, "reward_extra_info": reward_extra_info}
 
-        for sub in self._sub_rewards:
-            key = sub["key"]
-            fn = sub["fn"]
-            weight = sub["weight"]
-            sig = sub["sig"]
-            is_async = sub["is_async"]
-            extra_args = sub["extra_args"]
 
-            # Merge per-reward extra config fields into kwargs
-            sub_kwargs = {**all_kwargs, **extra_args}
-            filtered_kwargs = _filter_kwargs(sub_kwargs, sig)
+class MultiAudioRewardManager(AudioRewardManager):
+    """Audio counterpart of MultiVisualRewardManager.
 
-            try:
-                if is_async:
-                    result = await fn(**filtered_kwargs)
-                else:
-                    result = await self.loop.run_in_executor(None, lambda f=fn, kw=filtered_kwargs: f(**kw))
+    Same reward.reward_functions config and weighted-sum aggregation; sub-reward functions
+    receive solution_audio (the decoded (wav, sr) tuple, or None when synthesis failed) instead
+    of solution_image. Codec decoding comes from AudioRewardManager (reward.audio config).
+    """
 
-                if isinstance(result, dict):
-                    score = float(result["score"])
-                    for rk, rv in result.items():
-                        if rk == "score":
-                            continue
-                        reward_extra_info[f"reward/{key}/{rk}"] = rv
-                else:
-                    score = float(result)
+    def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
+        # Initialize parent with the placeholder (never actually called)
+        super().__init__(config, tokenizer, _multi_reward_placeholder, reward_router_address, reward_model_tokenizer)
 
-            except Exception as e:
-                logger.error(f"Sub-reward '{key}' raised an exception: {e}. Contributing 0 to weighted sum.")
-                score = 0.0
+        self._sub_rewards = _load_sub_rewards(config.reward.reward_functions)
 
-            reward_extra_info[f"reward/{key}"] = score
-            combined_score += weight * score
+    async def run_single(self, data: DataProto) -> dict:
+        assert len(data) == 1, "Only support single data item"
+        data_item = data[0]
+        data_source = data_item.non_tensor_batch["data_source"]
+        ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
+        extra_info = data_item.non_tensor_batch.get("extra_info", {})
+        tool_extra_fields = data_item.non_tensor_batch.get("tool_extra_fields", None)
+        if tool_extra_fields is not None:
+            extra_info.update(tool_extra_fields.items())
 
-        reward_extra_info["reward/combined"] = combined_score
+        num_turns = data_item.non_tensor_batch.get("__num_turns__", None)
+        rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
+        extra_info["num_turns"] = num_turns
+        extra_info["rollout_reward_scores"] = rollout_reward_scores
+
+        extra_reward_kwargs = (
+            {
+                "reward_router_address": self.reward_router_address,
+                "reward_model_tokenizer": self.reward_model_tokenizer,
+                "model_name": self.config.reward.reward_model.model_path,
+            }
+            if self.reward_router_address is not None
+            else {}
+        )
+
+        # Decode once; every sub-function scores the same waveform.
+        solution_audio = await self.loop.run_in_executor(
+            self._score_executor, lambda: self._extract_audio(data_item, extra_info)
+        )
+        all_kwargs = {
+            "data_source": data_source,
+            "solution_audio": solution_audio,
+            "ground_truth": ground_truth,
+            "extra_info": extra_info,
+            **extra_reward_kwargs,
+        }
+
+        combined_score, reward_extra_info = await _run_sub_rewards(
+            self.loop, self._sub_rewards, all_kwargs, executor=self._score_executor
+        )
         return {"reward_score": combined_score, "reward_extra_info": reward_extra_info}
