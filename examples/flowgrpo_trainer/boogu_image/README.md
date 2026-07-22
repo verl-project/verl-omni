@@ -1,9 +1,12 @@
 # Train Boogu-Image with FlowGRPO
 
 RL post-training for [Boogu-Image-0.1-Base](https://huggingface.co/Boogu/Boogu-Image-0.1-Base)
-(text-to-image) with the FlowGRPO trainer. The Edit (TI2I) checkpoint shares
-the same pipeline architecture but is not integrated yet; Edit rollouts fail
-with a clear error.
+(text-to-image) and [Boogu-Image-0.1-Edit](https://huggingface.co/Boogu/Boogu-Image-0.1-Edit)
+(TI2I editing) with the FlowGRPO trainer. Both checkpoints share the
+`BooguImagePipeline` architecture, so a single adapter pair serves both; a
+run is T2I or Edit depending on whether the dataset carries condition
+images. The Turbo variants (4-step Decoupled-DMD, `BooguImageTurboPipeline`)
+are out of scope until vllm-omni supports that pipeline class.
 
 ## Prerequisites
 
@@ -53,3 +56,26 @@ Model-specific constraints baked into the recipe:
   (`img_to_*`, `instruct_to_*`), single-stream/refiner attention (`to_*`),
   and both feed-forward variants — these match the released checkpoint's
   parameter tree.
+
+## Edit (TI2I) specifics
+
+- Boogu conditioning is **not** concat-and-crop: the reference latents enter
+  the transformer through the `ref_image_hidden_states` refiner path and the
+  transformer output is already target-length.
+- The parquet follows the I2I schema (an `images` column of
+  `{"bytes": ...}` dicts plus an `<image>` placeholder in the user turn);
+  one reference image per sample.
+- `align_res`: the output resolution follows the (VAE-preprocessed)
+  reference image dimensions; `pipeline.height/width` act as an upper bound
+  via the 2048² clamp, so keep condition images at the resolution you want
+  to generate at (multiples of 16).
+- Known deviation from upstream inference: the VLM copy of the reference is
+  sized by the checkpoint processor's own rules — identical to how the agent
+  loop tokenized the prompt — instead of upstream's 384² downscale cap. This
+  keeps the image-placeholder token count consistent between tokenization
+  and encoding; validate reward quality against upstream inference when
+  changing image resolutions.
+- Text CFG keeps the reference latents in the *unconditional* forward
+  (upstream behaviour); the negative instruction itself is encoded
+  text-only. Image guidance (`guidance_scale_2` / double guidance) is not
+  wired up.

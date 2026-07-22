@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Boogu-Image vLLM-Omni rollout adapter for FlowGRPO (T2I path)."""
+"""Boogu-Image vLLM-Omni rollout adapter for FlowGRPO (T2I and Edit/TI2I)."""
 
 import os
 from typing import Literal
@@ -21,11 +21,13 @@ import torch
 import torch.nn.functional as F
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
+from vllm_omni.diffusion.models.boogu_image.image_processor import BooguImageProcessor
 from vllm_omni.diffusion.models.boogu_image.pipeline_boogu_image import BooguImagePipeline
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
+from verl_omni.pipelines.utils import ImageGenerationRequest
 
 from .common import (
     apply_boogu_text_cfg,
@@ -56,7 +58,12 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
       ``all_timesteps`` within the SDE window.
 
     The Base (T2I) and Edit (TI2I) checkpoints share this architecture string;
-    this adapter covers the T2I path and rejects reference images.
+    one adapter serves both. Edit requests carry a single reference image,
+    which is VAE-encoded at near-native resolution (align_res: the output
+    resolution follows the reference) and threaded through the transformer's
+    ``ref_image_hidden_states`` refiner path; the VLM copy uses the
+    checkpoint processor's own sizing so the image-placeholder count matches
+    the pre-tokenised prompt.
     """
 
     supports_request_batch = False
@@ -89,12 +96,27 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
         self,
         prompt_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
+        condition_images: list | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode token IDs with the Qwen3VL ``mllm`` encoder (text-only path)."""
+        """Encode token IDs with the Qwen3VL ``mllm`` encoder.
+
+        For Edit (TI2I) requests, ``condition_images`` are processed with the
+        checkpoint processor's own image sizing — the same rule the agent
+        loop's tokenization applied — so the image-placeholder token count in
+        ``prompt_ids`` matches the pixel grid. (This intentionally skips
+        upstream inference's 384^2 VLM downscale cap, which would desync the
+        placeholder count from the pre-tokenised prompt.)
+        """
         prompt_ids = prompt_ids.unsqueeze(0) if prompt_ids.ndim == 1 else prompt_ids
         if attention_mask is None:
             attention_mask = torch.ones_like(prompt_ids, dtype=torch.long)
         attention_mask = attention_mask.unsqueeze(0) if attention_mask.ndim == 1 else attention_mask
+
+        encoder_kwargs = {}
+        if condition_images:
+            image_inputs = self.processor.image_processor(images=condition_images, return_tensors="pt")
+            encoder_kwargs["pixel_values"] = image_inputs["pixel_values"].to(device=self.device, dtype=self.mllm.dtype)
+            encoder_kwargs["image_grid_thw"] = image_inputs["image_grid_thw"].to(self.device)
 
         with torch.no_grad():
             outputs = self.mllm(
@@ -102,6 +124,7 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
                 attention_mask=attention_mask.to(self.device),
                 output_hidden_states=True,
                 return_dict=True,
+                **encoder_kwargs,
             )
         prompt_embeds = outputs.hidden_states[-1].to(dtype=self.mllm.dtype)
         return prompt_embeds, attention_mask.to(self.device)
@@ -114,6 +137,7 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
         prompt_embeds: torch.Tensor | None = None,
         prompt_embeds_mask: torch.Tensor | None = None,
         max_sequence_length: int = 1280,
+        condition_images: list | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode pre-tokenised prompt IDs into padded ``(B, L, D)`` embeddings.
 
@@ -122,7 +146,9 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
         match the upstream Boogu system prompts exactly.
         """
         if prompt_embeds is None:
-            prompt_embeds, prompt_embeds_mask = self._get_boogu_prompt_embeds(prompt_ids, attention_mask)
+            prompt_embeds, prompt_embeds_mask = self._get_boogu_prompt_embeds(
+                prompt_ids, attention_mask, condition_images=condition_images
+            )
 
         prompt_embeds = prompt_embeds[:, :max_sequence_length]
         prompt_embeds_mask = prompt_embeds_mask[:, :max_sequence_length]
@@ -189,6 +215,7 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
         sde_type: str,
         generator: torch.Generator | None,
         logprobs: bool,
+        ref_image_hidden_states: list | None = None,
     ):
         """Run the SDE loop and collect per-step rollout data.
 
@@ -220,10 +247,12 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
             boogu_t = boogu_timestep_from_scheduler(timestep_value, num_train_timesteps)
             x = latents.to(prompt_embeds.dtype)
 
-            noise_pred = self.predict(boogu_t, x, prompt_embeds, freqs_cis, prompt_embeds_mask, None)
+            noise_pred = self.predict(boogu_t, x, prompt_embeds, freqs_cis, prompt_embeds_mask, ref_image_hidden_states)
             if do_cfg:
+                # Upstream text-only TI2I guidance keeps the reference latents
+                # in the unconditional forward as well.
                 negative_noise_pred = self.predict(
-                    boogu_t, x, negative_prompt_embeds, freqs_cis, negative_prompt_embeds_mask, None
+                    boogu_t, x, negative_prompt_embeds, freqs_cis, negative_prompt_embeds_mask, ref_image_hidden_states
                 )
                 noise_pred = apply_boogu_text_cfg(noise_pred, negative_noise_pred, guidance_scale)
 
@@ -263,17 +292,22 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
         sde_type: Literal["sde", "cps", "dance_sde"] = "sde",
         logprobs: bool = True,
     ) -> DiffusionOutput:
-        """End-to-end T2I generation with rollout-trajectory collection."""
+        """End-to-end T2I / Edit (TI2I) generation with rollout-trajectory collection."""
         prompts = req.prompts
 
-        # The Edit (TI2I) path shares this architecture string but is not
-        # supported yet; fail loudly rather than silently ignoring the image.
-        _, preprocessed_images = self._extract_reference_images(prompts)
-        if any(image is not None for image in preprocessed_images):
-            raise NotImplementedError(
-                "BooguImagePipelineWithLogProb only supports the text-to-image path; "
-                "reference-image (Edit / TI2I) rollouts are not integrated yet."
+        # Edit (TI2I) requests carry a single reference image via the shared
+        # multimodal request payload. Boogu editing supports one image.
+        custom_prompt = prompts[0] if prompts else {}
+        condition_images: list = []
+        if isinstance(custom_prompt, dict):
+            generation_request = ImageGenerationRequest.from_request_payload(custom_prompt)
+            condition_images = list(generation_request.images or [])
+        if len(condition_images) > 1:
+            raise ValueError(
+                f"Boogu-Image editing supports a single reference image; received {len(condition_images)}."
             )
+        condition_images = [image.convert("RGB") for image in condition_images]
+        has_reference = bool(condition_images)
 
         prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask = self._extract_prompt_ids(prompts)
 
@@ -310,15 +344,23 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
             generator = torch.Generator(device=self.device).manual_seed(sampling_params.seed)
 
         batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
+        if has_reference and batch_size != 1:
+            raise ValueError(
+                "Boogu-Image Edit rollouts support one prompt per request "
+                f"(a single reference image); got a prompt batch of {batch_size}."
+            )
 
         prompt_embeds, prompt_embeds_mask = self.encode_prompt(
             prompt_ids=prompt_ids,
             attention_mask=prompt_mask,
             num_images_per_prompt=num_images_per_prompt,
             max_sequence_length=max_sequence_length,
+            condition_images=condition_images or None,
         )
         do_cfg = guidance_scale > 1.0 and negative_prompt_ids is not None
         if do_cfg:
+            # Upstream default use_input_images_4_neg_instruct=False: the
+            # negative instruction is encoded text-only.
             negative_prompt_embeds, negative_prompt_embeds_mask = self.encode_prompt(
                 prompt_ids=negative_prompt_ids,
                 attention_mask=negative_prompt_mask,
@@ -328,6 +370,26 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
         else:
             negative_prompt_embeds = None
             negative_prompt_embeds_mask = None
+
+        # Edit path: VAE-preprocess the reference at near-native resolution and
+        # let the output resolution follow the reference dims (align_res).
+        ref_image_hidden_states = None
+        condition_image_latents = None
+        if has_reference:
+            image_processor = BooguImageProcessor(vae_scale_factor=self.vae_scale_factor * 2, do_resize=True)
+            preprocessed_image = image_processor.preprocess(
+                condition_images[0], max_pixels=2048 * 2048, max_side_length=2048 * 2
+            )
+            height = int(preprocessed_image.shape[-2])
+            width = int(preprocessed_image.shape[-1])
+            ref_image_hidden_states = self._build_ref_latents(
+                [preprocessed_image],
+                num_images_per_prompt,
+                self.device,
+                generator,
+            )
+            # Transport shape (B, C, H, W): one reference latent per output.
+            condition_image_latents = torch.stack([sample_latents[0] for sample_latents in ref_image_hidden_states])
 
         # Working resolution (upstream clamps to 2048^2, multiples of vsf*2).
         height, width, ori_height, ori_width = self._resolve_output_size(height, width)
@@ -379,6 +441,7 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
             sde_type,
             generator,
             logprobs,
+            ref_image_hidden_states=ref_image_hidden_states,
         )
 
         # Decode (upstream post-VAE normalisation and optional resize-back).
@@ -395,17 +458,21 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
             if (ori_height, ori_width) != (height, width):
                 image = F.interpolate(image, size=(ori_height, ori_width), mode="bilinear")
 
+        metadata = {
+            "prompt_embeddings": {
+                "prompt_embeds": prompt_embeds,
+                "prompt_embeds_mask": prompt_embeds_mask,
+                "negative_prompt_embeds": negative_prompt_embeds,
+                "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
+            },
+        }
+        if condition_image_latents is not None:
+            metadata["condition_image_latents"] = condition_image_latents
+
         return DiffusionOutput(
             output={
                 "payload": {"image": image},
-                "metadata": {
-                    "prompt_embeddings": {
-                        "prompt_embeds": prompt_embeds,
-                        "prompt_embeds_mask": prompt_embeds_mask,
-                        "negative_prompt_embeds": negative_prompt_embeds,
-                        "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
-                    },
-                },
+                "metadata": metadata,
             },
             trajectory_latents=all_latents,
             trajectory_log_probs=all_log_probs,

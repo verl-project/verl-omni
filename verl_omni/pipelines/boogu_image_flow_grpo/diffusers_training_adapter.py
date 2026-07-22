@@ -32,7 +32,7 @@ import torch
 from tensordict import TensorDict
 from verl.utils.device import get_device_name
 
-from verl_omni.pipelines.model_base import DiffusionModelBase
+from verl_omni.pipelines.model_base import DiffusionI2IModelBase, DiffusionModelBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.workers.config import DiffusionModelConfig
 
@@ -95,13 +95,21 @@ def _configure_boogu_scheduler(
 
 
 @DiffusionModelBase.register("BooguImagePipeline", algorithm="flow_grpo")
-class BooguImage(DiffusionModelBase):
-    """Training adapter for the Boogu-Image (T2I) diffusion model.
+class BooguImage(DiffusionI2IModelBase):
+    """Training adapter for the Boogu-Image (T2I + Edit/TI2I) diffusion model.
 
     Registered under ``"BooguImagePipeline"`` — the shared
     ``model_index.json::_class_name`` of the Base (T2I) and Edit (TI2I)
-    checkpoints. This adapter covers the text-to-image path; reference-image
-    conditioning (``ref_image_hidden_states``) is not wired yet.
+    checkpoints, so one class serves both. Boogu conditioning is **not**
+    concat-and-crop: reference latents enter the transformer through the
+    ``ref_image_hidden_states`` kwarg (an internal refiner path) and the
+    output is already target-length, so :meth:`inject_condition` overrides
+    the base implementation entirely and :meth:`forward` never crops.
+
+    T2I batches carry no ``condition_image_latents``; ``prepare_condition``
+    then returns the sentinel ``{"ref_image_hidden_states": None}`` — a
+    non-empty dict (satisfying the I2I dispatcher's fail-closed contract)
+    that injects exactly the ``None`` the canonical forward expects.
     """
 
     @classmethod
@@ -192,6 +200,58 @@ class BooguImage(DiffusionModelBase):
             "instruction_attention_mask": negative_prompt_embeds_mask,
             "return_dict": False,
         }
+        return model_inputs, negative_model_inputs
+
+    @classmethod
+    def prepare_condition(
+        cls,
+        micro_batch: TensorDict,
+        latents: torch.Tensor,
+        step: int,
+    ) -> dict:
+        """Extract Edit reference latents from the micro-batch.
+
+        The rollout ships the VAE-encoded reference image as
+        ``condition_image_latents`` of shape ``(B, C, H, W)``; T2I batches
+        have no such key and take the sentinel path (see class docstring).
+        """
+        del latents, step
+        image_latents = micro_batch.get("condition_image_latents", None)
+        if image_latents is None:
+            return {"ref_image_hidden_states": None}
+        return {"condition_image_latents": image_latents}
+
+    @classmethod
+    def inject_condition(
+        cls,
+        model_inputs: dict,
+        negative_model_inputs: Optional[dict],
+        condition: Optional[dict],
+    ) -> tuple[dict, Optional[dict]]:
+        """Thread reference latents into the ``ref_image_hidden_states`` kwarg.
+
+        The canonical forward takes a per-sample nested list
+        ``list[list[Tensor[C, H, W]]] | None``. Upstream text-CFG keeps the
+        reference in the unconditional forward, so the negative inputs
+        receive the same condition.
+        """
+        image_latents = (condition or {}).get("condition_image_latents")
+        if image_latents is None:
+            ref_image_hidden_states = None
+        else:
+            hidden_states = model_inputs["hidden_states"]
+            image_latents = image_latents.to(device=hidden_states.device, dtype=hidden_states.dtype)
+            if image_latents.dim() != 4 or image_latents.shape[0] != hidden_states.shape[0]:
+                raise ValueError(
+                    "inject_condition: condition_image_latents must be (B, C, H, W) with the "
+                    f"micro-batch batch size; got {tuple(image_latents.shape)} vs "
+                    f"hidden_states {tuple(hidden_states.shape)}."
+                )
+            ref_image_hidden_states = [[image_latents[i]] for i in range(image_latents.shape[0])]
+
+        model_inputs["ref_image_hidden_states"] = ref_image_hidden_states
+        if negative_model_inputs is not None:
+            negative_model_inputs["ref_image_hidden_states"] = ref_image_hidden_states
         return model_inputs, negative_model_inputs
 
     @classmethod

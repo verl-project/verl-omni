@@ -32,4 +32,8 @@ run_test 3 "FlowGRPO Boogu-Image trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_flowgrpo_boogu_image.sh
 
+run_test 4 "FlowGRPO Boogu-Image-Edit trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
+    bash tests/special_e2e/run_flowgrpo_boogu_image_edit.sh
+
 gpu_smoke_summary
