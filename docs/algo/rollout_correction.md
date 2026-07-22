@@ -101,13 +101,6 @@ guidance scale and later denoising steps amplify it. Values orders of magnitude 
 indicate a schedule or backend mismatch — enable `calculate_log_probs=true` and check these
 metrics first when debugging convergence.
 
-> **Threshold caveat:** some recipes ship `diffusion_loss.clip_ratio` or `kl_mask_threshold`
-> at 1e-5, below the measured noise floor. Bypass mode is the worst case — the PPO ratio
-> `exp(current − rollout)` then carries the full rollout-train gap, so most samples fall
-> outside the clip band / inside the mask from numerical noise alone. Decoupled mode compares
-> against the recompute instead, but a noticeable `actor/pg_clipfrac` can still be pure noise
-> there. Keep thresholds above the |Δlogp| level these metrics report (the default is `1e-4`).
-
 ## Hyperparameter notes
 
 Defaults (`rollout_is_threshold=2.0`, `loss_type=ppo_clip`) transfer well because:
