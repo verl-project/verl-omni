@@ -177,13 +177,16 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         internal: _InternalDiffusionAgentLoopOutput = await super()._run_agent_loop(
             sampling_params, agent_name=agent_name, **kwargs
         )
+        uid = kwargs["uid"]
+        non_uid_kwargs = {k: v for k, v in kwargs.items() if k != "uid"}
         await self._write_trajectory_to_tq(
             internal,
-            uid=kwargs["uid"],
+            uid=uid,
             session_id=session_id,
             trajectory=trajectory,
             validate=trajectory["validate"] if trajectory else False,
-            **kwargs,
+            global_steps=sampling_params.get("global_steps"),
+            **non_uid_kwargs,
         )
 
     async def _write_trajectory_to_tq(
@@ -194,6 +197,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         session_id: int,
         trajectory: dict | None,
         validate: bool,
+        global_steps: int | None = None,
         **kwargs,
     ) -> None:
         """Convert a padded diffusion agent loop output into a TransferQueue row."""
@@ -236,7 +240,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         if reward_extra_info is not None:
             extra_fields_out["reward_extra_info"] = reward_extra_info
         # Track the rollout model version this trajectory was generated against.
-        step = trajectory["step"] if trajectory else sampling_params.get("global_steps")
+        step = trajectory["step"] if trajectory else global_steps
         extra_fields_out["min_global_steps"] = step
         extra_fields_out["max_global_steps"] = step
         field["extra_fields"] = extra_fields_out
