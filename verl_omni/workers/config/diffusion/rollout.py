@@ -122,6 +122,8 @@ class DiffusionRolloutConfig(BaseConfig):
 
     # note that the logprob computation should belong to the actor
     log_prob_micro_batch_size_per_gpu: Optional[int] = None
+    log_prob_use_dynamic_bsz: bool = False
+    log_prob_max_token_len_per_gpu: int = 16384
 
     disable_log_stats: bool = True
 

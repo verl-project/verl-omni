@@ -459,7 +459,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self.processor = hf_processor(processor_path, trust_remote_code=trust_remote_code, use_fast=True)
 
     def _normalize_dynamic_bsz_config(self) -> None:
-        """Backfill dynamic-batch-size flags expected by upstream engine workers."""
+        """Backfill dynamic-batch-size compatibility keys for upstream engine workers."""
         actor_cfg = OmegaConf.select(self.config, "actor_rollout_ref.actor")
         rollout_cfg = OmegaConf.select(self.config, "actor_rollout_ref.rollout")
         if actor_cfg is None or rollout_cfg is None:
@@ -467,6 +467,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         actor_dynamic_bsz = OmegaConf.select(self.config, "actor_rollout_ref.actor.use_dynamic_bsz")
         rollout_dynamic_bsz = OmegaConf.select(self.config, "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz")
+        actor_max_tokens = OmegaConf.select(self.config, "actor_rollout_ref.actor.ppo_max_token_len_per_gpu")
+        rollout_max_tokens = OmegaConf.select(self.config, "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu")
 
         # Keep rollout/actor flags consistent for engine_workers.init_model().
         if actor_dynamic_bsz is None:
@@ -474,13 +476,21 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         with open_dict(self.config):
             self.config.actor_rollout_ref.actor.use_dynamic_bsz = bool(actor_dynamic_bsz)
+            if actor_max_tokens is None:
+                self.config.actor_rollout_ref.actor.ppo_max_token_len_per_gpu = 16384
             if rollout_dynamic_bsz is None:
                 self.config.actor_rollout_ref.rollout.log_prob_use_dynamic_bsz = bool(actor_dynamic_bsz)
+            if rollout_max_tokens is None:
+                self.config.actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu = 16384
 
             ref_cfg = OmegaConf.select(self.config, "actor_rollout_ref.ref")
             ref_dynamic_bsz = OmegaConf.select(self.config, "actor_rollout_ref.ref.log_prob_use_dynamic_bsz")
-            if ref_cfg is not None and ref_dynamic_bsz is None:
-                self.config.actor_rollout_ref.ref.log_prob_use_dynamic_bsz = bool(actor_dynamic_bsz)
+            ref_max_tokens = OmegaConf.select(self.config, "actor_rollout_ref.ref.ppo_max_token_len_per_gpu")
+            if ref_cfg is not None:
+                if ref_dynamic_bsz is None:
+                    self.config.actor_rollout_ref.ref.log_prob_use_dynamic_bsz = bool(actor_dynamic_bsz)
+                if ref_max_tokens is None:
+                    self.config.actor_rollout_ref.ref.ppo_max_token_len_per_gpu = 16384
 
     def _init_dataloader(self):
         from verl_omni.utils.dataset.rl_dataset import (
