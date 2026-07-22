@@ -225,6 +225,8 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             "prompt_embeds_mask",
             "negative_prompt_embeds",
             "negative_prompt_embeds_mask",
+            "pooled_prompt_embeds",
+            "negative_pooled_prompt_embeds",
             "all_latents",
             "all_timesteps",
         ]:
