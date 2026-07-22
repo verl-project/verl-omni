@@ -26,7 +26,6 @@ from pathlib import Path
 import datasets
 from verl.utils.hdfs_io import copy, makedirs
 
-
 DEFAULT_DATASET = "CarperAI/pickapic_v1_no_images_training_sfw"
 DATA_SOURCE = "flow_grpo/pickscore_sfw"
 
@@ -51,17 +50,13 @@ def split_captions(
 ) -> tuple[list[str], list[str]]:
     """Normalize, filter, deduplicate, and deterministically split captions."""
     normalized = {
-        re.sub(r"\s+", " ", caption).strip()
-        for caption in captions
-        if isinstance(caption, str) and caption.strip()
+        re.sub(r"\s+", " ", caption).strip() for caption in captions if isinstance(caption, str) and caption.strip()
     }
     filtered = sorted(caption for caption in normalized if caption.count(" ") >= min_spaces)
     random.Random(seed).shuffle(filtered)
 
     if len(filtered) <= test_size:
-        raise ValueError(
-            f"Need more than test_size={test_size} eligible captions, but only found {len(filtered)}."
-        )
+        raise ValueError(f"Need more than test_size={test_size} eligible captions, but only found {len(filtered)}.")
 
     test_captions = filtered[:test_size]
     train_captions = filtered[test_size:]
@@ -100,12 +95,17 @@ def main() -> None:
     parser.add_argument(
         "--input-dir",
         default=None,
-        help="Directory containing upstream train.txt and test.txt; preserves the provided split instead of re-splitting.",
+        help=(
+            "Directory containing upstream train.txt and test.txt; "
+            "preserves the provided split instead of re-splitting."
+        ),
     )
     parser.add_argument("--source-split", default="train", help="Source split containing the caption column.")
     parser.add_argument("--caption-column", default="caption", help="Name of the source caption column.")
     parser.add_argument("--output-dir", default="~/data/pickscore_sfw/sd3", help="Local parquet output directory.")
-    parser.add_argument("--hdfs-dir", default=None, help="Optional HDFS destination for the completed output directory.")
+    parser.add_argument(
+        "--hdfs-dir", default=None, help="Optional HDFS destination for the completed output directory."
+    )
     parser.add_argument("--seed", type=int, default=42, help="Deterministic split seed.")
     parser.add_argument("--test-size", type=int, default=1024, help="Number of held-out validation prompts.")
     parser.add_argument(
