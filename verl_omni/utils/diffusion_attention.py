@@ -108,6 +108,7 @@ def validate_attention_consistency(config: Any) -> None:
     actor_cfg = config.actor_rollout_ref.actor
     strategy = actor_cfg.get("strategy") if hasattr(actor_cfg, "get") else None
     if strategy == "veomni":
+        logger.warning("strategy=veomni: attention consistency is not validated; ensure backends match manually.")
         return  # VeOmni engine manages its own attention independently
 
     model_cfg = config.actor_rollout_ref.model

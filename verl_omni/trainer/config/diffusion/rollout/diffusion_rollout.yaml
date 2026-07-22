@@ -73,8 +73,8 @@ max_model_len: null
 # max length of sequences
 max_num_seqs: 1024
 
-# When True, the vLLM-Omni engine runs in step-execution mode and selects
-# the *_stepwise variant of the pipeline (e.g. flow_grpo_stepwise).
+# When True, the vLLM-Omni engine runs the registered pipeline in
+# step-execution mode.
 step_execution: False
 
 # may get higher throughput when set to True. When activated, Please increase max_num_batched_tokens or decrease max_model_len.
