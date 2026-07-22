@@ -1,0 +1,12 @@
+name: GPU smoke upload logs
+description: Upload GPU smoke test logs as a workflow artifact
+
+runs:
+  using: composite
+  steps:
+    - name: Upload GPU smoke logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: gpu-smoke-logs-${{ github.job }}
+        path: logs/gpu_smoke/**
+        if-no-files-found: ignore
