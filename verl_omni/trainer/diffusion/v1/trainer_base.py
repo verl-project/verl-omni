@@ -398,6 +398,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self._init_resource_pool_mgr()
         self.resource_pool_manager.create_resource_pool()
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
+        self._normalize_dynamic_bsz_config()
 
         actor_rollout_resource_pool = self._init_colocated_workers()
         self._init_online_rollout_stack(actor_rollout_resource_pool)
@@ -456,6 +457,30 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         if not os.path.exists(processor_path):
             processor_path = local_path
         self.processor = hf_processor(processor_path, trust_remote_code=trust_remote_code, use_fast=True)
+
+    def _normalize_dynamic_bsz_config(self) -> None:
+        """Backfill dynamic-batch-size flags expected by upstream engine workers."""
+        actor_cfg = OmegaConf.select(self.config, "actor_rollout_ref.actor")
+        rollout_cfg = OmegaConf.select(self.config, "actor_rollout_ref.rollout")
+        if actor_cfg is None or rollout_cfg is None:
+            return
+
+        actor_dynamic_bsz = OmegaConf.select(self.config, "actor_rollout_ref.actor.use_dynamic_bsz")
+        rollout_dynamic_bsz = OmegaConf.select(self.config, "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz")
+
+        # Keep rollout/actor flags consistent for engine_workers.init_model().
+        if actor_dynamic_bsz is None:
+            actor_dynamic_bsz = bool(rollout_dynamic_bsz) if rollout_dynamic_bsz is not None else False
+
+        with open_dict(self.config):
+            self.config.actor_rollout_ref.actor.use_dynamic_bsz = bool(actor_dynamic_bsz)
+            if rollout_dynamic_bsz is None:
+                self.config.actor_rollout_ref.rollout.log_prob_use_dynamic_bsz = bool(actor_dynamic_bsz)
+
+            ref_cfg = OmegaConf.select(self.config, "actor_rollout_ref.ref")
+            ref_dynamic_bsz = OmegaConf.select(self.config, "actor_rollout_ref.ref.log_prob_use_dynamic_bsz")
+            if ref_cfg is not None and ref_dynamic_bsz is None:
+                self.config.actor_rollout_ref.ref.log_prob_use_dynamic_bsz = bool(actor_dynamic_bsz)
 
     def _init_dataloader(self):
         from verl_omni.utils.dataset.rl_dataset import (
