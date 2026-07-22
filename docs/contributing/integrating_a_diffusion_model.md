@@ -315,7 +315,7 @@ and
    `DiffusionRequestBatch`.
 
 For launch knobs and measured speedups, see
-[`request_level_batching.md`](../start/request_level_batching.md).
+[`rollout_batching.md`](../start/rollout_batching.md).
 
 This is separate from step-wise continuous batching
 (`step_execution=true`). For that path, see

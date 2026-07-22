@@ -39,7 +39,7 @@ start/metrics.md
 
 algo/async_reward.md
 algo/rollout_correction.md
-start/request_level_batching.md
+start/rollout_batching.md
 start/http_scorer.md
 ```
 
