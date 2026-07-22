@@ -22,19 +22,24 @@ Offline paired DPO branches on ``model_config.trainer_type`` (``direct_preferenc
 import logging
 import os
 import warnings
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from typing import Any, Callable, Optional
 
 import torch
 from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
+from transformers import AutoModelForMultimodalLM
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
+from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.device import get_device_id
 from verl.utils.fsdp_utils import (
     get_init_weight_context_manager,
     load_fsdp_model_to_gpu,
+    merged_lora_context,
+    normalize_peft_param_name,
     offload_fsdp_model_to_cpu,
+    replace_lora_wrapper,
 )
 from verl.utils.model import convert_weight_keys
 from verl.utils.torch_dtypes import PrecisionType
@@ -50,15 +55,14 @@ from verl_omni.pipelines.utils import (
 )
 from verl_omni.utils.fsdp_utils import collect_lora_params
 from verl_omni.workers.config import OmniModelConfig
-from verl_omni.workers.engine.lora_adapter_mixin import LoRAAdapterMixin
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 @EngineRegistry.register(model_type="omni_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
-class OmniFSDPEngine(LoRAAdapterMixin, FSDPEngineWithLMHead):
-    """FSDP/FSDP2 omni model engine for policy-gradient and offline paired DPO."""
+class OmniFSDPEngine(FSDPEngineWithLMHead):
+    """FSDP engine for omni models"""
 
     def __init__(
         self,
@@ -75,8 +79,6 @@ class OmniFSDPEngine(LoRAAdapterMixin, FSDPEngineWithLMHead):
         return self._trainer_type == "direct_preference"
 
     def _build_module(self):
-        from transformers import AutoModelForMultimodalLM
-
         from verl_omni.pipelines.model_base import OmniModelBase
 
         self.model_config: OmniModelConfig
@@ -120,17 +122,26 @@ class OmniFSDPEngine(LoRAAdapterMixin, FSDPEngineWithLMHead):
                 module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         return module
 
-    def _build_fsdp_module(self, module):
-        saved_lora_rank = self.model_config.lora_rank
-        lora_rank_changed = False
-        if self._is_lora and saved_lora_rank <= 0:
-            object.__setattr__(self.model_config, "lora_rank", 1)
-            lora_rank_changed = True
-        try:
-            return super()._build_fsdp_module(module)
-        finally:
-            if lora_rank_changed:
-                object.__setattr__(self.model_config, "lora_rank", saved_lora_rank)
+    def _build_lora_module(self, module):
+        module = super()._build_lora_module(module)
+
+        lora_dtype = getattr(self.model_config, "lora_dtype", None)
+        if lora_dtype is not None:
+            from peft.tuners.tuners_utils import BaseTunerLayer
+            from verl.utils.torch_dtypes import PrecisionType
+
+            target_dtype = PrecisionType.to_dtype(lora_dtype)
+            for name, param in module.named_parameters():
+                if param.requires_grad:
+                    orig_dtype = param.dtype
+                    param.data = param.data.to(target_dtype)
+                    logger.debug("LoRA param %s: %s -> %s", name, orig_dtype, param.dtype)
+
+            for submodule in module.modules():
+                if isinstance(submodule, BaseTunerLayer):
+                    submodule.cast_input_dtype_enabled = False
+
+        return module
 
     def prepare_model_inputs(self, micro_batch: TensorDict):
         """Apply omni adapter normalization, then run verl's LM packing path."""
@@ -251,45 +262,96 @@ class OmniFSDPEngine(LoRAAdapterMixin, FSDPEngineWithLMHead):
             return None
         return super().lr_scheduler_step()
 
-    def get_per_tensor_param(
-        self,
-        layered_summon=False,
-        base_sync_done=False,
-        adapter_name: str | None = None,
-        **kwargs,
-    ):
-        from verl.utils.device import get_device_id
+    def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
+        log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
-        load_fsdp_model_to_gpu(self.module)
+        # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
+        # leaves the module half-moved and crashes state_dict() below (#5995). The
+        # per-DTensor .to(device).full_tensor() below still produces GPU tensors.
+        if not self._uses_fsdp2_cpu_offload_policy:
+            load_fsdp_model_to_gpu(self.module)
+
+        log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
+
         peft_config = None
-        peft_model = self._model_module()
-        if hasattr(peft_model, "peft_config"):
-            peft_config = peft_model.peft_config.get("default", None)
-            adapter_ctx = self.use_adapter(adapter_name) if adapter_name is not None else nullcontext()
-            with adapter_ctx:
+        merge_lora = self.model_config.lora.get("merge", False)
+
+        peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        if hasattr(peft_model, "peft_config"):  # LoRA
+            if not merge_lora:
+                peft_config = peft_model.peft_config.get("default", None)
+                # DIFF vs upstream: use verl_omni's fixed collect_lora_params
                 params = collect_lora_params(
                     module=self.module,
                     layered_summon=layered_summon,
                     base_sync_done=base_sync_done,
-                    is_diffusers=False,
-                    adapter_name=adapter_name or "default",
-                    layer_prefixes=self.model_config.fsdp_layer_prefixes,
                 )
+                if not base_sync_done:
+                    params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
+            else:  # merge lora
+                with merged_lora_context(self.module, backup_adapters=True):
+                    params = self.module.state_dict()
+                    params = normalize_peft_param_name(params)
         else:
             params = self.module.state_dict()
-        params = convert_weight_keys(params, peft_model)
+
+        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+
+        log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.module)
-        device = get_device_id()
-        export_dtype = PrecisionType.to_dtype(self.engine_config.model_dtype)
+        log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
-        def param_generator():
-            for name, param in params.items():
-                tensor = param.full_tensor() if isinstance(param, DTensor) else param
-                tensor = tensor.to(device, non_blocking=True)
-                if tensor.is_floating_point() and export_dtype is not None and tensor.dtype != export_dtype:
-                    tensor = tensor.to(export_dtype, non_blocking=True)
-                yield name, tensor
+        if peft_config is not None and base_sync_done:
+            per_tensor_param = params.items()
+        else:
+            device = get_device_id()  # used when fsdp2 set cpu_offload_policy
+            # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
+            per_tensor_param = (
+                (
+                    name,
+                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                    if isinstance(param, DTensor)
+                    else param,
+                )
+                for name, param in params.items()
+            )
+
+        if self._qat_enabled:
+            from verl.utils.qat.quantizer import QATQuantizer
+            from verl.utils.torch_dtypes import PrecisionType
+
+            mixed_precision_config = self.engine_config.mixed_precision
+            if mixed_precision_config is not None:
+                param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
+            else:
+                param_dtype = torch.bfloat16
+
+            quantizer = QATQuantizer(
+                mode=self._qat_config.mode,
+                group_size=self._qat_config.group_size,
+                ignore_patterns=list(self._qat_config.ignore_patterns),
+                device=torch.device(get_device_id()),
+                param_dtype=param_dtype,
+            )
+            per_tensor_param = quantizer.quantize_with_fusion(
+                per_tensor_param,
+                target_device=torch.device("cpu"),
+            )
 
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
-        return param_generator(), peft_config_dict
+
+        # DIFF vs upstream: normalise LoRA weight keys for vLLM-Omni consumption.
+        if peft_config is not None and base_sync_done:
+            adapter = kwargs.get("adapter_name", "default")
+            per_tensor_param = (
+                (
+                    name.replace("_fsdp_wrapped_module.", "")
+                    .replace(f"lora_A.{adapter}.weight", "lora_A.weight")
+                    .replace(f"lora_B.{adapter}.weight", "lora_B.weight"),
+                    tensor,
+                )
+                for name, tensor in per_tensor_param
+            )
+
+        return per_tensor_param, peft_config_dict

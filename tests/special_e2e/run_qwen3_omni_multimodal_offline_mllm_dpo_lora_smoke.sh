@@ -18,7 +18,8 @@
 #
 # Override via env: NUM_GPUS, MODEL_PATH, DATA_DIR, TRAIN_SIZE, VAL_SIZE,
 # TOTAL_TRAINING_STEPS, PPO_MINI_BATCH_SIZE, PPO_MICRO_BATCH_SIZE_PER_GPU,
-# LORA_RANK, LORA_ALPHA, LORA_TARGET_MODULES, IMAGE_RATIO, VIDEO_RATIO, AUDIO_RATIO
+# LORA_RANK, LORA_ALPHA, LORA_TARGET_MODULES, LORA_TARGET_PARAMETERS,
+# IMAGE_RATIO, VIDEO_RATIO, AUDIO_RATIO
 set -xeuo pipefail
 
 export NCCL_IB_DISABLE=1
@@ -35,7 +36,8 @@ PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-2}
 PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
 LORA_RANK=${LORA_RANK:-8}
 LORA_ALPHA=${LORA_ALPHA:-16}
-LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-"['q_proj','k_proj','v_proj','o_proj','gate_proj','up_proj','down_proj']"}
+LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-q_proj,k_proj,v_proj,o_proj}
+LORA_TARGET_PARAMETERS=${LORA_TARGET_PARAMETERS:-'["gate_up_proj","down_proj"]'}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-2}
 ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-flash_attention_2}
 IMAGE_RATIO=${IMAGE_RATIO:-1.0}
@@ -101,6 +103,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.lora_rank="${LORA_RANK}" \
     actor_rollout_ref.model.lora_alpha="${LORA_ALPHA}" \
     actor_rollout_ref.model.target_modules="${LORA_TARGET_MODULES}" \
+    actor_rollout_ref.model.target_parameters="${LORA_TARGET_PARAMETERS}" \
     actor_rollout_ref.model.exclude_modules="${EXCLUDE_MODULES}" \
     actor_rollout_ref.model.use_remove_padding=false \
     actor_rollout_ref.actor.trainer_type=direct_preference \
