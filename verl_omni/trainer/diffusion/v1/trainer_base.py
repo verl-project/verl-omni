@@ -149,7 +149,6 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             max_off_policy_threshold=sampler_config.max_off_policy_threshold,
             max_off_policy_strategy=sampler_config.max_off_policy_strategy,
             sampler_kwargs=sampler_config.sampler_kwargs,
-            refill_fn=self._add_prompts_to_generate,
         )
 
     # ------------------------------ lifecycle ------------------------------
