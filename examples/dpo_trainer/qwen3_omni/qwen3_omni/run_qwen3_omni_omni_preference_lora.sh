@@ -34,7 +34,7 @@ PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-32}
 # Dense attention/MLP linears vs fused MoE expert nn.Parameter (PEFT target_parameters).
-LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-q_proj,k_proj,v_proj,o_proj}
+LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-'["q_proj","k_proj","v_proj","o_proj"]'}
 LORA_TARGET_PARAMETERS=${LORA_TARGET_PARAMETERS:-'["gate_up_proj","down_proj"]'}
 ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-flash_attention_2}
 LR=${LR:-1.0e-6}
@@ -89,7 +89,6 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.lora_rank="${LORA_RANK}" \
     actor_rollout_ref.model.lora_alpha="${LORA_ALPHA}" \
     actor_rollout_ref.model.target_modules="${LORA_TARGET_MODULES}" \
-    actor_rollout_ref.model.target_parameters="${LORA_TARGET_PARAMETERS}" \
     actor_rollout_ref.model.exclude_modules="${EXCLUDE_MODULES}" \
     actor_rollout_ref.model.use_remove_padding=false \
     actor_rollout_ref.actor.trainer_type=direct_preference \
