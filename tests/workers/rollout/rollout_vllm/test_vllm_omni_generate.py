@@ -20,8 +20,11 @@ Usage:
     python tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py
 """
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -37,19 +40,38 @@ from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOm
 
 MODEL_PATH = Path(os.path.expanduser("~/models/tiny-random/Qwen-Image"))
 
-
-# ---------------------------------------------------------------------
-#                👇 Test Helper Functions & Fixtures 👇
-# ---------------------------------------------------------------------
-
 _MIN_PROMPT_TOKENS = 35
+# Keep smoke generates cheap; engine launch dominates wall time.
+_SMOKE_STEPS = 2
+_SMOKE_SIZE = 256
+
+_PROMPTS = [
+    "a beautiful sunset over the ocean with vibrant orange and purple clouds "
+    "reflecting on the calm water surface near a rocky coastline",
+    "a fluffy orange cat sitting on a wooden windowsill looking outside at "
+    "a garden full of colorful flowers on a bright sunny afternoon",
+    "a majestic mountain landscape covered with fresh white snow under a "
+    "clear blue sky with pine trees in the foreground and a frozen lake",
+    "a futuristic city at night with neon lights glowing on tall glass "
+    "skyscrapers and flying vehicles soaring between the buildings",
+]
+
+_TOKENIZER = None
+
+
+def _get_tokenizer():
+    global _TOKENIZER
+    if _TOKENIZER is None:
+        _TOKENIZER = AutoTokenizer.from_pretrained(os.path.join(MODEL_PATH, "tokenizer"), trust_remote_code=True)
+    return _TOKENIZER
 
 
 def _tokenize_prompt(text: str) -> list[int]:
     """Tokenize a text prompt into valid token IDs for the model."""
-    tokenizer = AutoTokenizer.from_pretrained(os.path.join(MODEL_PATH, "tokenizer"), trust_remote_code=True)
     messages = [{"role": "user", "content": text}]
-    token_ids = normalize_token_ids(tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False))
+    token_ids = normalize_token_ids(
+        _get_tokenizer().apply_chat_template(messages, tokenize=True, add_generation_prompt=False)
+    )
     assert len(token_ids) > _MIN_PROMPT_TOKENS, (
         f"Prompt too short ({len(token_ids)} tokens, need >{_MIN_PROMPT_TOKENS}). "
         f"The pipeline drops the first 34 chat‑template prefix tokens; "
@@ -58,28 +80,11 @@ def _tokenize_prompt(text: str) -> list[int]:
     return token_ids
 
 
-@pytest.fixture
-def init_server():
-    """Create and launch a vLLMOmniHttpServer Ray actor with Qwen/Qwen-Image."""
-    model_path = MODEL_PATH
-
-    ray.init(
-        runtime_env={
-            "env_vars": {
-                "TOKENIZERS_PARALLELISM": "true",
-                "NCCL_DEBUG": "WARN",
-                "VLLM_LOGGING_LEVEL": "INFO",
-            }
-        },
-        ignore_reinit_error=True,
-    )
-
-    # Smoke: prefer local FLASH_ATTN over product-default Hub FA3 (cf. FSDP engine test).
+def _build_rollout_cfg() -> Any:
     from tests.utils.smoke_attention import resolve_smoke_attention_backends
 
     _, rollout_attn_backend = resolve_smoke_attention_backends()
-
-    rollout_cfg = OmegaConf.create(
+    return OmegaConf.create(
         {
             "_target_": "verl_omni.workers.config.diffusion.DiffusionRolloutConfig",
             "name": "vllm_omni",
@@ -89,7 +94,7 @@ def init_server():
             "pipeline_model_parallel_size": 1,
             "gpu_memory_utilization": 0.8,
             "max_num_batched_tokens": 8192,
-            "max_num_seqs": 256,
+            "max_num_seqs": 8,
             "max_model_len": 1058,
             "dtype": "bfloat16",
             "load_format": "auto",
@@ -99,18 +104,26 @@ def init_server():
             "enable_sleep_mode": False,
             "free_cache_engine": True,
             "disable_log_stats": True,
-            "n": 4,
+            "n": 1,
             "rollout_attn_backend": rollout_attn_backend,
+            "engine_kwargs": {
+                "vllm_omni": {
+                    "request_batch_max_wait_ms": 10.0,
+                }
+            },
             "pipeline": {
                 "_target_": "verl_omni.workers.config.diffusion.rollout.DiffusionPipelineConfig",
-                "height": 512,
-                "width": 512,
-                "num_inference_steps": 10,
+                "height": _SMOKE_SIZE,
+                "width": _SMOKE_SIZE,
+                "num_inference_steps": _SMOKE_STEPS,
             },
         }
     )
 
-    model_cfg = OmegaConf.create(
+
+def _build_model_cfg() -> Any:
+    model_path = MODEL_PATH
+    return OmegaConf.create(
         {
             "_target_": "verl_omni.workers.config.diffusion.DiffusionModelConfig",
             "path": model_path,
@@ -119,6 +132,21 @@ def init_server():
             "load_tokenizer": True,
             "algorithm": "flow_grpo",
         }
+    )
+
+
+@pytest.fixture(scope="module")
+def init_server():
+    """Module-scoped server shared by generate smokes (launch dominates runtime)."""
+    ray.init(
+        runtime_env={
+            "env_vars": {
+                "TOKENIZERS_PARALLELISM": "true",
+                "NCCL_DEBUG": "WARN",
+                "VLLM_LOGGING_LEVEL": "WARN",
+            }
+        },
+        ignore_reinit_error=True,
     )
 
     ServerCls = ray.remote(vLLMOmniHttpServer)
@@ -130,10 +158,10 @@ def init_server():
                 "NCCL_CUMEM_ENABLE": "0",
             }
         },
-        max_concurrency=10,
+        max_concurrency=16,
     ).remote(
-        config=rollout_cfg,
-        model_config=model_cfg,
+        config=_build_rollout_cfg(),
+        model_config=_build_model_cfg(),
         rollout_mode=RolloutMode.STANDALONE,
         workers=[],
         replica_rank=0,
@@ -142,61 +170,76 @@ def init_server():
         nnodes=1,
         cuda_visible_devices="0",
     )
-
     ray.get(server.launch_server.remote())
-
     yield server
-
     ray.shutdown()
+
+
+def _generate_concurrent(
+    server,
+    prompts: list[str],
+    *,
+    logprobs_first_only: bool = True,
+    sampling_overrides: dict[str, Any] | None = None,
+) -> list[DiffusionOutput]:
+    sampling_overrides = sampling_overrides or {}
+    refs = []
+    for i, prompt in enumerate(prompts):
+        rid = f"test_{i}_{uuid4().hex[:8]}"
+        sampling_params = {
+            "num_inference_steps": _SMOKE_STEPS,
+            "true_cfg_scale": 1.0,
+            "height": _SMOKE_SIZE,
+            "width": _SMOKE_SIZE,
+            "logprobs": (i == 0) if logprobs_first_only else True,
+            **sampling_overrides,
+        }
+        refs.append(
+            server.generate.remote(
+                prompt_ids=_tokenize_prompt(prompt),
+                sampling_params=sampling_params,
+                request_id=rid,
+            )
+        )
+    return ray.get(refs, timeout=600)
+
+
+def _assert_valid_diffusion_output(output: DiffusionOutput, *, index: int, expect_logprobs: bool = False) -> None:
+    assert isinstance(output, DiffusionOutput), f"Request {index}: expected DiffusionOutput"
+    assert len(output.diffusion_output) == 3, f"Request {index}: expected 3 channels (CHW)"
+    h, w = len(output.diffusion_output[0]), len(output.diffusion_output[0][0])
+    assert h > 0 and w > 0, f"Request {index}: image dimensions must be positive"
+    assert output.stop_reason in ("completed", "aborted", None), f"Request {index}: unexpected stop_reason"
+    assert 0.0 <= output.diffusion_output[0][0][0] <= 1.0, f"Request {index}: pixel values must be in [0, 1]"
+    if expect_logprobs:
+        lp = output.log_probs
+        assert lp is not None, f"Request {index}: log_probs should be present when logprobs=True"
+        if isinstance(lp, torch.Tensor):
+            assert lp.numel() > 0
+        else:
+            assert len(lp) > 0
 
 
 def test_generate(init_server):
     """Concurrent generate() calls covering basic output, logprobs, and multi-request correctness."""
-    server = init_server
-
-    prompts = [
-        "a beautiful sunset over the ocean with vibrant orange and purple clouds "
-        "reflecting on the calm water surface near a rocky coastline",
-        "a fluffy orange cat sitting on a wooden windowsill looking outside at "
-        "a garden full of colorful flowers on a bright sunny afternoon",
-        "a majestic mountain landscape covered with fresh white snow under a "
-        "clear blue sky with pine trees in the foreground and a frozen lake",
-        "a futuristic city at night with neon lights glowing on tall glass "
-        "skyscrapers and flying vehicles soaring between the buildings",
-    ]
-
-    refs = []
-    for i, prompt in enumerate(prompts):
-        rid = f"test_{i}_{uuid4().hex[:8]}"
-        ref = server.generate.remote(
-            prompt_ids=_tokenize_prompt(prompt),
-            sampling_params={
-                "num_inference_steps": 10,
-                "true_cfg_scale": 4.0,
-                "height": 512,
-                "width": 512,
-                "logprobs": i == 0,  # first request includes logprobs
-            },
-            request_id=rid,
-        )
-        refs.append(ref)
-
-    results = ray.get(refs, timeout=600)
+    results = _generate_concurrent(init_server, _PROMPTS, logprobs_first_only=True)
 
     for i, output in enumerate(results):
-        assert isinstance(output, DiffusionOutput), f"Request {i}: expected DiffusionOutput"
-        assert len(output.diffusion_output) == 3, f"Request {i}: expected 3 channels (CHW)"
-        h, w = len(output.diffusion_output[0]), len(output.diffusion_output[0][0])
-        assert h > 0 and w > 0, f"Request {i}: image dimensions must be positive"
-        assert output.stop_reason in ("completed", "aborted", None), f"Request {i}: unexpected stop_reason"
-        assert 0.0 <= output.diffusion_output[0][0][0] <= 1.0, f"Request {i}: pixel values must be in [0, 1]"
+        _assert_valid_diffusion_output(output, index=i, expect_logprobs=(i == 0))
 
-    # Verify logprobs for the first request
-    lp = results[0].log_probs
-    assert lp is not None, "log_probs should be present when logprobs=True"
-    if isinstance(lp, torch.Tensor):
-        assert lp.numel() > 0
-    else:
-        assert len(lp) > 0
+    print(f"All {len(_PROMPTS)} concurrent requests returned valid DiffusionOutput")
 
-    print(f"All {len(prompts)} concurrent requests returned valid DiffusionOutput")
+
+def test_generate_request_level_batch(init_server):
+    """Concurrent generate under request-level batching (max_num_seqs>1 + wait_ms)."""
+    results = _generate_concurrent(
+        init_server,
+        _PROMPTS,
+        logprobs_first_only=False,
+    )
+
+    assert len(results) == len(_PROMPTS)
+    for i, output in enumerate(results):
+        _assert_valid_diffusion_output(output, index=i, expect_logprobs=True)
+
+    print(f"All {len(_PROMPTS)} request-level-batched generates returned valid DiffusionOutput")

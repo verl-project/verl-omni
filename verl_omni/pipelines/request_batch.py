@@ -77,6 +77,13 @@ def collate_prompt_rows(
     field_name: str,
     pad_value: int = 0,
 ) -> tuple[torch.Tensor | None, list[int] | None]:
+    """Pad and stack per-request 1D prompt fields into a batched ``(N, L)`` tensor.
+
+    Looks up each field via ``aliases`` on the prompt (or its
+    ``additional_information``). When ``default_value`` is set it is used for
+    the whole batch instead. Returns ``(None, None)`` if no request provides
+    the field.
+    """
     default_rows, default_lengths = _rows_from_default(default_value, device=device, field_name=field_name)
     if default_rows is not None:
         if len(prompts) > 1 and default_rows.shape[0] != len(prompts):
@@ -125,6 +132,12 @@ def collate_prompt_mask(
     token_lengths: list[int] | None,
     target_seq_len: int | None,
 ) -> torch.Tensor | None:
+    """Build a boolean attention mask for a packed request batch.
+
+    Prefers an explicit mask field from ``prompts`` / ``default_value``. If
+    that is missing, synthesizes a left-aligned mask from ``token_lengths``
+    and ``target_seq_len``. Returns ``None`` when neither source is available.
+    """
     mask, _ = collate_prompt_rows(
         prompts,
         aliases,
@@ -172,6 +185,12 @@ def split_diffusion_output_by_request(
     *,
     num_outputs_per_prompt: int,
 ) -> list[Any]:
+    """Split a packed ``DiffusionOutput`` into one output per request.
+
+    Tensors whose leading dimension equals ``req.num_reqs * num_outputs_per_prompt``
+    are sliced along the batch axis; shared schedule / sequence axes are left
+    intact.
+    """
     outputs: list[Any] = []
     custom_output = result.custom_output or {}
     expected_batch_size = req.num_reqs * num_outputs_per_prompt
