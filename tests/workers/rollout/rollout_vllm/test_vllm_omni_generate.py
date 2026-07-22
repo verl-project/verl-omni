@@ -60,9 +60,7 @@ def _tokenize_prompt(text: str) -> list[int]:
 
 def _assert_non_empty_tensor(value, field_name: str) -> None:
     assert value is not None, f"{field_name} should not be None"
-    assert isinstance(value, torch.Tensor), (
-        f"{field_name} should be a torch.Tensor, got {type(value).__name__}"
-    )
+    assert isinstance(value, torch.Tensor), f"{field_name} should be a torch.Tensor, got {type(value).__name__}"
     assert value.numel() > 0, f"{field_name} should not be empty"
 
 
@@ -82,10 +80,7 @@ def _assert_flow_grpo_step_execution_contract(output: DiffusionOutput) -> None:
     }
 
     missing_fields = expected_extra_fields - set(output.extra_fields)
-    assert not missing_fields, (
-        "Missing FlowGRPO step-execution fields: "
-        f"{sorted(missing_fields)}"
-    )
+    assert not missing_fields, f"Missing FlowGRPO step-execution fields: {sorted(missing_fields)}"
 
     required_tensors = {
         "all_latents": output.extra_fields["all_latents"],
@@ -259,6 +254,7 @@ def test_generate(init_server):
         assert len(lp) > 0
 
     print(f"All {len(prompts)} concurrent requests returned valid DiffusionOutput")
+
 
 @pytest.mark.parametrize(
     "init_server",
