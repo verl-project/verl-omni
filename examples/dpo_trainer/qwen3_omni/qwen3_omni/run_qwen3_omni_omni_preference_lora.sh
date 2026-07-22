@@ -31,8 +31,8 @@ TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-${NUM_GPUS}}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-${TRAIN_BATCH_SIZE}}
 PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
 
-LORA_RANK=${LORA_RANK:-8}
-LORA_ALPHA=${LORA_ALPHA:-16}
+LORA_RANK=${LORA_RANK:-64}
+LORA_ALPHA=${LORA_ALPHA:-32}
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-"['q_proj','k_proj','v_proj','o_proj','gate_proj','up_proj','down_proj']"}
 ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-flash_attention_2}
 LR=${LR:-1.0e-6}
@@ -69,9 +69,6 @@ python3 -m verl_omni.trainer.main_omni \
     data.train_files="${TRAIN_FILES}" \
     data.val_files="${VAL_FILES}" \
     data.train_batch_size="${TRAIN_BATCH_SIZE}" \
-    data.max_prompt_length=512 \
-    data.trust_remote_code=true \
-    data.filter_overlong_prompts=false \
     data.custom_cls.path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset \
     data.custom_cls.name=OfflineMLLMDPODataset \
     data.custom_cls.collate_fn=offline_mllm_dpo_collate_fn \
@@ -86,11 +83,12 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.tokenizer_path="${MODEL_PATH}" \
     actor_rollout_ref.model.trust_remote_code=true \
     +actor_rollout_ref.model.override_config.attn_implementation="${ATTN_IMPLEMENTATION}" \
+    actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.model.lora_rank="${LORA_RANK}" \
     actor_rollout_ref.model.lora_alpha="${LORA_ALPHA}" \
     actor_rollout_ref.model.target_modules="${LORA_TARGET_MODULES}" \
     actor_rollout_ref.model.exclude_modules="${EXCLUDE_MODULES}" \
-    actor_rollout_ref.model.use_remove_padding=false \
+    actor_rollout_ref.model.use_remove_padding=true \
     actor_rollout_ref.actor.trainer_type=direct_preference \
     actor_rollout_ref.actor.omni_loss.loss_mode=dpo \
     actor_rollout_ref.actor.omni_loss.beta=0.1 \
