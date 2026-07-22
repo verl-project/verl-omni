@@ -27,10 +27,6 @@ import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
 
-from verl_omni.models.transformers.qwen3_omni_moe_lora import (
-    model_uses_lora,
-    unfuse_qwen3_omni_thinker_moe_experts,
-)
 from verl_omni.pipelines.model_base import OmniModelBase
 
 logger = logging.getLogger(__name__)
@@ -65,8 +61,6 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         module.forward = module.thinker.forward
         module.get_input_embeddings = module.thinker.get_input_embeddings
         module.set_input_embeddings = module.thinker.set_input_embeddings
-        if model_uses_lora(model_config):
-            unfuse_qwen3_omni_thinker_moe_experts(module)
         return module
 
     @classmethod
