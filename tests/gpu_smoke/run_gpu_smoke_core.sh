@@ -6,13 +6,15 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_gpu_smoke.sh"
 gpu_smoke_init "ci-core" 2 "$@"
 
-run_test 0 "vllm-omni rollout" \
-    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
-    pytest -s tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py
-
-run_test 1 "diffusion agent loop" \
+# Agent-loop (esp. step_execution + TP=2) is the memory-sensitive case; run it
+# before the rollout generate smoke so workers start on a clean GPU.
+run_test 0 "diffusion agent loop" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
     pytest -s tests/agent_loop/test_diffusion_agent_loop.py
+
+run_test 1 "vllm-omni rollout" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    pytest -s tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py
 
 run_test 2 "diffusers FSDP engine" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \

@@ -13,9 +13,22 @@ Requirements:
 - `actor_rollout_ref.rollout.step_execution=false` (yaml default)
 - Rollout adapter with `supports_request_batch = True`
 
-This is **not** step-wise continuous batching (`step_execution=true`). For that
-path, see
+This is **not** step-wise continuous batching (`step_execution=true`). The two
+modes are **mutually exclusive** in the engine (`step_execution=true` disables
+request-level packing). For step-wise, see
 [`integrating_a_stepwise_continuous_batching_model.md`](../contributing/integrating_a_stepwise_continuous_batching_model.md).
+
+## Choosing a batching mode (example scripts)
+
+| Capability | How to tell | Example default |
+|---|---|---|
+| Step-wise | Pipeline implements `prepare_encode` / `denoise_step` / `step_scheduler` / `post_decode` | `step_execution=true` + suitable `max_num_seqs` |
+| Request-level | Adapter sets `supports_request_batch = True` | `step_execution=false` + `max_num_seqs>1` (+ optional `request_batch_max_wait_ms`) |
+| Neither | — | leave serial (`max_num_seqs=1` or engine default) |
+
+Prefer the faster mode for that model. On Qwen-Image FlowGRPO e2e LoRA
+(32×16, 512²) the two were essentially tied (~106–108s gen); either is fine.
+SD3.5 FlowGRPO currently has request-level support only.
 
 ## How to enable
 
