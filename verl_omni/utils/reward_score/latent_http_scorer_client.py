@@ -132,9 +132,10 @@ async def compute_score(
 ) -> dict:
     """Score one SD3.5 clean latent with an external DRM server.
 
-    The rollout must use ``output_type=latent`` or ``output_type=both`` so
-    ``extra_info`` contains ``latents_clean``. Prompt embeddings are reused
-    from the rollout and therefore remain exactly aligned with generation.
+    With ``output_type=latent``, the clean latent is provided through
+    ``solution_image``. With ``output_type=both``, it is read from
+    ``extra_info["latents_clean"]``. Prompt embeddings are reused from the
+    rollout and remain exactly aligned with generation.
     """
     del ground_truth, kwargs
     if not 0 <= noise_level <= 1:

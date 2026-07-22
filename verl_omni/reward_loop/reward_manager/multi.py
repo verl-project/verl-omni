@@ -73,7 +73,16 @@ class MultiVisualRewardManager(VisualRewardManager):
             path = entry["path"]
             name = entry["name"]
             weight = float(entry.get("weight", 1.0))
-            required = bool(entry.get("required", False))
+            required_value = entry.get("required", False)
+            if isinstance(required_value, str):
+                normalized = required_value.lower()
+                if normalized not in {"true", "false"}:
+                    raise ValueError(f"Invalid required value: {required_value!r}")
+                required = normalized == "true"
+            elif isinstance(required_value, bool):
+                required = required_value
+            else:
+                raise TypeError(f"required must be a boolean, got {type(required_value).__name__}")
             total_weight += weight
 
             # Collect extra config fields (beyond path/name/weight) to pass to compute_score
