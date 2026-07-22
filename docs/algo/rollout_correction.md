@@ -1,6 +1,6 @@
 # Rollout Correction for Diffusion Training (Experimental)
 
-Last updated: 05/19/2026
+Last updated: 07/22/2026
 
 > **Status:** Experimental. The API, default thresholds and recommended preset may change.
 
@@ -84,6 +84,29 @@ rollout backend is drifting too far — tighten the RS band or fall back to
 > At high sustained rejection rates the effective gradient magnitude decreases by
 > the factor `kept / total`.  Monitor `rollout_corr/rollout_rs_seq_masked_fraction`
 > and widen the RS band if it exceeds ~10 % over several steps.
+
+## Consistency monitoring
+
+Whenever the rollout returns log-probs (`actor_rollout_ref.rollout.calculate_log_probs=true`)
+and bypass mode is off, the trainer additionally logs rollout-train consistency diagnostics
+once per global batch — no `rollout_correction` config needed:
+
+- `rollout_corr/logprob_abs_diff_mean` / `_max` — |`old_log_probs` − `rollout_log_probs`|.
+- `rollout_corr/logprob_abs_diff/ts_{t}` — the same grouped by denoising timestep value
+  (the SDE window is per-sample random, so aggregates hide the strong timestep dependence).
+- The off-policy metrics above (`kl`, `k3_kl`, PPL family).
+
+With matched attention backends the gap is bf16 noise, mean |Δlogp| in the 1e-5 range;
+guidance scale and later denoising steps amplify it. Values orders of magnitude above that
+indicate a schedule or backend mismatch — enable `calculate_log_probs=true` and check these
+metrics first when debugging convergence.
+
+> **Threshold caveat:** some recipes ship `diffusion_loss.clip_ratio` or `kl_mask_threshold`
+> at 1e-5, below the measured noise floor. Bypass mode is the worst case — the PPO ratio
+> `exp(current − rollout)` then carries the full rollout-train gap, so most samples fall
+> outside the clip band / inside the mask from numerical noise alone. Decoupled mode compares
+> against the recompute instead, but a noticeable `actor/pg_clipfrac` can still be pure noise
+> there. Keep thresholds above the |Δlogp| level these metrics report (the default is `1e-4`).
 
 ## Hyperparameter notes
 
