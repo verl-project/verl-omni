@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 06/02/2026.
+Last updated: 07/06/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -400,7 +400,7 @@ checkpoint:
 3. Assert exit code `0`.
 
 Then register the script in
-[`tests/gpu_smoke/run_gpu_smoke_tests.sh`](../../tests/gpu_smoke/run_gpu_smoke_tests.sh)
+[`tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh`](../../tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh)
 as a new numbered test entry. The runner already exports
 `PYTHONUNBUFFERED=1` and `RAY_DEDUP_LOGS=0` for readable logs — no need
 to set them in your script.
@@ -448,6 +448,6 @@ Before opening the PR, confirm every box:
       `examples/flowgrpo_trainer/data_process/`.
 - [ ] Smoke test `tests/special_e2e/run_<algo>_<model>.sh` exists and
       is wired into
-      [`tests/gpu_smoke/run_gpu_smoke_tests.sh`](../../tests/gpu_smoke/run_gpu_smoke_tests.sh).
+      [`tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh`](../../tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh).
 - [ ] Docs updated (this guide if the contract changed; the relevant
       `docs/algo/...` page if you introduce algorithm-level concepts).
