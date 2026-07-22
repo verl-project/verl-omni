@@ -68,6 +68,7 @@ from verl_omni.trainer.diffusion.diffusion_trainer_utils import NoOpCheckpointMa
 from verl_omni.trainer.diffusion.rollout_correction import (
     apply_bypass_mode_to_diffusion_batch,
     apply_rollout_correction_to_diffusion_batch,
+    compute_rollout_corr_metrics_from_logprobs,
     rollout_correction_enabled,
 )
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
@@ -1033,6 +1034,17 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                             batch = batch.union(old_log_prob)
 
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
+
+                    # Consistency monitoring (needs calculate_log_probs=true); in bypass
+                    # mode old == rollout so there is nothing to compare.
+                    if not bypass_recomputing_logprobs and "rollout_log_probs" in batch.batch:
+                        metrics.update(
+                            compute_rollout_corr_metrics_from_logprobs(
+                                batch.batch["old_log_probs"],
+                                batch.batch["rollout_log_probs"],
+                                timesteps=batch.batch.get("all_timesteps", None),
+                            )
+                        )
 
                     # Decoupled-mode rollout correction (old vs rollout).
                     # In bypass mode old == rollout, so correction runs per-step in ``diffusion_loss``.

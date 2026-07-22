@@ -12,10 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+
 from omegaconf import OmegaConf
 
 from tests.utils.smoke_attention import resolve_smoke_attention_backends
 from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
+
+
+def test_veomni_strategy_skips_with_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger="verl_omni.utils.diffusion_attention"):
+        validate_attention_consistency(
+            OmegaConf.create(
+                {
+                    "actor_rollout_ref": {
+                        "model": {"attn_backend": "native"},
+                        "actor": {"strategy": "veomni"},
+                        "rollout": {"rollout_attn_backend": "FLASH_ATTN"},
+                    }
+                }
+            )
+        )
+    assert "veomni" in caplog.text
 
 
 def test_fa3_actor_allows_flash_attn_3_hub():
