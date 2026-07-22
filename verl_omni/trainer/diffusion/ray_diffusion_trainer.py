@@ -1277,7 +1277,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
             actor_output["perf/mfu/actor"] = actor_mfu
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
-    def _compute_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:
+    def _infer_reference_policy(self, batch: DataProto) -> Optional[DataProto]:
         """Reference transformer output and shared flow tensors."""
         batch_td = batch.to_tensordict()
         batch_td = embeds_padding_2_no_padding(batch_td)
@@ -1424,7 +1424,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                         batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
                         if self.use_reference_policy:
                             with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
-                                ref_infer_res = self._compute_ref_noise_pred(batch)
+                                ref_infer_res = self._infer_reference_policy(batch)
                                 if ref_infer_res is not None:
                                     batch = batch.union(ref_infer_res)
 
@@ -1484,7 +1484,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                         batch.batch["sample_level_rewards"] = batch.batch["sample_level_scores"]
                         if self.use_reference_policy:
                             with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
-                                ref_infer_res = self._compute_ref_noise_pred(batch)
+                                ref_infer_res = self._infer_reference_policy(batch)
                                 if ref_infer_res is not None:
                                     batch = batch.union(ref_infer_res)
 
