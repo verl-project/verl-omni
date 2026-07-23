@@ -6,7 +6,7 @@
 
 <a href="https://deepwiki.com/verl-project/verl-omni"><img src="https://devin.ai/assets/deepwiki-badge.png" alt="Ask DeepWiki.com" style="height:20px;"></a>
 [![Docs](https://img.shields.io/badge/docs-Read%20the%20Docs-8A2BE2)](https://verl-omni.readthedocs.io/en/latest/index.html)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE) <a href="docs/assets/WeChat.jpg"><img src="https://img.shields.io/badge/微信-green?logo=wechat"></a> <a href="https://join.slack.com/t/verl-project/shared_invite/zt-41rr0s5g2-Qzy5PuMSNeor3Ksiy45CiQ"><img src="https://img.shields.io/badge/Slack-verl-blueviolet?logo=slack"></a>
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE) <a href="docs/assets/WeChat.jpg"><img src="https://img.shields.io/badge/微信-green?logo=wechat"></a> <a href="https://join.slack.com/t/verl-project/shared_invite/zt-44qlagy6p-WVn7sOdatfcfAm_RWbwHWQ"><img src="https://img.shields.io/badge/Slack-verl-blueviolet?logo=slack"></a>
 
 </div>
 
