@@ -39,6 +39,11 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 # Fields written by the diffusion TQ worker that are tensors with a fixed
 # (per-batch) shape and therefore stackable directly from TransferQueue.
+# This also includes driver-computed fields (old_log_probs, advantages, returns,
+# sample_level_scores, sample_level_rewards) that are persisted back to TQ via
+# ``put_dataproto_fields_to_tq`` after the policy-gradient compute path, so that
+# ``diffusion_tq_batch_to_dataproto`` can reconstruct the full trajectory for
+# metrics/dumping.
 _DIFFUSION_TENSOR_FIELDS = [
     "prompts",
     "responses",
@@ -53,6 +58,12 @@ _DIFFUSION_TENSOR_FIELDS = [
     "negative_pooled_prompt_embeds",
     "all_latents",
     "all_timesteps",
+    # Driver-computed fields written back to TQ after advantage/old-log-prob.
+    "old_log_probs",
+    "advantages",
+    "returns",
+    "sample_level_scores",
+    "sample_level_rewards",
 ]
 
 # Non-tensor fields carried through TransferQueue as object arrays.
