@@ -37,6 +37,30 @@ def _enabled() -> bool:
     return os.environ.get("DEBUG_DUMP_ENABLED", "1").lower() not in {"0", "false", "no"}
 
 
+def _set_local_rank_device() -> None:
+    if os.environ.get("RANK") is None:
+        return
+    try:
+        local_world_size = int(os.environ.get("RAY_LOCAL_WORLD_SIZE", "1"))
+        local_rank = int(os.environ["RANK"]) % max(local_world_size, 1)
+    except ValueError:
+        return
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible_devices:
+        devices = [device.strip() for device in visible_devices.split(",") if device.strip()]
+        if len(devices) > 1:
+            os.environ["CUDA_VISIBLE_DEVICES"] = devices[local_rank % len(devices)]
+            local_rank = 0
+    os.environ["LOCAL_RANK"] = str(local_rank)
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+    except Exception as exc:
+        print(f"WARN nightly debug failed to set local CUDA device: {exc}")
+
+
 def _dump_dir() -> Path:
     return Path(os.environ.get("DEBUG_DUMP_DIR", "outputs/debug_dumps/current")).expanduser().resolve()
 
@@ -371,6 +395,7 @@ def install_debug_hooks() -> None:
     """Install all test-side monkey patches. Safe to call multiple times."""
     if not _enabled():
         return
+    _set_local_rank_device()
     _install_tracking_hook()
     _install_driver_hook()
     _install_training_worker_hook()

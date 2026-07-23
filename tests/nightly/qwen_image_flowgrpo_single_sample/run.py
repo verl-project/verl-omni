@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import os
+import runpy
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -23,6 +24,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+_SCRIPT_DIR = Path(__file__).resolve().parent
 
 import install_debug_hooks
 
@@ -37,14 +39,18 @@ def _copy_debug_env(env_vars: Mapping[str, str] | None) -> dict[str, str]:
     for key, value in os.environ.items():
         if key in _DEBUG_ENV_NAMES or key.startswith(_DEBUG_ENV_PREFIXES):
             merged[key] = value
+    python_path = merged.get("PYTHONPATH") or os.environ.get("PYTHONPATH", "")
+    path_parts = [str(_SCRIPT_DIR), str(_REPO_ROOT)]
+    path_parts.extend(part for part in python_path.split(os.pathsep) if part and part not in path_parts)
+    merged["PYTHONPATH"] = os.pathsep.join(path_parts)
     return merged
 
 
 def _patch_ray_init() -> None:
     """Install debug hooks in every Ray worker process without touching product code."""
-    from verl_omni.trainer import main_diffusion
+    import ray
 
-    original_ray_init = main_diffusion.ray.init
+    original_ray_init = ray.init
     if getattr(original_ray_init, "__nightly_debug_wrapped__", False):
         return
 
@@ -56,16 +62,13 @@ def _patch_ray_init() -> None:
         return original_ray_init(*args, **kwargs)
 
     ray_init_with_debug_hooks.__nightly_debug_wrapped__ = True
-    main_diffusion.ray.init = ray_init_with_debug_hooks
+    ray.init = ray_init_with_debug_hooks
 
 
 def main() -> None:
     install_debug_hooks.install_debug_hooks()
     _patch_ray_init()
-
-    from verl_omni.trainer.main_diffusion import main as diffusion_main
-
-    diffusion_main()
+    runpy.run_module("verl_omni.trainer.main_diffusion", run_name="__main__", alter_sys=True)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,13 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_NUMERIC_VALUE_RE = re.compile(
+    r"^\s*(?:np\.\w+\()?("
+    r"nan|[-+]?inf|[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+    r")\)?"
+)
+
 
 def _as_float(value: Any) -> float | None:
     if isinstance(value, bool):
@@ -36,6 +43,18 @@ def _as_float(value: Any) -> float | None:
         except Exception:
             return None
     return None
+
+
+def _parse_console_value(value: str) -> float | None:
+    match = _NUMERIC_VALUE_RE.match(value.strip())
+    if not match:
+        return None
+    raw = match.group(1).lower()
+    if raw == "nan":
+        return None
+    if raw in {"inf", "+inf", "-inf"}:
+        return None
+    return _as_float(float(raw))
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -64,6 +83,23 @@ def _read_console_log(path: Path) -> list[dict]:
             try:
                 payload = ast.literal_eval(line[line.index("{") : line.rindex("}") + 1])
             except Exception:
+                clean_line = _ANSI_RE.sub("", line)
+                match = step_pattern.search(clean_line)
+                if not match:
+                    continue
+                payload = {}
+                for item in clean_line.split(" - "):
+                    if ":" not in item:
+                        continue
+                    key, value = item.split(":", 1)
+                    key = key.strip().split()[-1]
+                    number = _parse_console_value(value)
+                    if number is not None:
+                        payload[key] = number
+                if not payload:
+                    continue
+                step = int(match.group(1))
+                records.append({"step": step, "data": payload})
                 continue
             match = step_pattern.search(line)
             step = int(match.group(1)) if match else int(payload.get("training/global_step", -1))
