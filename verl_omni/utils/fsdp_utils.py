@@ -84,6 +84,13 @@ def _load_json(path: Path) -> dict:
         return json.load(f)
 
 
+def _to_peft_lora_key(key: str) -> str:
+    peft_key = key.replace(".default.weight", ".weight")
+    if peft_key.startswith("base_model.model."):
+        return peft_key
+    return f"base_model.model.{peft_key}"
+
+
 def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
     if hasattr(tensor, "_local_tensor"):
         tensor = tensor._local_tensor
@@ -138,7 +145,7 @@ def _merge_fsdp_lora_tensors(rank_paths: list[Path]) -> tuple[OrderedDict[str, t
         module_key = key.rsplit(".lora_", maxsplit=1)[0]
         target_parts = [part for part in module_key.split(".") if part != "base_layer"]
         target_module = target_parts[-1]
-        peft_key = "base_model.model." + key.replace(".default.weight", ".weight")
+        peft_key = _to_peft_lora_key(key)
         lora_params[peft_key] = merged
         target_modules.add(target_module)
 
