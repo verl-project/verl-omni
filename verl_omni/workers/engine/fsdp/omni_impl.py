@@ -122,18 +122,24 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
         peft_config_dict = peft_config.to_dict() if peft_config is not None else None
 
-        # DIFF vs upstream: normalise LoRA weight keys for vLLM-Omni consumption.
+        # DIFF vs upstream: delegate model-specific LoRA key normalization
+        # to the registered OmniModelBase adapter.
         if peft_config is not None and base_sync_done:
             adapter = kwargs.get("adapter_name", "default")
-            per_tensor_param = (
+            from verl_omni.pipelines.model_base import OmniModelBase
+
+            adapter_cls = OmniModelBase.get_class(self.model_config)
+            per_tensor_param = [
                 (
-                    name.replace("_fsdp_wrapped_module.", "")
-                    .replace(f"lora_A.{adapter}.weight", "lora_A.weight")
-                    .replace(f"lora_B.{adapter}.weight", "lora_B.weight"),
+                    adapter_cls.normalize_lora_key(
+                        name.replace("_fsdp_wrapped_module.", "")
+                        .replace(f"lora_A.{adapter}.weight", "lora_A.weight")
+                        .replace(f"lora_B.{adapter}.weight", "lora_B.weight"),
+                    ),
                     tensor,
                 )
                 for name, tensor in per_tensor_param
-            )
+            ]
 
         return per_tensor_param, peft_config_dict
 

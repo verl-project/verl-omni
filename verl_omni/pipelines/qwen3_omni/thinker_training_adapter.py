@@ -14,8 +14,9 @@
 """Qwen3-Omni Thinker training adapter.
 
 Implements ``OmniModelBase`` for thinker-stage training of
-Qwen3-Omni: sub-module stripping, forward redirection, and
-processor/tokenizer configuration.
+Qwen3-Omni: sub-module stripping, forward redirection,
+processor/tokenizer configuration, and LoRA key normalization for
+vLLM-Omni weight sync.
 """
 
 import json
@@ -101,6 +102,12 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         processor.get_rope_index = _get_rope_index_long
         processor.get_llm_pos_ids_for_vision = types.MethodType(model_cls.get_llm_pos_ids_for_vision, processor)
         return processor
+
+    @classmethod
+    def normalize_lora_key(cls, name: str) -> str:
+        name = name.replace("thinker.model.", "model.")
+        name = name.replace("thinker.lm_head.", "lm_head.")
+        return name
 
     @classmethod
     def configure_tokenizer(cls, model_path: str, model_config) -> Any:
