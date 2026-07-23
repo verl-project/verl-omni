@@ -15,12 +15,14 @@
 """Boogu-Image training-side adapter for diffusers-based diffusion RL.
 
 The training engine loads the checkpoint's canonical
-``BooguImageTransformer2DModel`` via ``diffusers.AutoModel`` with
-``trust_remote_code=True``. The checkpoint's ``transformer_boogu.py`` is a
-shim that re-exports the class from the ``boogu`` package, so the
-``boogu-image`` package (https://github.com/boogu-project/Boogu-Image) must be
-installed on trainer workers. Set
-``actor_rollout_ref.model.trust_remote_code=true`` in the launch config.
+``BooguImageTransformer2DModel`` through :meth:`BooguImage.build_module`.
+The checkpoint's ``transformer/config.json`` carries no ``auto_map`` entry,
+so ``diffusers.AutoModel`` cannot resolve the remote-code class even with
+``trust_remote_code=True`` — the ``transformer_boogu.py`` shim is only
+reachable through the *pipeline* loading path. ``build_module`` therefore
+imports the canonical class from the ``boogu-image`` package
+(https://github.com/boogu-project/Boogu-Image), which must be installed on
+trainer workers.
 """
 
 import json
@@ -111,6 +113,31 @@ class BooguImage(DiffusionI2IModelBase):
     non-empty dict (satisfying the I2I dispatcher's fail-closed contract)
     that injects exactly the ``None`` the canonical forward expects.
     """
+
+    @classmethod
+    def build_module(cls, model_config: DiffusionModelConfig, torch_dtype: torch.dtype):
+        """Load the canonical Boogu transformer, bypassing ``diffusers.AutoModel``.
+
+        The checkpoint has no ``auto_map`` in ``transformer/config.json``, so
+        the engine's default ``AutoModel`` path fails with "does not appear to
+        have any custom code". The canonical class ships in the required
+        ``boogu-image`` package; loading it directly also keeps the training
+        graph on the same code the released checkpoints were trained with.
+        """
+        try:
+            from boogu.models.transformers.transformer_boogu import BooguImageTransformer2DModel
+        except ImportError as exc:
+            raise ImportError(
+                "Boogu-Image training requires the `boogu-image` package: "
+                "pip install 'boogu-image @ git+https://github.com/boogu-project/Boogu-Image.git'"
+            ) from exc
+
+        module = BooguImageTransformer2DModel.from_pretrained(
+            model_config.config_path or model_config.local_path,
+            subfolder="" if model_config.config_path else model_config.transformer_subfolder,
+            torch_dtype=torch_dtype,
+        )
+        return module
 
     @classmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig):
