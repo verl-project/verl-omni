@@ -316,11 +316,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         with marked_timer("adv", timing_raw, color="brown"):
             data = self._compute_advantage(data)
 
-        if self.config.trainer.critic_warmup <= self.global_steps:
-            with marked_timer("update_actor", timing_raw, color="red"):
-                actor_output = self._update_actor(data)
-                actor_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-                metrics.update(actor_metrics)
+        with marked_timer("update_actor", timing_raw, color="red"):
+            actor_output = self._update_actor(data)
+            actor_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+            metrics.update(actor_metrics)
 
         # Persist computed fields back to TransferQueue so the sampled keys carry
         # the full trajectory for metrics/dumping (keys are cleared after step).
