@@ -212,6 +212,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             "prompts": internal.prompt_ids.squeeze(0),
             "responses": internal.response_diffusion_output.squeeze(0),
             "__num_turns__": internal.num_turns,
+            "uid": uid,
         }
         if internal.response_logprobs is not None:
             field["rollout_log_probs"] = internal.response_logprobs.squeeze(0)
