@@ -25,9 +25,9 @@ import torch
 from omegaconf import DictConfig
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
-from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.agent_loop import DiffusionAgentLoopWorker
+from verl_omni.workers.rollout.omni_llm_server import OmniLLMServerManager
 
 from ..utils.gpu_test_topology import resolve_diffusion_agent_loop_gpu_topology
 
@@ -170,7 +170,7 @@ def test_rollout_without_seed_produces_different_initial_latents(multi_worker_se
     )
     try:
         AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
-        llm_server_manager = LLMServerManager.create(config=multi_worker_seed_rollout_config)
+        llm_server_manager = OmniLLMServerManager.create(config=multi_worker_seed_rollout_config)
         agent_loop_manager = AgentLoopManager.create(
             config=multi_worker_seed_rollout_config,
             llm_client=llm_server_manager.get_client(),
@@ -218,7 +218,7 @@ def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollou
     )
     try:
         AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
-        llm_server_manager = LLMServerManager.create(config=multi_worker_seed_rollout_config)
+        llm_server_manager = OmniLLMServerManager.create(config=multi_worker_seed_rollout_config)
         agent_loop_manager = AgentLoopManager.create(
             config=multi_worker_seed_rollout_config,
             llm_client=llm_server_manager.get_client(),

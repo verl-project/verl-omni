@@ -4,6 +4,9 @@ defaults:
   # per-role profiler config, inheriting from trainer/config/profiler/profiler.yaml
   - ../../profiler@profiler: profiler
 
+  # shared rollout replica routing (diffusion + omni LLM)
+  - /rollout/server_routing@server_routing
+
   # load the reference default config, then apply the fields in the current yaml
   - _self_
 
@@ -88,6 +91,13 @@ logprobs_mode: processed_logprobs
 
 # scheduling policy for vllm-omni rollout
 scheduling_policy: fcfs
+
+# Replica routing across rollout HTTP servers (verl-side load balancer).
+# Distinct from vllm-omni internal diffusion scheduler batching.
+# Base schema from trainer/config/rollout/server_routing.yaml; diffusion defaults
+# to prompt_uid_affinity so rollout.n copies for one prompt co-locate on a replica.
+server_routing:
+  policy: prompt_uid_affinity
 
 # Which loader to use for rollout model weights: dummy, hf, megatron, etc.
 # safetensors (for huge model, and set use_shm=True); dummy: randomly init model weight

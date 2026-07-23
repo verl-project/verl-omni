@@ -213,6 +213,10 @@ actor_rollout_ref:
           trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
           name: torch_memory
+    server_routing:
+      _target_: verl_omni.workers.config.RolloutServerRoutingConfig
+      policy: prompt_uid_affinity
+      max_imbalance: null
     _target_: verl_omni.workers.config.diffusion.DiffusionRolloutConfig
     name: ???
     mode: async

@@ -38,6 +38,7 @@ start/metrics.md
 :caption: Advanced Features
 
 algo/async_reward.md
+algo/rollout_server_routing.md
 algo/rollout_correction.md
 start/http_scorer.md
 start/sd35_drm_flow_grpo.md

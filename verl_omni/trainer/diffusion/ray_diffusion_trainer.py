@@ -49,7 +49,6 @@ from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.workers.rollout.llm_server import LLMServerManager
 
 from verl_omni.trainer.config import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import (
@@ -71,6 +70,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     compute_rollout_corr_metrics_from_logprobs,
     rollout_correction_enabled,
 )
+from verl_omni.workers.rollout.omni_llm_server import OmniLLMServerManager
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 sys_logger = logging.getLogger(__name__)
@@ -676,7 +676,7 @@ class BaseRayDiffusionTrainer(ABC):
             self.reward_loop_manager.reward_loop_workers if self.enable_agent_reward_loop else None
         )
 
-        self.llm_server_manager = LLMServerManager.create(
+        self.llm_server_manager = OmniLLMServerManager.create(
             config=self.config,
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
