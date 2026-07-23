@@ -185,6 +185,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             self.logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 self._shutdown_dump_executor()
+                self._shutdown_dataloaders()
                 return
 
         current_epoch = self.global_steps // self.steps_per_epoch
@@ -236,10 +237,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 self._shutdown_dump_executor()
                 pprint(f"Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
+                self._shutdown_dataloaders()
                 return
 
         self.on_train_end()
         self._shutdown_dump_executor()
+        self._shutdown_dataloaders()
 
     def step(self, metrics: dict, timing_raw: dict) -> KVBatchMeta:
         """Feed one train batch and run ``parameter_sync_step`` local updates."""
@@ -559,6 +562,37 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             f.result()
         self._dump_futures.clear()
         self._dump_executor.shutdown(wait=True)
+
+    def _shutdown_dataloaders(self):
+        """Gracefully join dataloader worker processes before vLLM/Ray teardown.
+
+        If the StatefulDataLoader workers are still alive when ``__del__`` runs
+        during interpreter shutdown, PyTorch's DataLoader watchdog can raise a
+        spurious ``RuntimeError: DataLoader worker ... is killed by signal`` once
+        the colocated vLLM DiffusionWorker subprocesses are torn down. Joining
+        the workers explicitly here (while the rollout stack is still alive)
+        avoids that benign-but-noisy shutdown race.
+        """
+        for attr in ("train_dataloader", "val_dataloader"):
+            loader = getattr(self, attr, None)
+            if loader is None:
+                continue
+            iterator = getattr(loader, "_iterator", None)
+            if iterator is None:
+                # name-mangled private iterator in some torch versions
+                iterator = getattr(loader, "_DataLoader__iterator", None)
+            shutdown = getattr(iterator, "_shutdown_workers", None)
+            if callable(shutdown):
+                try:
+                    shutdown()
+                except Exception as e:
+                    logger.debug(f"Ignoring error shutting down {attr} workers: {e}")
+            # Drop references so the implicit __del__ during teardown is a no-op
+            try:
+                setattr(loader, "_iterator", None)
+            except Exception:
+                pass
+        self.train_dataloader_it = None
 
     def _init_resource_pool_mgr(self):
         self.role_worker_mapping = {}
