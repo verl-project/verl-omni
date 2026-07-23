@@ -1,4 +1,4 @@
-name: gpu_smoke
+name: npu_smoke
 
 on:
   push:
@@ -21,7 +21,7 @@ on:
     branches:
       - main
       - v0.*
-    types: [labeled]
+    types: [opened, synchronize, reopened, labeled]  # 加上默认类型
     paths:
       - "verl_omni/**"
       - "tests/gpu_smoke/**"
