@@ -159,8 +159,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
             import_external_libs(self.config.external_lib)
 
-            self.config.resolve_algorithm(self.model_config)
-
             pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
                 architecture=self.model_config.architecture,
                 algorithm=self.model_config.algorithm,

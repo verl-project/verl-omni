@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   check_pr_title:
-    if: contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+    if: contains(join(github.event.pull_request.labels.*.name, ','), 'ci')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     strategy:

@@ -36,7 +36,7 @@ jobs:
   cpu_unit_tests:
     if: >-
       github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+      contains(join(github.event.pull_request.labels.*.name, ','), 'ci')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:

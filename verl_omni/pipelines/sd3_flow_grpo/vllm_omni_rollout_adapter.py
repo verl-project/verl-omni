@@ -23,6 +23,7 @@ from typing import Any, Literal
 import torch
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
+from vllm_omni.diffusion.models.sd3 import pipeline_sd3
 from vllm_omni.diffusion.models.sd3.pipeline_sd3 import StableDiffusion3Pipeline
 from vllm_omni.diffusion.request import DUMMY_DIFFUSION_REQUEST_ID, OmniDiffusionRequest
 
@@ -103,6 +104,40 @@ def _decode_prompt_ids(tokenizer, prompt_ids_list: list[list[int]]) -> list[str]
 def _sd3_image_seq_len(height: int, width: int, vae_scale_factor: int = 8) -> int:
     patch_size = 2
     return (int(height) // vae_scale_factor // patch_size) * (int(width) // vae_scale_factor // patch_size)
+
+
+def _validate_output_type(output_type: str) -> Literal["image", "latent", "both"]:
+    if output_type not in ("image", "latent", "both"):
+        raise ValueError(f"SD3 rollout output_type must be one of ['image', 'latent', 'both'], got {output_type!r}.")
+    return output_type
+
+
+def _resolve_output_type(sampling_params, default: str) -> Literal["image", "latent", "both"]:
+    """Resolve output_type from vLLM-Omni's first-class sampling field."""
+    output_type = getattr(sampling_params, "output_type", None)
+    if output_type is None:
+        output_type = sampling_params.extra_args.get("output_type", None)
+    return _validate_output_type(_coalesce_not_none(output_type, default))
+
+
+_SD3_IMAGE_POST_PROCESS_FUNC = pipeline_sd3.get_sd3_image_post_process_func
+
+
+def get_latent_post_process_func(od_config):
+    """Keep SD3 latents untouched while normally postprocessing decoded images."""
+    image_postprocess = _SD3_IMAGE_POST_PROCESS_FUNC(od_config)
+
+    def postprocess(output):
+        if isinstance(output, torch.Tensor) and output.ndim >= 3 and output.shape[-3] == 16:
+            return output
+        return image_postprocess(output)
+
+    return postprocess
+
+
+# vLLM-Omni resolves this module-level factory before initializing the custom
+# pipeline, so install the SD3-specific override while registering this adapter.
+pipeline_sd3.get_sd3_image_post_process_func = get_latent_post_process_func
 
 
 @VllmOmniPipelineBase.register("StableDiffusion3Pipeline", algorithm="flow_grpo")
@@ -186,8 +221,9 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
             negative_prompt = _decode_prompt_ids(self.tokenizer, negative_prompt_ids)
         return prompt, negative_prompt
 
-    def _decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
-        if self.output_type == "latent":
+    def _decode_latents(self, latents: torch.Tensor, output_type: str | None = None) -> torch.Tensor:
+        output_type = self.output_type if output_type is None else output_type
+        if output_type == "latent":
             return latents
         latents = latents.to(self.vae.dtype)
         latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
@@ -304,6 +340,7 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
         sde_window_range: tuple[int, int] = (0, 5),
         sde_type: Literal["sde", "cps"] = "sde",
         logprobs: bool = True,
+        output_type: Literal["image", "latent", "both"] = "image",
     ) -> DiffusionOutput:
         """End-to-end SD3.5 generation with rollout trajectory collection."""
         req_prompt, req_negative_prompt = self._to_encode_prompt_text(req.prompts or [])
@@ -333,6 +370,7 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
         sde_window_size, sde_window_range = _normalize_sde_window_args(sde_window_size, sde_window_range)
         sde_type = _coalesce_not_none(sampling_params.extra_args.get("sde_type", None), sde_type)
         logprobs = _coalesce_not_none(sampling_params.extra_args.get("logprobs", None), logprobs)
+        output_type = _resolve_output_type(sampling_params, output_type)
 
         generator = sampling_params.generator or generator
         if generator is None and sampling_params.seed is not None:
@@ -398,8 +436,8 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
         )
 
         if req.request_id == DUMMY_DIFFUSION_REQUEST_ID and sde_window[0] == sde_window[1]:
-            image = self._decode_latents(latents)
-            return DiffusionOutput(output=image, custom_output={}, to_cpu=True)
+            output = self._decode_latents(latents, output_type)
+            return DiffusionOutput(output=output, custom_output={}, to_cpu=True)
 
         latents, all_latents, all_log_probs, all_timesteps = self.diffuse(
             prompt_embeds,
@@ -418,20 +456,23 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
         )
 
         self._current_timestep = None
-        image = self._decode_latents(latents)
+        output = self._decode_latents(latents, output_type)
+        custom_output = {
+            "all_latents": all_latents,
+            "all_log_probs": all_log_probs,
+            "all_timesteps": all_timesteps,
+            "prompt_embeds": prompt_embeds,
+            "prompt_embeds_mask": prompt_embeds_mask,
+            "pooled_prompt_embeds": pooled_prompt_embeds,
+            "negative_prompt_embeds": negative_prompt_embeds,
+            "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
+            "negative_pooled_prompt_embeds": negative_pooled_prompt_embeds,
+        }
+        if output_type == "both":
+            custom_output["latents_clean"] = latents.float()
 
         return DiffusionOutput(
-            output=image,
-            custom_output={
-                "all_latents": all_latents,
-                "all_log_probs": all_log_probs,
-                "all_timesteps": all_timesteps,
-                "prompt_embeds": prompt_embeds,
-                "prompt_embeds_mask": prompt_embeds_mask,
-                "pooled_prompt_embeds": pooled_prompt_embeds,
-                "negative_prompt_embeds": negative_prompt_embeds,
-                "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
-                "negative_pooled_prompt_embeds": negative_pooled_prompt_embeds,
-            },
+            output=output,
+            custom_output=custom_output,
             to_cpu=True,
         )

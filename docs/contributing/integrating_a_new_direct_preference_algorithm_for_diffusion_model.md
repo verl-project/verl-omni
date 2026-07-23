@@ -1,6 +1,6 @@
 # How to Integrate a New Direct-Preference Algorithm for Diffusion Model
 
-Last updated: 06/02/2026.
+Last updated: 07/06/2026.
 
 This guide explains how to add a direct-preference diffusion algorithm to
 VeRL-Omni. Direct-preference algorithms train from final samples, rewards, or
@@ -325,7 +325,7 @@ Add an end-to-end smoke test under `tests/special_e2e/`:
   as the reference for online direct-preference training.
 
 Register the script in
-[`tests/gpu_smoke/run_gpu_smoke_tests.sh`](../../tests/gpu_smoke/run_gpu_smoke_tests.sh).
+[`tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh`](../../tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh).
 The test should exercise trainer routing, sample-source routing, loss dispatch,
 FSDP engine dispatch, and any algorithm-specific adapter contract.
 
