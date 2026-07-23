@@ -5,11 +5,35 @@ on:
     branches:
       - main
       - v0.*
+    paths:
+      - "verl_omni/**"
+      - "tests/gpu_smoke/**"
+      - "tests/agent_loop/**"
+      - "tests/reward_loop/**"
+      - "tests/workers/**"
+      - "tests/special_e2e/**"
+      - "pyproject.toml"
+      - .github/workflows/gpu_smoke.yml
+      - .github/vllm_omni_pin.txt
+      - .github/actions/gpu-smoke-prepare/**
+      - .github/actions/gpu-smoke-upload-logs/**
   pull_request:
     branches:
       - main
       - v0.*
     types: [labeled]
+    paths:
+      - "verl_omni/**"
+      - "tests/gpu_smoke/**"
+      - "tests/agent_loop/**"
+      - "tests/reward_loop/**"
+      - "tests/workers/**"
+      - "tests/special_e2e/**"
+      - "pyproject.toml"
+      - .github/workflows/gpu_smoke.yml
+      - .github/vllm_omni_pin.txt
+      - .github/actions/gpu-smoke-prepare/**
+      - .github/actions/gpu-smoke-upload-logs/**
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
