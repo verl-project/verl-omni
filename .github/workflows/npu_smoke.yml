@@ -55,6 +55,11 @@ jobs:
     # Push events also run all groups on one 8-GPU runner.
     if: github.repository_owner == 'verl-project'
     runs-on: linux-aarch64-a2b3-8
+    timeout-minutes: 120
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-a3-ubuntu22.04-py3.11-vllm
+      options: >-
+        --shm-size 16g
     outputs:
       mode: ${{ steps.resolve-mode.outputs.mode }}
       groups-json: ${{ steps.resolve-groups.outputs.groups-json }}
@@ -119,111 +124,3 @@ jobs:
           mode: "create"
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
           mlp-image: "${{ env.IMAGE }}"
-
-  gpu_smoke:
-    needs: setup_runner
-    if: needs.setup_runner.outputs.mode != 'none'
-    runs-on: ["${{ needs.setup_runner.outputs.runner-label || needs.setup_runner.outputs.runner-size || 'L20x8' }}"]
-    timeout-minutes: ${{ needs.setup_runner.outputs.group-count == '1' && 45 || 90 }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-      - uses: ./.github/actions/gpu-smoke-prepare
-      - name: Run selected GPU smoke tests
-        env:
-          GPU_SMOKE_GROUPS_JSON: ${{ needs.setup_runner.outputs.groups-json }}
-        run: |
-          mode="${{ needs.setup_runner.outputs.mode }}"
-          ray stop --force || true
-          set -euo pipefail
-          mkdir -p logs/gpu_smoke/parallel
-
-          python - <<'PY' > /tmp/gpu_smoke_groups.tsv
-          import json
-          import os
-
-          plan = json.loads(os.environ["GPU_SMOKE_GROUPS_JSON"])
-          for group in plan["groups"]:
-              print(f"{group['name']}\t{group['devices']}\t{group['num_gpus']}\t{group['script']}")
-          PY
-
-          if [[ ! -s /tmp/gpu_smoke_groups.tsv ]]; then
-            echo "No GPU smoke groups selected for mode: ${mode}"
-            exit 1
-          fi
-
-          pids=()
-          names=()
-
-          run_group() {
-            local name="$1"
-            local devices="$2"
-            local num_gpus="$3"
-            local script="$4"
-            local logfile="logs/gpu_smoke/parallel/${name}.log"
-
-            echo "Starting ${name} on CUDA_VISIBLE_DEVICES=${devices}; log=${logfile}"
-            GPU_SMOKE_SKIP_RAY_STOP=1 bash "${script}" \
-              --num-gpus "${num_gpus}" \
-              --cuda-visible-devices "${devices}" \
-              > "${logfile}" 2>&1 &
-            pids+=("$!")
-            names+=("${name}")
-          }
-
-          while IFS=$'\t' read -r name devices num_gpus script; do
-            run_group "${name}" "${devices}" "${num_gpus}" "${script}"
-          done < /tmp/gpu_smoke_groups.tsv
-
-          failed=0
-          failed_names=()
-          for i in "${!pids[@]}"; do
-            if wait "${pids[$i]}"; then
-              echo "[PASS] ${names[$i]}"
-            else
-              echo "[FAIL] ${names[$i]}"
-              failed=1
-              failed_names+=("${names[$i]}")
-            fi
-          done
-
-          echo ""
-          if [[ "${failed}" -eq 0 ]]; then
-            echo "===== All GPU smoke groups passed; skipping parallel logs ====="
-            echo "Full logs are uploaded as workflow artifacts under logs/gpu_smoke/"
-          else
-            echo "===== GPU smoke logs (failed groups only) ====="
-            for name in "${failed_names[@]}"; do
-              logfile="logs/gpu_smoke/parallel/${name}.log"
-              if [[ -f "${logfile}" ]]; then
-                echo "::group::${logfile}"
-                cat "${logfile}" || true
-                echo "::endgroup::"
-              else
-                echo "::warning::Missing GPU smoke log: ${logfile}"
-              fi
-            done
-            echo "Full logs for all groups are uploaded as workflow artifacts under logs/gpu_smoke/"
-          fi
-
-          ray stop --force || true
-          exit "${failed}"
-
-      - if: always()
-        uses: ./.github/actions/gpu-smoke-upload-logs
-
-  cleanup:
-    runs-on: ubuntu-latest
-    needs:
-      - setup_runner
-      - gpu_smoke
-    if: always()
-    steps:
-      - id: destroy-runner
-        if: needs.setup_runner.outputs.mlp-task-id != ''
-        uses: volcengine/vemlp-github-runner@v1
-        with:
-          mode: "destroy"
-          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
-          mlp-task-id: "${{ needs.setup_runner.outputs.mlp-task-id }}"
