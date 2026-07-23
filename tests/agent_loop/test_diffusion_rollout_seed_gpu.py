@@ -203,9 +203,13 @@ def test_rollout_without_seed_produces_different_initial_latents(multi_worker_se
 def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollout_config):
     """Rollout seeds are reproducible and diverse with agent.num_workers > 1.
 
-    - Same ``rollout_seed`` + batch -> bit-identical initial latents across reruns.
+    - Same ``rollout_seed`` + batch -> matching initial latents across reruns.
     - Distinct rollout indices within one step -> distinct initial latents.
-    - Covers multi-worker seed dispatch path.
+    - Covers multi-worker seed dispatch under request packing.
+
+    ``allclose`` (not bit-equality): with ``sde_window_range=[0, 5]``, window
+    start may be ``> 0``, so ``all_latents[:, 0]`` includes transformer steps
+    whose bf16 numerics can drift slightly across pack shapes.
     """
     ray.init(
         runtime_env={
@@ -236,8 +240,11 @@ def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollou
         latents_first = _initial_latents(first)
         latents_second = _initial_latents(second)
         assert latents_first.shape[0] == n
-        assert torch.equal(latents_first, latents_second), (
-            "identical rollout_seed and batch must reproduce initial latents on GPU"
+        # Allow small bf16 pack-shape drift after pre-window ODE steps; seeds that
+        # disagree produce O(1) diffs, so this stays a real regression check.
+        assert torch.allclose(latents_first, latents_second, rtol=1e-3, atol=5e-3), (
+            "identical rollout_seed and batch must reproduce initial latents on GPU "
+            f"(max abs diff={(latents_first - latents_second).abs().max().item():.4g})"
         )
 
         for i in range(n):

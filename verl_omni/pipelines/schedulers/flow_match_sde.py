@@ -242,7 +242,12 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
                 log_prob = None
 
         elif sde_type == "cps":
-            std_dev_t = sigma_prev * math.sin(noise_level * math.pi / 2)
+            sin_noise = (
+                torch.sin(noise_level * (math.pi / 2))
+                if isinstance(noise_level, torch.Tensor)
+                else math.sin(noise_level * math.pi / 2)
+            )
+            std_dev_t = sigma_prev * sin_noise
             pred_original_sample = sample - sigma * model_output
             noise_estimate = sample + model_output * (1 - sigma)
             prev_sample_mean = pred_original_sample * (1 - sigma_prev) + noise_estimate * torch.sqrt(

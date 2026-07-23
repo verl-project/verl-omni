@@ -29,6 +29,9 @@ from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.request_batch import (
+    sample_per_sample_sde_windows as _sample_per_sample_sde_windows,
+)
+from verl_omni.pipelines.request_batch import (
     split_diffusion_output_by_request as _split_diffusion_output_by_request,
 )
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
@@ -156,24 +159,6 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
             "logprobs": logprobs,
         }
 
-    def _sample_sde_window(
-        self,
-        sde_window_size: int | None,
-        sde_window_range: tuple[int, int],
-        num_timesteps: int,
-        generator: torch.Generator | None,
-    ) -> tuple[int, int]:
-        if sde_window_size is not None:
-            start = torch.randint(
-                sde_window_range[0],
-                sde_window_range[1] - sde_window_size + 1,
-                (1,),
-                generator=generator,
-                device=self.device,
-            ).item()
-            return (start, start + sde_window_size)
-        return (0, num_timesteps - 1)
-
     def _model_dtype(self) -> torch.dtype:
         return self.od_config.dtype
 
@@ -210,15 +195,22 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
         do_cfg: bool,
         guidance_scale: float,
         noise_level: float,
-        sde_window: tuple[int, int],
+        sde_window: tuple[int, int] | list[tuple[int, int]],
         sde_type: str,
-        generator: torch.Generator | None,
+        generator: torch.Generator | list[torch.Generator] | None,
         logprobs: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Run the full SDE diffusion loop and collect per-step rollout data."""
-        all_latents = []
-        all_log_probs = []
-        all_timesteps = []
+        batch_size = latents.shape[0]
+        windows = [sde_window] * batch_size if isinstance(sde_window, tuple) else list(sde_window)
+        if len(windows) != batch_size:
+            raise ValueError(f"Expected {batch_size} SDE windows, got {len(windows)}.")
+        if len({end - start for start, end in windows}) != 1:
+            raise ValueError("Packed SDE windows must share the same size.")
+        all_latents: list[list[torch.Tensor]] = [[] for _ in range(batch_size)]
+        all_log_probs: list[list[Any]] = [[] for _ in range(batch_size)]
+        all_timesteps: list[list[Any]] = [[] for _ in range(batch_size)]
+
         model_dtype = self._model_dtype()
         self.scheduler.set_begin_index(0)
 
@@ -226,15 +218,17 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
             if self.interrupt:
                 continue
 
-            if i < sde_window[0]:
-                cur_noise_level = 0.0
-            elif i == sde_window[0]:
-                cur_noise_level = noise_level
-                all_latents.append(latents.float())
-            elif i > sde_window[0] and i < sde_window[1]:
-                cur_noise_level = noise_level
-            else:
-                cur_noise_level = 0.0
+            for batch_idx, (start, end) in enumerate(windows):
+                if i == start:
+                    all_latents[batch_idx].append(latents[batch_idx].detach().float().clone())
+            levels = [float(noise_level) if start <= i < end else 0.0 for start, end in windows]
+            cur_noise_level: float | torch.Tensor = (
+                levels[0]
+                if all(level == levels[0] for level in levels)
+                else torch.tensor(levels, device=latents.device, dtype=torch.float32).view(
+                    batch_size, *([1] * (latents.ndim - 1))
+                )
+            )
 
             self._current_timestep = timestep_value
             timestep = timestep_value.expand(latents.shape[0]).to(device=self.device, dtype=model_dtype)
@@ -281,15 +275,19 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
 
             # Save fp32 trajectory BEFORE casting back to model dtype, so the
             # trainer recomputes log-probs on full-precision latents.
-            if i >= sde_window[0] and i < sde_window[1]:
-                all_latents.append(latents.float())
-                all_log_probs.append(log_prob)
-                all_timesteps.append(timestep_value)
+            for batch_idx, (start, end) in enumerate(windows):
+                if start <= i < end:
+                    all_latents[batch_idx].append(latents[batch_idx].detach().float().clone())
+                    all_log_probs[batch_idx].append(None if log_prob is None else log_prob[batch_idx])
+                    all_timesteps[batch_idx].append(timestep_value)
 
-        all_latents = torch.stack(all_latents, dim=1)
-        all_log_probs = torch.stack(all_log_probs, dim=1) if all_log_probs and all_log_probs[0] is not None else None
-        all_timesteps = torch.stack(all_timesteps).unsqueeze(0).expand(latents.shape[0], -1)
-        return latents, all_latents, all_log_probs, all_timesteps
+        all_latents_t = torch.stack([torch.stack(traj, dim=0) for traj in all_latents], dim=0)
+        if all_log_probs and all_log_probs[0] and all_log_probs[0][0] is not None:
+            all_log_probs_t = torch.stack([torch.stack(traj, dim=0) for traj in all_log_probs], dim=0)
+        else:
+            all_log_probs_t = None
+        all_timesteps_t = torch.stack([torch.stack(traj, dim=0) for traj in all_timesteps], dim=0)
+        return latents, all_latents_t, all_log_probs_t, all_timesteps_t
 
     def forward(
         self,
@@ -353,7 +351,6 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
                     request_sampling_params.seed
                 )
         generator = request_batch.collate_request_generators(num_images_per_prompt, generator)
-        sde_generator = generator[0] if isinstance(generator, list) else generator
         latents = request_batch.collate_request_tensors("latents", latents)
 
         self._guidance_scale = guidance_scale
@@ -405,14 +402,16 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
         )
         self._num_timesteps = len(timesteps)
 
-        sde_window = self._sample_sde_window(
-            sde_window_size,
-            sde_window_range,
-            len(timesteps),
-            sde_generator,
+        sde_window = _sample_per_sample_sde_windows(
+            sde_window_size=sde_window_size,
+            sde_window_range=sde_window_range,
+            num_timesteps=len(timesteps),
+            batch_size=latents.shape[0],
+            generator=generator,
+            device=self.device,
         )
 
-        if request_batch.requests[0].request_id == DUMMY_DIFFUSION_REQUEST_ID and sde_window[0] == sde_window[1]:
+        if request_batch.requests[0].request_id == DUMMY_DIFFUSION_REQUEST_ID and sde_window[0][0] == sde_window[0][1]:
             image = self._decode_latents(latents)
             result = DiffusionOutput(output=image, custom_output={}, to_cpu=True)
             outputs = _split_diffusion_output_by_request(
@@ -434,7 +433,7 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
             noise_level,
             sde_window,
             sde_type,
-            sde_generator,
+            generator,
             logprobs,
         )
 

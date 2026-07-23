@@ -23,8 +23,36 @@ import torch
 __all__ = [
     "collate_prompt_mask",
     "collate_prompt_rows",
+    "sample_per_sample_sde_windows",
     "split_diffusion_output_by_request",
 ]
+
+
+def sample_per_sample_sde_windows(
+    *,
+    sde_window_size: int | None,
+    sde_window_range: tuple[int, int] | list[int],
+    num_timesteps: int,
+    batch_size: int,
+    generator: torch.Generator | list[torch.Generator] | None,
+    device: torch.device | str,
+) -> list[tuple[int, int]]:
+    """Sample one SDE window per batch row (serial ``B=1`` seed semantics under packing)."""
+    if sde_window_size is None:
+        return [(0, num_timesteps - 1)] * batch_size
+
+    low = int(sde_window_range[0])
+    high = int(sde_window_range[1]) - int(sde_window_size) + 1
+
+    def _one(gen: torch.Generator | None) -> tuple[int, int]:
+        start = int(torch.randint(low, high, (1,), generator=gen, device=device).item())
+        return (start, start + int(sde_window_size))
+
+    if isinstance(generator, list):
+        if len(generator) != batch_size:
+            raise ValueError(f"Expected {batch_size} generators for SDE windows, got {len(generator)}.")
+        return [_one(gen) for gen in generator]
+    return [_one(generator)] * batch_size
 
 
 def _to_prompt_row(value: Any, *, device: torch.device, field_name: str) -> torch.Tensor | None:
