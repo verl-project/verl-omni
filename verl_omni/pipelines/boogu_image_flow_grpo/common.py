@@ -38,7 +38,9 @@ rational shift is exactly the multiplicative diffusers shift
 ``mu`` / ``shift`` — no scheduler port is needed.
 """
 
+import json
 import math
+import os
 from typing import Any, Optional
 
 import torch
@@ -56,6 +58,24 @@ def _lin_mu(seq_len: int, base_shift: float, max_shift: float) -> float:
     return m * seq_len + b
 
 
+def load_boogu_shift_config(model_path: str) -> dict:
+    """Read the raw ``scheduler/scheduler_config.json`` from the checkpoint.
+
+    The Boogu time-shift keys (``do_shift`` / ``dynamic_time_shift`` /
+    ``time_shift_version`` / ``seq_len`` / ...) are **not** attributes of the
+    diffusers ``FlowMatchSDEDiscreteScheduler``, so ``from_pretrained``
+    silently drops them from ``scheduler.config`` ("were passed ... but are
+    not expected and will be ignored"). Reading the JSON directly is the only
+    way to recover them.
+    """
+    config_path = os.path.join(model_path, "scheduler", "scheduler_config.json")
+    try:
+        with open(config_path) as f:
+            return json.load(f)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+
+
 def resolve_time_shift(
     scheduler_config: Any,
     num_tokens: Optional[int] = None,
@@ -63,10 +83,11 @@ def resolve_time_shift(
     """Resolve Boogu's time-shift config into diffusers scheduler terms.
 
     Args:
-        scheduler_config: The checkpoint's scheduler config (a diffusers
-            ``FrozenDict``-like mapping carrying Boogu's ``do_shift`` /
-            ``dynamic_time_shift`` / ``time_shift_version`` / ``seq_len``
-            keys).
+        scheduler_config: The **raw** checkpoint scheduler config mapping
+            (from :func:`load_boogu_shift_config`), carrying Boogu's
+            ``do_shift`` / ``dynamic_time_shift`` / ``time_shift_version`` /
+            ``seq_len`` keys. Do **not** pass ``scheduler.config`` — diffusers
+            drops the custom keys there.
         num_tokens: Per-sample latent token count ``H_lat * W_lat``; only
             consulted by the dynamic variants.
 
@@ -116,17 +137,18 @@ def configure_boogu_sde_timesteps(
     num_inference_steps: int,
     num_tokens: int,
     device,
+    shift_config: dict,
 ) -> None:
     """Set SDE-scheduler timesteps reproducing the checkpoint's Boogu schedule.
 
-    ``scheduler`` must have been loaded from the checkpoint's ``scheduler``
-    subfolder so its config carries Boogu's time-shift keys. ``num_tokens``
-    is the latent pixel count ``H_lat * W_lat`` (only consulted by the
-    dynamic-shift variants).
+    ``shift_config`` is the **raw** scheduler config from
+    :func:`load_boogu_shift_config` (the diffusers ``scheduler.config`` has
+    already dropped Boogu's custom keys). ``num_tokens`` is the latent pixel
+    count ``H_lat * W_lat`` (only consulted by the dynamic-shift variants).
     """
     import numpy as np
 
-    mu, shift = resolve_time_shift(scheduler.config, num_tokens)
+    mu, shift = resolve_time_shift(shift_config, num_tokens)
     sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
     if mu is not None:
         scheduler.register_to_config(use_dynamic_shifting=True)

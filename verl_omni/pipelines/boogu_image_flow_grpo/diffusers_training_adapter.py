@@ -43,6 +43,7 @@ from .common import (
     boogu_timestep_from_scheduler,
     configure_boogu_sde_timesteps,
     get_boogu_freqs_cis,
+    load_boogu_shift_config,
     resolve_text_guidance_scale,
 )
 
@@ -64,12 +65,13 @@ def _load_vae_scale_factor(model_path: str) -> int:
 
 
 def _build_boogu_scheduler(model_path: str) -> FlowMatchSDEDiscreteScheduler:
-    """Load the SDE scheduler on top of the checkpoint's scheduler config.
+    """Load the SDE scheduler from the checkpoint's ``scheduler`` subfolder.
 
-    The checkpoint declares Boogu's own ``FlowMatchEulerDiscreteScheduler``
-    variant; ``from_pretrained`` keeps its extra keys (``do_shift``,
-    ``time_shift_version``, ``seq_len``, ...) on the config, where
-    :func:`resolve_time_shift` reads them at ``set_timesteps`` time.
+    ``from_pretrained`` **drops** Boogu's extra config keys (``do_shift``,
+    ``time_shift_version``, ``seq_len``, ...) because they are not attributes
+    of :class:`FlowMatchSDEDiscreteScheduler`. They are recovered separately
+    from the raw JSON via :func:`load_boogu_shift_config` at
+    ``set_timesteps`` time.
     """
     return FlowMatchSDEDiscreteScheduler.from_pretrained(
         pretrained_model_name_or_path=model_path,
@@ -93,6 +95,7 @@ def _configure_boogu_scheduler(
         num_inference_steps=num_inference_steps,
         num_tokens=num_tokens,
         device=device,
+        shift_config=load_boogu_shift_config(model_path),
     )
 
 

@@ -34,6 +34,7 @@ from .common import (
     boogu_timestep_from_scheduler,
     configure_boogu_sde_timesteps,
     get_boogu_freqs_cis,
+    load_boogu_shift_config,
 )
 
 __all__ = ["BooguImagePipelineWithLogProb"]
@@ -87,6 +88,8 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
             subfolder="scheduler",
             local_files_only=local_files_only,
         )
+        # Raw scheduler config (with Boogu's time-shift keys diffusers drops).
+        self._shift_config = load_boogu_shift_config(model)
 
     # ------------------------------------------------------------------
     # Prompt encoding from pre-tokenised IDs
@@ -112,8 +115,17 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
             attention_mask = torch.ones_like(prompt_ids, dtype=torch.long)
         attention_mask = attention_mask.unsqueeze(0) if attention_mask.ndim == 1 else attention_mask
 
+        # Only run the vision tower when the prompt actually carries image
+        # placeholder tokens. The engine's dummy warm-up run injects a synthetic
+        # image for every ``support_image_input`` pipeline (Boogu declares that
+        # for the shared Edit path), but its prompt_ids hold no placeholders —
+        # feeding pixel_values there produces image features with no matching
+        # tokens ("tokens: 0, features: N"). This guard also fails safe on any
+        # placeholder/pixel-grid desync between the preprocessor and rollout.
         encoder_kwargs = {}
-        if condition_images:
+        image_token_id = getattr(self.mllm.config, "image_token_id", None)
+        has_image_tokens = image_token_id is not None and bool((prompt_ids == image_token_id).any())
+        if condition_images and has_image_tokens:
             image_inputs = self.processor.image_processor(images=condition_images, return_tensors="pt")
             encoder_kwargs["pixel_values"] = image_inputs["pixel_values"].to(device=self.device, dtype=self.mllm.dtype)
             encoder_kwargs["image_grid_thw"] = image_inputs["image_grid_thw"].to(self.device)
@@ -410,6 +422,7 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
             num_inference_steps=num_inference_steps,
             num_tokens=num_tokens,
             device=self.device,
+            shift_config=self._shift_config,
         )
         timesteps = self.scheduler.timesteps
 
