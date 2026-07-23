@@ -6,7 +6,7 @@
 
 <a href="https://deepwiki.com/verl-project/verl-omni"><img src="https://devin.ai/assets/deepwiki-badge.png" alt="Ask DeepWiki.com" style="height:20px;"></a>
 [![Docs](https://img.shields.io/badge/docs-Read%20the%20Docs-8A2BE2)](https://verl-omni.readthedocs.io/en/latest/index.html)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE) <a href="docs/assets/WeChat.jpg"><img src="https://img.shields.io/badge/微信-green?logo=wechat"></a> <a href="https://join.slack.com/t/verl-project/shared_invite/zt-41rr0s5g2-Qzy5PuMSNeor3Ksiy45CiQ"><img src="https://img.shields.io/badge/Slack-verl-blueviolet?logo=slack"></a>
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE) <a href="docs/assets/WeChat.jpg"><img src="https://img.shields.io/badge/微信-green?logo=wechat"></a> <a href="https://join.slack.com/t/verl-project/shared_invite/zt-44qlagy6p-WVn7sOdatfcfAm_RWbwHWQ"><img src="https://img.shields.io/badge/Slack-verl-blueviolet?logo=slack"></a>
 
 </div>
 
@@ -16,6 +16,7 @@ It originated from the multi-modal generation RL effort in `verl`, and now has a
 
 ## News 🔥
 
+- **[2026-07]** [SD3.5 FlowGRPO with DiNa-LRM latent reward scoring](docs/start/sd35_drm_flow_grpo.md) is available. Training skips VAE decoding by scoring clean diffusion latents through an external HTTP DRM server.
 - **[2026-07]** VeRL-Omni is presented in QingKe AI, vLLM community, and verl x Ascend Beijing meetup. [Slides](https://drive.google.com/file/d/1RJBZZ2k6exxciFghU1FNUgds6s1w7Bpf/view?usp=sharing) are shared.
 - **[2026-06]** [Qwen3-Omni GSPO Trainer](verl-omni/examples/gspo_trainer) is available! [Flow-DPPO](https://verl-omni.readthedocs.io/en/latest/algo/flowdppo.html) is integrated. vLLM-Omni rollout backend is upgraded to v0.22 for higher throughput, with default actor attn backend switched to FA3.
 - **[2026-06]** [DiffusionNFT](https://verl-omni.readthedocs.io/en/latest/algo/diffusionnft.html) and [Diffusion DPO](https://verl-omni.readthedocs.io/en/latest/algo/diffusion_dpo.html) are integrated with verified recipes on Qwen-Image/SD3.5. [Wan2.2](examples/dancegrpo_trainer/README.md) is now supported for video generation tasks.  
@@ -131,14 +132,18 @@ Visit our documentation to learn more.
     <td>✅</td>
   </tr>
   <tr>
-    <td rowspan="2">SD3.5</td>
-    <td rowspan="2">Diffusion generator</td>
-    <td rowspan="2">Text → Image</td>
+    <td rowspan="3">SD3.5</td>
+    <td rowspan="3">Diffusion generator</td>
+    <td rowspan="3">Text → Image</td>
     <td>DPO</td>
     <td>✅</td>
   </tr>
   <tr>
     <td>FlowGRPO</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>FlowGRPO (latent DRM)</td>
     <td>✅</td>
   </tr>
 </table>

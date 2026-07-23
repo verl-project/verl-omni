@@ -41,6 +41,7 @@ algo/async_reward.md
 algo/rollout_correction.md
 start/rollout_batching.md
 start/http_scorer.md
+start/sd35_drm_flow_grpo.md
 ```
 
 ```{toctree}
