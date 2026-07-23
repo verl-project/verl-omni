@@ -143,7 +143,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_kwargs.pop("output_mode", None)
         if self._ar_mode:
             engine_kwargs.pop("custom_pipeline", None)
-            # TODO (mike): drop this once the legacy omni training script is removed.
+            # TODO (mike): drop this later
             # It should be automatically inferred from the model config
             pipeline_name = engine_kwargs.pop("pipeline_name", None)
             pipeline_mode = engine_kwargs.pop("pipeline_mode", "thinker_only")
