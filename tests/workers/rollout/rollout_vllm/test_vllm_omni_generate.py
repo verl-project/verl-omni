@@ -58,10 +58,62 @@ def _tokenize_prompt(text: str) -> list[int]:
     return token_ids
 
 
+def _assert_non_empty_tensor(value, field_name: str) -> None:
+    assert value is not None, f"{field_name} should not be None"
+    assert isinstance(value, torch.Tensor), f"{field_name} should be a torch.Tensor, got {type(value).__name__}"
+    assert value.numel() > 0, f"{field_name} should not be empty"
+
+
+def _assert_flow_grpo_step_execution_contract(output: DiffusionOutput) -> None:
+    """Validate the FlowGRPO trajectory contract in step-execution mode.
+
+    vLLMOmniHttpServer maps all_log_probs to DiffusionOutput.log_probs
+    and the remaining custom_output fields to DiffusionOutput.extra_fields.
+    """
+    expected_extra_fields = {
+        "all_latents",
+        "all_timesteps",
+        "prompt_embeds",
+        "prompt_embeds_mask",
+        "negative_prompt_embeds",
+        "negative_prompt_embeds_mask",
+    }
+
+    missing_fields = expected_extra_fields - set(output.extra_fields)
+    assert not missing_fields, f"Missing FlowGRPO step-execution fields: {sorted(missing_fields)}"
+
+    required_tensors = {
+        "all_latents": output.extra_fields["all_latents"],
+        "all_log_probs": output.log_probs,
+        "all_timesteps": output.extra_fields["all_timesteps"],
+        "prompt_embeds": output.extra_fields["prompt_embeds"],
+        "prompt_embeds_mask": output.extra_fields["prompt_embeds_mask"],
+    }
+    for field_name, value in required_tensors.items():
+        _assert_non_empty_tensor(value, field_name)
+
+    # This test does not provide negative_prompt_ids, so True-CFG is disabled.
+    # The keys must still be preserved while their values remain None.
+    assert output.extra_fields["negative_prompt_embeds"] is None
+    assert output.extra_fields["negative_prompt_embeds_mask"] is None
+
+    all_latents = output.extra_fields["all_latents"]
+    all_log_probs = output.log_probs
+    all_timesteps = output.extra_fields["all_timesteps"]
+    prompt_embeds = output.extra_fields["prompt_embeds"]
+    prompt_embeds_mask = output.extra_fields["prompt_embeds_mask"]
+
+    # The server removes the per-request batch dimension.
+    assert all_latents.shape[0] == all_timesteps.shape[0] + 1
+    assert all_log_probs.shape[0] == all_timesteps.shape[0]
+    assert prompt_embeds.shape[:-1] == prompt_embeds_mask.shape
+
+
 @pytest.fixture
-def init_server():
+def init_server(request):
     """Create and launch a vLLMOmniHttpServer Ray actor with Qwen/Qwen-Image."""
     model_path = MODEL_PATH
+    step_execution = getattr(request, "param", False)
 
     ray.init(
         runtime_env={
@@ -74,10 +126,10 @@ def init_server():
         ignore_reinit_error=True,
     )
 
-    # Smoke: prefer local FLASH_ATTN over product-default Hub FA3 (cf. FSDP engine test).
+    # Smoke: prefer local FLASH_ATTN over product-default Hub FA3.
     from tests.utils.smoke_attention import resolve_smoke_attention_backends
 
-    _, rollout_attn_backend = resolve_smoke_attention_backends()
+    attn_backend, rollout_attn_backend = resolve_smoke_attention_backends()
 
     rollout_cfg = OmegaConf.create(
         {
@@ -89,7 +141,8 @@ def init_server():
             "pipeline_model_parallel_size": 1,
             "gpu_memory_utilization": 0.8,
             "max_num_batched_tokens": 8192,
-            "max_num_seqs": 256,
+            "max_num_seqs": 16 if step_execution else 256,
+            "step_execution": step_execution,
             "max_model_len": 1058,
             "dtype": "bfloat16",
             "load_format": "auto",
@@ -117,6 +170,7 @@ def init_server():
             "tokenizer_path": os.path.join(model_path, "tokenizer"),
             "trust_remote_code": True,
             "load_tokenizer": True,
+            "attn_backend": attn_backend,
             "algorithm": "flow_grpo",
         }
     )
@@ -200,3 +254,38 @@ def test_generate(init_server):
         assert len(lp) > 0
 
     print(f"All {len(prompts)} concurrent requests returned valid DiffusionOutput")
+
+
+@pytest.mark.parametrize(
+    "init_server",
+    [True],
+    indirect=True,
+    ids=["step-execution"],
+)
+def test_flow_grpo_step_execution_contract(init_server):
+    """Verify FlowGRPO trajectory outputs with step_execution=True."""
+    prompt = (
+        "a beautiful sunset over the ocean with vibrant orange and purple clouds "
+        "reflecting on the calm water surface near a rocky coastline"
+    )
+
+    output = ray.get(
+        init_server.generate.remote(
+            prompt_ids=_tokenize_prompt(prompt),
+            sampling_params={
+                "num_inference_steps": 10,
+                "true_cfg_scale": 4.0,
+                "height": 512,
+                "width": 512,
+                "logprobs": True,
+            },
+            request_id=f"step_execution_{uuid4().hex[:8]}",
+        ),
+        timeout=600,
+    )
+
+    assert isinstance(output, DiffusionOutput)
+    assert len(output.diffusion_output) == 3
+    assert output.stop_reason in ("completed", "aborted", None)
+
+    _assert_flow_grpo_step_execution_contract(output)
