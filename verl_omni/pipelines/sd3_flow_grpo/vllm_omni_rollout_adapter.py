@@ -108,9 +108,7 @@ def _sd3_image_seq_len(height: int, width: int, vae_scale_factor: int = 8) -> in
 
 def _validate_output_type(output_type: str) -> Literal["image", "latent", "both"]:
     if output_type not in ("image", "latent", "both"):
-        raise ValueError(
-            f"SD3 rollout output_type must be one of ['image', 'latent', 'both'], got {output_type!r}."
-        )
+        raise ValueError(f"SD3 rollout output_type must be one of ['image', 'latent', 'both'], got {output_type!r}.")
     return output_type
 
 
