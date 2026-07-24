@@ -36,6 +36,8 @@ __all__ = [
     "prepare_diffusion_model_inputs",
     "prepare_model_inputs",
     "prepare_omni_model_inputs",
+    "prepare_omni_preference_inputs",
+    "compute_omni_preference_logps",
     "prepare_noisy_latents",
     "sample_noise_and_timesteps",
     "set_timesteps",
@@ -248,6 +250,76 @@ def prepare_omni_model_inputs(
     """
     adapter = OmniModelBase.get_class(model_config)
     return adapter.prepare_model_inputs(model_config, micro_batch, dtype=dtype)
+
+
+def prepare_omni_preference_inputs(
+    model_config,
+    micro_batch: TensorDict,
+    *,
+    dtype: Optional[torch.dtype] = None,
+) -> tuple[dict[str, Any], torch.Tensor, torch.Tensor]:
+    """Build architecture-specific omni preference (DPO) forward inputs.
+
+    Dispatches to the registered ``OmniModelBase`` subclass for the current
+    architecture and training stage. The adapter prepares model ``forward()``
+    kwargs and returns the labels plus pairing metadata needed to score
+    chosen/rejected responses after the forward pass.
+
+    Args:
+        model_config: ``OmniModelConfig`` (or compatible object with ``architecture``
+            and ``model_stage`` for registry lookup).
+        micro_batch (TensorDict): paired preference micro-batch produced by the
+            dataloader or collate path.
+        dtype (Optional[torch.dtype]): optional parameter dtype for floating-point
+            multimodal tensors such as ``pixel_values`` and ``input_features``.
+
+    Returns:
+        tuple[dict[str, Any], torch.Tensor, torch.Tensor]: model forward kwargs,
+            token labels for log-prob scoring, and adapter-specific pairing metadata
+            that maps chosen/rejected responses back to each preference pair.
+    """
+    adapter = OmniModelBase.get_class(model_config)
+    return adapter.prepare_preference_inputs(model_config, micro_batch, dtype=dtype)
+
+
+def compute_omni_preference_logps(
+    model_config,
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    pair_batch_size: torch.Tensor,
+    *,
+    average_log_prob: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reduce token logits to chosen/rejected sequence log-probs for DPO.
+
+    Dispatches to the registered ``OmniModelBase`` subclass so each architecture
+    can interpret its own preference packing metadata and aggregate token
+    log-probs into one score per chosen and rejected response.
+
+    Args:
+        model_config: ``OmniModelConfig`` (or compatible object with ``architecture``
+            and ``model_stage`` for registry lookup).
+        logits (torch.Tensor): model output logits over the vocabulary.
+        labels (torch.Tensor): token labels returned by
+            ``prepare_omni_preference_inputs``; ignored positions should use
+            ``-100``.
+        pair_batch_size (torch.Tensor): adapter-specific pairing metadata returned
+            by ``prepare_omni_preference_inputs``. For packed Qwen3-Omni batches,
+            this stores chosen/rejected segment ranges.
+        average_log_prob (bool): whether to average token log-probs over valid
+            response tokens instead of summing them.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: chosen and rejected sequence log-probs,
+            each with one value per preference pair.
+    """
+    adapter = OmniModelBase.get_class(model_config)
+    return adapter.compute_preference_logps(
+        logits,
+        labels,
+        pair_batch_size,
+        average_log_prob=average_log_prob,
+    )
 
 
 def build_scheduler(model_config: DiffusionModelConfig) -> SchedulerMixin:

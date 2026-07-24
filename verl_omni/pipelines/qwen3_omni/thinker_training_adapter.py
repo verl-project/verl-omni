@@ -21,9 +21,10 @@ processor/tokenizer configuration.
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 import torch
+import torch.nn.functional as F
 from tensordict import TensorDict
 
 from verl_omni.pipelines.model_base import OmniModelBase
@@ -125,7 +126,7 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
     def _drop_zero_rows(tensor: torch.Tensor) -> torch.Tensor:
         if tensor.numel() == 0:
             return tensor
-        keep = (tensor.reshape(tensor.shape[0], -1) != 0).any(dim=-1)
+        keep = tensor.reshape(tensor.shape[0], -1).abs().sum(dim=-1) != 0
         return tensor[keep]
 
     @classmethod
@@ -233,13 +234,21 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
                 model_inputs[pixel_key] = cls._drop_zero_rows(pixel_values.reshape(-1, pixel_values.shape[-1]))
 
         input_features = model_inputs.get("input_features")
-        if isinstance(input_features, torch.Tensor) and input_features.ndim == 3:
+        feature_attention_mask = model_inputs.get("feature_attention_mask")
+        if isinstance(input_features, torch.Tensor) and isinstance(feature_attention_mask, torch.Tensor):
+            if input_features.ndim > 3:
+                input_features = input_features.reshape(-1, *input_features.shape[-2:])
+            if feature_attention_mask.ndim > 2:
+                feature_attention_mask = feature_attention_mask.reshape(-1, feature_attention_mask.shape[-1])
+            valid_audio = feature_attention_mask.sum(dim=-1) != 0
+            model_inputs["input_features"] = input_features[valid_audio]
+            model_inputs["feature_attention_mask"] = feature_attention_mask[valid_audio]
+        elif isinstance(input_features, torch.Tensor) and input_features.ndim == 3:
             model_inputs["input_features"] = cls._drop_zero_rows(input_features.reshape(-1, input_features.shape[-1]))
 
         audio_feature_lengths = model_inputs.get("audio_feature_lengths")
-        if isinstance(audio_feature_lengths, torch.Tensor):
-            if audio_feature_lengths.ndim > 1:
-                audio_feature_lengths = audio_feature_lengths.reshape(-1)
+        if isinstance(audio_feature_lengths, torch.Tensor) and audio_feature_lengths.ndim > 1:
+            audio_feature_lengths = audio_feature_lengths.reshape(-1)
             model_inputs["audio_feature_lengths"] = audio_feature_lengths[audio_feature_lengths != 0]
 
         if dtype is not None:
@@ -248,3 +257,170 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
                 if isinstance(value, torch.Tensor) and torch.is_floating_point(value):
                     model_inputs[key] = value.to(dtype=dtype)
         return model_inputs
+
+    # Trainer/engine metadata excluded from model forward kwargs.
+    _MICRO_BATCH_NON_MODEL_KEYS = frozenset(
+        {
+            "average_log_prob",
+            "compute_loss",
+            "disable_auto_offload",
+            "global_token_num",
+            "gradient_accumulation_steps",
+            "max_token_len_per_gpu",
+            "micro_batch_size_per_gpu",
+            "mini_batch_size",
+            "num_mini_batch",
+            "reference_chosen_logps",
+            "reference_rejected_logps",
+            "sample_level_rewards",
+            "sample_level_scores",
+            "sp_size",
+            "update_lr_scheduler",
+            "use_dynamic_bsz",
+            "use_fused_kernels",
+            "use_remove_padding",
+        }
+    )
+
+    # Text tensors rebuilt by preference packing; multimodal placeholder masks
+    # are consumed during that step.
+    _PREFERENCE_REBUILT_TEXT_KEYS = frozenset(
+        {
+            "input_ids",
+            "attention_mask",
+            "position_ids",
+            "labels",
+            "image_mask",
+            "video_mask",
+            "audio_mask",
+        }
+    )
+
+    _placeholder_token_ids_cache: dict[int, dict[str, Optional[int]]] = {}
+
+    @classmethod
+    def _get_placeholder_token_ids(cls, model_config) -> dict[str, Optional[int]]:
+        """Multimodal placeholder token ids, matching the dataset transform.
+
+        The dataset zeroes the multimodal placeholder ids in ``input_ids`` and
+        tracks their positions in ``image_mask``/``video_mask``/``audio_mask``.
+        The HF forward locates placeholders via ``input_ids == <token_id>``, so
+        we restore the real ids before forward.
+        """
+        processor = model_config.get_processor()
+        cache_key = id(processor)
+        if cache_key not in cls._placeholder_token_ids_cache:
+            tokenizer = getattr(processor, "tokenizer", processor)
+            vocab = tokenizer.get_vocab()
+            cls._placeholder_token_ids_cache[cache_key] = {
+                "image": vocab.get("<|image_pad|>", vocab.get("<|IMAGE|>")),
+                "video": vocab.get("<|video_pad|>", vocab.get("<|VIDEO|>")),
+                "audio": vocab.get("<|audio_pad|>", vocab.get("<|AUDIO|>")),
+            }
+        return cls._placeholder_token_ids_cache[cache_key]
+
+    @classmethod
+    def _flatten_paired_preference_rows(
+        cls,
+        model_config,
+        micro_batch: TensorDict | dict[str, Any],
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        """Flatten branch-stacked ``[chosen, rejected]`` rows along batch dim.
+
+        The offline DPO dataset stores each preference pair as one row with a
+        branch dimension of size 2.  Flattening to ``2 * B`` independent rows
+        lets the model use ordinary causal attention masks across FA/SDPA/eager
+        without relying on packed varlen boundaries.
+        """
+        input_ids = micro_batch["input_ids"].clone()
+        attention_mask = micro_batch["attention_mask"]
+        labels = micro_batch["labels"]
+        position_ids = micro_batch["position_ids"]
+
+        if input_ids.dim() != 3 or input_ids.shape[1] != 2:
+            raise ValueError(
+                "Qwen3OmniThinkerAdapter expects branch-stacked input_ids with shape (B, 2, L) for offline DPO."
+            )
+        batch_size, branch_count, seq_len = input_ids.shape
+
+        token_ids = cls._get_placeholder_token_ids(model_config)
+        for name, mask_key in (("image", "image_mask"), ("video", "video_mask"), ("audio", "audio_mask")):
+            mask = micro_batch.get(mask_key, None)
+            token_id = token_ids.get(name)
+            if mask is not None and token_id is not None:
+                input_ids[mask.bool()] = token_id
+
+        if position_ids.dim() != 4 or position_ids.shape[:2] != (batch_size, branch_count):
+            raise ValueError(
+                "Qwen3OmniThinkerAdapter expects branch-stacked multimodal position_ids with shape (B, 2, 3, L)."
+            )
+
+        flat_mrope_positions = position_ids.reshape(batch_size * branch_count, *position_ids.shape[2:])
+        flat_mrope_positions = flat_mrope_positions.transpose(0, 1).contiguous()
+        flat_position_ids = torch.cat([flat_mrope_positions[:1], flat_mrope_positions], dim=0)
+        flat_text = {
+            "input_ids": input_ids.reshape(batch_size * branch_count, seq_len),
+            "attention_mask": attention_mask.reshape(batch_size * branch_count, seq_len),
+            "position_ids": flat_position_ids,
+            "labels": labels.reshape(batch_size * branch_count, seq_len),
+        }
+        return flat_text, flat_text["labels"]
+
+    @staticmethod
+    def _flatten_branch_tensors(items: dict[str, Any], batch_size: int, branch_count: int = 2) -> dict[str, Any]:
+        flattened: dict[str, Any] = {}
+        for key, value in items.items():
+            if (
+                isinstance(value, torch.Tensor)
+                and value.ndim >= 2
+                and tuple(value.shape[:2]) == (batch_size, branch_count)
+            ):
+                flattened[key] = value.reshape(batch_size * branch_count, *value.shape[2:])
+            else:
+                flattened[key] = value
+        return flattened
+
+    @classmethod
+    def prepare_preference_inputs(
+        cls,
+        model_config,
+        micro_batch: TensorDict,
+        *,
+        dtype: torch.dtype | None = None,
+    ) -> tuple[dict[str, Any], torch.Tensor, torch.Tensor]:
+        """Build Qwen3-Omni thinker forward kwargs for offline paired DPO."""
+        flat_text, labels = cls._flatten_paired_preference_rows(model_config, micro_batch)
+        exclude_keys = cls._MICRO_BATCH_NON_MODEL_KEYS | cls._PREFERENCE_REBUILT_TEXT_KEYS
+        branch_items = {key: value for key, value in micro_batch.items() if key not in exclude_keys}
+        pair_batch_size = micro_batch["input_ids"].shape[0]
+        branch_items = cls._flatten_branch_tensors(branch_items, pair_batch_size)
+        branch_items.update(flat_text)
+        model_inputs = cls.prepare_model_inputs(model_config, branch_items, dtype=dtype)
+        return model_inputs, labels, torch.tensor(pair_batch_size, dtype=torch.long, device=labels.device)
+
+    @classmethod
+    def compute_preference_logps(
+        cls,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        pair_batch_size: torch.Tensor,
+        *,
+        average_log_prob: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Score branch-stacked chosen/rejected rows from logits."""
+        shift_logits = logits[:, :-1, :].float()
+        shift_labels = labels[:, 1:].contiguous()
+        loss_mask = shift_labels != -100
+        safe_labels = shift_labels.masked_fill(~loss_mask, 0)
+        token_logps = F.log_softmax(shift_logits, dim=-1).gather(dim=-1, index=safe_labels.unsqueeze(-1)).squeeze(-1)
+        seq_logps = (token_logps * loss_mask).sum(dim=-1)
+        if average_log_prob:
+            seq_logps = seq_logps / loss_mask.sum(dim=-1).clamp(min=1)
+
+        expected_rows = int(pair_batch_size.item()) * 2
+        if seq_logps.shape[0] != expected_rows:
+            raise ValueError(
+                "Qwen3OmniThinkerAdapter expected 2 logits rows per preference pair, "
+                f"got {seq_logps.shape[0]} row(s) for {int(pair_batch_size.item())} pair(s)."
+            )
+        return seq_logps[0::2], seq_logps[1::2]

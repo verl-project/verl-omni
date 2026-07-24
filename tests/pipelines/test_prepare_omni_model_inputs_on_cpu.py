@@ -42,8 +42,15 @@ def _bootstrap_pipeline_modules():
     sys.modules.setdefault("verl_omni", types.ModuleType("verl_omni"))
     sys.modules.setdefault("verl_omni.pipelines", types.ModuleType("verl_omni.pipelines"))
     sys.modules.setdefault("verl_omni.pipelines.qwen3_omni", types.ModuleType("verl_omni.pipelines.qwen3_omni"))
+    sys.modules.setdefault("verl_omni.models", types.ModuleType("verl_omni.models"))
+    sys.modules.setdefault("verl_omni.models.transformers", types.ModuleType("verl_omni.models.transformers"))
+    qwen3_lora = types.ModuleType("verl_omni.models.transformers.qwen3_omni_moe_lora")
+    qwen3_lora.model_uses_lora = lambda model_config: False
+    qwen3_lora.unfuse_qwen3_omni_thinker_moe_experts = lambda module: 0
+    sys.modules["verl_omni.models.transformers.qwen3_omni_moe_lora"] = qwen3_lora
     workers_config = types.ModuleType("verl_omni.workers.config")
     workers_config.DiffusionModelConfig = object
+    workers_config.OmniModelConfig = object
     sys.modules["verl_omni.workers.config"] = workers_config
 
     _load_module(
@@ -66,10 +73,23 @@ class _FakeModelConfig:
     model_stage: str = "thinker"
     external_lib: str | None = None
 
+    def get_processor(self):
+        class _Tokenizer:
+            @staticmethod
+            def get_vocab():
+                return {"<|image_pad|>": 101, "<|video_pad|>": 102, "<|audio_pad|>": 103}
+
+        return _Tokenizer()
+
 
 @pytest.fixture(scope="module")
 def prepare_omni_model_inputs():
     return _bootstrap_pipeline_modules().prepare_omni_model_inputs
+
+
+@pytest.fixture(scope="module")
+def omni_pipeline_utils():
+    return _bootstrap_pipeline_modules()
 
 
 class TestPrepareOmniModelInputs:
@@ -138,3 +158,51 @@ class TestPrepareOmniModelInputs:
         )
         model_inputs = prepare_omni_model_inputs(_FakeModelConfig(), micro_batch)
         assert set(model_inputs) == set(micro_batch.keys())
+
+
+class TestPrepareOmniPreferenceInputs:
+    def test_flattens_preference_branches_without_packing_attention(self, omni_pipeline_utils):
+        micro_batch = TensorDict(
+            {
+                "input_ids": torch.tensor([[[1, 2, 0], [1, 3, 4]], [[5, 6, 0], [5, 7, 8]]]),
+                "attention_mask": torch.tensor([[[1, 1, 0], [1, 1, 1]], [[1, 1, 0], [1, 1, 1]]]),
+                "labels": torch.tensor([[[-100, 2, -100], [-100, 3, 4]], [[-100, 6, -100], [-100, 7, 8]]]),
+                "position_ids": torch.arange(2 * 2 * 3 * 3).reshape(2, 2, 3, 3),
+                "image_mask": torch.zeros(2, 2, 3, dtype=torch.bool),
+            },
+            batch_size=[2],
+        )
+
+        model_inputs, labels, pair_batch_size = omni_pipeline_utils.prepare_omni_preference_inputs(
+            _FakeModelConfig(), micro_batch
+        )
+
+        assert pair_batch_size.item() == 2
+        assert model_inputs["input_ids"].shape == (4, 3)
+        assert model_inputs["attention_mask"].shape == (4, 3)
+        assert model_inputs["position_ids"].shape == (4, 4, 3)
+        assert labels.shape == (4, 3)
+        torch.testing.assert_close(model_inputs["input_ids"][0], torch.tensor([1, 2, 0]))
+        torch.testing.assert_close(model_inputs["input_ids"][1], torch.tensor([1, 3, 4]))
+
+    def test_compute_preference_logps_splits_even_rows(self, omni_pipeline_utils):
+        labels = torch.tensor(
+            [
+                [-100, 1, 2],
+                [-100, 3, 4],
+                [-100, 5, 6],
+                [-100, 7, 8],
+            ]
+        )
+        logits = torch.zeros(4, 3, 10)
+
+        chosen, rejected = omni_pipeline_utils.compute_omni_preference_logps(
+            _FakeModelConfig(),
+            logits,
+            labels,
+            torch.tensor(2),
+        )
+
+        assert chosen.shape == (2,)
+        assert rejected.shape == (2,)
+        torch.testing.assert_close(chosen, rejected)
