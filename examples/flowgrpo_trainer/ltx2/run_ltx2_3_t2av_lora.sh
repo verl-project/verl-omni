@@ -7,7 +7,7 @@ MODEL_PATH=${MODEL_PATH:-dg845/LTX-2.3-Diffusers}
 DATA_DIR=${DATA_DIR:-$WORKSPACE/data/vid_prompt/verl_omni}
 NUM_GPUS=${NUM_GPUS:-8}
 ROLLOUT_TP=${ROLLOUT_TP:-$NUM_GPUS}
-TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-15}
+TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-100}
 
 train_path=$DATA_DIR/train.parquet
 test_path=$DATA_DIR/test.parquet
@@ -51,7 +51,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.lora_alpha=128 \
     actor_rollout_ref.model.target_modules="$ltx_lora_targets" \
     actor_rollout_ref.model.fsdp_layer_prefixes="['transformer_blocks.']" \
-    actor_rollout_ref.actor.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap=[LTX2VideoTransformerBlock] \
+    '+actor_rollout_ref.actor.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap=[LTX2VideoTransformerBlock]' \
     actor_rollout_ref.actor.strategy=fsdp \
     actor_rollout_ref.actor.optim.lr=3e-4 \
     actor_rollout_ref.actor.optim.weight_decay=1e-4 \
@@ -97,7 +97,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.val_kwargs.pipeline.guidance_scale=4.0 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
-    reward.num_workers=$NUM_GPUS \
+    reward.num_workers=1 \
     reward.reward_model.enable=False \
     reward.custom_reward_function.path=pkg://verl_omni.reward_loop.reward_manager.multi \
     reward.custom_reward_function.name=_multi_reward_placeholder \
