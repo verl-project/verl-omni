@@ -185,7 +185,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-jsonl", default=None, help="Optional per-sample logprob result JSONL path.")
     parser.add_argument("--batch-size", type=int, default=1, help="Validation batch size within each modality.")
-    parser.add_argument("--max-samples", type=int, default=-1, help="Limit samples for smoke tests.")
+    parser.add_argument("--max-samples", type=int, default=-1, help="Limit samples per data file for smoke tests.")
     parser.add_argument("--device", default="cuda", help="Device to run validation on, e.g. cuda, cuda:0, cpu.")
     parser.add_argument(
         "--device-map",
@@ -520,9 +520,10 @@ def load_qwen3_omni_lora_model(args: argparse.Namespace):
     return model, tokenizer, processor, model_config, adapter_path, input_device
 
 
-def build_dataset(args: argparse.Namespace, processor) -> OfflineMLLMDPODataset:
+def build_dataset(args: argparse.Namespace, processor, data_files: list[str] | None = None) -> OfflineMLLMDPODataset:
+    data_files = args.data_files if data_files is None else data_files
     mm_configs = json.loads(args.mm_configs) if args.mm_configs is not None else dict(DEFAULT_MM_CONFIGS)
-    logger.info("Building held-out dataset from %s", args.data_files)
+    logger.info("Building held-out dataset from %s", data_files)
     logger.info("Using multimodal transform configs: %s", mm_configs)
     data_config = OmegaConf.create(
         {
@@ -536,7 +537,7 @@ def build_dataset(args: argparse.Namespace, processor) -> OfflineMLLMDPODataset:
         }
     )
     dataset = OfflineMLLMDPODataset(
-        data_files=args.data_files,
+        data_files=data_files,
         tokenizer=None,
         processor=processor,
         config=data_config,
@@ -613,9 +614,19 @@ def main() -> None:
         args.output_jsonl,
     )
     model, _tokenizer, processor, model_config, adapter_path, input_device = load_qwen3_omni_lora_model(args)
-    dataset = build_dataset(args, processor)
-    counts = modality_counts(dataset)
-    total_batches = count_batches(counts, args.batch_size)
+    datasets = []
+    counts: dict[str, int] = defaultdict(int)
+    total_batches = 0
+    total_samples = 0
+    for data_file in args.data_files:
+        dataset = build_dataset(args, processor, [data_file])
+        dataset_counts = modality_counts(dataset)
+        datasets.append((data_file, dataset, dataset_counts))
+        total_batches += count_batches(dataset_counts, args.batch_size)
+        total_samples += len(dataset)
+        for modality, count in dataset_counts.items():
+            counts[modality] += count
+    counts = dict(sorted(counts.items()))
     logger.info("Validation modality counts: %s", counts)
     logger.info("Validation will run %d batch(es)", total_batches)
 
@@ -635,105 +646,113 @@ def main() -> None:
     batch_count = 0
     current_modality = None
     logger.info("Loaded adapter: %s", adapter_path)
-    logger.info("Evaluating %d held-out preference pair(s)", len(dataset))
+    logger.info("Evaluating %d held-out preference pair(s)", total_samples)
 
     with torch.inference_mode():
-        for modality, indices in iter_modality_batches(dataset, args.batch_size):
-            if modality != current_modality:
-                current_modality = modality
-                logger.info("Starting modality=%s with %d sample(s)", modality, counts.get(modality, 0))
-            logger.debug(
-                "Preparing batch %d/%d modality=%s indices=%s", batch_count + 1, total_batches, modality, indices
-            )
-            features = [dataset[index] for index in indices]
-            batch = offline_mllm_dpo_collate_fn(features)
-            model_batch = tensor_batch_only(batch, input_device, args.average_log_prob)
-            logger.debug("Building preference model inputs for batch %d/%d", batch_count + 1, total_batches)
-            policy_scores = score_preference_batch(
-                model=model,
-                model_config=model_config,
-                model_batch=model_batch,
-                input_device=input_device,
-                average_log_prob=args.average_log_prob,
-            )
-            reference_scores = None
-            if not args.skip_reference:
-                with peft_adapters_disabled(model):
-                    reference_scores = score_preference_batch(
-                        model=model,
-                        model_config=model_config,
-                        model_batch=model_batch,
-                        input_device=input_device,
-                        average_log_prob=args.average_log_prob,
-                    )
-
-            result_rows = []
-            for offset, index in enumerate(indices):
-                chosen = float(policy_scores.chosen_logps[offset].detach().cpu())
-                rejected = float(policy_scores.rejected_logps[offset].detach().cpu())
-                raw_margin = chosen - rejected
-                raw_stats.update(raw_margin)
-                raw_stats_by_modality[modality].update(raw_margin)
-                row = {
-                    "index": int(index),
-                    "uid": safe_json_value(batch.get("uid", [None])[offset]),
-                    "modality": modality,
-                    "policy_chosen_logp": chosen,
-                    "policy_rejected_logp": rejected,
-                    "raw_policy_margin": raw_margin,
-                    "raw_policy_correct": raw_margin > 0,
-                    "chosen_label_tokens": int(policy_scores.label_token_counts[offset * 2].detach().cpu()),
-                    "rejected_label_tokens": int(policy_scores.label_token_counts[offset * 2 + 1].detach().cpu()),
-                }
-                if reference_scores is not None:
-                    ref_chosen = float(reference_scores.chosen_logps[offset].detach().cpu())
-                    ref_rejected = float(reference_scores.rejected_logps[offset].detach().cpu())
-                    reference_raw_margin = ref_chosen - ref_rejected
-                    reference_raw_stats.update(reference_raw_margin)
-                    reference_raw_stats_by_modality[modality].update(reference_raw_margin)
-                    chosen_reward = chosen - ref_chosen
-                    rejected_reward = rejected - ref_rejected
-                    dpo_margin = chosen_reward - rejected_reward
-                    dpo_stats.update(dpo_margin)
-                    dpo_stats_by_modality[modality].update(dpo_margin)
-                    row.update(
-                        {
-                            "reference_chosen_logp": ref_chosen,
-                            "reference_rejected_logp": ref_rejected,
-                            "reference_raw_margin": reference_raw_margin,
-                            "reference_raw_correct": reference_raw_margin > 0,
-                            "chosen_reward": chosen_reward,
-                            "rejected_reward": rejected_reward,
-                            "dpo_margin": dpo_margin,
-                            "dpo_correct": dpo_margin > 0,
-                        }
-                    )
-                result_rows.append(row)
-            write_results(args.output_jsonl, result_rows)
-
-            del features, batch, model_batch, policy_scores, reference_scores, result_rows
-            if input_device.type == "cuda":
-                torch.cuda.empty_cache()
-
-            batch_count += 1
-            if args.log_every > 0 and batch_count % args.log_every == 0:
-                elapsed = time.perf_counter() - started_at
-                logger.info(
-                    "Progress: batches=%d/%d samples=%d/%d raw_accuracy=%.4f raw_margin=%.4f "
-                    "reference_raw_accuracy=%.4f reference_raw_margin=%.4f "
-                    "dpo_accuracy=%.4f dpo_margin=%.4f elapsed=%.1fs",
-                    batch_count,
+        for data_file, dataset, dataset_counts in datasets:
+            logger.info("Starting data file=%s with counts=%s", data_file, dataset_counts)
+            for modality, indices in iter_modality_batches(dataset, args.batch_size):
+                if modality != current_modality:
+                    current_modality = modality
+                    logger.info("Starting modality=%s with %d total sample(s)", modality, counts.get(modality, 0))
+                logger.debug(
+                    "Preparing batch %d/%d file=%s modality=%s indices=%s",
+                    batch_count + 1,
                     total_batches,
-                    raw_stats.total,
-                    len(dataset),
-                    raw_stats.accuracy,
-                    raw_stats.mean_margin,
-                    reference_raw_stats.accuracy,
-                    reference_raw_stats.mean_margin,
-                    dpo_stats.accuracy,
-                    dpo_stats.mean_margin,
-                    elapsed,
+                    data_file,
+                    modality,
+                    indices,
                 )
+                features = [dataset[index] for index in indices]
+                batch = offline_mllm_dpo_collate_fn(features)
+                model_batch = tensor_batch_only(batch, input_device, args.average_log_prob)
+                logger.debug("Building preference model inputs for batch %d/%d", batch_count + 1, total_batches)
+                policy_scores = score_preference_batch(
+                    model=model,
+                    model_config=model_config,
+                    model_batch=model_batch,
+                    input_device=input_device,
+                    average_log_prob=args.average_log_prob,
+                )
+                reference_scores = None
+                if not args.skip_reference:
+                    with peft_adapters_disabled(model):
+                        reference_scores = score_preference_batch(
+                            model=model,
+                            model_config=model_config,
+                            model_batch=model_batch,
+                            input_device=input_device,
+                            average_log_prob=args.average_log_prob,
+                        )
+
+                result_rows = []
+                for offset, index in enumerate(indices):
+                    chosen = float(policy_scores.chosen_logps[offset].detach().cpu())
+                    rejected = float(policy_scores.rejected_logps[offset].detach().cpu())
+                    raw_margin = chosen - rejected
+                    raw_stats.update(raw_margin)
+                    raw_stats_by_modality[modality].update(raw_margin)
+                    row = {
+                        "data_file": data_file,
+                        "index": int(index),
+                        "uid": safe_json_value(batch.get("uid", [None])[offset]),
+                        "modality": modality,
+                        "policy_chosen_logp": chosen,
+                        "policy_rejected_logp": rejected,
+                        "raw_policy_margin": raw_margin,
+                        "raw_policy_correct": raw_margin > 0,
+                        "chosen_label_tokens": int(policy_scores.label_token_counts[offset * 2].detach().cpu()),
+                        "rejected_label_tokens": int(policy_scores.label_token_counts[offset * 2 + 1].detach().cpu()),
+                    }
+                    if reference_scores is not None:
+                        ref_chosen = float(reference_scores.chosen_logps[offset].detach().cpu())
+                        ref_rejected = float(reference_scores.rejected_logps[offset].detach().cpu())
+                        reference_raw_margin = ref_chosen - ref_rejected
+                        reference_raw_stats.update(reference_raw_margin)
+                        reference_raw_stats_by_modality[modality].update(reference_raw_margin)
+                        chosen_reward = chosen - ref_chosen
+                        rejected_reward = rejected - ref_rejected
+                        dpo_margin = chosen_reward - rejected_reward
+                        dpo_stats.update(dpo_margin)
+                        dpo_stats_by_modality[modality].update(dpo_margin)
+                        row.update(
+                            {
+                                "reference_chosen_logp": ref_chosen,
+                                "reference_rejected_logp": ref_rejected,
+                                "reference_raw_margin": reference_raw_margin,
+                                "reference_raw_correct": reference_raw_margin > 0,
+                                "chosen_reward": chosen_reward,
+                                "rejected_reward": rejected_reward,
+                                "dpo_margin": dpo_margin,
+                                "dpo_correct": dpo_margin > 0,
+                            }
+                        )
+                    result_rows.append(row)
+                write_results(args.output_jsonl, result_rows)
+
+                del features, batch, model_batch, policy_scores, reference_scores, result_rows
+                if input_device.type == "cuda":
+                    torch.cuda.empty_cache()
+
+                batch_count += 1
+                if args.log_every > 0 and batch_count % args.log_every == 0:
+                    elapsed = time.perf_counter() - started_at
+                    logger.info(
+                        "Progress: batches=%d/%d samples=%d/%d raw_accuracy=%.4f raw_margin=%.4f "
+                        "reference_raw_accuracy=%.4f reference_raw_margin=%.4f "
+                        "dpo_accuracy=%.4f dpo_margin=%.4f elapsed=%.1fs",
+                        batch_count,
+                        total_batches,
+                        raw_stats.total,
+                        total_samples,
+                        raw_stats.accuracy,
+                        raw_stats.mean_margin,
+                        reference_raw_stats.accuracy,
+                        reference_raw_stats.mean_margin,
+                        dpo_stats.accuracy,
+                        dpo_stats.mean_margin,
+                        elapsed,
+                    )
 
     summary = {
         "raw_policy": {
