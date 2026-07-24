@@ -70,6 +70,7 @@ jobs:
       mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
     steps:
       - id: resolve-mode
+        shell: bash
         run: |
           mode="none"
           pr_labels="${{ github.event_name == 'pull_request' && join(github.event.pull_request.labels.*.name, ',') || '' }}"
