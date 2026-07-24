@@ -61,6 +61,7 @@ class DiffusionPipelineConfig(BaseConfig):
     height: int = 512
     width: int = 512
     num_inference_steps: int = 10
+    output_type: str = "image"
     true_cfg_scale: float = 1.0
     max_sequence_length: int = 512
     guidance_scale: Optional[float] = None

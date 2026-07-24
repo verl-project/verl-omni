@@ -101,3 +101,37 @@ class TestVllmOmniPipelineBaseRegistry:
 
         assert "diffuse" in QwenImagePipelineWithLogProb.__dict__
         assert "diffuse" not in QwenImageDiffusionNFTPipeline.__dict__
+
+    def test_sd3_latent_postprocess_is_defined_by_sd3_adapter(self, monkeypatch):
+        pytest.importorskip("vllm_omni")
+        import torch
+
+        from verl_omni.pipelines.sd3_flow_grpo import vllm_omni_rollout_adapter
+
+        image_outputs = []
+
+        def image_postprocess_factory(od_config):
+            def image_postprocess(output):
+                image_outputs.append(output)
+                return "decoded"
+
+            return image_postprocess
+
+        monkeypatch.setattr(
+            vllm_omni_rollout_adapter,
+            "_SD3_IMAGE_POST_PROCESS_FUNC",
+            image_postprocess_factory,
+        )
+
+        assert (
+            vllm_omni_rollout_adapter.pipeline_sd3.get_sd3_image_post_process_func
+            is vllm_omni_rollout_adapter.get_latent_post_process_func
+        )
+
+        postprocess = vllm_omni_rollout_adapter.get_latent_post_process_func(od_config=None)
+        latent = torch.zeros(1, 16, 2, 2)
+        image = torch.zeros(1, 3, 2, 2)
+        assert postprocess(latent) is latent
+        assert postprocess(image) == "decoded"
+        assert len(image_outputs) == 1
+        assert image_outputs[0] is image
