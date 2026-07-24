@@ -54,7 +54,7 @@ jobs:
     #   ci-e2e-diffusion           -> diffusion trainer e2e coverage on one 4-GPU runner
     # Push events also run all groups on one 8-GPU runner.
     if: github.repository_owner == 'verl-project'
-    runs-on: linux-aarch64-a2b3-8
+    runs-on: linux-aarch64-a2b4-8
     timeout-minutes: 120
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-a3-ubuntu22.04-py3.11-vllm
