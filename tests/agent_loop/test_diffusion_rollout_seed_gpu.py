@@ -15,7 +15,6 @@
 """GPU integration test for deterministic rollout seeding through vLLM-omni."""
 
 import os
-import random
 import shutil
 import tempfile
 
@@ -38,17 +37,6 @@ pytestmark = [
     pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA"),
     pytest.mark.skipif(not os.path.isdir(MODEL_PATH), reason=f"tiny model missing at {MODEL_PATH}"),
 ]
-
-
-def _configure_deterministic_prngs(seed: int = 42) -> None:
-    """Seed CPU/GPU PRNGs and prefer deterministic cuDNN kernels for this process."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
 
 def _create_tp_compatible_model(parent_dir, src_model_path, num_attention_heads=2):
@@ -142,6 +130,10 @@ def _build_seed_rollout_config(tmp_dir: str, *, default_num_gpus: int, num_worke
     config.data.max_prompt_length = max_length
     config.actor_rollout_ref.rollout.max_model_len = max_length
     config.actor_rollout_ref.rollout.tensor_model_parallel_size = tp_size
+    # Serial requests only: packing changes pre-window ODE batch shapes and breaks
+    # bit-equality for window-start latents until vLLM-Omni is batch-invariant.
+    config.actor_rollout_ref.rollout.step_execution = False
+    config.actor_rollout_ref.rollout.max_num_seqs = 1
 
     # Smoke: prefer local FLASH_ATTN over product-default Hub FA3 (cf. FSDP engine test).
     from tests.utils.smoke_attention import resolve_smoke_attention_backends
@@ -161,7 +153,7 @@ def multi_worker_seed_rollout_config() -> DictConfig:
 
 
 def _initial_latents(result: DataProto) -> torch.Tensor:
-    """Return the first denoising latent for every rollout row."""
+    """Return the SDE-window-start latent (``all_latents[:, 0]``) for every row."""
     return result.batch["all_latents"][:, 0].detach().cpu()
 
 
@@ -177,12 +169,9 @@ def test_rollout_without_seed_produces_different_initial_latents(multi_worker_se
                 "TOKENIZERS_PARALLELISM": "true",
                 "NCCL_DEBUG": "WARN",
                 "VLLM_LOGGING_LEVEL": "INFO",
-                "PYTHONHASHSEED": "0",
-                "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
             }
         }
     )
-    _configure_deterministic_prngs()
     try:
         AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
         llm_server_manager = LLMServerManager.create(config=multi_worker_seed_rollout_config)
@@ -216,15 +205,14 @@ def test_rollout_without_seed_produces_different_initial_latents(multi_worker_se
 
 
 def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollout_config):
-    """Rollout seeds are reproducible and diverse with agent.num_workers > 1.
+    """Rollout seeds are bit-reproducible and diverse with serial multi-worker rollout.
 
-    - Same ``rollout_seed`` + batch -> matching initial latents across reruns.
-    - Distinct rollout indices within one step -> distinct initial latents.
-    - Covers multi-worker seed dispatch under request packing.
+    - Same ``rollout_seed`` + batch -> bit-equal window-start latents across reruns.
+    - Distinct rollout indices within one step -> distinct latents.
+    - Uses ``max_num_seqs=1`` so pack-shape bf16 drift cannot affect reproducibility.
 
-    ``allclose`` (not bit-equality): with ``sde_window_range=[0, 5]``, window
-    start may be ``> 0``, so ``all_latents[:, 0]`` includes transformer steps
-    whose bf16 numerics can drift slightly across pack shapes (~1e-2 observed).
+    TODO: After vLLM-Omni supports batch-invariant inference, add a request-level
+    packing variant (``max_num_seqs>1``) with the same bit-equality check.
     """
     ray.init(
         runtime_env={
@@ -232,12 +220,9 @@ def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollou
                 "TOKENIZERS_PARALLELISM": "true",
                 "NCCL_DEBUG": "WARN",
                 "VLLM_LOGGING_LEVEL": "INFO",
-                "PYTHONHASHSEED": "0",
-                "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
             }
         }
     )
-    _configure_deterministic_prngs()
     try:
         AgentLoopManager.agent_loop_workers_class = ray.remote(DiffusionAgentLoopWorker)
         llm_server_manager = LLMServerManager.create(config=multi_worker_seed_rollout_config)
@@ -259,10 +244,8 @@ def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollou
         latents_first = _initial_latents(first)
         latents_second = _initial_latents(second)
         assert latents_first.shape[0] == n
-        # Allow small bf16 pack-shape drift after pre-window ODE steps; seeds that
-        # disagree produce O(1) diffs, so this stays a real regression check.
-        assert torch.allclose(latents_first, latents_second, rtol=1e-3, atol=1.5e-2), (
-            "identical rollout_seed and batch must reproduce initial latents on GPU "
+        assert torch.equal(latents_first, latents_second), (
+            "identical rollout_seed and batch must bit-reproduce window-start latents on GPU "
             f"(max abs diff={(latents_first - latents_second).abs().max().item():.4g})"
         )
 
