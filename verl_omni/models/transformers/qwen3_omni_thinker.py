@@ -74,7 +74,10 @@ def _register_qwen3_omni_automodel() -> None:
     Qwen3OmniMoeForConditionalGeneration.get_input_embeddings = _qwen3_omni_get_input_embeddings
     Qwen3OmniMoeForConditionalGeneration.set_input_embeddings = _qwen3_omni_set_input_embeddings
     # Upstream lists Qwen3OmniMoeDecoderLayer which does not exist; fix to the real class.
-    Qwen3OmniMoeForConditionalGeneration._no_split_modules = ["Qwen3OmniMoeThinkerTextDecoderLayer"]
+    Qwen3OmniMoeForConditionalGeneration._no_split_modules = [
+        "Qwen3OmniMoeThinkerTextDecoderLayer",
+        "Qwen3OmniMoeVisionBlock",
+    ]
     # _verl_strip_modules: verl's FSDPEngine drops these sub-modules for Thinker-only training.
     Qwen3OmniMoeForConditionalGeneration._verl_strip_modules = [
         "talker",
@@ -118,6 +121,7 @@ def patch_hf_processor_for_qwen3_omni() -> None:
             return result
 
         try:
+            import numpy as np
             from transformers import AutoConfig, AutoProcessor, PreTrainedTokenizerBase
 
             processor = AutoProcessor.from_pretrained(name_or_path, **kwargs)
@@ -132,8 +136,57 @@ def patch_hf_processor_for_qwen3_omni() -> None:
             processor.spatial_merge_size = config.thinker_config.vision_config.spatial_merge_size
             processor.config.vision_start_token_id = config.talker_config.vision_start_token_id
             model_class = Qwen3OmniMoeThinkerForConditionalGeneration
-            processor.get_rope_index = types.MethodType(model_class.get_rope_index, processor)
+
+            # cast to int64 to avoid BF16 large-int rounding in fsdp.
+            _ori_get_rope_index = types.MethodType(model_class.get_rope_index, processor)
+
+            def _get_rope_index_long(*args, **kwargs):
+                vision_position_ids, deltas = _ori_get_rope_index(*args, **kwargs)
+                return vision_position_ids.long(), deltas
+
+            processor.get_rope_index = _get_rope_index_long
             processor.get_llm_pos_ids_for_vision = types.MethodType(model_class.get_llm_pos_ids_for_vision, processor)
+
+            def _dedup_pad_tokens(self, prompt_ids: list[int]) -> list[int]:
+                """Collapse consecutive multimodal pad tokens to one.
+
+                HF processor and vLLM's ``_apply_prompt_updates`` both expand the pad
+                token, causing double expansion. Collapse every run of identical
+                placeholder tokens before sending to vLLM-Omni, mirroring
+                ``verl.workers.rollout.utils.qwen2_5_vl_dedup_image_tokens``.
+                """
+                tokenizer = getattr(self, "tokenizer", None)
+                if tokenizer is None:
+                    return prompt_ids
+
+                pad_ids: set[int] = set()
+                for tok_attr in ("image_token", "video_token", "audio_token"):
+                    tok = getattr(self, tok_attr, None)
+                    if tok is None:
+                        continue
+                    try:
+                        tid = tokenizer.convert_tokens_to_ids(tok)
+                    except Exception:
+                        continue
+                    if tid is None or tid == getattr(tokenizer, "unk_token_id", None):
+                        continue
+                    pad_ids.add(int(tid))
+                if not pad_ids:
+                    return prompt_ids
+
+                arr = np.asarray(prompt_ids, dtype=np.int64)
+                if arr.size == 0:
+                    return prompt_ids
+                is_pad = np.isin(arr, list(pad_ids))
+                # Collapse consecutive identical pad tokens to one: HF processor and
+                # vLLM's _apply_prompt_updates both expand the pad token, so the raw
+                # prompt_ids already carries the full run.
+                keep = np.ones(arr.size, dtype=bool)
+                same_as_prev = is_pad[1:] & is_pad[:-1] & (arr[1:] == arr[:-1])
+                keep[1:] &= ~same_as_prev
+                return arr[keep].tolist()
+
+            processor.dedup_pad_tokens = types.MethodType(_dedup_pad_tokens, processor)
             return processor
         except Exception:
             return None
@@ -325,12 +378,47 @@ def patch_hf_tokenizer_for_qwen3_omni() -> None:
             mod.hf_tokenizer = _patched_hf_tokenizer
 
 
+def patch_register_vllm_moe_model_weight_loader() -> None:
+    """Register Qwen3-Omni Thinker with verl's ``SUPPORTED_MOE_MODELS`` whitelist.
+
+    verl's ``patch_vllm_moe_model_weight_loader`` re-attaches ``weight_loader``
+    on FusedMoE ``w13_weight``/``w2_weight`` before IPC weight sync (the attr
+    that vllm-ascend's ``process_weights_after_loading`` drops when rebuilding
+    the params). But it early-returns unless the model class is in
+    ``SUPPORTED_MOE_MODELS``. Qwen3-Omni Thinker isn't there by default, so we
+    append it.
+    """
+    try:
+        from verl.utils.vllm import patch as _vp
+    except ImportError:
+        return
+
+    added = []
+    for mod_path, cls_name in [
+        (
+            "vllm_omni.model_executor.models.qwen3_omni.qwen3_omni_moe_thinker",
+            "Qwen3OmniMoeThinkerForConditionalGeneration",
+        ),
+    ]:
+        try:
+            import importlib
+
+            mod = importlib.import_module(mod_path)
+            cls = getattr(mod, cls_name, None)
+            if cls is not None and cls not in _vp.SUPPORTED_MOE_MODELS:
+                _vp.SUPPORTED_MOE_MODELS.append(cls)
+                added.append(f"{mod_path}.{cls_name}")
+        except ImportError:
+            continue
+
+
 def apply_qwen3_omni_thinker_patches() -> None:
     """Apply all Qwen3-Omni Thinker patches (idempotent registrations)."""
     _register_qwen3_omni_automodel()
     patch_hf_processor_for_qwen3_omni()
     _patch_unfuse_qwen3_omni_thinker_experts()
     patch_hf_tokenizer_for_qwen3_omni()
+    patch_register_vllm_moe_model_weight_loader()
 
 
 # Apply on import so this module works as a verl ``external_lib`` target.
