@@ -145,6 +145,73 @@ def get_diffusion_loss_fn(name: str) -> DiffusionLossFn:
     return DIFFUSION_LOSS_REGISTRY[name]
 
 
+@register_diffusion_loss("bagel_sft")
+class BagelSFTLoss(DiffusionLossFn):
+    """Supervised BAGEL loss for Uni-COT text spans and generated image spans."""
+
+    required_model_output_keys = ("logits",)
+    required_data_keys = ("labels",)
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        image_velocity: torch.Tensor | None = None,
+        image_velocity_target: torch.Tensor | None = None,
+        image_loss_mask: torch.Tensor | None = None,
+        ce_weight: float = 1.0,
+        mse_weight: float = 1.0,
+        ignore_index: int = -100,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute weighted text CE and optional image velocity MSE losses."""
+        shift_logits = logits[:, :-1].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+        ce_loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.shape[-1]),
+            shift_labels.view(-1),
+            ignore_index=ignore_index,
+        )
+
+        total_loss = ce_loss * ce_weight
+        metrics: dict[str, Any] = {
+            "bagel_sft/ce_loss": ce_loss.detach().float(),
+            "bagel_sft/text_tokens": (shift_labels != ignore_index).sum().detach().float(),
+        }
+
+        if image_velocity is not None and image_velocity_target is not None:
+            mse = (image_velocity.float() - image_velocity_target.float()).pow(2)
+            if image_loss_mask is not None:
+                mask = image_loss_mask.to(device=mse.device, dtype=mse.dtype)
+                while mask.ndim < mse.ndim:
+                    mask = mask.unsqueeze(-1)
+                mask = mask.expand_as(mse)
+                mse_loss = (mse * mask).sum() / mask.sum().clamp_min(1.0)
+            else:
+                mse_loss = mse.mean()
+            total_loss = total_loss + mse_loss * mse_weight
+            metrics["bagel_sft/mse_loss"] = mse_loss.detach().float()
+        else:
+            metrics["bagel_sft/mse_loss"] = logits.new_tensor(0.0)
+
+        return total_loss, metrics
+
+    def __call__(self, *, config: DiffusionActorConfig, model_output, data: TensorDict) -> DiffusionLossResult:
+        loss_cfg = config.diffusion_loss
+        loss, metrics = self.compute_loss(
+            logits=model_output["logits"],
+            labels=data["labels"],
+            image_velocity=model_output.get("image_velocity", None),
+            image_velocity_target=data.get("image_velocity_target", None),
+            image_loss_mask=data.get("image_loss_mask", None),
+            ce_weight=float(getattr(loss_cfg, "ce_weight", 1.0)),
+            mse_weight=float(getattr(loss_cfg, "mse_weight", 1.0)),
+            ignore_index=int(getattr(loss_cfg, "ignore_index", -100)),
+        )
+        return DiffusionLossResult(loss=loss, metrics=metrics, add_loss_metric=True)
+
+
 class DiffusionAdvantageEstimator(str, Enum):
     """Advantage estimators specific to diffusion-based training."""
 

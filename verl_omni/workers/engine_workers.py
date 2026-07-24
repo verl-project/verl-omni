@@ -694,6 +694,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 "diffusion_model",
                 "diffusion_dpo_model",
                 "diffusion_nft_model",
+                "bagel_sft_model",
             ):
                 self.loss_fn = partial(diffusion_loss, config=actor_config)
             else:

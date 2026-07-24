@@ -1245,6 +1245,95 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
         return loss, output
 
 
+@EngineRegistry.register(model_type="bagel_sft_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+class BagelSFTDiffusersFSDPEngine(DiffusersFSDPEngine):
+    """FSDP engine for BAGEL supervised fine-tuning."""
+
+    def forward_backward_batch(
+        self, data: TensorDict, loss_function: Callable, forward_only: bool = False
+    ) -> list[TensorDict]:
+        tu.assign_non_tensor(data, use_dynamic_bsz=False)
+        micro_batches, indices = prepare_micro_batches(
+            data=data,
+            dp_group=self.get_data_parallel_group(),
+            same_micro_num_in_dp=True,
+        )
+
+        output_lst = []
+        gradient_accumulation_steps = len(micro_batches)
+        ctx = torch.no_grad() if forward_only else nullcontext()
+        for micro_batch in micro_batches:
+            micro_batch = micro_batch.to(get_device_id())
+            tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
+            with ctx:
+                loss, meta_info = self.forward_step(
+                    micro_batch,
+                    loss_function=loss_function,
+                    forward_only=forward_only,
+                    step=None,
+                )
+                if not forward_only:
+                    loss.backward()
+            output_lst.append(
+                {
+                    "model_output": [meta_info["model_output"]],
+                    "loss": [meta_info["loss"]],
+                    "metrics": [meta_info["metrics"]],
+                }
+            )
+
+        return self.postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+
+    def prepare_model_inputs(self, micro_batch: TensorDict, step: int = None):
+        del step
+        return {
+            "input_ids": micro_batch["input_ids"],
+            "attention_mask": micro_batch.get("attention_mask", None),
+            "image_hidden_states": micro_batch.get("image_hidden_states", None),
+            "timesteps": micro_batch.get("timesteps", None),
+            "latent_pos_ids": micro_batch.get("latent_pos_ids", None),
+        }
+
+    def prepare_model_outputs(self, output, micro_batch: TensorDict):
+        del micro_batch
+        model_output = {"logits": output.logits}
+        if output.image_velocity is not None:
+            model_output["image_velocity"] = output.image_velocity
+        return model_output
+
+    def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
+        del step
+        raw_output = self.module(**self.prepare_model_inputs(micro_batch=micro_batch))
+        model_output = self.prepare_model_outputs(output=raw_output, micro_batch=micro_batch)
+
+        if loss_function is not None:
+            data_dict = {"labels": micro_batch["labels"]}
+            if micro_batch.get("image_velocity_target", None) is not None:
+                data_dict["image_velocity_target"] = micro_batch["image_velocity_target"]
+            if micro_batch.get("image_loss_mask", None) is not None:
+                data_dict["image_loss_mask"] = micro_batch["image_loss_mask"]
+            data = tu.get_tensordict(data_dict)
+            tu.assign_non_tensor(
+                data,
+                gradient_accumulation_steps=tu.get_non_tensor_data(
+                    micro_batch, "gradient_accumulation_steps", default=None
+                ),
+                sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
+            )
+            loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
+        else:
+            assert forward_only, "forward_only must be True when loss_function is None"
+            loss = torch.tensor(1.0, device=model_output["logits"].device)
+            metrics = {}
+
+        output = {
+            "model_output": model_output,
+            "loss": loss.detach().item(),
+            "metrics": metrics,
+        }
+        return loss, output
+
+
 class EngineEvalModeCtx(BaseEngineCtx):
     def __init__(self, engine: DiffusersFSDPEngine, **kwargs):
         super().__init__(engine=engine, mode="eval", **kwargs)
