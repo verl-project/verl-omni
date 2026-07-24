@@ -246,15 +246,23 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
         prompt_mask: torch.BoolTensor | None = None,
         priority: int = 0,
     ) -> DiffusionOutput | TokenOutput:
         prompt_ids = normalize_token_ids(prompt_ids)
-        multi_modal_data = self._build_multi_modal_data(image_data, video_data)
+        multi_modal_data = self._build_multi_modal_data(image_data, video_data, audio_data)
         lora_request = await self._resolve_lora_request()
         prompt, params = self._preprocess_input(
-            prompt_ids, sampling_params, multi_modal_data, lora_request, negative_prompt_ids, prompt_mask
+            prompt_ids,
+            sampling_params,
+            multi_modal_data,
+            lora_request,
+            negative_prompt_ids,
+            prompt_mask,
+            mm_processor_kwargs,
         )
         final_res = await self._run_generation(prompt, params, request_id, lora_request, priority)
         return self._process_output(final_res, params, sampling_params)
@@ -264,13 +272,19 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     @staticmethod
-    def _build_multi_modal_data(image_data: Optional[list[Any]], video_data: Optional[list[Any]]) -> dict[str, Any]:
-        """Assemble the vLLM multi_modal_data dict from optional image/video inputs."""
+    def _build_multi_modal_data(
+        image_data: Optional[list[Any]],
+        video_data: Optional[list[Any]],
+        audio_data: Optional[list[Any]] = None,
+    ) -> dict[str, Any]:
+        """Assemble the vLLM multi_modal_data dict from optional image/video/audio inputs."""
         multi_modal_data: dict[str, Any] = {}
         if image_data is not None:
             multi_modal_data["image"] = image_data
         if video_data is not None:
             multi_modal_data["video"] = video_data
+        if audio_data is not None:
+            multi_modal_data["audio"] = audio_data
         return multi_modal_data
 
     async def _resolve_lora_request(self) -> Optional[LoRARequest]:
@@ -304,6 +318,62 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # Mode-specific pipeline steps
     # -----------------------------------------------------------------------
 
+    @staticmethod
+    def _dedup_multimodal_pad_tokens(prompt_ids: list[int], processor) -> list[int]:
+        """Collapse consecutive multimodal pad tokens back to a single sentinel.
+
+        When we call ``self.processor(text=..., images=...)`` in
+        ``AgentLoopBase.apply_chat_template`` the HF processor expands a single
+        ``<|image_pad|>`` / ``<|video_pad|>`` / ``<|audio_pad|>`` placeholder into
+        ``N`` consecutive pad tokens (one per vision/audio patch). If we then
+        ship those expanded ids to vLLM-Omni together with raw
+        ``multi_modal_data``, vLLM-Omni's ``_apply_prompt_updates`` will
+        *re-expand* the first pad token it finds to ``N`` copies — producing
+        ``2N-1`` pad tokens, where only the first ``N`` are attached to vision
+        features and the remaining ``N-1`` are treated as plain text tokens.
+        This is the primary cause of train/infer logprob mismatch
+        (``rollout_probs_diff_mean≈0.3``, ``pearson_corr≈0.3``).
+
+        To prevent double expansion we collapse every run of identical
+        placeholder tokens down to one before sending to vLLM-Omni, mirroring
+        ``verl.workers.rollout.utils.qwen2_5_vl_dedup_image_tokens`` but also
+        handling audio and not relying on processor class-name heuristics.
+        """
+        if processor is None:
+            return prompt_ids
+        tokenizer = getattr(processor, "tokenizer", None)
+        if tokenizer is None:
+            return prompt_ids
+
+        # Resolve pad token ids for image / video / audio placeholders.
+        pad_ids: set[int] = set()
+        for tok_attr in ("image_token", "video_token", "audio_token"):
+            tok = getattr(processor, tok_attr, None)
+            if tok is None:
+                continue
+            try:
+                tid = tokenizer.convert_tokens_to_ids(tok)
+            except Exception:
+                continue
+            # unk_token_id means the token string is not in the vocab
+            if tid is None or tid == getattr(tokenizer, "unk_token_id", None):
+                continue
+            pad_ids.add(int(tid))
+        if not pad_ids:
+            return prompt_ids
+
+        arr = np.asarray(prompt_ids, dtype=np.int64)
+        if arr.size == 0:
+            return prompt_ids
+        is_pad = np.isin(arr, list(pad_ids))
+        # Keep position i if: not a pad token, OR it is a pad token whose
+        # predecessor is not the *same* pad token (i.e. collapse runs of
+        # identical pad tokens to one).
+        keep = np.ones(arr.size, dtype=bool)
+        same_as_prev = is_pad[1:] & is_pad[:-1] & (arr[1:] == arr[:-1])
+        keep[1:] &= ~same_as_prev
+        return arr[keep].tolist()
+
     def _preprocess_input(
         self,
         prompt_ids: list[int],
@@ -312,12 +382,17 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         lora_request: Optional[LoRARequest],
         negative_prompt_ids: Optional[list[int]],
         prompt_mask: torch.BoolTensor | None = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ):
         """Build the engine prompt + sampling params for the active mode.
 
         Returns ``(prompt, params)`` consumed by ``_run_generation``.
         """
         if self._ar_mode:
+            # Deduplicate already-expanded multimodal pad tokens to prevent
+            # double-expansion inside vLLM-Omni (see ``_dedup_multimodal_pad_tokens``).
+            if multi_modal_data:
+                prompt_ids = self._dedup_multimodal_pad_tokens(prompt_ids, self.model_config.processor)
             max_possible_tokens = self.config.max_model_len - len(prompt_ids)
             if max_possible_tokens <= 0:
                 raise ValueError(
@@ -351,6 +426,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             prompt = {"prompt_token_ids": prompt_ids}
             if multi_modal_data:
                 prompt["multi_modal_data"] = multi_modal_data
+            if mm_processor_kwargs:
+                prompt["mm_processor_kwargs"] = mm_processor_kwargs
             return prompt, params
 
         # diffusion
