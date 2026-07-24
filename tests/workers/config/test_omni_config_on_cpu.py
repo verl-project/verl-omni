@@ -13,9 +13,13 @@
 # limitations under the License.
 """CPU tests for omni trainer config dataclasses."""
 
+import json
+import os
+
 import pytest
 
 from verl_omni.trainer.config.algorithm import OmniAlgoConfig
+from verl_omni.workers.config import OmniModelConfig
 from verl_omni.workers.config.omni import OmniActorConfig, OmniLossConfig
 
 
@@ -83,6 +87,39 @@ class TestOmniActorConfig:
                 ppo_micro_batch_size_per_gpu=1,
                 trainer_type="policy_gradient",
             )
+
+
+class TestOmniModelConfigLoraFields:
+    def test_lora_fields_via_hydra(self, tmp_path):
+        from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
+
+        import verl_omni
+
+        model_dir = tmp_path / "dummy-model"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text(json.dumps({"architectures": ["Qwen3OmniMoeForConditionalGeneration"]}))
+
+        config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/omni/model")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            cfg = compose(
+                config_name="omni_model",
+                overrides=[
+                    f"path={model_dir}",
+                    "+load_tokenizer=false",
+                    "architecture=Qwen3OmniMoeForConditionalGeneration",
+                    'policy_state_adapters=["default","old"]',
+                    "lora_init_weights=gaussian",
+                    "lora_dtype=fp32",
+                ],
+            )
+        model_cfg: OmniModelConfig = omega_conf_to_dataclass(cfg)
+
+        assert model_cfg.lora_init_weights == "gaussian"
+        assert tuple(model_cfg.policy_state_adapters) == ("default", "old")
+        assert model_cfg.lora_dtype == "fp32"
+        assert model_cfg.target_parameters is None
+        assert model_cfg.fsdp_layer_prefixes == []
 
     def test_instantiate_via_hydra(self):
         import os
