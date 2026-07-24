@@ -436,6 +436,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         Returns ``(prompt, params)`` consumed by ``_run_generation``.
         """
         if self._ar_mode:
+            if multi_modal_data:
+                # Deduplicate already-expanded multimodal pad tokens to prevent
+                # double-expansion inside vLLM-Omni.
+                processor = getattr(self.model_config, "processor", None)
+                if processor is not None and hasattr(processor, "dedup_pad_tokens"):
+                    prompt_ids = processor.dedup_pad_tokens(prompt_ids)
             max_possible_tokens = self.config.max_model_len - len(prompt_ids)
             if max_possible_tokens <= 0:
                 raise ValueError(
