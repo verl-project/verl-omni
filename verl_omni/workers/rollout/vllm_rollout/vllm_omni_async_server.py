@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
+import json
 import logging
 import os
+import tempfile
 from dataclasses import asdict
 from typing import Any, Optional
 
@@ -22,11 +24,13 @@ import ray
 import torch
 import torchvision.transforms as T
 import vllm_omni.entrypoints.cli.serve
+import yaml
 from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.device import get_visible_devices_keyword
 from verl.utils.import_utils import import_external_libs
 from verl.utils.net_utils import get_free_port
 from verl.utils.tokenizer import normalize_token_ids
-from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.config import RolloutConfig
 from verl.workers.rollout.replica import TokenOutput
 from verl.workers.rollout.utils import run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
@@ -44,12 +48,16 @@ from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
 
-from verl_omni.pipelines.model_base import VllmOmniPipelineBase
-from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
+from verl_omni.pipelines.model_base import OmniRolloutPipelineBase, VllmOmniPipelineBase
+from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig, OmniModelConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
+
+def _strip_none(d: dict) -> dict:
+    return {k: _strip_none(v) if isinstance(v, dict) else v for k, v in d.items() if v is not None}
 
 
 class vLLMOmniHttpServer(vLLMHttpServer):
@@ -64,17 +72,20 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     def _init_model_config(self, model_config):
-        """AR mode uses HFModelConfig; diffusion uses DiffusionModelConfig.
+        """AR mode uses OmniModelConfig; diffusion uses DiffusionModelConfig.
 
         Mode is selected by ``engine_kwargs.vllm_omni.output_mode`` ("ar" vs the
         default "diffusion").
         """
         engine_kwargs = getattr(self.config, "engine_kwargs", None) or {}
         omni_kwargs = engine_kwargs.get("vllm_omni", {}) or {}
+        # TODO (mike): drop this once the legacy omni training script is removed.
+        # It should be automatically inferred from the model config
         self._ar_mode = omni_kwargs.get("output_mode", "diffusion") == "ar"
+        self._rollout_flags: dict[int, dict] = {}
 
         if self._ar_mode:
-            return omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
+            return omega_conf_to_dataclass(model_config, dataclass_type=OmniModelConfig)
         return omega_conf_to_dataclass(model_config, dataclass_type=DiffusionModelConfig)
 
     def _validate_configs(self) -> None:
@@ -132,9 +143,64 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_kwargs.pop("output_mode", None)
         if self._ar_mode:
             engine_kwargs.pop("custom_pipeline", None)
+            # TODO (mike): drop this later
+            # It should be automatically inferred from the model config
+            pipeline_name = engine_kwargs.pop("pipeline_name", None)
+            pipeline_mode = engine_kwargs.pop("pipeline_mode", "thinker_only")
+
+            adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
+            # Generate deploy config using the adapter's stage topology.
+            self._write_deploy_config(engine_kwargs, pipeline_name, adapter_cls, pipeline_mode)
+            # Store per-stage rollout flags for downstream use.
+            self._rollout_flags = adapter_cls.rollout_flags(pipeline_mode=pipeline_mode)
+            # Merge pipeline-specific HF config overrides.
+            adapter_overrides = adapter_cls.get_engine_hf_overrides(pipeline_mode=pipeline_mode)
+            if adapter_overrides:
+                hf_overrides = engine_kwargs.get("hf_overrides", {})
+                if isinstance(hf_overrides, str):
+                    hf_overrides = json.loads(hf_overrides)
+                hf_overrides.update(adapter_overrides)
+                engine_kwargs["hf_overrides"] = hf_overrides
+
             for underscore_key in ("stage_configs_path", "deploy_config", "stage_overrides", "async_chunk"):
                 if underscore_key in engine_kwargs:
                     engine_kwargs[underscore_key.replace("_", "-")] = engine_kwargs.pop(underscore_key)
+
+    def _write_deploy_config(self, engine_kwargs: dict, pipeline_name: str, adapter_cls, pipeline_mode: str) -> None:
+        """Write a deploy config YAML from the adapter's stage topology."""
+        adapter_cls.ensure_pipeline_registered(pipeline_mode)
+        stages = adapter_cls.build_stage_configs(pipeline_mode=pipeline_mode)
+        pipeline_id = adapter_cls.get_pipeline_id(pipeline_mode)
+
+        device_control_env = get_visible_devices_keyword()
+        devices = os.environ.get(device_control_env, "")
+        tp_size = self.config.tensor_model_parallel_size
+
+        deploy_dict: dict[str, object] = {"pipeline": pipeline_id}
+
+        if devices:
+            stage_ids = [s.stage_id for s in stages]
+            deploy_dict["stages"] = [
+                {
+                    "stage_id": sid,
+                    "devices": devices,
+                    "tensor_parallel_size": tp_size,
+                    "engine_extras": adapter_cls.get_stage_engine_extras(sid, pipeline_mode=pipeline_mode),
+                }
+                for sid in stage_ids
+            ]
+        else:
+            raise RuntimeError(
+                f"Environment variable `{device_control_env}` is not set, cannot generate deploy config."
+            )
+
+        yaml_str = yaml.dump(deploy_dict).strip()
+        logger.info("Generated deploy config:\n%s", yaml_str)
+        self._temp_deploy_ctx = tempfile.TemporaryDirectory(prefix="verl_omni_deploy_")
+        deploy_path = os.path.join(self._temp_deploy_ctx.name, f"{pipeline_name}.yaml")
+        with open(deploy_path, "w") as f:
+            f.write(yaml_str)
+        engine_kwargs["deploy_config"] = deploy_path
 
     # -----------------------------------------------------------------------
     # Server lifecycle
@@ -144,19 +210,16 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
 
+        deploy_config = getattr(args, "deploy_config", None)
+        if deploy_config:
+            engine_args["deploy_config"] = deploy_config
+
         if self._ar_mode:
             # AR mode: no diffusion pipeline. Drop None entries from
             # compilation_config that OmniEngineArgs may leave behind.
             if isinstance(engine_args.get("compilation_config"), dict):
-                engine_args["compilation_config"] = {
-                    k: v for k, v in engine_args["compilation_config"].items() if v is not None
-                }
+                engine_args["compilation_config"] = _strip_none(engine_args["compilation_config"])
         else:
-            # inject multi-stage yaml config
-            deploy_config = getattr(args, "deploy_config", None)
-            if deploy_config:
-                engine_args["deploy_config"] = deploy_config
-
             import_external_libs(self.config.external_lib)
 
             pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
@@ -499,7 +562,7 @@ class vLLMOmniReplica(vLLMReplica):
         self,
         replica_rank: int,
         config: DiffusionRolloutConfig | RolloutConfig,
-        model_config: DiffusionModelConfig | HFModelConfig,
+        model_config: DiffusionModelConfig | OmniModelConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
     ):

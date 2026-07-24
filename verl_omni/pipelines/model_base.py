@@ -498,19 +498,44 @@ class OmniModelBase(ABC):
             NotImplementedError: If no adapter is registered for the given
                 ``(architecture, stage)`` key.
         """
-        key = (model_config.architecture, model_config.model_stage)
-        if key not in cls._registry and getattr(model_config, "external_lib", None) is not None:
+        return cls.get_class_by_name(
+            model_config.architecture,
+            model_config.model_stage,
+            getattr(model_config, "external_lib", None),
+        )
+
+    @classmethod
+    def get_class_by_name(
+        cls,
+        architecture: str,
+        stage: str,
+        external_lib: Optional[str] = None,
+    ) -> type["OmniModelBase"]:
+        """Return the registered subclass for ``(architecture, stage)``.
+
+        Args:
+            architecture: HF config ``architectures[0]`` value.
+            stage: ``thinker``, ``talker``, or ``all``.
+            external_lib: Optional external library to import before lookup.
+
+        Returns:
+            type[OmniModelBase]: The registered adapter class.
+
+        Raises:
+            NotImplementedError: If no adapter is registered for the given key.
+        """
+        key = (architecture, stage)
+        if external_lib is not None:
             from verl.utils.import_utils import import_external_libs
 
-            import_external_libs(model_config.external_lib)
-
+            import_external_libs(external_lib)
         try:
             return cls._registry[key]
         except KeyError:
             registered = sorted(cls._registry.keys())
             raise NotImplementedError(
-                f"No omni model registered for (architecture={model_config.architecture!r}, "
-                f"stage={model_config.model_stage!r}). Registered: {registered}. "
+                f"No omni model registered for (architecture={architecture!r}, "
+                f"stage={stage!r}). Registered: {registered}. "
                 f"Set ``external_lib`` to load your training adapter."
             ) from None
 
@@ -677,5 +702,60 @@ class OmniRolloutPipelineBase:
 
         Returns:
             dict[int, dict]: Per-stage flags (empty dict by default).
+        """
+        return {}
+
+    @classmethod
+    def get_pipeline_id(cls, pipeline_mode: str = "thinker_only") -> str:
+        """Return the vLLM-Omni pipeline model_type for *pipeline_mode*.
+
+        The returned string is used as the ``pipeline`` field in the
+        generated deploy-config YAML so that the engine resolves the
+        same :class:`~vllm_omni.config.stage_config.PipelineConfig` that
+        the stages returned by :meth:`build_stage_configs` belong to.
+
+        Args:
+            pipeline_mode: The mode used to build the stages.
+
+        Returns:
+            str: vLLM-Omni pipeline ``model_type``.
+        """
+        for model_type, cls_ref in cls._registry.items():
+            if cls_ref is cls:
+                return model_type
+        return ""
+
+    @classmethod
+    def ensure_pipeline_registered(cls, pipeline_mode: str = "thinker_only") -> None:
+        """Ensure the pipeline for *pipeline_mode* is in vLLM-Omni's registry.
+
+        Called before the deploy-config YAML is consumed so the engine
+        can look up the correct :class:`PipelineConfig` by its
+        ``model_type``.
+        """
+        return
+
+    @classmethod
+    def get_engine_hf_overrides(cls, pipeline_mode="thinker_only") -> dict:
+        """Return HF config overrides per *pipeline_mode*.
+
+        Args:
+            pipeline_mode: The mode used to build the stages.
+
+        Returns:
+            dict: HF config key-value overrides.
+        """
+        return {}
+
+    @classmethod
+    def get_stage_engine_extras(cls, stage_id: int, pipeline_mode: str = "thinker_only") -> dict:
+        """Return per-stage ``engine_extras`` to inject into the deploy config.
+
+        Args:
+            stage_id: The pipeline stage ID.
+            pipeline_mode: The mode used to build the stages.
+
+        Returns:
+            dict: Extra key-value pairs merged into the stage's engine args.
         """
         return {}
