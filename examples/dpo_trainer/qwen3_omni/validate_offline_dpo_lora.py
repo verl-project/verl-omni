@@ -93,7 +93,7 @@ DEFAULT_EXCLUDE_MODULES = ".*talker.*|.*code2wav.*|.*code_predictor.*|.*visual.*
 DEFAULT_MM_CONFIGS = {
     "scale_factor": 28,
     "image_min_pixels": 3136,
-    "image_max_pixels": 12845056,
+    "image_max_pixels": 602112,
     "video_min_pixels": 3136,
     "video_max_pixels": 602112,
     "max_ratio": 200,
@@ -710,6 +710,10 @@ def main() -> None:
                     )
                 result_rows.append(row)
             write_results(args.output_jsonl, result_rows)
+
+            del features, batch, model_batch, policy_scores, reference_scores, result_rows
+            if input_device.type == "cuda":
+                torch.cuda.empty_cache()
 
             batch_count += 1
             if args.log_every > 0 and batch_count % args.log_every == 0:

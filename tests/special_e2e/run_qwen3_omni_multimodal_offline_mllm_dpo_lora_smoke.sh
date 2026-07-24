@@ -103,7 +103,7 @@ python3 -m verl_omni.trainer.main_omni \
     data.sampler.class_path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset \
     data.sampler.class_name=ModalityGroupedBatchSampler \
     +data.sampler.sampler_kwargs="{batch_size:${TRAIN_BATCH_SIZE},drop_last:true,modality_sample_weights:{image:${IMAGE_RATIO},video:${VIDEO_RATIO},audio:${AUDIO_RATIO}}}" \
-    +data.mm_configs="{scale_factor:28,image_min_pixels:3136,image_max_pixels:12845056,video_min_pixels:3136,video_max_pixels:602112,max_ratio:200,min_frames:2,max_frames:4,frame_factor:1,sample_rate:16000,fps:2.0,use_audio_in_video:false}" \
+    +data.mm_configs="{scale_factor:28,image_min_pixels:3136,image_max_pixels:602112,video_min_pixels:3136,video_max_pixels:602112,max_ratio:200,min_frames:2,max_frames:4,frame_factor:1,sample_rate:16000,fps:2.0,use_audio_in_video:false}" \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.hf_config_path="${MODEL_PATH}" \
     actor_rollout_ref.model.architecture=Qwen3OmniMoeForConditionalGeneration \
