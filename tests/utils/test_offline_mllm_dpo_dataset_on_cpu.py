@@ -163,6 +163,32 @@ def test_build_preference_branch_extracts_media_and_answer():
     assert branch["conversations"][0][0] == "user"
 
 
+def test_build_preference_branch_supports_compact_top_level_media_schema():
+    sample = {
+        "prompt": [{"role": "user", "content": "<video>What happens at the end?"}],
+        "chosen": {"role": "assistant", "content": "preferred answer"},
+        "videos": ["/tmp/clip.mp4"],
+        "data_source": "omni_preference/video",
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["source_name"] == "omni_preference/video"
+    assert branch["videos"] == ["/tmp/clip.mp4"]
+    assert branch["conversations"][0] == ["user", ("video", None), ("text", "What happens at the end?")]
+    assert branch["conversations"][-1] == ["assistant", ("text", "preferred answer")]
+
+
+def test_build_preference_branch_rejects_missing_top_level_media():
+    sample = {
+        "prompt": [{"role": "user", "content": "<video>What happens at the end?"}],
+        "chosen": {"role": "assistant", "content": "preferred answer"},
+        "data_source": "omni_preference/video",
+    }
+
+    with pytest.raises(ValueError, match=r"Prompt contains 1 <video> token\(s\) but videos has 0 item\(s\)"):
+        dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+
 def test_merge_chosen_rejected_stacks_branch_tensors():
     chosen = {"input_ids": torch.tensor([1, 2]), "labels": torch.tensor([3, 4])}
     rejected = {"input_ids": torch.tensor([5]), "labels": torch.tensor([7])}
@@ -313,6 +339,47 @@ def test_offline_mllm_dpo_dataset_getitem(monkeypatch, mock_processor, mixed_par
     assert item["extra_info"]["modality"] == "image"
 
 
+def test_offline_mllm_dpo_dataset_getitem_compact_top_level_media_schema(monkeypatch, mock_processor, tmp_path):
+    row = {
+        "prompt": [{"role": "user", "content": "<video>What visual is shown?"}],
+        "chosen": {"role": "assistant", "content": "preferred answer"},
+        "rejected": {"role": "assistant", "content": "rejected answer"},
+        "videos": ["/tmp/clip.mp4"],
+        "win_score": 9.0,
+        "lose_score": 2.0,
+        "extra_info": {"index": 0},
+    }
+    parquet_path = tmp_path / "compact.parquet"
+    pd.DataFrame([row]).to_parquet(parquet_path, index=False)
+
+    seen_samples = []
+
+    def fake_transform(sample, **kwargs):
+        seen_samples.append(sample)
+        answer = sample["conversations"][-1][1][1]
+        token = 1 if answer == "preferred answer" else 2
+        return [{"input_ids": torch.tensor([token]), "labels": torch.tensor([token])}]
+
+    monkeypatch.setattr(dataset_mod, "process_qwen3_omni_sample", fake_transform)
+
+    dataset = dataset_mod.OfflineMLLMDPODataset(
+        data_files=str(parquet_path),
+        tokenizer=None,
+        processor=mock_processor,
+        config=OmegaConf.create({"train_batch_size": 1}),
+    )
+    item = dataset[0]
+
+    assert dataset.get_modality(0) == "video"
+    assert seen_samples[0]["videos"] == ["/tmp/clip.mp4"]
+    assert seen_samples[0]["conversations"][0] == ["user", ("video", None), ("text", "What visual is shown?")]
+    assert seen_samples[0]["conversations"][-1] == ["assistant", ("text", "preferred answer")]
+    assert seen_samples[1]["conversations"][-1] == ["assistant", ("text", "rejected answer")]
+    torch.testing.assert_close(item["input_ids"], torch.tensor([[1], [2]]))
+    torch.testing.assert_close(item["sample_level_scores"], torch.tensor([9.0, 2.0]))
+    assert item["modality"] == "video"
+
+
 def test_offline_mllm_dpo_dataset_requires_processor():
     with pytest.raises(ValueError, match="requires a multimodal processor"):
         dataset_mod.OfflineMLLMDPODataset(
@@ -353,6 +420,29 @@ def test_multisource_parse_context_and_normalize_record():
     assert normalized["win_score"] == 8.0
     assert normalized["lose_score"] == 5.0
     assert normalized["dataset_media_rel"] == "rlaif-v-dataset/foo.jpg"
+
+
+def test_multisource_build_multimodal_row_uses_compact_schema():
+    multisource = _load_multisource_module()
+    record = {
+        "modality": "video",
+        "dataset_media_rel": "academic_source/clip.mp4",
+        "question": "What happens at the end?",
+        "chosen": "preferred answer",
+        "rejected": "rejected answer",
+        "win_score": 8.0,
+        "lose_score": 4.0,
+        "better": "A",
+        "sample_id": "sample-0",
+    }
+    row = multisource._build_multimodal_row(record, split="train", index=0, media_path="/tmp/clip.mp4")
+
+    assert row["prompt"] == [{"role": "user", "content": "<video>What happens at the end?"}]
+    assert row["chosen"] == {"role": "assistant", "content": "preferred answer"}
+    assert row["rejected"] == {"role": "assistant", "content": "rejected answer"}
+    assert row["videos"] == ["/tmp/clip.mp4"]
+    assert "images" not in row
+    assert "audios" not in row
 
 
 def test_multisource_skips_equal_verdict():
@@ -396,6 +486,13 @@ def test_row_modality_prefers_extra_info():
     row = {
         "data_source": "omni_preference/image",
         "extra_info": {"modality": "video"},
+    }
+    assert dataset_mod._row_modality(row, "data_source") == "video"
+
+
+def test_row_modality_falls_back_to_top_level_media_columns():
+    row = {
+        "videos": ["/tmp/clip.mp4"],
     }
     assert dataset_mod._row_modality(row, "data_source") == "video"
 

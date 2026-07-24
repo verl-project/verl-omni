@@ -232,14 +232,32 @@ DPO pipeline.
 | Column | Type | Required | Description |
 |--------|------|----------|-------------|
 | `data_source` | `str` | Yes | `"omni_preference/image"`, `".../video"`, or `".../audio"` |
-| `prompt` | `list[dict]` | Yes | Chat messages: system + user (typed media + question text) |
-| `chosen` | `str` | Yes | Preferred candidate answer |
-| `rejected` | `str` | Yes | Less preferred candidate answer |
+| `prompt` | `list[dict]` | Yes | Chat messages. User content starts with `<image>`, `<video>`, or `<audio>` followed by the question text. |
+| `chosen` | `dict` | Yes | Preferred assistant message, e.g. `{"role": "assistant", "content": "..."}` |
+| `rejected` | `dict` | Yes | Less preferred assistant message, e.g. `{"role": "assistant", "content": "..."}` |
+| `images` / `videos` / `audios` | `list[str]` | Yes for that modality | Local media paths referenced by the prompt placeholder. |
 | `win_score` | `float` | No | Score of the chosen candidate (from `score_A` / `score_B`) |
 | `lose_score` | `float` | No | Score of the rejected candidate |
 | `ability` | `str` | Yes | `"image_qa"`, `"video_qa"`, or `"audio_qa"` |
 | `reward_model` | `dict` | Yes | `{"style": "preference"}` |
 | `extra_info` | `dict` | Yes | Metadata: `split`, `question`, `source_media`, `better`, `{modality}_path`, … |
+
+Example video row:
+
+```json
+{
+  "data_source": "omni_preference/video",
+  "prompt": [{"role": "user", "content": "<video>What is shown at the end?"}],
+  "chosen": {"role": "assistant", "content": "The preferred answer."},
+  "rejected": {"role": "assistant", "content": "The rejected answer."},
+  "videos": ["/abs/path/to/video.mp4"],
+  "win_score": 8.0,
+  "lose_score": 4.0,
+  "ability": "video_qa",
+  "reward_model": {"style": "preference"},
+  "extra_info": {"split": "train", "modality": "video"}
+}
+```
 
 ---
 

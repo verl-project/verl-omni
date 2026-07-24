@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from collections import defaultdict
 from collections.abc import Sequence
@@ -31,6 +32,8 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import Dataset, Sampler
 
 from verl_omni.utils.dataset.qwen3_omni_transform import process_qwen3_omni_sample
+
+_MEDIA_TOKEN_PATTERN = re.compile(r"<(image|video|audio)>")
 
 
 def _read_dataframe(data_files: str | Sequence[str]) -> pd.DataFrame:
@@ -64,10 +67,87 @@ def _as_python(value: Any) -> Any:
     return value
 
 
+def _is_missing(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and np.isnan(value):
+        return True
+    return value is pd.NA
+
+
+def _append_media_path(media: dict[str, list[Any]], key: str, value: Any) -> None:
+    if _is_missing(value):
+        return
+    if value not in media[key]:
+        media[key].append(value)
+
+
+def _normalise_media_list(value: Any) -> list[Any]:
+    value = _as_python(value)
+    if _is_missing(value):
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, Sequence):
+        return [item for item in value if not _is_missing(item)]
+    return [value]
+
+
+def _initial_media(sample: dict[str, Any]) -> dict[str, list[Any]]:
+    return {
+        "images": _normalise_media_list(sample.get("images")),
+        "videos": _normalise_media_list(sample.get("videos")),
+        "audios": _normalise_media_list(sample.get("audios")),
+    }
+
+
+def _answer_text(answer: Any) -> str:
+    answer = _as_python(answer)
+    if isinstance(answer, dict):
+        if "content" in answer:
+            return _content_to_text(answer["content"])
+        if "text" in answer:
+            return str(answer["text"])
+    return _content_to_text(answer)
+
+
+def _content_to_text(content: Any) -> str:
+    content = _as_python(content)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        if content.get("type") == "text":
+            return str(content.get("text", ""))
+        if "content" in content:
+            return _content_to_text(content["content"])
+        if "text" in content:
+            return str(content["text"])
+        return str(content)
+    if isinstance(content, Sequence):
+        parts = [_content_to_text(item) for item in content]
+        return "\n".join(part for part in parts if part)
+    if _is_missing(content):
+        return ""
+    return str(content)
+
+
+def _append_string_content(conversation: list[Any], content: str) -> None:
+    cursor = 0
+    for match in _MEDIA_TOKEN_PATTERN.finditer(content):
+        text = content[cursor : match.start()]
+        if text:
+            conversation.append(("text", text))
+        conversation.append((match.group(1), None))
+        cursor = match.end()
+    remaining = content[cursor:]
+    if remaining:
+        conversation.append(("text", remaining))
+
+
 def _append_content(conversation: list[Any], content: Any, media: dict[str, list[Any]]) -> None:
     content = _as_python(content)
     if isinstance(content, str):
-        conversation.append(("text", content))
+        _append_string_content(conversation, content)
         return
 
     for item in content or []:
@@ -80,21 +160,41 @@ def _append_content(conversation: list[Any], content: Any, media: dict[str, list
         if item_type == "text":
             conversation.append(("text", item.get("text", "")))
         elif item_type == "image":
-            media["images"].append(item.get("image"))
+            _append_media_path(media, "images", item.get("image"))
             conversation.append(("image", None))
         elif item_type == "video":
-            media["videos"].append(item.get("video"))
+            _append_media_path(media, "videos", item.get("video"))
             conversation.append(("video", None))
         elif item_type == "audio":
-            media["audios"].append(item.get("audio"))
+            _append_media_path(media, "audios", item.get("audio"))
             conversation.append(("audio", None))
         else:
             conversation.append(("text", str(item)))
 
 
-def _build_preference_branch(sample: dict[str, Any], answer: str) -> dict[str, Any]:
+def _count_media_tokens(conversations: Sequence[Sequence[Any]], modality: str) -> int:
+    count = 0
+    for conversation in conversations:
+        for item in conversation[1:]:
+            if isinstance(item, (list | tuple)) and item and item[0] == modality:
+                count += 1
+    return count
+
+
+def _validate_media_alignment(conversations: Sequence[Sequence[Any]], media: dict[str, list[Any]]) -> None:
+    for modality, media_key in (("image", "images"), ("video", "videos"), ("audio", "audios")):
+        token_count = _count_media_tokens(conversations, modality)
+        media_count = len(media[media_key])
+        if token_count != media_count:
+            raise ValueError(
+                f"Prompt contains {token_count} <{modality}> token(s) but {media_key} has {media_count} item(s). "
+                "Ensure compact multimodal rows include matching top-level media paths."
+            )
+
+
+def _build_preference_branch(sample: dict[str, Any], answer: Any) -> dict[str, Any]:
     prompt = _as_python(sample.get("prompt", []))
-    media: dict[str, list[Any]] = {"images": [], "videos": [], "audios": []}
+    media = _initial_media(sample)
     conversations: list[list[Any]] = []
 
     for message in prompt:
@@ -109,7 +209,8 @@ def _build_preference_branch(sample: dict[str, Any], answer: str) -> dict[str, A
         if len(conversation) > 1:
             conversations.append(conversation)
 
-    conversations.append(["assistant", ("text", str(_as_python(answer)))])
+    _validate_media_alignment(conversations, media)
+    conversations.append(["assistant", ("text", _answer_text(answer))])
     branch = {
         "conversations": conversations,
         "source_name": sample.get("source_name") or sample.get("data_source"),
@@ -247,6 +348,9 @@ def _row_modality(row: dict[str, Any], source_name_key: str, default: str = "unk
     extra_info = _as_python(row.get("extra_info", {}))
     if isinstance(extra_info, dict) and extra_info.get("modality"):
         return _normalise_modality(extra_info["modality"], default)
+    for key, modality in (("images", "image"), ("videos", "video"), ("audios", "audio")):
+        if _normalise_media_list(row.get(key)):
+            return modality
     return _normalise_modality(row.get(source_name_key) or row.get("source_name"), default)
 
 
@@ -319,6 +423,9 @@ class OfflineMLLMDPODataset(Dataset):
             "chosen": row[self.chosen_key],
             "rejected": row[self.rejected_key],
             "source_name": source_name,
+            "images": row.get("images"),
+            "videos": row.get("videos"),
+            "audios": row.get("audios"),
         }
         transformed = _transform_sample(
             sample, self.base_transform, {"processor": self.processor, **self.transform_kwargs}

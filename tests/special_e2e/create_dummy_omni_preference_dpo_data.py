@@ -34,8 +34,6 @@ import av
 import pandas as pd
 from PIL import Image
 
-SYSTEM_PROMPT = "You are a helpful assistant."
-
 MODALITY_SPECS = {
     "image": {
         "data_source": "omni_preference/image",
@@ -53,10 +51,6 @@ MODALITY_SPECS = {
         "source_media": "audio/dummy_audio.wav",
     },
 }
-
-
-def _content_item(item_type: str, *, text: str | None = None, image="", video="", audio="") -> dict:
-    return {"type": item_type, "text": text, "image": image, "video": video, "audio": audio}
 
 
 def _write_png(path: str, color: tuple[int, int, int]) -> str:
@@ -124,8 +118,14 @@ def _base_row(split: str, modality: str, index: int, question: str) -> dict:
     source_media = spec["source_media"]
     return {
         "data_source": spec["data_source"],
-        "chosen": "The preferred answer correctly describes the dummy content.",
-        "rejected": "The rejected answer gives an unrelated description.",
+        "chosen": {
+            "role": "assistant",
+            "content": "The preferred answer correctly describes the dummy content.",
+        },
+        "rejected": {
+            "role": "assistant",
+            "content": "The rejected answer gives an unrelated description.",
+        },
         "win_score": 8.0,
         "lose_score": 4.0,
         "ability": spec["ability"],
@@ -147,15 +147,12 @@ def _image_row(split: str, index: int, image_path: str) -> dict:
     question = "What is shown in this dummy image?"
     row = _base_row(split, "image", index, question)
     row["prompt"] = [
-        {"role": "system", "content": [_content_item("text", text=SYSTEM_PROMPT)]},
         {
             "role": "user",
-            "content": [
-                _content_item("image", image=image_path),
-                _content_item("text", text=question),
-            ],
+            "content": f"<image>{question}",
         },
     ]
+    row["images"] = [image_path]
     row["extra_info"]["image_path"] = image_path
     return row
 
@@ -164,15 +161,12 @@ def _video_row(split: str, index: int, video_path: str) -> dict:
     question = "What changes across the dummy video frames?"
     row = _base_row(split, "video", index, question)
     row["prompt"] = [
-        {"role": "system", "content": [_content_item("text", text=SYSTEM_PROMPT)]},
         {
             "role": "user",
-            "content": [
-                _content_item("video", video=video_path),
-                _content_item("text", text=question),
-            ],
+            "content": f"<video>{question}",
         },
     ]
+    row["videos"] = [video_path]
     row["extra_info"]["video_path"] = video_path
     return row
 
@@ -181,15 +175,12 @@ def _audio_row(split: str, index: int, audio_path: str) -> dict:
     question = "What sound is described in this dummy audio clip?"
     row = _base_row(split, "audio", index, question)
     row["prompt"] = [
-        {"role": "system", "content": [_content_item("text", text=SYSTEM_PROMPT)]},
         {
             "role": "user",
-            "content": [
-                _content_item("audio", audio=audio_path),
-                _content_item("text", text=question),
-            ],
+            "content": f"<audio>{question}",
         },
     ]
+    row["audios"] = [audio_path]
     row["extra_info"]["audio_path"] = audio_path
     return row
 

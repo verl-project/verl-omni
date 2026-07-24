@@ -35,7 +35,6 @@ from pathlib import Path
 
 import pandas as pd
 
-SYSTEM_PROMPT = "You are a helpful assistant."
 VIDEO_FILE_EXTENSIONS = (".mp4", ".webm", ".mkv", ".mov", ".avi")
 AUDIO_FILE_EXTENSIONS = (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac")
 CONTEXT_PATTERN = re.compile(
@@ -67,10 +66,6 @@ MODALITY_CONFIGS = {
         "ability": "audio_qa",
     },
 }
-
-
-def _content_item(item_type: str, *, text: str | None = None, image="", video="", audio="") -> dict:
-    return {"type": item_type, "text": text, "image": image, "video": video, "audio": audio}
 
 
 def _media_key(media_rel: str) -> str:
@@ -268,8 +263,8 @@ def _base_row(record: dict, split: str, index: int) -> dict:
 
     return {
         "data_source": config["data_source"],
-        "chosen": record["chosen"],
-        "rejected": record["rejected"],
+        "chosen": {"role": "assistant", "content": record["chosen"]},
+        "rejected": {"role": "assistant", "content": record["rejected"]},
         "win_score": record["win_score"],
         "lose_score": record["lose_score"],
         "ability": config["ability"],
@@ -289,19 +284,16 @@ def _base_row(record: dict, split: str, index: int) -> dict:
 
 def _build_multimodal_row(record: dict, split: str, index: int, media_path: str) -> dict:
     modality = record["modality"]
+    config = MODALITY_CONFIGS[modality]
     question = record["question"]
     row = _base_row(record, split, index)
-    media_item = _content_item(modality, **{modality: media_path})
     row["prompt"] = [
-        {"role": "system", "content": [_content_item("text", text=SYSTEM_PROMPT)]},
         {
             "role": "user",
-            "content": [
-                media_item,
-                _content_item("text", text=question),
-            ],
+            "content": f"<{modality}>{question}",
         },
     ]
+    row[config["media_field"]] = [media_path]
     row["extra_info"][f"{modality}_path"] = media_path
     return row
 
