@@ -44,7 +44,6 @@ import os
 import sys
 import time
 from collections import defaultdict
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -62,6 +61,7 @@ from verl_omni.utils.dataset.offline_mllm_dpo_dataset import (  # noqa: E402
     OfflineMLLMDPODataset,
     offline_mllm_dpo_collate_fn,
 )
+from verl_omni.utils.peft_utils import peft_adapters_disabled, set_peft_adapter  # noqa: E402
 
 logger = logging.getLogger("qwen3_omni_dpo_validation")
 
@@ -296,33 +296,6 @@ def maybe_unfuse_qwen3_omni_experts(model, external_lib: str | None) -> None:
             logger.info("External lib %s unfused %d thinker expert module(s)", module_name, converted)
 
 
-@contextmanager
-def adapters_disabled(model):
-    """Temporarily disable PEFT adapters for ref-in-actor style validation."""
-    disable_adapters = getattr(model, "disable_adapters", None)
-    enable_adapters = getattr(model, "enable_adapters", None)
-    if callable(disable_adapters) and callable(enable_adapters):
-        disable_adapters()
-        try:
-            yield
-        finally:
-            enable_adapters()
-        return
-
-    disable_adapter = getattr(model, "disable_adapter", None)
-    if callable(disable_adapter):
-        maybe_context = disable_adapter()
-        if hasattr(maybe_context, "__enter__") and hasattr(maybe_context, "__exit__"):
-            with maybe_context:
-                yield
-            return
-
-    raise RuntimeError(
-        "The loaded model does not expose disable_adapter() or disable_adapters(); "
-        "run with --skip-reference if you only need raw policy margin."
-    )
-
-
 def score_preference_batch(
     *,
     model,
@@ -421,29 +394,7 @@ def load_lora_adapter_weights(model, adapter_path: str, adapter_name: str = "def
 
 def set_lora_adapter(model, adapter_name: str = "default") -> None:
     """Activate an adapter for both wrapped PEFT models and manually injected modules."""
-    set_adapter = getattr(model, "set_adapter", None)
-    if callable(set_adapter):
-        try:
-            set_adapter(adapter_name)
-            return
-        except ValueError as exc:
-            if "No adapter loaded" not in str(exc):
-                raise
-
-    activated = 0
-    for module in model.modules():
-        if module is model:
-            continue
-        module_set_adapter = getattr(module, "set_adapter", None)
-        if callable(module_set_adapter):
-            try:
-                module_set_adapter(adapter_name)
-            except ValueError as exc:
-                if "No adapter loaded" not in str(exc):
-                    raise
-                continue
-            activated += 1
-
+    activated = set_peft_adapter(model, adapter_name)
     if activated == 0:
         logger.warning("LoRA adapter %r: no set_adapter hooks found after injection.", adapter_name)
 
@@ -656,7 +607,7 @@ def main() -> None:
             )
             reference_scores = None
             if not args.skip_reference:
-                with adapters_disabled(model):
+                with peft_adapters_disabled(model):
                     reference_scores = score_preference_batch(
                         model=model,
                         model_config=model_config,
