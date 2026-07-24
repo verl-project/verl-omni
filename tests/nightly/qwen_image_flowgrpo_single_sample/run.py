@@ -28,16 +28,20 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 
 import install_debug_hooks
 
-_DEBUG_ENV_PREFIXES = ("DEBUG_DUMP_",)
-_DEBUG_ENV_NAMES = {
+_FORWARDED_ENV_PREFIXES = ("DEBUG_DUMP_", "GENRM_OCR_")
+_FORWARDED_ENV_NAMES = {
+    "CUBLAS_WORKSPACE_CONFIG",
     "DEBUG_METRICS_JSONL",
+    "NIGHTLY_DETERMINISTIC_SEED",
+    "PYTHONHASHSEED",
+    "TOKENIZERS_PARALLELISM",
 }
 
 
 def _copy_debug_env(env_vars: Mapping[str, str] | None) -> dict[str, str]:
     merged = dict(env_vars or {})
     for key, value in os.environ.items():
-        if key in _DEBUG_ENV_NAMES or key.startswith(_DEBUG_ENV_PREFIXES):
+        if key in _FORWARDED_ENV_NAMES or key.startswith(_FORWARDED_ENV_PREFIXES):
             merged[key] = value
     python_path = merged.get("PYTHONPATH") or os.environ.get("PYTHONPATH", "")
     path_parts = [str(_SCRIPT_DIR), str(_REPO_ROOT)]

@@ -126,6 +126,64 @@ def compare(args: argparse.Namespace) -> tuple[bool, dict]:
     return passed, results
 
 
+def _dump_failures(results: dict) -> list[str]:
+    thresholds = results.get("thresholds", {})
+    failures = []
+    for rel_path in results.get("missing_in_current", []):
+        failures.append(f"missing current file: {rel_path}")
+    for rel_path in results.get("missing_in_baseline", []):
+        failures.append(f"missing baseline file: {rel_path}")
+
+    for rel_path, file_result in results.get("files", {}).items():
+        for key in file_result.get("missing_in_current", []):
+            failures.append(f"missing current tensor: {rel_path}::{key}")
+        for key in file_result.get("missing_in_baseline", []):
+            failures.append(f"missing baseline tensor: {rel_path}::{key}")
+        for key, metrics in file_result.get("tensors", {}).items():
+            if metrics.get("shape_mismatch"):
+                failures.append(f"shape mismatch: {rel_path}::{key}")
+                continue
+            if (
+                metrics["max_abs_err"] > thresholds.get("atol", 0.0)
+                or metrics["max_rel_err"] > thresholds.get("rtol", 0.0)
+                or metrics["cos_sim"] < thresholds.get("min_cos_sim", 1.0)
+            ):
+                failures.append(
+                    f"tensor mismatch: {rel_path}::{key} "
+                    f"abs={metrics['max_abs_err']:.6g} "
+                    f"rel={metrics['max_rel_err']:.6g} "
+                    f"cos={metrics['cos_sim']:.6g}"
+                )
+    return failures
+
+
+def _print_conclusion(passed: bool, results: dict, report_path: Path) -> None:
+    print("=" * 80)
+    if results.get("bootstrapped"):
+        print("[DUMP] BASELINE BOOTSTRAPPED")
+        print(f"[DUMP] Baseline: {results['baseline']}")
+        print(f"[DUMP] Report:   {report_path}")
+        print("=" * 80)
+        return
+
+    files = results.get("files", {})
+    tensor_count = sum(len(file_result.get("tensors", {})) for file_result in files.values())
+    failures = _dump_failures(results)
+    print(f"[DUMP] DEBUG DUMP COMPARISON: {'PASS' if passed else 'FAIL'}")
+    print(f"[DUMP] Compared files: {len(files)}")
+    print(f"[DUMP] Compared tensors: {tensor_count}")
+    print(f"[DUMP] Failed items: {len(failures)}")
+    print(f"[DUMP] Thresholds: {results.get('thresholds', {})}")
+    print(f"[DUMP] Report: {report_path}")
+    if failures:
+        print("[DUMP] First failures:")
+        for item in failures[:10]:
+            print(f"[DUMP] {item}")
+        if len(failures) > 10:
+            print(f"[DUMP] ... {len(failures) - 10} more failed items in report")
+    print("=" * 80)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compare Qwen-Image FlowGRPO nightly debug dumps")
     parser.add_argument("--baseline", type=Path, required=True)
@@ -143,9 +201,9 @@ def main() -> None:
     with args.output.open("w", encoding="utf-8") as file:
         json.dump(results, file, indent=2, sort_keys=True)
 
+    _print_conclusion(passed, results, args.output)
     if not passed:
         raise SystemExit(f"Debug dump comparison failed. See {args.output}")
-    print(f"Debug dump comparison passed. Report: {args.output}")
 
 
 if __name__ == "__main__":

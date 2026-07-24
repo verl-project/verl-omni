@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
 import re
 import threading
 import time
@@ -59,6 +60,35 @@ def _set_local_rank_device() -> None:
             torch.cuda.set_device(local_rank)
     except Exception as exc:
         print(f"WARN nightly debug failed to set local CUDA device: {exc}")
+
+
+def _seed_everything() -> None:
+    raw_seed = os.environ.get("NIGHTLY_DETERMINISTIC_SEED")
+    if raw_seed is None:
+        return
+    try:
+        seed = int(raw_seed)
+    except ValueError:
+        print(f"WARN nightly debug ignored invalid NIGHTLY_DETERMINISTIC_SEED={raw_seed!r}")
+        return
+
+    random.seed(seed)
+    np.random.seed(seed)
+    try:
+        import torch
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.allow_tf32 = False
+        if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+            torch.backends.cuda.matmul.allow_tf32 = False
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except Exception as exc:
+        print(f"WARN nightly debug failed to seed torch deterministically: {exc}")
 
 
 def _dump_dir() -> Path:
@@ -396,6 +426,7 @@ def install_debug_hooks() -> None:
     if not _enabled():
         return
     _set_local_rank_device()
+    _seed_everything()
     _install_tracking_hook()
     _install_driver_hook()
     _install_training_worker_hook()

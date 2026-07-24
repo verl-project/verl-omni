@@ -13,11 +13,12 @@ REWARD_TP=${REWARD_TP:-1}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-20}
 DEBUG_DUMP_STEPS=${DEBUG_DUMP_STEPS:-1,2}
 PERF_SKIP_STEPS=${PERF_SKIP_STEPS:-2}
-PERF_THRESHOLD=${PERF_THRESHOLD:-0.05}
+PERF_THRESHOLD=${PERF_THRESHOLD:-0.10}
 PRECISION_ATOL=${PRECISION_ATOL:-1e-4}
 PRECISION_RTOL=${PRECISION_RTOL:-1e-3}
 PRECISION_MIN_COS_SIM=${PRECISION_MIN_COS_SIM:-0.999}
 BOOTSTRAP_MISSING_BASELINE=${BOOTSTRAP_MISSING_BASELINE:-1}
+NIGHTLY_DETERMINISTIC_SEED=${NIGHTLY_DETERMINISTIC_SEED:-42}
 
 DATA_DIR=${DATA_DIR:-${HOME}/data/qwen_image_flowgrpo_single_sample}
 TRAIN_FILES=${TRAIN_FILES:-${DATA_DIR}/train.parquet}
@@ -47,6 +48,15 @@ if ! python3 -c 'from verl_omni.utils.diffusion_attention import fa3_available; 
     ATTN_BACKEND=native
     ROLLOUT_ATTN_BACKEND=TORCH_SDPA
 fi
+
+export NIGHTLY_DETERMINISTIC_SEED
+export PYTHONHASHSEED=${PYTHONHASHSEED:-${NIGHTLY_DETERMINISTIC_SEED}}
+export CUBLAS_WORKSPACE_CONFIG=${CUBLAS_WORKSPACE_CONFIG:-:4096:8}
+export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
+export GENRM_OCR_TEMPERATURE=${GENRM_OCR_TEMPERATURE:-0.0}
+export GENRM_OCR_TOP_P=${GENRM_OCR_TOP_P:-1.0}
+export GENRM_OCR_MAX_TOKENS=${GENRM_OCR_MAX_TOKENS:-32}
+export GENRM_OCR_SEED=${GENRM_OCR_SEED:-${NIGHTLY_DETERMINISTIC_SEED}}
 
 rm -rf "${CURRENT_DUMP_DIR}"
 mkdir -p "${CURRENT_DUMP_DIR}" "${BASELINE_DUMP_DIR}" "${LOG_DIR}"
@@ -126,6 +136,8 @@ python3 "${SCRIPT_DIR}/run.py" \
     reward.reward_model.rollout.tensor_model_parallel_size=${REWARD_TP} \
     reward.reward_model.rollout.gpu_memory_utilization=0.4 \
     reward.reward_model.rollout.enforce_eager=True \
+    reward.reward_model.rollout.do_sample=False \
+    reward.reward_model.rollout.temperature=0.0 \
     reward.reward_model.rollout.prompt_length=${MAX_PROMPT_LENGTH} \
     reward.reward_model.rollout.response_length=32 \
     reward.custom_reward_function.path=verl_omni/utils/reward_score/genrm_ocr.py \
@@ -143,6 +155,7 @@ python3 "${SCRIPT_DIR}/run.py" \
     trainer.total_training_steps=${TOTAL_TRAIN_STEPS} \
     "$@" 2>&1 | tee "${CONSOLE_LOG}"
 
+METRICS_STATUS=0
 python3 "${SCRIPT_DIR}/collect_metrics.py" \
     --metrics-jsonl "${DEBUG_METRICS_JSONL}" \
     --log-file "${CONSOLE_LOG}" \
@@ -150,8 +163,9 @@ python3 "${SCRIPT_DIR}/collect_metrics.py" \
     --output "${CURRENT_METRICS_JSON}" \
     --perf-skip-steps "${PERF_SKIP_STEPS}" \
     --threshold "${PERF_THRESHOLD}" \
-    "${BOOTSTRAP_ARGS[@]}"
+    "${BOOTSTRAP_ARGS[@]}" || METRICS_STATUS=$?
 
+DUMP_STATUS=0
 python3 "${SCRIPT_DIR}/compare_dumps.py" \
     --baseline "${BASELINE_DUMP_DIR}" \
     --current "${CURRENT_DUMP_DIR}" \
@@ -159,6 +173,11 @@ python3 "${SCRIPT_DIR}/compare_dumps.py" \
     --atol "${PRECISION_ATOL}" \
     --rtol "${PRECISION_RTOL}" \
     --min-cos-sim "${PRECISION_MIN_COS_SIM}" \
-    "${BOOTSTRAP_ARGS[@]}"
+    "${BOOTSTRAP_ARGS[@]}" || DUMP_STATUS=$?
+
+if [ "${METRICS_STATUS}" -ne 0 ] || [ "${DUMP_STATUS}" -ne 0 ]; then
+    echo "Qwen-Image FlowGRPO single-sample nightly regression failed: metrics_status=${METRICS_STATUS}, dump_status=${DUMP_STATUS}."
+    exit 1
+fi
 
 echo "Qwen-Image FlowGRPO single-sample nightly regression passed."

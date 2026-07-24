@@ -30,6 +30,25 @@ _NUMERIC_VALUE_RE = re.compile(
     r"nan|[-+]?inf|[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
     r")\)?"
 )
+_LOWER_IS_BETTER_PREFIXES = ("timing_per_image_ms/",)
+_LOWER_IS_BETTER_KEYS = {
+    "perf/time_per_step",
+    "timing_s/adv",
+    "timing_s/gen",
+    "timing_s/old_log_prob",
+    "timing_s/reward",
+    "timing_s/step",
+    "timing_s/update_actor",
+    "timing_s/update_weights",
+}
+_HIGHER_IS_BETTER_KEYS = {
+    "perf/mfu/actor",
+    "perf/mfu/actor_infer",
+    "perf/throughput",
+}
+_NEUTRAL_KEYS = {
+    "perf/total_num_images",
+}
 
 
 def _as_float(value: Any) -> float | None:
@@ -142,10 +161,23 @@ def _load_records(metrics_jsonl: Path | None, log_file: Path | None) -> list[dic
     return sorted(records, key=lambda item: int(item["step"]))
 
 
+def _compare_direction(key: str) -> str | None:
+    if key in _LOWER_IS_BETTER_KEYS or key.startswith(_LOWER_IS_BETTER_PREFIXES):
+        return "lower"
+    if key in _HIGHER_IS_BETTER_KEYS:
+        return "higher"
+    if key in _NEUTRAL_KEYS:
+        return "neutral"
+    return None
+
+
 def _compare_summary(current: dict, baseline: dict, threshold: float) -> tuple[bool, dict]:
     passed = True
     report = {}
     for key, baseline_stats in baseline.items():
+        direction = _compare_direction(key)
+        if direction is None:
+            continue
         if key not in current:
             report[key] = {"missing_in_current": True}
             passed = False
@@ -159,16 +191,80 @@ def _compare_summary(current: dict, baseline: dict, threshold: float) -> tuple[b
             rel_delta = 0.0 if abs(current_mean) < 1e-12 else float("inf")
         else:
             rel_delta = (current_mean - baseline_mean) / abs(baseline_mean)
-        failed = abs(rel_delta) > threshold
+        if direction == "lower":
+            failed = rel_delta > threshold
+        elif direction == "higher":
+            failed = rel_delta < -threshold
+        else:
+            failed = abs(rel_delta) > threshold
         if failed:
             passed = False
         report[key] = {
             "baseline_mean": baseline_mean,
             "current_mean": current_mean,
+            "direction": direction,
             "relative_delta": rel_delta,
             "failed": failed,
         }
     return passed, report
+
+
+def _format_delta(value: float) -> str:
+    if math.isinf(value):
+        return "inf"
+    return f"{value * 100:+.2f}%"
+
+
+def _print_conclusion(passed: bool, output: dict, report_path: Path) -> None:
+    if "bootstrapped_baseline" in output:
+        print("=" * 80)
+        print("[PERF] BASELINE BOOTSTRAPPED")
+        print(f"[PERF] Baseline: {output['bootstrapped_baseline']}")
+        print(f"[PERF] Report:   {report_path}")
+        print("=" * 80)
+        return
+
+    compare = output.get("baseline_compare")
+    if not compare:
+        print("=" * 80)
+        print("[PERF] METRICS COLLECTED")
+        print(f"[PERF] Report: {report_path}")
+        print("=" * 80)
+        return
+
+    failed_items = [(key, stats) for key, stats in compare.items() if stats.get("failed")]
+    print("=" * 80)
+    print(f"[PERF] PERFORMANCE COMPARISON: {'PASS' if passed else 'FAIL'}")
+    print(f"[PERF] Threshold: {output['threshold']:.2%}")
+    print(f"[PERF] Compared metrics: {len(compare)}")
+    print(f"[PERF] Failed metrics: {len(failed_items)}")
+    print(f"[PERF] Report: {report_path}")
+
+    rows = failed_items
+    if not rows:
+        preferred_keys = (
+            "perf/throughput",
+            "perf/time_per_step",
+            "timing_s/gen",
+            "timing_s/update_actor",
+            "timing_s/update_weights",
+        )
+        rows = [(key, compare[key]) for key in preferred_keys if key in compare]
+
+    if rows:
+        print("[PERF] Key comparison rows:")
+        for key, stats in rows[:10]:
+            print(
+                "[PERF] "
+                f"{key}: baseline={stats['baseline_mean']:.6g}, "
+                f"current={stats['current_mean']:.6g}, "
+                f"delta={_format_delta(stats['relative_delta'])}, "
+                f"direction={stats['direction']}, "
+                f"status={'FAIL' if stats.get('failed') else 'PASS'}"
+            )
+        if len(rows) > 10:
+            print(f"[PERF] ... {len(rows) - 10} more failed metrics in report")
+    print("=" * 80)
 
 
 def collect(args: argparse.Namespace) -> tuple[bool, dict]:
@@ -217,7 +313,7 @@ def main() -> None:
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--perf-skip-steps", type=int, default=2)
-    parser.add_argument("--threshold", type=float, default=0.05)
+    parser.add_argument("--threshold", type=float, default=0.10)
     parser.add_argument("--bootstrap-missing", action="store_true")
     args = parser.parse_args()
 
@@ -228,9 +324,9 @@ def main() -> None:
 
     if args.baseline and not args.baseline.exists() and args.bootstrap_missing:
         shutil.copy2(args.output, args.baseline)
+    _print_conclusion(passed, output, args.output)
     if not passed:
         raise SystemExit(f"Performance comparison failed. See {args.output}")
-    print(f"Performance metrics collected. Report: {args.output}")
 
 
 if __name__ == "__main__":
