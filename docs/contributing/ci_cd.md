@@ -1,6 +1,6 @@
 # CI/CD Layers
 
-Last updated: 07/14/2026.
+Last updated: 07/24/2026.
 
 VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or convergence validation can evolve independently.
 
@@ -8,10 +8,12 @@ VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or co
 | --- | --- | --- | --- | --- | --- |
 | L1 CPU API tests | Validate CPU-only APIs, configs, data utilities, adapters, rewards, and unit behavior | Pull requests with `ready-for-ci`, pushes to `main` and release branches | CPU | Required before merge | Pass/fail and coverage artifacts |
 | L2 GPU smoke tests | Validate tiny-random GPU end-to-end training paths | Pull requests with `ready-for-ci`, usually after L1 is green | GPU | Required before merge for GPU-touching changes | Smoke logs and summaries |
-| L3 nightly regression | Detect numerical drift and performance regressions | Scheduled or manual | Fixed GPU runners | Nightly regression gate | Metrics and baseline comparisons |
+| L3 nightly regression | Detect numerical drift and performance regressions | Scheduled or manual | Fixed GPU runners | Nightly regression signal | Metrics and baseline comparisons |
 | L4 convergence tests | Validate real recipe convergence | Weekly, release candidate, or manual | Production GPU cluster | Release readiness gate | Reward/loss curves and convergence reports |
 
-L3 and L4 are planned layers and are not supported by runnable CI tests yet.
+L3 has one runnable test-side regression under `tests/nightly/`, but it is not
+yet wired to a stable GitHub scheduled workflow in this repository. L4 remains a
+planned layer.
 
 ## L1 CPU API Tests
 
@@ -37,7 +39,27 @@ Use L2 for changes that affect GPU rollout, trainer entrypoints, backend integra
 
 L3 is intended for scheduled numerical and performance regression tracking. These tests should run fixed-seed, short training windows and compare key metrics against reviewed baselines, such as loss, reward, KL, log probability, gradient norm, throughput, step time, and memory peak.
 
-L3 should not be part of the fast pull-request loop until its baseline policy and runner capacity are stable.
+The current runnable L3 case is
+`tests/nightly/qwen_image_flowgrpo_single_sample/`. It runs a deterministic
+20-step Qwen-Image FlowGRPO LoRA training window on local tiny-random policy and
+reward models, then compares:
+
+- debug dumps from selected steps for precision regressions; and
+- post-warmup timing, throughput, and memory metrics for performance regressions.
+
+Run it manually with:
+
+```bash
+bash tests/nightly/qwen_image_flowgrpo_single_sample/run_qwen_image_flowgrpo_single_sample.sh
+```
+
+Nightly jobs should run with `BOOTSTRAP_MISSING_BASELINE=0` so missing or stale
+baselines fail closed. Use `BOOTSTRAP_MISSING_BASELINE=1` only when intentionally
+creating or refreshing a reviewed baseline.
+
+Until the baseline policy, artifact retention, ownership, and fixed runner
+capacity are stable, L3 should remain outside the fast pull-request loop and
+should be treated as a regression signal rather than a required merge gate.
 
 ## L4 Convergence Tests
 

@@ -113,9 +113,15 @@ Delete the temporary `pytest.ini` if it is not part of your intended change.
 5. Mock model loading and external services.
 6. Run the L1 command above before opening a PR.
 
-## Future Layers
+## Higher Layers
 
-This guide currently defines L1 in detail because L1 is the main pull-request test layer. Add dedicated sections for L2, L3, or L4 when those workflows have stable ownership, trigger rules, naming conventions, and local commands.
+This guide currently defines L1 in detail because L1 is the main pull-request
+test layer. L2 and L3 checks may exist as GPU smoke or nightly regression jobs,
+but they should stay outside the fast PR loop until their ownership, trigger
+rules, baseline policy, runner capacity, and artifact retention are stable.
+
+For the current CI layer overview and the runnable L3 nightly case, see
+`ci_cd.md`.
 
 When adding a new layer section, include:
 
