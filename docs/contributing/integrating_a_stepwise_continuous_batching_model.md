@@ -5,6 +5,9 @@ Last updated: 07/22/2026.
 This guide explains how to extend an existing diffusion rollout adapter so it
 supports **continuous batching through vLLM-Omni step execution**.
 
+For a user-facing comparison of step-wise vs request-level batching (when to
+enable which), see [`rollout_batching.md`](../start/rollout_batching.md).
+
 You must already have a working full-forward integration following
 [`integrating_a_diffusion_model.md`](integrating_a_diffusion_model.md).
 

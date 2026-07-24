@@ -39,6 +39,7 @@ import random as _random
 from typing import Any
 
 from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 from vllm_omni.diffusion.worker.utils import DiffusionRequestState
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
@@ -70,8 +71,12 @@ class QwenImageMixGRPOPipelineWithLogProb(QwenImagePipelineWithLogProb):
             self._maybe_make_progressive_window(state.sampling.extra_args, kwargs)
         return super().prepare_encode(state, **kwargs)
 
-    def forward(self, req: OmniDiffusionRequest, **kwargs: Any):
-        self._maybe_make_progressive_window(req.sampling_params.extra_args, kwargs)
+    def forward(self, req: OmniDiffusionRequest | DiffusionRequestBatch, **kwargs: Any):
+        if isinstance(req, DiffusionRequestBatch):
+            for sampling_params in req.sampling_params_list:
+                self._maybe_make_progressive_window(sampling_params.extra_args, kwargs)
+        else:
+            self._maybe_make_progressive_window(req.sampling_params.extra_args, kwargs)
         return super().forward(req, **kwargs)
 
     @staticmethod

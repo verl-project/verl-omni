@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 07/06/2026.
+Last updated: 07/20/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -128,7 +128,10 @@ code — the answers determine every helper you need:
 
 Anything model-specific belongs inside the model's own package;
 anything reusable belongs in
-[`pipelines/utils.py`](../../verl_omni/pipelines/utils.py) or
+[`pipelines/utils.py`](../../verl_omni/pipelines/utils.py)
+(training dispatch),
+[`pipelines/request_batch.py`](../../verl_omni/pipelines/request_batch.py)
+(request-level batching collate/split), or
 [`pipelines/model_base.py`](../../verl_omni/pipelines/model_base.py).
 
 ---
@@ -286,6 +289,37 @@ Your subclass must do four things:
      `DiffusionOutput.custom_output`. The diffusion agent loop
      ([`diffusion_agent_loop.py`](../../verl_omni/agent_loop/diffusion_agent_loop.py))
      reads these field names verbatim — **do not rename them**.
+
+(request-level-batching)=
+### 4.1 Request-level batching (optional)
+
+To let vLLM-Omni pack multiple requests into one transformer forward
+(`max_num_seqs > 1`), extend the rollout adapter as follows. Reference
+implementations:
+[`qwen_image_flow_grpo/vllm_omni_rollout_adapter.py`](../../verl_omni/pipelines/qwen_image_flow_grpo/vllm_omni_rollout_adapter.py)
+and
+[`sd3_flow_grpo/vllm_omni_rollout_adapter.py`](../../verl_omni/pipelines/sd3_flow_grpo/vllm_omni_rollout_adapter.py).
+
+1. Set `supports_request_batch = True` on the pipeline class
+   (otherwise the engine stays serial even if `max_num_seqs > 1`).
+2. Accept `OmniDiffusionRequest | DiffusionRequestBatch` in `forward`.
+3. Normalize with
+   `request_batch = req if isinstance(req, DiffusionRequestBatch) else DiffusionRequestBatch(requests=[req])`.
+4. Collate per-request tensors/prompts (use helpers in
+   [`verl_omni/pipelines/request_batch.py`](../../verl_omni/pipelines/request_batch.py)
+   such as `collate_prompt_rows` / `collate_prompt_mask`, and
+   `request_batch.collate_request_tensors` /
+   `collate_request_generators`).
+5. Run the existing SDE loop once on the packed batch, then split the
+   output with `split_diffusion_output_by_request` when the input was a
+   `DiffusionRequestBatch`.
+
+For launch knobs and measured speedups, see
+[`rollout_batching.md`](../start/rollout_batching.md).
+
+This is separate from step-wise continuous batching
+(`step_execution=true`). For that path, see
+[`integrating_a_stepwise_continuous_batching_model.md`](integrating_a_stepwise_continuous_batching_model.md).
 
 ---
 

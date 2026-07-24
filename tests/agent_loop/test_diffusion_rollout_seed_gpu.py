@@ -130,6 +130,10 @@ def _build_seed_rollout_config(tmp_dir: str, *, default_num_gpus: int, num_worke
     config.data.max_prompt_length = max_length
     config.actor_rollout_ref.rollout.max_model_len = max_length
     config.actor_rollout_ref.rollout.tensor_model_parallel_size = tp_size
+    # Serial requests only: packing changes pre-window ODE batch shapes and breaks
+    # bit-equality for window-start latents until vLLM-Omni is batch-invariant.
+    config.actor_rollout_ref.rollout.step_execution = False
+    config.actor_rollout_ref.rollout.max_num_seqs = 1
 
     # Smoke: prefer local FLASH_ATTN over product-default Hub FA3 (cf. FSDP engine test).
     from tests.utils.smoke_attention import resolve_smoke_attention_backends
@@ -149,7 +153,7 @@ def multi_worker_seed_rollout_config() -> DictConfig:
 
 
 def _initial_latents(result: DataProto) -> torch.Tensor:
-    """Return the first denoising latent for every rollout row."""
+    """Return the SDE-window-start latent (``all_latents[:, 0]``) for every row."""
     return result.batch["all_latents"][:, 0].detach().cpu()
 
 
@@ -201,11 +205,14 @@ def test_rollout_without_seed_produces_different_initial_latents(multi_worker_se
 
 
 def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollout_config):
-    """Rollout seeds are reproducible and diverse with agent.num_workers > 1.
+    """Rollout seeds are bit-reproducible and diverse with serial multi-worker rollout.
 
-    - Same ``rollout_seed`` + batch -> bit-identical initial latents across reruns.
-    - Distinct rollout indices within one step -> distinct initial latents.
-    - Covers multi-worker seed dispatch path.
+    - Same ``rollout_seed`` + batch -> bit-equal window-start latents across reruns.
+    - Distinct rollout indices within one step -> distinct latents.
+    - Uses ``max_num_seqs=1`` so pack-shape bf16 drift cannot affect reproducibility.
+
+    TODO: After vLLM-Omni supports batch-invariant inference, add a request-level
+    packing variant (``max_num_seqs>1``) with the same bit-equality check.
     """
     ray.init(
         runtime_env={
@@ -226,6 +233,7 @@ def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollou
 
         n = multi_worker_seed_rollout_config.actor_rollout_ref.rollout.n
         batch = _make_prompt_batch(num_prompts=1).repeat(n)
+        # Stable global indices so multi-worker chunking cannot remap seed derivation.
         batch.non_tensor_batch["_rollout_seed_global_idx"] = np.arange(len(batch), dtype=np.int64)
         batch.meta_info["global_steps"] = 1
         batch.meta_info["rollout_seed"] = 42
@@ -237,7 +245,8 @@ def test_rollout_seeds_unique_across_agent_loop_workers(multi_worker_seed_rollou
         latents_second = _initial_latents(second)
         assert latents_first.shape[0] == n
         assert torch.equal(latents_first, latents_second), (
-            "identical rollout_seed and batch must reproduce initial latents on GPU"
+            "identical rollout_seed and batch must bit-reproduce window-start latents on GPU "
+            f"(max abs diff={(latents_first - latents_second).abs().max().item():.4g})"
         )
 
         for i in range(n):

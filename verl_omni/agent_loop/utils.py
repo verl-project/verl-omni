@@ -23,7 +23,13 @@ def _derive_rollout_seed(base_seed: int, rollout_index: int) -> int:
 
 
 def maybe_per_rollout_seeds(meta_info: dict, batch_size: int, global_indices=None) -> Optional[list[int]]:
-    """Build one seed per post-repeat rollout row."""
+    """Build one seed per post-repeat rollout row.
+
+    When ``global_indices`` is provided (trainer sets ``_rollout_seed_global_idx``),
+    seeds are derived from those stable indices rather than the local chunk
+    position, so multi-worker splits and request packing order cannot remap RNG
+    state across rows.
+    """
     base = meta_info.get("rollout_seed")
     if base is None:
         return None
@@ -32,7 +38,8 @@ def maybe_per_rollout_seeds(meta_info: dict, batch_size: int, global_indices=Non
     if global_indices is None:
         return [_derive_rollout_seed(base, i) for i in range(batch_size)]
 
-    if len(global_indices) != batch_size:
-        raise ValueError(f"Expected {batch_size} global rollout indices, got {len(global_indices)}")
+    indices = [int(idx) for idx in list(global_indices)]
+    if len(indices) != batch_size:
+        raise ValueError(f"Expected {batch_size} global rollout indices, got {len(indices)}")
 
-    return [_derive_rollout_seed(base, int(idx)) for idx in global_indices]
+    return [_derive_rollout_seed(base, idx) for idx in indices]
