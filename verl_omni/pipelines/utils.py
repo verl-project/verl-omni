@@ -23,9 +23,9 @@ from diffusers.training_utils import compute_density_for_timestep_sampling
 from tensordict import TensorDict
 from verl.utils.device import get_device_name
 
-from verl_omni.workers.config import DiffusionModelConfig
+from verl_omni.workers.config import DiffusionModelConfig, OmniModelConfig
 
-from .model_base import DiffusionI2IModelBase, DiffusionModelBase
+from .model_base import DiffusionI2IModelBase, DiffusionModelBase, OmniModelBase
 
 __all__ = [
     "ImageGenerationRequest",
@@ -33,11 +33,33 @@ __all__ = [
     "forward",
     "forward_and_sample_previous_step",
     "get_sigmas",
+    "prepare_diffusion_model_inputs",
     "prepare_model_inputs",
+    "prepare_omni_model_inputs",
+    "prepare_omni_preference_inputs",
+    "compute_omni_preference_logps",
     "prepare_noisy_latents",
     "sample_noise_and_timesteps",
     "set_timesteps",
 ]
+
+
+def _resolve_model_family(model_config) -> str:
+    if isinstance(model_config, OmniModelConfig):
+        return "omni"
+
+    if isinstance(model_config, DiffusionModelConfig):
+        return "diffusion"
+
+    if getattr(model_config, "model_stage", None) is not None:
+        return "omni"
+    if getattr(model_config, "algorithm", None) is not None:
+        return "diffusion"
+
+    raise TypeError(
+        f"Unsupported model_config type {type(model_config).__name__!r}; "
+        "expected OmniModelConfig or DiffusionModelConfig."
+    )
 
 
 @dataclass
@@ -114,7 +136,7 @@ class ImageGenerationRequest:
         )
 
 
-def prepare_model_inputs(
+def prepare_diffusion_model_inputs(
     module: ModelMixin,
     model_config: DiffusionModelConfig,
     latents: torch.Tensor,
@@ -126,8 +148,10 @@ def prepare_model_inputs(
     micro_batch: TensorDict,
     step: int,
 ) -> tuple[dict, Optional[dict]]:
-    """Build architecture-specific model inputs for the forward pass.
-    Dispatches to the registered DiffusionModelBase subclass for the current architecture.
+    """Build architecture-specific diffusion model inputs for the forward pass.
+
+    Dispatches to the registered ``DiffusionModelBase`` subclass for the current
+    architecture.
 
     Args:
         module (ModelMixin): the diffusion transformer module.
@@ -151,8 +175,6 @@ def prepare_model_inputs(
         after the T2I ``prepare_model_inputs`` call.
     """
     model_cls = DiffusionModelBase.get_class(model_config)
-
-    # T2I original logic (unchanged)
     model_inputs, negative_model_inputs = model_cls.prepare_model_inputs(
         module,
         model_config,
@@ -166,7 +188,6 @@ def prepare_model_inputs(
         step,
     )
 
-    # I2I adapters prepare and inject their model-specific condition tensors.
     if issubclass(model_cls, DiffusionI2IModelBase):
         condition = model_cls.prepare_condition(micro_batch, latents, step)
         if condition is None:
@@ -185,6 +206,120 @@ def prepare_model_inputs(
         model_inputs, negative_model_inputs = model_cls.inject_condition(model_inputs, negative_model_inputs, condition)
 
     return model_inputs, negative_model_inputs
+
+
+def prepare_model_inputs(
+    module,
+    model_config,
+    *args,
+    **kwargs,
+):
+    """Build architecture-specific model inputs for the forward pass.
+
+    Dispatches to ``prepare_omni_model_inputs`` or ``prepare_diffusion_model_inputs``
+    based on ``model_config``. The first two arguments are always ``module`` and
+    ``model_config``; remaining positional and keyword arguments are forwarded to
+    the model-family-specific helper.
+    """
+    if _resolve_model_family(model_config) == "omni":
+        return prepare_omni_model_inputs(model_config, *args, **kwargs)
+    return prepare_diffusion_model_inputs(module, model_config, *args, **kwargs)
+
+
+def prepare_omni_model_inputs(
+    model_config,
+    micro_batch: TensorDict,
+    *,
+    dtype: Optional[torch.dtype] = None,
+) -> dict[str, Any]:
+    """Build architecture-specific omni model inputs for the forward pass.
+
+    Dispatches to the registered ``OmniModelBase`` subclass for the current
+    architecture and training stage.
+
+    Args:
+        model_config: ``OmniModelConfig`` (or compatible object with ``architecture``
+            and ``model_stage`` for registry lookup).
+        micro_batch (TensorDict): training micro-batch produced by the dataloader or
+            collate path.
+        dtype (Optional[torch.dtype]): optional parameter dtype for floating-point
+            multimodal tensors such as ``pixel_values`` and ``input_features``.
+
+    Returns:
+        dict[str, Any]: keyword arguments ready for the omni model ``forward()`` call.
+    """
+    adapter = OmniModelBase.get_class(model_config)
+    return adapter.prepare_model_inputs(model_config, micro_batch, dtype=dtype)
+
+
+def prepare_omni_preference_inputs(
+    model_config,
+    micro_batch: TensorDict,
+    *,
+    dtype: Optional[torch.dtype] = None,
+) -> tuple[dict[str, Any], torch.Tensor, torch.Tensor]:
+    """Build architecture-specific omni preference (DPO) forward inputs.
+
+    Dispatches to the registered ``OmniModelBase`` subclass for the current
+    architecture and training stage. The adapter prepares model ``forward()``
+    kwargs and returns the labels plus pairing metadata needed to score
+    chosen/rejected responses after the forward pass.
+
+    Args:
+        model_config: ``OmniModelConfig`` (or compatible object with ``architecture``
+            and ``model_stage`` for registry lookup).
+        micro_batch (TensorDict): paired preference micro-batch produced by the
+            dataloader or collate path.
+        dtype (Optional[torch.dtype]): optional parameter dtype for floating-point
+            multimodal tensors such as ``pixel_values`` and ``input_features``.
+
+    Returns:
+        tuple[dict[str, Any], torch.Tensor, torch.Tensor]: model forward kwargs,
+            token labels for log-prob scoring, and adapter-specific pairing metadata
+            that maps chosen/rejected responses back to each preference pair.
+    """
+    adapter = OmniModelBase.get_class(model_config)
+    return adapter.prepare_preference_inputs(model_config, micro_batch, dtype=dtype)
+
+
+def compute_omni_preference_logps(
+    model_config,
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    pair_batch_size: torch.Tensor,
+    *,
+    average_log_prob: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reduce token logits to chosen/rejected sequence log-probs for DPO.
+
+    Dispatches to the registered ``OmniModelBase`` subclass so each architecture
+    can interpret its own preference packing metadata and aggregate token
+    log-probs into one score per chosen and rejected response.
+
+    Args:
+        model_config: ``OmniModelConfig`` (or compatible object with ``architecture``
+            and ``model_stage`` for registry lookup).
+        logits (torch.Tensor): model output logits over the vocabulary.
+        labels (torch.Tensor): token labels returned by
+            ``prepare_omni_preference_inputs``; ignored positions should use
+            ``-100``.
+        pair_batch_size (torch.Tensor): adapter-specific pairing metadata returned
+            by ``prepare_omni_preference_inputs``. For packed Qwen3-Omni batches,
+            this stores chosen/rejected segment ranges.
+        average_log_prob (bool): whether to average token log-probs over valid
+            response tokens instead of summing them.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: chosen and rejected sequence log-probs,
+            each with one value per preference pair.
+    """
+    adapter = OmniModelBase.get_class(model_config)
+    return adapter.compute_preference_logps(
+        logits,
+        labels,
+        pair_batch_size,
+        average_log_prob=average_log_prob,
+    )
 
 
 def build_scheduler(model_config: DiffusionModelConfig) -> SchedulerMixin:

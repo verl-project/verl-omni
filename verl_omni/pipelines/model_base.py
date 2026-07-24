@@ -498,19 +498,39 @@ class OmniModelBase(ABC):
             NotImplementedError: If no adapter is registered for the given
                 ``(architecture, stage)`` key.
         """
-        key = (model_config.architecture, model_config.model_stage)
-        if key not in cls._registry and getattr(model_config, "external_lib", None) is not None:
-            from verl.utils.import_utils import import_external_libs
+        return cls.get_class_by_name(
+            model_config.architecture,
+            model_config.model_stage,
+            getattr(model_config, "external_lib", None),
+        )
 
-            import_external_libs(model_config.external_lib)
+    @classmethod
+    def get_class_by_name(
+        cls,
+        architecture: str,
+        model_stage: str,
+        external_lib: Optional[str] = None,
+    ) -> type["OmniModelBase"]:
+        """Resolve an omni adapter before a full ``OmniModelConfig`` exists."""
+        key = (architecture, model_stage)
+        if key not in cls._registry:
+            if external_lib is not None:
+                from verl.utils.import_utils import import_external_libs
+
+                import_external_libs(external_lib)
+            if key not in cls._registry:
+                try:
+                    import verl_omni.pipelines  # noqa: F401
+                except ImportError:
+                    pass
 
         try:
             return cls._registry[key]
         except KeyError:
             registered = sorted(cls._registry.keys())
             raise NotImplementedError(
-                f"No omni model registered for (architecture={model_config.architecture!r}, "
-                f"stage={model_config.model_stage!r}). Registered: {registered}. "
+                f"No omni model registered for (architecture={architecture!r}, "
+                f"stage={model_stage!r}). Registered: {registered}. "
                 f"Set ``external_lib`` to load your training adapter."
             ) from None
 
@@ -573,6 +593,58 @@ class OmniModelBase(ABC):
 
         Returns:
             The configured tokenizer (model-specific type).
+        """
+        pass
+
+    _TRAINING_INPUT_KEYS = (
+        "input_ids",
+        "attention_mask",
+        "labels",
+        "position_ids",
+        "pixel_values",
+        "image_grid_thw",
+        "pixel_values_videos",
+        "video_grid_thw",
+        "input_features",
+        "feature_attention_mask",
+        "audio_feature_lengths",
+    )
+
+    @classmethod
+    def prepare_training_inputs(
+        cls,
+        model_config,
+        micro_batch: TensorDict,
+        *,
+        dtype: Optional[torch.dtype] = None,
+    ) -> dict[str, Any]:
+        """Extract standard AR/MLLM training keys from a micro-batch.
+
+        Model-family adapters override this to apply architecture-specific
+        normalization before ``model(**model_inputs)``.
+        """
+        model_inputs: dict[str, Any] = {}
+        for key in cls._TRAINING_INPUT_KEYS:
+            if key not in micro_batch.keys():
+                continue
+            value = micro_batch.get(key)
+            if value is not None:
+                model_inputs[key] = value
+        return model_inputs
+
+    @classmethod
+    @abstractmethod
+    def prepare_model_inputs(
+        cls,
+        model_config,
+        micro_batch: TensorDict,
+        *,
+        dtype: Optional[torch.dtype] = None,
+    ) -> dict[str, Any]:
+        """Build architecture-specific forward kwargs from a micro-batch.
+
+        Each omni model family extracts the keys it needs from ``micro_batch``
+        and applies any normalization before ``model(**model_inputs)``.
         """
         pass
 
