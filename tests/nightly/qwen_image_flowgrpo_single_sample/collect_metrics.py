@@ -49,7 +49,7 @@ _HIGHER_IS_BETTER_KEYS = {
 _NEUTRAL_KEYS = {
     "perf/total_num_images",
 }
-_EXCLUDED_COMPARE_KEYS = { # exclude from comparison because they are very small and sensitive 
+_EXCLUDED_COMPARE_KEYS = {  # exclude from comparison because they are very small and sensitive
     "timing_per_image_ms/adv",
     "timing_s/adv",
 }
