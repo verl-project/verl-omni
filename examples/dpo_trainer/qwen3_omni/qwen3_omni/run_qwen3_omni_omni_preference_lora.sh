@@ -27,17 +27,17 @@ DATA_DIR=${DATA_DIR:-${HOME}/didan-new/Omni-Preference/parquet_dpo}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-300}
 NUM_GPUS=${NUM_GPUS:-4}
 
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-${NUM_GPUS}}
-PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-${TRAIN_BATCH_SIZE}}
-PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-64}
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-8}
+PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-2}
 
-LORA_RANK=${LORA_RANK:-64}
-LORA_ALPHA=${LORA_ALPHA:-128}
+LORA_RANK=${LORA_RANK:-32}
+LORA_ALPHA=${LORA_ALPHA:-64}
 # The external lib unfuses Qwen3-Omni MoE experts before PEFT attaches LoRA, so expert LoRA
 # should target the unfused nn.Linear names instead of PEFT target_parameters on fused tensors.
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-'["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]'}
 ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-sdpa}
-LR=${LR:-1.0e-4}
+LR=${LR:-1.0e-6}
 SAVE_FREQ=${SAVE_FREQ:-150}
 TEST_FREQ=${TEST_FREQ:--1}
 
@@ -100,6 +100,8 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.omni_loss.average_log_prob=false \
     actor_rollout_ref.actor.omni_loss.refer_model_precision=bfloat16 \
     actor_rollout_ref.actor.optim.lr="${LR}" \
+    actor_rollout_ref.actor.optim.lr_scheduler_type=cosine \
+    actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.03 \
     actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU}" \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU}" \
