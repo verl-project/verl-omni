@@ -102,6 +102,13 @@ def resolve_time_shift(
         scheduler_config.get if hasattr(scheduler_config, "get") else lambda k, d=None: getattr(scheduler_config, k, d)
     )
 
+    # An empty mapping means the Boogu keys could not be read (e.g. someone
+    # passed the diffusers-filtered ``scheduler.config`` or the JSON was
+    # missing). Degrade to a no-op schedule rather than silently applying the
+    # dynamic-v2 defaults, which do not match the released checkpoints.
+    if isinstance(scheduler_config, dict) and not scheduler_config:
+        return None, 1.0
+
     if not get("do_shift", True):
         return None, 1.0
 
