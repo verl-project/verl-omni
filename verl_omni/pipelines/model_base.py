@@ -627,18 +627,6 @@ class OmniModelBase(ABC):
 
         return module
 
-    @classmethod
-    def normalize_lora_key(cls, name: str) -> str:
-        """Normalize a LoRA weight key for the rollout engine.
-
-        Args:
-            name: LoRA weight key after generic normalization.
-
-        Returns:
-            The normalized key.
-        """
-        return name
-
 
 class OmniRolloutPipelineBase:
     """Registry for omni model vLLM-Omni pipeline topologies.
