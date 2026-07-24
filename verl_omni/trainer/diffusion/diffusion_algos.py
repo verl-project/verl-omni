@@ -1049,3 +1049,84 @@ class KLLoss(DiffusionLossFn):
             std_dev_t=model_output["std_dev_t"],
         )
         return DiffusionLossResult(loss=kl_loss, metrics=metrics)
+
+
+@register_diffusion_loss("distill_kl")
+class DistillKLLoss(DiffusionLossFn):
+    """KL divergence between student and teacher reverse-SDE means (online policy distillation)."""
+
+    required_model_output_keys = ("prev_sample_mean", "std_dev_t")
+    required_data_keys = ("teacher_prev_sample_mean",)
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        prev_sample_mean: torch.Tensor,
+        teacher_prev_sample_mean: torch.Tensor,
+        std_dev_t: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute KL divergence given student and teacher previous sample means.
+
+        Args:
+            prev_sample_mean: (torch.Tensor) shape is (bs, s, c)
+            teacher_prev_sample_mean: (torch.Tensor) shape is (bs, s, c)
+            std_dev_t: (torch.Tensor) shape is (bs, 1, 1)
+        """
+        kl_loss = ((prev_sample_mean - teacher_prev_sample_mean) ** 2).mean(dim=(1, 2), keepdim=True) / (
+            2 * std_dev_t**2
+        )
+        metrics = {"actor/distill_kl_loss": kl_loss.mean().detach().item()}
+        return kl_loss.mean(), metrics
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        distill_loss, metrics = self.compute_loss(
+            prev_sample_mean=model_output["prev_sample_mean"],
+            teacher_prev_sample_mean=data["teacher_prev_sample_mean"],
+            std_dev_t=model_output["std_dev_t"],
+        )
+        return DiffusionLossResult(loss=distill_loss, metrics=metrics)
+
+
+@register_diffusion_loss("distill_fm_mse")
+class DistillFlowMatchingMSELoss(DiffusionLossFn):
+    """MSE between student and teacher flow/noise predictions (online policy distillation)."""
+
+    required_model_output_keys = ("noise_pred",)
+    required_data_keys = ("teacher_noise_pred",)
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        noise_pred: torch.Tensor,
+        teacher_noise_pred: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute the elementwise MSE between student and teacher predictions.
+
+        Args:
+            noise_pred: (torch.Tensor) shape is (bs, ...), e.g. (bs, s, c) or (bs, c, h, w)
+            teacher_noise_pred: (torch.Tensor) same shape as ``noise_pred``
+        """
+        mse_loss = ((noise_pred - teacher_noise_pred) ** 2).mean()
+        metrics = {"actor/distill_fm_mse_loss": mse_loss.detach().item()}
+        return mse_loss, metrics
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        distill_loss, metrics = self.compute_loss(
+            noise_pred=model_output["noise_pred"],
+            teacher_noise_pred=data["teacher_noise_pred"],
+        )
+        return DiffusionLossResult(loss=distill_loss, metrics=metrics)

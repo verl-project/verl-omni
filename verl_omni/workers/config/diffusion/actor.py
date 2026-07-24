@@ -49,7 +49,16 @@ class DiffusionLossConfig(BaseConfig):
 
     def __post_init__(self):
         """Validate diffusion loss configuration."""
-        valid_modes = ["flow_grpo", "flow_dppo", "grpo_guard", "diffusion_nft", "dpo", "dance_grpo"]
+        valid_modes = [
+            "flow_grpo",
+            "flow_dppo",
+            "grpo_guard",
+            "diffusion_nft",
+            "dpo",
+            "dance_grpo",
+            "distill_kl",
+            "distill_fm_mse",
+        ]
         if self.loss_mode not in valid_modes:
             raise ValueError(f"Invalid diffusion loss_mode: {self.loss_mode}. Must be one of {valid_modes}")
         if self.adv_clip_max <= 0:
@@ -137,6 +146,9 @@ class DiffusionActorConfig(BaseConfig):
     loss_scale_factor: Optional[float] = None
     use_kl_loss: bool = False
     kl_loss_coef: float = 0.001
+    use_distill_loss: bool = False
+    distill_loss_mode: str = "distill_kl"
+    distill_loss_coef: float = 1.0
     ppo_epochs: int = 1
     shuffle: bool = False
     data_loader_seed: int = 42
@@ -161,6 +173,11 @@ class DiffusionActorConfig(BaseConfig):
         """Validate diffusion actor configuration parameters."""
         assert self.strategy != MISSING
         assert self.rollout_n != MISSING
+        valid_distill_modes = ["distill_kl", "distill_fm_mse"]
+        if self.use_distill_loss and self.distill_loss_mode not in valid_distill_modes:
+            raise ValueError(
+                f"Invalid distill_loss_mode: {self.distill_loss_mode}. Must be one of {valid_distill_modes}"
+            )
 
 
 @dataclass

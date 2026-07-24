@@ -92,6 +92,9 @@ actor_rollout_ref:
     loss_scale_factor: null
     use_kl_loss: false
     kl_loss_coef: 0.001
+    use_distill_loss: false
+    distill_loss_mode: distill_kl
+    distill_loss_coef: 1.0
     ppo_epochs: 1
     shuffle: false
     data_loader_seed: 42
