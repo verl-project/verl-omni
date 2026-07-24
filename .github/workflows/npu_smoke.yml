@@ -1,0 +1,127 @@
+name: npu_smoke
+
+on:
+  push:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "verl_omni/**"
+      - "tests/gpu_smoke/**"
+      - "tests/agent_loop/**"
+      - "tests/reward_loop/**"
+      - "tests/workers/**"
+      - "tests/special_e2e/**"
+      - "pyproject.toml"
+      - .github/workflows/gpu_smoke.yml
+      - .github/vllm_omni_pin.txt
+      - .github/actions/gpu-smoke-prepare/**
+      - .github/actions/gpu-smoke-upload-logs/**
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    types: [opened, synchronize, reopened, labeled]  # 加上默认类型
+    paths:
+      - "verl_omni/**"
+      - "tests/gpu_smoke/**"
+      - "tests/agent_loop/**"
+      - "tests/reward_loop/**"
+      - "tests/workers/**"
+      - "tests/special_e2e/**"
+      - "pyproject.toml"
+      - .github/workflows/gpu_smoke.yml
+      - .github/vllm_omni_pin.txt
+      - .github/actions/gpu-smoke-prepare/**
+      - .github/actions/gpu-smoke-upload-logs/**
+
+# Cancel jobs on the same ref if a new one is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Declare permissions just read content and PR file metadata.
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  setup_runner:
+    # Pull request label mapping:
+    #   ready-for-ci               -> diff-selected GPU smoke groups in parallel, up to 8 GPUs
+    #   ci-core                    -> key module coverage on one 2-GPU runner
+    #   ci-e2e-omni                -> omni trainer e2e coverage on one 2-GPU runner
+    #   ci-e2e-diffusion           -> diffusion trainer e2e coverage on one 4-GPU runner
+    # Push events also run all groups on one 8-GPU runner.
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a2b4-8
+    timeout-minutes: 120
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-a3-ubuntu22.04-py3.11-vllm
+      options: >-
+        --shm-size 16g
+    outputs:
+      mode: ${{ steps.resolve-mode.outputs.mode }}
+      groups-json: ${{ steps.resolve-groups.outputs.groups-json }}
+      group-count: ${{ steps.resolve-groups.outputs.group-count }}
+      total-gpus: ${{ steps.resolve-groups.outputs.total-gpus }}
+      runner-size: ${{ steps.resolve-groups.outputs.runner-size }}
+      runner-label: ${{ steps.create-runner.outputs.runner-label }}
+      mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
+    steps:
+      - id: resolve-mode
+        shell: bash
+        run: |
+          mode="none"
+          pr_labels="${{ github.event_name == 'pull_request' && join(github.event.pull_request.labels.*.name, ',') || '' }}"
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            mode="all"
+          elif [[ ",${pr_labels}," == *",ready-for-ci,"* ]]; then
+            mode="all"
+          elif [[ ",${pr_labels}," == *",ci-core,"* ]]; then
+            mode="ci-core"
+          elif [[ ",${pr_labels}," == *",ci-e2e-omni,"* ]]; then
+            mode="ci-e2e-omni"
+          elif [[ ",${pr_labels}," == *",ci-e2e-diffusion,"* ]]; then
+            mode="ci-e2e-diffusion"
+          fi
+          echo "mode=${mode}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: steps.resolve-mode.outputs.mode != 'none'
+      - id: resolve-groups
+        if: steps.resolve-mode.outputs.mode != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mode="${{ steps.resolve-mode.outputs.mode }}"
+
+          if [[ "${mode}" == "all" && "${{ github.event_name }}" == "pull_request" ]]; then
+            gh api \
+              "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+              --paginate \
+              --jq '.[].filename' > changed_files.txt
+            plan_json="$(python tests/gpu_smoke/select_gpu_smoke_groups.py --changed-files-file changed_files.txt)"
+          elif [[ "${mode}" == "all" ]]; then
+            plan_json="$(python tests/gpu_smoke/select_gpu_smoke_groups.py --all)"
+          else
+            plan_json="$(python tests/gpu_smoke/select_gpu_smoke_groups.py --groups "${mode}")"
+          fi
+
+          echo "Resolved GPU smoke plan: ${plan_json}"
+          echo "groups-json=${plan_json}" >> "$GITHUB_OUTPUT"
+          PLAN_JSON="${plan_json}" python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          plan = json.loads(os.environ["PLAN_JSON"])
+          print(f"group-count={plan['group_count']}")
+          print(f"total-gpus={plan['total_gpus']}")
+          print(f"runner-size={plan['runner_size']}")
+          PY
+      - id: create-runner
+        if: steps.resolve-mode.outputs.mode != 'none'
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "create"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-image: "${{ env.IMAGE }}"
