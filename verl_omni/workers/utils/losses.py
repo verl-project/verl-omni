@@ -19,7 +19,8 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.metric import AggregationType, Metric
 
 from verl_omni.trainer.diffusion.diffusion_algos import get_diffusion_loss_fn
-from verl_omni.workers.config import DiffusionActorConfig
+from verl_omni.trainer.omni.omni_algos import get_omni_loss_fn
+from verl_omni.workers.config import DiffusionActorConfig, OmniActorConfig
 
 
 def _apply_bypass_rc(
@@ -115,6 +116,30 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
 
     sp_size = tu.get_non_tensor_data(data, "sp_size", default=None)
     if sp_size > 1:
+        loss_value = loss_value * sp_size
+
+    return loss_value, metrics
+
+
+def omni_loss(config: OmniActorConfig, model_output, data: TensorDict, dp_group=None):
+    """Compute loss for omni AR direct-preference training."""
+    del dp_group
+    metrics = {}
+
+    loss_mode = config.omni_loss.loss_mode
+    loss_func = get_omni_loss_fn(loss_mode)
+    loss_func.validate_inputs(model_output=model_output, data=data)
+    loss_result = loss_func(config=config, model_output=model_output, data=data)
+    loss_value = loss_result.loss
+    metrics.update(Metric.from_dict(loss_result.metrics, aggregation=AggregationType.MEAN))
+    metrics["actor/loss"] = Metric(value=loss_value, aggregation=AggregationType.MEAN)
+
+    gradient_accumulation_steps = tu.get_non_tensor_data(data, "gradient_accumulation_steps", default=None)
+    if gradient_accumulation_steps:
+        loss_value = loss_value / gradient_accumulation_steps
+
+    sp_size = tu.get_non_tensor_data(data, "sp_size", default=None)
+    if sp_size is not None and sp_size > 1:
         loss_value = loss_value * sp_size
 
     return loss_value, metrics
