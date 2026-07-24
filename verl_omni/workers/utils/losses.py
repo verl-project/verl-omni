@@ -110,6 +110,14 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
                 aggregation=AggregationType.MEAN,
             )
 
+    if config.use_distill_loss:
+        loss_func = get_diffusion_loss_fn(config.distill_loss_mode)
+        loss_func.validate_inputs(loss_name=config.distill_loss_mode, model_output=model_output, data=data)
+        distill_result = loss_func(config=config, model_output=model_output, data=data)
+        loss_value += distill_result.loss * config.distill_loss_coef
+        metrics.update(Metric.from_dict(distill_result.metrics, aggregation=AggregationType.MEAN))
+        metrics["distill_coef"] = config.distill_loss_coef
+
     gradient_accumulation_steps = tu.get_non_tensor_data(data, "gradient_accumulation_steps", default=None)
     loss_value = loss_value / gradient_accumulation_steps
 
