@@ -341,10 +341,21 @@ class DiffusionAgentLoopWorker:
             non_tensor_batch.update(input_non_tensor_batch)
 
         # add reward_extra_info to non_tensor_batch
+        # A sub-reward may emit different keys for different samples: MultiVisualRewardManager
+        # publishes `reward/{key}/{subkey}` for every field of a dict result, but falls back to
+        # only `reward/{key}` when the sub-reward raises. Take the union of keys over the batch
+        # rather than trusting sample 0, so a single failed sample neither crashes the step nor
+        # silently drops the other samples' extras.
         reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]
-        reward_extra_keys = list(reward_extra_infos[0].keys())
+        reward_extra_keys = list(dict.fromkeys(key for info in reward_extra_infos for key in info))
         for key in reward_extra_keys:
-            non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
+            if all(key in info for info in reward_extra_infos):
+                non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
+            else:
+                # Fill gaps with None, mirroring how extra_fields is aggregated below.
+                values = np.empty(len(inputs), dtype=object)
+                values[:] = [info.get(key) for info in reward_extra_infos]
+                non_tensor_batch[key] = values
 
         metrics = [input.metrics.model_dump() for input in inputs]
         # Collect extra fields from all inputs and convert them to np.ndarray
