@@ -39,6 +39,14 @@ def _has_lora(module: nn.Module) -> bool:
     return hasattr(module, "lora_A") and hasattr(module, "lora_B")
 
 
+def test_lora_key_preserves_thinker_prefix_for_vllm_mapper():
+    """vLLM needs the HF thinker prefix to map LoRA keys to language_model."""
+    from verl_omni.pipelines.qwen3_omni.thinker_training_adapter import Qwen3OmniThinkerAdapter
+
+    key = "base_model.model.thinker.model.layers.0.self_attn.q_proj.lora_A.weight"
+    assert Qwen3OmniThinkerAdapter.normalize_lora_key(key) == key
+
+
 class _FusedMoEExperts(nn.Module):
     """Minimal Qwen3-Omni-style fused expert group.
 

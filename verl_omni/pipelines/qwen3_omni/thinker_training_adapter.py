@@ -104,12 +104,6 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         return processor
 
     @classmethod
-    def normalize_lora_key(cls, name: str) -> str:
-        name = name.replace("thinker.model.", "model.")
-        name = name.replace("thinker.lm_head.", "lm_head.")
-        return name
-
-    @classmethod
     def configure_tokenizer(cls, model_path: str, model_config) -> Any:
         """Load the tokenizer with chat template from ``chat_template.json``.
 
