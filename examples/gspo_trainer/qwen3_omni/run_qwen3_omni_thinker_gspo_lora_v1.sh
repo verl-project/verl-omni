@@ -13,7 +13,7 @@ VAL_FILE=${VAL_FILE:-"$HOME/data/gsm8k/test.parquet"}
 python3 -m verl_omni.trainer.main_omni \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${VAL_FILE}" \
-    data.train_batch_size=64 \
+    data.train_batch_size=128 \
     data.max_prompt_length=2048 \
     data.max_response_length=8192 \
     data.truncation='error' \
