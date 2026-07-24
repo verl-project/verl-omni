@@ -129,6 +129,11 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
             image_inputs = self.processor.image_processor(images=condition_images, return_tensors="pt")
             encoder_kwargs["pixel_values"] = image_inputs["pixel_values"].to(device=self.device, dtype=self.mllm.dtype)
             encoder_kwargs["image_grid_thw"] = image_inputs["image_grid_thw"].to(self.device)
+            # transformers >= 5.x Qwen3VL requires per-token modality ids
+            # alongside pixel_values for M-RoPE (0 = text, 1 = image); the
+            # processor normally returns them next to input_ids, so rebuild
+            # them here from the pre-tokenised prompt.
+            encoder_kwargs["mm_token_type_ids"] = (prompt_ids == image_token_id).long().to(self.device)
 
         with torch.no_grad():
             outputs = self.mllm(
