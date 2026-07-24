@@ -33,6 +33,7 @@ PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-2}
 
 LORA_RANK=${LORA_RANK:-32}
 LORA_ALPHA=${LORA_ALPHA:-64}
+LORA_DROPOUT=${LORA_DROPOUT:-0.05}
 # The external lib unfuses Qwen3-Omni MoE experts before PEFT attaches LoRA, so expert LoRA
 # should target the unfused nn.Linear names instead of PEFT target_parameters on fused tensors.
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-'["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]'}
@@ -89,6 +90,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.model.lora_rank="${LORA_RANK}" \
     actor_rollout_ref.model.lora_alpha="${LORA_ALPHA}" \
+    actor_rollout_ref.model.lora.dropout="${LORA_DROPOUT}" \
     actor_rollout_ref.model.target_modules="${LORA_TARGET_MODULES}" \
     actor_rollout_ref.model.exclude_modules="${EXCLUDE_MODULES}" \
     actor_rollout_ref.model.use_remove_padding=false \
