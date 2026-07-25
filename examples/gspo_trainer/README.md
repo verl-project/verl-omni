@@ -1,9 +1,17 @@
-# Qwen3-Omni Thinker GSPO + LoRA Trainer
+# Qwen3-Omni Thinker GSPO Trainer
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
-**GSPO + LoRA** on a math-reasoning task, using FSDP for the actor and
-`vllm-omni` as the async rollout backend.
+**GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
+the async rollout backend. Three input recipes are supported: **text → text**
+(`MATH-lighteval`), **image → text** (`MMK12`), and
+**text + image + audio → text** (`AVQA-R1-6K`).
 
+Both **GPU** and **NPU** training platforms are supported via two launch scripts:
+
+- [`run_qwen3_omni_thinker_gspo_lora.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_lora.sh)
+  — **GPU**, **LoRA (r=64)** on a single node with **4 × H100/H200 80GB**.
+- [`run_qwen3_omni_thinker_gspo_npu.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh)
+  — **NPU**, **full-parameter** on a single **Atlas 800T A3** node with **16 NPUs**.
 For the base environment setup, see the [installation guide](../../docs/start/install.md).
 
 ## Installation
@@ -39,7 +47,7 @@ pip install "verl @ git+https://github.com/verl-project/verl.git@05b262b6"
 
 # verl's V1 trainer (TaskRunnerV1) imports TransferQueue at startup; main_ppo
 # fails with ModuleNotFoundError without it, and it is not always pulled transitively
-pip install TransferQueue==0.1.8
+pip install TransferQueue==0.1.8 librosa qwen_vl_utils
 
 # verl-omni (this repo)
 pip install -e .
@@ -71,10 +79,11 @@ so verl loads both on the driver via its `VERL_USE_EXTERNAL_MODULES` hook:
 patches before the driver's dataset loader runs. The GPU workers load the same
 model patch via `actor_rollout_ref.model.external_lib`.
 
-The provided script is configured for a single node with **4 × H100/H200 80GB**:
-the actor (FSDP, 30B + LoRA r=64 with param/optimizer offload) and the
-`vllm-omni` rollout (TP=4) colocate on the same 4 GPUs. Multi-node is not yet
-validated.
+The two launch scripts colocate the FSDP actor and the `vllm-omni` rollout on
+the same devices. `run_qwen3_omni_thinker_gspo_lora.sh` targets a single node with **4 × H100/H200 80GB**
+(30B + LoRA r=64 with param/optimizer offload, rollout TP=4). `run_qwen3_omni_thinker_gspo_npu.sh` targets
+a single **Atlas 800T A3** node with **16 NPUs** (full-parameter FSDP actor,
+rollout TP=2). Multi-node is not yet validated on either platform.
 
 > **Where the rollout engine's memory/batching is set.** When
 > `stage_configs_path` is provided, vLLM-Omni **ignores** the top-level engine
@@ -90,20 +99,6 @@ validated.
 > the codepaths used here are numpy-2 compatible, so the pip resolver warning is
 > safe to ignore.
 
-## Prepare the dataset
-
-A parquet dataset of math problems with `prompt` and `answer` fields, defaulting
-to `~/data/math/{train,test}.parquet`. The example was tested on
-`MATH-lighteval`; any standard RL math dataset works. To convert HuggingFace
-datasets into verl's parquet format, see
-[`verl/examples/data_preprocess/`](https://github.com/verl-project/verl/tree/main/examples/data_preprocess).
-
-```bash
-mkdir -p ~/data/math
-# … place train.parquet and test.parquet here …
-ls ~/data/math/   # train.parquet  test.parquet
-```
-
 ## Prepare the model
 
 The script uses the HuggingFace Hub ID `Qwen/Qwen3-Omni-30B-A3B-Instruct`
@@ -118,12 +113,32 @@ export MODEL_PATH=/path/to/local/Qwen3-Omni-30B-A3B-Instruct
 > `tokenizer.chat_template`; verl's dataset loader calls
 > `tokenizer.apply_chat_template(...)` and fails without it.
 
-## Run training
+## Training with `MATH-lighteval`
 
-Launch from the repository root:
+### Prepare the dataset
+
+A parquet dataset of math problems with `prompt` and `answer` fields, defaulting
+to `~/data/math/{train,test}.parquet`. The example was tested on
+`MATH-lighteval`; any standard RL math dataset works. To convert HuggingFace
+datasets into verl's parquet format, see
+[`verl/examples/data_preprocess/`](https://github.com/verl-project/verl/tree/main/examples/data_preprocess).
 
 ```bash
+mkdir -p ~/data/math
+# … place train.parquet and test.parquet here …
+ls ~/data/math/   # train.parquet  test.parquet
+```
+
+### Run training
+
+Launch from the repository root — pick the flavor that matches your hardware:
+
+```bash
+# GPU, LoRA (r=64), 4 × H100/H200
 bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora.sh
+
+# NPU, full-parameter, 16 × Atlas 800T A3
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh
 ```
 
 The recipe config lives in
@@ -152,21 +167,16 @@ which trains on a tiny random-weight model built by
 [`build_qwen3_omni_tiny_random.py`](../../tests/special_e2e/build_qwen3_omni_tiny_random.py)
 (no 60 GB download). It is wired into the `tests/gpu_smoke` CI suite as Test 8.
 
-## Logging
-
-W&B logging is enabled by default:
-
-```bash
-export WANDB_API_KEY=<your_wandb_api_key>
-# trainer.project_name / experiment_name are already set in the script
-```
-
-## What is trained
+### What is trained
 
 Only the **Thinker** (`Qwen3OmniMoeThinkerForConditionalGeneration`):
 
-- LoRA rank 64, alpha 32, on `target_modules="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"`
-  (explicit names so the unfused MoE expert `gate/up/down_proj` are targeted, not just attention).
+- **GPU (LoRA)** — rank 64, alpha 32, on
+  `target_modules="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"`
+  (explicit names so the unfused MoE expert `gate/up/down_proj` are targeted,
+  not just attention).
+- **NPU (full-parameter)** — LoRA is disabled (`lora_rank=0`); all Thinker
+  parameters are updated under FSDP.
 - `exclude_modules` strips talker / code2wav / code_predictor / visual /
   audio_tower; `freeze_vision_tower=True` keeps the vision encoder cold.
 - The non-Thinker heads are dropped at FSDP-wrap time via `_verl_strip_modules`.
@@ -182,10 +192,11 @@ sampled response length):
   (`actor/perf/max_memory_allocated_gb` < 65).
 - `val-core/.../acc/mean@1` rising with steps.
 
-## Performance
+### Performance (GPU + LoRA)
 
 > Measured on a single node of **4 × H100/H200 80GB**, actor and rollout
-> colocated, MATH-lighteval, `dapo` reward.
+> colocated, MATH-lighteval, `dapo` reward, LoRA r=64
+> (`run_qwen3_omni_thinker_gspo_lora.sh`).
 
 | Script | Model | Algorithm | # Cards (colocate) | Batch × `rollout.n` | lr | Steps | Throughput (tok/gpu/s) | Time / Step (s) | val acc/mean@1 | rollout↔actor pearson |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -196,9 +207,9 @@ response length (mean `response_length` ranged ~0.7k–3.6k tokens over the run,
 to `max_response_length=8192` with `rollout.n=8`); `actor/perf/max_memory_allocated`
 peaks at ~64 GB.
 
-## Preliminary results
+### Preliminary results (GPU + LoRA)
 
-Over a 60-step run with the default config, the training reward
+Over a 60-step run with the default LoRA config, the training reward
 (`critic/rewards/mean`) rises from **~0.75 to ~0.90** and validation accuracy on
 MATH-lighteval is **~0.90**. Treat this
 as a plumbing-correctness signal (finite loss, reasonable grad norm, rollout↔actor
@@ -209,15 +220,144 @@ low-variance advantages on a high-baseline policy.
 
 ![training reward](reward.png)
 
+## Training with `MMK12`
+
+For visual math reasoning we ship an end-to-end pipeline on top of the
+[MMK12](https://www.modelscope.cn/datasets/SKYLENAGE/MMK12) dataset (image
+input + text output, K12 math). It reuses the same GSPO recipe as the
+text-only path — only the data preprocessing and the reward scorer differ.
+The launch example below uses the NPU / full-parameter flavor
+(`run_qwen3_omni_thinker_gspo_npu.sh`), but the GPU / LoRA flavor works too
+after pointing it at the MMK12 parquet.
+
+### Prepare the dataset
+
+Download the raw MMK12 parquet shards (from ModelScope or HuggingFace) into a
+local directory — the loader expects filenames like `train-*.parquet` and
+`test-*.parquet` — and convert them into the verl RL parquet layout with:
+
+```bash
+python examples/gspo_trainer/data_process/mmk12.py \
+    --input_dir  /path/to/mmk12/ \
+    --output_dir ~/data/mmk12
+```
+
+The converter emits one verl RL row per problem, with
+`data_source="math_dapo"`, a system prompt that constrains the model to emit
+`<answer>…\boxed{…}…</answer>`, and the image bytes carried inline in the
+`images` column so the parquet stays self-contained. Dropped samples (empty
+question / answer, undecodable image) and answer-type tallies are printed at
+the end. See the module docstring in
+[`data_process/mmk12.py`](data_process/mmk12.py) for the exact output schema.
+
+### Run training
+
+The MMK12 reward scorer grades responses with
+[`math_verify`](https://github.com/huggingface/math-verify), which is **not**
+pulled in transitively by verl or verl-omni. Install it explicitly first —
+otherwise the scorer falls back to `accuracy = 0` for every sample:
+
+```bash
+pip install math-verify
+```
+
+Then point the launcher at the MMK12 parquet and register the custom reward
+scorer via CLI overrides (no yaml edits required):
+
+```bash
+TRAIN_FILE=$HOME/data/mmk12/train.parquet \
+VAL_FILE=$HOME/data/mmk12/test.parquet \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh \
+    reward.custom_reward_function.path=verl_omni/utils/reward_score/mmk12_reward.py \
+    actor_rollout_ref.actor.optim.lr=3e-6
+```
+
+The scorer combines `math_verify` accuracy with a progressive format reward on
+the `<answer>…\boxed{}…</answer>` template; see
+[`verl_omni/utils/reward_score/mmk12_reward.py`](../../verl_omni/utils/reward_score/mmk12_reward.py)
+for the full formula.
+
+## Training with `AVQA-R1-6K`
+
+The AVQA recipe trains the Qwen3-Omni Thinker to answer a four-way question
+from question text, one image, and one WAV clip. The output is text ending in a
+single option tag such as `<answer>B</answer>`.
+
+### Prepare the dataset
+
+```bash
+python examples/gspo_trainer/data_process/avqa.py \
+    --input_dir /path/to/AVQA_R1 \
+    --output_dir ~/data/avqa_r1_6k
+```
+
+This writes `train.parquet` and `validation.parquet`. The parquet stores
+absolute image/audio paths, so the AVQA media directory must be mounted at the
+same path on every Ray worker. The converter validates modalities, options,
+labels, and media existence and prints kept/dropped counts for each split.
+
+Standalone audio is decoded to a 16 kHz waveform by
+[`OmniRLHFDataset`](../../verl_omni/utils/dataset/omni_rl_datasets.py). Install
+the audio loader without changing the NPU engine stack with
+`pip install -e ".[audio]"`.
+
+### Run NPU training
+
+Use the shared NPU launcher with AVQA-specific data, dataset, reward, and
+sequence-length overrides. It keeps the full-parameter FSDP, 16-NPU, rollout
+TP=2, eight-agent-worker topology from `run_qwen3_omni_thinker_gspo_npu.sh`.
+
+```bash
+TRAIN_FILE=$HOME/data/avqa_r1_6k/train.parquet \
+VAL_FILE=$HOME/data/avqa_r1_6k/validation.parquet \
+MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh \
+    data.max_prompt_length=2048 \
+    data.max_response_length=512 \
+    data.val_max_samples=512 \
+    data.custom_cls.path=pkg://verl_omni.utils.dataset.omni_rl_datasets \
+    data.custom_cls.name=OmniRLHFDataset \
+    ++data.mm_processor_kwargs.sampling_rate=16000 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
+    reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py \
+    reward.custom_reward_function.name=compute_score \
+    trainer.project_name=qwen3_omni_avqa \
+    trainer.experiment_name=gspo_avqa_npu \
+    trainer.test_freq=20 \
+    trainer.total_epochs=3
+```
+
+These overrides use a 2048-token multimodal prompt budget and a 512-token
+response budget, register the audio-aware dataset class by importable package
+path so multiprocessing preserves its `RLHFDataset` base class, raise rollout
+GPU/NPU memory utilization from the launcher's `0.6` default to `0.8`, and wire
+[`choice_reward.py`](../../verl_omni/utils/reward_score/choice_reward.py). It
+extracts the first `<answer>...</answer>` payload and returns a binary exact-match
+reward against the tagged dataset label.
+
+## Logging
+
+W&B logging is enabled by default:
+
+```bash
+export WANDB_API_KEY=<your_wandb_api_key>
+# trainer.project_name / experiment_name are already set in the script
+```
+
 ## File map
 
 ```
 examples/gspo_trainer/
 ├── qwen3_omni/
-│   ├── run_qwen3_omni_thinker_gspo_lora.sh   ← launch script (volatile overrides only)
+│   ├── run_qwen3_omni_thinker_gspo_lora.sh   ← launch script (GPU, LoRA r=64)
+│   ├── run_qwen3_omni_thinker_gspo_npu.sh    ← launch script (NPU, full-parameter)
 │   ├── config/
-│   │   └── qwen3_omni_thinker_gspo.yaml      ← recipe config (inherits verl ppo_trainer)
-│   └── qwen3_omni_thinker_only.yaml          ← vllm-omni stage config
-├── reward.png                            ← preliminary reward curve
-└── README.md                             ← (this file)
+│   │   └── qwen3_omni_thinker_gspo.yaml      ← shared recipe config
+│   ├── qwen3_omni_thinker_only.yaml          ← vllm-omni stage config (GPU)
+│   └── qwen3_omni_thinker_only_npu.yaml      ← vllm-omni stage config (NPU)
+├── data_process/
+│   ├── mmk12.py                              ← MMK12 → verl RL parquet converter
+│   └── avqa.py                               ← AVQA → verl RL parquet converter
+├── reward.png                                ← preliminary reward curve
+└── README.md                                 ← (this file)
 ```

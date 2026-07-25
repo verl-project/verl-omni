@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
-import asyncio
 import logging
 import os
 from dataclasses import asdict
@@ -52,9 +51,6 @@ from verl_omni.workers.rollout.replica import DiffusionOutput
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
-# Sentinel: ``None`` is a valid cached value (LoRA not loaded).
-_LORA_REQUEST_CACHE_MISS = object()
-
 
 class vLLMOmniHttpServer(vLLMHttpServer):
     """vLLM-Omni http server in single node, this is equivalent to launch server with command line:
@@ -91,8 +87,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """Diffusion needs a PIL→tensor converter; AR does not."""
         if not self._ar_mode:
             self._to_tensor = T.PILToTensor()
-        self._lora_request_cache: LoRARequest | None | object = _LORA_REQUEST_CACHE_MISS
-        self._lora_resolve_lock = asyncio.Lock()
         super()._post_init(cuda_visible_devices)
 
     # -----------------------------------------------------------------------
@@ -165,6 +159,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
             import_external_libs(self.config.external_lib)
 
+            self.config.resolve_algorithm(self.model_config)
+
             pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
                 architecture=self.model_config.architecture,
                 algorithm=self.model_config.algorithm,
@@ -225,12 +221,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         await self.engine.collective_rpc(
             "wake_up", kwargs={"tags": tags if tags is not None else self._get_wake_up_tags()}
         )
-        self._invalidate_lora_request_cache()
-
-    async def set_global_steps(self, global_steps: int):
-        if global_steps != self.global_steps:
-            self._invalidate_lora_request_cache()
-        await super().set_global_steps(global_steps)
 
     async def _sleep_hybrid(self):
         """Preserve non-actor pipeline weights during hybrid training sleep.
@@ -243,7 +233,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """
         # TODO (andy): use `sleep_level=2` in the future when the
         #  trainer side incorporates the whole components of the model.
-        self._invalidate_lora_request_cache()
         await self.engine.collective_rpc("sleep", kwargs={"level": 1})
         await self.engine.reset_encoder_cache()
 
@@ -259,15 +248,23 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         request_id: str,
         image_data: Optional[list[Any]] = None,
         video_data: Optional[list[Any]] = None,
+        audio_data: Optional[list[Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
         prompt_mask: torch.BoolTensor | None = None,
         priority: int = 0,
     ) -> DiffusionOutput | TokenOutput:
         prompt_ids = normalize_token_ids(prompt_ids)
-        multi_modal_data = self._build_multi_modal_data(image_data, video_data)
+        multi_modal_data = self._build_multi_modal_data(image_data, video_data, audio_data)
         lora_request = await self._resolve_lora_request()
         prompt, params = self._preprocess_input(
-            prompt_ids, sampling_params, multi_modal_data, lora_request, negative_prompt_ids, prompt_mask
+            prompt_ids,
+            sampling_params,
+            multi_modal_data,
+            lora_request,
+            negative_prompt_ids,
+            prompt_mask,
+            mm_processor_kwargs,
         )
         final_res = await self._run_generation(prompt, params, request_id, lora_request, priority)
         return self._process_output(final_res, params, sampling_params)
@@ -277,48 +274,38 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     @staticmethod
-    def _build_multi_modal_data(image_data: Optional[list[Any]], video_data: Optional[list[Any]]) -> dict[str, Any]:
-        """Assemble the vLLM multi_modal_data dict from optional image/video inputs."""
+    def _build_multi_modal_data(
+        image_data: Optional[list[Any]],
+        video_data: Optional[list[Any]],
+        audio_data: Optional[list[Any]] = None,
+    ) -> dict[str, Any]:
+        """Assemble the vLLM multi_modal_data dict from optional image/video/audio inputs."""
         multi_modal_data: dict[str, Any] = {}
         if image_data is not None:
             multi_modal_data["image"] = image_data
         if video_data is not None:
             multi_modal_data["video"] = video_data
+        if audio_data is not None:
+            multi_modal_data["audio"] = audio_data
         return multi_modal_data
 
-    def _invalidate_lora_request_cache(self) -> None:
-        """Drop cached LoRA state after weight sync or engine sleep/wake."""
-        self._lora_request_cache = _LORA_REQUEST_CACHE_MISS
-
     async def _resolve_lora_request(self) -> Optional[LoRARequest]:
-        """Return the actor LoRA request when a LoRA adapter is loaded.
+        """Build the actor LoRA request if a LoRA adapter is currently loaded.
 
-        ``list_loras`` is a diffusion busy-loop RPC serialized behind
-        ``execute_fn``. Calling it on every ``generate`` blocks concurrent
-        ``add_request`` calls until the current forward finishes, collapsing
-        request batching to B≈1. Resolve once per weight version and cache.
-        Invalidate via :meth:`_invalidate_lora_request_cache` on wake/sleep/step.
+        Wraps ``list_loras`` in ``try/except TypeError`` (a strict superset of the
+        plain membership check): some engine backends return a non-iterable, in
+        which case we assume the adapter is loaded. The diffusion path is unchanged
+        in the normal (iterable) case.
         """
         if not self.lora_as_adapter:
             return None
-
-        if self._lora_request_cache is not _LORA_REQUEST_CACHE_MISS:
-            return self._lora_request_cache  # type: ignore[return-value]
-
-        async with self._lora_resolve_lock:
-            if self._lora_request_cache is not _LORA_REQUEST_CACHE_MISS:
-                return self._lora_request_cache  # type: ignore[return-value]
-            try:
-                lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
-            except TypeError:
-                # Some engine backends return a non-iterable; treat as loaded.
-                lora_loaded = True
-            self._lora_request_cache = (
-                LoRARequest(lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH)
-                if lora_loaded
-                else None
-            )
-            return self._lora_request_cache  # type: ignore[return-value]
+        try:
+            lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
+        except TypeError:
+            lora_loaded = True
+        if not lora_loaded:
+            return None
+        return LoRARequest(lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH)
 
     @staticmethod
     def _map_stop_reason(finish_reason: Optional[str]) -> Optional[str]:
@@ -333,6 +320,62 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # Mode-specific pipeline steps
     # -----------------------------------------------------------------------
 
+    @staticmethod
+    def _dedup_multimodal_pad_tokens(prompt_ids: list[int], processor) -> list[int]:
+        """Collapse consecutive multimodal pad tokens back to a single sentinel.
+
+        When we call ``self.processor(text=..., images=...)`` in
+        ``AgentLoopBase.apply_chat_template`` the HF processor expands a single
+        ``<|image_pad|>`` / ``<|video_pad|>`` / ``<|audio_pad|>`` placeholder into
+        ``N`` consecutive pad tokens (one per vision/audio patch). If we then
+        ship those expanded ids to vLLM-Omni together with raw
+        ``multi_modal_data``, vLLM-Omni's ``_apply_prompt_updates`` will
+        *re-expand* the first pad token it finds to ``N`` copies — producing
+        ``2N-1`` pad tokens, where only the first ``N`` are attached to vision
+        features and the remaining ``N-1`` are treated as plain text tokens.
+        This is the primary cause of train/infer logprob mismatch
+        (``rollout_probs_diff_mean≈0.3``, ``pearson_corr≈0.3``).
+
+        To prevent double expansion we collapse every run of identical
+        placeholder tokens down to one before sending to vLLM-Omni, mirroring
+        ``verl.workers.rollout.utils.qwen2_5_vl_dedup_image_tokens`` but also
+        handling audio and not relying on processor class-name heuristics.
+        """
+        if processor is None:
+            return prompt_ids
+        tokenizer = getattr(processor, "tokenizer", None)
+        if tokenizer is None:
+            return prompt_ids
+
+        # Resolve pad token ids for image / video / audio placeholders.
+        pad_ids: set[int] = set()
+        for tok_attr in ("image_token", "video_token", "audio_token"):
+            tok = getattr(processor, tok_attr, None)
+            if tok is None:
+                continue
+            try:
+                tid = tokenizer.convert_tokens_to_ids(tok)
+            except Exception:
+                continue
+            # unk_token_id means the token string is not in the vocab
+            if tid is None or tid == getattr(tokenizer, "unk_token_id", None):
+                continue
+            pad_ids.add(int(tid))
+        if not pad_ids:
+            return prompt_ids
+
+        arr = np.asarray(prompt_ids, dtype=np.int64)
+        if arr.size == 0:
+            return prompt_ids
+        is_pad = np.isin(arr, list(pad_ids))
+        # Keep position i if: not a pad token, OR it is a pad token whose
+        # predecessor is not the *same* pad token (i.e. collapse runs of
+        # identical pad tokens to one).
+        keep = np.ones(arr.size, dtype=bool)
+        same_as_prev = is_pad[1:] & is_pad[:-1] & (arr[1:] == arr[:-1])
+        keep[1:] &= ~same_as_prev
+        return arr[keep].tolist()
+
     def _preprocess_input(
         self,
         prompt_ids: list[int],
@@ -341,12 +384,17 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         lora_request: Optional[LoRARequest],
         negative_prompt_ids: Optional[list[int]],
         prompt_mask: torch.BoolTensor | None = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ):
         """Build the engine prompt + sampling params for the active mode.
 
         Returns ``(prompt, params)`` consumed by ``_run_generation``.
         """
         if self._ar_mode:
+            # Deduplicate already-expanded multimodal pad tokens to prevent
+            # double-expansion inside vLLM-Omni (see ``_dedup_multimodal_pad_tokens``).
+            if multi_modal_data:
+                prompt_ids = self._dedup_multimodal_pad_tokens(prompt_ids, self.model_config.processor)
             max_possible_tokens = self.config.max_model_len - len(prompt_ids)
             if max_possible_tokens <= 0:
                 raise ValueError(
@@ -380,6 +428,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             prompt = {"prompt_token_ids": prompt_ids}
             if multi_modal_data:
                 prompt["multi_modal_data"] = multi_modal_data
+            if mm_processor_kwargs:
+                prompt["mm_processor_kwargs"] = mm_processor_kwargs
             return prompt, params
 
         # diffusion

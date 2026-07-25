@@ -36,6 +36,7 @@ from verl_omni.pipelines.bagel_flow_grpo.common import (
     BAGEL_FLOWGRPO_CFG_DEFAULTS,
     maybe_to_cpu,
     setup_bagel_sigmas,
+    vllm_omni_num_timesteps,
 )
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
@@ -336,8 +337,12 @@ class BagelPipelineWithLogProb(BagelPipeline):
             return_logprobs=logprobs,
         )
 
-        # vllm-omni >= 0.24 (#4509) matches official BAGEL: n schedule points, n-1 denoise steps.
-        output = super().forward(req)
+        # vllm-omni 0.22 runs one extra denoise step; compensate for BAGEL parity.
+        req.sampling_params.num_inference_steps = vllm_omni_num_timesteps(bagel_num_timesteps)
+        try:
+            output = super().forward(req)
+        finally:
+            req.sampling_params.num_inference_steps = bagel_num_timesteps
 
         # Slice trajectory to the SDE window so training only sees noisy steps.
         traj_latents = output.trajectory_latents

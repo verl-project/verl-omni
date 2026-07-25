@@ -39,6 +39,44 @@ def _has_lora(module: nn.Module) -> bool:
     return hasattr(module, "lora_A") and hasattr(module, "lora_B")
 
 
+def test_agent_loop_forwards_qwen3_omni_audio_lengths_to_rope():
+    """Audio feature lengths must reach Qwen3-Omni's RoPE helper."""
+    pytest.importorskip("cachetools")
+    pytest.importorskip("uvicorn")
+    pytest.importorskip("vllm")
+
+    from verl.experimental.agent_loop.agent_loop import AgentLoopWorker
+
+    import verl_omni.models.transformers.qwen3_omni_thinker  # noqa: F401
+
+    class Qwen3OmniMoeProcessor:
+        def __init__(self):
+            self.audio_seqlens = None
+
+        def get_rope_index(
+            self,
+            *,
+            input_ids,
+            attention_mask,
+            image_grid_thw=None,
+            video_grid_thw=None,
+            audio_seqlens=None,
+        ):
+            self.audio_seqlens = audio_seqlens
+            _ = audio_seqlens[0]
+            return torch.zeros((3, *input_ids.shape), dtype=torch.long), torch.zeros((input_ids.shape[0], 1))
+
+    processor = Qwen3OmniMoeProcessor()
+    worker = type("Worker", (), {"processor": processor})()
+    input_ids = torch.tensor([[1, 2, 3]])
+    attention_mask = torch.ones_like(input_ids)
+    multi_modal_inputs = {"feature_attention_mask": torch.tensor([[1, 1, 1, 0]])}
+
+    AgentLoopWorker._compute_position_ids(worker, input_ids, attention_mask, multi_modal_inputs)
+
+    torch.testing.assert_close(processor.audio_seqlens, torch.tensor([3]))
+
+
 class _FusedMoEExperts(nn.Module):
     """Minimal Qwen3-Omni-style fused expert group.
 
