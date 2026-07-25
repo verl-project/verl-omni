@@ -21,13 +21,18 @@ logger = logging.getLogger(__name__)
 
 
 def _patch_agent_loop_audio_rope_for_qwen3_omni() -> None:
-    """Forward Qwen3-Omni audio feature lengths into ``get_rope_index``.
+    """Forward Qwen3-Omni audio + video RoPE aux tensors into ``get_rope_index``.
 
-    verl's generic agent loop forwards image/video grids when rebuilding
-    multimodal position ids, but Qwen3-Omni additionally requires the raw
-    audio feature lengths. The processor exposes those lengths through
-    ``feature_attention_mask``; bind them for the duration of the synchronous
-    position-id call without changing other processor types.
+    verl's generic agent loop forwards only ``image_grid_thw`` / ``video_grid_thw``
+    when rebuilding multimodal position ids, but Qwen3-Omni additionally requires
+    the raw audio feature lengths (``audio_seqlens``, from ``feature_attention_mask``)
+    and the per-video seconds-per-grid (``second_per_grids``, from
+    ``video_second_per_grid``). Without ``second_per_grids`` the video branch of
+    ``get_rope_index`` indexes ``None`` and crashes (``NoneType not subscriptable``).
+    Bind both for the duration of the synchronous position-id call; restored in
+    ``finally`` so the processor is never left with a partial-bound
+    ``get_rope_index``. Either tensor may be absent (audio-only / video-only /
+    text-only), so kwargs are bound incrementally.
     """
     try:
         from functools import partial
@@ -40,10 +45,10 @@ def _patch_agent_loop_audio_rope_for_qwen3_omni() -> None:
         return
 
     original_compute_position_ids = AgentLoopWorker._compute_position_ids
-    if getattr(original_compute_position_ids, "_verl_qwen3_omni_audio_rope_patch", False):
+    if getattr(original_compute_position_ids, "_verl_qwen3_omni_rope_patch", False):
         return
 
-    def _compute_position_ids_with_audio(
+    def _compute_position_ids_with_mm_rope(
         self,
         input_ids,
         attention_mask,
@@ -52,7 +57,11 @@ def _patch_agent_loop_audio_rope_for_qwen3_omni() -> None:
     ):
         processor = self.processor
         feature_attention_mask = multi_modal_inputs.get("feature_attention_mask")
-        if processor.__class__.__name__ != "Qwen3OmniMoeProcessor" or feature_attention_mask is None:
+        video_second_per_grid = multi_modal_inputs.get("video_second_per_grid")
+        if (
+            processor.__class__.__name__ != "Qwen3OmniMoeProcessor"
+            or (feature_attention_mask is None and video_second_per_grid is None)
+        ):
             return original_compute_position_ids(
                 self,
                 input_ids,
@@ -61,11 +70,22 @@ def _patch_agent_loop_audio_rope_for_qwen3_omni() -> None:
                 mm_processor_kwargs,
             )
 
+        rope_kwargs = {}
+        if feature_attention_mask is not None:
+            rope_kwargs["audio_seqlens"] = feature_attention_mask.sum(-1)
+        if video_second_per_grid is not None:
+            # Field-name mapping: processor key ``video_second_per_grid`` ->
+            # ``get_rope_index`` param ``second_per_grids``. Ensure it's a tensor
+            # so ``.cpu().float()`` inside get_rope_index works (a plain list
+            # has no ``.cpu()``).
+            import torch as _torch
+
+            if not isinstance(video_second_per_grid, _torch.Tensor):
+                video_second_per_grid = _torch.tensor(video_second_per_grid, dtype=_torch.float)
+            rope_kwargs["second_per_grids"] = video_second_per_grid
+
         original_get_rope_index = processor.get_rope_index
-        processor.get_rope_index = partial(
-            original_get_rope_index,
-            audio_seqlens=feature_attention_mask.sum(-1),
-        )
+        processor.get_rope_index = partial(original_get_rope_index, **rope_kwargs)
         try:
             return original_compute_position_ids(
                 self,
@@ -77,8 +97,10 @@ def _patch_agent_loop_audio_rope_for_qwen3_omni() -> None:
         finally:
             processor.get_rope_index = original_get_rope_index
 
-    _compute_position_ids_with_audio._verl_qwen3_omni_audio_rope_patch = True
-    AgentLoopWorker._compute_position_ids = _compute_position_ids_with_audio
+    _compute_position_ids_with_mm_rope._verl_qwen3_omni_rope_patch = True
+    # Backward-compat alias: older code may check the audio-only flag.
+    _compute_position_ids_with_mm_rope._verl_qwen3_omni_audio_rope_patch = True
+    AgentLoopWorker._compute_position_ids = _compute_position_ids_with_mm_rope
 
 
 def _register_qwen3_omni_automodel() -> None:

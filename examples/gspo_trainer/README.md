@@ -2,9 +2,10 @@
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
-the async rollout backend. Three input recipes are supported: **text → text**
-(`MATH-lighteval`), **image → text** (`MMK12`), and
-**text + image + audio → text** (`AVQA-R1-6K`).
+the async rollout backend. Four input recipes are supported: **text → text**
+(`MATH-lighteval`), **image → text** (`MMK12`),
+**text + image + audio → text** (`AVQA-R1-6K`), and **video → text**
+(`NExT-QA`).
 
 Both **GPU** and **NPU** training platforms are supported via two launch scripts:
 
@@ -335,6 +336,88 @@ GPU/NPU memory utilization from the launcher's `0.6` default to `0.8`, and wire
 extracts the first `<answer>...</answer>` payload and returns a binary exact-match
 reward against the tagged dataset label.
 
+## Training with `NExT-QA` (video → text)
+
+The video recipe trains the Qwen3-Omni Thinker to answer a five-way multiple-choice
+question from a short video clip. The output is text ending in a single option tag
+such as `<answer>C</answer>`. It reuses the `choice_reward` scorer from the AVQA
+recipe and the default `RLHFDataset` (video is auto-extracted via `qwen_vl_utils`
+through the `has_visual` path); only the data preprocessing and a video-specific
+RoPE patch differ.
+
+### Why a video RoPE patch is needed
+
+verl's `AgentLoopWorker._compute_position_ids` forwards only `image_grid_thw` /
+`video_grid_thw` to the processor's `get_rope_index`. Qwen3-Omni's `get_rope_index`
+additionally requires `second_per_grids` (per-video seconds-per-grid, from
+`video_second_per_grid`) on its video branch — without it the video branch indexes
+`None` and crashes (`NoneType not subscriptable`). The
+`_patch_agent_loop_audio_rope_for_qwen3_omni` patch is extended into a unified
+wrapper that binds **both** `audio_seqlens` (from `feature_attention_mask`) and
+`second_per_grids` for the duration of the position-id call, so audio-only /
+video-only / audio-in-video / text-only samples are all handled. The field-name
+mapping `video_second_per_grid` → `second_per_grids` and a list→tensor guard are
+applied so `.cpu().float()` inside `get_rope_index` works.
+
+### Prepare the dataset
+
+Download NExT-QA (e.g. from ModelScope `AI-ModelScope/NExTQA`), unzip the videos,
+and convert the MC split into verl RL parquet:
+
+```bash
+python examples/gspo_trainer/data_process/video2text.py \
+    --input      /path/to/NExTQA/MC/test-00000-of-00001.parquet \
+    --videos_dir /path/to/NExTVideo \
+    --output_dir ~/data/video2text \
+    --val_size 200
+```
+
+The converter emits one verl RL row per question with `data_source="nextqa_video_qa"`,
+a system prompt constraining the model to emit `<answer>X</answer>` (single letter),
+the answer index (0-4) mapped to a letter (A-E), and the video stored as an
+**external path** in the `videos` column as a dict `{"video": <abs path>, "fps": 2.0,
+"max_frames": 32}`. The `fps`/`max_frames` fields flow into `qwen_vl_utils`'s
+`smart_nframes` (verl does **not** forward `mm_processor_kwargs` to
+`process_vision_info`), capping video tokens to ~8-10k so the prompt fits
+`max_model_len=16384`. Train/val are group-split by `video_id` to avoid leakage
+(NExT-QA has ~8.5 questions per video).
+
+### Run NPU training
+
+```bash
+TRAIN_FILE=$HOME/data/video2text/train.parquet \
+VAL_FILE=$HOME/data/video2text/validation.parquet \
+MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_video_npu.sh
+```
+
+Key video-specific settings baked into the launcher:
+
+- `data.max_prompt_length=12000` — video tokens (~8-10k) + text need a larger
+  prompt budget than the image/audio recipes.
+- `++data.mm_processor_kwargs.fps=2.0` — keeps the processor's
+  `video_second_per_grid` (= `temporal_patch_size / fps`) consistent with the
+  `fps=2.0` used by `qwen_vl_utils` frame extraction, so the video RoPE time
+  dimension is correct.
+- `data.filter_overlong_prompts=false` — `datasets.map(num_proc=...)` stalls on
+  heavy video decode; `max_frames=32` already bounds the prompt length, so
+  filtering is unnecessary.
+- `data.filter_overlong_prompts_workers=8` — when filtering is enabled, keep the
+  worker count low: pyav's swscaler raises `BlockingIOError` under high
+  concurrency (64 workers); 8 is stable.
+
+### Preliminary results (NPU, full-parameter)
+
+Validated end-to-end on a single Atlas 800T A3 node (16 NPUs, tf5 stack:
+transformers 5.5.3 + verl 8a694930 + PR#6923). 1-step smoke:
+
+| signal | value |
+| --- | --- |
+| `rollout_actor_probs_pearson_corr` | 0.985 (> 0.95 ✓) |
+| `actor/entropy` | 0.675 (not collapsed) |
+| baseline val accuracy | 0.78 |
+| crashes / OOM | 0 |
+
 ## Logging
 
 W&B logging is enabled by default:
@@ -351,13 +434,15 @@ examples/gspo_trainer/
 ├── qwen3_omni/
 │   ├── run_qwen3_omni_thinker_gspo_lora.sh   ← launch script (GPU, LoRA r=64)
 │   ├── run_qwen3_omni_thinker_gspo_npu.sh    ← launch script (NPU, full-parameter)
+│   ├── run_qwen3_omni_thinker_gspo_video_npu.sh ← launch script (NPU, video→text)
 │   ├── config/
 │   │   └── qwen3_omni_thinker_gspo.yaml      ← shared recipe config
 │   ├── qwen3_omni_thinker_only.yaml          ← vllm-omni stage config (GPU)
 │   └── qwen3_omni_thinker_only_npu.yaml      ← vllm-omni stage config (NPU)
 ├── data_process/
 │   ├── mmk12.py                              ← MMK12 → verl RL parquet converter
-│   └── avqa.py                               ← AVQA → verl RL parquet converter
+│   ├── avqa.py                               ← AVQA → verl RL parquet converter
+│   └── video2text.py                         ← NExT-QA → verl RL parquet converter
 ├── reward.png                                ← preliminary reward curve
 └── README.md                                 ← (this file)
 ```
