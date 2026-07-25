@@ -32,7 +32,6 @@ dependencies = [
     "pybind11",
     "pylatexenc",
     "ray[default]",
-    "safetensors>=0.4.5",
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
     "torchdata",
     "transformers",
@@ -50,6 +49,9 @@ dependencies = [
 vllm-omni = [
     "vllm-omni==0.24.0",
     "qwen-vl-utils>=0.0.14",
+]
+audio = [
+    "librosa>=0.10.0",
 ]
 # CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
 gpu = [
