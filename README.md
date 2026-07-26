@@ -69,7 +69,7 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
   </tr>
 </table>
 <p align="center"><b>Example: Optimizing Qwen-Image Text Rendering Accuracy with FlowGRPO</b>
-  (<a href="examples/flowdppo_trainer/README.md" target="_blank">recipe</a>
+  (<a href="examples/flowgrpo_trainer/README.md" target="_blank">recipe</a>
   &nbsp;|&nbsp;
   <a href="https://wandb.ai/andyzhou/VeRL-Omni-demo/runs/8p8y9olb" target="_blank">wandb</a>)
 </p>
