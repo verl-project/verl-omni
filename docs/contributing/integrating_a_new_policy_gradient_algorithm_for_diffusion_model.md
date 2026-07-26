@@ -1,6 +1,6 @@
 # How to Integrate a New Policy-Gradient Algorithm for Diffusion Model
 
-Last updated: 06/02/2026.
+Last updated: 07/06/2026.
 
 This guide explains how to add a new PPO-like policy-gradient algorithm to
 VeRL-Omni's diffusion trainer. Policy-gradient diffusion algorithms operate on
@@ -332,7 +332,7 @@ Document any algorithm-specific knobs in the example's `README.md`.
 Add an end-to-end smoke test under `tests/special_e2e/` modelled on
 [`tests/special_e2e/run_flowgrpo_qwen_image.sh`](../../tests/special_e2e/run_flowgrpo_qwen_image.sh)
 and register it in
-[`tests/gpu_smoke/run_gpu_smoke_tests.sh`](../../tests/gpu_smoke/run_gpu_smoke_tests.sh)
+[`tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh`](../../tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh)
 as a new numbered test entry. The script must exercise the full
 algorithm dispatch chain (adv estimator + loss + adapter pair + SDE
 step) against a `tiny-random/<ModelName>` checkpoint.
@@ -358,7 +358,7 @@ step) against a `tiny-random/<ModelName>` checkpoint.
       [`diffusion_model.yaml`](../../verl_omni/trainer/config/diffusion/model/diffusion_model.yaml).
 - [ ] Example launch script under `examples/<algo>_trainer/`.
 - [ ] Smoke test under `tests/special_e2e/run_<algo>_<model>.sh` wired
-      into `tests/gpu_smoke/run_gpu_smoke_tests.sh`.
+      into `tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh`.
 - [ ] If the registry or adapter contract changed, update
       [`integrating_a_diffusion_model.md`](integrating_a_diffusion_model.md)
       to match.

@@ -6,7 +6,7 @@
 
 <a href="https://deepwiki.com/verl-project/verl-omni"><img src="https://devin.ai/assets/deepwiki-badge.png" alt="Ask DeepWiki.com" style="height:20px;"></a>
 [![Docs](https://img.shields.io/badge/docs-Read%20the%20Docs-8A2BE2)](https://verl-omni.readthedocs.io/en/latest/index.html)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE) <a href="docs/assets/WeChat.jpg"><img src="https://img.shields.io/badge/微信-green?logo=wechat"></a> <a href="https://join.slack.com/t/verl-project/shared_invite/zt-41rr0s5g2-Qzy5PuMSNeor3Ksiy45CiQ"><img src="https://img.shields.io/badge/Slack-verl-blueviolet?logo=slack"></a>
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE) <a href="docs/assets/WeChat.jpg"><img src="https://img.shields.io/badge/微信-green?logo=wechat"></a> <a href="https://join.slack.com/t/verl-project/shared_invite/zt-44qlagy6p-WVn7sOdatfcfAm_RWbwHWQ"><img src="https://img.shields.io/badge/Slack-verl-blueviolet?logo=slack"></a>
 
 </div>
 
@@ -16,6 +16,7 @@ It originated from the multi-modal generation RL effort in `verl`, and now has a
 
 ## News 🔥
 
+- **[2026-07]** Team-proposed algorithm [FlowGRPO with DiNa-LRM](docs/start/sd35_drm_flow_grpo.md) is available. Training skips VAE decoding by scoring clean diffusion latents directly for faster and more resource-efficient model alignment.
 - **[2026-07]** VeRL-Omni is presented in QingKe AI, vLLM community, and verl x Ascend Beijing meetup. [Slides](https://drive.google.com/file/d/1RJBZZ2k6exxciFghU1FNUgds6s1w7Bpf/view?usp=sharing) are shared.
 - **[2026-06]** [Qwen3-Omni GSPO Trainer](verl-omni/examples/gspo_trainer) is available! [Flow-DPPO](https://verl-omni.readthedocs.io/en/latest/algo/flowdppo.html) is integrated. vLLM-Omni rollout backend is upgraded to v0.22 for higher throughput, with default actor attn backend switched to FA3.
 - **[2026-06]** [DiffusionNFT](https://verl-omni.readthedocs.io/en/latest/algo/diffusionnft.html) and [Diffusion DPO](https://verl-omni.readthedocs.io/en/latest/algo/diffusion_dpo.html) are integrated with verified recipes on Qwen-Image/SD3.5. [Wan2.2](examples/dancegrpo_trainer/README.md) is now supported for video generation tasks.  
@@ -34,12 +35,11 @@ Multimodal generative RL training differs from text-only LLM RL not only in mode
 
 ### What we focus on
 
-- **Optimized rollout:** [`vLLM-Omni`](https://github.com/vllm-project/vllm-omni) as a rollout backend for high-throughput multimodal generation.
-- **Flexible and async multi-reward serving:** Support for multi-reward serving (HPSv3, GenRM-OCR, UnifiedReward, etc.), [HTTP scorer](https://verl-omni.readthedocs.io/en/latest/start/http_scorer.html), and [asynchronous reward computation](https://verl-omni.readthedocs.io/en/latest/algo/async_reward.html) to overlap the rollout phase.
+- **Fast multi-modal rollout:** Adopt [`vLLM-Omni`](https://github.com/vllm-project/vllm-omni) backend and accelerate generation via rollout routing, rollout  batching, embed caching optimizations, and more.
+- **Flexible & async multi-reward serving:** Support multi-reward serving (HPSv3, GenRM-OCR, UnifiedReward, etc.), [HTTP scorer](https://verl-omni.readthedocs.io/en/latest/start/http_scorer.html), and [asynchronous reward computation](https://verl-omni.readthedocs.io/en/latest/algo/async_reward.html) to overlap the rollout phase.
 - **Modular training backends:** Selectable [VeOmni](https://github.com/ByteDance-Seed/VeOmni) and FSDP2 backends with combinable parallelism (USP/TP/DP) for distributed training.
-- **Stability tools:** Improved diffusion RL stability with [rollout correction](https://verl-omni.readthedocs.io/en/latest/algo/rollout_correction.html) and deterministic rollout/reward/trainer.
-- **End-to-end examples and benchmarks:** Validated recipes for co-located sync and fully-async RL on the model families above.
-- **High training throughput:** On our reference Qwen-Image FlowGRPO setup, `VeRL-Omni` achieves **~25% higher end-to-end throughput** than the diffusers-based [`flow_grpo`](https://github.com/yifan123/flow_grpo) implementation, driven by `vLLM-Omni` rollout, FSDP2 trainer, overlapped reward computation (asynchronous), etc.
+- **Stability:** Boost stability and speed in diffusion RL pipelines via [rollout correction](https://verl-omni.readthedocs.io/en/latest/algo/rollout_correction.html) to skip logP recomputation, and achieve reproducible E2E training with deterministic RL. Reward, rollout and actor update are composable and extensible, via Hydra configs.
+- **Efficient and convergent training recipes:** On our reference Qwen-Image FlowGRPO setup, `VeRL-Omni` achieves **~25% higher end-to-end throughput** than the diffusers-based [`flow_grpo`](https://github.com/yifan123/flow_grpo) implementation, driven by `vLLM-Omni` rollout, FSDP2 trainer, overlapped reward computation (asynchronous), etc.
 
 
 <div align="center">
@@ -49,10 +49,30 @@ Multimodal generative RL training differs from text-only LLM RL not only in mode
 
 ## Getting Started  🚀
 
-Visit our documentation to learn more.
+Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html) to learn more.
 
 - [Installation](https://verl-omni.readthedocs.io/en/latest/start/install.html)
 - [Quickstart](https://verl-omni.readthedocs.io/en/latest/start/flowgrpo_quickstart.html)
+
+<table align="center">
+  <tr>
+    <td align="center">
+      <img src="https://github.com/user-attachments/assets/cb242db0-4233-4a1b-8274-5b3d87d69a36" alt="Training step 0" width="250"/>
+    </td>
+    <td align="center">
+      <img src="https://github.com/user-attachments/assets/af82391b-081d-46a3-9878-9113b89452cd" alt="Training step 120" width="250"/>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">Training step 0</td>
+    <td align="center">Training step 120</td>
+  </tr>
+</table>
+<p align="center"><b>Example: Optimizing Qwen-Image Text Rendering Accuracy with FlowGRPO</b>
+  (<a href="examples/flowgrpo_trainer/README.md" target="_blank">recipe</a>
+  &nbsp;|&nbsp;
+  <a href="https://wandb.ai/andyzhou/VeRL-Omni-demo/runs/8p8y9olb" target="_blank">wandb</a>)
+</p>
 
 ## Model and Algorithm Support 🎨
 
@@ -65,9 +85,9 @@ Visit our documentation to learn more.
     <th>Status</th>
   </tr>
   <tr>
-    <td rowspan="6">Qwen-Image</td>
+    <td rowspan="6">Qwen-Image & Qwen-Image-Edit</td>
     <td rowspan="6">Diffusion generator</td>
-    <td rowspan="6">Text → Image</td>
+    <td rowspan="6">Text/Image → Image</td>
     <td>FlowGRPO (+ CPS/SDE)</td>
     <td>✅</td>
   </tr>
@@ -113,6 +133,21 @@ Visit our documentation to learn more.
     <td>✅</td>
   </tr>
   <tr>
+    <td rowspan="3">SD3.5</td>
+    <td rowspan="3">Diffusion generator</td>
+    <td rowspan="3">Text → Image</td>
+    <td>DPO</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>FlowGRPO</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>FlowGRPO w/ DiNa-LRM</td>
+    <td>✅</td>
+  </tr>
+  <tr>
     <td rowspan="2">HunyuanImage-3.0</td>
     <td rowspan="2">Unified understand + gen</td>
     <td rowspan="2">Text + Image</td>
@@ -124,22 +159,26 @@ Visit our documentation to learn more.
     <td>Planned</td>
   </tr>
   <tr>
-    <td>Qwen3-Omni-Thinker</td>
-    <td>Omni-modality</td>
-    <td>Text / Image / Video / Audio</td>
+    <td rowspan="2">Qwen3-Omni-Thinker</td>
+    <td rowspan="2">Omni-modality</td>
+    <td rowspan="2">Text / Image / Video / Audio</td>
+    <td>DPO</td>
+    <td>WIP</td>
+  </tr>
+    <tr>
     <td>GSPO</td>
     <td>✅</td>
   </tr>
-  <tr>
-    <td rowspan="2">SD3.5</td>
-    <td rowspan="2">Diffusion generator</td>
-    <td rowspan="2">Text → Image</td>
+    <tr>
+    <td rowspan="2">Qwen3-TTS</td>
+    <td rowspan="2">Audio-modality</td>
+    <td rowspan="2">Text → Audio</td>
     <td>DPO</td>
-    <td>✅</td>
+    <td>WIP</td>
   </tr>
-  <tr>
-    <td>FlowGRPO</td>
-    <td>✅</td>
+    <tr>
+    <td>GSPO</td>
+    <td>WIP</td>
   </tr>
 </table>
 
@@ -158,6 +197,9 @@ Future work is tracked in [VeRL-Omni Q3 Roadmap](https://github.com/verl-project
 Contributions are welcome.
 
 See the [contribution guide](CONTRIBUTING.md).
+
+**Join the Community**: Feel free to ask questions, provide feedback, and discuss with fellow users of VeRL-Omni in our [WeChat group](docs/assets/WeChat.jpg).
+
 
 ## Acknowledgement 🌟
 
