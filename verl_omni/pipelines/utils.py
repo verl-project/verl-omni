@@ -62,10 +62,12 @@ class ImageGenerationRequest:
         """Build a request from verl-omni's rollout request payload (``custom_prompt``)."""
         prompt = request_payload.get("prompt")
         if prompt is None:
+            prompt = request_payload.get("instruction")
+        if prompt is None:
             prompt = request_payload.get("prompt_token_ids")
         if prompt is None:
             raise ValueError(
-                "ImageGenerationRequest missing required 'prompt' or 'prompt_token_ids' field. "
+                "ImageGenerationRequest missing required 'prompt', 'instruction', or 'prompt_token_ids' field. "
                 "The rollout request payload must carry one of them in custom_prompt."
             )
 
@@ -109,7 +111,7 @@ class ImageGenerationRequest:
         return cls(
             prompt=prompt,
             images=images,
-            negative_prompt=request_payload.get("negative_prompt"),
+            negative_prompt=request_payload.get("negative_prompt", request_payload.get("negative_instruction")),
             metadata=metadata,
         )
 
@@ -170,6 +172,8 @@ def prepare_model_inputs(
     if issubclass(model_cls, DiffusionI2IModelBase):
         condition = model_cls.prepare_condition(micro_batch, latents, step)
         if condition is None:
+            if getattr(model_cls, "allow_missing_condition", False):
+                return model_inputs, negative_model_inputs
             available_keys = [str(key) for key in micro_batch.keys()]
             raise ValueError(
                 f"{model_cls.__name__}.prepare_condition returned None. "

@@ -113,8 +113,21 @@ class TestImageGenerationRequest:
 
         assert request.prompt == [1, 2]
 
+    def test_from_request_payload_supports_instruction_style_payloads(self):
+        request = ImageGenerationRequest.from_request_payload(
+            {
+                "instruction": "turn this cat into a dog",
+                "negative_instruction": "low quality",
+                "image": "img",
+            }
+        )
+
+        assert request.prompt == "turn this cat into a dog"
+        assert request.negative_prompt == "low quality"
+        assert request.images == ["img"]
+
     def test_from_request_payload_requires_prompt_or_prompt_token_ids(self):
-        with pytest.raises(ValueError, match="missing required 'prompt' or 'prompt_token_ids'"):
+        with pytest.raises(ValueError, match="missing required 'prompt', 'instruction', or 'prompt_token_ids'"):
             ImageGenerationRequest.from_request_payload({"images": ["img"]})
 
     def test_from_request_payload_preserves_empty_metadata(self):

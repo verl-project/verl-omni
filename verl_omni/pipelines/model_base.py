@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # Copyright 2026 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,13 +16,14 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from diffusers import ModelMixin, SchedulerMixin
 from tensordict import TensorDict
 
-from verl_omni.workers.config import DiffusionModelConfig
+if TYPE_CHECKING:
+    from verl_omni.workers.config import DiffusionModelConfig
 
 logger = logging.getLogger(__name__)
 
@@ -267,6 +270,12 @@ class DiffusionI2IModelBase(DiffusionModelBase):
     noise segment. Models with non-concat conditioning (Wan I2V, LTX2 I2AV)
     override ``inject_condition``.
     """
+
+    # Unified pipelines such as BOOGU can serve both plain T2I requests and
+    # image-conditioned edit requests under the same ``_class_name``. Those
+    # adapters may opt into a missing-condition degenerate path by setting this
+    # flag to ``True``.
+    allow_missing_condition: bool = False
 
     @classmethod
     def forward(

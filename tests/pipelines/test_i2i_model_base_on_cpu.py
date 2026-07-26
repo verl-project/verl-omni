@@ -243,3 +243,40 @@ class TestPrepareModelInputsConditionDispatch:
                 step=0,
             )
         assert "tensor(" not in str(exc_info.value)
+
+    def test_i2i_adapter_can_opt_into_missing_condition_t2i_path(self):
+        @DiffusionModelBase.register("_GeneralInterfaceOptionalI2I", algorithm="flow_grpo")
+        class _OptionalI2I(DiffusionI2IModelBase):
+            allow_missing_condition = True
+
+            @classmethod
+            def build_scheduler(cls, model_config):
+                pass
+
+            @classmethod
+            def set_timesteps(cls, scheduler, model_config, device):
+                pass
+
+            @classmethod
+            def prepare_model_inputs(cls, *args, **kwargs):
+                return {"hidden_states": torch.zeros(1, 2, 4)}, None
+
+            @classmethod
+            def forward_and_sample_previous_step(cls, *args, **kwargs):
+                pass
+
+        model_inputs, negative_model_inputs = prepare_model_inputs(
+            module=None,
+            model_config=_model_config("_GeneralInterfaceOptionalI2I"),
+            latents=torch.zeros(1, 2, 4),
+            timesteps=torch.zeros(1),
+            prompt_embeds=torch.zeros(1, 1, 4),
+            prompt_embeds_mask=None,
+            negative_prompt_embeds=None,
+            negative_prompt_embeds_mask=None,
+            micro_batch={"other": torch.zeros(1)},
+            step=0,
+        )
+
+        assert model_inputs["hidden_states"].shape == (1, 2, 4)
+        assert negative_model_inputs is None

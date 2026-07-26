@@ -12,36 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import (
-    bagel_flow_grpo,
-    qwen3_omni,
-    qwen_image_diffusion_nft,
-    qwen_image_dpo,
-    qwen_image_edit_flow_grpo,
-    qwen_image_flow_grpo,
-    qwen_image_mix_grpo,
-    sd3_dpo,
-    sd3_flow_grpo,
-    wan22_dance_grpo,
-)
-from .bagel_flow_grpo import *  # noqa: F401, F403
-from .qwen3_omni import *  # noqa: F401, F403
-from .qwen_image_diffusion_nft import *  # noqa: F401, F403
-from .qwen_image_dpo import *  # noqa: F401, F403
-from .qwen_image_edit_flow_grpo import *  # noqa: F401, F403
-from .qwen_image_flow_grpo import *  # noqa: F401, F403
-from .qwen_image_mix_grpo import *  # noqa: F401, F403
-from .sd3_dpo import *  # noqa: F401, F403
-from .sd3_flow_grpo import *  # noqa: F401, F403
-from .wan22_dance_grpo import *  # noqa: F401, F403
+import importlib
+import logging
 
-__all__ = list(qwen3_omni.__all__)
-__all__ += list(qwen_image_flow_grpo.__all__)
-__all__ += list(qwen_image_diffusion_nft.__all__)
-__all__ += list(qwen_image_mix_grpo.__all__)
-__all__ += list(bagel_flow_grpo.__all__)
-__all__ += list(sd3_dpo.__all__)
-__all__ += list(sd3_flow_grpo.__all__)
-__all__ += list(wan22_dance_grpo.__all__)
-__all__ += list(qwen_image_dpo.__all__)
-__all__ += list(qwen_image_edit_flow_grpo.__all__)
+logger = logging.getLogger(__name__)
+
+_MODULE_NAMES = (
+    "bagel_flow_grpo",
+    "boogu_image_diffusion_nft",
+    "boogu_image_flow_grpo",
+    "qwen3_omni",
+    "qwen_image_diffusion_nft",
+    "qwen_image_dpo",
+    "qwen_image_edit_flow_grpo",
+    "qwen_image_flow_grpo",
+    "qwen_image_mix_grpo",
+    "sd3_dpo",
+    "sd3_flow_grpo",
+    "wan22_dance_grpo",
+)
+
+__all__: list[str] = []
+
+for _module_name in _MODULE_NAMES:
+    try:
+        _module = importlib.import_module(f"{__name__}.{_module_name}")
+    except (ModuleNotFoundError, ImportError) as exc:
+        logger.warning("Skipping optional pipeline module %s due to import failure: %s", _module_name, exc)
+        continue
+
+    globals()[_module_name] = _module
+    for _export_name in getattr(_module, "__all__", []):
+        globals()[_export_name] = getattr(_module, _export_name)
+        __all__.append(_export_name)
