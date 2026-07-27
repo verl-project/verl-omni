@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import gc
 import os
 import shutil
 import tempfile
@@ -18,6 +19,7 @@ import tempfile
 import numpy as np
 import pytest
 import ray
+import torch
 from omegaconf import DictConfig
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
@@ -74,7 +76,11 @@ def init_config(request) -> DictConfig:
         config.actor_rollout_ref.rollout.mode = "async"
         config.actor_rollout_ref.rollout.enforce_eager = True
         config.actor_rollout_ref.rollout.step_execution = request.param
-        config.actor_rollout_ref.rollout.n = 4
+        # Keep the 2-GPU TP smoke light; CI EOFError on worker launch is usually OOM.
+        # Keep enough inference steps for sde_window_range=[0, 5] / sde_window_size=2.
+        config.actor_rollout_ref.rollout.n = 2
+        config.actor_rollout_ref.rollout.pipeline.height = 256
+        config.actor_rollout_ref.rollout.pipeline.width = 256
         config.actor_rollout_ref.rollout.pipeline.num_inference_steps = 10
         config.actor_rollout_ref.rollout.calculate_log_probs = True
         config.actor_rollout_ref.rollout.agent.num_workers = min(2, requested_gpus)
@@ -183,3 +189,6 @@ def test_single_turn(init_config):
         print("Test passed!")
     finally:
         ray.shutdown()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()

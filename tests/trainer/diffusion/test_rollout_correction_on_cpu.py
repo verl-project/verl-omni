@@ -358,6 +358,41 @@ class TestLossIntegration:
 # ---------------------------------------------------------------------------
 
 
+class TestConsistencyMetrics:
+    def test_abs_diff_aggregates(self):
+        """Mean/max |Δlogp| are exact on known tensors."""
+        old = torch.tensor([[1.0, 2.0], [3.0, 5.0]])
+        rollout = torch.tensor([[1.5, 2.0], [2.0, 5.5]])
+        metrics = rollout_correction.compute_rollout_corr_metrics_from_logprobs(old, rollout)
+        assert metrics["rollout_corr/logprob_abs_diff_mean"] == pytest.approx(0.5)
+        assert metrics["rollout_corr/logprob_abs_diff_max"] == pytest.approx(1.0)
+        assert "rollout_corr/kl" in metrics
+
+    def test_per_timestep_breakdown(self):
+        """|Δlogp| is grouped by timestep value, not column index."""
+        old = torch.tensor([[1.0, 2.0], [3.0, 5.0]])
+        rollout = torch.tensor([[1.5, 2.0], [2.0, 5.5]])
+        timesteps = torch.tensor([[800.0, 700.0], [800.0, 700.0]])
+        metrics = rollout_correction.compute_rollout_corr_metrics_from_logprobs(old, rollout, timesteps=timesteps)
+        assert metrics["rollout_corr/logprob_abs_diff/ts_800"] == pytest.approx(0.75)
+        assert metrics["rollout_corr/logprob_abs_diff/ts_700"] == pytest.approx(0.25)
+
+    def test_no_timesteps_no_breakdown(self):
+        """Without timesteps the output has no per-timestep keys (backward compat)."""
+        old = torch.randn(4, 2)
+        metrics = rollout_correction.compute_rollout_corr_metrics_from_logprobs(old, old + 0.1)
+        assert not any("logprob_abs_diff/ts_" in k for k in metrics)
+
+    def test_shape_mismatch_skips_breakdown(self):
+        """Misaligned timesteps yield aggregates only, never a wrong grouping."""
+        old = torch.randn(4, 2)
+        metrics = rollout_correction.compute_rollout_corr_metrics_from_logprobs(
+            old, old + 0.1, timesteps=torch.randn(4, 3)
+        )
+        assert "rollout_corr/logprob_abs_diff_mean" in metrics
+        assert not any("logprob_abs_diff/ts_" in k for k in metrics)
+
+
 class TestConfigHelpers:
     def test_rollout_correction_enabled(self):
         """rollout_correction_enabled returns True when IS or RS is set."""

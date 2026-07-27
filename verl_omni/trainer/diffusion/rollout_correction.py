@@ -169,6 +169,7 @@ def apply_rollout_correction_to_diffusion_batch(
 def compute_rollout_corr_metrics_from_logprobs(
     log_prob: torch.Tensor,
     rollout_log_prob: torch.Tensor,
+    timesteps: Optional[torch.Tensor] = None,
 ) -> dict[str, float]:
     """Off-policy diagnostics from (current, rollout) log probs.
 
@@ -177,9 +178,12 @@ def compute_rollout_corr_metrics_from_logprobs(
     Args:
         log_prob: Current policy log-prob, shape ``(B,)`` or ``(B, T)``.
         rollout_log_prob: Rollout policy log-prob, same shape.
+        timesteps: Optional denoising timesteps aligned with ``log_prob`` columns;
+            adds a per-timestep ``|Δlogp|`` breakdown (grouped by timestep value —
+            the SDE window is per-sample random, so column index is not meaningful).
 
     Returns:
-        Dict of ``rollout_corr/`` metrics (KL, PPL, χ², etc.).
+        Dict of ``rollout_corr/`` metrics (KL, PPL, χ², |Δlogp|, etc.).
     """
     if log_prob.dim() == 1:
         log_prob = log_prob.unsqueeze(-1)
@@ -198,5 +202,15 @@ def compute_rollout_corr_metrics_from_logprobs(
             metrics_with_prefix[f"rollout_corr/{key}"] = value.item()
         else:
             metrics_with_prefix[f"rollout_corr/{key}"] = value
+
+    abs_diff = (log_prob - rollout_log_prob).abs()
+    metrics_with_prefix["rollout_corr/logprob_abs_diff_mean"] = abs_diff.mean().item()
+    metrics_with_prefix["rollout_corr/logprob_abs_diff_max"] = abs_diff.max().item()
+
+    if timesteps is not None and timesteps.shape == log_prob.shape:
+        for ts in torch.unique(timesteps):
+            metrics_with_prefix[f"rollout_corr/logprob_abs_diff/ts_{ts.item():.4g}"] = (
+                abs_diff[timesteps == ts].mean().item()
+            )
 
     return metrics_with_prefix
