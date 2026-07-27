@@ -32,7 +32,7 @@ external_lib: null
 override_config: {}
 
 # HuggingFace config architectures[0] (auto-detected from config.json if unset)
-architecture: ???
+architecture: null
 
 # Which stage to train: "thinker" (default), "talker", or "all"
 model_stage: thinker
@@ -55,8 +55,14 @@ lora_rank: 0
 # LoRA scaling factor
 lora_alpha: 16
 
+# Optional dtype for LoRA parameters (e.g., "float32"); null = use model dtype
+lora_dtype: null
+
 # Target modules for LoRA adaptation ("all-linear" or a list of module names)
 target_modules: all-linear
+
+# Target parameters for LoRA adaptation
+target_parameters: null
 
 # Exclude modules from LoRA adaptation
 exclude_modules: null
