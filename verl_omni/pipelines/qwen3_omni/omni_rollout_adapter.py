@@ -18,6 +18,7 @@ vLLM-Omni's frozen pipeline definitions — no duplication of what vLLM-Omni
 already owns.
 """
 
+from vllm_omni.config.pipeline_registry import register_pipeline
 from vllm_omni.model_executor.models.qwen3_omni.pipeline import (
     QWEN3_OMNI_PIPELINE,
     QWEN3_OMNI_THINKER_ONLY_PIPELINE,
@@ -96,3 +97,38 @@ class Qwen3OmniRolloutAdapter(OmniRolloutPipelineBase):
         raise ValueError(
             f"Unknown pipeline_mode={pipeline_mode!r}. Expected one of: 'thinker_only', 'thinker_talker', 'full'."
         )
+
+    @classmethod
+    def get_pipeline_id(cls, pipeline_mode="thinker_only") -> str:
+        """Return the vLLM-Omni pipeline model_type for *pipeline_mode*."""
+        if pipeline_mode == "thinker_only":
+            return QWEN3_OMNI_THINKER_ONLY_PIPELINE.model_type
+        return QWEN3_OMNI_PIPELINE.model_type
+
+    @classmethod
+    def ensure_pipeline_registered(cls, pipeline_mode="thinker_only") -> None:
+        """Register the thinker-only pipeline variant in vLLM-Omni's registry."""
+        if pipeline_mode == "thinker_only":
+            register_pipeline(QWEN3_OMNI_THINKER_ONLY_PIPELINE)
+
+    @classmethod
+    def get_engine_hf_overrides(cls, pipeline_mode="thinker_only") -> dict:
+        """Return HF config overrides per *pipeline_mode*.
+
+        Args:
+            pipeline_mode (str): Pipeline mode selector.  One of
+                ``thinker_only``, ``thinker_talker``, ``full``.
+
+        Returns:
+            dict: HF config key-value overrides.
+        """
+        if pipeline_mode == "thinker_only":
+            return {"enable_audio_output": False}
+        return {}
+
+    @classmethod
+    def get_stage_engine_extras(cls, stage_id: int, pipeline_mode: str = "thinker_only") -> dict:
+        """Override model_arch to the thinker-only class when in thinker_only mode."""
+        if pipeline_mode == "thinker_only" and stage_id == 0:
+            return {"model_arch": "Qwen3OmniMoeThinkerForConditionalGeneration"}
+        return {}
