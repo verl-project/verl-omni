@@ -33,6 +33,12 @@ from torch.utils.data import Dataset, Sampler
 
 from verl_omni.utils.dataset.qwen3_omni_transform import process_qwen3_omni_sample
 
+__all__ = [
+    "ModalityGroupedBatchSampler",
+    "OfflineMLLMDPODataset",
+    "offline_mllm_dpo_collate_fn",
+]
+
 _MEDIA_TOKEN_PATTERN = re.compile(r"<(image|video|audio)>")
 
 
@@ -355,7 +361,27 @@ def _row_modality(row: dict[str, Any], source_name_key: str, default: str = "unk
 
 
 class OfflineMLLMDPODataset(Dataset):
-    """Dataset for Omni-Preference rows consumed by Qwen3-Omni offline DPO."""
+    """Build Qwen3-Omni offline DPO samples from Omni-Preference style rows.
+
+    The dataset reads parquet/json/jsonl files containing a multimodal prompt,
+    a preferred response, and a rejected response. Each row is converted into
+    paired chosen/rejected model inputs with aligned image, video, or audio
+    features, plus sample metadata needed by the offline DPO trainer.
+
+    Args:
+        data_files: Path or sequence of paths to parquet, json, or jsonl files.
+        tokenizer: Unused tokenizer argument kept for compatibility with the
+            common dataset factory signature.
+        processor: Multimodal processor used by the Qwen3-Omni transform.
+        config: Dataset config containing column names, multimodal transform
+            kwargs, and source metadata.
+        max_samples: Optional positive limit on the number of rows to load.
+
+    Returns:
+        A dataset whose ``__getitem__`` returns a dictionary of stacked
+        chosen/rejected tensors and metadata, including ``sample_level_scores``,
+        ``data_source``, ``reward_model``, ``modality``, and ``extra_info``.
+    """
 
     def __init__(self, data_files, tokenizer, processor=None, config: DictConfig | None = None, max_samples: int = -1):
         del tokenizer
@@ -390,6 +416,13 @@ class OfflineMLLMDPODataset(Dataset):
                 "`Qwen3OmniMoeThinkerForConditionalGeneration.get_rope_index` to the processor before "
                 "constructing the dataset."
             )
+
+        if self.transform_kwargs.get("use_audio_in_video"):
+            raise ValueError(
+                "use_audio_in_video=True is not supported yet for Qwen3-Omni offline DPO preprocessing. "
+                "Leave use_audio_in_video unset or set it to false."
+            )
+
         base_transform = config.get("base_transform", "qwen3_omni_moe")
         if base_transform not in {"qwen3_omni_moe", "qwen2_5_omni"}:
             raise ValueError(
