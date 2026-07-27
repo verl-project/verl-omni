@@ -43,6 +43,7 @@ class OmniModelConfig(BaseConfig):
         "model_stage",
         "tokenizer_path",
         "tokenizer",
+        "hf_config_path",
         "processor",
         "local_path",
         "local_tokenizer_path",
@@ -62,10 +63,10 @@ class OmniModelConfig(BaseConfig):
     local_tokenizer_path: Optional[str] = None
 
     # model type
-    model_type: str = "language_model"
+    model_type: str = "omni_model"
 
     # HF config architectures[0] (auto-detected from config.json if unset)
-    architecture: str = MISSING
+    architecture: Optional[str] = None
     architectures: Optional[list[str]] = None
 
     # which stage to train: "thinker", "talker", or "all"
@@ -105,6 +106,9 @@ class OmniModelConfig(BaseConfig):
     target_parameters: Optional[list[str]] = None  # for lora adapter on nn.Parameter
     exclude_modules: Optional[str] = None
 
+    # optional dtype for LoRA parameters (e.g. "float32"); None = use model dtype
+    lora_dtype: Optional[str] = None
+
     # megatron lora config
     lora: dict[str, Any] = field(default_factory=dict)
 
@@ -142,7 +146,7 @@ class OmniModelConfig(BaseConfig):
             tokenizer_path = os.path.join(self.local_path, "tokenizer")
             self.tokenizer_path = tokenizer_path if os.path.exists(tokenizer_path) else self.local_path
 
-        if self.architecture == MISSING:
+        if not self.architecture:
             config_path = os.path.join(self.local_path, "config.json")
             with open(config_path) as f:
                 self.architecture = json.load(f)["architectures"][0]
@@ -160,9 +164,12 @@ class OmniModelConfig(BaseConfig):
         self.architectures = getattr(self.hf_config, "architectures", None)
 
         if self.load_tokenizer:
-            # Tokenizer/processor are loaded by the omni trainer via
-            # OmniModelBase.configure_tokenizer / configure_processor.
+            from verl_omni.pipelines.model_base import OmniModelBase
+
             self.local_tokenizer_path = copy_to_local(self.tokenizer_path, use_shm=self.use_shm)
+            adapter_cls = OmniModelBase.get_class_by_name(self.architecture, self.model_stage, self.external_lib)
+            self.tokenizer = adapter_cls.configure_tokenizer(self.local_tokenizer_path, self)
+            self.processor = adapter_cls.configure_processor(self.local_path, self)
 
     def get_processor(self):
         """Return the processor, or fall back to the tokenizer."""
