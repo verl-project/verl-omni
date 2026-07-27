@@ -157,16 +157,23 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
-        # Umbrella config delegates tie_word_embeddings to sub-configs.
-        if not hasattr(self.model_config.hf_config, "tie_word_embeddings"):
-            self.model_config.hf_config.tie_word_embeddings = False
-
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not self.model_config.hf_config.tie_word_embeddings, mesh=self.device_mesh
+        # Use the stage sub-config for the meta-tensor decision; fall back to the umbrella config.
+        stage_config = getattr(
+            self.model_config.hf_config, f"{self.model_config.model_stage}_config", self.model_config.hf_config
         )
+        tie_word_embeddings = getattr(stage_config, "tie_word_embeddings", False)
+        if not hasattr(self.model_config.hf_config, "tie_word_embeddings"):
+            self.model_config.hf_config.tie_word_embeddings = tie_word_embeddings
+
+        init_context = get_init_weight_context_manager(use_meta_tensor=not tie_word_embeddings, mesh=self.device_mesh)
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
+
+            if getattr(self.model_config, "use_liger", False):
+                logger.warning("use_liger is set but not applied for omni models; this is a no-op.")
+            if getattr(self.model_config, "use_fused_kernels", False):
+                logger.warning("use_fused_kernels is set but not applied for omni models; this is a no-op.")
 
             module = AutoModelForMultimodalLM.from_pretrained(
                 pretrained_model_name_or_path=self.model_config.local_path,

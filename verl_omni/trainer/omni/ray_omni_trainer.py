@@ -25,6 +25,7 @@ class OmniPPOTrainerSync(PPOTrainerSync):
     """``PPOTrainerSync`` subclass that wires tokenizer/processor from ``OmniModelConfig``."""
 
     def _init_tokenizer(self):
+        # Skip super(): OmniModelConfig loads tokenizer/processor via the registered adapter.
         model_config: OmniModelConfig = omega_conf_to_dataclass(self.config.actor_rollout_ref.model, OmniModelConfig)
         self.tokenizer = model_config.tokenizer
         self.processor = model_config.processor

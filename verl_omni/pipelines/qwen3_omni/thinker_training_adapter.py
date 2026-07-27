@@ -93,13 +93,11 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         model_cls = Qwen3OmniMoeThinkerForConditionalGeneration
 
         # Cast to int64: HF returns float32, FSDP would otherwise bf16-round positions.
-        _ori_get_rope_index = types.MethodType(model_cls.get_rope_index, processor)
-
-        def _get_rope_index_long(*args, **kwargs):
-            vision_position_ids, deltas = _ori_get_rope_index(*args, **kwargs)
+        def _get_rope_index_long(self, *args, **kwargs):
+            vision_position_ids, deltas = model_cls.get_rope_index(self, *args, **kwargs)
             return vision_position_ids.long(), deltas
 
-        processor.get_rope_index = _get_rope_index_long
+        processor.get_rope_index = types.MethodType(_get_rope_index_long, processor)
         processor.get_llm_pos_ids_for_vision = types.MethodType(model_cls.get_llm_pos_ids_for_vision, processor)
         return processor
 
