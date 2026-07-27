@@ -14,6 +14,8 @@
 
 """Qwen-Image rollout-side adapter for online diffusion DPO."""
 
+import copy
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -21,6 +23,7 @@ from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
 from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.worker.utils import DiffusionRequestState
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.common import apply_true_cfg, build_img_shapes
@@ -39,6 +42,210 @@ class QwenImageDPOPipeline(QwenImagePipeline):
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
         self.device = get_local_device()
+
+    def _extract_step_prompt_ids(self, prompt):
+        """Extract tokenized prompts, with a raw-text warm-up fallback."""
+        prompt_ids = None
+        prompt_mask = None
+        negative_prompt_ids = None
+        negative_prompt_mask = None
+        if isinstance(prompt, dict):
+            prompt_ids = prompt.get("prompt_token_ids")
+            prompt_mask = prompt.get("prompt_mask")
+            negative_prompt_ids = prompt.get("negative_prompt_ids")
+            negative_prompt_mask = prompt.get("negative_prompt_mask")
+            if prompt_ids is None and prompt.get("prompt"):
+                prompt_ids, prompt_mask = self._tokenize_step_prompt(prompt["prompt"])
+            if negative_prompt_ids is None and prompt.get("negative_prompt"):
+                negative_prompt_ids, negative_prompt_mask = self._tokenize_step_prompt(prompt["negative_prompt"])
+        elif isinstance(prompt, str):
+            prompt_ids, prompt_mask = self._tokenize_step_prompt(prompt)
+        return prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask
+
+    def _tokenize_step_prompt(self, text: str | list[str]):
+        """Tokenize raw text for the step-execution warm-up request."""
+        prompt = [text] if isinstance(text, str) else text
+        formatted = [self.prompt_template_encode.format(item) for item in prompt]
+        tokens = self.tokenizer(
+            formatted,
+            max_length=self.tokenizer_max_length + self.prompt_template_encode_start_idx,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+        ).to(self.device)
+        return tokens.input_ids, tokens.attention_mask
+
+    def prepare_encode(
+        self,
+        state: DiffusionRequestState,
+        **kwargs: Any,
+    ) -> DiffusionRequestState:
+        """Initialize request-local state for step execution."""
+        sampling = state.sampling
+        prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask = self._extract_step_prompt_ids(state.prompt)
+        if isinstance(prompt_ids, list):
+            prompt_ids = torch.tensor(prompt_ids, device=self.device)
+        if isinstance(negative_prompt_ids, list):
+            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
+        if prompt_ids is None:
+            raise ValueError(
+                f"{self.__class__.__name__}.prepare_encode requires either "
+                "'prompt_token_ids' or a text 'prompt' on state.prompt."
+            )
+
+        height = sampling.height or self.default_sample_size * self.vae_scale_factor
+        width = sampling.width or self.default_sample_size * self.vae_scale_factor
+        num_inference_steps = sampling.num_inference_steps or 50
+        num_images_per_prompt = sampling.num_outputs_per_prompt if sampling.num_outputs_per_prompt > 0 else 1
+        true_cfg_scale = _coalesce_not_none(sampling.true_cfg_scale, 4.0)
+        max_sequence_length = sampling.max_sequence_length or 512
+
+        generator = sampling.generator
+        if generator is None and sampling.seed is not None:
+            generator = torch.Generator(device=self.device).manual_seed(sampling.seed)
+
+        self._guidance_scale = 1.0
+        self._attention_kwargs = kwargs.get("attention_kwargs") or {}
+        self._current_timestep = None
+        self._interrupt = False
+
+        batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
+        has_neg_prompt = negative_prompt_ids is not None
+        do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
+
+        prompt_embeds, prompt_embeds_mask = self.encode_prompt(
+            prompt_ids=prompt_ids,
+            attention_mask=prompt_mask,
+            num_images_per_prompt=num_images_per_prompt,
+            max_sequence_length=max_sequence_length,
+        )
+        if do_true_cfg:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self.encode_prompt(
+                prompt_ids=negative_prompt_ids,
+                attention_mask=negative_prompt_mask,
+                num_images_per_prompt=num_images_per_prompt,
+                max_sequence_length=max_sequence_length,
+            )
+        else:
+            negative_prompt_embeds = None
+            negative_prompt_embeds_mask = None
+
+        num_channels_latents = self.transformer.in_channels // 4
+        latents = self.prepare_latents(
+            batch_size * num_images_per_prompt,
+            num_channels_latents,
+            height,
+            width,
+            prompt_embeds.dtype,
+            self.device,
+            generator,
+            None,
+        ).float()
+        timesteps, _ = self.prepare_timesteps(num_inference_steps, None, latents.shape[1])
+        self._num_timesteps = len(timesteps)
+
+        if self.transformer.guidance_embeds:
+            guidance = torch.full([1], 1.0, dtype=torch.float32).expand(latents.shape[0])
+        else:
+            guidance = None
+
+        request_scheduler = copy.deepcopy(self.scheduler)
+        request_scheduler.set_begin_index(0)
+
+        state.prompt_embeds = prompt_embeds
+        state.prompt_embeds_mask = prompt_embeds_mask
+        state.negative_prompt_embeds = negative_prompt_embeds
+        state.negative_prompt_embeds_mask = negative_prompt_embeds_mask
+        state.latents = latents
+        state.timesteps = timesteps
+        state.step_index = 0
+        state.scheduler = request_scheduler
+        state.do_true_cfg = do_true_cfg
+        state.guidance = guidance
+        state.img_shapes = build_img_shapes(height, width, batch_size, self.vae_scale_factor)
+        state.txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist() if prompt_embeds_mask is not None else None
+        state.negative_txt_seq_lens = (
+            negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
+        )
+        state.sampling.cfg_normalize = True
+        state.extra["height"] = height
+        state.extra["width"] = width
+        return state
+
+    def denoise_step(self, input_batch, **kwargs: Any) -> torch.Tensor | None:
+        """Run one DPO denoising pass while retaining FP32 live state."""
+        del kwargs
+        if self.interrupt:
+            return None
+
+        timestep = input_batch.timesteps
+        self._current_timestep = timestep
+        self.transformer.do_true_cfg = input_batch.do_true_cfg
+        model_latents = input_batch.latents.to(self.transformer.img_in.weight.dtype)
+        positive_kwargs, negative_kwargs, output_slice = self._build_denoise_kwargs(
+            latents=model_latents,
+            timestep=timestep,
+            guidance=input_batch.guidance,
+            prompt_embeds=input_batch.prompt_embeds,
+            prompt_embeds_mask=input_batch.prompt_embeds_mask,
+            img_shapes=input_batch.img_shapes,
+            txt_seq_lens=input_batch.txt_seq_lens,
+            do_true_cfg=input_batch.do_true_cfg,
+            negative_prompt_embeds=input_batch.negative_prompt_embeds,
+            negative_prompt_embeds_mask=input_batch.negative_prompt_embeds_mask,
+            negative_txt_seq_lens=input_batch.negative_txt_seq_lens,
+            extra_transformer_kwargs={"attention_kwargs": self.attention_kwargs, "return_dict": False},
+        )
+        noise_pred = self.predict_noise_maybe_with_cfg(
+            input_batch.do_true_cfg,
+            input_batch.true_cfg_scale,
+            positive_kwargs,
+            negative_kwargs,
+            input_batch.cfg_normalize,
+            output_slice,
+        )
+        return noise_pred.float()
+
+    def step_scheduler(
+        self,
+        state: DiffusionRequestState,
+        noise_pred: torch.Tensor,
+        **kwargs: Any,
+    ) -> None:
+        """Advance one DPO step and keep live latents in FP32."""
+        del kwargs
+        if self.interrupt:
+            return
+
+        state.latents = self.scheduler_step_maybe_with_cfg(
+            noise_pred.float(),
+            state.current_timestep,
+            state.latents.float(),
+            state.do_true_cfg,
+            per_request_scheduler=state.scheduler,
+        ).float()
+        state.step_index += 1
+
+    def post_decode(
+        self,
+        state: DiffusionRequestState,
+        **kwargs: Any,
+    ) -> DiffusionOutput:
+        """Decode step execution output with DPO training tensors."""
+        del kwargs
+        self._current_timestep = None
+        output = self._decode_latents(state.latents, state.extra["height"], state.extra["width"], "pil")
+        return replace(
+            output,
+            custom_output={
+                "latents_clean": state.latents.float(),
+                "prompt_embeds": state.prompt_embeds,
+                "prompt_embeds_mask": state.prompt_embeds_mask,
+                "negative_prompt_embeds": state.negative_prompt_embeds,
+                "negative_prompt_embeds_mask": state.negative_prompt_embeds_mask,
+            },
+            to_cpu=True,
+        )
 
     def _get_qwen_prompt_embeds(
         self,
