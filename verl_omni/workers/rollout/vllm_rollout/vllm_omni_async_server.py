@@ -204,8 +204,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         logger.info("Generated deploy config:\n%s", yaml_str)
         self._temp_deploy_ctx = tempfile.TemporaryDirectory(prefix="verl_omni_deploy_")
         deploy_path = os.path.join(self._temp_deploy_ctx.name, f"{pipeline_name}.yaml")
-        with open(deploy_path, "w") as f:
-            f.write(yaml_str)
+        try:
+            with open(deploy_path, "w") as f:
+                f.write(yaml_str)
+        except OSError as e:
+            self._temp_deploy_ctx.cleanup()
+            self._temp_deploy_ctx = None
+            raise RuntimeError(f"Failed to write deploy config to {deploy_path}: {e}") from e
         engine_kwargs["deploy_config"] = deploy_path
 
     # -----------------------------------------------------------------------
@@ -256,6 +261,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
         await omni_init_app_state(engine_client, app.state, args)
+
+        # Deploy config YAML is consumed by AsyncOmni above; clean up the temp dir.
+        if getattr(self, "_temp_deploy_ctx", None) is not None:
+            self._temp_deploy_ctx.cleanup()
+            self._temp_deploy_ctx = None
 
         self.engine = engine_client
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
