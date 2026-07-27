@@ -15,13 +15,20 @@ hooks. No `verl_omni/` production code is modified.
 
 ## CI Status
 
-This directory contains a runnable L3 nightly regression, but the repository
-does not currently include a stable GitHub scheduled workflow for it. Run it
-manually on a fixed GPU runner, or call the script from an external nightly
-orchestration job.
+This directory is wired to
+`.github/workflows/l3_qwen_image_flowgrpo_nightly.yml`. The workflow runs strict
+nightly mode every day at 22:00 Asia/Shanghai and can also be triggered
+manually.
 
 Use this test as a regression signal for numerical drift and performance
 changes. It is not part of the fast pull-request CI loop.
+
+Workflow trigger modes:
+
+- Scheduled runs use `nightly` mode and require an existing baseline artifact.
+- `workflow_dispatch` supports `mode=nightly` or `mode=baseline`.
+- Adding the `L3-baseline` label to a pull request triggers `baseline` mode for
+  that PR.
 
 ## Requirements
 
@@ -80,12 +87,35 @@ Use bootstrap mode only when intentionally creating or refreshing a reviewed
 baseline. A real scheduled nightly should use strict mode so missing baselines,
 missing dump files, or metric regressions fail the job.
 
+In GitHub Actions, baseline mode uploads:
+
+- `l3-qwen-image-flowgrpo-single-sample-baseline`, retained for 30 days.
+- `l3-qwen-image-flowgrpo-single-sample-reports-<run_id>`, retained for 14 days.
+
+Nightly mode downloads the latest non-expired
+`l3-qwen-image-flowgrpo-single-sample-baseline` artifact for the configured
+`baseline_branch` input, then runs strict comparison. If no matching baseline is
+found, the job fails before training starts.
+
+To refresh the production baseline:
+
+1. Review the expected change and choose the branch whose baseline should be
+   refreshed.
+2. Trigger `l3_qwen_image_flowgrpo_nightly` manually with `mode=baseline`, or
+   apply `L3-baseline` to the target pull request.
+3. Inspect the uploaded reports and baseline artifact before relying on later
+   nightly runs.
+
 The comparison outputs are written under `current/`:
 
 - `metrics.json` contains aggregated timing, throughput, and memory metrics.
 - `dump_compare.json` contains precision comparison results.
 - `metrics.jsonl` contains step-level debug metrics from the run.
 - `logs/qwen_image_flowgrpo_single_sample.log` contains the console log.
+
+Nightly mode uploads all current intermediate outputs as
+`l3-qwen-image-flowgrpo-single-sample-current-<run_id>` and always uploads logs
+and reports as `l3-qwen-image-flowgrpo-single-sample-reports-<run_id>`.
 
 Precision thresholds:
 

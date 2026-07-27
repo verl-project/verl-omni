@@ -11,9 +11,8 @@ VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or co
 | L3 nightly regression | Detect numerical drift and performance regressions | Scheduled or manual | Fixed GPU runners | Nightly regression signal | Metrics and baseline comparisons |
 | L4 convergence tests | Validate real recipe convergence | Weekly, release candidate, or manual | Production GPU cluster | Release readiness gate | Reward/loss curves and convergence reports |
 
-L3 has one runnable test-side regression under `tests/nightly/`, but it is not
-yet wired to a stable GitHub scheduled workflow in this repository. L4 remains a
-planned layer.
+L3 has one runnable scheduled workflow for the Qwen-Image FlowGRPO
+single-sample regression. L4 remains a planned layer.
 
 ## L1 CPU API Tests
 
@@ -53,9 +52,20 @@ Run it manually with:
 bash tests/nightly/qwen_image_flowgrpo_single_sample/run_qwen_image_flowgrpo_single_sample.sh
 ```
 
-Nightly jobs should run with `BOOTSTRAP_MISSING_BASELINE=0` so missing or stale
-baselines fail closed. Use `BOOTSTRAP_MISSING_BASELINE=1` only when intentionally
-creating or refreshing a reviewed baseline.
+The GitHub workflow is
+`.github/workflows/l3_qwen_image_flowgrpo_nightly.yml`. It runs strict nightly
+mode every day at 22:00 Asia/Shanghai and can also be triggered manually with
+`workflow_dispatch`.
+
+Nightly jobs run with `BOOTSTRAP_MISSING_BASELINE=0` so missing or stale
+baselines fail closed. Baseline creation is manual only: run the workflow with
+`mode=baseline`, or add the `L3-baseline` label to a pull request. Baseline mode
+uses `BOOTSTRAP_MISSING_BASELINE=1` and uploads the reviewed baseline as the
+`l3-qwen-image-flowgrpo-single-sample-baseline` artifact.
+
+Strict nightly mode downloads the latest non-expired baseline artifact for the
+configured baseline branch, runs the comparison, and uploads current debug
+dumps, metrics, reports, and logs as artifacts even when the regression fails.
 
 Until the baseline policy, artifact retention, ownership, and fixed runner
 capacity are stable, L3 should remain outside the fast pull-request loop and
