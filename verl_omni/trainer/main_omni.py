@@ -14,7 +14,7 @@
 """Entrypoint for omni (thinker/talker) model RL training."""
 
 import hydra
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from verl.trainer.main_ppo import TaskRunnerV1, run_ppo
 from verl.utils.device import auto_set_device
 
@@ -22,7 +22,7 @@ import verl_omni.trainer.omni  # noqa: F401
 
 
 @hydra.main(config_path="./config", config_name="omni_trainer", version_base=None)
-def main(config) -> None:
+def main(config: DictConfig) -> None:
     """Omni model training entrypoint.
 
     Configures device, resolves OmegaConf interpolations, forces V1 trainer
