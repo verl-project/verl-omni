@@ -480,14 +480,32 @@ class OfflineMLLMDPODataset(Dataset):
 
 
 class ModalityGroupedBatchSampler(Sampler[int]):
-    """Yield indices in same-modality chunks for regular DataLoader batching.
+    """Build same-modality batches for regular DataLoader sampling.
 
     ``StatefulDataLoader`` is configured with ``sampler=`` and ``batch_size=``,
     not ``batch_sampler=``. This sampler therefore yields individual indices,
-    but orders them as contiguous same-modality chunks of ``batch_size``. When
-    Each chunk first samples a modality uniformly by default, or by
+    ordered as contiguous same-modality chunks of ``batch_size``. Each chunk
+    samples a modality uniformly by default, or according to
     ``modality_sample_weights`` when provided, then samples rows from that
     modality with replacement.
+
+    Args:
+        data_source: Dataset that provides ``get_modality(index)``.
+        dataset: Alias for ``data_source`` kept for compatibility with dataset
+            factory arguments.
+        data_config: Optional config used to infer ``batch_size`` from
+            ``gen_batch_size`` or ``train_batch_size``.
+        batch_size: Number of samples in each same-modality chunk.
+        shuffle: Unused compatibility argument.
+        drop_last: Whether to drop the final incomplete batch when inferring
+            the number of generated chunks.
+        seed: Base random seed used for modality and row sampling.
+        modality_sample_weights: Optional per-modality sampling weights.
+        num_batches: Optional explicit number of chunks to generate per epoch.
+
+    Returns:
+        A sampler whose iterator yields dataset indices arranged so each regular
+        DataLoader batch contains samples from a single modality.
     """
 
     def __init__(

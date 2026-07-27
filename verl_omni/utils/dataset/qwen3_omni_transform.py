@@ -411,7 +411,24 @@ def process_qwen3_omni_sample(
     position_id_func: Callable,
     **kwargs,
 ) -> list[dict[str, Any]]:
-    """Transform one offline preference sample into Qwen3-Omni model inputs."""
+    """Transform one offline preference sample into Qwen3-Omni model inputs.
+
+    The transform renders the conversation with the Qwen3-Omni chat template,
+    loads referenced image, video, and audio inputs, and builds model-ready
+    tensors with modality masks, position ids, attention masks, and labels.
+
+    Args:
+        sample: Offline preference sample containing conversations and optional
+            multimodal resource fields.
+        processor: Qwen3-Omni processor used to render text and encode
+            multimodal inputs.
+        position_id_func: Callable that builds multimodal position ids from the
+            encoded model inputs.
+        **kwargs: Additional options forwarded to multimodal resource loaders.
+
+    Returns:
+        A single-item list containing the encoded model input dictionary.
+    """
     image_token_id, video_token_id, audio_token_id = _get_omni_token_ids(processor)
     conversations = (
         sample["conversations"] if ("conversations" in sample and len(sample["conversations"]) > 0) else sample
