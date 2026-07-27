@@ -13,3 +13,16 @@ defaults:
   - omni/model@actor_rollout_ref.model: omni_model
   - _self_
 
+actor_rollout_ref:
+
+  rollout:
+
+    # Use vLLM-Omni as the rollout backend for omni models.
+    name: vllm_omni
+
+trainer:
+
+  v1:
+
+    # Use the omni trainer mode for omni models.
+    trainer_mode: omni_sync

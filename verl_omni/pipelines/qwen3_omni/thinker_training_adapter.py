@@ -14,8 +14,9 @@
 """Qwen3-Omni Thinker training adapter.
 
 Implements ``OmniModelBase`` for thinker-stage training of
-Qwen3-Omni: sub-module stripping, forward redirection, and
-processor/tokenizer configuration.
+Qwen3-Omni: sub-module stripping, forward redirection,
+processor/tokenizer configuration, and LoRA key normalization for
+vLLM-Omni weight sync.
 """
 
 import json
@@ -57,6 +58,7 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         module.forward = module.thinker.forward
         module.get_input_embeddings = module.thinker.get_input_embeddings
         module.set_input_embeddings = module.thinker.set_input_embeddings
+        module._no_split_modules = ["Qwen3OmniMoeThinkerTextDecoderLayer"]
         return module
 
     @classmethod
@@ -89,7 +91,13 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         processor.config.vision_start_token_id = config.talker_config.vision_start_token_id
 
         model_cls = Qwen3OmniMoeThinkerForConditionalGeneration
-        processor.get_rope_index = types.MethodType(model_cls.get_rope_index, processor)
+
+        # Cast to int64: HF returns float32, FSDP would otherwise bf16-round positions.
+        def _get_rope_index_long(self, *args, **kwargs):
+            vision_position_ids, deltas = model_cls.get_rope_index(self, *args, **kwargs)
+            return vision_position_ids.long(), deltas
+
+        processor.get_rope_index = types.MethodType(_get_rope_index_long, processor)
         processor.get_llm_pos_ids_for_vision = types.MethodType(model_cls.get_llm_pos_ids_for_vision, processor)
         return processor
 
