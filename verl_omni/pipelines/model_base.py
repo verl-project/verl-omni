@@ -736,7 +736,7 @@ class OmniRolloutPipelineBase:
         return
 
     @classmethod
-    def get_engine_hf_overrides(cls, pipeline_mode="thinker_only") -> dict:
+    def get_engine_hf_overrides(cls, pipeline_mode: str = "thinker_only") -> dict:
         """Return HF config overrides per *pipeline_mode*.
 
         Args:

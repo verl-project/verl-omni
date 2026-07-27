@@ -155,18 +155,19 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             pipeline_mode = engine_kwargs.pop("pipeline_mode", "thinker_only")
 
             adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
-            # Generate deploy config using the adapter's stage topology.
-            self._write_deploy_config(engine_kwargs, pipeline_name, adapter_cls, pipeline_mode)
-            # Store per-stage rollout flags for downstream use.
-            self._rollout_flags = adapter_cls.rollout_flags(pipeline_mode=pipeline_mode)
-            # Merge pipeline-specific HF config overrides.
-            adapter_overrides = adapter_cls.get_engine_hf_overrides(pipeline_mode=pipeline_mode)
-            if adapter_overrides:
-                hf_overrides = engine_kwargs.get("hf_overrides", {})
-                if isinstance(hf_overrides, str):
-                    hf_overrides = json.loads(hf_overrides)
-                hf_overrides.update(adapter_overrides)
-                engine_kwargs["hf_overrides"] = hf_overrides
+            if adapter_cls is not None:
+                # Generate deploy config using the adapter's stage topology.
+                self._write_deploy_config(engine_kwargs, pipeline_name, adapter_cls, pipeline_mode)
+                # Store per-stage rollout flags for downstream use.
+                self._rollout_flags = adapter_cls.rollout_flags(pipeline_mode=pipeline_mode)
+                # Merge pipeline-specific HF config overrides.
+                adapter_overrides = adapter_cls.get_engine_hf_overrides(pipeline_mode=pipeline_mode)
+                if adapter_overrides:
+                    hf_overrides = engine_kwargs.get("hf_overrides", {})
+                    if isinstance(hf_overrides, str):
+                        hf_overrides = json.loads(hf_overrides)
+                    hf_overrides.update(adapter_overrides)
+                    engine_kwargs["hf_overrides"] = hf_overrides
 
             for underscore_key in ("stage_configs_path", "deploy_config", "stage_overrides", "async_chunk"):
                 if underscore_key in engine_kwargs:

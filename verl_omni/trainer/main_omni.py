@@ -22,7 +22,7 @@ import verl_omni.trainer.omni  # noqa: F401
 
 
 @hydra.main(config_path="./config", config_name="omni_trainer", version_base=None)
-def main(config):
+def main(config) -> None:
     """Omni model training entrypoint.
 
     Configures device, resolves OmegaConf interpolations, forces V1 trainer

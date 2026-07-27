@@ -99,20 +99,20 @@ class Qwen3OmniRolloutAdapter(OmniRolloutPipelineBase):
         )
 
     @classmethod
-    def get_pipeline_id(cls, pipeline_mode="thinker_only") -> str:
+    def get_pipeline_id(cls, pipeline_mode: str = "thinker_only") -> str:
         """Return the vLLM-Omni pipeline model_type for *pipeline_mode*."""
         if pipeline_mode == "thinker_only":
             return QWEN3_OMNI_THINKER_ONLY_PIPELINE.model_type
         return QWEN3_OMNI_PIPELINE.model_type
 
     @classmethod
-    def ensure_pipeline_registered(cls, pipeline_mode="thinker_only") -> None:
+    def ensure_pipeline_registered(cls, pipeline_mode: str = "thinker_only") -> None:
         """Register the thinker-only pipeline variant in vLLM-Omni's registry."""
         if pipeline_mode == "thinker_only":
             register_pipeline(QWEN3_OMNI_THINKER_ONLY_PIPELINE)
 
     @classmethod
-    def get_engine_hf_overrides(cls, pipeline_mode="thinker_only") -> dict:
+    def get_engine_hf_overrides(cls, pipeline_mode: str = "thinker_only") -> dict:
         """Return HF config overrides per *pipeline_mode*.
 
         Args:
