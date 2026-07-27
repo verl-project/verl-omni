@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="620" viewBox="0 0 1100 620">
+  <defs>
+    <style>
+      .bg { fill: #0f172a; }
+      .title { fill: #f8fafc; font: 700 28px Arial, sans-serif; }
+      .head { fill: #cbd5e1; font: 700 17px Arial, sans-serif; }
+      .cell { fill: #111827; stroke: #475569; stroke-width: 1.5; }
+      .text { fill: #e5e7eb; font: 400 15px Arial, sans-serif; }
+      .ok { fill: #22c55e; font: 700 15px Arial, sans-serif; }
+      .warn { fill: #f59e0b; font: 700 15px Arial, sans-serif; }
+      .bad { fill: #ef4444; font: 700 15px Arial, sans-serif; }
+    </style>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1100" height="620"/>
+  <text class="title" x="50" y="55">Why use a tiny-random BOOGU e2e path first</text>
+
+  <rect class="cell" x="50" y="100" width="260" height="60"/>
+  <rect class="cell" x="310" y="100" width="340" height="60"/>
+  <rect class="cell" x="650" y="100" width="400" height="60"/>
+  <text class="head" x="75" y="138">Dimension</text>
+  <text class="head" x="335" y="138">Real BOOGU checkpoint</text>
+  <text class="head" x="675" y="138">Tiny-random BOOGU e2e</text>
+
+  <rect class="cell" x="50" y="160" width="260" height="70"/>
+  <rect class="cell" x="310" y="160" width="340" height="70"/>
+  <rect class="cell" x="650" y="160" width="400" height="70"/>
+  <text class="text" x="75" y="202">VRAM requirement</text>
+  <text class="bad" x="335" y="202">~34.6 GiB, recommended 40GB+</text>
+  <text class="ok" x="675" y="202">Designed to fit low-VRAM dev machines</text>
+
+  <rect class="cell" x="50" y="230" width="260" height="70"/>
+  <rect class="cell" x="310" y="230" width="340" height="70"/>
+  <rect class="cell" x="650" y="230" width="400" height="70"/>
+  <text class="text" x="75" y="272">Framework validation</text>
+  <text class="warn" x="335" y="272">Blocked on local hardware</text>
+  <text class="ok" x="675" y="272">Can validate rollout + reward + update</text>
+
+  <rect class="cell" x="50" y="300" width="260" height="70"/>
+  <rect class="cell" x="310" y="300" width="340" height="70"/>
+  <rect class="cell" x="650" y="300" width="400" height="70"/>
+  <text class="text" x="75" y="342">Model quality signal</text>
+  <text class="ok" x="335" y="342">Yes</text>
+  <text class="warn" x="675" y="342">No, framework-only validation</text>
+
+  <rect class="cell" x="50" y="370" width="260" height="70"/>
+  <rect class="cell" x="310" y="370" width="340" height="70"/>
+  <rect class="cell" x="650" y="370" width="400" height="70"/>
+  <text class="text" x="75" y="412">Saved artifacts</text>
+  <text class="warn" x="335" y="412">Not currently feasible on this machine</text>
+  <text class="ok" x="675" y="412">Images, grid, metrics, curves</text>
+
+  <rect class="cell" x="50" y="440" width="260" height="70"/>
+  <rect class="cell" x="310" y="440" width="340" height="70"/>
+  <rect class="cell" x="650" y="440" width="400" height="70"/>
+  <text class="text" x="75" y="482">Best use in PR</text>
+  <text class="text" x="335" y="482">Final quality evidence on large hardware</text>
+  <text class="text" x="675" y="482">Interim e2e integration evidence</text>
+
+  <text class="text" x="50" y="575">Recommended sequence: CPU tests -> BOOGU smoke -> tiny-random BOOGU e2e -> real BOOGU checkpoint on larger GPU.</text>
+</svg>

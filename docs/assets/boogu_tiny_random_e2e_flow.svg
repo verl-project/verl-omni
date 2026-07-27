@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760">
+  <defs>
+    <style>
+      .bg { fill: #0b1020; }
+      .title { fill: #f8fafc; font: 700 30px Arial, sans-serif; }
+      .subtitle { fill: #cbd5e1; font: 400 16px Arial, sans-serif; }
+      .box { fill: #111827; stroke: #60a5fa; stroke-width: 2; rx: 16; ry: 16; }
+      .box2 { fill: #172554; stroke: #93c5fd; stroke-width: 2; rx: 16; ry: 16; }
+      .box3 { fill: #1f2937; stroke: #34d399; stroke-width: 2; rx: 16; ry: 16; }
+      .text { fill: #e5e7eb; font: 600 18px Arial, sans-serif; }
+      .small { fill: #cbd5e1; font: 400 14px Arial, sans-serif; }
+      .warn { fill: #fde68a; font: 600 15px Arial, sans-serif; }
+      .arrow { stroke: #94a3b8; stroke-width: 3; fill: none; marker-end: url(#m); }
+    </style>
+    <marker id="m" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1200" height="760"/>
+
+  <text class="title" x="60" y="60">Tiny-random BOOGU e2e validation path</text>
+  <text class="subtitle" x="60" y="92">A practical BOOGU-shaped end-to-end path for low-VRAM machines</text>
+
+  <rect class="box" x="60" y="150" width="260" height="130"/>
+  <text class="text" x="85" y="188">1. Tiny-random checkpoint</text>
+  <text class="small" x="85" y="220">- tiny transformer</text>
+  <text class="small" x="85" y="245">- tiny MLLM + processor</text>
+  <text class="small" x="85" y="270">- BOOGU scheduler + VAE</text>
+
+  <rect class="box2" x="380" y="150" width="260" height="130"/>
+  <text class="text" x="405" y="188">2. BOOGU rollout adapter</text>
+  <text class="small" x="405" y="220">- prompt / negative prompt</text>
+  <text class="small" x="405" y="245">- SDE scheduler + logprobs</text>
+  <text class="small" x="405" y="270">- final image + latents</text>
+
+  <rect class="box" x="700" y="150" width="260" height="130"/>
+  <text class="text" x="725" y="188">3. Minimal trainer loop</text>
+  <text class="small" x="725" y="220">- tiny parquet dataset</text>
+  <text class="small" x="725" y="245">- 1~2 training steps</text>
+  <text class="small" x="725" y="270">- jpeg reward only</text>
+
+  <rect class="box3" x="380" y="370" width="260" height="170"/>
+  <text class="text" x="405" y="408">4. Saved artifacts</text>
+  <text class="small" x="405" y="440">- generated_0.png</text>
+  <text class="small" x="405" y="465">- generated_1.png</text>
+  <text class="small" x="405" y="490">- grid.png</text>
+  <text class="small" x="405" y="515">- metrics.csv</text>
+  <text class="small" x="405" y="540">- metrics_curve.png</text>
+
+  <rect class="box2" x="60" y="590" width="900" height="100"/>
+  <text class="text" x="85" y="628">What this proves</text>
+  <text class="small" x="85" y="655">BOOGU-specific wiring, rollout outputs, reward flow, update step, and artifact saving all work together under a tiny-random checkpoint.</text>
+  <text class="warn" x="85" y="680">Important: this validates framework integration, not real BOOGU checkpoint quality.</text>
+
+  <path class="arrow" d="M320 215 L380 215"/>
+  <path class="arrow" d="M640 215 L700 215"/>
+  <path class="arrow" d="M830 280 L830 330 L510 330 L510 370"/>
+</svg>
