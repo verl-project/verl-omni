@@ -16,6 +16,7 @@ import os
 from typing import Any
 from uuid import uuid4
 
+from omegaconf import OmegaConf
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, register
 from verl.utils.profiler import simple_timer
 
@@ -58,6 +59,10 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
             negative_prompt_ids = None
 
         # 3. generate sequences
+        routing_key_field = OmegaConf.select(self.rollout_config, "server_routing.routing_key_field", default="uid")
+        value = kwargs.get(routing_key_field) if routing_key_field else None
+        routing_key = str(value) if value is not None else None
+
         metrics = {}
         with simple_timer("generate_sequences", metrics):
             output = await self.server_manager.generate(
@@ -67,6 +72,7 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
                 image_data=images,
                 video_data=videos,
                 negative_prompt_ids=negative_prompt_ids,
+                routing_key=routing_key,
             )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
