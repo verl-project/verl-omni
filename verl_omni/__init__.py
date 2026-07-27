@@ -36,7 +36,7 @@ except Exception:
 def _safe_import(module_name: str) -> None:
     try:
         importlib.import_module(module_name)
-  except (ModuleNotFoundError, ImportError) as exc:
+    except (ModuleNotFoundError, ImportError) as exc:
         logger.warning("Skipping optional module import %s due to missing dependency: %s", module_name, exc)
 
 
