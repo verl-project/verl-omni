@@ -439,7 +439,7 @@ class VeOmniDiffusionEngine(BaseEngine):
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
     ) -> list[TensorDict]:
-        num_timesteps = data["all_timesteps"].shape[1]
+        num_timesteps = int(data["all_timesteps"].shape[1])
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
         tu.assign_non_tensor(data, use_dynamic_bsz=False)
 
