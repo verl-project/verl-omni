@@ -6,8 +6,9 @@
 #       --local_dataset_path <path_to_raw_mmk12> \
 #       --local_save_dir ~/data/mmk12
 #
-# Runtime dependency (all Ray worker nodes):
-#   pip install math-verify   # required by mmk12_reward.py
+# Runtime dependencies (all Ray worker nodes):
+#   pip install math-verify    # required by mmk12_reward.py
+#   pip install qwen-vl-utils  # required for multimodal data processing
 
 set -x
 

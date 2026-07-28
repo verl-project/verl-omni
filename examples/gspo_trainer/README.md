@@ -204,12 +204,12 @@ in [`data_process/mmk12.py`](data_process/mmk12.py) for the exact output schema.
 ### Run training
 
 The MMK12 reward scorer grades responses with
-[`math_verify`](https://github.com/huggingface/math-verify), which is **not**
-pulled in transitively by verl or verl-omni. Install it explicitly first —
-otherwise the scorer falls back to `accuracy = 0` for every sample:
+[`math_verify`](https://github.com/huggingface/math-verify). Multimodal data
+processing also requires [`qwen-vl-utils`](https://github.com/QwenLM/Qwen2.5-VL)
+for vision info extraction. Install both explicitly:
 
 ```bash
-pip install math-verify
+pip install math-verify qwen-vl-utils
 ```
 
 Then launch the MMK12 V1 training script:
