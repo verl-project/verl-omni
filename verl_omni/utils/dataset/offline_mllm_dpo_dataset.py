@@ -602,6 +602,22 @@ class ModalityGroupedBatchSampler(Sampler[int]):
 
 
 def offline_mllm_dpo_collate_fn(features):
+    """Collate a list of offline MLLM DPO samples into a single batch.
+
+    All samples must belong to the same modality. Tensor fields are padded to
+    the maximum shape across the batch and stacked; ``position_ids`` receive
+    additional shape normalization. Non-tensor fields are gathered into a NumPy
+    object array.
+
+    Args:
+        features (list[dict[str, Any]]): List of sample dictionaries produced by
+            :class:`OfflineMLLMDPODataset`.
+
+    Returns:
+        dict[str, Any]: A batched dictionary where tensor keys map to
+            :class:`torch.Tensor` and non-tensor keys map to
+            :class:`numpy.ndarray` with ``dtype=object``.
+    """
     modalities = {feature.get("modality") for feature in features}
     if len(modalities) != 1:
         raise ValueError(f"Offline MLLM DPO batches must contain a single modality, got {sorted(modalities)}")
