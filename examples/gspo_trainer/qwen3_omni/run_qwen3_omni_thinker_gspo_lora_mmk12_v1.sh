@@ -26,7 +26,7 @@ python3 -m verl_omni.trainer.main_omni \
     data.max_prompt_length=2048 \
     data.max_response_length=8192 \
     data.truncation='error' \
-    data.filter_overlong_prompts=false \
+    data.filter_overlong_prompts=true \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.lora_rank=32 \
     actor_rollout_ref.model.lora_alpha=64 \
