@@ -24,6 +24,8 @@ import logging
 import os
 from typing import Any
 
+import numpy as np
+
 from verl_omni.pipelines.model_base import OmniModelBase
 
 logger = logging.getLogger(__name__)
@@ -63,20 +65,20 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
 
     @classmethod
     def configure_processor(cls, model_path: str, model_config) -> Any:
-        """Load the Qwen3-Omni multimodal processor with RoPE helpers.
+        """Load the Qwen3-Omni multimodal processor with RoPE + dedup helpers.
 
-        Swaps ``processor.config`` to ``thinker_config`` (Qwen3-Omni
-        nests multimodal settings under sub-configs).  Binds
-        ``get_rope_index`` and ``get_llm_pos_ids_for_vision`` to the
-        processor — the omni agent loop calls these on the processor,
-        but they are model methods.
+        Swaps ``processor.config`` to ``thinker_config`` (Qwen3-Omni nests
+        multimodal settings under sub-configs). Binds ``get_rope_index`` and
+        ``get_llm_pos_ids_for_vision`` (model methods the omni agent loop
+        calls on the processor), and ``dedup_pad_tokens`` (collapses
+        consecutive multimodal pad tokens before vLLM-Omni re-expands them).
 
         Args:
             model_path: Local path to the model checkpoint.
             model_config: The ``OmniModelConfig``.
 
         Returns:
-            The configured processor with RoPE helpers bound.
+            The configured processor with RoPE and dedup helpers bound.
         """
         import types
 
@@ -99,6 +101,38 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
 
         processor.get_rope_index = types.MethodType(_get_rope_index_long, processor)
         processor.get_llm_pos_ids_for_vision = types.MethodType(model_cls.get_llm_pos_ids_for_vision, processor)
+
+        # Collapse consecutive multimodal pad tokens before vLLM-Omni re-expands
+        # them (token-IDs path still unfixed: https://github.com/vllm-project/vllm/issues/33672);
+        # mirrors verl's qwen2_5_vl_dedup_image_tokens.
+        def _dedup_pad_tokens(self, prompt_ids: list[int]) -> list[int]:
+            tokenizer = getattr(self, "tokenizer", None)
+            if tokenizer is None:
+                return prompt_ids
+            pad_ids: set[int] = set()
+            for tok_attr in ("image_token", "video_token", "audio_token"):
+                tok = getattr(self, tok_attr, None)
+                if tok is None:
+                    continue
+                try:
+                    tid = tokenizer.convert_tokens_to_ids(tok)
+                except Exception:
+                    continue
+                if tid is None or tid == getattr(tokenizer, "unk_token_id", None):
+                    continue
+                pad_ids.add(int(tid))
+            if not pad_ids:
+                return prompt_ids
+            arr = np.asarray(prompt_ids, dtype=np.int64)
+            if arr.size == 0:
+                return prompt_ids
+            is_pad = np.isin(arr, list(pad_ids))
+            keep = np.ones(arr.size, dtype=bool)
+            same_as_prev = is_pad[1:] & is_pad[:-1] & (arr[1:] == arr[:-1])
+            keep[1:] &= ~same_as_prev
+            return arr[keep].tolist()
+
+        processor.dedup_pad_tokens = types.MethodType(_dedup_pad_tokens, processor)
         return processor
 
     @classmethod

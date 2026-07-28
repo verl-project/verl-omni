@@ -1,6 +1,6 @@
 # Supported Models
 
-Last updated: 06/26/2026.
+Last updated: 07/28/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
@@ -127,11 +127,10 @@ BAGEL uses a per-stage deploy YAML that overrides top-level vLLM engine argument
 | **Hugging Face ID** | `Qwen/Qwen3-Omni-30B-A3B-Instruct` |
 | **Architecture** | Omni-modality Thinker with Mixture-of-Experts (30B total, 3B active) |
 | **Modality** | Text + Image + Audio + Video (understand and generate) |
-| **Trainer type** | GSPO — Group Sampling Policy Optimization (verl-native PPO-style) |
-| **FSDP** | Full FSDP with LoRA (rank 64), param and optimizer CPU offload |
-| **Rollout** | vLLM-Omni TP=4 colocated on the same GPUs as the FSDP actor |
-| **Stage config** | `examples/gspo_trainer/qwen3_omni/qwen3_omni_thinker_only.yaml` (`gpu_memory_utilization=0.4`) |
-| **External module** | `verl_omni.models.transformers.qwen3_omni_thinker` |
+| **Trainer type** | GSPO — V1 Sync trainer via `verl_omni.trainer.main_omni` (algorithm-agnostic) |
+| **FSDP** | FSDP2 with LoRA (rank 32 for V1), param and optimizer CPU offload |
+| **Rollout** | vLLM-Omni TP=2 colocated on the same GPUs as the FSDP actor |
+| **Stage config** | Auto-generated deploy config via `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name="qwen3_omni_moe"` |
 
 For version requirements and detailed setup instructions, see
 [`examples/gspo_trainer/README.md`](../../examples/gspo_trainer/README.md).
@@ -140,11 +139,14 @@ For version requirements and detailed setup instructions, see
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
-| GSPO (math) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora.sh` | 4×H100/H200 80GB |
+| GSPO (text) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh` | 4×H100/H200 80GB |
+| GSPO (image) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh` | 4×H100/H200 80GB |
 
-The actor (FSDP, 30B + LoRA r=64 with offloading) and vLLM-Omni rollout (TP=4)
-colocate on the same 4 GPUs. `gpu_memory_utilization` is kept at `0.4` in the
-stage config to leave headroom for the FSDP actor.
+The actor (FSDP2, 30B + LoRA r=32 with offloading) and vLLM-Omni rollout (TP=2)
+colocate on the same 4 GPUs. The rollout deploy config is auto-generated from
+`pipeline_name=qwen3_omni_moe` — tune rollout memory/batching through standard
+verl CLI overrides (e.g. `actor_rollout_ref.rollout.gpu_memory_utilization=0.4`)
+rather than a separate per-stage YAML file.
 
 ---
 
