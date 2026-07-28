@@ -23,7 +23,7 @@ python3 -m verl_omni.trainer.main_omni \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${VAL_FILE}" \
     data.train_batch_size=128 \
-    data.max_prompt_length=2048 \
+    data.max_prompt_length=4096 \
     data.max_response_length=12288 \
     data.truncation='error' \
     data.filter_overlong_prompts=true \
@@ -57,6 +57,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.load_format=safetensors \
+    actor_rollout_ref.rollout.prompt_length=4160 \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=30720 \
     actor_rollout_ref.rollout.enable_prefix_caching=False \
