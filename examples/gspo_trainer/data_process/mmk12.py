@@ -17,13 +17,16 @@ Raw MMK12 schema:
     id, question, answer, subject, image   # image is {"bytes": <png bytes>, "path": ...}
 
 Output verl RL schema (one row per problem):
-    data_source  = "math_dapo"   # routes through the math_dapo rule reward
-    prompt       = [{"role": "system", "content": <SYSTEM_PROMPT>},
-                    {"role": "user",   "content": "<image>\\n{question}"}]
+    data_source  = "mmk12"
+    prompt       = [{"role": "user",
+                     "content": "<image>\\n{instruction}\\n\\n{question}"}]
     images       = [{"bytes": <png bytes>}]   # carried inline, byte-identical to the source
     ability      = "math_vl"
     reward_model = {"style": "rule", "ground_truth": <answer>}
     extra_info   = {split, index, id, dataset, subject, raw_question, raw_answer, options}
+
+Format instruction follows MM-Eureka (Table 1, instruct-model variant),
+adapted for Qwen3-Omni thinker mode with \\boxed{} wrapping.
 
 Pure helpers (is_valid_image, normalize_image, can_open_image, classify_answer,
 parse_options) are importable without torch/verl so they can be unit-tested on CPU.
@@ -44,18 +47,19 @@ DATA_SOURCE = "mmk12"
 ABILITY = "math_vl"
 DATASET_NAME = "MMK12"
 
-SYSTEM_PROMPT = (
-    "Solve the question. The user asks a question, and you solve it. "
-    "You first think about the reasoning process in the mind and then "
-    "provide the user with the answer. The answer is in latex format and "
-    "wrapped in $...$. The final answer must be wrapped using the \\boxed{} "
-    "command. The answer should be enclosed within <answer></answer> tags, "
-    "i.e., Since $1+1=2$, so the answer is $2$. "
-    "<answer>The answer is $\\boxed{2}$</answer>, which means the final "
-    "answer assistant's output should start with <answer> and end with </answer>."
+# Format instruction adapted from MM-Eureka Table 1 (instruct-model variant).
+# The original uses $...$ wrapping; we use \boxed{} to match the reward function.
+INSTRUCTION = (
+    "You should first think about the reasoning process in the mind and then "
+    "provide the user with the answer. The final answer must be wrapped using "
+    "the \\boxed{} command. The reasoning process and answer are enclosed "
+    "within <think></think> and <answer></answer> tags, respectively, i.e., "
+    "<think>Since $1+1=2$, so the answer is $2$.</think>"
+    "<answer>$\\boxed{2}$</answer>, which means your output should start "
+    "with <think> and end with </answer>."
 )
 
-USER_PROMPT_TEMPLATE = "<image>\n{question}"
+USER_PROMPT_TEMPLATE = "<image>\n{instruction}\n\n{question}"
 
 _OPTION_LINE_RE = re.compile(r"^\s*([A-E])[.)、]\s*(.+?)\s*$", re.MULTILINE)
 
@@ -142,8 +146,7 @@ def make_map_fn(split: str):
         return {
             "data_source": DATA_SOURCE,
             "prompt": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": USER_PROMPT_TEMPLATE.format(question=question)},
+                {"role": "user", "content": USER_PROMPT_TEMPLATE.format(instruction=INSTRUCTION, question=question)},
             ],
             "images": [normalize_image(image_field)],
             "ability": ABILITY,
