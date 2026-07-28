@@ -40,7 +40,7 @@ from typing import Any
 import datasets
 from PIL import Image
 
-DATA_SOURCE = "math_dapo"
+DATA_SOURCE = "mmk12"
 ABILITY = "math_vl"
 DATASET_NAME = "MMK12"
 

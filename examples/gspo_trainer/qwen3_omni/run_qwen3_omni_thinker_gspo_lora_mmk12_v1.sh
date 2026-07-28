@@ -5,6 +5,9 @@
 #   python examples/gspo_trainer/data_process/mmk12.py \
 #       --local_dataset_path <path_to_raw_mmk12> \
 #       --local_save_dir ~/data/mmk12
+#
+# Runtime dependency (all Ray worker nodes):
+#   pip install math-verify   # required by mmk12_reward.py
 
 set -x
 
