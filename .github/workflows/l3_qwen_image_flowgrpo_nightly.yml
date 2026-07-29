@@ -74,7 +74,7 @@ jobs:
     if: >-
       github.repository_owner == 'verl-project' && (
         github.event_name != 'pull_request' ||
-        contains(github.event.pull_request.labels.*.name, 'L3-nightly-ci')
+        github.event.label.name == 'L3-nightly-ci'
       )
     runs-on: ubuntu-latest
     outputs:
