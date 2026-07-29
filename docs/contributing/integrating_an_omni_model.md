@@ -3,9 +3,10 @@
 Last updated: 07/28/2026.
 
 This guide walks through adding a new omni (multimodal autoregressive) model to
-the verl-omni training framework, using the Qwen3-Omni Thinker adapter as the
-reference implementation. All adapter code lives under
-[`verl_omni/pipelines/`](../../verl_omni/pipelines/).
+the verl-omni training framework. It uses the Qwen3-Omni Thinker adapter as a
+**running example**, not as the only valid pattern. Your model's architecture,
+decomposition, and required adapter logic may differ. All adapter code lives
+under [`verl_omni/pipelines/`](../../verl_omni/pipelines/).
 
 ## 1. Understand the architecture
 
@@ -25,11 +26,16 @@ Decide which **training stage** you want to train and how the model decomposes:
   verl config fields (`actor.policy_loss.loss_mode`,
   `algorithm.adv_estimator`) — the adapter is algorithm-agnostic.
 
+The stage-split decomposition described above is specific to Qwen3-Omni. Your
+omni model may have a simpler (single-stage) or different multi-stage
+architecture.
+
 ## 2. Create the training adapter
 
 Subclass `OmniModelBase` (see
 [`verl_omni/pipelines/model_base.py`](../../verl_omni/pipelines/model_base.py))
-and implement these methods:
+and implement these methods. Descriptions below use Qwen3-Omni as an example —
+adapt each implementation to your model's architecture:
 
 - **`get_strip_modules(model_config)`**: Return a list of submodule attribute
   names to delete before FSDP wrapping (e.g. `["talker", "code2wav",
@@ -144,6 +150,9 @@ Reference:
 [`examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh`](../../examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh)
 
 ## 6. Common pitfalls
+
+These pitfalls are drawn from the Qwen3-Omni adapter. Some are
+model-specific — verify each against your own model's architecture.
 
 - **`_no_split_modules`**: Must be set to the correct decoder layer class
   name in `configure_model` (e.g. `Qwen3OmniMoeThinkerTextDecoderLayer`).
