@@ -35,6 +35,8 @@ Verify:
 python -c "import verl, verl_omni, vllm, vllm_omni; print('OK')"
 ```
 
+> **Tested with** `transformers==5.13.1`, `accelerate==1.14.0`, `peft==0.19.1`.
+
 The run scripts set
 `export VERL_USE_EXTERNAL_MODULES=verl_omni`,
 so verl loads the `vllm_omni` rollout adapter registration on the driver.

@@ -43,10 +43,6 @@ from tokenizers.pre_tokenizers import ByteLevel as ByteLevelPreTokenizer
 from tokenizers.trainers import BpeTrainer
 from transformers import AutoModelForMultimodalLM, Qwen2TokenizerFast
 
-# transformers 5.x natively registers Qwen3OmniMoeForConditionalGeneration with
-# AutoModelForMultimodalLM, matching the V1 OmniFSDPEngine._build_module path
-# (AutoModelForMultimodalLM.from_pretrained). No monkey-patch is needed.
-
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/models/tiny-random/Qwen3-Omni")
 
 # Minimal ChatML template (verl's dataset loader calls apply_chat_template).
