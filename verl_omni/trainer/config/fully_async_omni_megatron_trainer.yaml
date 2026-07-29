@@ -28,7 +28,7 @@ async_training:
   # Resume interrupted requests after parameter synchronization.
   partial_rollout: true
 
-  # Disable synchronous validation in the fully asynchronous trainer.
+  # Run validation on standalone rollout replicas instead of trainer GPUs.
   use_trainer_do_validate: false
 
   # Keep hybrid rollout replicas disabled for standalone resource placement.
