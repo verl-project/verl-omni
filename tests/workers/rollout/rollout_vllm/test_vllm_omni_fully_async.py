@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from hydra import compose, initialize_config_dir
 from verl.workers.rollout.vllm_rollout.utils import vLLMColocateWorkerExtension
 
 from verl_omni.workers.config import OmniModelConfig
@@ -214,22 +215,24 @@ def test_ar_model_config_always_uses_omni_contract(monkeypatch):
     assert calls == [(model_config, OmniModelConfig)]
 
 
-def test_megatron_fully_async_recipe_uses_omni_model_config():
-    recipe_path = (
-        Path(__file__).resolve().parents[4]
-        / "examples"
-        / "gspo_trainer"
-        / "qwen3_omni"
-        / "config"
-        / "qwen3_omni_thinker_gspo_megatron_fully_async.yaml"
-    )
-    recipe = yaml.safe_load(recipe_path.read_text())
+def test_default_megatron_fully_async_config_uses_omni_contract():
+    config_dir = Path(__file__).resolve().parents[4] / "verl_omni" / "trainer" / "config"
+    with initialize_config_dir(config_dir=str(config_dir), version_base=None):
+        config = compose(config_name="fully_async_omni_megatron_trainer")
 
-    assert recipe["actor_rollout_ref"]["model"]["_target_"] == ("verl_omni.workers.config.omni.OmniModelConfig")
-    assert recipe["actor_rollout_ref"]["actor"]["strategy"] == "megatron"
-    assert recipe["actor_rollout_ref"]["ref"]["strategy"] == "megatron"
-    assert recipe["actor_rollout_ref"]["rollout"]["name"] == "vllm_omni"
-    assert recipe["actor_rollout_ref"]["rollout"]["mode"] == "async"
+    assert config.actor_rollout_ref.model._target_ == "verl_omni.workers.config.omni.OmniModelConfig"
+    assert config.actor_rollout_ref.model.model_type == "language_model"
+    assert config.actor_rollout_ref.actor.strategy == "megatron"
+    assert config.actor_rollout_ref.ref.strategy == "megatron"
+    assert config.actor_rollout_ref.hybrid_engine is False
+    assert config.actor_rollout_ref.rollout.name == "vllm_omni"
+    assert config.actor_rollout_ref.rollout.mode == "async"
+    assert config.actor_rollout_ref.rollout.data_parallel_size == 1
+    assert config.actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode == "ar"
+    assert config.async_training.require_batches == 1
+    assert config.data.continuous_token.enable is False
+    assert config.reward.reward_manager.source == "register"
+    assert config.reward.reward_manager.name == "naive"
 
 
 def test_compilation_config_drops_nested_none_values():
