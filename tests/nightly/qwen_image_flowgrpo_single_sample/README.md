@@ -120,15 +120,57 @@ Nightly mode uploads all current intermediate outputs as
 `l3-qwen-image-flowgrpo-single-sample-current-<run_id>` and always uploads logs
 and reports as `l3-qwen-image-flowgrpo-single-sample-reports-<run_id>`.
 
+## Comparison Details
+
+Performance comparison reads step-level metrics from `metrics.jsonl`, or falls
+back to parsing the console log. It compares only steps after `PERF_SKIP_STEPS`,
+which defaults to `2`, and compares the mean value for each metric.
+
+Performance tolerance:
+
+- `PERF_THRESHOLD`, default `0.10`, meaning a 10% relative-change threshold.
+
+Performance metrics:
+
+- Lower is better: `perf/time_per_step`, `timing_s/gen`,
+  `timing_s/old_log_prob`, `timing_s/reward`, `timing_s/step`,
+  `timing_s/update_actor`, `timing_s/update_weights`, and
+  `timing_per_image_ms/*`.
+- Higher is better: `perf/mfu/actor`, `perf/mfu/actor_infer`, and
+  `perf/throughput`.
+
+A lower-is-better metric fails when current is more than `PERF_THRESHOLD` above
+baseline. A higher-is-better metric fails when current is more than
+`PERF_THRESHOLD` below baseline. A neutral metric fails when the absolute
+relative change is greater than `PERF_THRESHOLD`.
+
+Precision comparison recursively compares all tensors in matching `payload.pt`
+debug dumps under `current/` and `baseline/`. Missing files, missing tensors, and
+shape mismatches fail the comparison. The default dumps cover driver-forward,
+actor-forward, and LoRA-gradient payloads for `DEBUG_DUMP_STEPS`, which defaults
+to `1,2`.
+
+Precision tensors:
+
+- batch tensors: `responses`, `log_probs`, `old_log_probs`,
+  `advantages`, `sample_level_scores`, `sample_level_rewards`, `latents`,
+  `all_latents`, and `all_timesteps`.
+- Actor-forward tensors: every tensor returned by the diffusion FSDP engine
+  forward/backward batch output, recursively flattened from the actor-forward
+  `payload.pt`.
+- LoRA-gradient tensors: every available LoRA parameter gradient under
+  `gradients.<parameter_name>`.
+- Optional actor-forward-step tensors are included only when
+  `DEBUG_DUMP_FORWARD_STEPS=1`.
+
 Precision thresholds:
 
-- `PRECISION_ATOL`, default `1e-4`
-- `PRECISION_RTOL`, default `1e-3`
-- `PRECISION_MIN_COS_SIM`, default `0.999`
+- `PRECISION_ATOL`, default `1e-4`, maximum allowed absolute error.
+- `PRECISION_RTOL`, default `1e-3`, maximum allowed relative error.
+- `PRECISION_MIN_COS_SIM`, default `0.999`, minimum allowed cosine similarity.
 
-Performance threshold:
-
-- `PERF_THRESHOLD`, default `0.10`
+Each tensor fails if `max_abs_err > PRECISION_ATOL`,
+`max_rel_err > PRECISION_RTOL`, or `cos_sim < PRECISION_MIN_COS_SIM`.
 
 ## Failure Triage
 
