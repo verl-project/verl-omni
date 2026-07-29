@@ -15,8 +15,13 @@ from typing import Any
 
 import yaml
 
-from verl_omni.utils.dataset.bagel_sft_dataset import DATASET_INFO, DataConfig, PackedDataset, add_special_tokens
-from verl_omni.utils.dataset.bagel_sft_dataset import collate_wrapper
+from verl_omni.utils.dataset.bagel_sft_dataset import (
+    DATASET_INFO,
+    DataConfig,
+    PackedDataset,
+    add_special_tokens,
+    collate_wrapper,
+)
 
 
 def _config_get(config: Any, key: str, default: Any = None) -> Any:
