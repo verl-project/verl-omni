@@ -25,7 +25,7 @@ uv venv --python 3.12 --seed && source .venv/bin/activate
 uv pip install -e ".[gpu]" --torch-backend=auto
 uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
 uv pip install -e ".[train,dev]"
-# flash-attn is required for GPU training (omni model attention)
+# flash-attn is required for GPU training
 uv pip install flash-attn>=2.8.3
 ```
 
@@ -34,35 +34,6 @@ Verify:
 ```bash
 python -c "import verl, verl_omni, vllm, vllm_omni; print('OK')"
 ```
-
-> **Tested with** `transformers==5.13.1`, `accelerate==1.14.0`, `peft==0.19.1`.
-
-The run scripts set
-`export VERL_USE_EXTERNAL_MODULES=verl_omni`,
-so verl loads the `vllm_omni` rollout adapter registration on the driver.
-No per-model monkey-patch modules are needed — the V1 path uses the
-registered `OmniModelBase` / `OmniRolloutPipelineBase` adapters instead
-of `external_lib` overrides.
-
-The two launch scripts colocate the FSDP actor and the `vllm-omni` rollout on
-the same devices. `run_qwen3_omni_thinker_gspo_lora_v1.sh` targets a single node with **4 × H100/H200 80GB**
-(30B + LoRA r=32 with param/optimizer offload, rollout TP=2). `run_qwen3_omni_thinker_gspo_npu.sh` targets
-a single **Atlas 800T A3** node with **16 NPUs** (full-parameter FSDP actor,
-rollout TP=2). Multi-node is not yet validated on either platform.
-
-> **Where the rollout engine's deploy config is set.** The V1
-> `vLLMOmniHttpServer` auto-generates the deploy config from
-> `pipeline_name=qwen3_omni_moe` (the `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name`
-> CLI override). No per-stage YAML file is needed — the pipeline topology
-> comes from the registered `Qwen3OmniRolloutAdapter`, and the engine
-> args (`gpu_memory_utilization`, `max_num_seqs`, `load_format`, `dtype`,
-> LoRA, …) flow through the standard verl rollout config. To tune rollout
-> memory or batching, adjust those CLI flags directly
-> (e.g. `actor_rollout_ref.rollout.gpu_memory_utilization=0.4`).
-
-> `vllm` pulls `numpy>=2.x` while verl/verl-omni may still pin `numpy<2.0.0`;
-> the codepaths used here are numpy-2 compatible, so the pip resolver warning is
-> safe to ignore.
 
 ## Prepare the model
 
@@ -73,10 +44,6 @@ The script uses the HuggingFace Hub ID `Qwen/Qwen3-Omni-30B-A3B-Instruct`
 ```bash
 export MODEL_PATH=/path/to/local/Qwen3-Omni-30B-A3B-Instruct
 ```
-
-> **Use the Instruct variant.** The base checkpoint ships no
-> `tokenizer.chat_template`; verl's dataset loader calls
-> `tokenizer.apply_chat_template(...)` and fails without it.
 
 ## Training with `gsm8k`
 
@@ -123,12 +90,6 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh \
     trainer.total_epochs=10 \
     actor_rollout_ref.actor.optim.lr=2e-6
 ```
-
-To verify the wiring before a full run, use the end-to-end GSPO smoke test
-[`tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_v1_smoke.sh`](../../tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_v1_smoke.sh),
-which trains on a tiny random-weight model built by
-[`build_qwen3_omni_tiny_random.py`](../../tests/special_e2e/build_qwen3_omni_tiny_random.py)
-(no 60 GB download). It is wired into the `ci-e2e-omni` GPU smoke suite.
 
 ### What is trained
 
