@@ -29,7 +29,7 @@ class OmniLossConfig(BaseConfig):
 
     Which config block to use depends on ``algorithm.trainer_type`` (``OmniAlgoConfig``):
 
-    * ``policy_gradient`` (online RL: GSPO, GRPO, PPO, …): use verl's inherited
+    * policy_gradient (online RL: GSPO, GRPO, PPO, …): use verl's inherited
       ``actor_rollout_ref.actor.policy_loss`` (``PolicyLossConfig``) and sibling
       ``actor`` fields such as ``clip_ratio_low``, ``clip_ratio_high``,
       ``loss_agg_mode``, ``use_kl_loss``, and ``kl_loss_coef``. Those are consumed
