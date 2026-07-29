@@ -79,14 +79,14 @@ class TestOmniActorConfig:
         assert cfg.omni_loss.loss_mode == "dpo"
         assert cfg.trainer_type == "direct_preference"
 
-    def test_rejects_policy_gradient_trainer_type(self):
-        with pytest.raises(ValueError, match="OmniActorConfig is only valid"):
-            OmniActorConfig(
-                strategy="fsdp",
-                rollout_n=1,
-                ppo_micro_batch_size_per_gpu=1,
-                trainer_type="policy_gradient",
-            )
+    def test_accepts_policy_gradient_trainer_type(self):
+        cfg = OmniActorConfig(
+            strategy="fsdp",
+            rollout_n=1,
+            ppo_micro_batch_size_per_gpu=1,
+            trainer_type="policy_gradient",
+        )
+        assert cfg.trainer_type == "policy_gradient"
 
 
 class TestOmniModelConfigLoraFields:
@@ -98,7 +98,9 @@ class TestOmniModelConfigLoraFields:
 
         model_dir = tmp_path / "dummy-model"
         model_dir.mkdir()
-        (model_dir / "config.json").write_text(json.dumps({"architectures": ["Qwen3OmniMoeForConditionalGeneration"]}))
+        (model_dir / "config.json").write_text(
+            json.dumps({"architectures": ["Qwen3OmniMoeForConditionalGeneration"], "model_type": "qwen3_omni_moe"})
+        )
 
         config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/omni/model")
         with initialize_config_dir(config_dir=config_dir, version_base=None):
