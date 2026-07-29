@@ -9,6 +9,27 @@
 # Data: examples/flowgrpo_trainer/data_process/boogu_image_ocr.py
 # (its chat template replicates the upstream Boogu system prompts verbatim,
 # including the empty-negative-prompt quirk — do not edit them).
+#
+# fsdp_layer_prefixes below is required, not tuning: Boogu's DiT blocks are not
+# named transformer_blocks.*, so LoRA weight-sync collection gathers 0 params
+# without it.
+#
+# Settings this script deliberately leaves at their defaults, because whether
+# they are needed depends on the box rather than on Boogu:
+#   attn_backend=native, rollout_attn_backend=TORCH_SDPA
+#       The Boogu path has no FA3 requirement, so these are safe to set, and
+#       they are the fix if the transformer fails at construction time trying
+#       to fetch kernels-community/flash-attn3 from the Hub (no egress, or
+#       remote code not trusted). Where the kernel does load, the default is
+#       the faster choice.
+#   reward.reward_model.rollout.max_model_len=8192
+#       Qwen3-VL advertises a 262144 context; if vLLM reports that the KV cache
+#       reservation exceeds the reward engine's share of GPU memory, cap it.
+#       OCR scoring needs a small fraction of that context.
+#   actor.fsdp_config.param_offload / optimizer_offload
+#       Offload targets the GPU-poor/CPU-rich case. Colocating rollout,
+#       training and reward on one node makes host RAM the binding constraint
+#       instead, so on a single 80GB+ card turn both off.
 set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME
@@ -41,6 +62,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
     actor_rollout_ref.model.target_modules="['to_q','to_k','to_v','to_out.0','img_to_q','img_to_k','img_to_v','img_out','instruct_to_q','instruct_to_k','instruct_to_v','instruct_out','feed_forward.linear_1','feed_forward.linear_2','feed_forward.linear_3','img_feed_forward.linear_1','img_feed_forward.linear_2','img_feed_forward.linear_3']" \
+    actor_rollout_ref.model.fsdp_layer_prefixes="['double_stream_layers.','single_stream_layers.','context_refiner.','noise_refiner.','ref_image_refiner.']" \
     actor_rollout_ref.actor.optim.lr=3e-4 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
