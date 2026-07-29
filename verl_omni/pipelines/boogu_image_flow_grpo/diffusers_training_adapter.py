@@ -27,7 +27,9 @@ trainer workers.
 
 import json
 import os
+import shutil
 from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 import torch
@@ -116,6 +118,32 @@ class BooguImage(DiffusionI2IModelBase):
     non-empty dict (satisfying the I2I dispatcher's fail-closed contract)
     that injects exactly the ``None`` the canonical forward expects.
     """
+
+    @classmethod
+    def prepare_processor_files(cls, model_path: str) -> Optional[str]:
+        """Complete the processor directory Boogu checkpoints ship without a config.
+
+        Both the released Base/Edit checkpoints and the tiny-random fixture put
+        Qwen3VL processor/tokenizer files under ``processor/`` but no
+        ``config.json``. verl's ``hf_processor`` loads ``AutoConfig`` from the
+        same path to bind ``get_rope_index``, so it returns ``None`` and
+        multimodal (Edit) dataloading fails with "processor is needed to
+        process multimodal data". Copy the ``mllm`` config (the encoder the
+        processor belongs to) next to the processor files; fall back to a
+        minimal ``qwen3_vl`` stub when the checkpoint has no ``mllm`` config.
+        Idempotent: the driver may restart.
+        """
+        processor_dir = Path(model_path) / "processor"
+        if not processor_dir.is_dir():
+            return None
+        config_path = processor_dir / "config.json"
+        if not config_path.is_file():
+            mllm_config = Path(model_path) / "mllm" / "config.json"
+            if mllm_config.is_file():
+                shutil.copyfile(mllm_config, config_path)
+            else:
+                config_path.write_text(json.dumps({"model_type": "qwen3_vl"}), encoding="utf-8")
+        return str(processor_dir)
 
     @classmethod
     def build_module(cls, model_config: DiffusionModelConfig, torch_dtype: torch.dtype):
