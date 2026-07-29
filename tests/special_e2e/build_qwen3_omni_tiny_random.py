@@ -108,6 +108,7 @@ def _build_tiny_config(vocab_size: int):
     config.enable_audio_output = False
 
     text = config.thinker_config.text_config
+    text.tie_word_embeddings = False
     text.num_hidden_layers = 2
     text.hidden_size = 128
     text.intermediate_size = 256
