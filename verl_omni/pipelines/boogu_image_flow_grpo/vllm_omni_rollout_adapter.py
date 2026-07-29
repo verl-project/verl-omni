@@ -289,6 +289,14 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
                 all_log_probs.append(log_prob)
                 all_timesteps.append(timestep_value)
 
+        if not all_timesteps:
+            # Degenerate SDE window (e.g. the engine warm-up / dummy run, which
+            # denoises with a single step so no ``i`` satisfies
+            # ``sde_window[0] <= i < sde_window[1]``). No trajectory to record;
+            # the caller ships None-safe trajectory fields. Real rollouts always
+            # have ``sde_window_size >= 1`` and collect at least one step.
+            return latents, None, None, None
+
         stacked_latents = torch.stack(all_latents, dim=1)
         stacked_log_probs = (
             torch.stack(all_log_probs, dim=1) if all_log_probs and all_log_probs[0] is not None else None

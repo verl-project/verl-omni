@@ -60,6 +60,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \
     actor_rollout_ref.model.target_modules=all-linear \
+    actor_rollout_ref.model.fsdp_layer_prefixes="['double_stream_layers.','single_stream_layers.','context_refiner.','noise_refiner.','ref_image_refiner.']" \
     actor_rollout_ref.actor.optim.lr=1e-4 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${mini_bsz} \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${micro_bsz_per_gpu} \
@@ -87,8 +88,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${micro_bsz_per_gpu} \
     reward.num_workers=1 \
-    reward.custom_reward_function.path=pkg://verl_omni.utils.reward_score.jpeg_compressibility \
-    reward.custom_reward_function.name=compute_score \
+    reward.reward_model.enable=False \
     trainer.logger=console \
     trainer.project_name=verl-test \
     trainer.experiment_name=flowgrpo-boogu-image-edit-e2e \

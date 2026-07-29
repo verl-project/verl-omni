@@ -77,7 +77,12 @@ def get_dummy_components(*, hidden_size: int = 16, seed: int = 42) -> dict[str, 
         ffn_dim_multiplier=None,
         norm_eps=1e-5,
         axes_dim_rope=(4, 2, 2),
-        axes_lens=(64, 32, 32),
+        # axis 0 is the instruction-sequence position table: it must exceed the
+        # smoke's max_sequence_length (256); axes 1/2 are spatial and only need
+        # to cover the latent patch grid (16x16 at 256px). The real checkpoint
+        # uses (2048, 1664, 1664) -- these are shrunk but kept comfortably above
+        # the tiny smoke's token counts so rope gather never indexes OOB.
+        axes_lens=(1024, 128, 128),
         timestep_scale=1000.0,
         instruction_feature_configs={
             "instruction_feat_dim": hidden_size,
