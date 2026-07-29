@@ -120,9 +120,6 @@ class OmniModelConfig(BaseConfig):
     # Named LoRA policy states required by the algorithm. "reference" uses disabled adapters.
     policy_state_adapters: tuple[str, ...] = ("default",)
 
-    # dtype to convert LoRA parameters to (e.g., "fp32", "bf16"). Default None means no conversion.
-    lora_dtype: Optional[str] = None
-
     # FSDP layer name prefixes for LoRA parameter layered summon.
     fsdp_layer_prefixes: list[str] = field(default_factory=list)
 
