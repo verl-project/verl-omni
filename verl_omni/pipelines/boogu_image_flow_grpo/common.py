@@ -14,28 +14,44 @@
 
 """Shared helpers for the Boogu-Image FlowGRPO adapters.
 
-Boogu-Image differs from the diffusers flow-matching convention in two ways
-that both adapters must agree on:
+The rollout adapter (vllm-omni) and the training adapter (diffusers) must
+handle Boogu-Image with identical conventions — otherwise the rollout
+trajectory and the training-time log-probs diverge and RL silently breaks.
+Those shared conventions live in this module.
 
-1. **Timestep direction.** Boogu timesteps run ascending ``0 -> 1`` (``t=0``
-   is pure noise, ``t=1`` is data), while :class:`FlowMatchSDEDiscreteScheduler`
-   uses descending sigmas (``sigma=1`` is pure noise). The mapping is
-   ``sigma = 1 - t``, i.e. ``t = 1 - timestep / num_train_timesteps`` for the
-   scheduler-native timestep values that ride the rollout trajectory.
-2. **Velocity sign.** The Boogu transformer predicts
-   ``v_boogu ~ x0 - noise = -v_diffusers``, so its output must be **negated**
-   before it is handed to the diffusers-convention scheduler. Under this
-   mapping Boogu's Euler update ``x + (t_next - t) * v_boogu`` is identical to
-   the diffusers update ``x + (sigma_prev - sigma) * v_diffusers``.
+Convention differences
+----------------------
 
-The released checkpoints configure their scheduler with a *static v1* time
-shift (``do_shift=true, dynamic_time_shift=false, time_shift_version="v1",
-seq_len=4096``). In sigma space Boogu's v1 logistic shift is exactly the
-diffusers exp-mu shift ``exp(mu) / (exp(mu) + (1/sigma - 1))`` and the v2
-rational shift is exactly the multiplicative diffusers shift
-``m * sigma / (1 + (m - 1) * sigma)``, so the stock
-:class:`FlowMatchSDEDiscreteScheduler` reproduces the schedule with the right
-``mu`` / ``shift`` — no scheduler port is needed.
+Boogu-Image runs flow matching "backwards" relative to diffusers:
+
+                        Boogu-Image            diffusers (FlowMatchSDEDiscreteScheduler)
+  timestep direction    t: 0 -> 1 (0 = noise)  sigma: 1 -> 0 (1 = noise)
+  velocity target       v_boogu = x0 - noise   v_diffusers = noise - x0
+
+Both adapters therefore apply the same two fix-ups:
+
+1. Timestep mapping: t = 1 - sigma, i.e. t = 1 - timestep / num_train_timesteps
+   for the scheduler-native timestep values that ride the rollout trajectory
+   (see boogu_timestep_from_scheduler).
+2. Velocity negation: the transformer output is negated before it enters the
+   scheduler. Under this mapping Boogu's Euler update x + (t_next - t) * v_boogu
+   is identical to the diffusers update x + (sigma_prev - sigma) * v_diffusers.
+
+Time shift
+----------
+
+No scheduler port is needed for Boogu's time shift either, because both
+variants map exactly onto knobs the stock scheduler already has:
+
+- the v1 logistic shift is exactly the diffusers exp-mu shift
+  exp(mu) / (exp(mu) + (1/sigma - 1));
+- the v2 rational shift is exactly the diffusers multiplicative shift
+  m * sigma / (1 + (m - 1) * sigma).
+
+resolve_time_shift recovers the right mu / shift from the raw checkpoint
+config, so FlowMatchSDEDiscreteScheduler reproduces the original schedule
+unchanged. The released checkpoints use a static v1 shift
+(do_shift=true, dynamic_time_shift=false, time_shift_version="v1", seq_len=4096).
 """
 
 import json
@@ -43,6 +59,7 @@ import math
 import os
 from typing import Any, Optional
 
+import numpy as np
 import torch
 
 # Latent-token count of a 1024x1024 image at vae_scale_factor 8 divided by 4
@@ -59,12 +76,12 @@ def _lin_mu(seq_len: int, base_shift: float, max_shift: float) -> float:
 
 
 def load_boogu_shift_config(model_path: str) -> dict:
-    """Read the raw ``scheduler/scheduler_config.json`` from the checkpoint.
+    """Read the raw scheduler/scheduler_config.json from the checkpoint.
 
-    The Boogu time-shift keys (``do_shift`` / ``dynamic_time_shift`` /
-    ``time_shift_version`` / ``seq_len`` / ...) are **not** attributes of the
-    diffusers ``FlowMatchSDEDiscreteScheduler``, so ``from_pretrained``
-    silently drops them from ``scheduler.config`` ("were passed ... but are
+    The Boogu time-shift keys (do_shift / dynamic_time_shift /
+    time_shift_version / seq_len / ...) are not attributes of the
+    diffusers FlowMatchSDEDiscreteScheduler, so from_pretrained
+    silently drops them from scheduler.config ("were passed ... but are
     not expected and will be ignored"). Reading the JSON directly is the only
     way to recover them.
     """
@@ -83,19 +100,19 @@ def resolve_time_shift(
     """Resolve Boogu's time-shift config into diffusers scheduler terms.
 
     Args:
-        scheduler_config: The **raw** checkpoint scheduler config mapping
-            (from :func:`load_boogu_shift_config`), carrying Boogu's
-            ``do_shift`` / ``dynamic_time_shift`` / ``time_shift_version`` /
-            ``seq_len`` keys. Do **not** pass ``scheduler.config`` — diffusers
-            drops the custom keys there.
-        num_tokens: Per-sample latent token count ``H_lat * W_lat``; only
+        scheduler_config: The raw checkpoint scheduler config mapping
+            (from load_boogu_shift_config), carrying Boogu's do_shift /
+            dynamic_time_shift / time_shift_version / seq_len keys.
+            Do not pass scheduler.config — diffusers drops the custom
+            keys there.
+        num_tokens: Per-sample latent token count H_lat * W_lat; only
             consulted by the dynamic variants.
 
     Returns:
-        ``(mu, shift)`` where ``mu`` is the exp-shift exponent for
-        ``set_timesteps(mu=...)`` (``None`` when the v2 / no-shift path is
-        active) and ``shift`` is the multiplicative shift for the static
-        scheduler path (``1.0`` = disabled). Exactly one of the two is
+        (mu, shift) where mu is the exp-shift exponent for
+        set_timesteps(mu=...) (None when the v2 / no-shift path is
+        active) and shift is the multiplicative shift for the static
+        scheduler path (1.0 = disabled). Exactly one of the two is
         meaningful.
     """
     get = (
@@ -103,7 +120,7 @@ def resolve_time_shift(
     )
 
     # An empty mapping means the Boogu keys could not be read (e.g. someone
-    # passed the diffusers-filtered ``scheduler.config`` or the JSON was
+    # passed the diffusers-filtered scheduler.config or the JSON was
     # missing). Degrade to a no-op schedule rather than silently applying the
     # dynamic-v2 defaults, which do not match the released checkpoints.
     if isinstance(scheduler_config, dict) and not scheduler_config:
@@ -148,13 +165,11 @@ def configure_boogu_sde_timesteps(
 ) -> None:
     """Set SDE-scheduler timesteps reproducing the checkpoint's Boogu schedule.
 
-    ``shift_config`` is the **raw** scheduler config from
-    :func:`load_boogu_shift_config` (the diffusers ``scheduler.config`` has
-    already dropped Boogu's custom keys). ``num_tokens`` is the latent pixel
-    count ``H_lat * W_lat`` (only consulted by the dynamic-shift variants).
+    shift_config is the raw scheduler config from load_boogu_shift_config
+    (the diffusers scheduler.config has already dropped Boogu's custom
+    keys). num_tokens is the latent pixel count H_lat * W_lat (only
+    consulted by the dynamic-shift variants).
     """
-    import numpy as np
-
     mu, shift = resolve_time_shift(shift_config, num_tokens)
     sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
     if mu is not None:
@@ -166,7 +181,7 @@ def configure_boogu_sde_timesteps(
 
 
 def boogu_timestep_from_scheduler(timestep: torch.Tensor, num_train_timesteps: int) -> torch.Tensor:
-    """Map scheduler-native timestep values (``sigma * N``, descending) to Boogu t (``1 - sigma``)."""
+    """Map scheduler-native timestep values (sigma * N, descending) to Boogu t (1 - sigma)."""
     return 1.0 - timestep.float() / num_train_timesteps
 
 
@@ -185,7 +200,7 @@ _FREQS_CIS_CACHE: dict[tuple, Any] = {}
 def get_boogu_freqs_cis(axes_dim_rope, axes_lens, theta: int = 10000):
     """Build (and cache) the rotary tables the Boogu transformer consumes.
 
-    Prefers the canonical implementation from the installed ``boogu-image``
+    Prefers the canonical implementation from the installed boogu-image
     package (the training-side transformer is the canonical class, so its
     rope tables must come from the same code); falls back to the verbatim
     vllm-omni port, which the rollout-side transformer uses.
