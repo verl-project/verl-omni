@@ -25,45 +25,45 @@ __all__ = [
 
 @dataclass
 class OmniLossConfig(BaseConfig):
-    """Loss hyperparameters for omni AR **direct-preference** training.
+    """Loss hyperparameters for omni AR direct-preference training.
 
-    Which config block to use depends on ``algorithm.trainer_type`` (``OmniAlgoConfig``):
+    Which config block to use depends on algorithm.trainer_type (OmniAlgoConfig):
 
-    * policy_gradient (online RL: GSPO, GRPO, PPO, …): use verl's inherited
-      ``actor_rollout_ref.actor.policy_loss`` (``PolicyLossConfig``) and sibling
-      ``actor`` fields such as ``clip_ratio_low``, ``clip_ratio_high``,
-      ``loss_agg_mode``, ``use_kl_loss``, and ``kl_loss_coef``. Those are consumed
-      by ``verl.trainer.ppo.core_algos`` via ``get_policy_loss_fn()``. This
-      dataclass is **not** read on that path.
-    * ``direct_preference`` (offline/online DPO): use this block at YAML path
-      ``actor_rollout_ref.actor.omni_loss``. Consumed by
-      ``verl_omni.trainer.omni.omni_algos`` (``OmniDPOLoss``) and
-      ``OmniDirectPreferenceRayTrainer``.
+    * policy_gradient (online RL: GSPO, GRPO, PPO, ...): use verl's inherited
+      actor_rollout_ref.actor.policy_loss (PolicyLossConfig) and sibling
+      actor fields such as clip_ratio_low, clip_ratio_high,
+      loss_agg_mode, use_kl_loss, and kl_loss_coef. Those are consumed
+      by verl.trainer.ppo.core_algos via get_policy_loss_fn(). This
+      dataclass is not read on that path.
+    * direct_preference (offline/online DPO): use this block at YAML path
+      actor_rollout_ref.actor.omni_loss. Consumed by
+      verl_omni.trainer.omni.omni_algos (OmniDPOLoss) and
+      OmniDirectPreferenceRayTrainer.
 
-    Field reference (``direct_preference`` only)
-    --------------------------------------------
+    Field reference (direct_preference only)
+    ----------------------------------------
 
     loss_mode:
-        Preference loss registry key. Currently only ``"dpo"`` is supported.
+        Preference loss registry key. Currently only "dpo" is supported.
     beta:
         DPO inverse temperature β. Scales the log-probability margin between
         policy and reference on chosen vs. rejected pairs before the sigmoid/IPO
         loss. Typical values for token-level AR DPO are ~0.01–0.5 (default 0.1).
     label_smoothing:
-        Label smoothing for the Bradley-Terry sigmoid DPO loss (cDPO). ``0.0``
-        disables smoothing; values in ``(0, 1)`` soften chosen/rejected targets.
-        Ignored when ``loss_type="ipo"``.
+        Label smoothing for the Bradley-Terry sigmoid DPO loss (cDPO). 0.0
+        disables smoothing; values in (0, 1) soften chosen/rejected targets.
+        Ignored when loss_type="ipo".
     loss_type:
-        ``"sigmoid"`` — standard DPO ``-log σ(β·Δlogπ)``; ``"ipo"`` — identity
+        "sigmoid" — standard DPO -log σ(β·Δlogπ); "ipo" — identity
         preference optimization (squared error on the implicit reward).
     average_log_prob:
-        If ``True``, sequence log-probs are averaged over response tokens before
-        the pairwise DPO margin; if ``False``, token log-probs are summed (TRL
+        If True, sequence log-probs are averaged over response tokens before
+        the pairwise DPO margin; if False, token log-probs are summed (TRL
         default). Passed through the engine micro-batch for log-prob aggregation.
     refer_model_precision:
         Parameter dtype for the reference (frozen) policy during ref log-prob
-        computation, e.g. ``"bfloat16"`` or ``"float32"``. Policy (trainable)
-        precision is controlled separately by ``actor.fsdp_config.model_dtype``.
+        computation, e.g. "bfloat16" or "float32". Policy (trainable)
+        precision is controlled separately by actor.fsdp_config.model_dtype.
     """
 
     loss_mode: str = "dpo"

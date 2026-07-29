@@ -123,7 +123,7 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
 
 def omni_loss(config: OmniActorConfig, model_output, data: TensorDict, dp_group=None):
     """Compute loss for omni AR direct-preference training."""
-    del dp_group
+
     metrics = {}
 
     loss_mode = config.omni_loss.loss_mode
