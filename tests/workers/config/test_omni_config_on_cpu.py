@@ -143,5 +143,6 @@ class TestOmniModelConfigLoraFields:
         actor_cfg: OmniActorConfig = omega_conf_to_dataclass(cfg.actor_rollout_ref.actor)
 
         assert isinstance(actor_cfg, OmniActorConfig)
-        assert isinstance(actor_cfg.omni_loss, OmniLossConfig)
+        assert actor_cfg.omni_loss.__class__.__name__ == OmniLossConfig.__name__
+        assert actor_cfg.omni_loss.loss_mode == "dpo"
         assert actor_cfg.omni_loss.beta == pytest.approx(0.2)
