@@ -190,7 +190,11 @@ def _build_tiny_processor(tokenizer):
             min_pixels=3136,
             max_pixels=12845056,
         ),
-        video_processor=Qwen2VLVideoProcessor(),
+        video_processor=Qwen2VLVideoProcessor(
+            patch_size=16,
+            temporal_patch_size=2,
+            merge_size=2,
+        ),
         feature_extractor=WhisperFeatureExtractor(),
         tokenizer=tokenizer,
         chat_template=_CHATML_TEMPLATE,
