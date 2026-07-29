@@ -27,10 +27,10 @@ Workflow trigger modes:
 
 - Scheduled runs use `nightly` mode and require an existing baseline artifact.
 - `workflow_dispatch` supports `mode=nightly` or `mode=baseline`.
-- Adding the `L3-baseline` label to a pull request triggers `baseline` mode for
-  that PR.
-- Adding the `L3-nightly` label to a pull request triggers strict `nightly` mode
-  for that PR.
+- To trigger a baseline run, open the workflow in GitHub Actions, choose
+  **Run workflow**, and set `mode=baseline`.
+- Adding the `L3-nightly-ci` label to a pull request triggers strict `nightly`
+  mode for that PR.
 
 ## Requirements
 
@@ -45,16 +45,14 @@ The runner must have:
 
 ## Run
 
-```bash
-bash tests/nightly/qwen_image_flowgrpo_single_sample/run_qwen_image_flowgrpo_single_sample.sh
-```
-
 Expected local model defaults:
 
 - Policy: `~/models/tiny-random/Qwen-Image`
 - Reward: `~/models/tiny-random/qwen3-vl`
 
-Useful overrides:
+Generate a local baseline first. This is the default behavior because
+`BOOTSTRAP_MISSING_BASELINE=1` copies the current artifacts into `baseline/`
+when no baseline exists:
 
 ```bash
 NUM_GPUS=4 \
@@ -64,9 +62,13 @@ OUTPUT_ROOT=/path/to/debug_dumps \
 bash tests/nightly/qwen_image_flowgrpo_single_sample/run_qwen_image_flowgrpo_single_sample.sh
 ```
 
-Useful nightly mode:
+Then run strict nightly mode against the generated baseline:
 
 ```bash
+NUM_GPUS=4 \
+MODEL_PATH=/path/to/tiny-random/Qwen-Image \
+REWARD_MODEL_PATH=/path/to/tiny-random/qwen3-vl \
+OUTPUT_ROOT=/path/to/debug_dumps \
 BOOTSTRAP_MISSING_BASELINE=0 \
 bash tests/nightly/qwen_image_flowgrpo_single_sample/run_qwen_image_flowgrpo_single_sample.sh
 ```
@@ -91,8 +93,8 @@ missing dump files, or metric regressions fail the job.
 
 In GitHub Actions, baseline mode uploads:
 
-- `l3-qwen-image-flowgrpo-single-sample-baseline`, retained for 30 days.
-- `l3-qwen-image-flowgrpo-single-sample-reports-<run_id>`, retained for 14 days.
+- `l3-qwen-image-flowgrpo-single-sample-baseline`, retained for 90 days.
+- `l3-qwen-image-flowgrpo-single-sample-reports-<run_id>`, retained for 30 days.
 
 Nightly mode downloads the latest non-expired
 `l3-qwen-image-flowgrpo-single-sample-baseline` artifact for the configured
@@ -103,8 +105,7 @@ To refresh the production baseline:
 
 1. Review the expected change and choose the branch whose baseline should be
    refreshed.
-2. Trigger `l3_qwen_image_flowgrpo_nightly` manually with `mode=baseline`, or
-   apply `L3-baseline` to the target pull request.
+2. Trigger `l3_qwen_image_flowgrpo_nightly` manually with `mode=baseline`.
 3. Inspect the uploaded reports and baseline artifact before relying on later
    nightly runs.
 

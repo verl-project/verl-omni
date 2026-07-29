@@ -49,7 +49,7 @@ on:
 
 concurrency:
   group: >-
-    ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'L3-nightly') && 'nightly' || github.event_name == 'pull_request' && 'baseline' || github.event.inputs.mode || 'nightly' }}
+    ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && 'nightly' || github.event.inputs.mode || 'nightly' }}
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 permissions:
@@ -62,7 +62,7 @@ env:
   BASELINE_ARTIFACT_NAME: l3-qwen-image-flowgrpo-single-sample-baseline
   CURRENT_ARTIFACT_PREFIX: l3-qwen-image-flowgrpo-single-sample-current
   REPORT_ARTIFACT_PREFIX: l3-qwen-image-flowgrpo-single-sample-reports
-  RUN_MODE: ${{ github.event_name == 'schedule' && 'nightly' || github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'L3-nightly') && 'nightly' || github.event_name == 'pull_request' && 'baseline' || github.event.inputs.mode || 'nightly' }}
+  RUN_MODE: ${{ github.event_name == 'schedule' && 'nightly' || github.event_name == 'pull_request' && 'nightly' || github.event.inputs.mode || 'nightly' }}
   NUM_GPUS: ${{ github.event.inputs.num_gpus || '4' }}
   MODEL_PATH: ${{ github.event.inputs.model_path || '' }}
   REWARD_MODEL_PATH: ${{ github.event.inputs.reward_model_path || '' }}
@@ -74,8 +74,7 @@ jobs:
     if: >-
       github.repository_owner == 'verl-project' && (
         github.event_name != 'pull_request' ||
-        contains(github.event.pull_request.labels.*.name, 'L3-baseline') ||
-        contains(github.event.pull_request.labels.*.name, 'L3-nightly')
+        contains(github.event.pull_request.labels.*.name, 'L3-nightly-ci')
       )
     runs-on: ubuntu-latest
     outputs:
@@ -136,7 +135,7 @@ jobs:
 
           if [ -z "${artifact_row}" ]; then
             echo "No non-expired ${BASELINE_ARTIFACT_NAME} artifact found for branch ${BASELINE_BRANCH}."
-            echo "Create one with workflow_dispatch mode=baseline or the L3-baseline PR label before running nightly mode."
+            echo "Create one with workflow_dispatch mode=baseline before running nightly mode."
             exit 1
           fi
 
@@ -181,7 +180,7 @@ jobs:
           path: |
             ${{ env.OUTPUT_ROOT }}/current/**
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 30
 
       - name: Upload baseline artifact
         if: always() && env.RUN_MODE == 'baseline'
@@ -191,7 +190,7 @@ jobs:
           path: |
             ${{ env.OUTPUT_ROOT }}/baseline/**
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
 
       - name: Upload reports and logs
         if: always()
@@ -204,7 +203,7 @@ jobs:
             ${{ env.OUTPUT_ROOT }}/current/metrics.jsonl
             ${{ env.OUTPUT_ROOT }}/logs/**
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 30
 
   cleanup:
     runs-on: ubuntu-latest
