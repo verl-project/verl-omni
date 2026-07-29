@@ -29,6 +29,8 @@ Workflow trigger modes:
 - `workflow_dispatch` supports `mode=nightly` or `mode=baseline`.
 - Adding the `L3-baseline` label to a pull request triggers `baseline` mode for
   that PR.
+- Adding the `L3-nightly` label to a pull request triggers strict `nightly` mode
+  for that PR.
 
 ## Requirements
 

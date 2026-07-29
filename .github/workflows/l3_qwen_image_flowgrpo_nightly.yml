@@ -49,7 +49,7 @@ on:
 
 concurrency:
   group: >-
-    ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && 'baseline' || github.event.inputs.mode || 'nightly' }}
+    ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'L3-nightly') && 'nightly' || github.event_name == 'pull_request' && 'baseline' || github.event.inputs.mode || 'nightly' }}
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 permissions:
@@ -62,7 +62,7 @@ env:
   BASELINE_ARTIFACT_NAME: l3-qwen-image-flowgrpo-single-sample-baseline
   CURRENT_ARTIFACT_PREFIX: l3-qwen-image-flowgrpo-single-sample-current
   REPORT_ARTIFACT_PREFIX: l3-qwen-image-flowgrpo-single-sample-reports
-  RUN_MODE: ${{ github.event_name == 'schedule' && 'nightly' || github.event_name == 'pull_request' && 'baseline' || github.event.inputs.mode || 'nightly' }}
+  RUN_MODE: ${{ github.event_name == 'schedule' && 'nightly' || github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'L3-nightly') && 'nightly' || github.event_name == 'pull_request' && 'baseline' || github.event.inputs.mode || 'nightly' }}
   NUM_GPUS: ${{ github.event.inputs.num_gpus || '4' }}
   MODEL_PATH: ${{ github.event.inputs.model_path || '' }}
   REWARD_MODEL_PATH: ${{ github.event.inputs.reward_model_path || '' }}
@@ -74,7 +74,8 @@ jobs:
     if: >-
       github.repository_owner == 'verl-project' && (
         github.event_name != 'pull_request' ||
-        contains(github.event.pull_request.labels.*.name, 'L3-baseline')
+        contains(github.event.pull_request.labels.*.name, 'L3-baseline') ||
+        contains(github.event.pull_request.labels.*.name, 'L3-nightly')
       )
     runs-on: ubuntu-latest
     outputs:
