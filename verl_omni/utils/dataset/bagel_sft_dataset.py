@@ -199,10 +199,14 @@ class ImageTransform:
         min_image_size,
         image_stride,
         max_pixels=14 * 14 * 9 * 1024,
-        image_mean=[0.5, 0.5, 0.5],
-        image_std=[0.5, 0.5, 0.5],
+        image_mean=None,
+        image_std=None,
     ):
         self.stride = image_stride
+        if image_mean is None:
+            image_mean = [0.5, 0.5, 0.5]
+        if image_std is None:
+            image_std = [0.5, 0.5, 0.5]
         self.resize_transform = MaxLongEdgeMinShortEdgeResize(
             max_size=max_image_size,
             min_size=min_image_size,
@@ -664,7 +668,7 @@ class SftJSONLIterableDataset(DistributedIterableDataset):
                     data_item = json.loads(data)
                     raw_images = None
                     if "image" in data_item:
-                        if type(data_item["image"]) == list:
+                        if isinstance(data_item["image"], list):
                             raw_images = [
                                 pil_img2rgb(Image.open(os.path.join(image_dir, image))) for image in data_item["image"]
                             ]
@@ -1016,7 +1020,7 @@ DATASET_INFO = {
             "data_dir": "your_data_path/bagel_example/editing/seedxedit_multi",
             "num_files": 10,
             "num_total_samples": 1000,
-            "parquet_info_path": "your_data_path/bagel_example/editing/parquet_info/seedxedit_multi_nas.json",
+            "parquet_info_path": "your_data_path/bagel_example/editing/parquet_info/seedxedit_multi.json",
         },
     },
     "vlm_sft": {

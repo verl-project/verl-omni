@@ -41,15 +41,16 @@ def _read_yaml(path: str) -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
-def _patch_bagel_example_paths(bagel_example_dir: str) -> None:
+def _patch_bagel_example_paths(bagel_example_dir: str, parquet_info_file: str | None = None) -> None:
     bagel_example_dir = os.path.abspath(os.path.expanduser(bagel_example_dir))
+    parquet_info_file = parquet_info_file or os.path.join(
+        bagel_example_dir, "editing", "parquet_info", "seedxedit_multi.json"
+    )
     DATASET_INFO["t2i_pretrain"]["t2i"]["data_dir"] = os.path.join(bagel_example_dir, "t2i")
     DATASET_INFO["unified_edit"]["seedxedit_multi"]["data_dir"] = os.path.join(
         bagel_example_dir, "editing", "seedxedit_multi"
     )
-    DATASET_INFO["unified_edit"]["seedxedit_multi"]["parquet_info_path"] = os.path.join(
-        bagel_example_dir, "editing", "parquet_info", "seedxedit_multi_nas.json"
-    )
+    DATASET_INFO["unified_edit"]["seedxedit_multi"]["parquet_info_path"] = parquet_info_file
     DATASET_INFO["vlm_sft"]["llava_ov"]["data_dir"] = os.path.join(bagel_example_dir, "vlm", "images")
     DATASET_INFO["vlm_sft"]["llava_ov"]["jsonl_path"] = os.path.join(bagel_example_dir, "vlm", "llava_ov_si.jsonl")
 
@@ -73,7 +74,8 @@ class BagelExampleSFTDataset(PackedDataset):
         bagel_example_dir = _config_get(custom_config, "bagel_example_dir", os.environ.get("BAGEL_EXAMPLE_DIR"))
         if not bagel_example_dir:
             raise ValueError("Set data.custom_cls.bagel_example_dir or BAGEL_EXAMPLE_DIR.")
-        _patch_bagel_example_paths(bagel_example_dir)
+        parquet_info_file = _config_get(custom_config, "parquet_info_file", None)
+        _patch_bagel_example_paths(bagel_example_dir, parquet_info_file)
 
         dataset_config_file = _config_get(custom_config, "dataset_config_file", None)
         if dataset_config_file is None:
