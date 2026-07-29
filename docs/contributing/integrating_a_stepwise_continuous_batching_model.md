@@ -219,9 +219,11 @@ the full-forward path.
 Choose the live-latent dtype from the algorithm's scheduler and full-forward
 semantics, and keep it homogeneous across all in-flight requests.
 
-FlowGRPO, MixGRPO, and online DPO preserve seeded parity with their full-forward
-paths by generating the initial noise in `prompt_embeds.dtype` first and then
-casting those exact values to float32 for live step state:
+FlowGRPO and MixGRPO create their step-execution latents directly in float32.
+
+Online DPO instead generates the initial noise in `prompt_embeds.dtype` and
+then casts it to float32, matching the initial random values produced by its
+non-step path:
 
 ```python
 latents = self.prepare_latents(
@@ -235,9 +237,6 @@ latents = self.prepare_latents(
     None,
 ).float()
 ```
-
-Generating directly in float32 would consume the same seed through a different
-dtype path and would not reproduce the non-step initial latent values.
 
 Prepare the same timestep schedule used by `forward()`.
 
