@@ -159,13 +159,6 @@ model-specific — verify each against your own model's architecture.
   FSDP uses this hint for sharding granularity — a wrong name causes the
   entire module to be treated as a single leaf, defeating parameter sharding.
 
-- **`tie_word_embeddings`**: Must be `False` for FSDP meta-tensor init.
-  When the model config has `tie_word_embeddings=True`, the weight is shared
-  between `lm_head` and the embedding layer, which conflicts with FSDP's
-  deferred parameter materialization. The V1 `_build_module` method in
-  `OmniFSDPEngine` reads from the stage sub-config and overrides if needed;
-  no adapter action is required unless the default config value is wrong.
-
 - **mrope**: Qwen-style multimodal models use 3-component position IDs
   (temporal, height, width) for mrope. HuggingFace's `get_rope_index` returns
   float32 position IDs that FSDP would bf16-round. Cast to `int64` in
@@ -183,9 +176,3 @@ model-specific — verify each against your own model's architecture.
   in `configure_tokenizer` and assign it to `tokenizer.chat_template`.
   verl's dataset loader calls `tokenizer.apply_chat_template()` and will
   fail without a template.
-
-- **LoRA target modules**: Use explicit Python list syntax for
-  `target_modules` (e.g. `"['q_proj','k_proj','v_proj','o_proj']"`) when
-  passing via CLI. The V1 adapter does not unfuse MoE experts — if you need
-  LoRA on expert layers, subclass `configure_model` to handle unfusing before
-  PEFT injection.
