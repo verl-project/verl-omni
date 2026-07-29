@@ -15,11 +15,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
-from verl.workers.config import HFModelConfig
 from verl.workers.rollout.vllm_rollout.utils import vLLMColocateWorkerExtension
 
 from verl_omni.workers.config import OmniModelConfig
@@ -30,7 +30,6 @@ from verl_omni.workers.rollout.vllm_rollout.placement_guard import (
 from verl_omni.workers.rollout.vllm_rollout.utils import vLLMOmniColocateWorkerExtension
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import (
     _drop_none_mapping_values,
-    _select_ar_model_config_type,
     vLLMOmniHttpServer,
 )
 
@@ -195,16 +194,42 @@ def test_ar_adapter_generates_thinker_only_deploy_config(monkeypatch):
     assert engine_kwargs["hf_overrides"]["enable_audio_output"] is False
 
 
-@pytest.mark.parametrize(
-    ("model_config", "expected_type"),
-    [
-        ({"model_type": "language_model"}, HFModelConfig),
-        ({"model_type": "omni_model"}, OmniModelConfig),
-        ({"_target_": "verl_omni.workers.config.omni.OmniModelConfig"}, OmniModelConfig),
-    ],
-)
-def test_ar_model_config_preserves_training_backend_contract(model_config, expected_type):
-    assert _select_ar_model_config_type(model_config) is expected_type
+def test_ar_model_config_always_uses_omni_contract(monkeypatch):
+    server = object.__new__(vLLMOmniHttpServer)
+    server.config = SimpleNamespace(engine_kwargs={"vllm_omni": {"output_mode": "ar"}})
+    sentinel = object()
+    calls = []
+
+    def fake_omega_conf_to_dataclass(model_config, dataclass_type):
+        calls.append((model_config, dataclass_type))
+        return sentinel
+
+    monkeypatch.setattr(
+        "verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server.omega_conf_to_dataclass",
+        fake_omega_conf_to_dataclass,
+    )
+
+    model_config = {"model_type": "language_model"}
+    assert server._init_model_config(model_config) is sentinel
+    assert calls == [(model_config, OmniModelConfig)]
+
+
+def test_megatron_fully_async_recipe_uses_omni_model_config():
+    recipe_path = (
+        Path(__file__).resolve().parents[4]
+        / "examples"
+        / "gspo_trainer"
+        / "qwen3_omni"
+        / "config"
+        / "qwen3_omni_thinker_gspo_megatron_fully_async.yaml"
+    )
+    recipe = yaml.safe_load(recipe_path.read_text())
+
+    assert recipe["actor_rollout_ref"]["model"]["_target_"] == ("verl_omni.workers.config.omni.OmniModelConfig")
+    assert recipe["actor_rollout_ref"]["actor"]["strategy"] == "megatron"
+    assert recipe["actor_rollout_ref"]["ref"]["strategy"] == "megatron"
+    assert recipe["actor_rollout_ref"]["rollout"]["name"] == "vllm_omni"
+    assert recipe["actor_rollout_ref"]["rollout"]["mode"] == "async"
 
 
 def test_compilation_config_drops_nested_none_values():

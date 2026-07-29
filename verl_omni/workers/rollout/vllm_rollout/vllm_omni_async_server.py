@@ -32,7 +32,7 @@ from verl.utils.device import get_visible_devices_keyword
 from verl.utils.import_utils import import_external_libs
 from verl.utils.net_utils import get_free_port
 from verl.utils.tokenizer import normalize_token_ids
-from verl.workers.config import HFModelConfig, RolloutConfig
+from verl.workers.config import RolloutConfig
 from verl.workers.rollout.replica import TokenOutput
 from verl.workers.rollout.utils import run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
@@ -72,15 +72,6 @@ def _drop_none_mapping_values(value: Any) -> Any:
     return value
 
 
-def _select_ar_model_config_type(model_config) -> type[HFModelConfig] | type[OmniModelConfig]:
-    """Keep legacy language-model backends compatible with the omni rollout server."""
-    target = model_config.get("_target_", "") if hasattr(model_config, "get") else ""
-    model_type = model_config.get("model_type", "language_model") if hasattr(model_config, "get") else "language_model"
-    if str(target).endswith("OmniModelConfig") or model_type == "omni_model":
-        return OmniModelConfig
-    return HFModelConfig
-
-
 class vLLMOmniHttpServer(vLLMHttpServer):
     """vLLM-Omni http server in single node, this is equivalent to launch server with command line:
     ```
@@ -106,8 +97,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._rollout_flags: dict[int, dict] = {}
 
         if self._ar_mode:
-            config_type = _select_ar_model_config_type(model_config)
-            return omega_conf_to_dataclass(model_config, dataclass_type=config_type)
+            return omega_conf_to_dataclass(model_config, dataclass_type=OmniModelConfig)
         return omega_conf_to_dataclass(model_config, dataclass_type=DiffusionModelConfig)
 
     def _validate_configs(self) -> None:
