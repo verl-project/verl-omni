@@ -29,6 +29,8 @@ uv pip install -e ".[train,dev]"
 uv pip install flash-attn>=2.8.3
 ```
 
+> **Tested with** `transformers==5.13.1`, `accelerate==1.14.0`, `peft==0.19.1`.
+
 Verify:
 
 ```bash
