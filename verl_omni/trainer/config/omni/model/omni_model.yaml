@@ -58,6 +58,9 @@ lora_rank: 0
 # LoRA scaling factor
 lora_alpha: 16
 
+# Optional dtype for LoRA parameters (e.g., "float32"); null = use model dtype
+lora_dtype: null
+
 # Lora initialization method.
 lora_init_weights: gaussian
 
@@ -75,10 +78,6 @@ lora_adapter_path: null
 
 # Named LoRA policy states required by the algorithm. "reference" disables adapters.
 policy_state_adapters: ["default"]
-
-# Convert LoRA parameters to a target dtype for numerical stability (e.g., "fp32", "bf16").
-# Default null means no conversion.
-lora_dtype: null
 
 # FSDP layer name prefixes for LoRA parameter layered summon.
 fsdp_layer_prefixes: []
