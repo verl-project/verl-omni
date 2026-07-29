@@ -39,9 +39,9 @@ python -c "import verl, verl_omni, vllm, vllm_omni; print('OK')"
 
 ## Prepare the model
 
-The V1 scripts default `MODEL_PATH` to `$HOME/models/Qwen/Qwen3-Omni-30B-A3B-Instruct`
-(~60 GB). To use the HuggingFace Hub ID (cached automatically on first run) or a
-different local copy, set `MODEL_PATH`:
+The GPU V1 scripts default `MODEL_PATH` to `$HOME/models/Qwen/Qwen3-Omni-30B-A3B-Instruct`
+(~60 GB). The NPU script defaults to the HuggingFace Hub ID `Qwen/Qwen3-Omni-30B-A3B-Instruct`.
+To use a different local copy or Hub ID, set `MODEL_PATH`:
 
 ```bash
 export MODEL_PATH=/path/to/local/Qwen3-Omni-30B-A3B-Instruct
