@@ -133,3 +133,114 @@ class TestColocatedSpawnEntry:
         class_dict = self.assemble(monkeypatch, {Role.ActorRollout: DiffusionTeacherWorker})
 
         assert set(class_dict) == {str(Role.ActorRollout)}
+
+
+class FakeHandle:
+    """Stands in for a Ray actor handle."""
+
+
+class FakeSpawnedGroup:
+    """One prefixed view. All views share the same handle list, as verl's spawn does."""
+
+    def __init__(self, handles, calls, name, fails=False):
+        self._workers = handles
+        self.calls = calls
+        self.name = name
+        self.fails = fails
+
+    def init_model(self):
+        self.calls.append(self.name)
+        if self.fails:
+            raise RuntimeError("teacher ran out of memory at init")
+
+
+class FakeWorkerGroupCls:
+    def __init__(self, handles, calls, failing=()):
+        self.handles = handles
+        self.calls = calls
+        self.failing = set(failing)
+        self.spawned = []
+
+    def __call__(self, resource_pool, ray_cls_with_init, **kwargs):
+        return self
+
+    def spawn(self, prefix_set):
+        groups = {
+            prefix: FakeSpawnedGroup(self.handles, self.calls, prefix, fails=prefix in self.failing)
+            for prefix in prefix_set
+        }
+        self.spawned.extend(groups.values())
+        return groups
+
+
+class FakeManager:
+    def __init__(self):
+        self.scored = []
+
+    def compute_teacher_outputs(self, batch):
+        self.scored.append(batch)
+        return batch
+
+
+class TestInitOrderingAndTeardown:
+    @staticmethod
+    def build_trainer(monkeypatch, role_worker_mapping, failing=(), kills=None):
+        from verl_omni.trainer.diffusion import ray_diffusion_trainer
+        from verl_omni.trainer.diffusion.ray_diffusion_trainer import PolicyGradientRayTrainer
+
+        monkeypatch.setattr(ray_diffusion_trainer, "create_colocated_worker_cls", lambda class_dict: object())
+        if kills is not None:
+            monkeypatch.setattr(ray_diffusion_trainer.ray, "kill", kills.append)
+
+        calls = []
+        handles = [FakeHandle(), FakeHandle()]
+        pool = FakeResourcePool()
+        trainer = object.__new__(PolicyGradientRayTrainer)
+        trainer.config = compose_config(*TEACHER_OVERRIDES)
+        trainer.role_worker_mapping = role_worker_mapping
+        trainer.resource_pool_manager = FakeResourcePoolManager(pool)
+        trainer.hybrid_engine = True
+        trainer.use_reference_policy = False
+        trainer.ref_in_actor = False
+        trainer.device_name = "cpu"
+        trainer.teacher_wg = None
+        trainer.teacher_manager = None
+        trainer.ray_worker_group_cls = FakeWorkerGroupCls(handles, calls, failing=failing)
+        monkeypatch.setattr(PolicyGradientRayTrainer, "_build_teacher_manager", lambda self: FakeManager())
+        return trainer, calls, handles
+
+    def test_init_order(self, monkeypatch):
+        """actor/rollout must stay last: it is created last so vLLM can size its KV cache."""
+        trainer, calls, _ = self.build_trainer(
+            monkeypatch, {Role.ActorRollout: DiffusionTeacherWorker, Role.TeacherModel: DiffusionTeacherWorker}
+        )
+
+        trainer._init_colocated_workers()
+
+        assert calls == [str(Role.TeacherModel), str(Role.ActorRollout)]
+        assert trainer.teacher_manager is not None
+
+    def test_default_off_no_manager(self, monkeypatch):
+        trainer, calls, _ = self.build_trainer(monkeypatch, {Role.ActorRollout: DiffusionTeacherWorker})
+
+        trainer._init_colocated_workers()
+
+        assert calls == [str(Role.ActorRollout)]
+        assert trainer.teacher_manager is None
+        assert trainer.teacher_wg is None
+
+    def test_teacher_init_failure_teardown(self, monkeypatch):
+        """Spawned views share one handle list, so each actor must be killed exactly once."""
+        kills = []
+        trainer, calls, handles = self.build_trainer(
+            monkeypatch,
+            {Role.ActorRollout: DiffusionTeacherWorker, Role.TeacherModel: DiffusionTeacherWorker},
+            failing=(str(Role.TeacherModel),),
+            kills=kills,
+        )
+
+        with pytest.raises(RuntimeError, match="ran out of memory"):
+            trainer._init_colocated_workers()
+
+        assert kills == handles  # each handle once, despite two views sharing the list
+        assert calls == [str(Role.TeacherModel)]  # actor/rollout never started
