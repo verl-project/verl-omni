@@ -33,6 +33,7 @@ from typing import Any, Optional
 
 from omegaconf import MISSING
 from verl.base_config import BaseConfig
+from verl.workers.config.engine import FSDPEngineConfig
 from verl.workers.config.model import MtpConfig
 
 from .model import DiffusionModelConfig
@@ -44,6 +45,7 @@ __all__ = [
     "TeacherPlacementConfig",
     "DiffusionTeacherConfig",
     "resolve_teacher_model_config",
+    "resolve_teacher_engine_config",
 ]
 
 VALID_PLACEMENT_MODES = ("colocated", "standalone")
@@ -197,3 +199,53 @@ def resolve_teacher_model_config(actor: DiffusionModelConfig, entry: TeacherMode
     )
 
     return DiffusionModelConfig(**fields)
+
+
+def resolve_teacher_engine_config(
+    actor_cfg,
+    rollout_cfg,
+    actor_engine: FSDPEngineConfig,
+    entry: TeacherModelEntry,
+    world_size: int,
+) -> FSDPEngineConfig:
+    """Build the teacher's engine config. Allow-list again; two fields carry traps.
+
+    ``infer_micro_batch_size_per_gpu`` is read from the *source* configs rather
+    than from ``actor_engine``: the diffusion actor branch writes it at worker
+    init, so reading it here -- before worker construction -- would yield None,
+    and ``TrainingWorker.infer_batch`` requires a finite value.
+
+    ``forward_only`` is a correctness invariant, not a preference: it selects the
+    no-grad path, skips optimizer/LR-scheduler construction, and picks the
+    wrapping and offload branches. It is also why no offload knobs exist here --
+    both FSDP paths already force CPU offload for a forward-only module, so a
+    knob would be inert.
+
+    Fields not named below (wrap_policy, mixed_precision, reshard_after_forward,
+    use_orig_params, use_torch_compile, ...) take their FSDPEngineConfig defaults
+    and are never inherited from the actor.
+    """
+    micro_bsz = entry.engine.micro_batch_size_per_gpu
+    if micro_bsz is None:
+        micro_bsz = rollout_cfg.get("log_prob_micro_batch_size_per_gpu")
+    if micro_bsz is None:
+        micro_bsz = actor_cfg.ppo_micro_batch_size_per_gpu
+    if micro_bsz is None:
+        raise ValueError(
+            "Diffusion teacher requires teacher.engine.micro_batch_size_per_gpu, "
+            "rollout.log_prob_micro_batch_size_per_gpu, or actor.ppo_micro_batch_size_per_gpu "
+            "(used by prepare_micro_batches)."
+        )
+
+    return FSDPEngineConfig(
+        strategy=entry.engine.strategy,
+        forward_only=True,
+        model_dtype=_or_actor(entry.engine.model_dtype, actor_engine.model_dtype),
+        infer_micro_batch_size_per_gpu=micro_bsz,
+        fsdp_size=world_size,
+        ulysses_sequence_parallel_size=actor_engine.ulysses_sequence_parallel_size,
+        param_offload=False,
+        offload_policy=False,
+        optimizer_offload=False,
+        grad_offload=False,
+    )

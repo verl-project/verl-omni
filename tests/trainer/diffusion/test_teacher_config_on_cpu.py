@@ -19,7 +19,9 @@ from copy import deepcopy
 
 import pytest
 from hydra import compose, initialize_config_dir
+from omegaconf import OmegaConf
 from verl.utils.config import omega_conf_to_dataclass
+from verl.workers.config.engine import FSDPEngineConfig
 from verl.workers.config.model import MtpConfig
 
 import verl_omni
@@ -28,7 +30,9 @@ from verl_omni.workers.config.diffusion import (
     DiffusionModelConfig,
     DiffusionTeacherConfig,
     TeacherCheckpointConfig,
+    TeacherEngineConfig,
     TeacherModelEntry,
+    resolve_teacher_engine_config,
     resolve_teacher_model_config,
 )
 
@@ -252,3 +256,94 @@ class TestResolveTeacherModelConfig:
         resolve_teacher_model_config(actor, make_teacher_entry(teacher_path))
 
         assert actor == before
+
+
+class TestResolveTeacherEngineConfig:
+    """§5.2: forward-only is a correctness invariant, and offload is not a knob."""
+
+    @pytest.fixture
+    def actor_engine(self):
+        # every offload flag on, so "the teacher does not inherit them" is observable
+        return FSDPEngineConfig(
+            strategy="fsdp2",
+            model_dtype="bfloat16",
+            ulysses_sequence_parallel_size=2,
+            param_offload=True,
+            optimizer_offload=True,
+            offload_policy=True,
+            grad_offload=True,
+        )
+
+    @staticmethod
+    def resolve(actor_engine, teacher_mbs=None, rollout_mbs=None, actor_mbs=None, **engine_overrides):
+        entry = TeacherModelEntry(
+            model=TeacherCheckpointConfig(path="/ckpt/teacher"),
+            engine=TeacherEngineConfig(micro_batch_size_per_gpu=teacher_mbs, **engine_overrides),
+        )
+        return resolve_teacher_engine_config(
+            actor_cfg=OmegaConf.create({"ppo_micro_batch_size_per_gpu": actor_mbs}),
+            rollout_cfg=OmegaConf.create({"log_prob_micro_batch_size_per_gpu": rollout_mbs}),
+            actor_engine=actor_engine,
+            entry=entry,
+            world_size=4,
+        )
+
+    @pytest.mark.parametrize(
+        "teacher_mbs,rollout_mbs,actor_mbs,expected",
+        [
+            (4, 8, 16, 4),
+            (None, 8, 16, 8),
+            (None, None, 16, 16),
+        ],
+    )
+    def test_micro_batch_fallback_order(self, actor_engine, teacher_mbs, rollout_mbs, actor_mbs, expected):
+        engine = self.resolve(actor_engine, teacher_mbs, rollout_mbs, actor_mbs)
+
+        assert engine.infer_micro_batch_size_per_gpu == expected
+
+    def test_micro_batch_all_missing_raises(self, actor_engine):
+        with pytest.raises(ValueError) as excinfo:
+            self.resolve(actor_engine)
+
+        message = str(excinfo.value)
+        for key in (
+            "teacher.engine.micro_batch_size_per_gpu",
+            "rollout.log_prob_micro_batch_size_per_gpu",
+            "actor.ppo_micro_batch_size_per_gpu",
+        ):
+            assert key in message
+
+    def test_strategy_defaults_fsdp_not_inherited(self, actor_engine):
+        """Inheriting would resolve to `veomni` on a VeOmni actor, i.e. unimplemented code."""
+        assert actor_engine.strategy == "fsdp2"
+
+        assert self.resolve(actor_engine, actor_mbs=1).strategy == "fsdp"
+        assert self.resolve(actor_engine, actor_mbs=1, strategy="fsdp2").strategy == "fsdp2"
+
+    def test_forward_only_and_offload_fields(self, actor_engine):
+        engine = self.resolve(actor_engine, actor_mbs=1)
+
+        assert engine.forward_only is True
+        # forward_only already forces CPU offload in both FSDP paths, so exposing
+        # these would advertise control that does not exist
+        assert engine.param_offload is False
+        assert engine.optimizer_offload is False
+        assert engine.offload_policy is False
+        assert engine.grad_offload is False
+
+    def test_model_dtype_defaults_to_actor(self, actor_engine):
+        assert self.resolve(actor_engine, actor_mbs=1).model_dtype == "bfloat16"
+        assert self.resolve(actor_engine, actor_mbs=1, model_dtype="fp32").model_dtype == "fp32"
+
+    def test_topology_fields(self, actor_engine):
+        engine = self.resolve(actor_engine, actor_mbs=1)
+
+        assert engine.fsdp_size == 4
+        assert engine.ulysses_sequence_parallel_size == actor_engine.ulysses_sequence_parallel_size
+
+    def test_actor_engine_not_mutated(self, actor_engine):
+        before = deepcopy(actor_engine)
+
+        self.resolve(actor_engine, actor_mbs=1)
+
+        assert actor_engine == before
