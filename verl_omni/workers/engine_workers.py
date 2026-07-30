@@ -18,6 +18,7 @@ import os
 import time
 from contextlib import nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from functools import partial
 from itertools import chain
 from typing import Optional
@@ -594,8 +595,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             ref_config: ActorConfig | DiffusionActorConfig = omega_conf_to_dataclass(self.config.ref)
 
             # The ref model does not need to enable MTP; force it to false.
-            ref_config.model_config = deepcopy(model_config)
-            ref_config.model_config.mtp = MtpConfig(enable=False)
+            if is_diffusion:
+                # DiffusionModelConfig does not list ``mtp`` as mutable; rebuild instead of assigning.
+                ref_config.model_config = replace(deepcopy(model_config), mtp=MtpConfig(enable=False))
+            else:
+                ref_config.model_config = deepcopy(model_config)
+                ref_config.model_config.mtp = MtpConfig(enable=False)
 
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(
