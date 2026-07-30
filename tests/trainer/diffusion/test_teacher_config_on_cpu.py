@@ -13,7 +13,6 @@
 # limitations under the License.
 """CPU tests for the diffusion OPD teacher config group (RFC #293)."""
 
-import json
 import os
 from copy import deepcopy
 
@@ -25,9 +24,7 @@ from verl.workers.config.engine import FSDPEngineConfig
 from verl.workers.config.model import MtpConfig
 
 import verl_omni
-from verl_omni.pipelines.schedulers.flow_match_sde import FlowMatchSDEDiscreteScheduler
 from verl_omni.workers.config.diffusion import (
-    DiffusionModelConfig,
     DiffusionTeacherConfig,
     TeacherCheckpointConfig,
     TeacherEngineConfig,
@@ -48,28 +45,8 @@ def compose_teacher(*overrides: str) -> DiffusionTeacherConfig:
     return omega_conf_to_dataclass(cfg.actor_rollout_ref.teacher, DiffusionTeacherConfig)
 
 
-def make_fake_sd3_checkpoint(tmp_path, name, class_name="StableDiffusion3Pipeline") -> str:
-    """A diffusers layout with just what DiffusionModelConfig.__post_init__ reads."""
-    ckpt = tmp_path / name
-    (ckpt / "scheduler").mkdir(parents=True)
-    (ckpt / "model_index.json").write_text(json.dumps({"_class_name": class_name}))
-    FlowMatchSDEDiscreteScheduler().save_pretrained(ckpt / "scheduler")
-    return str(ckpt)
-
-
 def make_teacher_entry(path, **model_overrides) -> TeacherModelEntry:
     return TeacherModelEntry(model=TeacherCheckpointConfig(path=path, **model_overrides))
-
-
-def make_actor_model_config(path, **overrides) -> DiffusionModelConfig:
-    kwargs = {
-        "path": path,
-        "algorithm": "flow_grpo",
-        "attn_backend": "native",
-        "load_tokenizer": False,
-    }
-    kwargs.update(overrides)
-    return DiffusionModelConfig(**kwargs)
 
 
 @pytest.fixture
@@ -156,16 +133,16 @@ class TestResolveTeacherModelConfig:
     """§5.2 provenance: teacher-owned / inherited / checkpoint-derived / forced."""
 
     @pytest.fixture
-    def actor(self, tmp_path):
-        return make_actor_model_config(
-            make_fake_sd3_checkpoint(tmp_path, "student"),
+    def actor(self, fake_sd3_checkpoint, diffusion_model_config):
+        return diffusion_model_config(
+            fake_sd3_checkpoint("student"),
             external_lib=None,
             fsdp_layer_prefixes=["transformer_blocks.", "single_blocks."],
         )
 
     @pytest.fixture
-    def teacher_path(self, tmp_path):
-        return make_fake_sd3_checkpoint(tmp_path, "teacher")
+    def teacher_path(self, fake_sd3_checkpoint):
+        return fake_sd3_checkpoint("teacher")
 
     def test_teacher_owned_path(self, actor, teacher_path):
         teacher = resolve_teacher_model_config(actor, make_teacher_entry(teacher_path))
@@ -177,10 +154,8 @@ class TestResolveTeacherModelConfig:
         assert teacher.local_path != actor.local_path
         assert teacher.transformer_subfolder == "transformer"
 
-    def test_disk_fields_default_to_actor_unless_set(self, tmp_path, teacher_path):
-        actor = make_actor_model_config(
-            make_fake_sd3_checkpoint(tmp_path, "student"), trust_remote_code=True, use_shm=False
-        )
+    def test_disk_fields_default_to_actor_unless_set(self, fake_sd3_checkpoint, diffusion_model_config, teacher_path):
+        actor = diffusion_model_config(fake_sd3_checkpoint("student"), trust_remote_code=True, use_shm=False)
 
         inherited = resolve_teacher_model_config(actor, make_teacher_entry(teacher_path))
         assert inherited.trust_remote_code is True
@@ -218,10 +193,12 @@ class TestResolveTeacherModelConfig:
 
         assert teacher.architecture == "StableDiffusion3Pipeline"
 
-    def test_forced_frozen_defaults(self, tmp_path, teacher_path, stub_tokenizer_loading):
+    def test_forced_frozen_defaults(
+        self, fake_sd3_checkpoint, diffusion_model_config, teacher_path, stub_tokenizer_loading
+    ):
         """A maximally LoRA-flavoured actor must leak none of it into the teacher."""
-        actor = make_actor_model_config(
-            make_fake_sd3_checkpoint(tmp_path, "student"),
+        actor = diffusion_model_config(
+            fake_sd3_checkpoint("student"),
             load_tokenizer=True,
             enable_gradient_checkpointing=True,
             lora_rank=32,
