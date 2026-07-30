@@ -28,6 +28,7 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
 )
+from verl_omni.trainer.diffusion.teacher_preflight import validate_teacher_preflight
 from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
 
 
@@ -55,6 +56,8 @@ def run_diffusion(config, task_runner_class=None) -> None:
                 settings, model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    validate_teacher_preflight(config, stack="v0")
+
     # Check if Ray is not initialized
     if not ray.is_initialized():
         # Initialize Ray with a local cluster configuration
