@@ -146,8 +146,19 @@ class DiffusionTeacherWorker(Worker, DistProfilerExtension):
 
         # The teacher shares the actor's pool and step, so it reports under the
         # actor's profiler settings; the teacher namespace adds no profiler surface.
-        profiler_config = omega_conf_to_dataclass(config.actor.get("profiler", {}), dataclass_type=ProfilerConfig)
-        DistProfilerExtension.__init__(self, DistProfiler(rank=self.rank, config=profiler_config))
+        # The tool config must be resolved too: the torch/nsys backends read typed
+        # fields off it, and a raw dict reaches them as an AttributeError at worker
+        # construction.
+        omega_profiler_config = config.actor.get("profiler", {})
+        profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
+        tool = omega_profiler_config.get("tool", None)
+        if tool in ("npu", "nsys", "torch", "torch_memory", "precision_debugger"):
+            tool_config = omega_conf_to_dataclass(omega_profiler_config.get("tool_config", {}).get(tool))
+        else:
+            tool_config = None
+        DistProfilerExtension.__init__(
+            self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
+        )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
