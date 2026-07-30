@@ -195,6 +195,10 @@ class BaseRayDiffusionTrainer(ABC):
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
+        # Teacher runtime; stays None unless actor_rollout_ref.teacher.enabled is set.
+        self.teacher_wg = None
+        self.teacher_manager = None
+
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
         self.checkpoint_manager = None
@@ -616,6 +620,15 @@ class BaseRayDiffusionTrainer(ABC):
             )
             self.resource_pool_to_cls[resource_pool][str(Role.RefPolicy)] = ref_policy_cls
 
+        # create the frozen teacher if online policy distillation is enabled
+        if Role.TeacherModel in self.role_worker_mapping:
+            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            teacher_cls = RayClassWithInitArgs(
+                cls=self.role_worker_mapping[Role.TeacherModel],
+                config=self.config.actor_rollout_ref,
+            )
+            self.resource_pool_to_cls[teacher_resource_pool][str(Role.TeacherModel)] = teacher_cls
+
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`.
@@ -660,6 +673,9 @@ class BaseRayDiffusionTrainer(ABC):
                 # Model engine: ActorRolloutRefWorker
                 assert str(Role.ActorRolloutRef) in all_wg, f"{all_wg.keys()=}"
                 self.ref_policy_wg = all_wg[str(Role.ActorRolloutRef)]
+
+        if Role.TeacherModel in self.role_worker_mapping:
+            self.teacher_wg = all_wg[str(Role.TeacherModel)]
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg[str(actor_role)]
