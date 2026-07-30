@@ -27,11 +27,15 @@ explicit ``dataclass_type``; the ``_target_`` route leaves ``models`` as plain
 dicts, which skips both the entry defaults and the validation below.
 """
 
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from omegaconf import MISSING
 from verl.base_config import BaseConfig
+from verl.workers.config.model import MtpConfig
+
+from .model import DiffusionModelConfig
 
 __all__ = [
     "TeacherCheckpointConfig",
@@ -39,9 +43,15 @@ __all__ = [
     "TeacherModelEntry",
     "TeacherPlacementConfig",
     "DiffusionTeacherConfig",
+    "resolve_teacher_model_config",
 ]
 
 VALID_PLACEMENT_MODES = ("colocated", "standalone")
+
+
+def _or_actor(teacher_value: Any, actor_value: Any) -> Any:
+    """Teacher-owned field defaulting to the actor's; ``None`` means "not set"."""
+    return actor_value if teacher_value is None else teacher_value
 
 
 @dataclass
@@ -125,3 +135,65 @@ class DiffusionTeacherConfig(BaseConfig):
                 "mode=standalone; under colocated the teacher shares the actor's resource pool "
                 "and these values would be silently ignored."
             )
+
+
+def resolve_teacher_model_config(actor: DiffusionModelConfig, entry: TeacherModelEntry) -> DiffusionModelConfig:
+    """Build the teacher's model config as an allow-list over a fresh instance.
+
+    Deliberately not a copy of the actor's config with a few overrides: that is a
+    deny-list over a ~20-field dataclass, and everything unlisted leaks. The
+    sharpest leak is ``config_path``, which the VeOmni engine resolves as
+    ``config_path or weights_path`` -- a non-empty actor value would silently
+    define the teacher's architecture from the student's directory.
+
+    Anything not named below is a deliberate gap to be closed in review.
+    """
+    fields = {}
+
+    # 1. teacher-owned: how this checkpoint sits on disk
+    fields.update(
+        path=entry.model.path,
+        trust_remote_code=_or_actor(entry.model.trust_remote_code, actor.trust_remote_code),
+        use_shm=_or_actor(entry.model.use_shm, actor.use_shm),
+        transformer_subfolder=entry.model.transformer_subfolder,
+    )
+
+    # 2. inherited: trajectory semantics belong to the replayed rollout, not to the
+    #    teacher. `algorithm` is a verl-omni registry key that model_index.json cannot
+    #    supply, and the pipeline adapter is chosen by (architecture, algorithm)
+    #    jointly, so only half of that pair comes from disk.
+    fields.update(
+        model_type=actor.model_type,
+        algorithm=actor.algorithm,
+        pipeline=deepcopy(actor.pipeline),
+        algo=deepcopy(actor.algo),
+        attn_backend=actor.attn_backend,
+        external_lib=actor.external_lib,
+        fsdp_layer_prefixes=list(actor.fsdp_layer_prefixes),
+    )
+
+    # 3. checkpoint-derived: nothing here on purpose. Leaving architecture /
+    #    transformer_config / local_path / tokenizer_path unset makes __post_init__
+    #    derive them, and it resolves the local dir *before* reading model_index.json,
+    #    so an HF/HDFS path is materialised first rather than read as a local one.
+
+    # 4. forced frozen defaults: fields whose dataclass defaults are wrong for a
+    #    teacher (the worker loads transformer + scheduler only, and nothing backprops).
+    fields.update(
+        load_tokenizer=False,
+        tokenizer=None,
+        processor=None,
+        tokenizer_path=None,
+        local_tokenizer_path=None,
+        enable_gradient_checkpointing=False,
+        lora_rank=0,
+        lora_adapter_path=None,
+        lora={},
+        lora_dtype=None,
+        policy_state_adapters=(),
+        mtp=MtpConfig(enable=False),
+        config_path=None,
+        local_path=None,
+    )
+
+    return DiffusionModelConfig(**fields)
