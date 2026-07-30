@@ -53,12 +53,15 @@ _EXCLUDED_COMPARE_KEYS = {  # exclude from comparison because they are very smal
     "timing_per_image_ms/adv",
     "timing_s/adv",
 }
+_SUPPORTED_MFU_CONFIGS = {
+    ("qwen-image", "flowgrpo"),
+}
 
 
 def _as_float(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+    if isinstance(value, (int | float)) and math.isfinite(float(value)):
         return float(value)
     if hasattr(value, "item"):
         try:
@@ -221,12 +224,31 @@ def _format_delta(value: float) -> str:
     return f"{value * 100:+.2f}%"
 
 
+def _normalize_name(value: str | None) -> str:
+    return (value or "unknown").strip().lower().replace("_", "-")
+
+
+def _collect_warnings(summary: dict[str, dict[str, float]], model: str | None, algorithm: str | None) -> list[str]:
+    warnings = []
+    has_mfu = any(key.startswith("perf/mfu/") for key in summary)
+    mfu_config = (_normalize_name(model), _normalize_name(algorithm))
+    if has_mfu and mfu_config not in _SUPPORTED_MFU_CONFIGS:
+        warnings.append(
+            "MFU metrics are only supported and validated for Qwen-Image + FlowGRPO; "
+            f"current model/algorithm is {mfu_config[0]} + {mfu_config[1]},"
+            " so interpret perf/mfu/* values with caution."
+        )
+    return warnings
+
+
 def _print_conclusion(passed: bool, output: dict, report_path: Path) -> None:
     if "bootstrapped_baseline" in output:
         print("=" * 80)
         print("[PERF] BASELINE BOOTSTRAPPED")
         print(f"[PERF] Baseline: {output['bootstrapped_baseline']}")
         print(f"[PERF] Report:   {report_path}")
+        for warning in output.get("warnings", []):
+            print(f"[PERF][WARN] {warning}")
         print("=" * 80)
         return
 
@@ -235,6 +257,8 @@ def _print_conclusion(passed: bool, output: dict, report_path: Path) -> None:
         print("=" * 80)
         print("[PERF] METRICS COLLECTED")
         print(f"[PERF] Report: {report_path}")
+        for warning in output.get("warnings", []):
+            print(f"[PERF][WARN] {warning}")
         print("=" * 80)
         return
 
@@ -245,6 +269,8 @@ def _print_conclusion(passed: bool, output: dict, report_path: Path) -> None:
     print(f"[PERF] Compared metrics: {len(compare)}")
     print(f"[PERF] Failed metrics: {len(failed_items)}")
     print(f"[PERF] Report: {report_path}")
+    for warning in output.get("warnings", []):
+        print(f"[PERF][WARN] {warning}")
 
     rows = failed_items
     if not rows:
@@ -283,12 +309,17 @@ def collect(args: argparse.Namespace) -> tuple[bool, dict]:
     summary = _summarize(metrics_for_compare)
 
     output = {
+        "algorithm": args.algorithm,
+        "model": args.model,
         "perf_skip_steps": args.perf_skip_steps,
         "metrics_all_steps": metrics_all_steps,
         "metrics_for_compare": metrics_for_compare,
         "summary_for_compare": summary,
         "threshold": args.threshold,
     }
+    warnings = _collect_warnings(summary, args.model, args.algorithm)
+    if warnings:
+        output["warnings"] = warnings
 
     passed = True
     baseline = args.baseline.expanduser().resolve() if args.baseline else None
@@ -318,6 +349,8 @@ def main() -> None:
     parser.add_argument("--log-file", type=Path)
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--model", default="unknown")
+    parser.add_argument("--algorithm", default="unknown")
     parser.add_argument("--perf-skip-steps", type=int, default=2)
     parser.add_argument("--threshold", type=float, default=0.10)
     parser.add_argument("--bootstrap-missing", action="store_true")

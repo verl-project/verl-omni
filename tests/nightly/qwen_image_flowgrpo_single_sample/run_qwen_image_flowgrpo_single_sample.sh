@@ -161,6 +161,8 @@ python3 "${SCRIPT_DIR}/collect_metrics.py" \
     --log-file "${CONSOLE_LOG}" \
     --baseline "${BASELINE_METRICS_JSON}" \
     --output "${CURRENT_METRICS_JSON}" \
+    --model qwen-image \
+    --algorithm flowgrpo \
     --perf-skip-steps "${PERF_SKIP_STEPS}" \
     --threshold "${PERF_THRESHOLD}" \
     "${BOOTSTRAP_ARGS[@]}" || METRICS_STATUS=$?
