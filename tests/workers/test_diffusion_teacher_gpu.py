@@ -200,9 +200,9 @@ def test_distinct_checkpoints_give_distinct_checksums():
     assert teacher.teacher_param_checksum() != student_as_teacher.teacher_param_checksum()
 
 
-# The third §7 checksum scenario -- teacher = student, identical checksums -- is not
-# here on purpose. It needs a further pair of worker groups on the same GPU, and
-# tearing that many down mid-session crashes the driver. Its substantive half ("the
-# teacher's targets match the student's own replay") belongs to the structural
-# equivalence fixture anyway; checksum equality alone is near-tautological for a
+# The teacher = student scenario is not here on purpose. It needs a further pair of
+# worker groups on the same GPU, and tearing that many down mid-session crashes the
+# driver. Its substantive half -- that the teacher's targets match the student's own
+# replay -- belongs with the standalone-placement work, where a same-hardware
+# comparison exists; checksum equality on its own is near-tautological for a
 # deterministic hash over identical weights.

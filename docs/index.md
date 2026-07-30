@@ -54,6 +54,7 @@ algo/diffusion_dpo.md
 algo/diffusionnft.md
 algo/grpo_guard.md
 algo/mixgrpo.md
+algo/diffusion_opd.md
 algo/performance.md
 ```
 

@@ -33,4 +33,9 @@ run_test 5 "visual reward manager" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
     pytest -s tests/reward_loop/test_visual_reward_manager.py
 
+# Builds its own tiny SD3 offline; needs one GPU.
+run_test 6 "diffusion teacher worker" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    pytest -s tests/workers/test_diffusion_teacher_gpu.py
+
 gpu_smoke_summary
