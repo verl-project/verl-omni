@@ -101,6 +101,41 @@ def _configure_boogu_scheduler(
     )
 
 
+def _make_config_checkpointable(module: torch.nn.Module) -> None:
+    """Give the module's diffusers config the HF ``save_pretrained`` entry point.
+
+    ``FSDPCheckpointManager.save_checkpoint`` calls
+    ``unwrap_model.config.save_pretrained(dir)`` unconditionally, assuming a
+    transformers ``PretrainedConfig``. A diffusers ``ConfigMixin`` instead
+    exposes ``save_config`` and its ``.config`` is a plain ``FrozenDict``, so
+    saving a checkpoint raised ``AttributeError: 'FrozenDict' object has no
+    attribute 'save_pretrained'`` — mid-write, which left a partial checkpoint
+    behind and the retry grew it without bound.
+
+    Bind a ``save_pretrained`` alias onto the config object that writes the same
+    ``config.json`` diffusers would. Bound on the instance (not the class) so no
+    other diffusers model is affected.
+    """
+    config = getattr(module, "config", None)
+    if config is None or hasattr(config, "save_pretrained"):
+        return
+
+    def save_pretrained(save_directory, **kwargs):
+        del kwargs  # verl passes none; diffusers' save_config takes the dir only
+        os.makedirs(save_directory, exist_ok=True)
+        module.save_config(save_directory)
+
+    try:
+        object.__setattr__(config, "save_pretrained", save_pretrained)
+    except (AttributeError, TypeError):
+        # FrozenDict blocks attribute writes; fall back to a dict subclass that
+        # carries the alias while preserving the original mapping and attrs.
+        class _CheckpointableConfig(type(config)):  # type: ignore[misc]
+            save_pretrained = staticmethod(save_pretrained)
+
+        module.config = _CheckpointableConfig(dict(config))
+
+
 @DiffusionModelBase.register("BooguImagePipeline", algorithm="flow_grpo")
 class BooguImage(DiffusionI2IModelBase):
     """Training adapter for the Boogu-Image (T2I + Edit/TI2I) diffusion model.
@@ -168,6 +203,7 @@ class BooguImage(DiffusionI2IModelBase):
             subfolder="" if model_config.config_path else model_config.transformer_subfolder,
             torch_dtype=torch_dtype,
         )
+        _make_config_checkpointable(module)
         return module
 
     @classmethod
