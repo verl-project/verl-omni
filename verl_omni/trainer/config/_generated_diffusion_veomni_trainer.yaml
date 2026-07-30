@@ -193,6 +193,13 @@ actor_rollout_ref:
           stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
           name: torch_memory
     _target_: verl_omni.workers.config.diffusion.VeOmniDiffusionActorConfig
+  teacher:
+    enabled: false
+    models: {}
+    placement:
+      mode: colocated
+      n_gpus_per_node: null
+      nnodes: null
   rollout:
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig

@@ -20,6 +20,9 @@ defaults:
   # Reference model will be enabled when actor.use_kl_loss is True.
   - diffusion/ref@actor_rollout_ref.ref: ${diffusion/model_engine}_ref
 
+  # Frozen teacher config for online policy distillation; disabled by default.
+  - diffusion/teacher@actor_rollout_ref.teacher: diffusion_teacher
+
   # Rollout model config.
   - diffusion/rollout@actor_rollout_ref.rollout: diffusion_rollout
 

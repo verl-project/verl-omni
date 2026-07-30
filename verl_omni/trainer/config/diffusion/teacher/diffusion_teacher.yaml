@@ -1,0 +1,35 @@
+# Frozen teacher for diffusion online policy distillation (RFC #293).
+# The teacher replays the trajectories the student explored during rollout and
+# publishes `teacher_*` batch keys consumed by the distill_kl / distill_fm_mse losses.
+
+# Whether to build the teacher worker. Must agree with the distillation loss
+# selection (actor.diffusion_loss.loss_mode or actor.use_distill_loss); a teacher
+# without a consuming loss, or a distill loss without a teacher, is rejected at startup.
+enabled: false
+
+# Teacher checkpoints keyed by teacher name; exactly one entry is supported.
+# A teacher entry is a path plus a placement -- scheduler, CFG, latent layout,
+# engine strategy and micro-batch all come from inheritance, the checkpoint, or a
+# frozen default. For example:
+#   models:
+#     default:
+#       model:
+#         path: /ckpt/sd35m-ocr-grpo-merged
+#       engine:
+#         micro_batch_size_per_gpu: 2
+models: {}
+
+# Where the teacher runs. Teacher identity is an algorithm-level role; placement
+# is a deployment-level config, and the two are independent axes.
+placement:
+
+  # colocated (shares the actor's global_pool) or standalone (own teacher_pool).
+  # Only colocated is implemented; standalone arrives with the next runtime PR.
+  mode: colocated
+
+  # GPUs per node for the standalone pool. Setting it under colocated is an error
+  # rather than a silently inert value.
+  n_gpus_per_node: null
+
+  # Number of nodes for the standalone pool; same rule as n_gpus_per_node.
+  nnodes: null
