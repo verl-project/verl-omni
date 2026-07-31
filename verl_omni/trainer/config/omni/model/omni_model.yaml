@@ -7,6 +7,9 @@
 # Target class for this configuration
 _target_: verl_omni.workers.config.omni.OmniModelConfig
 
+# verl-omni dispatch key for engine and trainer routing
+model_type: omni_model
+
 # path to the huggingface model
 path: ???
 
@@ -58,6 +61,9 @@ lora_alpha: 16
 # Optional dtype for LoRA parameters (e.g., "float32"); null = use model dtype
 lora_dtype: null
 
+# Lora initialization method.
+lora_init_weights: gaussian
+
 # Target modules for LoRA adaptation ("all-linear" or a list of module names)
 target_modules: all-linear
 
@@ -69,6 +75,12 @@ exclude_modules: null
 
 # Path to pre-trained LoRA adapter to load for continued training
 lora_adapter_path: null
+
+# Named LoRA policy states required by the algorithm. "reference" disables adapters.
+policy_state_adapters: ["default"]
+
+# FSDP layer name prefixes for LoRA parameter layered summon.
+fsdp_layer_prefixes: []
 
 # whether to use liger
 use_liger: False

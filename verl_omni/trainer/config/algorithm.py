@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Diffusion-specific algorithm config additions for verl_omni."""
+"""Algorithm config additions for verl_omni."""
 
 from dataclasses import dataclass, field
 from typing import Optional
@@ -22,7 +22,7 @@ from verl.trainer.config.algorithm import RolloutCorrectionConfig
 
 from verl_omni.trainer.diffusion.diffusion_trainer_utils import OLD_POLICY_DECAY_SCHEDULES
 
-__all__ = ["DiffusionAlgoConfig", "RolloutCorrectionConfig"]
+__all__ = ["DiffusionAlgoConfig", "OmniAlgoConfig", "RolloutCorrectionConfig"]
 
 
 @dataclass
@@ -57,3 +57,25 @@ class DiffusionAlgoConfig(BaseConfig):
             raise ValueError(f"old_policy_update_interval must be positive, got {self.old_policy_update_interval}.")
         if not 0 < self.timestep_fraction <= 1:
             raise ValueError(f"timestep_fraction must be in (0, 1], got {self.timestep_fraction}.")
+
+
+@dataclass
+class OmniAlgoConfig(BaseConfig):
+    """Omni-specific algorithm config."""
+
+    trainer_type: str = "direct_preference"
+    sample_source: str = "offline"
+    paired_preference: bool = True
+    adv_estimator: str = "dpo"
+    norm_adv_by_std_in_grpo: bool = True
+    global_std: bool = True
+
+    def __post_init__(self):
+        valid_trainer_types = {"policy_gradient", "direct_preference"}
+        if self.trainer_type not in valid_trainer_types:
+            raise ValueError(f"Invalid trainer_type: {self.trainer_type}. Must be one of {sorted(valid_trainer_types)}")
+        valid_sample_sources = {"online", "offline"}
+        if self.sample_source not in valid_sample_sources:
+            raise ValueError(
+                f"Invalid sample_source: {self.sample_source}. Must be one of {sorted(valid_sample_sources)}"
+            )

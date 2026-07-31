@@ -57,7 +57,7 @@ actor_rollout_ref:
         - re:.*mlp.gate$
         activation_observer: static_minmax
         quantization_config_path: null
-    _target_: verl.workers.config.FSDPActorConfig
+    _target_: verl_omni.workers.config.omni.OmniActorConfig
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: fsdp
     ppo_mini_batch_size: 256
@@ -155,6 +155,15 @@ actor_rollout_ref:
     entropy_from_logits_chunk_size: 2048
     entropy_checkpointing: false
     use_remove_padding: ${oc.select:actor_rollout_ref.model.use_remove_padding,false}
+    trainer_type: ${algorithm.trainer_type}
+    omni_loss:
+      _target_: verl_omni.workers.config.omni.OmniLossConfig
+      loss_mode: dpo
+      beta: 0.1
+      label_smoothing: 0.0
+      loss_type: sigmoid
+      average_log_prob: false
+      refer_model_precision: bfloat16
   ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: ${actor_rollout_ref.actor.strategy}
@@ -431,11 +440,16 @@ actor_rollout_ref:
       freeze_vision_model: true
       freeze_vision_projection: true
       freeze_language_model: true
+    model_type: omni_model
     architecture: null
     model_stage: thinker
     hf_config_name: null
     lora_dtype: null
+    lora_init_weights: gaussian
     target_parameters: null
+    policy_state_adapters:
+    - default
+    fsdp_layer_prefixes: []
     max_image_tokens: null
     max_audio_tokens: null
     max_video_tokens: null
@@ -794,10 +808,10 @@ algorithm:
     bypass_mode: false
     loss_type: ppo_clip
     rollout_is_batch_normalize: false
-  _target_: verl.trainer.config.AlgoConfig
+  _target_: verl_omni.trainer.config.OmniAlgoConfig
   gamma: 1.0
   lam: 1.0
-  adv_estimator: gae
+  adv_estimator: dpo
   norm_adv_by_std_in_grpo: true
   use_kl_in_reward: false
   kl_penalty: kl
@@ -811,6 +825,10 @@ algorithm:
   pf_ppo:
     reweight_method: pow
     weight_pow: 2.0
+  trainer_type: direct_preference
+  sample_source: offline
+  paired_preference: true
+  global_std: true
 distillation:
   _target_: verl.workers.config.DistillationConfig
   enabled: false

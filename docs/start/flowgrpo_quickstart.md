@@ -173,8 +173,8 @@ You can also override `trainer.project_name` and `trainer.experiment_name` from 
 ## Further reading
 
 For the algorithm background, detailed configuration notes, async reward, and rule-based
-reward training (e.g. JPEG incompressibility), see:
+reward training (e.g. JPEG incompressibility), see {doc}`../algo/flowgrpo`.
 
-- {doc}`../algo/flowgrpo`
+For detailed batch size configurations, see [Batch size](../algo/flowgrpo.md#batch-size).
 
 To scale training across multiple nodes, follow the {doc}`multi-node guide <multi_node_training>`.

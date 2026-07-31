@@ -1,10 +1,12 @@
 # DiffusionNFT Trainer
 
+Last updated: 06/30/2026
+
 This example shows how to post-train `Qwen-Image` with DiffusionNFT on an OCR-style image generation task using `vllm-omni` rollout and a visual generative reward model (`Qwen3-VL-8B-Instruct` in this example).
 
 DiffusionNFT is a direct-preference / forward-process algorithm. Unlike PPO-style FlowGRPO training, this example trains from final clean latents and uses an `old` LoRA adapter as the rollout policy while updating the `default` adapter.
 
-For the full installation guide, see `docs/start/install.md`. For implementation details on adding or extending direct-preference diffusion algorithms, see `docs/contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md`.
+For the full installation guide, see [Installation](../../docs/start/install.md). For implementation details on adding or extending direct-preference diffusion algorithms, see `docs/contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md`.
 
 ## Installation
 
@@ -134,8 +136,8 @@ See the [Metrics Documentation](../../docs/start/metrics.md) for a full descript
 
 | Script | Model | Algorithm | Hybrid Engine | # Cards | Reward Fn | # Cards for Actor | # Cards for Rollout | # Cards for Async Reward | Batch Size | `rollout.n` | lr   | # Val Samples | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / Card / Seconds) | Time per Step (Seconds) |
 | --- | --- | --- | --- | --- | --- | --- | --- |-------------------------| --- | --- |------| --- | --- | --- |------------------------------| --------------------------------|
-| `qwen_image/run_qwen_image_ocr_lora.sh` | Qwen-Image | DiffusionNFT | True | 4 (NVIDIA) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.166                        | 570 |
-| `qwen_image/run_qwen_image_ocr_lora_npu.sh` | Qwen-Image | DiffusionNFT | True | 16 (NPU) | qwenvl-ocr-vllm | 16 | 16 | 0 (sync)               | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.049                      | 490 |
+| `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | Qwen-Image | DiffusionNFT | True | 4 (NVIDIA) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.166                        | 570 |
+| `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_npu.sh` | Qwen-Image | DiffusionNFT | True | 16 (NPU) | qwenvl-ocr-vllm | 16 | 16 | 0 (sync)               | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.049                      | 490 |
 
 <table align="center" style="border: none;">
   <tr style="border: none;">
