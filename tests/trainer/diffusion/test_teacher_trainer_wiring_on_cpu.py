@@ -244,3 +244,34 @@ class TestInitOrderingAndTeardown:
 
         assert kills == handles  # each handle once, despite two views sharing the list
         assert calls == [str(Role.TeacherModel)]  # actor/rollout never started
+
+    def test_actor_init_failure_tears_down_teacher(self, monkeypatch):
+        """Teacher up, actor OOMs: the fused actors co-host the teacher, so they must still be killed."""
+        kills = []
+        trainer, calls, handles = self.build_trainer(
+            monkeypatch,
+            {Role.ActorRollout: DiffusionTeacherWorker, Role.TeacherModel: DiffusionTeacherWorker},
+            failing=(str(Role.ActorRollout),),
+            kills=kills,
+        )
+
+        with pytest.raises(RuntimeError, match="ran out of memory"):
+            trainer._init_colocated_workers()
+
+        assert calls == [str(Role.TeacherModel), str(Role.ActorRollout)]  # teacher booted, then actor tried
+        assert kills == handles  # booted teacher does not leak when the actor fails after it
+
+    def test_actor_init_failure_without_teacher_does_not_kill(self, monkeypatch):
+        """No teacher: an actor failure is the pre-existing path and must not gain teardown here."""
+        kills = []
+        trainer, calls, _ = self.build_trainer(
+            monkeypatch,
+            {Role.ActorRollout: DiffusionTeacherWorker},
+            failing=(str(Role.ActorRollout),),
+            kills=kills,
+        )
+
+        with pytest.raises(RuntimeError, match="ran out of memory"):
+            trainer._init_colocated_workers()
+
+        assert kills == []  # teacher-only cleanup boundary leaves the plain path untouched

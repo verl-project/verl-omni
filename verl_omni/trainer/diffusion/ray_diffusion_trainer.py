@@ -712,18 +712,23 @@ class BaseRayDiffusionTrainer(ABC):
 
         # The teacher initialises *before* actor/rollout: the ordering below is a
         # correctness constraint, not a style choice (see the rollout comment).
-        if Role.TeacherModel in self.role_worker_mapping:
-            self.teacher_wg = all_wg[str(Role.TeacherModel)]
-            try:
+        # Once the teacher is booted it co-hosts the fused actors, so an actor or
+        # rollout failure has to tear them down too -- the same cleanup boundary
+        # must span both inits, or a teacher that loaded fine leaks on actor OOM.
+        teacher_present = Role.TeacherModel in self.role_worker_mapping
+        try:
+            if teacher_present:
+                self.teacher_wg = all_wg[str(Role.TeacherModel)]
                 self.teacher_manager = self._build_teacher_manager()
                 self.teacher_wg.init_model()
-            except Exception:
-                _terminate_worker_handles(all_wg.values())
-                raise
 
-        # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
-        self.actor_rollout_wg = all_wg[str(actor_role)]
-        self.actor_rollout_wg.init_model()
+            # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
+            self.actor_rollout_wg = all_wg[str(actor_role)]
+            self.actor_rollout_wg.init_model()
+        except Exception:
+            if teacher_present:
+                _terminate_worker_handles(all_wg.values())
+            raise
 
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
