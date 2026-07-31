@@ -83,6 +83,28 @@ from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 sys_logger = logging.getLogger(__name__)
 
 
+def validate_separate_config(config) -> None:
+    """Validate the synchronous separate trainer/generator topology."""
+    separate = OmegaConf.select(config, "actor_rollout_ref.separate", default=False)
+    if not isinstance(separate, bool):
+        raise ValueError("actor_rollout_ref.separate must be a bool.")
+    if not separate:
+        return
+
+    if (config.algorithm.trainer_type, config.algorithm.sample_source) != ("policy_gradient", "online"):
+        raise ValueError(
+            "Separate mode requires algorithm.trainer_type='policy_gradient' and algorithm.sample_source='online'."
+        )
+    if config.actor_rollout_ref.hybrid_engine:
+        raise ValueError("Separate mode requires actor_rollout_ref.hybrid_engine=false.")
+
+    rollout = config.actor_rollout_ref.rollout
+    if rollout.nnodes <= 0 or rollout.n_gpus_per_node <= 0:
+        raise ValueError("Separate mode requires positive rollout nnodes and n_gpus_per_node.")
+    if rollout.checkpoint_engine.backend == "naive":
+        raise ValueError("Separate mode requires a non-naive checkpoint engine backend.")
+
+
 def compute_advantage(
     data: DataProto,
     adv_estimator: str,
@@ -177,12 +199,16 @@ class BaseRayDiffusionTrainer(ABC):
         self.processor = processor
         self.config = config
 
+        self.separate = OmegaConf.select(config, "actor_rollout_ref.separate", default=False)
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         if config.algorithm.sample_source == "online":
-            assert self.hybrid_engine, "Currently, only support hybrid engine"
-            assert Role.ActorRollout in role_worker_mapping or Role.ActorRolloutRef in role_worker_mapping, (
-                f"{role_worker_mapping.keys()=}"
-            )
+            if self.separate:
+                assert Role.Actor in role_worker_mapping, f"{role_worker_mapping.keys()=}"
+            else:
+                assert self.hybrid_engine, "Currently, only support hybrid engine"
+                assert Role.ActorRollout in role_worker_mapping or Role.ActorRolloutRef in role_worker_mapping, (
+                    f"{role_worker_mapping.keys()=}"
+                )
         else:
             assert Role.Actor in role_worker_mapping, f"{role_worker_mapping.keys()=}"
 
@@ -203,6 +229,8 @@ class BaseRayDiffusionTrainer(ABC):
         if lora_rank <= 0:
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        if self.separate and self.use_reference_policy and not self.ref_in_actor:
+            assert Role.RefPolicy in role_worker_mapping, f"{role_worker_mapping.keys()=}"
 
         self.use_teacher_policy = is_distillation_enabled(config.get("distillation"))
         validate_distillation_config(config)
@@ -535,12 +563,14 @@ class BaseRayDiffusionTrainer(ABC):
             if self.use_rm and "rm_scores" not in test_output_gen_batch_padded.batch.keys():
                 # for colocate reward models, we need to sleep rollout model
                 # to spare GPU memory for reward model
-                self.checkpoint_manager.sleep_replicas()
+                if not self.separate:
+                    self.checkpoint_manager.sleep_replicas()
                 batch_reward = self._compute_reward_colocate(test_output_gen_batch_padded)
                 test_output_gen_batch_padded = test_output_gen_batch_padded.union(batch_reward)
                 # wake up rollout model
                 # replace with wake_up method once supported
-                self.checkpoint_manager.update_weights(self.global_steps)
+                if not self.separate:
+                    self.checkpoint_manager.update_weights(self.global_steps)
 
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
@@ -788,8 +818,8 @@ class BaseRayDiffusionTrainer(ABC):
 
         self.llm_server_manager = LLMServerManager.create(
             config=self.config,
-            worker_group=self.actor_rollout_wg,
-            rollout_resource_pool=actor_rollout_resource_pool,
+            worker_group=None if self.separate else self.actor_rollout_wg,
+            rollout_resource_pool=None if self.separate else actor_rollout_resource_pool,
         )
         self.async_rollout_manager = AgentLoopManager.create(
             config=self.config,
@@ -805,7 +835,8 @@ class BaseRayDiffusionTrainer(ABC):
         )
 
         # sleep all replicas to load checkpoint
-        self.checkpoint_manager.sleep_replicas()
+        if not self.separate:
+            self.checkpoint_manager.sleep_replicas()
 
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
@@ -1146,7 +1177,8 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                             if self.enable_agent_reward_loop:
                                 self.reward_loop_manager.start_profile()
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                        self.checkpoint_manager.sleep_replicas()
+                        if not self.separate:
+                            self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
                             self.llm_server_manager.stop_profile()
                             if self.enable_agent_reward_loop:
