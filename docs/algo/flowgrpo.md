@@ -123,6 +123,7 @@ the rollout section is the main place to override sampling behavior.
   parameters to for numerical stability during training (e.g., `"fp32"`,
   `"bf16"`). Default `null` means no conversion.
 
+(batch-size)=
 #### Batch size
 
 FlowGRPO uses three nested batch-size parameters that operate at different

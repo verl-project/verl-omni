@@ -1,5 +1,7 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
+Last updated: 07/29/2026
+
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on a math-reasoning task, using FSDP for the actor and `vllm-omni` as
 the async rollout backend. Two input modalities are supported: **text → text**
@@ -7,9 +9,9 @@ the async rollout backend. Two input modalities are supported: **text → text**
 
 Both **GPU** and **NPU** training platforms are supported:
 
-- [`run_qwen3_omni_thinker_gspo_lora_v1.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh)
+- `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh`
   — **GPU**, **LoRA (r=32)** on a single node with **4 × H100/H200 80GB**.
-- [`run_qwen3_omni_thinker_gspo_npu.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh)
+- `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh`
   — **NPU**, **full-parameter** on a single **Atlas 800T A3** node with **16 NPUs**.
 
 For the base environment setup, see the [installation guide](../../docs/start/install.md).
@@ -142,7 +144,7 @@ offload enabled.
 ## Training with `MMK12`
 
 For visual math reasoning we ship an end-to-end pipeline on top of the
-[MMK12](https://huggingface.co/datasets/FangqingM/MMK12) dataset (image
+[MMK12](https://huggingface.co/datasets/FanqingM/MMK12) dataset (image
 input + text output, K12 math). It reuses the same GSPO recipe as the
 text-only path — only the data preprocessing and the reward scorer differ.
 Use the dedicated V1 GPU/LoRA script:
@@ -164,7 +166,7 @@ The converter emits one verl RL row per problem, with
 `<answer>…\boxed{…}…</answer>`, and the image bytes carried inline in the
 `images` column so the parquet stays self-contained. Input / kept / dropped
 counts and answer-type tallies are printed at the end. See the module docstring
-in [`data_process/mmk12.py`](data_process/mmk12.py) for the exact output schema.
+in [`examples/gspo_trainer/data_process/mmk12.py`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/data_process/mmk12.py) for the exact output schema.
 
 ### Run training
 
@@ -197,7 +199,7 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1.
 
 The scorer combines `math_verify` accuracy with a progressive format reward on
 the `<answer>…\boxed{}…</answer>` template; see
-[`verl_omni/utils/reward_score/mmk12_reward.py`](../../verl_omni/utils/reward_score/mmk12_reward.py)
+[`verl_omni/utils/reward_score/mmk12_reward.py`](https://github.com/verl-project/verl-omni/blob/main/verl_omni/utils/reward_score/mmk12_reward.py)
 for the full formula.
 
 ## Logging

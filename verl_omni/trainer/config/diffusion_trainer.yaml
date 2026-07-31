@@ -144,6 +144,20 @@ trainer:
   # Directory for logging validation data; no dump if null
   validation_data_dir: null
 
+  # Frames per second for videos saved to rollout_data_dir/validation_data_dir and logged
+  # to wandb (image runs ignore this)
+  video_fps: 24
+
+  # Dump train rollout data every N steps (1 = every step, <=0 = never). Larger values
+  # bound disk usage and per-step ffmpeg encode cost for video rollouts.
+  rollout_data_save_freq: 1
+
+  # Cap on the number of samples dumped per train rollout step (null = all)
+  rollout_data_max_samples: null
+
+  # Cap on the number of samples dumped per validation run (null = all)
+  validation_data_max_samples: null
+
   # Number of nodes used in the training
   nnodes: 1
 
