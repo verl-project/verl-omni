@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
-Last updated: 07/29/2026
+Last updated: 07/31/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on a math-reasoning task, using FSDP for the actor and `vllm-omni` as
@@ -9,9 +9,9 @@ the async rollout backend. Two input modalities are supported: **text → text**
 
 Both **GPU** and **NPU** training platforms are supported:
 
-- [`run_qwen3_omni_thinker_gspo_lora_v1.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh)
+- `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh`
   — **GPU**, **LoRA (r=32)** on a single node with **4 × H800 80GB**.
-- [`run_qwen3_omni_thinker_gspo_npu.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh)
+- `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh`
   — **NPU**, **full-parameter** on a single **Atlas 800T A3** node with **16 NPUs**.
 
 For the base environment setup, see the [installation guide](../../docs/start/install.md).
@@ -193,16 +193,18 @@ rollout colocated, LoRA r=32, GSPO.
 
 | Script | Dataset | # Cards | Batch × `rollout.n` | lr | Steps | val acc@1 / reward@1 | rollout↔actor pearson | GPU memory |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `run_qwen3_omni_thinker_gspo_lora_v1.sh` | gsm8k | 4 | 128 × 16 = 2048 | 3e-6 | 578 | acc 0.969 | 0.997 | ~43 GB |
-| `run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh` | MMK12 | 4 | 128 × 16 = 2048 | 3e-6 | 62 | reward 0.773 | 0.998 | ~58 GB |
+| [`gsm8k (wandb)`](https://wandb.ai/mikecheung/gspo/runs/j5mro1tn) | gsm8k | 4 | 128 × 16 = 2048 | 3e-6 | 578 | acc 0.969 | 0.997 | ~43 GB |
+| [`MMK12 (wandb)`](https://wandb.ai/mikecheung/gspo/runs/2j8hxr36) | MMK12 | 4 | 128 × 16 = 2048 | 3e-6 | 225 | reward 0.814 | 0.998 | ~58 GB |
 
-**gsm8k** (`naive` reward, math accuracy): `critic/rewards/mean` rose from
-~0.93 to ~0.97, `val-core/openai/gsm8k/acc/mean@1` reached **0.969**.
+**gsm8k** ([wandb](https://wandb.ai/mikecheung/gspo/runs/j5mro1tn), `naive`
+reward, math accuracy): `critic/rewards/mean` rose from ~0.93 to ~0.97,
+`val-core/openai/gsm8k/acc/mean@1` reached **0.969**.
 `rollout_corr/log_ppl_diff` stayed near zero (~0.002).
 
-**MMK12** (composite reward, `math_verify` + format): `critic/rewards/mean`
-reached 0.731, `val-core/mmk12/reward/mean@1` reached **0.773**.
-`rollout_corr/log_ppl_diff` stayed near zero (~0.002).
+**MMK12** ([wandb](https://wandb.ai/mikecheung/gspo/runs/2j8hxr36), composite
+reward, `math_verify` + format): `critic/rewards/mean` reached 0.846,
+`val-core/mmk12/reward/mean@1` reached **0.814** (still training at
+step 225). `rollout_corr/log_ppl_diff` stayed near zero (~0.002).
 
 ## Logging
 
