@@ -18,24 +18,33 @@ import json
 
 import pytest
 
-from tests.utils.dataset._bagel_visual_reflection_fixtures import make_unicot_row, write_rgb_png
-from verl_omni.utils.dataset.bagel_visual_reflection import (
+from tests.utils.dataset._visual_reflection_fixtures import (
+    make_visual_reflection_trajectory,
+    write_rgb_png,
+)
+from verl_omni.utils.dataset.visual_reflection import (
     LocalImageResolver,
     RejectionLedger,
     RejectionReason,
-    UniCoTParserConfig,
     VisualReflectionDataError,
-    adapt_echo_pair_record,
-    adapt_midjourney_prompt_record,
     assign_source_splits,
     build_data_manifest,
+    derive_manifest_id,
+    format_reflection_response,
+    make_split_provenance,
+    plan_atomic_examples,
+    validate_atomic_example,
+)
+from verl_omni.utils.dataset.visual_reflection.contracts import (
+    derive_pair_source_dedup_key,
+    derive_trajectory_id,
+)
+from verl_omni.utils.dataset.visual_reflection.partition import derive_source_seed, derive_split_for_dedup_key
+from verl_omni.utils.dataset.visual_reflection.sources import (
+    adapt_echo_pair_record,
+    adapt_midjourney_prompt_record,
     build_pair_synthesis_request,
     build_prompt_synthesis_request,
-    derive_manifest_id,
-    derive_source_seed,
-    derive_split_for_dedup_key,
-    derive_trajectory_id,
-    format_reflection_response,
     make_draft_generation_request,
     make_edit_synthesis_request,
     make_edit_verification_request,
@@ -43,15 +52,10 @@ from verl_omni.utils.dataset.bagel_visual_reflection import (
     make_pair_verification_request,
     make_reflection_synthesis_request,
     make_reflection_synthesis_result,
-    make_split_provenance,
     make_synthesis_result,
     make_terminal_verification_request,
     make_verification_result,
-    parse_unicot_record,
-    plan_atomic_examples,
     synthesis_request_source,
-    unicot_converter_config,
-    validate_atomic_example,
 )
 
 
@@ -59,10 +63,10 @@ def _recipe():
     return {
         "sources": [
             {
-                "dataset_id": "Fr0zencr4nE/UniCoT-Self-Reflection-6K",
+                "dataset_id": "example/visual-reflection",
                 "config": "default",
                 "split": "train",
-                "revision": "726706888395bb22ec1681e406cd641fe6e09e83",
+                "revision": "a" * 40,
                 "license": "apache-2.0",
                 "pipeline_variant": "direct_parse",
             }
@@ -71,7 +75,7 @@ def _recipe():
         "models": {"generator": None, "reflector": None, "verifier": None, "editor": None},
         "prompt_template_hashes": {},
         "seeds": {},
-        "converter_config": unicot_converter_config(),
+        "converter_config": {"adapter": "example_direct_parser", "adapter_version": "v1"},
         "partition": make_split_provenance(seed="17", ratios={"train": 0.8, "validation": 0.1, "test": 0.1}),
     }
 
@@ -86,13 +90,18 @@ def _source_partition(trajectory, split):
     return assignment, partition
 
 
+def test_manifest_accepts_arbitrary_pinned_direct_parse_source():
+    manifest_id = derive_manifest_id(**_recipe())
+
+    assert manifest_id.startswith("manifest_")
+
+
 @pytest.mark.parametrize("edit_turns", [0, 1, 2])
 def test_atomic_planner_emits_exact_counts_and_terminal_t2i_target(tmp_path, edit_turns):
-    row = make_unicot_row(tmp_path, edit_turns=edit_turns, data_id=f"row-{edit_turns}")
-    trajectory = parse_unicot_record(
-        row,
-        manifest_id="manifest-test",
-        image_resolver=LocalImageResolver(tmp_path),
+    trajectory = make_visual_reflection_trajectory(
+        tmp_path,
+        edit_turns=edit_turns,
+        source_record_id=f"row-{edit_turns}",
     )
 
     source_split, partition = _source_partition(trajectory, "train")
@@ -118,12 +127,7 @@ def test_atomic_planner_emits_exact_counts_and_terminal_t2i_target(tmp_path, edi
 
 
 def test_atomic_planner_is_deterministic_and_does_not_mutate_trajectory(tmp_path):
-    row = make_unicot_row(tmp_path, edit_turns=2)
-    trajectory = parse_unicot_record(
-        row,
-        manifest_id="manifest-test",
-        image_resolver=LocalImageResolver(tmp_path),
-    )
+    trajectory = make_visual_reflection_trajectory(tmp_path, edit_turns=2)
     before = copy.deepcopy(trajectory)
 
     source_split, partition = _source_partition(trajectory, "validation")
@@ -152,11 +156,7 @@ def test_planner_validates_entire_trajectory_before_emitting_atoms():
 
 
 def test_planner_recomputes_split_before_atomic_expansion(tmp_path):
-    trajectory = parse_unicot_record(
-        make_unicot_row(tmp_path, edit_turns=0),
-        manifest_id="manifest-test",
-        image_resolver=LocalImageResolver(tmp_path),
-    )
+    trajectory = make_visual_reflection_trajectory(tmp_path, edit_turns=0)
     source_split, partition = _source_partition(trajectory, "train")
     tampered = {**source_split, "split": "test"}
 
@@ -166,12 +166,66 @@ def test_planner_recomputes_split_before_atomic_expansion(tmp_path):
     assert error.value.reason is RejectionReason.INVALID_SPLIT
 
 
-def test_persisted_atom_validator_rejects_content_or_id_tampering(tmp_path):
-    trajectory = parse_unicot_record(
-        make_unicot_row(tmp_path, edit_turns=0),
-        manifest_id="manifest-test",
-        image_resolver=LocalImageResolver(tmp_path),
+def test_pair_planner_turn_limit_error_is_source_neutral(tmp_path):
+    trajectory = make_visual_reflection_trajectory(
+        tmp_path,
+        edit_turns=2,
+        source_dataset="example/image-pairs",
+        pipeline_variant="pair_0_1_turn",
     )
+    source = {
+        "source_dataset": trajectory["source_dataset"],
+        "source_record_id": trajectory["source_record_id"],
+        "pipeline_variant": trajectory["pipeline_variant"],
+        "prompt": trajectory["prompt"],
+        "reference_image": trajectory["images"][-1],
+        "dedup_key": derive_pair_source_dedup_key(trajectory["prompt"], trajectory["images"][-1]),
+    }
+    source_split, partition = _source_partition(source, "train")
+
+    with pytest.raises(VisualReflectionDataError) as error:
+        plan_atomic_examples(
+            trajectory,
+            source_split=source_split,
+            partition=partition,
+            source_record=source,
+        )
+
+    assert str(error.value) == "turn_limit_exhausted: Pair-source trajectories may contain at most one edit"
+
+
+def test_pair_planner_reference_error_is_source_neutral(tmp_path):
+    trajectory = make_visual_reflection_trajectory(
+        tmp_path,
+        edit_turns=1,
+        source_dataset="example/image-pairs",
+        pipeline_variant="pair_0_1_turn",
+    )
+    source = {
+        "source_dataset": trajectory["source_dataset"],
+        "source_record_id": trajectory["source_record_id"],
+        "pipeline_variant": trajectory["pipeline_variant"],
+        "prompt": trajectory["prompt"],
+        "reference_image": trajectory["images"][0],
+        "dedup_key": derive_pair_source_dedup_key(trajectory["prompt"], trajectory["images"][0]),
+    }
+    source_split, partition = _source_partition(source, "train")
+
+    with pytest.raises(VisualReflectionDataError) as error:
+        plan_atomic_examples(
+            trajectory,
+            source_split=source_split,
+            partition=partition,
+            source_record=source,
+        )
+
+    assert str(error.value) == (
+        "incompatible_edit_target: One-edit pair-source trajectory must terminate at the reference image"
+    )
+
+
+def test_persisted_atom_validator_rejects_content_or_id_tampering(tmp_path):
+    trajectory = make_visual_reflection_trajectory(tmp_path, edit_turns=0)
     source_split, partition = _source_partition(trajectory, "train")
     atom = plan_atomic_examples(trajectory, source_split=source_split, partition=partition)[0]
 
@@ -191,12 +245,7 @@ def test_persisted_atom_validator_rejects_content_or_id_tampering(tmp_path):
 
 @pytest.mark.parametrize("edit_turns", [0, 1])
 def test_synthesis_result_enforces_accepted_and_rejected_shapes(tmp_path, edit_turns):
-    row = make_unicot_row(tmp_path, edit_turns=edit_turns)
-    trajectory = parse_unicot_record(
-        row,
-        manifest_id="manifest-test",
-        image_resolver=LocalImageResolver(tmp_path),
-    )
+    trajectory = make_visual_reflection_trajectory(tmp_path, edit_turns=edit_turns)
 
     source = adapt_midjourney_prompt_record({"id": "mj-1", "prompt": trajectory["prompt"]})
     source_split = assign_source_splits([source], ratios={"train": 1.0, "validation": 0.0, "test": 0.0}, seed=7)[
@@ -418,10 +467,11 @@ def test_echo_synthesis_result_requires_exact_zero_or_one_turn_quality_gates(tmp
         "partition": partition,
     }
     manifest_id = derive_manifest_id(**recipe)
-    base = parse_unicot_record(
-        make_unicot_row(tmp_path, edit_turns=edit_turns, data_id=f"pair-image-{edit_turns}"),
+    base = make_visual_reflection_trajectory(
+        tmp_path,
+        edit_turns=edit_turns,
+        source_record_id=f"pair-image-{edit_turns}",
         manifest_id=manifest_id,
-        image_resolver=LocalImageResolver(tmp_path),
     )
     reference_uri = base["images"][-1]["uri"]
     if edit_turns == 0:
@@ -608,10 +658,11 @@ def test_manifest_audits_synthesis_request_seed_bounds_partition_and_receipts(tm
         ratios=recipe["partition"]["ratios"],
         seed=recipe["partition"]["seed"],
     )[(source["source_dataset"], source["source_record_id"])]
-    base = parse_unicot_record(
-        make_unicot_row(tmp_path, edit_turns=0, data_id="image-source"),
+    base = make_visual_reflection_trajectory(
+        tmp_path,
+        edit_turns=0,
+        source_record_id="image-source",
         manifest_id=manifest_id,
-        image_resolver=LocalImageResolver(tmp_path),
     )
     trajectory = {
         **base,
@@ -778,15 +829,17 @@ def test_manifest_id_excludes_result_counts_and_ledger_is_consistent(tmp_path):
     recipe = _recipe()
     manifest_id = derive_manifest_id(**recipe)
     asset_root = tmp_path / "assets"
-    first = parse_unicot_record(
-        make_unicot_row(asset_root, edit_turns=0, data_id="good-row-1"),
+    first = make_visual_reflection_trajectory(
+        asset_root,
+        edit_turns=0,
+        source_record_id="good-row-1",
         manifest_id=manifest_id,
-        image_resolver=LocalImageResolver(asset_root),
     )
-    second = parse_unicot_record(
-        make_unicot_row(asset_root, edit_turns=1, data_id="good-row-2"),
+    second = make_visual_reflection_trajectory(
+        asset_root,
+        edit_turns=1,
+        source_record_id="good-row-2",
         manifest_id=manifest_id,
-        image_resolver=LocalImageResolver(asset_root),
     )
     assignments = assign_source_splits(
         [first, second],
@@ -797,7 +850,7 @@ def test_manifest_id_excludes_result_counts_and_ledger_is_consistent(tmp_path):
     second_assignment = assignments[(second["source_dataset"], second["source_record_id"])]
     ledger = RejectionLedger(manifest_id)
     ledger.append(
-        source_dataset="Fr0zencr4nE/UniCoT-Self-Reflection-6K",
+        source_dataset="example/visual-reflection",
         source_record_id="bad-row",
         pipeline_variant="direct_parse",
         stage="direct_parse",
@@ -861,24 +914,25 @@ def test_manifest_rejects_tampered_partition_id():
     assert error.value.reason is RejectionReason.INVALID_PROVENANCE
 
 
-def test_manifest_rejects_unknown_public_source_split():
+def test_manifest_rejects_empty_source_split():
     recipe = _recipe()
-    recipe["sources"][0]["split"] = "typo"
+    recipe["sources"][0]["split"] = " "
 
     with pytest.raises(VisualReflectionDataError) as error:
         derive_manifest_id(**recipe)
 
-    assert error.value.reason is RejectionReason.INVALID_PROVENANCE
+    assert error.value.reason is RejectionReason.INVALID_FIELD_TYPE
 
 
 def test_manifest_requires_matching_source_split_and_rehashes_assets(tmp_path):
     recipe = _recipe()
     manifest_id = derive_manifest_id(**recipe)
     asset_root = tmp_path / "assets"
-    trajectory = parse_unicot_record(
-        make_unicot_row(asset_root, edit_turns=0, data_id="good-row"),
+    trajectory = make_visual_reflection_trajectory(
+        asset_root,
+        edit_turns=0,
+        source_record_id="good-row",
         manifest_id=manifest_id,
-        image_resolver=LocalImageResolver(asset_root),
     )
     assignment = assign_source_splits(
         [trajectory],
@@ -942,12 +996,12 @@ def test_manifest_requires_matching_source_split_and_rehashes_assets(tmp_path):
     assert image_error.value.reason is RejectionReason.MISSING_IMAGE
 
 
-def test_manifest_id_binds_the_exact_unicot_converter_config():
+def test_manifest_id_binds_the_exact_converter_config():
     default_recipe = _recipe()
-    shorter_recipe = copy.deepcopy(default_recipe)
-    shorter_recipe["converter_config"] = unicot_converter_config(UniCoTParserConfig(fallback_max_chars=512))
+    changed_recipe = copy.deepcopy(default_recipe)
+    changed_recipe["converter_config"]["adapter_version"] = "v2"
 
-    assert derive_manifest_id(**default_recipe) != derive_manifest_id(**shorter_recipe)
+    assert derive_manifest_id(**default_recipe) != derive_manifest_id(**changed_recipe)
 
 
 def test_rejection_ledger_defensive_copies_nested_details():
@@ -955,7 +1009,7 @@ def test_rejection_ledger_defensive_copies_nested_details():
     ledger = RejectionLedger(manifest_id)
     details = {"nested": {"values": [1]}}
     ledger.append(
-        source_dataset="Fr0zencr4nE/UniCoT-Self-Reflection-6K",
+        source_dataset="example/visual-reflection",
         source_record_id="bad-row",
         pipeline_variant="direct_parse",
         stage="direct_parse",
@@ -971,11 +1025,33 @@ def test_rejection_ledger_defensive_copies_nested_details():
     assert ledger.entries[0]["details"] == {"nested": {"values": [1]}}
 
 
+def test_rejection_ledger_append_error_has_direct_parse_lineage():
+    ledger = RejectionLedger("manifest-test")
+    error = VisualReflectionDataError(
+        RejectionReason.EMPTY_REFLECTION,
+        "reflection is empty",
+        field="eval_summary[0]",
+        details={"index": 0},
+    )
+
+    entry = ledger.append_error(
+        error,
+        source_dataset="example/visual-reflection",
+        source_record_id="bad-row",
+    )
+
+    assert entry["pipeline_variant"] == "direct_parse"
+    assert entry["lineage_kind"] == "direct_parse"
+    assert entry["stage"] == "direct_parse"
+    assert entry["attempt"] == 0
+    assert entry["details"] == {"field": "eval_summary[0]", "index": 0}
+
+
 def test_rejection_ledger_accepts_only_one_final_row_per_source():
     manifest_id = derive_manifest_id(**_recipe())
     ledger = RejectionLedger(manifest_id)
     kwargs = {
-        "source_dataset": "Fr0zencr4nE/UniCoT-Self-Reflection-6K",
+        "source_dataset": "example/visual-reflection",
         "source_record_id": "bad-row",
         "pipeline_variant": "direct_parse",
         "stage": "direct_parse",
@@ -996,7 +1072,7 @@ def test_rejection_ledger_serialization_is_independent_of_append_order():
     second = RejectionLedger(manifest_id)
     rows = [
         {
-            "source_dataset": "Fr0zencr4nE/UniCoT-Self-Reflection-6K",
+            "source_dataset": "example/visual-reflection",
             "source_record_id": record_id,
             "pipeline_variant": "direct_parse",
             "stage": "direct_parse",

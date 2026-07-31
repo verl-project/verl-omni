@@ -305,7 +305,7 @@ def _planner_source_record(
         if len(trajectory["images"]) > 2:
             raise VisualReflectionDataError(
                 RejectionReason.TURN_LIMIT_EXHAUSTED,
-                "Echo pair trajectories may contain at most one edit",
+                "Pair-source trajectories may contain at most one edit",
                 source_record_id=trajectory["source_record_id"],
             )
         if (
@@ -314,7 +314,7 @@ def _planner_source_record(
         ):
             raise VisualReflectionDataError(
                 RejectionReason.INCOMPATIBLE_EDIT_TARGET,
-                "Echo one-edit trajectory must terminate at the public reference image",
+                "One-edit pair-source trajectory must terminate at the reference image",
                 source_record_id=trajectory["source_record_id"],
             )
     return source_record

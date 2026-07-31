@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tokenizer-independent contracts for BAGEL visual-reflection SFT data."""
+"""Tokenizer-independent contracts for multi-turn visual-reflection data."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from collections.abc import Mapping
 from enum import Enum
 from typing import Any, Literal, TypeAlias, TypedDict
 
-SCHEMA_VERSION = "bagel_visual_reflection_v1"
+SCHEMA_VERSION = "visual_reflection_v1"
 CONVERTER_VERSION = "public_adapters_v1"
 FILTER_VERSION = "fail_closed_v1"
 FINGERPRINT_VERSION = "nfkc_ws_casefold_v1"
@@ -121,8 +121,8 @@ class VisualReflectionTrajectory(TypedDict):
     steps: list[ReflectionStep]
 
 
-class EchoPairSource(TypedDict):
-    """Normalized Echo text-to-image pair before synthesis and splitting."""
+class ImagePairSource(TypedDict):
+    """Normalized text-to-image pair before synthesis and splitting."""
 
     source_dataset: str
     source_record_id: str
@@ -142,7 +142,7 @@ class PromptOnlySource(TypedDict):
     dedup_key: str
 
 
-class PairSynthesisRequest(EchoPairSource):
+class PairSynthesisRequest(ImagePairSource):
     """Split-assigned request for bounded zero/one-edit pair synthesis."""
 
     request_id: str
@@ -171,7 +171,7 @@ SynthesisRequest: TypeAlias = PairSynthesisRequest | PromptKTurnSynthesisRequest
 
 
 class DraftGenerationRequest(TypedDict):
-    """Repo-native BAGEL draft generation input with a stable source seed."""
+    """Draft image-generation input with a stable source seed."""
 
     request_id: str
     parent_request_id: str
@@ -469,7 +469,7 @@ def derive_pair_source_dedup_key(prompt: str, reference_image: Mapping[str, Any]
     normalized_prompt = require_nonempty_text(prompt, field="prompt", reason=RejectionReason.EMPTY_PROMPT)
     image = validate_image_ref(reference_image)
     return stable_digest(
-        "echo_pair_dedup",
+        "image_pair_source_dedup_v1",
         {
             "version": FINGERPRINT_VERSION,
             "prompt": normalize_text_for_fingerprint(normalized_prompt),
@@ -482,7 +482,7 @@ def derive_prompt_source_dedup_key(prompt: str) -> str:
     """Derive the exact normalized-prompt fingerprint for prompt-only synthesis."""
     normalized_prompt = require_nonempty_text(prompt, field="prompt", reason=RejectionReason.EMPTY_PROMPT)
     return stable_digest(
-        "midjourney_prompt_dedup",
+        "prompt_only_source_dedup_v1",
         {"version": FINGERPRINT_VERSION, "prompt": normalize_text_for_fingerprint(normalized_prompt)},
     )
 

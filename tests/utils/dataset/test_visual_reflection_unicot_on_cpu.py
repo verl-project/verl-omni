@@ -15,17 +15,49 @@
 
 import copy
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from tests.utils.dataset._bagel_visual_reflection_fixtures import make_unicot_row, write_rgb_png
-from verl_omni.utils.dataset.bagel_visual_reflection import (
+from tests.utils.dataset._visual_reflection_fixtures import write_rgb_png
+from verl_omni.utils.dataset.visual_reflection import (
     LocalImageResolver,
     RejectionReason,
-    UniCoTParserConfig,
     VisualReflectionDataError,
-    parse_unicot_record,
 )
+from verl_omni.utils.dataset.visual_reflection.unicot import UniCoTParserConfig, parse_unicot_record
+
+
+def make_unicot_row(root: Path, *, edit_turns: int, data_id: str = "fixture") -> dict[str, Any]:
+    """Create a valid row using the public UniCoT field shape."""
+    state_count = edit_turns + 1
+    input_paths = [(Path("images") / "inputs" / f"state_{index}.png").as_posix() for index in range(state_count)]
+    for index in range(state_count):
+        write_rgb_png(root / input_paths[index], (index * 70 % 255, index * 40 % 255, index * 20 % 255))
+    output_paths: list[str | None] = []
+    for index in range(edit_turns):
+        output_path = Path("images") / "outputs" / f"state_{index + 1}.png"
+        (root / output_path).parent.mkdir(parents=True, exist_ok=True)
+        (root / output_path).write_bytes((root / input_paths[index + 1]).read_bytes())
+        output_paths.append(output_path.as_posix())
+    output_paths.append(None)
+
+    evaluations = [f"Detailed evaluation for state {index}." for index in range(state_count)]
+    summaries = [f"Summary for state {index}." for index in range(state_count)]
+    if state_count > 1:
+        summaries[1] = ""
+        evaluations[1] = "  Detailed\n evaluation   fallback for state 1.  "
+    edits = [f"Apply delta edit {index}." for index in range(edit_turns)]
+    edits.append("Everything is good. No editing needed.")
+    return {
+        "data_id": data_id,
+        "prompt": "A precise visual prompt.",
+        "eval": evaluations,
+        "eval_summary": summaries,
+        "edit": edits,
+        "input_image": input_paths,
+        "output_image": output_paths,
+    }
 
 
 @pytest.mark.parametrize("edit_turns", [0, 1, 2])

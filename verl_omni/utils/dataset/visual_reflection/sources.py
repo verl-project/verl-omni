@@ -20,9 +20,9 @@ from typing import Any
 
 from .contracts import (
     DraftGenerationRequest,
-    EchoPairSource,
     EditSynthesisRequest,
     EditVerificationRequest,
+    ImagePairSource,
     ImageSynthesisRequest,
     ImageSynthesisResult,
     PairSynthesisRequest,
@@ -62,7 +62,7 @@ def adapt_echo_pair_record(
     source_record_id: str | None = None,
     prompt_field: str = "instruction",
     image_field: str = "output_image",
-) -> EchoPairSource:
+) -> ImagePairSource:
     """Normalize one Echo instruction-following T2I pair without teacher inference."""
     if not isinstance(record, Mapping):
         raise VisualReflectionDataError(
@@ -236,7 +236,7 @@ def build_prompt_synthesis_request(
     }
 
 
-def synthesis_request_source(request: Mapping[str, Any]) -> EchoPairSource | PromptOnlySource:
+def synthesis_request_source(request: Mapping[str, Any]) -> ImagePairSource | PromptOnlySource:
     """Extract the exact normalized public source bound into a synthesis request."""
     normalized = _validate_synthesis_request(request)
     if normalized["pipeline_variant"] == "pair_0_1_turn":
@@ -262,7 +262,7 @@ def make_draft_generation_request(
     parent_request: Mapping[str, Any],
     attempt: int,
 ) -> DraftGenerationRequest:
-    """Build the repo-native BAGEL draft request from its stable source seed."""
+    """Build a draft image-generation request from its stable source seed."""
     parent = _validate_synthesis_request(parent_request)
     _validate_stage_attempt(parent, attempt)
     stage_payload = [parent["request_id"], parent["prompt"], parent["seed"], attempt]
@@ -1051,7 +1051,7 @@ def _normalize_echo_image_path(value: Any, *, source_record_id: str) -> Any:
     return value
 
 
-def _validate_echo_source(source: Mapping[str, Any]) -> EchoPairSource:
+def _validate_echo_source(source: Mapping[str, Any]) -> ImagePairSource:
     if not isinstance(source, Mapping):
         raise VisualReflectionDataError(RejectionReason.INVALID_FIELD_TYPE, "Echo source must be a mapping")
     expected_fields = {

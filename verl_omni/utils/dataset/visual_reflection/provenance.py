@@ -48,18 +48,13 @@ from .partition import (
     validate_split_provenance,
 )
 from .sources import validate_synthesis_result
-from .unicot import UniCoTParserConfig, unicot_converter_config
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _FLOATING_REVISIONS = {"head", "latest", "main", "master"}
 _PIPELINE_VARIANTS = {"direct_parse", "pair_0_1_turn", "prompt_k_turn"}
 _SOURCE_PREPARATION_STAGES = {"source_adapter", "source_dedup", "source_filter"}
-_PUBLIC_SOURCE_POLICIES = {
-    "Fr0zencr4nE/UniCoT-Self-Reflection-6K": ("default", "apache-2.0", "direct_parse", {"train"}),
-    "Yejy53/Echo-4o-Image": ("Instruction-Following-Image", "mit", "pair_0_1_turn", {"train"}),
-    "brivangl/midjourney-v6-llava": ("default", "mit", "prompt_k_turn", {"train"}),
-}
+_MANIFEST_DIGEST_DOMAIN = "visual_reflection_manifest_v1"
 
 
 def _rejection_sort_key(entry: RejectionRecord) -> tuple[Any, ...]:
@@ -295,22 +290,19 @@ class RejectionLedger:
         *,
         source_dataset: str,
         source_record_id: str,
-        pipeline_variant: str,
-        stage: str,
-        attempt: int = 0,
     ) -> RejectionRecord:
-        """Append a classified ``VisualReflectionDataError`` without swallowing unknown bugs."""
+        """Append a classified direct-parse error without swallowing unknown bugs."""
         details = dict(error.details)
         if error.field is not None:
             details["field"] = error.field
         return self.append(
             source_dataset=source_dataset,
             source_record_id=source_record_id,
-            pipeline_variant=pipeline_variant,
-            stage=stage,
+            pipeline_variant="direct_parse",
+            stage="direct_parse",
             reason=error.reason,
             message=str(error),
-            attempt=attempt,
+            attempt=0,
             details=details,
         )
 
@@ -373,7 +365,7 @@ def derive_manifest_id(
         converter_config=converter_config,
         partition=partition,
     )
-    return f"manifest_{stable_digest('bagel_visual_reflection_manifest_v1', recipe)}"
+    return f"manifest_{stable_digest(_MANIFEST_DIGEST_DOMAIN, recipe)}"
 
 
 def build_data_manifest(
@@ -401,7 +393,7 @@ def build_data_manifest(
         converter_config=converter_config,
         partition=partition,
     )
-    manifest_id = f"manifest_{stable_digest('bagel_visual_reflection_manifest_v1', recipe)}"
+    manifest_id = f"manifest_{stable_digest(_MANIFEST_DIGEST_DOMAIN, recipe)}"
     if rejection_ledger.manifest_id != manifest_id:
         raise VisualReflectionDataError(
             RejectionReason.INVALID_PROVENANCE,
@@ -813,31 +805,12 @@ def _validate_source_provenance(value: Mapping[str, Any]) -> SourceDatasetProven
     config = require_nonempty_text(value.get("config"), field="sources.config")
     split = require_nonempty_text(value.get("split"), field="sources.split")
     license_declaration = require_nonempty_text(value.get("license"), field="sources.license")
-    expected_policy = _PUBLIC_SOURCE_POLICIES.get(dataset_id)
-    if expected_policy is None:
-        raise VisualReflectionDataError(
-            RejectionReason.INVALID_PROVENANCE,
-            f"unsupported public source dataset: {dataset_id}",
-            field="sources.dataset_id",
-        )
-    expected_config, expected_license, expected_variant, allowed_splits = expected_policy
-    if (
-        config != expected_config
-        or license_declaration.casefold() != expected_license
-        or pipeline_variant != expected_variant
-        or split not in allowed_splits
-    ):
-        raise VisualReflectionDataError(
-            RejectionReason.INVALID_PROVENANCE,
-            f"source {dataset_id} config, split, license, or pipeline variant does not match the public adapter policy",
-            field="sources",
-        )
     return {
         "dataset_id": dataset_id,
         "config": config,
         "split": split,
         "revision": _validate_revision(value.get("revision"), field="sources.revision"),
-        "license": expected_license,
+        "license": license_declaration,
         "pipeline_variant": pipeline_variant,  # type: ignore[typeddict-item]
     }
 
@@ -880,23 +853,6 @@ def _validate_revision(value: Any, *, field: str) -> str:
 
 
 def _validate_converter_config(value: dict[str, Any], variants: set[str]) -> dict[str, Any]:
-    if "direct_parse" in variants:
-        fallback_max_chars = value.get("unicot_fallback_max_chars")
-        try:
-            expected_unicot = unicot_converter_config(UniCoTParserConfig(fallback_max_chars=fallback_max_chars))
-        except (TypeError, ValueError) as exc:
-            raise VisualReflectionDataError(
-                RejectionReason.INVALID_PROVENANCE,
-                "converter_config has invalid UniCoT parser settings",
-                field="converter_config",
-            ) from exc
-        for key, expected in expected_unicot.items():
-            if value.get(key) != expected:
-                raise VisualReflectionDataError(
-                    RejectionReason.INVALID_PROVENANCE,
-                    f"converter_config.{key} does not match the versioned UniCoT policy",
-                    field=f"converter_config.{key}",
-                )
     if "pair_0_1_turn" in variants:
         _require_positive_config_int(value, "pair_max_attempts")
     if "prompt_k_turn" in variants:

@@ -11,26 +11,97 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU tests for BAGEL visual-reflection contracts and text protocol."""
+"""CPU tests for generic visual-reflection contracts and text protocol."""
 
 import json
 
 import pytest
 
-from verl_omni.utils.dataset.bagel_visual_reflection import (
+from verl_omni.utils.dataset.visual_reflection import (
     RejectionReason,
     VisualReflectionDataError,
-    canonical_json,
-    derive_trajectory_id,
     format_reflection_response,
     parse_reflection_response,
+    validate_trajectory,
+)
+from verl_omni.utils.dataset.visual_reflection.contracts import (
+    FINGERPRINT_VERSION,
+    SCHEMA_VERSION,
+    canonical_json,
+    derive_pair_source_dedup_key,
+    derive_prompt_source_dedup_key,
+    derive_trajectory_id,
+    stable_digest,
     validate_image_ref,
     validate_reflection_step,
-    validate_trajectory,
 )
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
+EXPECTED_PUBLIC_API = {
+    "AtomicSFTExample",
+    "DataManifest",
+    "ImageRef",
+    "ImageResolver",
+    "LocalImageResolver",
+    "ReflectionStep",
+    "RejectionLedger",
+    "RejectionReason",
+    "SourceSplitAssignment",
+    "SplitProvenance",
+    "VisualReflectionDataError",
+    "VisualReflectionTrajectory",
+    "assign_source_splits",
+    "build_data_manifest",
+    "deduplicate_source_records",
+    "derive_manifest_id",
+    "format_reflection_response",
+    "make_split_provenance",
+    "parse_reflection_response",
+    "plan_atomic_examples",
+    "validate_atomic_example",
+    "validate_trajectory",
+}
+
+
+def test_schema_identity_is_model_agnostic():
+    assert SCHEMA_VERSION == "visual_reflection_v1"
+
+
+def test_package_root_exports_only_stable_generic_api():
+    import verl_omni.utils.dataset.visual_reflection as visual_reflection
+
+    assert set(visual_reflection.__all__) == EXPECTED_PUBLIC_API
+
+
+def test_pair_source_dedup_key_uses_source_neutral_digest_domain():
+    expected = stable_digest(
+        "image_pair_source_dedup_v1",
+        {
+            "version": FINGERPRINT_VERSION,
+            "prompt": "draw one object.",
+            "reference_sha256": SHA_A,
+        },
+    )
+
+    actual = derive_pair_source_dedup_key(
+        "  Draw ONE object.  ",
+        {"uri": "images/reference.png", "sha256": SHA_A},
+    )
+
+    assert actual == expected
+
+
+def test_prompt_source_dedup_key_uses_source_neutral_digest_domain():
+    expected = stable_digest(
+        "prompt_only_source_dedup_v1",
+        {
+            "version": FINGERPRINT_VERSION,
+            "prompt": "draw one object.",
+        },
+    )
+
+    assert derive_prompt_source_dedup_key("  Draw ONE object.  ") == expected
 
 
 def _trajectory(**overrides):

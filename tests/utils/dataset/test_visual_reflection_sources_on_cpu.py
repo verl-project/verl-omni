@@ -15,18 +15,21 @@
 
 import pytest
 
-from tests.utils.dataset._bagel_visual_reflection_fixtures import write_rgb_png
-from verl_omni.utils.dataset.bagel_visual_reflection import (
+from tests.utils.dataset._visual_reflection_fixtures import write_rgb_png
+from verl_omni.utils.dataset.visual_reflection import (
     LocalImageResolver,
     RejectionReason,
     VisualReflectionDataError,
+    assign_source_splits,
+    deduplicate_source_records,
+    make_split_provenance,
+)
+from verl_omni.utils.dataset.visual_reflection.partition import derive_source_seed
+from verl_omni.utils.dataset.visual_reflection.sources import (
     adapt_echo_pair_record,
     adapt_midjourney_prompt_record,
-    assign_source_splits,
     build_pair_synthesis_request,
     build_prompt_synthesis_request,
-    deduplicate_source_records,
-    derive_source_seed,
     make_draft_generation_request,
     make_edit_synthesis_request,
     make_edit_verification_request,
@@ -34,7 +37,6 @@ from verl_omni.utils.dataset.bagel_visual_reflection import (
     make_pair_verification_request,
     make_reflection_synthesis_request,
     make_reflection_synthesis_result,
-    make_split_provenance,
     make_terminal_verification_request,
     make_verification_result,
 )
