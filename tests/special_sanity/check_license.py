@@ -21,11 +21,13 @@ license_head_bytedance_25 = "Copyright 2025 Bytedance Ltd. and/or its affiliates
 license_head_bytedance_26 = "Copyright 2026 Bytedance Ltd. and/or its affiliates"
 # Add custom license headers below
 license_head_amazon_26 = "Copyright 2026 Amazon.com Inc and/or its affiliates"
+license_head_nvidia_26 = "Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved."
 license_headers = [
     license_head_bytedance,
     license_head_bytedance_25,
     license_head_bytedance_26,
     license_head_amazon_26,
+    license_head_nvidia_26,
 ]
 
 

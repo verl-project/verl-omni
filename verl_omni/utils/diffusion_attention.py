@@ -55,6 +55,14 @@ def fa3_available() -> bool:
     return actor_fa3_available() and rollout_fa3_available()
 
 
+def fallback_rollout_fa3_if_unavailable(attn_backend: str) -> str:
+    """Fall back to Torch SDPA when rollout Flash Attention is unavailable."""
+    if attn_backend == "FLASH_ATTN" and not rollout_fa3_available():
+        logger.warning("Rollout Flash Attention unavailable; falling back to TORCH_SDPA.")
+        return "TORCH_SDPA"
+    return attn_backend
+
+
 def fallback_fa3_if_unavailable(config: Any) -> None:
     """Downgrade explicit FA3 settings to native when deps are missing."""
     attn_backend = config.actor_rollout_ref.model.get("attn_backend", ACTOR_FA3_BACKEND)
