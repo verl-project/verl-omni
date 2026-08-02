@@ -20,12 +20,11 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
-from vllm_omni.diffusion.distributed.utils import get_local_device
-from vllm_omni.diffusion.models.boogu_image.image_processor import BooguImageProcessor
 from vllm_omni.diffusion.models.boogu_image.pipeline_boogu_image import BooguImagePipeline
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.qwen_image_flow_grpo.common import QwenImageTokenIdPromptMixin, coalesce_not_none
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.pipelines.utils import ImageGenerationRequest
 
@@ -34,18 +33,13 @@ from .common import (
     boogu_timestep_from_scheduler,
     configure_boogu_sde_timesteps,
     get_boogu_freqs_cis,
-    load_boogu_shift_config,
 )
 
 __all__ = ["BooguImagePipelineWithLogProb"]
 
 
-def _coalesce_not_none(value, default):
-    return default if value is None else value
-
-
 @VllmOmniPipelineBase.register("BooguImagePipeline", algorithm="flow_grpo")
-class BooguImagePipelineWithLogProb(BooguImagePipeline):
+class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipeline):
     """Rollout pipeline for Boogu-Image that captures per-step log-probabilities.
 
     Extends the vllm-omni ``BooguImagePipeline`` with:
@@ -71,7 +65,8 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:
         super().__init__(od_config=od_config, prefix=prefix)
-        self.device = get_local_device()
+        self._boogu_scheduler = self.scheduler
+        self.device = self._execution_device
         model = od_config.model
         local_files_only = os.path.exists(model)
 
@@ -88,8 +83,6 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
             subfolder="scheduler",
             local_files_only=local_files_only,
         )
-        # Raw scheduler config (with Boogu's time-shift keys diffusers drops).
-        self._shift_config = load_boogu_shift_config(model)
 
     # ------------------------------------------------------------------
     # Prompt encoding from pre-tokenised IDs
@@ -166,15 +159,14 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
             prompt_embeds, prompt_embeds_mask = self._get_boogu_prompt_embeds(
                 prompt_ids, attention_mask, condition_images=condition_images
             )
-
-        prompt_embeds = prompt_embeds[:, :max_sequence_length]
-        prompt_embeds_mask = prompt_embeds_mask[:, :max_sequence_length]
-
-        if num_images_per_prompt > 1:
-            prompt_embeds = prompt_embeds.repeat_interleave(num_images_per_prompt, dim=0)
-            prompt_embeds_mask = prompt_embeds_mask.repeat_interleave(num_images_per_prompt, dim=0)
-
-        return prompt_embeds, prompt_embeds_mask
+        return super().encode_prompt(
+            prompt_ids,
+            attention_mask,
+            num_images_per_prompt,
+            prompt_embeds,
+            prompt_embeds_mask,
+            max_sequence_length,
+        )
 
     def _tokenize_text_prompt(self, text: str | list[str]) -> tuple[torch.Tensor, torch.Tensor]:
         """Tokenize raw text with the upstream chat template (dummy-run fallback)."""
@@ -320,8 +312,9 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
         """End-to-end T2I / Edit (TI2I) generation with rollout-trajectory collection."""
         prompts = req.prompts
 
-        # Edit (TI2I) requests carry a single reference image via the shared
-        # multimodal request payload. Boogu editing supports one image.
+        # Parent preprocessing supplies VAE tensors; Qwen3VL still needs the raw
+        # image whose pixel grid matches the pre-tokenised placeholders.
+        _, preprocessed_images = self._extract_reference_images(prompts)
         custom_prompt = prompts[0] if prompts else {}
         condition_images: list = []
         if isinstance(custom_prompt, dict):
@@ -332,7 +325,9 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
                 f"Boogu-Image editing supports a single reference image; received {len(condition_images)}."
             )
         condition_images = [image.convert("RGB") for image in condition_images]
-        has_reference = bool(condition_images)
+        has_reference = any(image is not None for image in preprocessed_images)
+        if has_reference != bool(condition_images):
+            raise ValueError("Boogu-Image Edit requires both raw and parent-preprocessed reference images.")
 
         prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask = self._extract_prompt_ids(prompts)
 
@@ -358,11 +353,11 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
         )
 
         extra = sampling_params.extra_args or {}
-        noise_level = _coalesce_not_none(extra.get("noise_level", None), noise_level)
-        sde_window_size = _coalesce_not_none(extra.get("sde_window_size", None), sde_window_size)
-        sde_window_range = _coalesce_not_none(extra.get("sde_window_range", None), sde_window_range)
-        sde_type = _coalesce_not_none(extra.get("sde_type", None), sde_type)
-        logprobs = _coalesce_not_none(extra.get("logprobs", None), logprobs)
+        noise_level = coalesce_not_none(extra.get("noise_level", None), noise_level)
+        sde_window_size = coalesce_not_none(extra.get("sde_window_size", None), sde_window_size)
+        sde_window_range = coalesce_not_none(extra.get("sde_window_range", None), sde_window_range)
+        sde_type = coalesce_not_none(extra.get("sde_type", None), sde_type)
+        logprobs = coalesce_not_none(extra.get("logprobs", None), logprobs)
 
         generator = sampling_params.generator
         if generator is None and sampling_params.seed is not None:
@@ -396,19 +391,13 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
             negative_prompt_embeds = None
             negative_prompt_embeds_mask = None
 
-        # Edit path: VAE-preprocess the reference at near-native resolution and
-        # let the output resolution follow the reference dims (align_res).
+        # Edit path: reuse the parent's near-native VAE preprocessing and let
+        # the output resolution follow the reference dims (align_res).
         ref_image_hidden_states = None
         condition_image_latents = None
         if has_reference:
-            image_processor = BooguImageProcessor(vae_scale_factor=self.vae_scale_factor * 2, do_resize=True)
-            preprocessed_image = image_processor.preprocess(
-                condition_images[0], max_pixels=2048 * 2048, max_side_length=2048 * 2
-            )
-            height = int(preprocessed_image.shape[-2])
-            width = int(preprocessed_image.shape[-1])
             ref_image_hidden_states = self._build_ref_latents(
-                [preprocessed_image],
+                preprocessed_images,
                 num_images_per_prompt,
                 self.device,
                 generator,
@@ -432,10 +421,10 @@ class BooguImagePipelineWithLogProb(BooguImagePipeline):
         num_tokens = latents.shape[-2] * latents.shape[-1]
         configure_boogu_sde_timesteps(
             self.scheduler,
+            native_scheduler=self._boogu_scheduler,
             num_inference_steps=num_inference_steps,
             num_tokens=num_tokens,
             device=self.device,
-            shift_config=self._shift_config,
         )
         timesteps = self.scheduler.timesteps
 

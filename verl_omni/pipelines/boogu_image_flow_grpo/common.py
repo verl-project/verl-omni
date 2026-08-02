@@ -37,147 +37,49 @@ Both adapters therefore apply the same two fix-ups:
    scheduler. Under this mapping Boogu's Euler update x + (t_next - t) * v_boogu
    is identical to the diffusers update x + (sigma_prev - sigma) * v_diffusers.
 
-Time shift
-----------
-
-No scheduler port is needed for Boogu's time shift either, because both
-variants map exactly onto knobs the stock scheduler already has:
-
-- the v1 logistic shift is exactly the diffusers exp-mu shift
-  exp(mu) / (exp(mu) + (1/sigma - 1));
-- the v2 rational shift is exactly the diffusers multiplicative shift
-  m * sigma / (1 + (m - 1) * sigma).
-
-resolve_time_shift recovers the right mu / shift from the raw checkpoint
-config, so FlowMatchSDEDiscreteScheduler reproduces the original schedule
-unchanged. The released checkpoints use a static v1 shift
-(do_shift=true, dynamic_time_shift=false, time_shift_version="v1", seq_len=4096).
+Boogu's native scheduler remains the source of truth for time shifting. Its
+ascending timesteps are bridged to the SDE scheduler with ``sigma = 1 - t``;
+the latter then only supplies stochastic sampling and log probabilities.
 """
 
-import json
-import math
-import os
 from typing import Any, Optional
 
-import numpy as np
 import torch
 
-# Latent-token count of a 1024x1024 image at vae_scale_factor 8 divided by 4
-# (the v1 shift operates on (H_lat // 2) * (W_lat // 2) tokens).
-_V1_LIN_X1 = 256
-_V1_LIN_X2 = 4096
 
-
-def _lin_mu(seq_len: int, base_shift: float, max_shift: float) -> float:
-    """Boogu's linear token-count -> mu mapping (mirrors upstream training)."""
-    m = (max_shift - base_shift) / (_V1_LIN_X2 - _V1_LIN_X1)
-    b = base_shift - m * _V1_LIN_X1
-    return m * seq_len + b
-
-
-def load_boogu_shift_config(model_path: str) -> dict:
-    """Read the raw scheduler/scheduler_config.json from the checkpoint.
-
-    The Boogu time-shift keys (do_shift / dynamic_time_shift /
-    time_shift_version / seq_len / ...) are not attributes of the
-    diffusers FlowMatchSDEDiscreteScheduler, so from_pretrained
-    silently drops them from scheduler.config ("were passed ... but are
-    not expected and will be ignored"). Reading the JSON directly is the only
-    way to recover them.
-    """
-    config_path = os.path.join(model_path, "scheduler", "scheduler_config.json")
-    try:
-        with open(config_path) as f:
-            return json.load(f)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return {}
-
-
-def resolve_time_shift(
-    scheduler_config: Any,
-    num_tokens: Optional[int] = None,
-) -> tuple[Optional[float], float]:
-    """Resolve Boogu's time-shift config into diffusers scheduler terms.
-
-    Args:
-        scheduler_config: The raw checkpoint scheduler config mapping
-            (from load_boogu_shift_config), carrying Boogu's do_shift /
-            dynamic_time_shift / time_shift_version / seq_len keys.
-            Do not pass scheduler.config — diffusers drops the custom
-            keys there.
-        num_tokens: Per-sample latent token count H_lat * W_lat; only
-            consulted by the dynamic variants.
-
-    Returns:
-        (mu, shift) where mu is the exp-shift exponent for
-        set_timesteps(mu=...) (None when the v2 / no-shift path is
-        active) and shift is the multiplicative shift for the static
-        scheduler path (1.0 = disabled). Exactly one of the two is
-        meaningful.
-    """
-    get = (
-        scheduler_config.get if hasattr(scheduler_config, "get") else lambda k, d=None: getattr(scheduler_config, k, d)
+def build_boogu_native_scheduler(model_path: str):
+    """Load the checkpoint's native scheduler, including Boogu shift config."""
+    from vllm_omni.diffusion.models.boogu_image.scheduling_flow_match_euler_discrete_time_shifting import (
+        FlowMatchEulerDiscreteScheduler,
     )
 
-    # An empty mapping means the Boogu keys could not be read (e.g. someone
-    # passed the diffusers-filtered scheduler.config or the JSON was
-    # missing). Degrade to a no-op schedule rather than silently applying the
-    # dynamic-v2 defaults, which do not match the released checkpoints.
-    if isinstance(scheduler_config, dict) and not scheduler_config:
-        return None, 1.0
-
-    if not get("do_shift", True):
-        return None, 1.0
-
-    version = get("time_shift_version", "v2")
-    dynamic = get("dynamic_time_shift", True)
-    base_shift = get("base_shift", 0.5)
-    max_shift = get("max_shift", 1.15)
-    seq_len = get("seq_len", None)
-    half_scaling = get("time_shift_v2_half_scaling_factor", 60.0)
-
-    if version == "v1":
-        if dynamic:
-            if num_tokens is None or num_tokens <= 0:
-                return None, 1.0
-            tokens_reduced = max(1, int(num_tokens) // 4)
-            return _lin_mu(tokens_reduced, base_shift, max_shift), 1.0
-        if seq_len is None or seq_len <= 0:
-            return None, 1.0
-        return _lin_mu(int(seq_len), base_shift, max_shift), 1.0
-
-    if version == "v2":
-        tokens = num_tokens if dynamic else seq_len
-        if tokens is None or tokens <= 0:
-            return None, 1.0
-        return None, float(math.sqrt(tokens)) / (half_scaling * 2)
-
-    raise ValueError(f"Unknown Boogu time_shift_version: {version!r}")
+    return FlowMatchEulerDiscreteScheduler.from_pretrained(model_path, subfolder="scheduler")
 
 
 def configure_boogu_sde_timesteps(
     scheduler,
     *,
+    native_scheduler,
     num_inference_steps: int,
     num_tokens: int,
     device,
-    shift_config: dict,
 ) -> None:
-    """Set SDE-scheduler timesteps reproducing the checkpoint's Boogu schedule.
+    """Bridge native Boogu timesteps into the log-probability SDE scheduler."""
+    native_scheduler.set_timesteps(
+        num_inference_steps=num_inference_steps,
+        device=device,
+        num_tokens=num_tokens,
+    )
+    sigmas = (1.0 - native_scheduler.timesteps).detach().cpu().numpy()
 
-    shift_config is the raw scheduler config from load_boogu_shift_config
-    (the diffusers scheduler.config has already dropped Boogu's custom
-    keys). num_tokens is the latent pixel count H_lat * W_lat (only
-    consulted by the dynamic-shift variants).
-    """
-    mu, shift = resolve_time_shift(shift_config, num_tokens)
-    sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
-    if mu is not None:
-        scheduler.register_to_config(use_dynamic_shifting=True)
-        scheduler.set_timesteps(num_inference_steps, device=device, sigmas=sigmas, mu=mu)
-    else:
-        scheduler.register_to_config(use_dynamic_shifting=False, shift=shift)
-        scheduler.set_timesteps(num_inference_steps, device=device, sigmas=sigmas)
+    # Native Boogu already applied the checkpoint's v1/v2 shift. Disable both
+    # diffusers shift paths so the supplied sigmas are not transformed again.
+    scheduler.register_to_config(use_dynamic_shifting=False, shift=1.0)
+    scheduler.set_timesteps(
+        num_inference_steps=num_inference_steps,
+        device=device,
+        sigmas=sigmas,
+    )
 
 
 def boogu_timestep_from_scheduler(timestep: torch.Tensor, num_train_timesteps: int) -> torch.Tensor:
