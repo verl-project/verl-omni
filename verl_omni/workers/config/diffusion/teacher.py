@@ -147,8 +147,6 @@ def resolve_teacher_model_config(actor: DiffusionModelConfig, entry: TeacherMode
     sharpest leak is ``config_path``, which the VeOmni engine resolves as
     ``config_path or weights_path`` -- a non-empty actor value would silently
     define the teacher's architecture from the student's directory.
-
-    Anything not named below is a deliberate gap to be closed in review.
     """
     fields = {}
 

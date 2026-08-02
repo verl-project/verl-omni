@@ -150,7 +150,7 @@ class DiffusionTeacherModelManager:
         return DataProto.from_tensordict(tu.get_tensordict({"teacher_prev_sample_mean": teacher_mean}))
 
     def teacher_param_checksums(self) -> list[str]:
-        """One checksum per rank, for the frozen-teacher probes (§6.3)."""
+        """One checksum per rank, for the frozen-teacher probes."""
         return self._teacher_wg.teacher_param_checksum()
 
     def start_profile(self, step: int) -> None:

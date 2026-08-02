@@ -121,7 +121,7 @@ def build_teacher_response(output: TensorDict, all_timesteps: torch.Tensor, teac
 
 
 def parameter_checksum(module: torch.nn.Module) -> str:
-    """Stable hash of a module's parameters, for the frozen-teacher probes (§6.3)."""
+    """Stable hash of a module's parameters, for the frozen-teacher probes."""
     hasher = hashlib.sha256()
     for name, param in sorted(module.named_parameters(), key=lambda item: item[0]):
         hasher.update(name.encode())
@@ -162,7 +162,7 @@ class DiffusionTeacherWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        """Build the frozen teacher. Must run before the actor/rollout group (§6.1)."""
+        """Build the frozen teacher. Must run before the actor/rollout group."""
         self.teacher_key, training_config = build_teacher_training_config(self.config, world_size=self.world_size)
         self.teacher = TrainingWorker(config=training_config)
         self.teacher.reset()
@@ -180,5 +180,5 @@ class DiffusionTeacherWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def teacher_param_checksum(self) -> str:
-        """Probe for the frozen guarantee: unchanged across optimizer steps (§6.3)."""
+        """Probe for the frozen guarantee: unchanged across optimizer steps."""
         return parameter_checksum(self.teacher.engine.module)

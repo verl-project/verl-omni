@@ -84,7 +84,8 @@ def _terminate_worker_handles(worker_groups) -> None:
     ``spawn()`` hands each prefixed view the *same* handle list and there is no
     group-level shutdown, so killing "the teacher group" would take the fused
     actor with it, while killing only the teacher's view would leave it alive.
-    De-duplicating by object identity is what makes the fused case correct.
+    De-duplicating by object identity avoids calling ``ray.kill`` twice on a
+    handle shared across those prefixed views.
     """
     seen: set[int] = set()
     for worker_group in worker_groups:
