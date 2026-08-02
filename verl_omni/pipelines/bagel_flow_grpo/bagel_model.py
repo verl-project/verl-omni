@@ -234,6 +234,7 @@ class BagelMoTAttention(nn.Module):
         latent_mask: Tensor,
         L_ctx: int = 0,
         key_padding_mask: Optional[Tensor] = None,
+        attention_mask: Optional[Tensor] = None,
     ) -> Tensor:
         B, L, _ = hidden_states.shape
         text_idx = text_mask.nonzero(as_tuple=True)
@@ -285,7 +286,23 @@ class BagelMoTAttention(nn.Module):
         k_normed = k_normed.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        if L_ctx > 0:
+        if attention_mask is not None:
+            if attention_mask.ndim == 3:
+                attention_mask = attention_mask.unsqueeze(1)
+            if attention_mask.ndim != 4 or attention_mask.shape[0] != B:
+                raise ValueError("attention_mask must have shape (B, L, L) or (B, 1, L, L)")
+            if attention_mask.shape[-2:] != (L, L):
+                raise ValueError(
+                    f"attention_mask has trailing shape {tuple(attention_mask.shape[-2:])}, expected {(L, L)}"
+                )
+            attn_out = F.scaled_dot_product_attention(
+                q_normed,
+                k_normed,
+                v,
+                attn_mask=attention_mask,
+                is_causal=False,
+            )
+        elif L_ctx > 0:
             if key_padding_mask is not None and not key_padding_mask.all():
                 # Official BAGEL packs prompts, so padded prompt keys do not exist there.
                 # Mask them in both branches to match packed attention semantics.
@@ -299,7 +316,7 @@ class BagelMoTAttention(nn.Module):
                     is_causal=False,
                 )
                 # key_padding_mask: True = valid key, broadcast as (B,1,1,L).
-                img_attn_mask = key_padding_mask.view(B, 1, 1, L)
+                img_attn_mask = key_padding_mask.view(B, 1, 1, L).expand(-1, 1, L - L_ctx, -1).contiguous()
                 img_out = F.scaled_dot_product_attention(
                     q_normed[:, :, L_ctx:],
                     k_normed,
@@ -357,6 +374,7 @@ class BagelMoTLayer(nn.Module):
         latent_mask: Tensor,
         L_ctx: int = 0,
         key_padding_mask: Optional[Tensor] = None,
+        attention_mask: Optional[Tensor] = None,
     ) -> Tensor:
         """Forward pass with MoT-routed layernorm, attention, and MLP.
 
@@ -388,6 +406,7 @@ class BagelMoTLayer(nn.Module):
             latent_mask,
             L_ctx,
             key_padding_mask=key_padding_mask,
+            attention_mask=attention_mask,
         )
         hidden_states = hidden_states + attn_out
 
@@ -503,6 +522,8 @@ class BagelForTraining(NonDiffusersModelBase):
             ``(B, L_latent, patch_latent_dim)``.
         """
         text_attention_mask = kwargs.pop("text_attention_mask", None)
+        image_position_ids = kwargs.pop("image_position_ids", None)
+        latent_attention_mask = kwargs.pop("latent_attention_mask", None)
         if text_token_ids is not None and text_attention_mask is not None:
             text_attention_mask = text_attention_mask.to(device=text_token_ids.device, dtype=torch.bool)
             text_lengths = text_attention_mask.sum(dim=-1)
@@ -518,6 +539,10 @@ class BagelForTraining(NonDiffusersModelBase):
         B = hidden_states.shape[0]
         L_latent = hidden_states.shape[1]
         dev = hidden_states.device
+        if latent_attention_mask is not None:
+            if latent_attention_mask.shape != (B, L_latent):
+                raise ValueError("latent_attention_mask must have shape (B, L_latent)")
+            latent_attention_mask = latent_attention_mask.to(device=dev, dtype=torch.bool)
 
         # 1. Embed text context
         if text_token_ids is not None:
@@ -556,17 +581,32 @@ class BagelForTraining(NonDiffusersModelBase):
 
         # 6. RoPE positions
         if L_ctx > 0:
-            ctx_pos = torch.arange(L_ctx, device=dev)
-            img_pos = ctx_pos.new_full((1 + L_latent + 1,), L_ctx)
-            position_ids = torch.cat([ctx_pos, img_pos]).unsqueeze(0).expand(B, -1)
+            ctx_pos = torch.arange(L_ctx, device=dev).unsqueeze(0).expand(B, -1)
+            if image_position_ids is None:
+                image_position = torch.full((B, 1), L_ctx, dtype=torch.long, device=dev)
+            else:
+                if image_position_ids.shape != (B,):
+                    raise ValueError("image_position_ids must have shape (B,)")
+                image_position = image_position_ids.to(device=dev, dtype=torch.long).unsqueeze(1)
+                if bool(((image_position < 0) | (image_position > L_ctx)).any()):
+                    raise ValueError("image_position_ids must be between 0 and the text sequence length")
+            img_pos = image_position.expand(-1, 1 + L_latent + 1)
+            position_ids = torch.cat([ctx_pos, img_pos], dim=1)
         else:
+            if image_position_ids is not None:
+                raise ValueError("image_position_ids require a text context")
             position_ids = torch.zeros(1, L_total, dtype=torch.long, device=dev).expand(B, -1)
 
         # Key padding mask: zero-padded text tokens in uneven micro-batches
         # must not attend to image queries.  ``None`` keeps the flash backend.
-        if L_ctx > 0 and text_attention_mask is not None and not bool(text_attention_mask.all()):
-            key_padding_mask = text_attention_mask.new_ones(B, L_total, dtype=torch.bool)
-            key_padding_mask[:, :L_ctx] = text_attention_mask
+        has_text_padding = L_ctx > 0 and text_attention_mask is not None and not bool(text_attention_mask.all())
+        has_latent_padding = latent_attention_mask is not None and not bool(latent_attention_mask.all())
+        if has_text_padding or has_latent_padding:
+            key_padding_mask = torch.ones(B, L_total, dtype=torch.bool, device=dev)
+            if text_attention_mask is not None:
+                key_padding_mask[:, :L_ctx] = text_attention_mask
+            if latent_attention_mask is not None:
+                key_padding_mask[:, L_ctx + 1 : L_ctx + 1 + L_latent] = latent_attention_mask
         else:
             key_padding_mask = None
 
