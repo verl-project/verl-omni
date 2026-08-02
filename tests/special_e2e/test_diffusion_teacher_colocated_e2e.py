@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Env-gated e2e test for the *colocated* teacher runtime (RFC #293).
+"""Env-gated e2e test for the *colocated* teacher runtime.
 
 The other GPU test (``tests/workers/test_diffusion_teacher_gpu.py``) exercises a
 standalone teacher worker; the runtime this PR actually ships is the teacher

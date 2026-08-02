@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU tests for wiring the diffusion teacher into the trainer (RFC #293)."""
+"""CPU tests for wiring the diffusion teacher into the trainer."""
 
 import os
 
@@ -94,7 +94,7 @@ class TestColocatedSpawnEntry:
 
     A standalone pool must *not* go through ``create_colocated_worker_cls`` --
     both upstream and this file's own comment say per-role pools need separate
-    worker groups -- which is why placement is the next runtime PR, not a flag.
+    worker groups -- which is why placement is deferred rather than exposed as a flag.
     """
 
     @staticmethod

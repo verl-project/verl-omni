@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Trainer-facing boundary for the diffusion teacher (RFC #293).
+"""Trainer-facing boundary for the diffusion teacher.
 
 The trainer sees one call and must not branch on placement, checkpoint form or
 backend:
@@ -39,7 +39,7 @@ from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 __all__ = ["DiffusionTeacherModelManager", "MVP_SUPPORT_MATRIX"]
 
-# (architecture, algorithm) pairs PR A serves. The request contract requires
+# (architecture, algorithm) pairs this runtime serves. The request contract requires
 # pooled_prompt_embeds and scheduler validation loads a checkpoint scheduler
 # directory; both are SD3-specific, and generalising needs adapter-owned hooks.
 MVP_SUPPORT_MATRIX = (("StableDiffusion3Pipeline", "flow_grpo"),)

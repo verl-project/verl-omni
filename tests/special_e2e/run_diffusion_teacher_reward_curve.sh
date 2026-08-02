@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Diffusion OPD teacher-runtime *reward-curve* experiment (RFC #293, PR #325).
+# Diffusion OPD teacher-runtime *reward-curve* experiment.
 #
-# NOT a CI smoke. Reproduces #304's base -> teacher -> student OCR-reward result
-# through the #325 teacher runtime, so the new runtime carries its own algorithm
-# evidence instead of borrowing #304's figure.
+# NOT a CI smoke. Reproduces the base -> teacher -> student OCR-reward result
+# through the teacher runtime, so the runtime carries its own algorithm evidence
+# instead of borrowing an earlier figure.
 #
-# This is #304's *exact, proven* command (LoRA rank 32, cps SDE, and a dedicated
+# This is the exact, proven command (LoRA rank 32, cps SDE, and a dedicated
 # 1-GPU reward pool serving Qwen2.5-VL-3B at gpu_memory_utilization=0.9,
-# enforce_eager=False -- the config that actually produced #304's curve). The
-# ONLY deliberate change is the teacher mechanism: #304 overloaded the ref slot
-# (`ref.model_path=<teacher>`); this uses the separate teacher runtime
-# (`actor_rollout_ref.teacher.*`). Everything else is held fixed so a difference
-# in the curve is attributable to the runtime, not to a re-tuned recipe.
+# enforce_eager=False -- the config that actually produced that curve). The
+# ONLY deliberate change is the teacher mechanism: the earlier run overloaded
+# the ref slot (`ref.model_path=<teacher>`); this uses the separate teacher
+# runtime (`actor_rollout_ref.teacher.*`). Everything else is held fixed so a
+# difference in the curve is attributable to the runtime, not to a re-tuned
+# recipe.
 #
 # Reward is monitored, not optimised: the loss is pure distill_kl. val reward is
 # the plotted series (base at step 0 via val_before_train, then every TEST_FREQ).

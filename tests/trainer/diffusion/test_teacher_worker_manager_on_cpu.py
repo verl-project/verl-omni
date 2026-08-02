@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU tests for the frozen diffusion teacher worker (RFC #293)."""
+"""CPU tests for the frozen diffusion teacher worker."""
 
 import pytest
 import torch
@@ -208,7 +208,7 @@ def make_batch(all_timesteps):
 
 class TestTeacherManagerConstruction:
     def test_non_mvp_architecture_rejected(self, adapter, fake_sd3_checkpoint, diffusion_model_config):
-        """Both sides Qwen: compatible with each other, still outside PR A's matrix."""
+        """Both sides Qwen: compatible with each other, still outside the supported matrix."""
         actor = diffusion_model_config(fake_sd3_checkpoint("student", class_name="QwenImagePipeline"))
         teacher_path = fake_sd3_checkpoint("teacher", class_name="QwenImagePipeline")
 

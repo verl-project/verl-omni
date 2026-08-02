@@ -1,4 +1,4 @@
-# Frozen teacher for diffusion online policy distillation (RFC #293).
+# Frozen teacher for diffusion online policy distillation.
 # The teacher replays the trajectories the student explored during rollout and
 # publishes `teacher_*` batch keys consumed by the distill_kl / distill_fm_mse losses.
 
@@ -24,7 +24,7 @@ models: {}
 placement:
 
   # colocated (shares the actor's global_pool) or standalone (own teacher_pool).
-  # Only colocated is implemented; standalone arrives with the next runtime PR.
+  # Only colocated is implemented; standalone is not yet available.
   mode: colocated
 
   # GPUs per node for the standalone pool. Setting it under colocated is an error

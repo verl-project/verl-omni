@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Scheduler compatibility between the actor and a diffusion teacher (RFC #293).
+"""Scheduler compatibility between the actor and a diffusion teacher.
 
 The teacher replays states the student visited, so both sides must resolve the
 same sigma grid. Checking that by enumerating config fields is not decidable --
@@ -41,7 +41,7 @@ def build_cpu_scheduler(model_config: DiffusionModelConfig, adapter) -> Schedule
     device the driver may not have. The adapter's ``set_timesteps`` already takes
     a device, so validation composes the two steps itself.
 
-    The class is SD3's, matching PR A's support matrix. An adapter-owned
+    The class is SD3's, matching the supported matrix. An adapter-owned
     scheduler loader is what generalises this (Bagel constructs its scheduler
     bare, Wan through a module-level helper), and it is its own workstream.
     """

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Static preflight for the diffusion teacher runtime (RFC #293).
+"""Static preflight for the diffusion teacher runtime.
 
 Everything decidable from the config alone, checked before ``ray.init`` so a
 misconfigured run fails at the command line instead of drifting until a batch key
@@ -31,7 +31,7 @@ from verl_omni.workers.config.diffusion import DiffusionTeacherConfig
 
 __all__ = ["validate_teacher_preflight", "DISTILL_MODES"]
 
-# #300's valid_distill_modes: the loss modes that need teacher_* batch keys.
+# The distillation loss modes that consume the teacher_* batch keys.
 DISTILL_MODES = ("distill_kl", "distill_fm_mse")
 
 FSDP_STRATEGIES = ("fsdp", "fsdp2")
@@ -48,7 +48,7 @@ def _selected_distill_modes(actor) -> set[str]:
 
 
 def validate_teacher_preflight(config, stack: str) -> None:
-    """Reject teacher configurations PR A cannot serve.
+    """Reject teacher configurations this runtime cannot serve.
 
     Args:
         config: the composed trainer config.

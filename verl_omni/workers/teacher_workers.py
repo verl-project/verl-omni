@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Frozen teacher worker for diffusion online policy distillation (RFC #293).
+"""Frozen teacher worker for diffusion online policy distillation.
 
 A thin, forward-only wrapper over the same ``TrainingWorker`` + engine stack the
 actor and reference use -- the replay computation is identical, only the

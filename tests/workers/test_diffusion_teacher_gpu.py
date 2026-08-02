@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""GPU tests for the frozen diffusion teacher worker (RFC #293, §6.3/§7).
+"""GPU tests for the frozen diffusion teacher worker.
 
 Uses the tiny random SD3 from ``build_sd3_tiny_random.py``. That checkpoint
 cannot serve rollout (vllm-omni's SD3 pipeline builds the slow T5Tokenizer,
@@ -161,7 +161,7 @@ def release_worker_groups():
 
 
 def test_teacher_scoring_is_frozen_and_well_formed():
-    """§6.3: the teacher's weights do not move, and its targets satisfy the contract."""
+    """The teacher's weights do not move, and its targets satisfy the contract."""
     from verl_omni.pipelines.model_base import DiffusionModelBase
     from verl_omni.trainer.diffusion.teacher_scheduler_checks import build_cpu_scheduler
     from verl_omni.workers.config.diffusion import DiffusionModelConfig
@@ -193,7 +193,7 @@ def test_teacher_scoring_is_frozen_and_well_formed():
 
 
 def test_distinct_checkpoints_give_distinct_checksums():
-    """§7: proves the teacher is a separate model rather than a copy of the actor."""
+    """Proves the teacher is a separate model rather than a copy of the actor."""
     teacher = spawn_teacher(TEACHER_DIR)
     student_as_teacher = spawn_teacher(STUDENT_DIR)
 

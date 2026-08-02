@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU tests for the diffusion OPD teacher config group (RFC #293)."""
+"""CPU tests for the diffusion OPD teacher config group."""
 
 import os
 from copy import deepcopy
@@ -130,7 +130,7 @@ class TestTeacherConfigGroup:
 
 
 class TestResolveTeacherModelConfig:
-    """§5.2 provenance: teacher-owned / inherited / checkpoint-derived / forced."""
+    """Provenance: teacher-owned / inherited / checkpoint-derived / forced."""
 
     @pytest.fixture
     def actor(self, fake_sd3_checkpoint, diffusion_model_config):
@@ -236,7 +236,7 @@ class TestResolveTeacherModelConfig:
 
 
 class TestResolveTeacherEngineConfig:
-    """§5.2: forward-only is a correctness invariant, and offload is not a knob."""
+    """Forward-only is a correctness invariant, and offload is not a knob."""
 
     @pytest.fixture
     def actor_engine(self):

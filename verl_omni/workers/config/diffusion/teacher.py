@@ -70,8 +70,8 @@ class TeacherCheckpointConfig(BaseConfig):
 class TeacherEngineConfig(BaseConfig):
     """Teacher engine knobs. ``None`` means "inherit from the actor".
 
-    ``strategy`` is deliberately *not* inherited: PR A implements the FSDP engine
-    only, and inheriting would resolve to ``veomni`` on a VeOmni actor.
+    ``strategy`` is deliberately *not* inherited: only the FSDP engine is
+    implemented, and inheriting would resolve to ``veomni`` on a VeOmni actor.
     Offload is absent by design -- a forward-only engine is CPU-offloaded
     unconditionally, so a knob here would be inert.
     """

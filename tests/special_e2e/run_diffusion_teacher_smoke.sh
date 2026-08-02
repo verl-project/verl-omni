@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Diffusion OPD teacher-runtime e2e smoke (RFC #293).
+# Diffusion OPD teacher-runtime e2e smoke.
 #
 # Two runs over one SD3 checkpoint pair:
 #   SMOKE=distill      pure distillation -- teacher is a *distinct* checkpoint and
