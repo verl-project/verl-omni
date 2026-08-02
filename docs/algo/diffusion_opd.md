@@ -212,5 +212,5 @@ must never happen is a shared worker slot or a fallback to other weights.
 - Runtime: `verl_omni/workers/teacher_workers.py::DiffusionTeacherWorker`,
   `verl_omni/trainer/diffusion/teacher_manager.py::DiffusionTeacherModelManager`
 - Validation: `verl_omni/trainer/diffusion/teacher_preflight.py::validate_teacher_preflight`,
-  `verl_omni/trainer/diffusion/teacher_scheduler_checks.py`
+  `verl_omni/trainer/diffusion/teacher_manager.py::validate_scheduler_grids`/`validate_request_timesteps`
 - Config: `verl_omni/workers/config/diffusion/teacher.py`
