@@ -104,7 +104,7 @@ class TestTeacherConfigGroup:
             compose_teacher(ENABLED, ONE_TEACHER, f"actor_rollout_ref.teacher.placement.{resource_field}=1")
 
     def test_standalone_mode_rejected(self):
-        with pytest.raises(NotImplementedError, match="next runtime PR"):
+        with pytest.raises(NotImplementedError, match="standalone teacher placement"):
             compose_teacher(ENABLED, ONE_TEACHER, "actor_rollout_ref.teacher.placement.mode=standalone")
 
     def test_unknown_placement_mode_rejected(self):

@@ -119,7 +119,7 @@ def validate_teacher_preflight(config, stack: str) -> None:
         raise ValueError(
             "`distill_fm_mse` needs `teacher_noise_pred`, which no producer emits on the "
             "policy-gradient path -- that path's prepare_model_outputs computes no noise_pred at "
-            "all. Its producer arrives with the direct-preference follow-up; use `distill_kl`."
+            "all. Its producer is not yet implemented; use `distill_kl`."
         )
 
     if actor.strategy not in FSDP_STRATEGIES:
@@ -133,5 +133,5 @@ def validate_teacher_preflight(config, stack: str) -> None:
         if entry.engine.strategy not in FSDP_STRATEGIES:
             raise ValueError(
                 f"Teacher {key!r}: engine.strategy must be one of {list(FSDP_STRATEGIES)}, got "
-                f"{entry.engine.strategy!r}. PR A implements the FSDP teacher engine only."
+                f"{entry.engine.strategy!r}. Only the FSDP teacher engine is implemented."
             )

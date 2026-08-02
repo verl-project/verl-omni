@@ -112,7 +112,7 @@ REJECTIONS = [
         TEACHER + ("actor_rollout_ref.teacher.placement.mode=standalone",),
         "v0",
         NotImplementedError,
-        "next runtime PR",
+        "standalone teacher placement",
     ),
     (
         "fm_mse_has_no_producer",

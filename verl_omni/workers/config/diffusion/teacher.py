@@ -118,7 +118,7 @@ class DiffusionTeacherConfig(BaseConfig):
         if len(self.models) > 1:
             raise NotImplementedError(
                 f"The diffusion teacher runtime supports exactly one teacher, got {sorted(self.models)}. "
-                "Multi-teacher routing is a follow-up; the config shape already allows it."
+                "Multi-teacher routing is not yet implemented; the config shape already allows it."
             )
 
         if self.placement.mode not in VALID_PLACEMENT_MODES:
@@ -128,7 +128,7 @@ class DiffusionTeacherConfig(BaseConfig):
             )
         if self.placement.mode == "standalone":
             raise NotImplementedError(
-                "standalone teacher placement is introduced by the next runtime PR; use mode=colocated."
+                "standalone teacher placement is not yet implemented; use mode=colocated."
             )
         set_resources = [name for name in ("n_gpus_per_node", "nnodes") if getattr(self.placement, name) is not None]
         if set_resources:
