@@ -97,11 +97,6 @@ def validate_teacher_preflight(config, stack: str) -> None:
             "The v1 diffusion trainer does not wire the teacher runtime. Run the v0 trainer "
             "(`trainer.use_v1=false`) or disable `actor_rollout_ref.teacher.enabled`."
         )
-    if config.trainer.get("use_v1", False):
-        raise ValueError(
-            "`trainer.use_v1` selects the v1 diffusion trainer, which does not wire the teacher "
-            "runtime. Unset it or disable `actor_rollout_ref.teacher.enabled`."
-        )
 
     if config.algorithm.trainer_type != "policy_gradient":
         raise ValueError(

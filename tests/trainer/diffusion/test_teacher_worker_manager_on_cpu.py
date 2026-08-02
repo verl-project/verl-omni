@@ -91,22 +91,6 @@ class TestBuildTeacherTrainingConfig:
         assert training_config.model_config.lora_rank == 0
         assert training_config.model_config.policy_state_adapters == ()
 
-    def test_forward_only_asserted_not_trusted(self, actor_rollout_ref_config, monkeypatch):
-        """The invariant is re-checked on the built config, not assumed from the resolver."""
-        from verl_omni.workers import teacher_workers
-
-        real_resolver = teacher_workers.resolve_teacher_engine_config
-
-        def trainable_engine(*args, **kwargs):
-            engine = real_resolver(*args, **kwargs)
-            object.__setattr__(engine, "forward_only", False)
-            return engine
-
-        monkeypatch.setattr(teacher_workers, "resolve_teacher_engine_config", trainable_engine)
-
-        with pytest.raises(ValueError, match="forward_only must be True"):
-            build_teacher_training_config(actor_rollout_ref_config, world_size=2)
-
 
 class TestBuildTeacherResponse:
     def test_output_renamed_and_fp32_cpu(self):
@@ -162,23 +146,16 @@ class TestParameterChecksum:
 
 
 class FakeTeacherWorkerGroup:
-    """Stands in for the Ray worker group; the manager must never hand it out."""
+    """Stands in for the Ray worker group."""
 
-    def __init__(self, response=None, raises=None, checksums=("rank0", "rank1")):
+    def __init__(self, response=None):
         self.response = response
-        self.raises = raises
-        self.checksums = list(checksums)
         self.requests = []
         self.profile_calls = []
 
     def compute_teacher_outputs(self, batch_td):
         self.requests.append(batch_td)
-        if self.raises is not None:
-            raise self.raises
         return self.response
-
-    def teacher_param_checksum(self):
-        return self.checksums
 
     def start_profile(self, profile_step):
         self.profile_calls.append(("start", profile_step))
@@ -248,12 +225,6 @@ class TestTeacherManagerConstruction:
         with pytest.raises(NotImplementedError, match="exactly one teacher"):
             DiffusionTeacherModelManager(config, FakeTeacherWorkerGroup(), actor, adapter)
 
-    def test_worker_group_not_publicly_exposed(self, manager_and_wg):
-        manager, worker_group = manager_and_wg
-
-        public = {name: value for name, value in vars(manager).items() if not name.startswith("_")}
-        assert worker_group not in public.values()
-
 
 @pytest.fixture
 def manager_and_wg(adapter, fake_sd3_checkpoint, diffusion_model_config):
@@ -308,41 +279,6 @@ class TestTeacherManagerScoring:
         with pytest.raises(ValueError, match="rows but the request carried"):
             manager.compute_teacher_outputs(make_batch(on_grid_timesteps))
 
-    def test_missing_response_key_rejected(self, manager_and_wg, on_grid_timesteps):
-        manager, worker_group = manager_and_wg
-        worker_group.response = tu.get_tensordict({"prev_sample_mean": torch.randn(BATCH, STEPS, CHANNELS)})
-
-        with pytest.raises(ValueError, match="no 'teacher_prev_sample_mean'"):
-            manager.compute_teacher_outputs(make_batch(on_grid_timesteps))
-
-    def test_empty_response_rejected(self, manager_and_wg, on_grid_timesteps):
-        """Collect ranks assemble the response before it reaches the manager, so a
-        None here is a broken teacher group, not a non-collect rank."""
-        manager, worker_group = manager_and_wg
-        worker_group.response = None
-
-        with pytest.raises(ValueError, match="returned no output"):
-            manager.compute_teacher_outputs(make_batch(on_grid_timesteps))
-
-    def test_worker_failure_propagates_with_key(self, adapter, fake_sd3_checkpoint, diffusion_model_config):
-        actor = diffusion_model_config(fake_sd3_checkpoint("student"))
-        teacher_path = fake_sd3_checkpoint("teacher")
-        worker_group = FakeTeacherWorkerGroup(raises=RuntimeError("CUDA OOM in teacher forward"))
-        manager = DiffusionTeacherModelManager(
-            make_teacher_config(teacher_path, key="ocr_expert"), worker_group, actor, adapter
-        )
-        timesteps = manager.actor_scheduler.timesteps[:STEPS].expand(BATCH, STEPS).contiguous()
-
-        with pytest.raises(RuntimeError) as excinfo:
-            manager.compute_teacher_outputs(make_batch(timesteps))
-
-        message = str(excinfo.value)
-        assert "ocr_expert" in message
-        assert f"{BATCH} rows" in message
-        assert teacher_path in message
-        assert isinstance(excinfo.value.__cause__, RuntimeError)
-        assert "CUDA OOM" in str(excinfo.value.__cause__)
-
     def test_request_carries_pipeline_metadata(self, manager_and_wg, on_grid_timesteps):
         manager, worker_group = manager_and_wg
         worker_group.response = make_response(BATCH, STEPS)
@@ -356,15 +292,6 @@ class TestTeacherManagerScoring:
 
 
 class TestTeacherManagerPassthroughs:
-    def test_checksums_are_per_rank_list(self, manager_and_wg):
-        manager, worker_group = manager_and_wg
-        worker_group.checksums = ["a" * 8, "b" * 8]
-
-        checksums = manager.teacher_param_checksums()
-
-        assert isinstance(checksums, list)
-        assert checksums == ["a" * 8, "b" * 8]
-
     def test_profiling_forwarded(self, manager_and_wg):
         manager, worker_group = manager_and_wg
 

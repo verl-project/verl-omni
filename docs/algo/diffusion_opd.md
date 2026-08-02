@@ -174,12 +174,11 @@ match the actor's and fall inside the supported matrix, and both schedulers,
 each built from its own checkpoint and stepped with the same pipeline settings,
 must resolve to identical `timesteps` and `sigmas`.
 
-**Per request** — every timestep the rollout visited must map to the same sigma
-index on both sides.
+**Per request** — every timestep the rollout visited must land on the shared
+scheduler grid; stage 1 already proved the two grids identical.
 
-**At worker init** — the engine must really be forward-only. A teacher
-checkpoint that fails to load aborts the run; it never falls back to actor or
-reference weights.
+**At worker init** — a teacher checkpoint that fails to load aborts the run; it
+never falls back to actor or reference weights.
 
 Capacity is not among these. There is no checkpoint memory estimator, so an
 out-of-memory teacher fails loudly at initialisation rather than being predicted

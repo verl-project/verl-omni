@@ -14,8 +14,8 @@
 """Env-gated e2e test for the *colocated* teacher runtime.
 
 The other GPU test (``tests/workers/test_diffusion_teacher_gpu.py``) exercises a
-standalone teacher worker; the runtime this PR actually ships is the teacher
-*fused* with the actor in one Ray worker via ``create_colocated_worker_cls``.
+standalone teacher worker; the colocated runtime fuses the teacher with the
+actor in one Ray worker via ``create_colocated_worker_cls``.
 This test covers that path by driving ``run_diffusion_teacher_smoke.sh`` through
 the real trainer, so the fused actor + reference + teacher init and the
 once-per-step teacher hook are asserted, not just described.

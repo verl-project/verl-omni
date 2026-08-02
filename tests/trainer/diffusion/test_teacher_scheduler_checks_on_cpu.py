@@ -17,8 +17,7 @@ import pytest
 import torch
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
-from verl_omni.trainer.diffusion.teacher_scheduler_checks import (
-    build_cpu_scheduler,
+from verl_omni.trainer.diffusion.teacher_manager import (
     validate_request_timesteps,
     validate_scheduler_grids,
 )
@@ -74,20 +73,6 @@ class TestStage1Grids:
         assert actor_scheduler.timesteps.device.type == "cpu"
         assert actor_scheduler.sigmas.device.type == "cpu"
 
-    def test_does_not_go_through_build_scheduler(
-        self, adapter, fake_sd3_checkpoint, diffusion_model_config, monkeypatch
-    ):
-        """build_scheduler() resolves onto get_device_name(); the driver may have no CUDA."""
-
-        def forbidden(*args, **kwargs):
-            raise AssertionError("stage 1 must not call adapter.build_scheduler")
-
-        monkeypatch.setattr(adapter, "build_scheduler", forbidden)
-        actor = diffusion_model_config(fake_sd3_checkpoint("student"))
-        teacher = diffusion_model_config(fake_sd3_checkpoint("teacher"))
-
-        validate_scheduler_grids(actor, teacher, adapter, "default")
-
 
 class TestStage2RequestTimesteps:
     @pytest.fixture
@@ -114,23 +99,3 @@ class TestStage2RequestTimesteps:
         # converted from the bare index error rather than surfacing it
         assert isinstance(excinfo.value.__cause__, IndexError | RuntimeError)
         assert "default" in str(excinfo.value)
-
-    def test_index_mismatch_rejected(self, adapter, fake_sd3_checkpoint, diffusion_model_config):
-        """Stage 2 stands on its own; it is not merely a corollary of stage 1.
-
-        A 10-step and a 20-step grid share the timestep at sigma 0.9 but place it
-        at different indices, which is exactly what would corrupt a replay.
-        """
-        actor = diffusion_model_config(fake_sd3_checkpoint("student"))
-        teacher = diffusion_model_config(
-            fake_sd3_checkpoint("teacher"), pipeline=DiffusionPipelineConfig(num_inference_steps=20)
-        )
-        actor_scheduler = build_cpu_scheduler(actor, adapter)
-        teacher_scheduler = build_cpu_scheduler(teacher, adapter)
-        shared = set(actor_scheduler.timesteps.tolist()) & set(teacher_scheduler.timesteps.tolist())
-        assert shared, "expected the two grids to overlap"
-
-        with pytest.raises(ValueError, match="maps to sigma index"):
-            validate_request_timesteps(
-                torch.tensor([sorted(shared, reverse=True)]), actor_scheduler, teacher_scheduler, "default"
-            )

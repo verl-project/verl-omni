@@ -163,7 +163,7 @@ def release_worker_groups():
 def test_teacher_scoring_is_frozen_and_well_formed():
     """The teacher's weights do not move, and its targets satisfy the contract."""
     from verl_omni.pipelines.model_base import DiffusionModelBase
-    from verl_omni.trainer.diffusion.teacher_scheduler_checks import build_cpu_scheduler
+    from verl_omni.trainer.diffusion.teacher_manager import build_cpu_scheduler
     from verl_omni.workers.config.diffusion import DiffusionModelConfig
     from verl_omni.workers.config.diffusion.rollout import DiffusionPipelineConfig
 

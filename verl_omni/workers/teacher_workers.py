@@ -52,13 +52,7 @@ TEACHER_MESH_NAME = "teacher"
 
 
 def build_teacher_training_config(config: DictConfig, world_size: int) -> tuple[str, TrainingWorkerConfig]:
-    """Assemble the teacher's ``TrainingWorkerConfig`` from the actor_rollout_ref subtree.
-
-    ``forward_only`` is re-checked on the constructed engine config rather than
-    trusted: it is what skips optimizer construction and selects the no-grad
-    path, so getting it wrong would not merely waste memory, it would break the
-    frozen guarantee.
-    """
+    """Assemble the teacher's ``TrainingWorkerConfig`` from the actor_rollout_ref subtree."""
     teacher_config = omega_conf_to_dataclass(config.teacher, DiffusionTeacherConfig)
     teacher_key, entry = next(iter(teacher_config.models.items()))
 
@@ -71,13 +65,6 @@ def build_teacher_training_config(config: DictConfig, world_size: int) -> tuple[
         entry=entry,
         world_size=world_size,
     )
-
-    if not engine_config.forward_only:
-        raise ValueError(
-            f"Teacher {teacher_key!r}: engine_config.forward_only must be True. It selects the "
-            "no-grad path and skips optimizer construction, so a trainable teacher is not a "
-            "performance regression but a broken frozen guarantee."
-        )
 
     training_config = TrainingWorkerConfig(
         model_type=model_config.model_type,

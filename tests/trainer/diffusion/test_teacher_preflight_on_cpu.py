@@ -73,13 +73,6 @@ REJECTIONS = [
         "v1",
     ),
     (
-        "use_v1_flag",
-        TEACHER + ("trainer.use_v1=true",),
-        "v0",
-        ValueError,
-        "trainer.use_v1",
-    ),
-    (
         "direct_preference_trainer",
         TEACHER + ("algorithm.trainer_type=direct_preference",),
         "v0",

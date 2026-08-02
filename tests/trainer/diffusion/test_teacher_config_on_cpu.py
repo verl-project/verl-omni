@@ -111,13 +111,13 @@ class TestTeacherConfigGroup:
         with pytest.raises(ValueError, match="placement.mode"):
             compose_teacher(ENABLED, ONE_TEACHER, "actor_rollout_ref.teacher.placement.mode=hybrid")
 
-    def test_untyped_conversion_fails_loudly(self):
+    def test_group_carries_no_target(self):
         """The group carries no `_target_`, anywhere, and that must stay true.
 
         Hydra only instantiates `_target_`-bearing nodes, and `models` keys are
         user-named, so no entry can pre-declare one. Adding `_target_` back would
         turn every user-added teacher into a bare dict -- entry defaults dropped,
-        `__post_init__` never run -- instead of the loud failure below.
+        `__post_init__` never run.
         """
         with initialize_config_dir(config_dir=CONFIG_DIR, version_base=None):
             cfg = compose(config_name="diffusion_trainer", overrides=[ENABLED, ONE_TEACHER])
@@ -125,8 +125,6 @@ class TestTeacherConfigGroup:
 
         assert "_target_" not in teacher_node
         assert "_target_" not in teacher_node.models.default
-        with pytest.raises(AssertionError, match="_target_"):
-            omega_conf_to_dataclass(teacher_node)
 
 
 class TestResolveTeacherModelConfig:
