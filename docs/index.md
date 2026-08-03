@@ -35,13 +35,19 @@ start/metrics.md
 
 ```{toctree}
 :maxdepth: 1
+:caption: Examples
+
+examples/config.md
+```
+
+```{toctree}
+:maxdepth: 1
 :caption: Advanced Features
 
 algo/async_reward.md
 algo/rollout_correction.md
 start/rollout_batching.md
 start/http_scorer.md
-start/sd35_drm_flow_grpo.md
 start/diffusion_v1.md
 ```
 
@@ -56,6 +62,23 @@ algo/diffusionnft.md
 algo/grpo_guard.md
 algo/mixgrpo.md
 algo/performance.md
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Examples
+
+examples/flowgrpo_trainer.md
+examples/flowdppo_trainer.md
+examples/dpo_trainer.md
+examples/dancegrpo_trainer.md
+examples/diffusionnft_trainer.md
+examples/grpoguard_trainer.md
+examples/gspo_trainer.md
+examples/mixgrpo_trainer.md
+examples/flowgrpo_trainer_sd35_drm.md
+examples/bagel/flowgrpo_trainer_bagel.md
+examples/qwen_image_edit/flowgrpo_trainer_qwen_image_edit.md
 ```
 
 ```{toctree}

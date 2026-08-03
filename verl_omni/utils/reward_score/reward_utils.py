@@ -12,10 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Image/video conversion helpers shared by reward scoring and trainer output paths."""
+
 import base64
 from io import BytesIO
 
+import torch
 from PIL import Image
+
+
+def video_tensor_to_pil_frames(video: torch.Tensor) -> list[Image.Image]:
+    """Convert an RGB ``[T, C, H, W]`` tensor in ``[0, 1]`` to PIL frames.
+
+    PIL (not NumPy) frames avoid ``export_to_video`` rescaling already-uint8 input
+    by 255, which would invert colors modulo 256.
+    """
+    if video.ndim != 4 or video.shape[1] != 3:
+        raise ValueError(f"Expected an RGB video tensor with shape [T, 3, H, W], got {tuple(video.shape)}")
+
+    video = video.detach().permute(0, 2, 3, 1).to(dtype=torch.float32)
+    video = torch.nan_to_num(video, nan=0.0, posinf=1.0, neginf=0.0).clamp_(0, 1)
+    frames = video.mul_(255).round_().to(dtype=torch.uint8, device="cpu").contiguous().numpy()
+    return [Image.fromarray(frame) for frame in frames]
 
 
 def pil_image_to_base64(image: Image.Image) -> str:

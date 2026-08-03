@@ -1,8 +1,10 @@
 # FlowGRPO Trainer
 
+Last updated: 07/18/2026
+
 This example shows how to post-train `Qwen-Image` with FlowGRPO on an OCR-style image generation task using `vllm-omni` rollout and a visual generative reward model (`Qwen3-VL-8B-Instruct` in this example).
 
-For the full installation and quickstart guide, see `docs/start/flowgrpo_quickstart.md`. For algorithm details and rule-based reward training (e.g. JPEG incompressibility), see `docs/algo/flowgrpo.md`.
+For the full installation and quickstart guide, see [Quickstart: FlowGRPO training on OCR dataset](../../docs/start/flowgrpo_quickstart.md). For algorithm details and rule-based reward training (e.g. JPEG incompressibility), see [Algorithms - Flow-GRPO](../../docs/algo/flowgrpo.md).
 
 ## Installation
 
@@ -96,34 +98,34 @@ All example scripts in this directory:
 
 | Variant | Script | GPUs | Notes |
 |---------|--------|------|-------|
-| LoRA (baseline) | `qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU | Standard LoRA FlowGRPO + OCR reward |
-| LoRA + async reward | `qwen_image/run_qwen_image_ocr_lora_async_reward.sh` | 5×GPU | Dedicated GPU pool for reward model |
-| LoRA + SP=2 | `qwen_image/run_qwen_image_ocr_lora_sp2.sh` | 4×GPU | Ulysses sequence parallelism |
-| LoRA + FA3 | `qwen_image/run_qwen_image_ocr_lora_fsdp2_fa3.sh` | 4×GPU | FSDP2 with FlashAttention 3 |
-| LoRA + rollout corr | `qwen_image/run_qwen_image_ocr_lora_rollout_corr.sh` | 4×GPU | Bypass old-log-prob recompute |
-| LoRA + multi-node | `qwen_image/run_qwen_image_ocr_lora_multi_node.sh` | 2×4 GPU | Horizontal scaling across nodes |
-| LoRA + NPU | `qwen_image/run_qwen_image_ocr_lora_npu.sh` | 8×NPU | Ascend NPU LoRA training |
-| Full model | `qwen_image/run_qwen_image_ocr.sh` | 4×H200 | Non-CFG full-weight training |
-| Full + FSDP2 64-card | `qwen_image/run_qwen_image_ocr_fsdp2_64cards.sh` | 64×GPU | Large-scale FSDP2 |
-| Full + VeOmni | `qwen_image/run_qwen_image_ocr_veomni.sh` | 64×H100 | VeOmni engine backend |
-| Full + VeOmni 64-card | `qwen_image/run_qwen_image_ocr_veomni_64cards.sh` | 64×GPU | VeOmni at scale |
-| Full + H200 MFU opt | `qwen_image/run_qwen_image_ocr_h200_mfu_optimized.sh` | H200 | MFU-optimized config |
-| Full + NPU | `qwen_image/run_qwen_image_ocr_npu.sh` | 16×NPU | Ascend NPU full model |
-| HTTP reward server | `qwen_image/run_qwen_image_ocr_reward_server.sh` | 4×GPU | External HTTP OCR reward service |
-| Multi-reward | `qwen_image/run_qwen_image_ocr_multi_reward.sh` | 4×GPU | Multiple reward functions combined |
+| LoRA (baseline) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU | Standard LoRA FlowGRPO + OCR reward |
+| LoRA + async reward | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_async_reward.sh` | 5×GPU | Dedicated GPU pool for reward model |
+| LoRA + SP=2 | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_sp2.sh` | 4×GPU | Ulysses sequence parallelism |
+| LoRA + FA3 | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_fsdp2_fa3.sh` | 4×GPU | FSDP2 with FlashAttention 3 |
+| LoRA + rollout corr | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_rollout_corr.sh` | 4×GPU | Bypass old-log-prob recompute |
+| LoRA + multi-node | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_multi_node.sh` | 2×4 GPU | Horizontal scaling across nodes |
+| LoRA + NPU | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_npu.sh` | 8×NPU | Ascend NPU LoRA training |
+| Full model | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr.sh` | 4×H200 | Non-CFG full-weight training |
+| Full + FSDP2 64-card | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_fsdp2_64cards.sh` | 64×GPU | Large-scale FSDP2 |
+| Full + VeOmni | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh` | 64×H100 | VeOmni engine backend |
+| Full + VeOmni 64-card | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni_64cards.sh` | 64×GPU | VeOmni at scale |
+| Full + H200 MFU opt | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_h200_mfu_optimized.sh` | H200 | MFU-optimized config |
+| Full + NPU | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_npu.sh` | 16×NPU | Ascend NPU full model |
+| HTTP reward server | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_reward_server.sh` | 4×GPU | External HTTP OCR reward service |
+| Multi-reward | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_multi_reward.sh` | 4×GPU | Multiple reward functions combined |
 
 ### Stable Diffusion 3.5 Medium
 
 | Variant | Script | GPUs | Notes |
 |---------|--------|------|-------|
-| LoRA | `sd35/run_sd35_medium_ocr_lora.sh` | 3×GPU | 2 actor+rollout, 1 reward pool |
+| LoRA | `examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh` | 3×GPU | 2 actor+rollout, 1 reward pool |
 
 ### BAGEL
 
 | Variant | Script | GPUs | Notes |
 |---------|--------|------|-------|
-| LoRA (OCR) | `bagel/run_bagel_ocr_lora.sh` | 4×GPU | OCR reward (Qwen3-VL) |
-| LoRA (PickScore) | `bagel/run_bagel_pickscore_lora.sh` | 4×GPU | CLIP-based image-text alignment |
+| LoRA (OCR) | `examples/flowgrpo_trainer/bagel/run_bagel_ocr_lora.sh` | 4×GPU | OCR reward (Qwen3-VL) |
+| LoRA (PickScore) | `examples/flowgrpo_trainer/bagel/run_bagel_pickscore_lora.sh` | 4×GPU | CLIP-based image-text alignment |
 
 ### Engine backends
 
@@ -153,17 +155,26 @@ The experiment settings and throughputs are shown in the table below.
 
 | Script | Model | Algorithm | Hybrid Engine | # Cards | Reward Fn | # GPUs for Actor | # GPUs for Rollout | # GPUs for Async Reward | Batch Size | `rollout.n` | lr   | # Val Samples | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / GPU / Seconds) | Time per Step (Seconds) |
 | --- | --- | --- | --- | --- | --- | --- | --- |-------------------------| --- | --- |------| --- | --- | --- |------------------------------| --------------------------------|
-| `qwen_image/run_qwen_image_ocr_lora.sh` | Qwen-Image | Flow-GRPO | True | 4 | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 32 | 16 | 3e-4 | 1k (full set) | 32×16=512 | 16 | 0.305                        | 420 |
-| `qwen_image/run_qwen_image_ocr_lora_async_reward.sh` | Qwen-Image | Flow-GRPO | True | 5 | qwenvl-ocr-vllm | 4 | 4 | 1                       | 32 | 16 | 3e-4 | 1k (full set) | 32×16=512 | 16 | 0.280                        | 360 |
+| `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | Qwen-Image | Flow-GRPO | True | 4 | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 32 | 16 | 3e-4 | 1k (full set) | 32×16=512 | 16 | 0.305                        | 420 |
+| `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_async_reward.sh` | Qwen-Image | Flow-GRPO | True | 5 | qwenvl-ocr-vllm | 4 | 4 | 1                       | 32 | 16 | 3e-4 | 1k (full set) | 32×16=512 | 16 | 0.280                        | 360 |
 
 - Validation reward curve (evaluated with `trainer.val_before_train=True`):
 
 <div align="center">
 <img width="600" alt="2p_comparison" src="https://github.com/user-attachments/assets/1094beaf-fed9-4661-8a6a-1c3983150648" />
 <br>
-qwen_image_ocr_lora: corresponding with the script `qwen_image/run_qwen_image_ocr_lora.sh`; 
+qwen_image_ocr_lora: corresponding with the script `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh`; 
 <br>
-qwen_image_ocr_lora_async_reward: corresponding with the script `qwen_image/run_qwen_image_ocr_lora_async_reward.sh`.
+qwen_image_ocr_lora_async_reward: corresponding with the script `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_async_reward.sh`.
 </div>
 
 > **Note:** Reward curves may differ from the references above mainly due to rollout-side stochasticity: diffusion rollouts sample random latents/noise, and the example scripts do not fix the data seed, so prompt ordering can vary between runs.
+
+
+## Further Reading
+For more examples of FlowGRPO training other models, see
+- Stable Diffusion: [Quickstart: FlowGRPO training on OCR dataset](../../docs/start/flowgrpo_quickstart.md)
+- Image-to-image model: [Examples - Qwen-Image-Edit-2511 FlowGRPO training](https://verl-omni.readthedocs.io/en/latest/examples/qwen_image_edit/flowgrpo_trainer_qwen_image_edit.html)
+- Unified image understanding and generation model: [Examples - BAGEL-7B-MoT FlowGRPO training](https://verl-omni.readthedocs.io/en/latest/examples/bagel/flowgrpo_trainer_bagel.html)
+
+To train a model with a latent reward model, see [Examples - SD3.5 FlowGRPO training with a latent reward model](../../docs/examples/flowgrpo_trainer_sd35_drm.md).

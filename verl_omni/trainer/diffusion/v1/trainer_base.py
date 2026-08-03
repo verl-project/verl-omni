@@ -65,6 +65,7 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import compute_advantage
 from verl_omni.trainer.diffusion.rollout_correction import (
     apply_bypass_mode_to_diffusion_batch,
     apply_rollout_correction_to_diffusion_batch,
+    compute_rollout_corr_metrics_from_batch,
     rollout_correction_enabled,
 )
 from verl_omni.trainer.diffusion.v1.tq_utils import (
@@ -288,6 +289,13 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 data = data.union(old_log_prob)
 
         assert "old_log_probs" in data.batch, f'"old_log_probs" not in {data.batch.keys()}'
+
+        metrics.update(
+            compute_rollout_corr_metrics_from_batch(
+                data,
+                bypass_mode=bypass_recomputing_logprobs,
+            )
+        )
 
         if not bypass_recomputing_logprobs and rollout_correction_enabled(rollout_corr_config):
             with marked_timer("rollout_corr", timing_raw, color="cyan"):

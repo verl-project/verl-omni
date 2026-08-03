@@ -1,7 +1,7 @@
 (integrating_a_non_diffusers_model)=
 # How to Integrate a Non-Diffusers Model for FlowGRPO Training
 
-Last updated: 06/15/2026.
+Last updated: 07/29/2026.
 
 This guide walks you through integrating a **non-diffusers model** — a
 standalone `nn.Module` that does **not** inherit from `diffusers.ModelMixin`
@@ -345,9 +345,10 @@ pipeline's expectation. Most models will not need this —
 interface.
 
 **SDE window.** ``forward()`` must set up an SDE window (selecting a
-subset of denoising steps), compensate for any vllm-omni version-specific
-step-count quirks, and slice the trajectory to return only the
-windowed steps.
+subset of denoising steps) and slice the trajectory to return only the
+windowed steps. Keep the window indices aligned with the trajectory produced
+by the supported vllm-omni version; do not carry forward step-count
+compensation for older releases.
 
 ---
 
@@ -449,7 +450,7 @@ checklist to verify your implementation against it:
 - [ ] Wraps scheduler in `_BagelSchedulerAdapter` for 4-arg `step()` convention
 - [ ] SDE `step()` passes batched `(1, tokens, C)` tensors so log-probs match training
 - [ ] `_ensure_bagel_prompt_text()` workaround for text-prompt requirement
-- [ ] `forward()` sets up SDE window, vllm-omni 0.22 timestep compensation, returns sliced trajectory
+- [ ] `forward()` sets up the SDE window and returns the sliced trajectory
 
 ### Shared utilities (`common.py`)
 - [ ] `setup_bagel_sigmas()` — shared sigma schedule for rollout and training

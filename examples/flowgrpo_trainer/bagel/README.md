@@ -1,16 +1,18 @@
 # BAGEL-7B-MoT FlowGRPO training
 
-[BAGEL-7B-MoT](https://github.com/ByteDance-Seed/BAGEL-7B-MoT) is a
+Last updated: 07/06/2026
+
+[BAGEL-7B-MoT](https://github.com/ByteDance-Seed/BAGEL) is a
 Mixture-of-Transformers model supporting both image understanding and
 generation.  Unlike Qwen-Image, BAGEL is a **non-diffusers** model — it
 cannot be loaded by diffusers and uses its own weight-loading path via
 ``NonDiffusersModelBase``.  See
-[docs/contributing/integrating_a_non_diffusers_model.md](../../docs/contributing/integrating_a_non_diffusers_model.md)
+[How to Integrate a Non-Diffusers Model for FlowGRPO Training](../../../docs/contributing/integrating_a_non_diffusers_model.md)
 for the integration architecture.
 
 ## Prerequisites
 
-- Install VeRL-Omni (see [docs/start/install.md](../../docs/start/install.md)).
+- Install VeRL-Omni (see [installation guide](../../../docs/start/install.md)).
 
 - 4 GPUs or 8 NPUs. Run commands from the repository root.
 
@@ -111,7 +113,7 @@ Key differences from the LoRA variant:
 
 | Aspect | LoRA | Full-weight |
 |---|---|---|
-| Script | ``run_bagel_pickscore_lora.sh`` | ``run_bagel_pickscore.sh`` |
+| Script | ``examples/flowgrpo_trainer/bagel/run_bagel_pickscore_lora.sh`` | ``examples/flowgrpo_trainer/bagel/run_bagel_pickscore.sh`` |
 | Strategy | default | ``fsdp2`` (required for mixed ``requires_grad``) |
 | Trainable params | Low-rank adapters on ``*_moe_gen`` | All ``moe_gen`` parameters (``requires_grad`` set by ``configure_trainable_params``) |
 | ``lora_rank`` / ``lora_alpha`` | 64 / 128 | N/A |
@@ -139,5 +141,5 @@ wrapper replacement but simply has ``requires_grad=False`` set by the
 
 ## Further reading
 
-- [integrating_a_non_diffusers_model.md](../../docs/contributing/integrating_a_non_diffusers_model.md) — full integration guide using BAGEL as the worked example
+- [How to Integrate a Non-Diffusers Model for FlowGRPO Training](../../../docs/contributing/integrating_a_non_diffusers_model.md) — full integration guide using BAGEL as the worked example
 - [vLLM-Omni BAGEL docs](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/examples/online_serving/bagel/)

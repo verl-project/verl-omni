@@ -34,6 +34,7 @@ from verl.trainer.ppo.rollout_corr_helper import (
 __all__ = [
     "apply_bypass_mode_to_diffusion_batch",
     "apply_rollout_correction_to_diffusion_batch",
+    "compute_rollout_corr_metrics_from_batch",
     "compute_rollout_corr_metrics_from_logprobs",
     "rollout_correction_enabled",
 ]
@@ -214,3 +215,22 @@ def compute_rollout_corr_metrics_from_logprobs(
             )
 
     return metrics_with_prefix
+
+
+def compute_rollout_corr_metrics_from_batch(
+    batch: DataProto,
+    *,
+    bypass_mode: bool,
+) -> dict[str, float]:
+    """Compute rollout-train consistency metrics when both log-probs are available."""
+    if bypass_mode or batch.batch is None:
+        return {}
+
+    if "old_log_probs" not in batch.batch or "rollout_log_probs" not in batch.batch:
+        return {}
+
+    return compute_rollout_corr_metrics_from_logprobs(
+        batch.batch["old_log_probs"],
+        batch.batch["rollout_log_probs"],
+        timesteps=batch.batch.get("all_timesteps", None),
+    )

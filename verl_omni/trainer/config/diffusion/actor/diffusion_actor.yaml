@@ -93,6 +93,15 @@ use_kl_loss: false
 # KL loss coefficient when use_kl_loss is enabled. For FlowGRPO
 kl_loss_coef: 0.001
 
+# Whether to add a teacher-anchored distillation loss (online policy distillation)
+use_distill_loss: false
+
+# Distillation loss mode: distill_kl or distill_fm_mse
+distill_loss_mode: distill_kl
+
+# Distillation loss coefficient
+distill_loss_coef: 1.0
+
 # Number of PPO epochs per batch
 ppo_epochs: 1
 

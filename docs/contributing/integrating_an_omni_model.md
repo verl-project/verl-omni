@@ -6,7 +6,7 @@ This guide walks through adding a new omni (multimodal autoregressive) model to
 the verl-omni training framework. It uses the Qwen3-Omni Thinker adapter as a
 **running example**, not as the only valid pattern. Your model's architecture,
 decomposition, and required adapter logic may differ. All adapter code lives
-under [`verl_omni/pipelines/`](../../verl_omni/pipelines/).
+under [`verl_omni/pipelines/`](https://github.com/verl-project/verl-omni/tree/main/verl_omni/pipelines).
 
 ## 1. Understand the architecture
 
@@ -33,7 +33,7 @@ architecture.
 ## 2. Create the training adapter
 
 Subclass `OmniModelBase` (see
-[`verl_omni/pipelines/model_base.py`](../../verl_omni/pipelines/model_base.py))
+[`verl_omni/pipelines/model_base.py`](https://github.com/verl-project/verl-omni/tree/main/verl_omni/pipelines/model_base.py)
 and implement these methods. Descriptions below use Qwen3-Omni as an example —
 adapt each implementation to your model's architecture:
 
