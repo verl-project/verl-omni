@@ -30,6 +30,9 @@ from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.request_batch import (
+    request_batch_needs_logprobs as _request_batch_needs_logprobs,
+)
+from verl_omni.pipelines.request_batch import (
     sample_per_sample_sde_windows as _sample_per_sample_sde_windows,
 )
 from verl_omni.pipelines.request_batch import (
@@ -376,7 +379,7 @@ class StableDiffusion3PipelineWithLogProb(StableDiffusion3Pipeline):
         )
         sde_window_size, sde_window_range = _normalize_sde_window_args(sde_window_size, sde_window_range)
         sde_type = _coalesce_not_none(sampling_params.extra_args.get("sde_type", None), sde_type)
-        logprobs = _coalesce_not_none(sampling_params.extra_args.get("logprobs", None), logprobs)
+        logprobs = _request_batch_needs_logprobs(request_batch.sampling_params_list, default=logprobs)
         output_type = _resolve_output_type(sampling_params, output_type)
 
         req_num_outputs = getattr(sampling_params, "num_outputs_per_prompt", None)
