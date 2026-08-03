@@ -69,6 +69,7 @@ This installs `vllm-omni`, then `verl` and `verl-omni`.
 | Extra                 | Install                                                   | When needed                             |
 | --------------------- | --------------------------------------------------------- | --------------------------------------- |
 | OCR reward            | `uv pip install -e ".[ocr]"`                              | FlowGRPO training with OCR-based reward |
+| Multimodal training   | `pip install qwen-vl-utils math-verify`                   | Vision-language training (e.g. MMK12)   |
 | Dev tools             | `uv pip install -e ".[dev]"`                              | Linting and unit tests                  |
 | VeOmni engine backend | See [Optional engine backends](#optional-engine-backends) | VeOmni instead of default FSDP2         |
 

@@ -91,7 +91,10 @@ pairs or online DiffusionNFT-style forward-process training), follow:
 Thanks for submitting a PR! To streamline reviews:
 
 - Follow our [Pull Request Template](.github/PULL_REQUEST_TEMPLATE.md) for title format and checklist.
-- Format the PR title as `[{modules}] {type}: {description}` — valid modules include `vllm_omni`, `diffusion`, `omni`, `rollout`, `trainer`, `reward`, `model`, `algo`, `fsdp`, `ray`, `worker`, `data`, `cfg`, `ckpt`, `doc`, `ci`, `tests`, `docker`, `misc`.
+- Format the PR title as `[{modules}] {type}: {description}`. The
+  [PR-title CI check](tests/special_sanity/check_pr_title.py) is the source of
+  truth for accepted modules and types; the pull request template mirrors the
+  current values.
 - Adhere to our pre-commit lint rules and ensure all checks pass.
 - Update docs for any user-facing changes.
 - Add or update tests in the CI workflows, or explain why tests aren't applicable.

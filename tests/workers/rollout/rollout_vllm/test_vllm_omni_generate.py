@@ -132,6 +132,48 @@ def _assert_flow_grpo_step_execution_contract(output: DiffusionOutput) -> None:
     assert prompt_embeds.shape[:-1] == prompt_embeds_mask.shape
 
 
+def _assert_training_step_execution_contract(
+    output: DiffusionOutput,
+    *,
+    algorithm: str,
+    include_train_timesteps: bool,
+) -> None:
+    """Validate algorithm-specific Qwen-Image training tensors."""
+    expected_extra_fields = {
+        "latents_clean",
+        "prompt_embeds",
+        "prompt_embeds_mask",
+        "negative_prompt_embeds",
+        "negative_prompt_embeds_mask",
+    }
+    if include_train_timesteps:
+        expected_extra_fields.add("train_timesteps")
+
+    missing_fields = expected_extra_fields - set(output.extra_fields)
+    assert not missing_fields, f"Missing {algorithm} step-execution fields: {sorted(missing_fields)}"
+
+    required_tensors = {
+        "latents_clean": output.extra_fields["latents_clean"],
+        "prompt_embeds": output.extra_fields["prompt_embeds"],
+        "prompt_embeds_mask": output.extra_fields["prompt_embeds_mask"],
+    }
+    if include_train_timesteps:
+        required_tensors["train_timesteps"] = output.extra_fields["train_timesteps"]
+    for field_name, value in required_tensors.items():
+        _assert_non_empty_tensor(value, field_name)
+
+    assert output.extra_fields["latents_clean"].dtype == torch.float32
+    negative_prompt_embeds = output.extra_fields["negative_prompt_embeds"]
+    negative_prompt_embeds_mask = output.extra_fields["negative_prompt_embeds_mask"]
+    if negative_prompt_embeds is None:
+        assert negative_prompt_embeds_mask is None
+    else:
+        _assert_non_empty_tensor(negative_prompt_embeds, "negative_prompt_embeds")
+        _assert_non_empty_tensor(negative_prompt_embeds_mask, "negative_prompt_embeds_mask")
+        assert negative_prompt_embeds.shape[:-1] == negative_prompt_embeds_mask.shape
+    assert output.extra_fields["prompt_embeds"].shape[:-1] == output.extra_fields["prompt_embeds_mask"].shape
+
+
 def _build_rollout_cfg(*, step_execution: bool = False) -> Any:
     from tests.utils.smoke_attention import resolve_smoke_attention_backends
 
@@ -175,7 +217,7 @@ def _build_rollout_cfg(*, step_execution: bool = False) -> Any:
     return OmegaConf.create(cfg)
 
 
-def _build_model_cfg(*, attn_backend: str | None = None) -> Any:
+def _build_model_cfg(*, attn_backend: str | None = None, algorithm: str = "flow_grpo") -> Any:
     from tests.utils.smoke_attention import resolve_smoke_attention_backends
 
     resolved_attn_backend, _ = resolve_smoke_attention_backends()
@@ -188,12 +230,12 @@ def _build_model_cfg(*, attn_backend: str | None = None) -> Any:
             "trust_remote_code": True,
             "load_tokenizer": True,
             "attn_backend": attn_backend or resolved_attn_backend,
-            "algorithm": "flow_grpo",
+            "algorithm": algorithm,
         }
     )
 
 
-def _launch_server(*, step_execution: bool = False):
+def _launch_server(*, step_execution: bool = False, algorithm: str = "flow_grpo"):
     ray.init(
         runtime_env={
             "env_vars": {
@@ -216,7 +258,7 @@ def _launch_server(*, step_execution: bool = False):
         max_concurrency=16,
     ).remote(
         config=_build_rollout_cfg(step_execution=step_execution),
-        model_config=_build_model_cfg(),
+        model_config=_build_model_cfg(algorithm=algorithm),
         rollout_mode=RolloutMode.STANDALONE,
         workers=[],
         replica_rank=0,
@@ -248,6 +290,14 @@ def init_server():
 def init_step_execution_server():
     """Function-scoped step-execution server (cannot share with request-level)."""
     server = _launch_server(step_execution=True)
+    yield server
+    _shutdown_server()
+
+
+@pytest.fixture
+def init_training_step_execution_server(request):
+    """Function-scoped NFT/DPO step-execution server."""
+    server = _launch_server(step_execution=True, algorithm=request.param)
     yield server
     _shutdown_server()
 
@@ -349,3 +399,63 @@ def test_flow_grpo_step_execution_contract(init_step_execution_server):
     assert output.stop_reason in ("completed", "aborted", None)
 
     _assert_flow_grpo_step_execution_contract(output)
+
+
+@pytest.mark.parametrize(
+    "init_training_step_execution_server",
+    ["diffusion_nft"],
+    indirect=True,
+    ids=["diffusion-nft-step-execution"],
+)
+def test_diffusion_nft_step_execution_contract(init_training_step_execution_server):
+    """Verify DiffusionNFT final-latent outputs with step_execution=True."""
+    prompt = (
+        "a detailed watercolor painting of a quiet forest stream surrounded by "
+        "mossy stones and tall green trees under soft morning sunlight"
+    )
+    output = ray.get(
+        init_training_step_execution_server.generate.remote(
+            prompt_ids=_tokenize_prompt(prompt),
+            sampling_params={"num_inference_steps": 10, "height": 512, "width": 512},
+            request_id=f"diffusion_nft_step_execution_{uuid4().hex[:8]}",
+        ),
+        timeout=600,
+    )
+
+    assert isinstance(output, DiffusionOutput)
+    assert len(output.diffusion_output) == 3
+    _assert_training_step_execution_contract(
+        output,
+        algorithm="DiffusionNFT",
+        include_train_timesteps=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "init_training_step_execution_server",
+    ["dpo"],
+    indirect=True,
+    ids=["dpo-step-execution"],
+)
+def test_dpo_step_execution_contract(init_training_step_execution_server):
+    """Verify online DPO final-latent outputs with step_execution=True."""
+    prompt = (
+        "a cinematic photograph of a red tram crossing a rainy city street at "
+        "night with reflections from warm shop lights on the pavement"
+    )
+    output = ray.get(
+        init_training_step_execution_server.generate.remote(
+            prompt_ids=_tokenize_prompt(prompt),
+            sampling_params={"num_inference_steps": 10, "height": 512, "width": 512},
+            request_id=f"dpo_step_execution_{uuid4().hex[:8]}",
+        ),
+        timeout=600,
+    )
+
+    assert isinstance(output, DiffusionOutput)
+    assert len(output.diffusion_output) == 3
+    _assert_training_step_execution_contract(
+        output,
+        algorithm="DPO",
+        include_train_timesteps=False,
+    )

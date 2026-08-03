@@ -392,6 +392,34 @@ class TestConsistencyMetrics:
         assert "rollout_corr/logprob_abs_diff_mean" in metrics
         assert not any("logprob_abs_diff/ts_" in k for k in metrics)
 
+    def test_batch_metrics_include_timestep_breakdown(self):
+        """The trainer-facing helper reads log-probs and timesteps from DataProto."""
+        batch = DataProto.from_dict(
+            tensors={
+                "old_log_probs": torch.tensor([[1.0, 2.0]]),
+                "rollout_log_probs": torch.tensor([[1.5, 2.0]]),
+                "all_timesteps": torch.tensor([[800.0, 700.0]]),
+            }
+        )
+
+        metrics = rollout_correction.compute_rollout_corr_metrics_from_batch(batch, bypass_mode=False)
+
+        assert metrics["rollout_corr/logprob_abs_diff_mean"] == pytest.approx(0.25)
+        assert metrics["rollout_corr/logprob_abs_diff/ts_800"] == pytest.approx(0.5)
+
+    @pytest.mark.parametrize(
+        ("bypass_mode", "include_rollout_log_probs"),
+        [(True, True), (False, False)],
+    )
+    def test_batch_metrics_skip_unavailable_comparisons(self, bypass_mode, include_rollout_log_probs):
+        """Bypass mode and batches without rollout log-probs do not emit trivial metrics."""
+        tensors = {"old_log_probs": torch.randn(2, 2)}
+        if include_rollout_log_probs:
+            tensors["rollout_log_probs"] = torch.randn(2, 2)
+        batch = DataProto.from_dict(tensors=tensors)
+
+        assert rollout_correction.compute_rollout_corr_metrics_from_batch(batch, bypass_mode=bypass_mode) == {}
+
 
 class TestConfigHelpers:
     def test_rollout_correction_enabled(self):

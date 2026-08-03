@@ -1,5 +1,7 @@
 # DPO Training
 
+Last updated: 06/30/2026
+
 This directory contains examples for **direct-preference** diffusion training
 (DPO and related losses). Two workflows are supported:
 
@@ -11,7 +13,7 @@ This directory contains examples for **direct-preference** diffusion training
 
 For implementation details on adding or extending direct-preference algorithms,
 see
-[`docs/contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md`](../../docs/contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md).
+[How to Integrate a New Direct-Preference Algorithm for Diffusion Model](../../docs/contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md).
 
 ## Qwen-Image Online DPO
 
@@ -27,8 +29,8 @@ training step it:
 ### Dataset
 
 Use the same OCR prompt parquet as FlowGRPO Qwen-Image training. Prepare the
-data following [Prepare the dataset](../flowgrpo_trainer/README.md#prepare-the-dataset)
-in `examples/flowgrpo_trainer/README.md` (raw OCR from
+data following [Prepare the dataset](https://verl-omni.readthedocs.io/en/latest/examples/flowgrpo_trainer.html#prepare-the-dataset)
+in [Examples - FlowGRPO Trainer](https://verl-omni.readthedocs.io/en/latest/examples/flowgrpo_trainer.html) (raw OCR from
 [flow_grpo/dataset/ocr](https://github.com/yifan123/flow_grpo/tree/main/dataset/ocr),
 then `examples/flowgrpo_trainer/data_process/qwenimage_ocr.py` to write
 `$WORKSPACE/data/ocr/qwen_image/train.parquet` and `test.parquet`).
@@ -72,9 +74,9 @@ This script uses a 16-NPU global distribution strategy with:
 > All experiments were conducted on *NVIDIA H800* GPUs; NPU experiments use *16× Ascend NPUs*. The OCR reward was used for all experiments.
 
 | Script | Model | Algorithm | Hybrid Engine | # Cards | Reward Fn | # Cards for Actor | # Cards for Rollout | # Cards for Async Reward | Batch Size | `rollout.n` | lr   | # Val Samples | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / Card / Seconds) | Time per Step (Seconds) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `qwen_image/run_qwen_image_online_dpo_lora.sh` | Qwen-Image | Online DPO | True | 4 (NVIDIA) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync) | 32 | 16 | 3e-4 | 1k (full set) | 32×2=64 | 8 | 0.040 | 408 |
-| `qwen_image/run_qwen_image_online_dpo_lora_npu.sh` | Qwen-Image | Online DPO | True | 16 (NPU) | qwenvl-ocr-vllm | 16 | 16 | 0 (sync) | 32 | 16 | 3e-4 | 1k (full set) | 32×2=64 | 4 | 0.003 | 1188 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora.sh` | Qwen-Image | Online DPO | True | 4 (NVIDIA) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync) | 32 | 16 | 3e-4 | 1k (full set) | 32×2=64 | 8 | 0.040 | 408 |
+| `examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora_npu.sh` | Qwen-Image | Online DPO | True | 16 (NPU) | qwenvl-ocr-vllm | 16 | 16 | 0 (sync) | 32 | 16 | 3e-4 | 1k (full set) | 32×2=64 | 4 | 0.003 | 1188 |
 
 - Colocated actor, vLLM-Omni rollout, and sync OCR reward on 4 NVIDIA GPUs (or 16 NPUs for NPU script); `rollout.n=16` samples candidates, then top/bottom pairing keeps 64 actor-update images per step.
 - Validation uses the full OCR test parquet.
@@ -180,7 +182,7 @@ disabled by default.
 
 ### Reward template
 
-`prepare_offline_dpo.py` can call any reward function with the standard VeRL-Omni
+`examples/dpo_trainer/data_process/prepare_offline_dpo.py` can call any reward function with the standard VeRL-Omni
 custom reward signature. The example commands above use
 `verl_omni/utils/reward_score/unified_reward.py` and can either launch a local
 OpenAI-compatible vLLM reward server or connect to an existing one through

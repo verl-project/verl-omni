@@ -88,7 +88,7 @@ rollout backend is drifting too far — tighten the RS band or fall back to
 ## Consistency monitoring
 
 Whenever the rollout returns log-probs (`actor_rollout_ref.rollout.calculate_log_probs=true`)
-and bypass mode is off, the trainer additionally logs rollout-train consistency diagnostics
+and bypass mode is off, both the legacy and v1 trainers log rollout-train consistency diagnostics
 once per global batch — no `rollout_correction` config needed:
 
 - `rollout_corr/logprob_abs_diff_mean` / `_max` — |`old_log_probs` − `rollout_log_probs`|.

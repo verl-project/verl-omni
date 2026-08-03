@@ -14,14 +14,17 @@
 """Qwen3-Omni Thinker training adapter.
 
 Implements ``OmniModelBase`` for thinker-stage training of
-Qwen3-Omni: sub-module stripping, forward redirection, and
-processor/tokenizer configuration.
+Qwen3-Omni: sub-module stripping, forward redirection,
+processor/tokenizer configuration, and LoRA key normalization for
+vLLM-Omni weight sync.
 """
 
 import json
 import logging
 import os
 from typing import Any
+
+import numpy as np
 
 from verl_omni.pipelines.model_base import OmniModelBase
 
@@ -57,24 +60,25 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         module.forward = module.thinker.forward
         module.get_input_embeddings = module.thinker.get_input_embeddings
         module.set_input_embeddings = module.thinker.set_input_embeddings
+        module._no_split_modules = ["Qwen3OmniMoeThinkerTextDecoderLayer"]
         return module
 
     @classmethod
     def configure_processor(cls, model_path: str, model_config) -> Any:
-        """Load the Qwen3-Omni multimodal processor with RoPE helpers.
+        """Load the Qwen3-Omni multimodal processor with RoPE + dedup helpers.
 
-        Swaps ``processor.config`` to ``thinker_config`` (Qwen3-Omni
-        nests multimodal settings under sub-configs).  Binds
-        ``get_rope_index`` and ``get_llm_pos_ids_for_vision`` to the
-        processor — the omni agent loop calls these on the processor,
-        but they are model methods.
+        Swaps ``processor.config`` to ``thinker_config`` (Qwen3-Omni nests
+        multimodal settings under sub-configs). Binds ``get_rope_index`` and
+        ``get_llm_pos_ids_for_vision`` (model methods the omni agent loop
+        calls on the processor), and ``dedup_pad_tokens`` (collapses
+        consecutive multimodal pad tokens before vLLM-Omni re-expands them).
 
         Args:
             model_path: Local path to the model checkpoint.
             model_config: The ``OmniModelConfig``.
 
         Returns:
-            The configured processor with RoPE helpers bound.
+            The configured processor with RoPE and dedup helpers bound.
         """
         import types
 
@@ -89,8 +93,46 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         processor.config.vision_start_token_id = config.talker_config.vision_start_token_id
 
         model_cls = Qwen3OmniMoeThinkerForConditionalGeneration
-        processor.get_rope_index = types.MethodType(model_cls.get_rope_index, processor)
+
+        # Cast to int64: HF returns float32, FSDP would otherwise bf16-round positions.
+        def _get_rope_index_long(self, *args, **kwargs):
+            vision_position_ids, deltas = model_cls.get_rope_index(self, *args, **kwargs)
+            return vision_position_ids.long(), deltas
+
+        processor.get_rope_index = types.MethodType(_get_rope_index_long, processor)
         processor.get_llm_pos_ids_for_vision = types.MethodType(model_cls.get_llm_pos_ids_for_vision, processor)
+
+        # Collapse consecutive multimodal pad tokens before vLLM-Omni re-expands
+        # them (token-IDs path still unfixed: https://github.com/vllm-project/vllm/issues/33672);
+        # mirrors verl's qwen2_5_vl_dedup_image_tokens.
+        def _dedup_pad_tokens(self, prompt_ids: list[int]) -> list[int]:
+            tokenizer = getattr(self, "tokenizer", None)
+            if tokenizer is None:
+                return prompt_ids
+            pad_ids: set[int] = set()
+            for tok_attr in ("image_token", "video_token", "audio_token"):
+                tok = getattr(self, tok_attr, None)
+                if tok is None:
+                    continue
+                try:
+                    tid = tokenizer.convert_tokens_to_ids(tok)
+                except Exception:
+                    continue
+                if tid is None or tid == getattr(tokenizer, "unk_token_id", None):
+                    continue
+                pad_ids.add(int(tid))
+            if not pad_ids:
+                return prompt_ids
+            arr = np.asarray(prompt_ids, dtype=np.int64)
+            if arr.size == 0:
+                return prompt_ids
+            is_pad = np.isin(arr, list(pad_ids))
+            keep = np.ones(arr.size, dtype=bool)
+            same_as_prev = is_pad[1:] & is_pad[:-1] & (arr[1:] == arr[:-1])
+            keep[1:] &= ~same_as_prev
+            return arr[keep].tolist()
+
+        processor.dedup_pad_tokens = types.MethodType(_dedup_pad_tokens, processor)
         return processor
 
     @classmethod
