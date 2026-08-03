@@ -23,27 +23,9 @@ import torch
 __all__ = [
     "collate_prompt_mask",
     "collate_prompt_rows",
-    "request_batch_needs_logprobs",
     "sample_per_sample_sde_windows",
     "split_diffusion_output_by_request",
 ]
-
-
-def request_batch_needs_logprobs(sampling_params_list: list[Any], default: bool = True) -> bool:
-    """Return whether a packed diffusion batch must compute log-probs.
-
-    Packed pipelines compute scheduler log-probs for the whole batch at once,
-    so one request with ``logprobs=True`` requires enabling computation for all
-    rows. The server still decides per request whether to expose the result.
-    """
-    for sampling_params in sampling_params_list:
-        extra_args = getattr(sampling_params, "extra_args", None) or {}
-        logprobs = extra_args.get("logprobs", None)
-        if logprobs is None:
-            logprobs = default
-        if bool(logprobs):
-            return True
-    return False
 
 
 def sample_per_sample_sde_windows(

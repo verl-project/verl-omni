@@ -34,9 +34,6 @@ from verl_omni.pipelines.request_batch import (
     collate_prompt_rows as _collate_prompt_rows,
 )
 from verl_omni.pipelines.request_batch import (
-    request_batch_needs_logprobs as _request_batch_needs_logprobs,
-)
-from verl_omni.pipelines.request_batch import (
     sample_per_sample_sde_windows as _sample_per_sample_sde_windows,
 )
 from verl_omni.pipelines.request_batch import (
@@ -779,7 +776,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         sde_window_size = coalesce_not_none(sampling_params.extra_args.get("sde_window_size", None), sde_window_size)
         sde_window_range = coalesce_not_none(sampling_params.extra_args.get("sde_window_range", None), sde_window_range)
         sde_type = coalesce_not_none(sampling_params.extra_args.get("sde_type", None), sde_type)
-        logprobs = _request_batch_needs_logprobs(request_batch.sampling_params_list, default=logprobs)
+        logprobs = coalesce_not_none(sampling_params.extra_args.get("logprobs", None), logprobs)
 
         for request in request_batch.requests:
             request_sampling_params = request.sampling_params
