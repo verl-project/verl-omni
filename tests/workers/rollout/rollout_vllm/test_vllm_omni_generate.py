@@ -347,15 +347,15 @@ def _assert_valid_diffusion_output(output: DiffusionOutput, *, index: int, expec
             assert len(lp) > 0
 
 
-# Disabled: mixed-logprobs request batching is not critical for now. In rollout, it is always disabled.
-# def test_generate(init_server):
-#     """Concurrent generate() covering basic output, logprobs, and multi-request correctness."""
-#     results = _generate_concurrent(init_server, _PROMPTS, logprobs_first_only=True)
+@pytest.mark.skip(reason="Mixed-logprobs request batching is not critical for now; rollout always disables it.")
+def test_generate(init_server):
+    """Concurrent generate() covering basic output, logprobs, and multi-request correctness."""
+    results = _generate_concurrent(init_server, _PROMPTS, logprobs_first_only=True)
 
-#     for i, output in enumerate(results):
-#         _assert_valid_diffusion_output(output, index=i, expect_logprobs=(i == 0))
+    for i, output in enumerate(results):
+        _assert_valid_diffusion_output(output, index=i, expect_logprobs=(i == 0))
 
-#     print(f"All {len(_PROMPTS)} concurrent requests returned valid DiffusionOutput")
+    print(f"All {len(_PROMPTS)} concurrent requests returned valid DiffusionOutput")
 
 
 def test_generate_request_level_batch(init_server):
