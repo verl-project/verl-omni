@@ -36,7 +36,7 @@ def _flatten_tensors(value: Any, prefix: str = "") -> dict[str, torch.Tensor]:
         for key, item in value.items():
             child = f"{prefix}.{key}" if prefix else str(key)
             flat.update(_flatten_tensors(item, child))
-    elif isinstance(value, (list, tuple)):
+    elif isinstance(value, (list | tuple)):
         for index, item in enumerate(value):
             child = f"{prefix}.{index}" if prefix else str(index)
             flat.update(_flatten_tensors(item, child))

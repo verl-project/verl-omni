@@ -21,12 +21,13 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
+import install_debug_hooks
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 _SCRIPT_DIR = Path(__file__).resolve().parent
 
-import install_debug_hooks
 
 _FORWARDED_ENV_PREFIXES = ("DEBUG_DUMP_", "GENRM_OCR_")
 _FORWARDED_ENV_NAMES = {

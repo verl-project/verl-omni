@@ -165,9 +165,9 @@ def _to_cpu_payload(value: Any, *, max_sequence_items: int = 128) -> Any:
         return value.copy()
     if isinstance(value, Mapping):
         return {str(k): _to_cpu_payload(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (list | tuple)):
         return [_to_cpu_payload(v) for v in list(value)[:max_sequence_items]]
-    if isinstance(value, (str, int, float, bool)) or value is None:
+    if isinstance(value, (str | int | float | bool)) or value is None:
         return value
     return repr(value)
 
