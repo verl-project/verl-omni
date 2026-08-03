@@ -490,6 +490,9 @@ trainer:
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
   max_actor_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
+  ray_master_port_range:
+  - 20000
+  - 30000
   device: cuda
   use_v1: false
   v1:

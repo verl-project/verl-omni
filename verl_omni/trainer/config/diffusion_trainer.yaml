@@ -193,6 +193,9 @@ trainer:
   # Timeout (in seconds) for Ray worker to wait for registration
   ray_wait_register_center_timeout: 300
 
+  # Stable port range used by RayWorkerGroup for torch distributed rendezvous.
+  ray_master_port_range: [20000, 30000]
+
   # Device to run training on (e.g., "cuda", "cpu")
   device: cuda
 

@@ -153,7 +153,9 @@ jobs:
 
           plan = json.loads(os.environ["GPU_SMOKE_GROUPS_JSON"])
           for group in plan["groups"]:
-              print(f"{group['name']}\t{group['devices']}\t{group['num_gpus']}\t{group['script']}")
+              port_start, port_end = group["ray_master_port_range"]
+              port_range = f"{port_start},{port_end}"
+              print(f"{group['name']}\t{group['devices']}\t{group['num_gpus']}\t{group['script']}\t{port_range}")
           PY
 
           if [[ ! -s /tmp/gpu_smoke_groups.tsv ]]; then
@@ -169,10 +171,11 @@ jobs:
             local devices="$2"
             local num_gpus="$3"
             local script="$4"
+            local ray_master_port_range="$5"
             local logfile="logs/gpu_smoke/parallel/${name}.log"
 
-            echo "Starting ${name} on CUDA_VISIBLE_DEVICES=${devices}; log=${logfile}"
-            GPU_SMOKE_SKIP_RAY_STOP=1 bash "${script}" \
+            echo "Starting ${name} on CUDA_VISIBLE_DEVICES=${devices}; RAY_MASTER_PORT_RANGE=${ray_master_port_range}; log=${logfile}"
+            RAY_MASTER_PORT_RANGE="${ray_master_port_range}" GPU_SMOKE_SKIP_RAY_STOP=1 bash "${script}" \
               --num-gpus "${num_gpus}" \
               --cuda-visible-devices "${devices}" \
               > "${logfile}" 2>&1 &
@@ -180,8 +183,8 @@ jobs:
             names+=("${name}")
           }
 
-          while IFS=$'\t' read -r name devices num_gpus script; do
-            run_group "${name}" "${devices}" "${num_gpus}" "${script}"
+          while IFS=$'\t' read -r name devices num_gpus script ray_master_port_range; do
+            run_group "${name}" "${devices}" "${num_gpus}" "${script}" "${ray_master_port_range}"
           done < /tmp/gpu_smoke_groups.tsv
 
           failed=0

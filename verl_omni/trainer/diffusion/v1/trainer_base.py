@@ -578,6 +578,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         all_wg = {}
         wg_kwargs = {"device_name": self.config.trainer.device}
+        if OmegaConf.select(self.config.trainer, "ray_master_port_range") is not None:
+            wg_kwargs["master_port_range"] = OmegaConf.to_container(self.config.trainer.ray_master_port_range)
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             if not class_dict:
                 continue
