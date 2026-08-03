@@ -59,9 +59,8 @@ mode every day at 22:00 Asia/Shanghai and can also be triggered manually with
 
 Nightly jobs run with `BOOTSTRAP_MISSING_BASELINE=0` so missing or stale
 baselines fail closed. Baseline creation is manual only: run the workflow with
-`mode=baseline`, or add the `L3-baseline` label to a pull request. Baseline mode
-uses `BOOTSTRAP_MISSING_BASELINE=1` and uploads the reviewed baseline as the
-`l3-qwen-image-flowgrpo-single-sample-baseline` artifact.
+`mode=baseline`. Baseline mode uses `BOOTSTRAP_MISSING_BASELINE=1` and uploads 
+the reviewed baseline as the `l3-qwen-image-flowgrpo-single-sample-baseline` artifact.
 
 Strict nightly mode downloads the latest non-expired baseline artifact for the
 configured baseline branch, runs the comparison, and uploads current debug
