@@ -70,4 +70,4 @@ Reward Utilities
 ^^^^^^^^^^^^^^^^^^
 
 .. automodule:: verl_omni.utils.reward_score.reward_utils
-   :members: pil_image_to_base64
+   :members: video_tensor_to_pil_frames, pil_image_to_base64

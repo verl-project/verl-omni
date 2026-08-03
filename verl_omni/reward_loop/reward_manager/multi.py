@@ -68,11 +68,21 @@ class MultiVisualRewardManager(VisualRewardManager):
 
         self._sub_rewards = []
         total_weight = 0.0
-        _reserved_keys = {"path", "name", "weight"}
+        _reserved_keys = {"path", "name", "weight", "required"}
         for key, entry in reward_functions_cfg.items():
             path = entry["path"]
             name = entry["name"]
             weight = float(entry.get("weight", 1.0))
+            required_value = entry.get("required", False)
+            if isinstance(required_value, str):
+                normalized = required_value.lower()
+                if normalized not in {"true", "false"}:
+                    raise ValueError(f"Invalid required value: {required_value!r}")
+                required = normalized == "true"
+            elif isinstance(required_value, bool):
+                required = required_value
+            else:
+                raise TypeError(f"required must be a boolean, got {type(required_value).__name__}")
             total_weight += weight
 
             # Collect extra config fields (beyond path/name/weight) to pass to compute_score
@@ -87,6 +97,7 @@ class MultiVisualRewardManager(VisualRewardManager):
                     "key": key,
                     "fn": fn,
                     "weight": weight,
+                    "required": required,
                     "sig": sig,
                     "is_async": is_async,
                     "extra_args": extra_args,
@@ -142,6 +153,7 @@ class MultiVisualRewardManager(VisualRewardManager):
             key = sub["key"]
             fn = sub["fn"]
             weight = sub["weight"]
+            required = sub["required"]
             sig = sub["sig"]
             is_async = sub["is_async"]
             extra_args = sub["extra_args"]
@@ -166,6 +178,8 @@ class MultiVisualRewardManager(VisualRewardManager):
                     score = float(result)
 
             except Exception as e:
+                if required:
+                    raise RuntimeError(f"Required sub-reward '{key}' failed: {e}") from e
                 logger.error(f"Sub-reward '{key}' raised an exception: {e}. Contributing 0 to weighted sum.")
                 score = 0.0
 

@@ -11,7 +11,7 @@ contracts. Read that guide first.
 The worked example is the Qwen-Image-Edit-Plus implementation in
 [`verl_omni/pipelines/qwen_image_edit_flow_grpo/`](../../verl_omni/pipelines/qwen_image_edit_flow_grpo/__init__.py).
 For instructions on running that model, see
-[Train Qwen-Image-Edit-2511 with FlowGRPO](../../examples/flowgrpo_trainer/qwen_image_edit/README.md).
+[Train Qwen-Image-Edit-2511 with FlowGRPO](https://verl-omni.readthedocs.io/en/latest/examples/qwen_image_edit/flowgrpo_trainer_qwen_image_edit.html).
 
 ## TL;DR
 
@@ -442,7 +442,7 @@ The prompt template, image placeholders, and processor calls must agree. A
 placeholder/image-count mismatch usually fails in the VLM encoder; a prompt
 template mismatch can silently change policy behavior.
 
-Use the [Qwen-Image-Edit training guide](../../examples/flowgrpo_trainer/qwen_image_edit/README.md) as a
+Use the [Qwen-Image-Edit training guide](https://verl-omni.readthedocs.io/en/latest/examples/qwen_image_edit/flowgrpo_trainer_qwen_image_edit.html) as a
 complete example of raw data conversion, parquet schema, launcher overrides,
 and model-specific constraints.
 

@@ -54,3 +54,11 @@ vLLM-Omni LoRA Hooks
 See :class:`verl_omni.utils.vllm_omni.utils.OmniTensorLoRARequest` and
 :class:`verl_omni.utils.vllm_omni.utils.VLLMOmniHijack` in the
 :doc:`rollout` section.
+
+Tracking Utilities
+------------------
+
+VeRL-Omni reuses :mod:`verl.utils.tracking` and adds a helper to wrap validation
+samples (images and videos) as ``wandb`` media before logging.
+
+.. autofunction:: verl_omni.utils.tracking.wrap_val_samples_for_wandb

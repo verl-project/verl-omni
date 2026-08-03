@@ -32,6 +32,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 
 import torch
@@ -40,13 +41,7 @@ from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 from tokenizers.models import BPE
 from tokenizers.pre_tokenizers import ByteLevel as ByteLevelPreTokenizer
 from tokenizers.trainers import BpeTrainer
-from transformers import AutoModelForCausalLM, Qwen2TokenizerFast
-
-# Importing the patch module registers Qwen3OmniMoeConfig with
-# AutoModelForCausalLM (the Thinker is decoder-only despite its config class).
-# It is NOT applied by ``import verl_omni`` — the patch is loaded on demand via
-# ``actor_rollout_ref.model.external_lib`` — so apply it explicitly here.
-from verl_omni.models.transformers.qwen3_omni_thinker import apply_qwen3_omni_thinker_patches
+from transformers import AutoModelForMultimodalLM, Qwen2TokenizerFast
 
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/models/tiny-random/Qwen3-Omni")
 
@@ -113,6 +108,7 @@ def _build_tiny_config(vocab_size: int):
     config.enable_audio_output = False
 
     text = config.thinker_config.text_config
+    text.tie_word_embeddings = False
     text.num_hidden_layers = 2
     text.hidden_size = 128
     text.intermediate_size = 256
@@ -125,7 +121,8 @@ def _build_tiny_config(vocab_size: int):
     text.vocab_size = vocab_size
     # The default config leaves rope_scaling unset, but the M-RoPE rotary
     # embedding requires it. mrope_section must sum to head_dim // 2 (= 16 here).
-    text.rope_scaling = {"rope_type": "default", "mrope_section": [8, 4, 4]}
+    # Set rope_parameters directly (not rope_scaling) to avoid dropping rope_theta.
+    text.rope_parameters = {"rope_theta": 1000000.0, "rope_type": "default", "mrope_section": [8, 4, 4]}
 
     vision = config.thinker_config.vision_config
     # Shrink dims but keep every field vLLM-Omni's vision tower reads (the default
@@ -136,7 +133,6 @@ def _build_tiny_config(vocab_size: int):
     vision.num_heads = 4
     vision.out_hidden_size = 128  # must match text hidden_size for the projector
     vision.image_size = 768
-    vision.in_chans = 3
     vision.in_channels = 3
     vision.patch_size = 16
     vision.spatial_patch_size = 16
@@ -194,7 +190,11 @@ def _build_tiny_processor(tokenizer):
             min_pixels=3136,
             max_pixels=12845056,
         ),
-        video_processor=Qwen2VLVideoProcessor(),
+        video_processor=Qwen2VLVideoProcessor(
+            patch_size=16,
+            temporal_patch_size=2,
+            merge_size=2,
+        ),
         feature_extractor=WhisperFeatureExtractor(),
         tokenizer=tokenizer,
         chat_template=_CHATML_TEMPLATE,
@@ -203,7 +203,6 @@ def _build_tiny_processor(tokenizer):
 
 def build(output_dir: str, *, seed: int = 42, dtype: torch.dtype = torch.bfloat16) -> str:
     """Construct and save a tiny random-weight Qwen3-Omni Thinker checkpoint."""
-    apply_qwen3_omni_thinker_patches()
     torch.manual_seed(seed)
 
     tokenizer = _build_tiny_chatml_tokenizer()
@@ -215,24 +214,34 @@ def build(output_dir: str, *, seed: int = 42, dtype: torch.dtype = torch.bfloat1
     text.eos_token_id = tokenizer.eos_token_id
     text.pad_token_id = tokenizer.pad_token_id
 
-    model = AutoModelForCausalLM.from_config(config).to(dtype)
+    model = AutoModelForMultimodalLM.from_config(config).to(dtype)
 
     os.makedirs(output_dir, exist_ok=True)
     model.save_pretrained(output_dir)
-    # Save the full multimodal processor (tokenizer + image/video/audio configs);
-    # the vLLM-Omni rollout loader requires preprocessor_config.json to exist.
+    # Save the full multimodal processor (tokenizer + image/video/audio configs).
     processor = _build_tiny_processor(tokenizer)
     processor.save_pretrained(output_dir)
     _merge_image_processor_config(output_dir, processor)
+    # Write chat_template.json — configure_tokenizer reads this explicitly.
+    chat_template_path = os.path.join(output_dir, "chat_template.json")
+    with open(chat_template_path, "w") as f:
+        json.dump({"chat_template": _CHATML_TEMPLATE}, f)
     return output_dir
 
 
 def _merge_image_processor_config(output_dir: str, processor) -> None:
-    """Re-merge image-processor keys into preprocessor_config.json (save_pretrained lets
-    the audio feature extractor overwrite ``image_processor_type``, which the loader needs)."""
+    """Re-merge image-processor keys into ``processor_config.json`` (``save_pretrained``
+    lets the audio feature extractor overwrite ``image_processor_type``, which the loader needs)."""
     import json
 
-    pc_path = os.path.join(output_dir, "preprocessor_config.json")
+    # Try the newer config name first, fall back to the old one.
+    for fname in ("processor_config.json", "preprocessor_config.json"):
+        pc_path = os.path.join(output_dir, fname)
+        if os.path.isfile(pc_path):
+            break
+    else:
+        return
+
     with open(pc_path) as f:
         merged = json.load(f)
     image_dict = processor.image_processor.to_dict()

@@ -50,9 +50,11 @@ Direct Preference Ray Trainer
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :class:`~verl_omni.trainer.diffusion.ray_diffusion_trainer.DirectPreferenceRayTrainer`
-is the extension point for direct-preference algorithms (DPO, DiffusionNFT, AWM)
-that train with single forward-timestep updates rather than a full multi-step
-SDE trajectory. The ``fit`` implementation is not yet available in-tree.
+implements the training loop for direct-preference algorithms (DPO,
+DiffusionNFT, AWM) that use single forward-timestep updates rather than a full
+multi-step SDE trajectory. Offline algorithms consume pre-computed rewards
+from the dataset; online algorithms generate rollouts and compute rewards
+during training.
 
 .. autoclass:: verl_omni.trainer.diffusion.ray_diffusion_trainer.DirectPreferenceRayTrainer
    :members: fit
