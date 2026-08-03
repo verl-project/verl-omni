@@ -53,9 +53,6 @@ from vllm_omni.outputs import OmniRequestOutput
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase, VllmOmniPipelineBase
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig, OmniModelConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
-from verl_omni.workers.rollout.vllm_rollout.placement_guard import (
-    validate_vllm_omni_rollout_placement,
-)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -105,19 +102,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if self._ar_mode:
             if self.config.max_model_len is None:
                 self.config.max_model_len = self.config.prompt_length + self.config.response_length
-            if int(getattr(self.config, "data_parallel_size", 1) or 1) != 1:
-                raise ValueError(
-                    "vLLM-Omni AR rollout requires data_parallel_size=1. Scale with verl-owned outer rollout replicas."
-                )
-            logprobs_mode = getattr(self.config, "logprobs_mode", "processed_logprobs")
-            if getattr(self.config, "calculate_log_probs", False) and logprobs_mode not in {
-                "raw_logprobs",
-                "processed_logprobs",
-            }:
-                raise ValueError(
-                    "vLLM-Omni AR rollout requires raw_logprobs or processed_logprobs "
-                    f"when calculate_log_probs is enabled, got {logprobs_mode!r}"
-                )
 
     def _post_init(self, cuda_visible_devices: str) -> None:
         """Diffusion needs a PIL→tensor converter; AR does not."""
@@ -141,6 +125,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return "vllm_omni"
 
     def _get_worker_extension_cls(self) -> str:
+        # AR stages reuse verl's standard vLLM weight update implementation.
+        if self._ar_mode:
+            return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniARColocateWorkerExtension"
+
         device_type = ""
         try:
             from vllm.platforms import current_platform
@@ -149,11 +137,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         except Exception:
             pass
 
-        # vLLMOmniColocateWorkerExtension supports LoRA + weight updates for GPU.
+        # vLLMOmniColocateWorkerExtension supports diffusion LoRA + weight updates for GPU.
         # vLLMOmniNPUColocateWorkerExtension additionally mixes in NPUColocateWorkerMixin
         # for NPU memory pool, sleep, and wake_up.
-        # ar_mode uses vllm-ascend which already handles NPU natively, so the base extension suffices.
-        if device_type != "npu" or self._ar_mode:
+        if device_type != "npu":
             return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
         else:
             return "verl_omni.workers.rollout.vllm_rollout.npu_utils.vLLMOmniNPUColocateWorkerExtension"
@@ -170,19 +157,18 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_kwargs.pop("output_mode", None)
         if self._ar_mode:
             engine_kwargs.pop("custom_pipeline", None)
+            # TODO (mike): drop this later
+            # It should be automatically inferred from the model config
             pipeline_name = engine_kwargs.pop("pipeline_name", None)
             pipeline_mode = engine_kwargs.pop("pipeline_mode", "thinker_only")
 
-            if pipeline_name:
-                adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
-                if adapter_cls is None:
-                    registered = sorted(OmniRolloutPipelineBase._registry)
-                    raise ValueError(
-                        f"No Omni rollout adapter registered for pipeline_name={pipeline_name!r}. "
-                        f"Registered: {registered}"
-                    )
+            adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
+            if adapter_cls is not None:
+                # Generate deploy config using the adapter's stage topology.
                 self._write_deploy_config(engine_kwargs, pipeline_name, adapter_cls, pipeline_mode)
+                # Store per-stage rollout flags for downstream use.
                 self._rollout_flags = adapter_cls.rollout_flags(pipeline_mode=pipeline_mode)
+                # Merge pipeline-specific HF config overrides.
                 adapter_overrides = adapter_cls.get_engine_hf_overrides(pipeline_mode=pipeline_mode)
                 if adapter_overrides:
                     hf_overrides = engine_kwargs.get("hf_overrides", {})
@@ -190,11 +176,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                         hf_overrides = json.loads(hf_overrides)
                     hf_overrides.update(adapter_overrides)
                     engine_kwargs["hf_overrides"] = hf_overrides
-            elif not (engine_kwargs.get("deploy_config") or engine_kwargs.get("stage_configs_path")):
-                raise ValueError(
-                    "vLLM-Omni AR rollout requires pipeline_name for adapter-generated placement "
-                    "or an explicit deploy_config/stage_configs_path."
-                )
 
             stage_init_timeout = engine_kwargs.get("stage_init_timeout") or engine_kwargs.get("stage-init-timeout")
             init_timeout = engine_kwargs.get("init_timeout") or engine_kwargs.get("init-timeout")
@@ -225,6 +206,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         deploy_dict: dict[str, object] = {"pipeline": pipeline_id}
 
         if visible_devices:
+            # Stage configs use logical ids relative to the Ray actor's visible-device set.
             device_count = len([device for device in visible_devices.split(",") if device.strip()])
             devices = ",".join(str(device_id) for device_id in range(device_count))
             stage_ids = [s.stage_id for s in stages]
@@ -259,27 +241,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # Server lifecycle
     # -----------------------------------------------------------------------
 
-    @staticmethod
-    def _visible_device_count() -> int | None:
-        raw_devices = os.environ.get("CUDA_VISIBLE_DEVICES") or os.environ.get("ROCR_VISIBLE_DEVICES")
-        if not raw_devices:
-            return None
-        return len([device for device in raw_devices.split(",") if device.strip()])
-
-    def _run_ar_placement_preflight(self, args: argparse.Namespace):
-        if int(self.nnodes) != 1:
-            raise ValueError(
-                "A vLLM-Omni AR rollout replica must fit on one node. "
-                "Use data_parallel_size=1 and scale with verl-owned outer replicas."
-            )
-        config_path = getattr(args, "deploy_config", None) or getattr(args, "stage_configs_path", None)
-        placement = validate_vllm_omni_rollout_placement(
-            config_path=config_path,
-            visible_device_count=self._visible_device_count(),
-        )
-        logger.info("vLLM-Omni AR rollout placement: %s", placement)
-        return placement
-
     async def run_server(self, args: argparse.Namespace):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
@@ -289,7 +250,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             engine_args["deploy_config"] = deploy_config
 
         if self._ar_mode:
-            self._run_ar_placement_preflight(args)
             for timeout_key in ("stage_init_timeout", "init_timeout"):
                 timeout_value = getattr(args, timeout_key, None)
                 if timeout_value is not None:
@@ -340,10 +300,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
 
     async def run_headless(self, args: argparse.Namespace):
-        raise NotImplementedError(
-            "vLLM-Omni AR uses node-local replicas with data_parallel_size=1; "
-            "cross-node headless rollout replicas are not supported."
-        )
+        """Run headless server in a separate thread."""
+        # TODO (mike): support multi node
+        raise NotImplementedError("vLLM-Omni headless mode is not implemented yet.")
 
     # -----------------------------------------------------------------------
     # wake_up hook: Omni does not restore KV cache on wake-up
@@ -394,13 +353,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if self.node_rank != 0:
             return {"aborted_count": 0, "request_ids": []}
 
+        request_ids = list(dict.fromkeys(state.external_request_id for state in self.engine.request_states.values()))
         await self.engine.pause_generation(
             wait_for_inflight_requests=False,
             clear_cache=False,
         )
-        request_ids = list(self.engine.request_states)
         if request_ids:
-            await self.engine._abort_internal_requests(request_ids)
+            await self.engine.abort(request_ids)
         if reset_prefix_cache:
             await self.engine.reset_prefix_cache(
                 reset_running_requests=True,
@@ -416,11 +375,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         request_states = self.engine.request_states
         if request_id in request_states:
-            await self.engine._abort_internal_requests(request_id)
+            external_request_id = request_states[request_id].external_request_id
         elif any(state.external_request_id == request_id for state in request_states.values()):
-            await self.engine.abort(request_id)
+            external_request_id = request_id
         else:
             return {"aborted": False, "request_id": request_id, "error": "request not found"}
+        await self.engine.abort(external_request_id)
         if reset_prefix_cache:
             await self.engine.reset_prefix_cache(
                 reset_running_requests=True,
@@ -637,7 +597,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if self._ar_mode:
             generator = self.engine.generate(
                 prompt=prompt,
-                sampling_params=params,
+                sampling_params_list=params,
                 request_id=request_id,
                 lora_request=lora_request,
                 priority=priority,

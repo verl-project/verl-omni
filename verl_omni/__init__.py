@@ -28,19 +28,11 @@ except Exception:
     pass
 
 
-# Apply model patches and auto-register trainers, pipelines, rollout, reward loop, and engines.
-_skip_diffusion_components = os.environ.get("VERL_OMNI_SKIP_PIPELINES", "0").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
+# Import pipelines / rollout / reward loop / engines to auto-register them
+# Apply model patches and auto-register pipelines / rollout / reward loop / engines
 import verl_omni.models  # noqa: E402, F401
 import verl_omni.pipelines  # noqa: E402, F401
 import verl_omni.reward_loop  # noqa: E402, F401
-
-if not _skip_diffusion_components:
-    import verl_omni.experimental  # noqa: E402, F401
-    import verl_omni.trainer  # noqa: E402, F401
-    import verl_omni.workers.engine  # noqa: E402, F401
+import verl_omni.trainer  # noqa: E402, F401
+import verl_omni.workers.engine  # noqa: E402, F401
 import verl_omni.workers.rollout  # noqa: E402, F401

@@ -13,7 +13,7 @@ defaults:
   - omni/model@actor_rollout_ref.model: omni_model
   - _self_
 
-# Fully asynchronous training controls.
+# Fully asynchronous defaults. Sync recipes may override these fields.
 async_training:
 
   # Maximum accepted sample staleness.

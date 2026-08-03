@@ -20,7 +20,6 @@ from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
     VLLM_LORA_PATH,
-    vLLMColocateWorkerExtension,
 )
 from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
 
@@ -30,7 +29,7 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-class vLLMOmniColocateWorkerExtension(vLLMColocateWorkerExtension, CustomPipelineWorkerExtension):
+class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     """
     The class for vLLM-Omni's worker to inherit from, in the colocate setting.
     By defining an extension class, the code can work no matter what is
@@ -130,13 +129,28 @@ class vLLMOmniColocateWorkerExtension(vLLMColocateWorkerExtension, CustomPipelin
                 lora_total_bytes / (1024 * 1024),
             )
 
-            lora_request = OmniTensorLoRARequest(
-                lora_name=VLLM_LORA_NAME,
-                lora_int_id=VLLM_LORA_INT_ID,
-                lora_path=VLLM_LORA_PATH,
-                peft_config=peft_config,
-                lora_tensors=accumulated_weights,
-            )
+            # AR (standard vLLM) workers go through verl's base VLLMHijack, which
+            # dispatches on ``isinstance(req, TensorLoRARequest)``; diffusion workers
+            # go through vllm-omni's DiffusionLoRAManager, which expects the
+            # OmniLoRARequest-derived ``OmniTensorLoRARequest``. Pick by worker type.
+            if self._get_standard_weight_model_and_config() is not None:
+                from verl.utils.vllm.utils import TensorLoRARequest
+
+                lora_request = TensorLoRARequest(
+                    lora_name=VLLM_LORA_NAME,
+                    lora_int_id=VLLM_LORA_INT_ID,
+                    lora_path=VLLM_LORA_PATH,
+                    peft_config=peft_config,
+                    lora_tensors=accumulated_weights,
+                )
+            else:
+                lora_request = OmniTensorLoRARequest(
+                    lora_name=VLLM_LORA_NAME,
+                    lora_int_id=VLLM_LORA_INT_ID,
+                    lora_path=VLLM_LORA_PATH,
+                    peft_config=peft_config,
+                    lora_tensors=accumulated_weights,
+                )
             t2 = time.perf_counter()
             self.add_lora(lora_request)
             t3 = time.perf_counter()

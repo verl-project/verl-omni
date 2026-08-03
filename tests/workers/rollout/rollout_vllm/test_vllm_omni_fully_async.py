@@ -19,16 +19,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 import yaml
 from hydra import compose, initialize_config_dir
 from verl.workers.rollout.vllm_rollout.utils import vLLMColocateWorkerExtension
 
 from verl_omni.workers.config import OmniModelConfig
-from verl_omni.workers.rollout.vllm_rollout.placement_guard import (
-    load_stage_placements,
-    validate_vllm_omni_rollout_placement,
+from verl_omni.workers.rollout.vllm_rollout.utils import (
+    vLLMOmniARColocateWorkerExtension,
+    vLLMOmniColocateWorkerExtension,
 )
-from verl_omni.workers.rollout.vllm_rollout.utils import vLLMOmniColocateWorkerExtension
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import (
     _drop_none_mapping_values,
     vLLMOmniHttpServer,
@@ -62,102 +62,6 @@ def _ar_server(**config_overrides) -> vLLMOmniHttpServer:
     config.update(config_overrides)
     server.config = Config(config)
     return server
-
-
-@pytest.mark.parametrize(
-    ("body", "expected_devices"),
-    [
-        (
-            """
-stage_args:
-  - stage_id: 0
-    runtime:
-      devices: "0,1"
-    engine_args:
-      tensor_parallel_size: 2
-""",
-            "0,1",
-        ),
-        (
-            """
-stages:
-  - stage_id: 0
-    devices: "0,1"
-    tensor_parallel_size: 2
-""",
-            "0,1",
-        ),
-    ],
-)
-def test_load_stage_placements_supports_legacy_and_deploy_configs(tmp_path, body, expected_devices):
-    path = tmp_path / "stage.yaml"
-    path.write_text(body)
-
-    stages = load_stage_placements(path)
-
-    assert len(stages) == 1
-    assert stages[0].devices == expected_devices
-    assert stages[0].tensor_parallel_size == 2
-    assert stages[0].num_replicas == 1
-
-
-def test_placement_rejects_inner_replica_parallelism(tmp_path):
-    path = tmp_path / "deploy.yaml"
-    path.write_text(
-        """
-stages:
-  - stage_id: 0
-    devices: "0,1"
-    num_replicas: 2
-    tensor_parallel_size: 1
-"""
-    )
-
-    with pytest.raises(ValueError, match="exactly one inner stage replica"):
-        validate_vllm_omni_rollout_placement(
-            config_path=path,
-            visible_device_count=2,
-        )
-
-
-def test_placement_rejects_physical_device_ids(tmp_path):
-    path = tmp_path / "stage.yaml"
-    path.write_text(
-        """
-stage_args:
-  - stage_id: 0
-    runtime:
-      devices: "2,3"
-"""
-    )
-
-    with pytest.raises(ValueError, match="actor-local CUDA ids"):
-        validate_vllm_omni_rollout_placement(
-            config_path=path,
-            visible_device_count=2,
-        )
-
-
-def test_ar_config_requires_single_dp_owner():
-    server = _ar_server(data_parallel_size=2)
-
-    with pytest.raises(ValueError, match="data_parallel_size=1"):
-        server._validate_configs()
-
-
-def test_ar_config_requires_explicit_supported_logprob_semantics():
-    server = _ar_server(logprobs_mode="unsupported")
-
-    with pytest.raises(ValueError, match="raw_logprobs or processed_logprobs"):
-        server._validate_configs()
-
-
-def test_ar_preflight_rejects_cross_node_replica():
-    server = _ar_server()
-    server.nnodes = 2
-
-    with pytest.raises(ValueError, match="must fit on one node"):
-        server._run_ar_placement_preflight(SimpleNamespace(deploy_config=None, stage_configs_path=None))
 
 
 def test_ar_timeout_args_are_normalized_before_cli_parse():
@@ -215,10 +119,10 @@ def test_ar_model_config_always_uses_omni_contract(monkeypatch):
     assert calls == [(model_config, OmniModelConfig)]
 
 
-def test_default_megatron_fully_async_config_uses_omni_contract():
+def test_default_omni_megatron_config_uses_fully_async_omni_contract():
     config_dir = Path(__file__).resolve().parents[4] / "verl_omni" / "trainer" / "config"
     with initialize_config_dir(config_dir=str(config_dir), version_base=None):
-        config = compose(config_name="fully_async_omni_megatron_trainer")
+        config = compose(config_name="omni_megatron_trainer")
 
     assert config.actor_rollout_ref.model._target_ == "verl_omni.workers.config.omni.OmniModelConfig"
     assert config.actor_rollout_ref.model.model_type == "language_model"
@@ -278,9 +182,7 @@ def test_ar_prompt_forwards_all_supported_multimodal_inputs():
 
 
 def test_ar_weight_update_reuses_verl_vllm_bounded_bucket_path(monkeypatch):
-    worker = object.__new__(vLLMOmniColocateWorkerExtension)
-    model = SimpleNamespace(load_weights=lambda _weights: None)
-    worker.model_runner = SimpleNamespace(get_model=lambda: model, model_config=object())
+    worker = object.__new__(vLLMOmniARColocateWorkerExtension)
     calls = []
 
     def fake_update(self, peft_config=None, base_sync_done=False, use_shm=False):
@@ -296,9 +198,43 @@ def test_ar_weight_update_reuses_verl_vllm_bounded_bucket_path(monkeypatch):
 
 
 def test_ar_weight_update_disables_layerwise_reload():
-    worker = object.__new__(vLLMOmniColocateWorkerExtension)
+    worker = object.__new__(vLLMOmniARColocateWorkerExtension)
 
     assert worker._maybe_reload_standard_weights_from_ipc(receiver=object()) is False
+
+
+def test_ar_server_selects_dedicated_worker_extension():
+    server = _ar_server()
+
+    assert server._get_worker_extension_cls().endswith(".vLLMOmniARColocateWorkerExtension")
+
+
+def test_diffusion_lora_update_accumulates_buckets_before_add(monkeypatch):
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    class FakeReceiver:
+        def __init__(self, **_kwargs):
+            pass
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received([("layer.a", torch.ones(1))])
+            on_bucket_received([("layer.b", torch.zeros(1))])
+
+    monkeypatch.setattr(bucketed_weight_transfer, "BucketedWeightReceiver", FakeReceiver)
+    worker = object.__new__(vLLMOmniColocateWorkerExtension)
+    worker.device = torch.device("cpu")
+    worker.local_rank = 0
+    worker.model_runner = None
+    removed = []
+    added = []
+    worker.remove_lora = removed.append
+    worker.add_lora = added.append
+
+    worker.update_weights_from_ipc(peft_config={"r": 8}, base_sync_done=True)
+
+    assert len(removed) == 1
+    assert len(added) == 1
+    assert set(added[0].lora_tensors) == {"layer.a", "layer.b"}
 
 
 class FakeAsyncOmni:
@@ -312,16 +248,11 @@ class FakeAsyncOmni:
     async def pause_generation(self, **kwargs):
         self.calls.append(("pause", kwargs))
 
-    async def _abort_internal_requests(self, request_ids):
-        ids = [request_ids] if isinstance(request_ids, str) else list(request_ids)
-        self.calls.append(("abort_internal", ids))
-        for request_id in ids:
-            self.request_states.pop(request_id, None)
-
     async def abort(self, request_id):
-        self.calls.append(("abort_external", request_id))
+        request_ids = [request_id] if isinstance(request_id, str) else list(request_id)
+        self.calls.append(("abort_external", request_ids))
         for internal_id, state in list(self.request_states.items()):
-            if state.external_request_id == request_id:
+            if state.external_request_id in request_ids:
                 self.request_states.pop(internal_id)
 
     async def reset_prefix_cache(self, **kwargs):
@@ -346,11 +277,11 @@ def test_abort_all_pauses_then_aborts_and_clears_caches():
 
     assert result == {
         "aborted_count": 2,
-        "request_ids": ["internal-a", "internal-b"],
+        "request_ids": ["external-a", "external-b"],
     }
     assert server.engine.calls == [
         ("pause", {"wait_for_inflight_requests": False, "clear_cache": False}),
-        ("abort_internal", ["internal-a", "internal-b"]),
+        ("abort_external", ["external-a", "external-b"]),
         ("reset_prefix", {"reset_running_requests": True, "reset_connector": True}),
         ("reset_mm", None),
         ("reset_encoder", None),
@@ -366,5 +297,16 @@ def test_abort_request_accepts_external_id_and_resume_uses_engine_api():
     asyncio.run(server.resume_generation())
 
     assert result == {"aborted": True, "request_id": "external-b"}
-    assert ("abort_external", "external-b") in server.engine.calls
+    assert ("abort_external", ["external-b"]) in server.engine.calls
     assert server.engine.calls[-1] == ("resume", None)
+
+
+def test_abort_request_maps_internal_id_to_public_engine_api():
+    server = _ar_server()
+    server.node_rank = 0
+    server.engine = FakeAsyncOmni()
+
+    result = asyncio.run(server.abort_request("internal-a", reset_prefix_cache=False))
+
+    assert result == {"aborted": True, "request_id": "internal-a"}
+    assert server.engine.calls == [("abort_external", ["external-a"])]
