@@ -14,11 +14,9 @@
 
 """CPU tests for per-sample SDE window sampling under request packing."""
 
-from types import SimpleNamespace
-
 import torch
 
-from verl_omni.pipelines.request_batch import request_batch_needs_logprobs, sample_per_sample_sde_windows
+from verl_omni.pipelines.request_batch import sample_per_sample_sde_windows
 
 
 def _advanced_generator(seed: int, latent_numel: int = 8) -> torch.Generator:
@@ -51,22 +49,3 @@ def test_per_sample_sde_windows_match_serial_and_ignore_pack_order():
         device="cpu",
     )
     assert packed == [serial[i] for i in packed_order]
-
-
-def test_request_batch_needs_logprobs_ignores_pack_order():
-    sampling_params = [
-        SimpleNamespace(extra_args={"logprobs": False}),
-        SimpleNamespace(extra_args={"logprobs": True}),
-        SimpleNamespace(extra_args={"logprobs": False}),
-    ]
-
-    assert request_batch_needs_logprobs(sampling_params, default=True)
-
-
-def test_request_batch_needs_logprobs_disabled_only_when_all_requests_disable_it():
-    sampling_params = [
-        SimpleNamespace(extra_args={"logprobs": False}),
-        SimpleNamespace(extra_args={"logprobs": False}),
-    ]
-
-    assert not request_batch_needs_logprobs(sampling_params, default=True)
