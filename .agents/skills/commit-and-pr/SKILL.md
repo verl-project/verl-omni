@@ -96,15 +96,15 @@ the actual repo convention — see recent history):
 Add a PickScore-based scorer routed via default_compute_score_image so
 flow-GRPO runs can optimize human-preference reward.
 
-AI assistance (Claude Code) was used for this change.
+AI assistance (<your tool name>) was used for this change.
 
-Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+Co-authored-by: <your tool name>
 Signed-off-by: Your Name <your.email@example.com>
 ```
 
-The `Co-authored-by` trailer names the assisting tool actually used
-(`Claude Opus 4.8`, `GitHub Copilot`, `Cursor <cursoragent@cursor.com>`, … all
-appear in history). `Signed-off-by` with a real name/email is required.
+The `Co-authored-by` trailer names the assisting tool **actually used** —
+substitute your own tool name, do **not** copy `Claude Code` verbatim unless
+you are Claude Code. `Signed-off-by` with a real name/email is required.
 
 ## PR description (AI-assisted work — mandatory)
 
