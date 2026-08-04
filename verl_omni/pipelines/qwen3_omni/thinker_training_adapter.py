@@ -61,6 +61,11 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         module.get_input_embeddings = module.thinker.get_input_embeddings
         module.set_input_embeddings = module.thinker.set_input_embeddings
         module._no_split_modules = ["Qwen3OmniMoeThinkerTextDecoderLayer"]
+        thinker_config = getattr(module.thinker, "config", None)
+        talker_config = getattr(getattr(module, "config", None), "talker_config", None)
+        vision_start_token_id = getattr(talker_config, "vision_start_token_id", None)
+        if thinker_config is not None and vision_start_token_id is not None:
+            thinker_config.vision_start_token_id = vision_start_token_id
         return module
 
     @classmethod
