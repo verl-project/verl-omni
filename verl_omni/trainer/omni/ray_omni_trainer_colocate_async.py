@@ -49,8 +49,6 @@ class OmniPPOTrainerColocateAsync(PPOTrainerColocateAsync):
         self.processor = model_config.processor
 
     def on_train_begin(self):
-        if self.config.skip.rollout_tq.enable:
-            return
         num_warmup_batches = self.config.trainer.v1.omni_colocate_async.num_warmup_batches
         for _ in range(num_warmup_batches):
             self._add_batch_to_generate()

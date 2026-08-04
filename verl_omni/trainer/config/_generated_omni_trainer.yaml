@@ -923,6 +923,8 @@ trainer:
         path: null
         name: null
       sampler_kwargs: {}
+    omni_colocate_async:
+      num_warmup_batches: 1
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null

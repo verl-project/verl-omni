@@ -53,7 +53,6 @@ class TestOmniColocateAsyncOnTrainBegin:
         trainer = OmniPPOTrainerColocateAsync.__new__(OmniPPOTrainerColocateAsync)
         trainer.config = OmegaConf.create(
             {
-                "skip": {"rollout_tq": {"enable": False}},
                 "trainer": {
                     "v1": {
                         "omni_colocate_async": {"num_warmup_batches": 3},
@@ -66,21 +65,3 @@ class TestOmniColocateAsyncOnTrainBegin:
             trainer.on_train_begin()
 
         assert mock_add.call_count == 3
-
-    def test_skip_rollout_tq_disables_warmup(self):
-        trainer = OmniPPOTrainerColocateAsync.__new__(OmniPPOTrainerColocateAsync)
-        trainer.config = OmegaConf.create(
-            {
-                "skip": {"rollout_tq": {"enable": True}},
-                "trainer": {
-                    "v1": {
-                        "omni_colocate_async": {"num_warmup_batches": 3},
-                    }
-                },
-            }
-        )
-
-        with patch.object(trainer, "_add_batch_to_generate") as mock_add:
-            trainer.on_train_begin()
-
-        assert mock_add.call_count == 0
