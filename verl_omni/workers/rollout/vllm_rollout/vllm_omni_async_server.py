@@ -125,10 +125,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return "vllm_omni"
 
     def _get_worker_extension_cls(self) -> str:
-        # AR stages reuse verl's standard vLLM weight update implementation.
-        if self._ar_mode:
-            return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniARColocateWorkerExtension"
-
         device_type = ""
         try:
             from vllm.platforms import current_platform
@@ -137,10 +133,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         except Exception:
             pass
 
-        # vLLMOmniColocateWorkerExtension supports diffusion LoRA + weight updates for GPU.
+        # vLLMOmniColocateWorkerExtension supports LoRA + weight updates for GPU.
         # vLLMOmniNPUColocateWorkerExtension additionally mixes in NPUColocateWorkerMixin
         # for NPU memory pool, sleep, and wake_up.
-        if device_type != "npu":
+        # ar_mode uses vllm-ascend which already handles NPU natively, so the base extension suffices.
+        if device_type != "npu" or self._ar_mode:
             return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
         else:
             return "verl_omni.workers.rollout.vllm_rollout.npu_utils.vLLMOmniNPUColocateWorkerExtension"
@@ -348,45 +345,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._invalidate_lora_request_cache()
         await self.engine.collective_rpc("sleep", kwargs={"level": 1})
         await self.engine.reset_encoder_cache()
-
-    async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
-        if self.node_rank != 0:
-            return {"aborted_count": 0, "request_ids": []}
-
-        request_ids = list(dict.fromkeys(state.external_request_id for state in self.engine.request_states.values()))
-        await self.engine.pause_generation(
-            wait_for_inflight_requests=False,
-            clear_cache=False,
-        )
-        if request_ids:
-            await self.engine.abort(request_ids)
-        if reset_prefix_cache:
-            await self.engine.reset_prefix_cache(
-                reset_running_requests=True,
-                reset_connector=True,
-            )
-            await self.engine.reset_mm_cache()
-            await self.engine.reset_encoder_cache()
-        return {"aborted_count": len(request_ids), "request_ids": request_ids}
-
-    async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
-        if self.node_rank != 0:
-            return {"aborted": False, "request_id": request_id}
-
-        request_states = self.engine.request_states
-        if request_id in request_states:
-            external_request_id = request_states[request_id].external_request_id
-        elif any(state.external_request_id == request_id for state in request_states.values()):
-            external_request_id = request_id
-        else:
-            return {"aborted": False, "request_id": request_id, "error": "request not found"}
-        await self.engine.abort(external_request_id)
-        if reset_prefix_cache:
-            await self.engine.reset_prefix_cache(
-                reset_running_requests=True,
-                reset_connector=True,
-            )
-        return {"aborted": True, "request_id": request_id}
 
     async def resume_generation(self):
         if self.node_rank == 0:

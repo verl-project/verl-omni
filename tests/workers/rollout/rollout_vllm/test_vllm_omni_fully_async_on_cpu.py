@@ -22,13 +22,9 @@ import pytest
 import torch
 import yaml
 from hydra import compose, initialize_config_dir
-from verl.workers.rollout.vllm_rollout.utils import vLLMColocateWorkerExtension
 
 from verl_omni.workers.config import OmniModelConfig
-from verl_omni.workers.rollout.vllm_rollout.utils import (
-    vLLMOmniARColocateWorkerExtension,
-    vLLMOmniColocateWorkerExtension,
-)
+from verl_omni.workers.rollout.vllm_rollout.utils import vLLMOmniColocateWorkerExtension
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import (
     _drop_none_mapping_values,
     vLLMOmniHttpServer,
@@ -181,32 +177,74 @@ def test_ar_prompt_forwards_all_supported_multimodal_inputs():
     assert prompt["mm_processor_kwargs"] == {"fps": 1}
 
 
-def test_ar_weight_update_reuses_verl_vllm_bounded_bucket_path(monkeypatch):
-    worker = object.__new__(vLLMOmniARColocateWorkerExtension)
-    calls = []
-
-    def fake_update(self, peft_config=None, base_sync_done=False, use_shm=False):
-        calls.append((self, peft_config, base_sync_done, use_shm))
-        return "updated"
-
-    monkeypatch.setattr(vLLMColocateWorkerExtension, "update_weights_from_ipc", fake_update)
-
-    result = worker.update_weights_from_ipc(peft_config=None, base_sync_done=False, use_shm=True)
-
-    assert result == "updated"
-    assert calls == [(worker, None, False, True)]
-
-
-def test_ar_weight_update_disables_layerwise_reload():
-    worker = object.__new__(vLLMOmniARColocateWorkerExtension)
-
-    assert worker._maybe_reload_standard_weights_from_ipc(receiver=object()) is False
-
-
-def test_ar_server_selects_dedicated_worker_extension():
+def test_ar_server_selects_omni_worker_extension():
     server = _ar_server()
 
-    assert server._get_worker_extension_cls().endswith(".vLLMOmniARColocateWorkerExtension")
+    assert server._get_worker_extension_cls().endswith(".vLLMOmniColocateWorkerExtension")
+
+
+def test_ar_full_weight_update_uses_omni_bucketed_loader(monkeypatch):
+    from verl.utils.vllm import patch as vllm_patch
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+    from vllm.model_executor.model_loader import utils as model_loader_utils
+
+    events = []
+
+    class FakeModel:
+        def load_weights(self, weights):
+            events.append(("load", [name for name, _tensor in weights]))
+
+    model = FakeModel()
+    model_config = object()
+
+    class FakeModelRunner:
+        def get_model(self):
+            return model
+
+    model_runner = FakeModelRunner()
+    model_runner.model_config = model_config
+
+    class FakeReceiver:
+        def __init__(self, **kwargs):
+            assert kwargs["zmq_handle"] == "ipc:///test-ar-full-weight"
+            assert kwargs["device"] == torch.device("cpu")
+            assert kwargs["use_shm"] is True
+
+        def receive_weights(self, on_bucket_received):
+            on_bucket_received([("layer.a", torch.ones(1))])
+            on_bucket_received([("layer.b", torch.zeros(1))])
+
+    monkeypatch.setattr(bucketed_weight_transfer, "BucketedWeightReceiver", FakeReceiver)
+    monkeypatch.setattr(
+        vllm_patch,
+        "patch_vllm_moe_model_weight_loader",
+        lambda patched_model: events.append(("patch", patched_model)),
+    )
+    monkeypatch.setattr(
+        model_loader_utils,
+        "process_weights_after_loading",
+        lambda processed_model, config, device: events.append(("postprocess", processed_model, config, device)),
+    )
+
+    worker = object.__new__(vLLMOmniColocateWorkerExtension)
+    worker.device = torch.device("cpu")
+    worker.local_rank = 0
+    worker.model_runner = model_runner
+    worker._pending_lora_peft_config = None
+
+    worker.update_weights_from_ipc(
+        peft_config=None,
+        base_sync_done=False,
+        use_shm=True,
+        zmq_handle="ipc:///test-ar-full-weight",
+    )
+
+    assert events == [
+        ("patch", model),
+        ("load", ["layer.a"]),
+        ("load", ["layer.b"]),
+        ("postprocess", model, model_config, torch.device("cpu")),
+    ]
 
 
 def test_diffusion_lora_update_accumulates_buckets_before_add(monkeypatch):
@@ -240,9 +278,10 @@ def test_diffusion_lora_update_accumulates_buckets_before_add(monkeypatch):
 class FakeAsyncOmni:
     def __init__(self):
         self.request_states = {
-            "internal-a": SimpleNamespace(external_request_id="external-a"),
-            "internal-b": SimpleNamespace(external_request_id="external-b"),
+            "internal-a": SimpleNamespace(request_id="internal-a", external_request_id="external-a"),
+            "internal-b": SimpleNamespace(request_id="internal-b", external_request_id="external-b"),
         }
+        self.output_processor = None
         self.calls = []
 
     async def pause_generation(self, **kwargs):
@@ -268,10 +307,20 @@ class FakeAsyncOmni:
         self.calls.append(("resume", None))
 
 
-def test_abort_all_pauses_then_aborts_and_clears_caches():
+def test_abort_all_uses_async_omni_request_state_contract(monkeypatch):
+    monkeypatch.setenv("VERL_OMNI_ABORT_DRAIN_TIMEOUT_S", "0")
     server = _ar_server()
     server.node_rank = 0
     server.engine = FakeAsyncOmni()
+    enqueued = []
+    cache_clears = []
+
+    server._enqueue_abort_output = lambda internal_id, state: enqueued.append((internal_id, state.external_request_id))
+
+    async def clear_kv_cache():
+        cache_clears.append(True)
+
+    server.clear_kv_cache = clear_kv_cache
 
     result = asyncio.run(server.abort_all_requests())
 
@@ -280,18 +329,24 @@ def test_abort_all_pauses_then_aborts_and_clears_caches():
         "request_ids": ["external-a", "external-b"],
     }
     assert server.engine.calls == [
-        ("pause", {"wait_for_inflight_requests": False, "clear_cache": False}),
         ("abort_external", ["external-a", "external-b"]),
-        ("reset_prefix", {"reset_running_requests": True, "reset_connector": True}),
-        ("reset_mm", None),
-        ("reset_encoder", None),
     ]
+    assert enqueued == [("internal-a", "external-a"), ("internal-b", "external-b")]
+    assert cache_clears == [True]
 
 
 def test_abort_request_accepts_external_id_and_resume_uses_engine_api():
     server = _ar_server()
     server.node_rank = 0
     server.engine = FakeAsyncOmni()
+    enqueued = []
+
+    server._enqueue_abort_output = lambda internal_id, state: enqueued.append((internal_id, state.external_request_id))
+
+    async def clear_kv_cache():
+        return None
+
+    server.clear_kv_cache = clear_kv_cache
 
     result = asyncio.run(server.abort_request("external-b"))
     asyncio.run(server.resume_generation())
@@ -299,14 +354,4 @@ def test_abort_request_accepts_external_id_and_resume_uses_engine_api():
     assert result == {"aborted": True, "request_id": "external-b"}
     assert ("abort_external", ["external-b"]) in server.engine.calls
     assert server.engine.calls[-1] == ("resume", None)
-
-
-def test_abort_request_maps_internal_id_to_public_engine_api():
-    server = _ar_server()
-    server.node_rank = 0
-    server.engine = FakeAsyncOmni()
-
-    result = asyncio.run(server.abort_request("internal-a", reset_prefix_cache=False))
-
-    assert result == {"aborted": True, "request_id": "internal-a"}
-    assert server.engine.calls == [("abort_external", ["external-a"])]
+    assert enqueued == [("internal-b", "external-b")]
