@@ -65,7 +65,7 @@ from verl_omni.workers.config import (
     DiffusionModelConfig,
     OmniModelConfig,
 )
-from verl_omni.workers.utils.losses import diffusion_loss
+from verl_omni.workers.utils.losses import diffusion_loss, omni_loss
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -608,6 +608,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             # The ref model does not need to enable MTP; force it to false.
             ref_config.model_config = deepcopy(model_config)
+            if ref_config.model_config.get("model_type", "language_model") == "omni_model":
+                ref_config.model_config.trainer_type = self.config.actor.get("trainer_type", "policy_gradient")
             ref_config.model_config.mtp = MtpConfig(enable=False)
 
             # construct TrainingWorkerConfig
@@ -645,6 +647,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if "actor" in self.role:
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
             actor_config.model_config = model_config
+            if actor_config.model_config.get("model_type", "language_model") == "omni_model":
+                actor_config.model_config.trainer_type = getattr(actor_config, "trainer_type", "policy_gradient")
             distillation_config: Optional[DistillationConfig] = (
                 omega_conf_to_dataclass(self.distillation_config) if self.distillation_enabled else None
             )
@@ -708,6 +712,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 "diffusion_nft_model",
             ):
                 self.loss_fn = partial(diffusion_loss, config=actor_config)
+            elif (
+                model_config.get("model_type", "language_model") == "omni_model"
+                and getattr(actor_config, "trainer_type", "policy_gradient") == "direct_preference"
+            ):
+                self.loss_fn = partial(omni_loss, config=actor_config)
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
             self.actor = TrainingWorker(config=actor_training_config)
