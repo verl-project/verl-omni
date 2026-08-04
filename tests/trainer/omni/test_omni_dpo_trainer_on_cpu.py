@@ -13,7 +13,7 @@
 # limitations under the License.
 """CPU tests for OmniDirectPreferenceRayTrainer guardrails and helpers."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -23,7 +23,6 @@ from tensordict import TensorDict
 from verl.protocol import DataProto
 from verl.utils import tensordict_utils as tu
 
-from verl_omni.trainer.diffusion.ray_diffusion_trainer import BaseRayDiffusionTrainer
 from verl_omni.trainer.omni.ray_omni_trainer import OmniDirectPreferenceRayTrainer
 
 
@@ -77,38 +76,31 @@ def _make_config(**overrides):
 
 
 def _make_trainer(config):
-    with patch.object(BaseRayDiffusionTrainer, "__init__", return_value=None):
-        trainer = OmniDirectPreferenceRayTrainer(config)
-    trainer.config = config
-    return trainer
+    return OmniDirectPreferenceRayTrainer(config)
 
 
 class TestOmniDirectPreferenceRayTrainerInit:
     def test_rejects_online_sample_source(self):
         config = _make_config(algorithm={"sample_source": "online"})
-        with patch.object(BaseRayDiffusionTrainer, "__init__", return_value=None):
-            with pytest.raises(NotImplementedError, match="sample_source=offline"):
-                OmniDirectPreferenceRayTrainer(config)
+        with pytest.raises(NotImplementedError, match="sample_source=offline"):
+            OmniDirectPreferenceRayTrainer(config)
 
     def test_requires_omni_model_type(self):
         config = _make_config(actor_rollout_ref={"model": {"model_type": "language_model"}})
-        with patch.object(BaseRayDiffusionTrainer, "__init__", return_value=None):
-            with pytest.raises(ValueError, match="model_type=omni_model"):
-                OmniDirectPreferenceRayTrainer(config)
+        with pytest.raises(ValueError, match="model_type=omni_model"):
+            OmniDirectPreferenceRayTrainer(config)
 
     def test_requires_dpo_loss_mode(self):
         config = _make_config(
             actor_rollout_ref={"actor": {"omni_loss": {"loss_mode": "other", "average_log_prob": False}}}
         )
-        with patch.object(BaseRayDiffusionTrainer, "__init__", return_value=None):
-            with pytest.raises(NotImplementedError, match="loss_mode=dpo"):
-                OmniDirectPreferenceRayTrainer(config)
+        with pytest.raises(NotImplementedError, match="loss_mode=dpo"):
+            OmniDirectPreferenceRayTrainer(config)
 
     def test_rejects_old_policy_adapter(self):
         config = _make_config(actor_rollout_ref={"model": {"policy_state_adapters": ("default", "old")}})
-        with patch.object(BaseRayDiffusionTrainer, "__init__", return_value=None):
-            with pytest.raises(NotImplementedError, match="old-policy adapters"):
-                OmniDirectPreferenceRayTrainer(config)
+        with pytest.raises(NotImplementedError, match="old-policy adapters"):
+            OmniDirectPreferenceRayTrainer(config)
 
 
 class TestOmniDirectPreferenceRayTrainerHelpers:

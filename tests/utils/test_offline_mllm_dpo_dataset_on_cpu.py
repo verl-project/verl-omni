@@ -134,6 +134,18 @@ def mixed_parquet_path(tmp_path):
     return str(parquet_path)
 
 
+@pytest.fixture
+def imbalanced_parquet_path(tmp_path):
+    rows = (
+        [_parquet_row("image", index) for index in range(5)]
+        + [_parquet_row("video", index) for index in range(4)]
+        + [_parquet_row("audio", index) for index in range(3)]
+    )
+    parquet_path = tmp_path / "imbalanced.parquet"
+    pd.DataFrame(rows).to_parquet(parquet_path, index=False)
+    return str(parquet_path)
+
+
 class FakeModalityDataset:
     def __init__(self, modalities: list[str]):
         self._modalities = modalities
@@ -410,7 +422,7 @@ def test_modality_grouped_batch_sampler_without_replacement_visits_each_row_once
         data_source=dataset,
         batch_size=2,
         shuffle=True,
-        drop_last=True,
+        drop_last=False,
         replacement=False,
     )
 
@@ -420,6 +432,28 @@ def test_modality_grouped_batch_sampler_without_replacement_visits_each_row_once
     for start in range(0, len(sampled), sampler.batch_size):
         batch = sampled[start : start + sampler.batch_size]
         assert len({dataset.get_modality(index) for index in batch}) == 1
+
+
+def test_modality_grouped_batch_sampler_sequential_drop_last_skips_partial_batches():
+    dataset = FakeModalityDataset(["image", "image", "image", "video", "audio"])
+    sampler = dataset_mod.ModalityGroupedBatchSampler(
+        data_source=dataset,
+        batch_size=2,
+        drop_last=True,
+        replacement=False,
+    )
+
+    sampled = list(sampler)
+    assert sampled == [0, 1]
+    assert len(sampled) == sampler.batch_size
+
+    sampler_keep_partial = dataset_mod.ModalityGroupedBatchSampler(
+        data_source=dataset,
+        batch_size=2,
+        drop_last=False,
+        replacement=False,
+    )
+    assert list(sampler_keep_partial) == [4, 0, 1, 2, 3]
 
 
 def test_offline_mllm_dpo_dataset_init_and_get_modality(mock_processor, mixed_parquet_path):
@@ -435,6 +469,23 @@ def test_offline_mllm_dpo_dataset_init_and_get_modality(mock_processor, mixed_pa
     assert dataset.get_modality(0) == "image"
     assert dataset.get_modality(2) == "video"
     assert dataset.get_modality(3) == "audio"
+
+
+def test_offline_mllm_dpo_dataset_balances_max_samples_by_modality(mock_processor, imbalanced_parquet_path):
+    config = OmegaConf.create({"train_batch_size": 2, "max_length": 1, "balance_max_samples_by_modality": True})
+    dataset = dataset_mod.OfflineMLLMDPODataset(
+        data_files=imbalanced_parquet_path,
+        tokenizer=None,
+        processor=mock_processor,
+        config=config,
+        max_samples=6,
+    )
+
+    modalities = [dataset.get_modality(index) for index in range(len(dataset))]
+    assert len(dataset) == 6
+    assert modalities.count("image") == 2
+    assert modalities.count("video") == 2
+    assert modalities.count("audio") == 2
 
 
 def test_offline_mllm_dpo_dataset_getitem(monkeypatch, mock_processor, mixed_parquet_path):

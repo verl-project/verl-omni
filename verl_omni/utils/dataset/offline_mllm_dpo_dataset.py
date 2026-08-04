@@ -492,6 +492,59 @@ def _row_modality(row: dict[str, Any], default: str = "unknown") -> str:
     return _normalise_modality(row.get("data_source"), default)
 
 
+def _balanced_modality_sample_indices(
+    dataframe: pd.DataFrame,
+    max_samples: int,
+    *,
+    shuffle: bool,
+    seed: int | None,
+    default_modality: str,
+) -> list[int]:
+    rows = dataframe.to_dict(orient="records")
+    indices_by_modality: dict[str, list[int]] = defaultdict(list)
+    for index, row in enumerate(rows):
+        indices_by_modality[_row_modality(row, default_modality)].append(index)
+
+    modalities = sorted(indices_by_modality)
+    if not modalities:
+        return []
+
+    target = min(max_samples, len(dataframe))
+    base_quota, remainder = divmod(target, len(modalities))
+    quotas = {
+        modality: min(base_quota + (1 if offset < remainder else 0), len(indices_by_modality[modality]))
+        for offset, modality in enumerate(modalities)
+    }
+
+    leftover = target - sum(quotas.values())
+    while leftover > 0:
+        progressed = False
+        for modality in modalities:
+            if quotas[modality] >= len(indices_by_modality[modality]):
+                continue
+            quotas[modality] += 1
+            leftover -= 1
+            progressed = True
+            if leftover == 0:
+                break
+        if not progressed:
+            break
+
+    rng = np.random.default_rng(seed) if shuffle else None
+    selected: list[int] = []
+    for modality in modalities:
+        indices = indices_by_modality[modality]
+        quota = quotas[modality]
+        if quota <= 0:
+            continue
+        if shuffle:
+            assert rng is not None
+            selected.extend(rng.choice(indices, size=quota, replace=False).tolist())
+        else:
+            selected.extend(indices[:quota])
+    return selected
+
+
 class OfflineMLLMDPODataset(MultiTurnSFTDataset):
     """Build Qwen3-Omni offline DPO samples from Omni-Preference style rows.
 
@@ -535,6 +588,7 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
         self.shuffle = config.get("shuffle", False)
         self.seed = config.get("seed")
         self.max_samples = max_samples
+        self.balance_max_samples_by_modality = bool(config.get("balance_max_samples_by_modality", False))
         self.prompt_key = config.get("prompt_key", "prompt")
         self.chosen_key = config.get("chosen_key", "chosen")
         self.rejected_key = config.get("rejected_key", "rejected")
@@ -578,14 +632,24 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
         print(f"dataset len: {len(self.dataframe)}")
 
         if self.max_samples is not None and self.max_samples > 0 and self.max_samples < total:
-            if self.shuffle:
+            if self.balance_max_samples_by_modality:
+                indices = _balanced_modality_sample_indices(
+                    self.dataframe,
+                    int(self.max_samples),
+                    shuffle=bool(self.shuffle),
+                    seed=self.seed,
+                    default_modality=self.data_source,
+                )
+            elif self.shuffle:
                 rngs_args = (self.seed,) if self.seed is not None else ()
                 rng = np.random.default_rng(*rngs_args)
                 indices = rng.choice(total, size=self.max_samples, replace=False)
             else:
                 indices = np.arange(self.max_samples)
-            self.dataframe = self.dataframe.iloc[indices.tolist()]
-            print(f"selected {self.max_samples} random samples out of {total}")
+            selected_indices = indices.tolist() if hasattr(indices, "tolist") else list(indices)
+            self.dataframe = self.dataframe.iloc[selected_indices]
+            sampling_mode = "balanced modality" if self.balance_max_samples_by_modality else "limited"
+            print(f"selected {len(self.dataframe)} {sampling_mode} samples out of {total}")
 
         required = {self.prompt_key, self.chosen_key, self.rejected_key}
         missing = required - set(self.dataframe.columns)
@@ -720,9 +784,10 @@ class ModalityGroupedBatchSampler(Sampler[int]):
         batch_size: Number of samples in each same-modality chunk.
         shuffle: Kept for compatibility. Ignored when ``replacement`` is false
             because validation should be deterministic.
-        drop_last: Whether to drop the final incomplete batch when inferring
-            the number of generated chunks. Ignored when ``replacement`` is
-            false because validation must visit every row.
+        drop_last: Whether to drop incomplete same-modality chunks whose size
+            is smaller than ``batch_size``. For weighted training batches this
+            controls how many chunks are generated; for sequential validation
+            batches this drops trailing partial chunks per modality.
         seed: Base random seed used for modality and row sampling.
         modality_sample_weights: Optional per-modality sampling weights.
         num_batches: Optional explicit number of chunks to generate per epoch.
@@ -824,8 +889,11 @@ class ModalityGroupedBatchSampler(Sampler[int]):
             indices = list(indices_by_modality[modality])
             for start in range(0, len(indices), self.batch_size):
                 batch = indices[start : start + self.batch_size]
-                if batch:
-                    batches.append(batch)
+                if not batch:
+                    continue
+                if self.drop_last and len(batch) < self.batch_size:
+                    continue
+                batches.append(batch)
         return batches
 
     def _build_batches(self) -> list[list[int]]:
