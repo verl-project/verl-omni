@@ -1,4 +1,4 @@
-name: l3_qwen_image_flowgrpo_nightly
+name: l3_nightly
 
 on:
   schedule:
@@ -41,9 +41,9 @@ on:
     types: [labeled]
     paths:
       - "verl_omni/**"
-      - "tests/nightly/qwen_image_flowgrpo_single_sample/**"
+      - "tests/nightly/**"
       - "pyproject.toml"
-      - ".github/workflows/l3_qwen_image_flowgrpo_nightly.yml"
+      - ".github/workflows/l3_nightly.yml"
       - ".github/vllm_omni_pin.txt"
       - ".github/verl_pin.txt"
 

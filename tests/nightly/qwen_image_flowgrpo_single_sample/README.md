@@ -16,7 +16,7 @@ hooks. No `verl_omni/` production code is modified.
 ## CI Status
 
 This directory is wired to
-`.github/workflows/l3_qwen_image_flowgrpo_nightly.yml`. The workflow runs strict
+`.github/workflows/l3_nightly.yml`. The workflow runs strict
 nightly mode every day at 22:00 Asia/Shanghai and can also be triggered
 manually.
 
@@ -105,7 +105,7 @@ To refresh the production baseline:
 
 1. Review the expected change and choose the branch whose baseline should be
    refreshed.
-2. Trigger `l3_qwen_image_flowgrpo_nightly` manually with `mode=baseline`.
+2. Trigger `l3_nightly` manually with `mode=baseline`.
 3. Inspect the uploaded reports and baseline artifact before relying on later
    nightly runs.
 

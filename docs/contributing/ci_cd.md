@@ -1,6 +1,6 @@
 # CI/CD Layers
 
-Last updated: 07/24/2026.
+Last updated: 08/04/2026.
 
 VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or convergence validation can evolve independently.
 
@@ -52,8 +52,8 @@ Run it manually with:
 bash tests/nightly/qwen_image_flowgrpo_single_sample/run_qwen_image_flowgrpo_single_sample.sh
 ```
 
-The GitHub workflow is
-`.github/workflows/l3_qwen_image_flowgrpo_nightly.yml`. It runs strict nightly
+The GitHub workflow is `.github/workflows/l3_nightly.yml`. The current job runs
+strict nightly
 mode every day at 22:00 Asia/Shanghai and can also be triggered manually with
 `workflow_dispatch`.
 
