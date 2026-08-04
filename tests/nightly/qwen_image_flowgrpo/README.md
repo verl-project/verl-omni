@@ -59,7 +59,7 @@ NUM_GPUS=4 \
 MODEL_PATH=/path/to/tiny-random/Qwen-Image \
 REWARD_MODEL_PATH=/path/to/tiny-random/qwen3-vl \
 OUTPUT_ROOT=/path/to/debug_dumps \
-bash tests/nightly/qwen_image_flowgrpo_single_sample/run_qwen_image_flowgrpo_single_sample.sh
+bash tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh
 ```
 
 Then run strict nightly mode against the generated baseline:
@@ -70,7 +70,7 @@ MODEL_PATH=/path/to/tiny-random/Qwen-Image \
 REWARD_MODEL_PATH=/path/to/tiny-random/qwen3-vl \
 OUTPUT_ROOT=/path/to/debug_dumps \
 BOOTSTRAP_MISSING_BASELINE=0 \
-bash tests/nightly/qwen_image_flowgrpo_single_sample/run_qwen_image_flowgrpo_single_sample.sh
+bash tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh
 ```
 
 ## Baselines
@@ -79,13 +79,21 @@ The default layout is:
 
 ```text
 outputs/debug_dumps/
+|-- baseline/
+|   `-- qwen_image_flowgrpo/
 |-- current/
-`-- baseline/
+|   `-- qwen_image_flowgrpo/
+`-- logs/
+    `-- qwen_image_flowgrpo/
 ```
 
+Each L3 test case uses its own subdirectory under `baseline/` and `current/`.
+GitHub Actions stores every case inside one shared `l3-nightly-baseline`
+artifact.
+
 `BOOTSTRAP_MISSING_BASELINE=1` is the default, so a first run with no baseline
-will copy current artifacts into `baseline/` and pass. Set
-`BOOTSTRAP_MISSING_BASELINE=0` for strict nightly comparison.
+will copy current artifacts into `baseline/qwen_image_flowgrpo/`
+and pass. Set `BOOTSTRAP_MISSING_BASELINE=0` for strict nightly comparison.
 
 Use bootstrap mode only when intentionally creating or refreshing a reviewed
 baseline. A real scheduled nightly should use strict mode so missing baselines,
@@ -93,13 +101,15 @@ missing dump files, or metric regressions fail the job.
 
 In GitHub Actions, baseline mode uploads:
 
-- `l3-qwen-image-flowgrpo-single-sample-baseline`, retained for 90 days.
-- `l3-qwen-image-flowgrpo-single-sample-reports-<run_id>`, retained for 30 days.
+- `l3-nightly-baseline`, retained for 90 days.
+- `l3-nightly-reports-<run_id>`, retained for 30 days.
 
-Nightly mode downloads the latest non-expired
-`l3-qwen-image-flowgrpo-single-sample-baseline` artifact for the configured
-`baseline_branch` input, then runs strict comparison. If no matching baseline is
-found, the job fails before training starts.
+Nightly mode downloads the latest non-expired `l3-nightly-baseline` artifact for
+the configured `baseline_branch` input, then runs strict comparison. If no
+matching baseline is found, the job fails before training starts.
+
+Baseline refresh downloads the existing unified baseline when available, updates
+only this test's subdirectory, and re-uploads the full baseline tree.
 
 To refresh the production baseline:
 
@@ -109,16 +119,17 @@ To refresh the production baseline:
 3. Inspect the uploaded reports and baseline artifact before relying on later
    nightly runs.
 
-The comparison outputs are written under `current/`:
+The comparison outputs are written under
+`current/qwen_image_flowgrpo/`:
 
 - `metrics.json` contains aggregated timing, throughput, and memory metrics.
 - `dump_compare.json` contains precision comparison results.
 - `metrics.jsonl` contains step-level debug metrics from the run.
-- `logs/qwen_image_flowgrpo_single_sample.log` contains the console log.
+- `logs/qwen_image_flowgrpo.log` contains the console log.
 
 Nightly mode uploads all current intermediate outputs as
-`l3-qwen-image-flowgrpo-single-sample-current-<run_id>` and always uploads logs
-and reports as `l3-qwen-image-flowgrpo-single-sample-reports-<run_id>`.
+`l3-nightly-current-<run_id>` and always uploads logs and reports as
+`l3-nightly-reports-<run_id>`.
 
 ## Comparison Details
 
@@ -145,7 +156,8 @@ baseline. A higher-is-better metric fails when current is more than
 relative change is greater than `PERF_THRESHOLD`.
 
 Precision comparison recursively compares all tensors in matching `payload.pt`
-debug dumps under `current/` and `baseline/`. Missing files, missing tensors, and
+debug dumps under `current/qwen_image_flowgrpo/` and
+`baseline/qwen_image_flowgrpo/`. Missing files, missing tensors, and
 shape mismatches fail the comparison. The default dumps cover driver-forward,
 actor-forward, and LoRA-gradient payloads for `DEBUG_DUMP_STEPS`, which defaults
 to `1,2`.
@@ -176,7 +188,7 @@ Each tensor fails if `max_abs_err > PRECISION_ATOL`,
 
 When the job fails:
 
-1. Check `logs/qwen_image_flowgrpo_single_sample.log` first for environment,
+1. Check `logs/qwen_image_flowgrpo.log` first for environment,
    model-loading, Ray, CUDA, or OOM failures.
 2. Check `dump_compare.json` for tensor-level precision drift on the configured
    `DEBUG_DUMP_STEPS`.

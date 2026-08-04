@@ -30,7 +30,7 @@ GROUND_TRUTH = "CI"
 
 def build_rows(split: str, size: int) -> list[dict]:
     row = {
-        "data_source": "qwen_image_flowgrpo_single_sample",
+        "data_source": "qwen_image_flowgrpo",
         "prompt": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": USER_PROMPT},
@@ -54,7 +54,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate repeated single-sample Qwen-Image FlowGRPO data")
     parser.add_argument(
         "--local_save_dir",
-        default=os.path.expanduser("~/data/qwen_image_flowgrpo_single_sample"),
+        default=os.path.expanduser("~/data/qwen_image_flowgrpo"),
         help="Directory to write train.parquet and test.parquet",
     )
     parser.add_argument("--train_size", type=int, default=16, help="Repeated train rows")

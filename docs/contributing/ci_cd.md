@@ -39,7 +39,7 @@ Use L2 for changes that affect GPU rollout, trainer entrypoints, backend integra
 L3 is intended for scheduled numerical and performance regression tracking. These tests should run fixed-seed, short training windows and compare key metrics against reviewed baselines, such as loss, reward, KL, log probability, gradient norm, throughput, step time, and memory peak.
 
 The current runnable L3 case is
-`tests/nightly/qwen_image_flowgrpo_single_sample/`. It runs a deterministic
+`tests/nightly/qwen_image_flowgrpo/`. It runs a deterministic
 20-step Qwen-Image FlowGRPO LoRA training window on local tiny-random policy and
 reward models, then compares:
 
@@ -49,7 +49,7 @@ reward models, then compares:
 Run it manually with:
 
 ```bash
-bash tests/nightly/qwen_image_flowgrpo_single_sample/run_qwen_image_flowgrpo_single_sample.sh
+bash tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh
 ```
 
 The GitHub workflow is `.github/workflows/l3_nightly.yml`. The current job runs
@@ -59,8 +59,9 @@ mode every day at 22:00 Asia/Shanghai and can also be triggered manually with
 
 Nightly jobs run with `BOOTSTRAP_MISSING_BASELINE=0` so missing or stale
 baselines fail closed. Baseline creation is manual only: run the workflow with
-`mode=baseline`. Baseline mode uses `BOOTSTRAP_MISSING_BASELINE=1` and uploads 
-the reviewed baseline as the `l3-qwen-image-flowgrpo-single-sample-baseline` artifact.
+`mode=baseline`. Baseline mode uses `BOOTSTRAP_MISSING_BASELINE=1`, downloads the
+existing unified baseline when available, updates each test's subdirectory, and
+uploads the reviewed baseline as the `l3-nightly-baseline` artifact.
 
 Strict nightly mode downloads the latest non-expired baseline artifact for the
 configured baseline branch, runs the comparison, and uploads current debug
