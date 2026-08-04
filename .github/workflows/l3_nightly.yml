@@ -89,7 +89,8 @@ jobs:
           faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
           mlp-image: "${{ env.IMAGE }}"
 
-  qwen_image_flowgrpo_single_sample:
+  l3_nightly_tests:
+    name: L3 Nightly Tests
     needs: setup
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 180
@@ -207,7 +208,7 @@ jobs:
 
   cleanup:
     runs-on: ubuntu-latest
-    needs: [setup, qwen_image_flowgrpo_single_sample]
+    needs: [setup, l3_nightly_tests]
     if: always() && needs.setup.outputs.mlp-task-id != ''
     steps:
       - id: destroy-runner
