@@ -1,6 +1,6 @@
 # How to Add Continuous Batching (Step-Execution) Support for a Diffusion Model
 
-Last updated: 07/22/2026.
+Last updated: 07/23/2026.
 
 This guide explains how to extend an existing diffusion rollout adapter so it
 supports **continuous batching through vLLM-Omni step execution**.
@@ -19,6 +19,12 @@ Qwen-Image MixGRPO reuses the same implementation and adds its own SDE-window
 initialisation:
 
 [`verl_omni/pipelines/qwen_image_mix_grpo/vllm_omni_rollout_adapter.py`](../../verl_omni/pipelines/qwen_image_mix_grpo/vllm_omni_rollout_adapter.py)
+
+Qwen-Image DiffusionNFT and online DPO are examples of algorithms that reuse
+the same engine lifecycle but preserve different training-output contracts:
+
+- [`verl_omni/pipelines/qwen_image_diffusion_nft/vllm_omni_rollout_adapter.py`](../../verl_omni/pipelines/qwen_image_diffusion_nft/vllm_omni_rollout_adapter.py)
+- [`verl_omni/pipelines/qwen_image_dpo/vllm_omni_rollout_adapter.py`](../../verl_omni/pipelines/qwen_image_dpo/vllm_omni_rollout_adapter.py)
 
 ---
 
@@ -55,7 +61,7 @@ actor_rollout_ref.rollout.max_num_seqs=16
 Do **not** create a separate package under `verl_omni/experimental`, register an
 algorithm such as `flow_grpo_stepwise`, or rewrite the configured algorithm name.
 Both execution modes use the original registration, such as `flow_grpo` or
-`mix_grpo`.
+`mix_grpo`. The same rule applies to `diffusion_nft` and `dpo`.
 
 ---
 
@@ -100,24 +106,23 @@ Before adding step execution, confirm that:
 1. The model already has a working rollout adapter registered under the normal
    algorithm name, such as `flow_grpo`.
 2. Its full-forward `forward()` or `diffuse()` path already returns the complete
-   trajectory required by training.
-3. The expected `custom_output` contract is defined. For Qwen-Image FlowGRPO and
-   MixGRPO it is:
+   rollout outputs required by training.
+3. The expected `custom_output` contract is defined. The current Qwen-Image
+   integrations use these contracts:
 
-   ```text
-   all_latents
-   all_log_probs
-   all_timesteps
-   prompt_embeds
-   prompt_embeds_mask
-   negative_prompt_embeds
-   negative_prompt_embeds_mask
-   ```
+   | Algorithm | Required algorithm-specific fields |
+   |---|---|
+   | FlowGRPO / MixGRPO | `all_latents`, `all_log_probs`, `all_timesteps` |
+   | DiffusionNFT | `latents_clean`, `train_timesteps` |
+   | Online DPO | `latents_clean` |
+
+   Every integration also preserves `prompt_embeds`, `prompt_embeds_mask`,
+   `negative_prompt_embeds`, and `negative_prompt_embeds_mask`.
 
 4. The corresponding vLLM-Omni model pipeline supports step execution.
-5. Step execution is appropriate for the algorithm. Qwen-Image DPO and
-   DiffusionNFT use different `custom_output` contracts and must be integrated
-   separately rather than forced to emit the FlowGRPO trajectory format.
+5. Step execution is appropriate for the algorithm. Algorithms with different
+   `custom_output` contracts must implement separate adapter hooks rather than
+   being forced to emit the FlowGRPO trajectory format.
 
 ---
 
@@ -211,7 +216,14 @@ the full-forward path.
 
 ### Latents and timesteps
 
-Initial latents should be created in float32:
+Choose the live-latent dtype from the algorithm's scheduler and full-forward
+semantics, and keep it homogeneous across all in-flight requests.
+
+FlowGRPO and MixGRPO create their step-execution latents directly in float32.
+
+Online DPO instead generates the initial noise in `prompt_embeds.dtype` and
+then casts it to float32, matching the initial random values produced by its
+non-step path:
 
 ```python
 latents = self.prepare_latents(
@@ -219,14 +231,21 @@ latents = self.prepare_latents(
     num_channels_latents,
     height,
     width,
-    torch.float32,
+    prompt_embeds.dtype,
     self.device,
     generator,
     None,
-)
+).float()
 ```
 
 Prepare the same timestep schedule used by `forward()`.
+
+DiffusionNFT reuses the standard Qwen-Image denoising and scheduler methods, so
+it prepares latents in the prompt-embedding/model dtype. The standard scheduler
+returns the model-output dtype, keeping newly admitted and already-stepped
+requests compatible. If an algorithm's scheduler changes dtype after the first
+step, override `denoise_step()` and `step_scheduler()` and keep the live state in
+one explicit dtype, as the DPO adapter does.
 
 ### RoPE text lengths
 
@@ -262,6 +281,10 @@ request_scheduler.set_begin_index(0)
 
 ### SDE and log-probability state
 
+This subsection applies to trajectory-based algorithms such as FlowGRPO and
+MixGRPO. DiffusionNFT and DPO do not initialise reverse-SDE trajectory
+containers.
+
 Resolve the same sampling values used by `forward()`:
 
 ```text
@@ -277,7 +300,7 @@ across multiple engine iterations continue the same random stream.
 
 ### Required state
 
-Populate every value consumed later, including:
+Populate every shared value consumed later, including:
 
 ```text
 prompt_embeds
@@ -293,26 +316,24 @@ guidance
 img_shapes
 txt_seq_lens
 negative_txt_seq_lens
-sde_window
-noise_level
-sde_type
-logprobs
-all_latents
-all_log_probs
-all_timesteps
 ```
 
-Initialise the trajectory containers as empty lists and return `state`.
+For FlowGRPO and MixGRPO, also populate `sde_window`, `noise_level`, `sde_type`,
+`logprobs`, and initialise `all_latents`, `all_log_probs`, and `all_timesteps`
+as empty lists. DiffusionNFT and DPO only store the state required by their
+standard scheduler and final-latent output contracts. Return `state`.
 
 ---
 
 ## Step 3 — Implement `denoise_step`
 
 `denoise_step()` receives a batch assembled from multiple in-flight request
-states.
+states. Reuse the upstream model implementation when its prompt representation,
+CFG logic, attention arguments, output slicing, and precision already match the
+algorithm. DiffusionNFT follows this path.
 
-Cast the live float32 latents to the transformer's compute dtype only for the
-forward pass:
+When live state is kept in float32, cast latents to the transformer's compute
+dtype only for the forward pass:
 
 ```python
 x = input_batch.latents.to(
@@ -321,14 +342,16 @@ x = input_batch.latents.to(
 ```
 
 Build the model-specific positive and negative CFG inputs, run the transformer,
-and return the noise prediction in float32:
+and return the noise prediction in the dtype required by the scheduler. The
+FlowGRPO and DPO adapters return float32:
 
 ```python
 return noise_pred.float()
 ```
 
-Keeping the returned prediction in float32 matches the scheduler path and avoids
-precision loss in log-probability computation.
+For FlowGRPO, float32 also avoids precision loss in log-probability computation.
+For DPO, it preserves the existing full-forward scheduler behavior and keeps all
+live requests in the same dtype.
 
 An override is required when the upstream model implementation does not match
 the RL adapter's prompt representation, CFG logic, attention arguments, or
@@ -339,9 +362,10 @@ output slicing.
 ## Step 4 — Implement `step_scheduler`
 
 `step_scheduler()` must mirror one iteration of the full-forward `diffuse()`
-loop.
+loop. Reuse the upstream implementation when the algorithm only needs the final
+latent and its scheduler semantics already match, as DiffusionNFT does.
 
-It should:
+For a trajectory-based algorithm such as FlowGRPO or MixGRPO, it should:
 
 1. Read the current timestep from `state.timesteps[state.step_index]`.
 2. Resolve whether the current step is inside the SDE window.
@@ -368,10 +392,11 @@ new_latents, log_prob, _, _ = state.scheduler.step(
 state.latents = new_latents.to(torch.float32)
 ```
 
-Do not store stepped requests in bf16. Continuous batching may combine a newly
-admitted request whose latents are fp32 with older requests that have already
-advanced. Mixed live dtypes cause batch assembly failures and also break
-rollout/training log-probability parity.
+Do not mix live dtypes. Continuous batching may combine a newly admitted request
+with older requests that have already advanced. If new requests start in fp32,
+stepped requests must remain fp32; if the standard model path starts in model
+dtype, the scheduler must keep returning that dtype. Mixed live dtypes cause
+batch assembly failures and can break rollout/training parity.
 
 ---
 
@@ -381,13 +406,15 @@ rollout/training log-probability parity.
 
 It should:
 
-1. Call `super().post_decode(state, **kwargs)` to decode the final latent.
-2. Stack the trajectory lists using the same dimensions as the full-forward
+1. Decode the final latent, either through `super().post_decode()` or the
+   model's `_decode_latents()` helper.
+2. Build the exact `custom_output` required by the algorithm's full-forward
    path.
-3. Preserve all required keys, including optional negative-prompt fields.
+3. Preserve optional negative-prompt keys even when their values are `None`.
 4. Move the complete output to CPU before inter-process transfer.
 
-For immutable `DiffusionOutput` objects, use `dataclasses.replace`:
+Use `dataclasses.replace` to preserve the decoded output's existing fields while
+replacing its algorithm-specific payload:
 
 ```python
 from dataclasses import replace
@@ -414,6 +441,52 @@ tensors or initialising an unintended accelerator context.
 The step-execution output must match the full-forward output contract exactly.
 Downstream training code should not need to know which execution mode produced
 the trajectory.
+
+### DiffusionNFT output
+
+DiffusionNFT trains from the final clean latent and the inference timestep
+schedule. It reuses the upstream Qwen-Image `denoise_step()` and
+`step_scheduler()` implementations, then returns:
+
+```python
+custom_output = {
+    "latents_clean": state.latents.float(),
+    "train_timesteps": state.timesteps.unsqueeze(0).expand(
+        state.latents.shape[0], -1
+    ),
+    "prompt_embeds": state.prompt_embeds,
+    "prompt_embeds_mask": state.prompt_embeds_mask,
+    "negative_prompt_embeds": state.negative_prompt_embeds,
+    "negative_prompt_embeds_mask":
+        state.negative_prompt_embeds_mask,
+}
+```
+
+It must not emit synthetic `all_latents`, `all_log_probs`, or `all_timesteps`
+fields because DiffusionNFT training does not consume the reverse-SDE
+trajectory.
+
+### Online DPO output
+
+Online DPO trains from paired final clean latents. Its step path keeps live
+latents and scheduler inputs in float32, but returns no reverse-SDE trajectory:
+
+```python
+custom_output = {
+    "latents_clean": state.latents.float(),
+    "prompt_embeds": state.prompt_embeds,
+    "prompt_embeds_mask": state.prompt_embeds_mask,
+    "negative_prompt_embeds": state.negative_prompt_embeds,
+    "negative_prompt_embeds_mask":
+        state.negative_prompt_embeds_mask,
+}
+```
+
+Keep prompt extraction and warm-up fallback logic local to an
+algorithm-specific adapter unless multiple existing adapters require exactly
+the same behavior. Avoid adding private step-execution helpers to a broadly
+shared mixin merely to reduce duplication: doing so changes the method
+resolution order of unrelated adapters such as Qwen-Image Edit.
 
 ---
 
@@ -500,6 +573,15 @@ actor_rollout_ref:
     algorithm: mix_grpo
 ```
 
+For DiffusionNFT or online DPO, use the existing algorithm registration in the
+same way:
+
+```yaml
+actor_rollout_ref:
+  model:
+    algorithm: diffusion_nft  # or: dpo
+```
+
 No `_stepwise` suffix is required.
 
 ---
@@ -520,6 +602,8 @@ For example:
 ```text
 (QwenImagePipeline, flow_grpo)
 (QwenImagePipeline, mix_grpo)
+(QwenImagePipeline, diffusion_nft)
+(QwenImagePipeline, dpo)
 ```
 
 The same adapter class therefore provides both paths:
@@ -538,11 +622,11 @@ Current Qwen-Image scope:
 |---|---|
 | FlowGRPO | Supported |
 | MixGRPO | Supported |
-| DPO | Not covered by this integration |
-| DiffusionNFT | Not covered by this integration |
+| DiffusionNFT | Supported with final-latent/timestep output |
+| Online DPO | Supported with final-latent output |
 
-DPO and DiffusionNFT should receive separate integrations because their rollout
-outputs differ from the FlowGRPO trajectory.
+The four algorithms share the vLLM-Omni engine lifecycle, but their rollout
+adapters preserve their own scheduler precision and `custom_output` contracts.
 
 ---
 
@@ -583,15 +667,43 @@ len(all_log_probs) = len(all_timesteps)
 prompt_embeds.shape[:-1] = prompt_embeds_mask.shape
 ```
 
+For DiffusionNFT, assert that these fields are present, are tensors, and are
+non-empty:
+
+```text
+latents_clean
+train_timesteps
+prompt_embeds
+prompt_embeds_mask
+```
+
+For online DPO, assert the same contract without `train_timesteps`:
+
+```text
+latents_clean
+prompt_embeds
+prompt_embeds_mask
+```
+
+For both algorithms, keep the negative-prompt keys in `extra_fields`; they may
+be `None` when no negative prompt is supplied. Also verify that DPO live latents
+remain float32 across concurrent step-execution requests.
+
 The canonical regression test is:
 
 [`tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py`](../../tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py)
 
 Run parity checks between `step_execution=False` and `step_execution=True` for:
 
+- resolved height, width, inference steps, sigmas, guidance scales, output count,
+  and maximum sequence length;
+- seed/generator handling and initial latent values;
 - output field names and shapes;
 - fp32 stored latents;
 - prompt embedding and mask values;
+- text RoPE lengths derived from padded embedding width;
+- model-input, timestep, noise-prediction, scheduler-input, and live-state
+  dtypes at the first and subsequent steps;
 - SDE-window selection;
 - first-step `ratio_mean`, KL, and clipping metrics;
 - seeded reproducibility;
@@ -610,10 +722,13 @@ Run parity checks between `step_execution=False` and `step_execution=True` for:
 - [ ] Implement `post_decode()`.
 - [ ] Deep-copy mutable scheduler state per request.
 - [ ] Use padded embedding width for text RoPE lengths.
-- [ ] Keep live and stored trajectory latents in fp32.
+- [ ] Keep live request dtypes homogeneous across admission and scheduler steps.
+- [ ] Keep FlowGRPO/MixGRPO and DPO live latents in fp32.
 - [ ] Preserve the full `custom_output` contract.
 - [ ] Move returned tensors to CPU.
 - [ ] Mirror algorithm-specific setup in both execution paths.
+- [ ] Keep algorithm-private helpers out of shared mixins unless all consumers
+      require identical behavior.
 - [ ] Add a real-engine regression test.
 - [ ] Test both `step_execution=False` and `step_execution=True`.
 - [ ] Do not create an experimental `_stepwise` registration.

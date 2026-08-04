@@ -419,6 +419,9 @@ class VeOmniDiffusionEngine(BaseEngine):
             if micro_batch.get("ref_prev_sample_mean", None) is not None:
                 data["ref_prev_sample_mean"] = micro_batch["ref_prev_sample_mean"][:, step]
 
+            if micro_batch.get("teacher_prev_sample_mean", None) is not None:
+                data["teacher_prev_sample_mean"] = micro_batch["teacher_prev_sample_mean"][:, step]
+
             if micro_batch.get("old_prev_sample_mean", None) is not None:
                 data["old_prev_sample_mean"] = micro_batch["old_prev_sample_mean"][:, step]
 
@@ -439,7 +442,7 @@ class VeOmniDiffusionEngine(BaseEngine):
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
     ) -> list[TensorDict]:
-        num_timesteps = data["all_timesteps"].shape[1]
+        num_timesteps = int(data["all_timesteps"].shape[1])
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
         tu.assign_non_tensor(data, use_dynamic_bsz=False)
 

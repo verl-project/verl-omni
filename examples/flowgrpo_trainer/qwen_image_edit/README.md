@@ -1,6 +1,6 @@
-# Train Qwen-Image-Edit-2511 with FlowGRPO
+# Qwen-Image-Edit-2511 FlowGRPO training
 
-Last updated: 07/14/2026.
+Last updated: 07/14/2026
 
 This guide shows how to prepare an image-edit dataset and train
 [Qwen-Image-Edit-2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511)

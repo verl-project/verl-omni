@@ -320,7 +320,12 @@ def collect_diffusion_flops_meta(
     for key in ("all_timesteps", "train_timesteps"):
         timesteps = data.get(key, None)
         if timesteps is not None and hasattr(timesteps, "shape") and timesteps.ndim >= 2:
-            num_timesteps = int(timesteps.shape[1])
+            try:
+                num_timesteps = int(timesteps.shape[1])
+            except (TypeError, ValueError, AttributeError):
+                # Symbolic shape (e.g. during torch.compile / fx tracing) —
+                # fall back to neutral value so MFU accounting stays a no-op.
+                num_timesteps = 1
             break
 
     transformer_config = getattr(flops_counter, "config", None)
