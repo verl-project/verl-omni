@@ -1,5 +1,15 @@
 # configs for the reward computation
 
+# specify the default per-component configs
+defaults:
+
+  # per-role profiler config for the reward-model rollout servers,
+  # inheriting from trainer/config/profiler/profiler.yaml
+  - ../profiler@reward_model.rollout.profiler: profiler
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
 # we launch num_workers reward managers to parallelize the reward computation
 num_workers: 8
 
@@ -42,6 +52,12 @@ reward_model:
   model_path: null
   rollout:
     _target_: verl.workers.config.RolloutConfig
+
+    # Keep reward-server traces out of the actor rollout replicas' directories:
+    # the trace subdirectory is named agent_loop_rollout_replica_{rank} for both.
+    profiler:
+      save_path: ${oc.select:global_profiler.save_path,outputs/profile}/reward_model
+
     name: ???
     dtype: bfloat16
     gpu_memory_utilization: 0.5

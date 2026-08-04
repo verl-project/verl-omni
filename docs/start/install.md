@@ -69,12 +69,22 @@ This installs `vllm-omni`, then `verl` and `verl-omni`.
 | Extra                 | Install                                                   | When needed                             |
 | --------------------- | --------------------------------------------------------- | --------------------------------------- |
 | OCR reward            | `uv pip install -e ".[ocr]"`                              | FlowGRPO training with OCR-based reward |
+| Multimodal training   | `pip install qwen-vl-utils math-verify`                   | Vision-language training (e.g. MMK12)   |
 | Dev tools             | `uv pip install -e ".[dev]"`                              | Linting and unit tests                  |
 | VeOmni engine backend | See [Optional engine backends](#optional-engine-backends) | VeOmni instead of default FSDP2         |
 
 ### Flash Attention 3
 
-The `gpu` extra pulls `kernels==0.14.1` for the Diffusers **actor** FA3 backend. Rollout FA3 comes from `vllm-omni` (`fa3-fwd`), not from `kernels`.
+The `gpu` extra pulls `kernels==0.14.1` for Diffusers actor FA3 (`attn_backend=_flash_3_varlen_hub`).
+Defaults pair actor and rollout on the same Hub kernel backend:
+
+```bash
+actor_rollout_ref.model.attn_backend=_flash_3_varlen_hub
+actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN_3_HUB
+```
+
+`FLASH_ATTN_3_HUB` is provided by vLLM-Omni (`kernels-community/flash-attn3`). The legacy
+`FLASH_ATTN` rollout path still uses local FA packages (`fa3-fwd` / `flash-attn`).
 
 If FA3 deps are missing at runtime, training falls back to native/SDPA automatically. NPU recipes override with `actor_rollout_ref.model.attn_backend=_native_npu`.
 

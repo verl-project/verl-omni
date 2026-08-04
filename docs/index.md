@@ -1,6 +1,6 @@
 # Welcome to VeRL-Omni's documentation!
 
-Last updated: 06/05/2026
+Last updated: 07/20/2026
 
 [VeRL-Omni](https://github.com/verl-project/verl-omni) is a general RL training framework focused on multimodal generative models, built on top of [verl](https://github.com/verl-project/verl). It originated from the multi-modal generation RL effort in `verl`, and now has a dedicated home so it can evolve in a more focused way.
 
@@ -35,11 +35,20 @@ start/metrics.md
 
 ```{toctree}
 :maxdepth: 1
+:caption: Examples
+
+examples/config.md
+```
+
+```{toctree}
+:maxdepth: 1
 :caption: Advanced Features
 
 algo/async_reward.md
 algo/rollout_correction.md
+start/rollout_batching.md
 start/http_scorer.md
+start/diffusion_v1.md
 ```
 
 ```{toctree}
@@ -53,6 +62,23 @@ algo/diffusionnft.md
 algo/grpo_guard.md
 algo/mixgrpo.md
 algo/performance.md
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Examples
+
+examples/flowgrpo_trainer.md
+examples/flowdppo_trainer.md
+examples/dpo_trainer.md
+examples/dancegrpo_trainer.md
+examples/diffusionnft_trainer.md
+examples/grpoguard_trainer.md
+examples/gspo_trainer.md
+examples/mixgrpo_trainer.md
+examples/flowgrpo_trainer_sd35_drm.md
+examples/bagel/flowgrpo_trainer_bagel.md
+examples/qwen_image_edit/flowgrpo_trainer_qwen_image_edit.md
 ```
 
 ```{toctree}
@@ -87,11 +113,16 @@ api/utils.rst
 :caption: Developer Guide
 
 contributing/editing-agent-instructions.md
+contributing/ci_cd.md
+contributing/testing_guide.md
+contributing/integrating_an_omni_model.md
 contributing/integrating_a_diffusion_model.md
+contributing/integrating_an_i2i_diffusion_model.md
 contributing/integrating_a_non_diffusers_model.md
 contributing/integrating_a_stepwise_continuous_batching_model.md
 contributing/integrating_a_new_policy_gradient_algorithm_for_diffusion_model.md
 contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md
+contributing/gpu_smoke_tests.md
 contributing/common_pitfalls.md
 ```
 
@@ -120,13 +151,14 @@ pre-commit run
 
 ### Adding CI tests
 
-If possible, please add CI test(s) for your new feature. Pick the most relevant workflow from [`.github/workflows/`](https://github.com/verl-project/verl-omni/tree/main/.github/workflows):
+If possible, please add CI test(s) for your new feature. See {doc}`contributing/testing_guide` for the L1-L4 test taxonomy, placement rules, and coverage policy.
+
+Pick the most relevant workflow from [`.github/workflows/`](https://github.com/verl-project/verl-omni/tree/main/.github/workflows):
 
 | Workflow | When to use |
 |---|---|
 | `cpu_unit_tests.yml` | New tests that run without a GPU (file name must end with `_on_cpu.py`) |
 | `gpu_smoke.yml` | GPU-requiring tests for trainer, worker, rollout, or agent-loop changes |
-| `gpu_smoke_verl_latest.yml` | Same as above, but pinned against the latest `verl` main (for upstream compatibility) |
 | `sanity.yml` | Static / import-level checks under `tests/special_sanity/` |
 
 Steps:
@@ -134,3 +166,21 @@ Steps:
 1. Place your test file in the appropriate directory under `tests/` (e.g. `tests/trainer/`, `tests/workers/`, `tests/agent_loop/`).
 2. Open the chosen workflow yml and add any missing path patterns to its `paths` section so the workflow triggers on your changes.
 3. Keep the test as lightweight as possible — use small models, reduced steps, and CPU where feasible (see existing `*_on_cpu.py` scripts for examples).
+
+For GPU smoke tests, see {doc}`contributing/gpu_smoke_tests` for how to register
+tests in the right group and run them locally.
+
+#### Triggering CI on pull requests
+
+Most PR workflows are label-driven. Add a label whose name contains `ci` to run
+the matching checks:
+
+| Label | Effect |
+|---|---|
+| `ci-core` | Core GPU smoke (2 GPUs) (training, reward, rollout modules) |
+| `ci-e2e-omni` | Omni trainer e2e GPU smoke (2 GPUs) |
+| `ci-e2e-diffusion` | Diffusion trainer e2e GPU smoke (4 GPUs) |
+| `ready-for-ci` | Selective GPU smoke suite in parallel (Up to 8 GPUs) |
+
+Labels are removed automatically when new commits are pushed; re-apply the
+label after each update. 

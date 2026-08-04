@@ -176,6 +176,29 @@ actor_rollout_ref.rollout.profiler.tool_config.torch.discrete=True
 Combine with recipe 1 to capture the actor train phase and the rollout in the
 same step.
 
+### 6. Reward-model servers
+
+When `reward.reward_model.enable=True`, the reward model runs in its own
+vLLM server processes — the same server stack as recipe 5, driven by
+`reward.reward_model.rollout.profiler`:
+
+```bash
+global_profiler.tool=torch \
+global_profiler.steps=[1] \
+reward.reward_model.rollout.profiler.enable=True \
+reward.reward_model.rollout.profiler.ranks=[0] \
+reward.reward_model.rollout.profiler.tool=torch \
+reward.reward_model.rollout.profiler.tool_config.torch.contents=[cpu,cuda] \
+reward.reward_model.rollout.profiler.tool_config.torch.discrete=True
+```
+
+The trainer starts/stops it around the phase where the servers actually
+score: the generation phase when reward computation streams with the rollout
+(`reward.reward_model.enable_resource_pool=True`), or the reward phase in
+colocate mode. Each profiled replica writes to
+`{save_path}/reward_model/agent_loop_rollout_replica_{rank}`, keeping reward
+traces apart from the actor rollout ones.
+
 ## Lightweight profiling recipe
 
 Profiling a full FlowGRPO step produces a large trace that is slow to open.
@@ -185,7 +208,8 @@ last-wins — so appending overrides to any recipe shrinks its footprint
 without editing the script. The following profiles a single lightweight step
 of the SD3.5 OCR recipe (2 rollouts instead of 8, 4 denoising steps instead
 of 10, 256px instead of 384px, train batch 4 instead of 8), capturing the
-actor train phase and the rollout servers (recipes 1 and 5 combined):
+actor train phase, the rollout servers and the reward-model servers
+(recipes 1, 5 and 6 combined):
 
 ```bash
 bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh \
@@ -215,7 +239,12 @@ bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh \
     actor_rollout_ref.rollout.profiler.ranks=[0] \
     actor_rollout_ref.rollout.profiler.tool=torch \
     actor_rollout_ref.rollout.profiler.tool_config.torch.contents=[cpu,cuda] \
-    actor_rollout_ref.rollout.profiler.tool_config.torch.discrete=True
+    actor_rollout_ref.rollout.profiler.tool_config.torch.discrete=True \
+    reward.reward_model.rollout.profiler.enable=True \
+    reward.reward_model.rollout.profiler.ranks=[0] \
+    reward.reward_model.rollout.profiler.tool=torch \
+    reward.reward_model.rollout.profiler.tool_config.torch.contents=[cpu,cuda] \
+    reward.reward_model.rollout.profiler.tool_config.torch.discrete=True
 ```
 
 Measured on 3×RTX 4090 against the recipe defaults: traces 163 MB → 32 MB,
@@ -255,7 +284,8 @@ recipe's own values, minding two couplings:
 * For the rollout servers, the trainer calls
   `llm_server_manager.start_profile()`/`stop_profile()` around the generation
   phase of profiled steps; the servers record through vLLM's built-in torch
-  profiler (recipe 5).
+  profiler (recipe 5). The reward-model servers are driven the same way
+  through `verl_omni.reward_loop.OmniRewardLoopManager` (recipe 6).
 
 ## Further reading
 

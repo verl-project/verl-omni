@@ -54,8 +54,8 @@ if [ -z "${MODEL_PATH}" ]; then
         MODEL_PATH="${MODEL_REPO}"
     else
         MODEL_PATH="${HOME}/models/tiny-random/Qwen3-Omni"
-        [ -d "${MODEL_PATH}" ] || python3 "${REPO_ROOT}/tests/special_e2e/build_qwen3_omni_tiny_random.py" \
-            --output-dir "${MODEL_PATH}"
+        python3 "${REPO_ROOT}/tests/special_e2e/build_qwen3_omni_tiny_random.py" \
+            --output-dir "${MODEL_PATH}" --force
     fi
 fi
 

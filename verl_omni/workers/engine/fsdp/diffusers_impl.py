@@ -781,7 +781,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         *,
         timesteps_key: str,
     ) -> dict:
-        num_timesteps = data[timesteps_key].shape[1]
+        num_timesteps = int(data[timesteps_key].shape[1])
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
         tu.assign_non_tensor(data, use_dynamic_bsz=False)
 
@@ -910,6 +910,9 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
 
             if micro_batch.get("ref_prev_sample_mean", None) is not None:
                 data["ref_prev_sample_mean"] = micro_batch["ref_prev_sample_mean"][:, step]
+
+            if micro_batch.get("teacher_prev_sample_mean", None) is not None:
+                data["teacher_prev_sample_mean"] = micro_batch["teacher_prev_sample_mean"][:, step]
 
             if micro_batch.get("old_prev_sample_mean", None) is not None:
                 data["old_prev_sample_mean"] = micro_batch["old_prev_sample_mean"][:, step]
@@ -1098,6 +1101,11 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
                 if ref_noise_pred.ndim == model_output["noise_pred"].ndim + 1 and ref_noise_pred.shape[1] == 1:
                     ref_noise_pred = ref_noise_pred[:, 0]
                 data["ref_noise_pred"] = ref_noise_pred
+            if micro_batch.get("teacher_noise_pred", None) is not None:
+                teacher_noise_pred = micro_batch["teacher_noise_pred"]
+                if teacher_noise_pred.ndim == model_output["noise_pred"].ndim + 1 and teacher_noise_pred.shape[1] == 1:
+                    teacher_noise_pred = teacher_noise_pred[:, 0]
+                data["teacher_noise_pred"] = teacher_noise_pred
             loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
         else:
             assert forward_only, "forward_only must be True when loss_function is None"

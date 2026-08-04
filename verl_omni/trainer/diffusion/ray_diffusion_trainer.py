@@ -68,8 +68,11 @@ from verl_omni.trainer.diffusion.diffusion_trainer_utils import NoOpCheckpointMa
 from verl_omni.trainer.diffusion.rollout_correction import (
     apply_bypass_mode_to_diffusion_batch,
     apply_rollout_correction_to_diffusion_batch,
+    compute_rollout_corr_metrics_from_batch,
     rollout_correction_enabled,
 )
+from verl_omni.utils.reward_score.reward_utils import video_tensor_to_pil_frames
+from verl_omni.utils.tracking import wrap_val_samples_for_wandb
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 sys_logger = logging.getLogger(__name__)
@@ -274,36 +277,55 @@ class BaseRayDiffusionTrainer(ABC):
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
-    def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
-        """Dump rollout/validation samples as JSONL."""
+    def _dump_generations(
+        self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path, max_samples=None, fps=24
+    ):
+        """Dump samples to disk as media files plus a JSONL index.
+
+        ``outputs`` is a batch of images ``[N, C, H, W]`` (-> ``{i}.jpg``) or videos
+        ``[N, T, C, H, W]`` (-> ``{i}.mp4`` at ``fps``). ``max_samples`` caps how many
+        are written (``None`` = all).
+        """
         os.makedirs(dump_path, exist_ok=True)
         output_paths = ["skipped_image"] * len(inputs)
 
         # visual_folder = os.path.join(dump_path, f"{self.global_steps}")
         # os.makedirs(visual_folder, exist_ok=True)
 
-        # output_paths = []
-        # images_pil = outputs.cpu().float().permute(0, 2, 3, 1).numpy()
-        # images_pil = (images_pil * 255).round().clip(0, 255).astype("uint8")
-        # for i, image in enumerate(images_pil):
-        #     image_path = os.path.join(visual_folder, f"{i}.jpg")
-        #     Image.fromarray(image).save(image_path)
-        #     output_paths.append(image_path)
+        n_full = outputs.shape[0]
+        n = n_full if max_samples is None else min(max_samples, n_full)
+        is_video = outputs.ndim == 5  # [N, T, C, H, W] vs image [N, C, H, W]
+
+        output_paths = []
+        if is_video:
+            from diffusers.utils import export_to_video
+
+            for i in range(n):
+                frames = video_tensor_to_pil_frames(outputs[i])
+                video_path = os.path.join(visual_folder, f"{i}.mp4")
+                export_to_video(frames, video_path, fps=fps)
+                output_paths.append(video_path)
+        else:
+            images_pil = outputs[:n].cpu().float().permute(0, 2, 3, 1).numpy()
+            images_pil = (images_pil * 255).round().clip(0, 255).astype("uint8")
+            for i, image in enumerate(images_pil):
+                image_path = os.path.join(visual_folder, f"{i}.jpg")
+                Image.fromarray(image).save(image_path)
+                output_paths.append(image_path)
 
         filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
 
-        n = len(inputs)
         base_data = {
-            "input": inputs,
+            "input": list(inputs)[:n],
             "output": output_paths,
-            "gts": gts,
-            "score": scores,
+            "gts": list(gts)[:n],
+            "score": list(scores)[:n],
             "step": [self.global_steps] * n,
         }
 
         for k, v in reward_extra_infos_dict.items():
-            if len(v) == n:
-                base_data[k] = v
+            if len(v) == n_full:
+                base_data[k] = list(v)[:n]
 
         lines = []
         for i in range(n):
@@ -347,6 +369,8 @@ class BaseRayDiffusionTrainer(ABC):
                 scores=scores,
                 reward_extra_infos_dict=reward_extra_infos_to_dump,
                 dump_path=rollout_data_dir,
+                max_samples=self.config.trainer.get("rollout_data_max_samples", None),
+                fps=int(self.config.trainer.get("video_fps", 24)),
             )
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
@@ -357,14 +381,12 @@ class BaseRayDiffusionTrainer(ABC):
         if generations_to_log == 0:
             return
 
+        import shutil
+
         import numpy as np
 
         # Create tuples of (input, output, score) and sort by input text
-        if "wandb" in self.config.trainer.logger:
-            import wandb
-
-            outputs = [wandb.Image(image.float(), file_type="jpg") for image in outputs]
-        samples = list(zip(inputs, outputs, scores, strict=True))
+        samples = list(zip(inputs, list(outputs), scores, strict=True))
         samples.sort(key=lambda x: x[0])  # Sort by input text
 
         # Use fixed random seed for deterministic shuffling
@@ -374,8 +396,19 @@ class BaseRayDiffusionTrainer(ABC):
         # Take first N samples after shuffling
         samples = samples[:generations_to_log]
 
+        # Wrap retained media for wandb (after truncation, so videos are not all encoded)
+        video_tmp_dir = None
+        if "wandb" in self.config.trainer.logger:
+            samples, video_tmp_dir = wrap_val_samples_for_wandb(
+                samples, fps=int(self.config.trainer.get("video_fps", 24))
+            )
+
         # Log to each configured logger
-        self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
+        try:
+            self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
+        finally:
+            if video_tmp_dir is not None:
+                shutil.rmtree(video_tmp_dir, ignore_errors=True)
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
         reward_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
@@ -506,6 +539,8 @@ class BaseRayDiffusionTrainer(ABC):
                 scores=sample_scores,
                 reward_extra_infos_dict=reward_extra_infos_dict,
                 dump_path=val_data_dir,
+                max_samples=self.config.trainer.get("validation_data_max_samples", None),
+                fps=int(self.config.trainer.get("video_fps", 24)),
             )
 
         for key_info, lst in reward_extra_infos_dict.items():
@@ -591,6 +626,8 @@ class BaseRayDiffusionTrainer(ABC):
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
+        if OmegaConf.select(self.config.trainer, "ray_master_port_range") is not None:
+            wg_kwargs["master_port_range"] = OmegaConf.to_container(self.config.trainer.ray_master_port_range)
         # Forward profiling steps and (when nsys is selected) per-worker Nsight options to the
         # Ray worker group so that workers can be launched under nsys with the right capture range.
         if OmegaConf.select(self.config, "global_profiler.steps") is not None:
@@ -639,13 +676,13 @@ class BaseRayDiffusionTrainer(ABC):
     def _init_online_rollout_stack(self, actor_rollout_resource_pool):
         """Initialize rollout, reward, and checkpoint engines (online sampling only)."""
         # create reward loop manager
-        from verl.experimental.reward_loop import RewardLoopManager
+        from verl_omni.reward_loop import OmniRewardLoopManager
 
         # initalize reward loop manager
         # reward model (colocate or standalone): get resource_pool
         # no reward model: resource_pool = None
         resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
-        self.reward_loop_manager = RewardLoopManager(
+        self.reward_loop_manager = OmniRewardLoopManager(
             config=self.config,
             rm_resource_pool=resource_pool,
         )
@@ -668,11 +705,13 @@ class BaseRayDiffusionTrainer(ABC):
         # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
         # agent_reward_loop: streaming reward computation with actor rollout
         # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
-        enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
+        self.enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
 
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
-        reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
+        reward_loop_worker_handles = (
+            self.reward_loop_manager.reward_loop_workers if self.enable_agent_reward_loop else None
+        )
 
         self.llm_server_manager = LLMServerManager.create(
             config=self.config,
@@ -988,10 +1027,15 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                     with marked_timer("gen", timing_raw, color="red"):
                         if curr_step_profile:
                             self.llm_server_manager.start_profile()
+                            # streaming reward scores inside the gen window; colocate in the reward phase
+                            if self.enable_agent_reward_loop:
+                                self.reward_loop_manager.start_profile()
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
                         self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
                             self.llm_server_manager.stop_profile()
+                            if self.enable_agent_reward_loop:
+                                self.reward_loop_manager.stop_profile()
 
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
@@ -1003,7 +1047,11 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
+                            if curr_step_profile:
+                                self.reward_loop_manager.start_profile()
                             batch_reward = self._compute_reward_colocate(batch)
+                            if curr_step_profile:
+                                self.reward_loop_manager.stop_profile()
                             batch = batch.union(batch_reward)
 
                         # extract reward_tensor and reward_extra_infos_dict for training
@@ -1022,7 +1070,14 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                                 metrics.update({"perf/mfu/actor_infer": old_log_prob_mfu})
                             batch = batch.union(old_log_prob)
 
-                    assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
+                    assert "old_log_probs" in batch.batch, f'"old_log_probs" not in {batch.batch.keys()=}'
+
+                    metrics.update(
+                        compute_rollout_corr_metrics_from_batch(
+                            batch,
+                            bypass_mode=bool(bypass_recomputing_logprobs),
+                        )
+                    )
 
                     # Decoupled-mode rollout correction (old vs rollout).
                     # In bypass mode old == rollout, so correction runs per-step in ``diffusion_loss``.
@@ -1100,7 +1155,8 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
-                    if rollout_data_dir:
+                    save_freq = self.config.trainer.get("rollout_data_save_freq", 1)
+                    if rollout_data_dir and save_freq > 0 and self.global_steps % save_freq == 0:
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
                 # validate
@@ -1204,6 +1260,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         if self.is_offline:
             self.reward_loop_manager = None
             self.llm_server_manager = None
+            self.enable_agent_reward_loop = False
             self.checkpoint_manager = NoOpCheckpointManager()
             return
         self._init_online_rollout_stack(actor_rollout_resource_pool)
@@ -1425,10 +1482,15 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                         with marked_timer("gen", timing_raw, color="red"):
                             if curr_step_profile:
                                 self.llm_server_manager.start_profile()
+                                # streaming reward scores inside the gen window; colocate in the reward phase
+                                if self.enable_agent_reward_loop:
+                                    self.reward_loop_manager.start_profile()
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
                             self.checkpoint_manager.sleep_replicas()
                             if curr_step_profile:
                                 self.llm_server_manager.stop_profile()
+                                if self.enable_agent_reward_loop:
+                                    self.reward_loop_manager.stop_profile()
                             timing_raw.update(gen_batch_output.meta_info["timing"])
                             gen_batch_output.meta_info.pop("timing", None)
 
@@ -1437,7 +1499,11 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
                         with marked_timer("reward", timing_raw, color="yellow"):
                             if self.use_rm and "rm_scores" not in batch.batch.keys():
+                                if curr_step_profile:
+                                    self.reward_loop_manager.start_profile()
                                 batch_reward = self._compute_reward_colocate(batch)
+                                if curr_step_profile:
+                                    self.reward_loop_manager.stop_profile()
                                 batch = batch.union(batch_reward)
                             reward_tensor, reward_extra_infos_dict = extract_reward(batch)
 
@@ -1492,7 +1558,13 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
-                    if rollout_data_dir and not self.is_offline:
+                    save_freq = self.config.trainer.get("rollout_data_save_freq", 1)
+                    if (
+                        rollout_data_dir
+                        and not self.is_offline
+                        and save_freq > 0
+                        and self.global_steps % save_freq == 0
+                    ):
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
                 # validate

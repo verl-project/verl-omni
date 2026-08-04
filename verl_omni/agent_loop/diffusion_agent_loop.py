@@ -168,7 +168,11 @@ class DiffusionAgentLoopWorker:
             sampling_params["logprobs"] = False
         else:
             sampling_params["global_steps"] = batch.meta_info["global_steps"]
+            # Prefer trainer-assigned global indices so chunked workers derive the
+            # same per-row seed regardless of local batch position / pack order.
             global_indices = batch.non_tensor_batch.get("_rollout_seed_global_idx")
+            if global_indices is not None:
+                global_indices = np.asarray(global_indices, dtype=np.int64).reshape(-1)
             per_rollout_seeds = maybe_per_rollout_seeds(batch.meta_info, len(batch), global_indices)
 
         if "agent_name" not in batch.non_tensor_batch:

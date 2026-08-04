@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   type_coverage_check:
-    if: contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+    if: contains(join(github.event.pull_request.labels.*.name, ','), 'ci')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -37,6 +37,7 @@ jobs:
         run: |
           pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.24.0/vllm-0.24.0+cpu-cp38-abi3-manylinux_2_34_x86_64.whl"
           pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
+          pip install TransferQueue==0.1.8
           pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
           pip install .
           pip install --no-deps -e .
