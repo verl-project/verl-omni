@@ -20,6 +20,8 @@ from typing import Any
 
 import torch
 
+__all__ = ["GroupedMetricMean"]
+
 
 class _MetricMeanStats:
     """Accumulate batch-mean metrics weighted by sample count."""
@@ -48,13 +50,22 @@ class _MetricMeanStats:
 
 
 class GroupedMetricMean:
-    """Aggregate metric means overall and optionally by one attribute.
+    """Accumulate weighted metric means overall and optionally by group.
 
-    Each update consumes metrics that are already averaged over a batch and a
-    weight equal to the number of logical samples represented by that batch.
-    When ``group_attribute`` is set, callers pass the group value through
-    ``attributes`` and the aggregator emits both overall and per-group means.
-    When ``group_attribute`` is ``None``, only the overall means are emitted.
+    What is class:
+        Aggregates metrics that are already averaged over each batch, weighting
+        them by the number of logical samples represented by that batch. When
+        ``group_attribute`` is set, the class also tracks per-group means using
+        values supplied through ``attributes`` in ``update``.
+
+    Args:
+        metric_keys: Metric names to include in emitted summaries.
+        group_attribute: Optional attribute name used to split metrics into
+            per-group summaries. If ``None``, only overall metrics are emitted.
+
+    Returns:
+        A ``GroupedMetricMean`` instance that can be updated with batch metrics
+        and converted to a prefixed metrics dictionary.
     """
 
     def __init__(self, *, metric_keys: tuple[str, ...], group_attribute: str | None = None) -> None:
