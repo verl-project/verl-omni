@@ -393,16 +393,12 @@ def _extract_frames(solution_image, frame_interval: int = 1) -> list[Image.Image
         solution_image = solution_image.unsqueeze(0)
 
     elif solution_image.ndim == 4:
-        if is_channels_last:
-            solution_image = solution_image.permute(3, 0, 1, 2)
-        solution_image = solution_image[:, ::frame_interval]
-        solution_image = solution_image.permute(1, 0, 2, 3)
+        # Per-sample video is TCHW (or THWC when channels-last); temporal axis is dim 0.
+        solution_image = solution_image[::frame_interval]
 
     elif solution_image.ndim == 5:
-        if is_channels_last:
-            solution_image = solution_image.permute(0, 4, 1, 2, 3)
-        solution_image = solution_image[:, :, ::frame_interval]
-        solution_image = solution_image.permute(0, 2, 1, 3, 4)
+        # Batched video is BTCHW (or BTHWC when channels-last); temporal axis is dim 1.
+        solution_image = solution_image[:, ::frame_interval]
         solution_image = solution_image.reshape(-1, *solution_image.shape[2:])
 
     return [_to_pil_hwc(frame) for frame in solution_image]
@@ -421,6 +417,8 @@ def compute_score_hpsv3(
     checkpoint_path = os.getenv("custom_reward_model_path", model_name)
     assert checkpoint_path is not None, "HPSv3 checkpoint path must be provided via reward.reward_model.model_path"
 
+    # Reward manager does not pass this through, so allow CUDA/NPU selection via env.
+    device = os.getenv("custom_reward_device", device)
     inferencer = _get_inferencer(checkpoint_path, device)
 
     frame_interval = extra_info.get("frame_interval", 4)

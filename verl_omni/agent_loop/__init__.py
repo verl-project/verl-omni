@@ -17,6 +17,7 @@ from .diffusion_agent_loop_tq import (
     DiffusionAgentLoopWorkerTQ,
     create_diffusion_agent_loop_manager,
 )
+from .lingbot_dense_t2v_agent_loop import LingBotDenseT2VAgentLoop
 from .single_turn_agent_loop import DiffusionSingleTurnAgentLoop
 
 __all__ = [
@@ -24,5 +25,6 @@ __all__ = [
     "DiffusionAgentLoopWorker",
     "DiffusionAgentLoopWorkerTQ",
     "create_diffusion_agent_loop_manager",
+    "LingBotDenseT2VAgentLoop",
     "DiffusionSingleTurnAgentLoop",
 ]

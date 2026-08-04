@@ -1261,8 +1261,19 @@ class EngineEvalModeCtx(BaseEngineCtx):
         assert isinstance(self.engine, DiffusersFSDPEngine)
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
-        # unshard the root FSDP module
-        if self.engine.engine_config.fsdp_size > 1:
+        # After an inference-only forward, FSDP leaves the *root* module's
+        # parameters unsharded, so ``flat_param.data`` no longer aliases
+        # ``flat_param._local_shard``. A subsequent CPU offload
+        # (``offload_fsdp_model_to_cpu`` when ``param_offload=True``) asserts
+        # exactly that alias, so reshard the root here first.
+        #
+        # Gate on the *resolved* shard-group size, not ``engine_config.fsdp_size``:
+        # the latter is the raw config value and defaults to ``-1`` ("shard
+        # across all ranks"), which ``create_device_mesh`` turns into a real
+        # shard group of ``world_size``. Testing ``-1 > 1`` skipped the reshard
+        # and crashed offload with an AssertionError. ``device_mesh["fsdp"]``
+        # names the shard dim in both the 1-D and 2-D mesh layouts.
+        if self.engine.device_mesh["fsdp"].size() > 1:
             if fsdp_version(self.engine.module) == 1:
                 self.engine.module._handle.reshard(True)
             elif fsdp_version(self.engine.module) == 2:

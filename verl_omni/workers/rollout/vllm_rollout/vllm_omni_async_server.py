@@ -585,8 +585,20 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         else:
             diffusion_output = self._to_tensor(diffusion_output).float() / 255.0
 
-        # Extract extra data from custom_output (populated by DiffusionEngine)
+        # Extract replay data. vLLM-Omni main removed DiffusionOutput.custom_output
+        # (#4922): custom pipelines now return output["payload"]["trajectory"], which
+        # the engine copies whole into multimodal_output["trajectory"]. Fall back to
+        # the legacy custom_output dict for engines/pipelines that still populate it.
         mm_output = final_res.custom_output or {}
+        if not mm_output:
+            multimodal_output = getattr(final_res, "multimodal_output", None) or {}
+            trajectory_output = multimodal_output.get("trajectory")
+            if isinstance(trajectory_output, dict):
+                # Drop the formatter-facing duplicate keys; downstream consumers
+                # use the all_* names (plus prompt embeds).
+                mm_output = {
+                    k: v for k, v in trajectory_output.items() if k not in ("latents", "log_probs", "timesteps")
+                }
 
         if sampling_params.get("logprobs", False):
             all_log_probs = mm_output.get("all_log_probs")

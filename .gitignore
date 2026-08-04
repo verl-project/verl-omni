@@ -130,3 +130,5 @@ logs
 log
 outputs
 .history
+# local smoke-test artifacts (contain personal paths)
+.artifacts/

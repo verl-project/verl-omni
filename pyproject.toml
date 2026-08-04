@@ -52,6 +52,11 @@ vllm-omni = [
     "vllm-omni==0.24.0",
     "qwen-vl-utils>=0.0.14",
 ]
+# Official LingBot custom architecture used by the optional Dense T2V FlowGRPO adapter.
+# Pin code because the checkpoint's model_index references this package directly.
+lingbot-video = [
+    "lingbot-video @ git+https://github.com/Robbyant/lingbot-video.git@a638721cf2271804d02738b69f2ad788c4a559fc",
+]
 # CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
 gpu = [
     "vllm==0.24.0",

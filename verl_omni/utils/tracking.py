@@ -20,25 +20,29 @@ import tempfile
 from verl_omni.utils.reward_score.reward_utils import video_tensor_to_pil_frames
 
 
-def wrap_val_samples_for_wandb(samples, fps=24):
+def wrap_val_samples_for_wandb(samples, fps=24, output_dir=None):
     """Wrap ``(input, output, score)`` tuples for ``wandb`` validation logging.
 
-    Video outputs ``[T, C, H, W]`` are encoded to a temp mp4 and passed to
+    Video outputs ``[T, C, H, W]`` are encoded to mp4 and passed to
     ``wandb.Video`` by path (no moviepy); other outputs become ``wandb.Image``.
-    Returns the wrapped samples and the temp dir (``None`` if no video), which the
-    caller removes after logging.
+    With ``output_dir``, mp4s are kept for wandb's async serialization;
+    otherwise a temp dir is returned for caller cleanup.
     """
     import wandb
 
+    video_dir = output_dir
     video_tmp_dir = None
     wrapped = []
     for inp, out, score in samples:
         if hasattr(out, "ndim") and out.ndim == 4:
             from diffusers.utils import export_to_video
 
-            if video_tmp_dir is None:
+            if video_dir is None:
                 video_tmp_dir = tempfile.mkdtemp(prefix="val_video_")
-            video_path = os.path.join(video_tmp_dir, f"{len(wrapped)}.mp4")
+                video_dir = video_tmp_dir
+            else:
+                os.makedirs(video_dir, exist_ok=True)
+            video_path = os.path.join(video_dir, f"{len(wrapped)}.mp4")
             export_to_video(video_tensor_to_pil_frames(out), video_path, fps=fps)
             media = wandb.Video(video_path, format="mp4")
         else:

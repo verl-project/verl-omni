@@ -66,6 +66,9 @@ class DiffusionPipelineConfig(BaseConfig):
     max_sequence_length: int = 512
     guidance_scale: Optional[float] = None
 
+    # Flow-match sigma shift. LingBot Dense T2V uses 3.0 in the official recipe.
+    shift: float = 1.0
+
     # Wan2.2 video generation: number of frames (81 = ~3s at 24fps)
     num_frames: int = 1
 

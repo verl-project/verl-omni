@@ -14,6 +14,7 @@
 """CPU tests for the wandb branch of ``BaseRayDiffusionTrainer._maybe_log_val_generations``."""
 
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -37,19 +38,28 @@ class _RecordingValLogger:
         self.calls.append((list(loggers), samples, step))
 
 
-def _run_val_logging(outputs, *, log_val_generations, video_fps=8, global_steps=0):
+def _run_val_logging(
+    outputs,
+    *,
+    log_val_generations,
+    video_fps=8,
+    global_steps=0,
+    validation_data_dir=None,
+    default_local_dir=None,
+):
     """Invoke the unbound ``_maybe_log_val_generations`` with a minimal stub ``self``."""
     val_logger = _RecordingValLogger()
+    trainer_cfg = {
+        "log_val_generations": log_val_generations,
+        "logger": ["wandb"],
+        "video_fps": video_fps,
+    }
+    if validation_data_dir is not None:
+        trainer_cfg["validation_data_dir"] = str(validation_data_dir)
+    if default_local_dir is not None:
+        trainer_cfg["default_local_dir"] = str(default_local_dir)
     stub = SimpleNamespace(
-        config=OmegaConf.create(
-            {
-                "trainer": {
-                    "log_val_generations": log_val_generations,
-                    "logger": ["wandb"],
-                    "video_fps": video_fps,
-                }
-            }
-        ),
+        config=OmegaConf.create({"trainer": trainer_cfg}),
         global_steps=global_steps,
         validation_generations_logger=val_logger,
     )
@@ -112,6 +122,39 @@ class TestMaybeLogValGenerationsWandb:
         assert loggers == ["wandb"] and step == 0
         assert len(samples) == 2
         assert all(isinstance(media, _FakeVideo) for _inp, media, _score in samples)
+
+    def test_wandb_video_uses_persistent_validation_dir_when_configured(self, monkeypatch, tmp_path):
+        captured = []
+
+        class _FakeVideo:
+            def __init__(self, data_or_path, *args, **kwargs):
+                assert isinstance(data_or_path, str), f"expected a file path, got {type(data_or_path)}"
+                assert os.path.isfile(data_or_path), f"wandb.Video got a non-existent path: {data_or_path}"
+                captured.append(SimpleNamespace(path=data_or_path, kwargs=dict(kwargs)))
+                self.data_or_path = data_or_path
+
+        monkeypatch.setattr(wandb, "Video", _FakeVideo)
+
+        outputs = _warm_clips(2)
+        validation_data_dir = tmp_path / "validation"
+        val_logger = _run_val_logging(
+            outputs,
+            log_val_generations=2,
+            global_steps=7,
+            validation_data_dir=validation_data_dir,
+        )
+
+        expected_dir = validation_data_dir / "wandb_val_media" / "global_step_7"
+        assert len(captured) == 2
+        for captured_video in captured:
+            path = Path(captured_video.path)
+            assert path.parent == expected_dir
+            assert path.is_file(), "persistent wandb media should not be removed after log()"
+            assert captured_video.kwargs.get("format") == "mp4"
+
+        assert len(val_logger.calls) == 1
+        _loggers, samples, _step = val_logger.calls[0]
+        assert all(Path(media.data_or_path).parent == expected_dir for _inp, media, _score in samples)
 
     def test_real_wandb_video_ingests_our_production_mp4(self, tmp_path):
         """The REAL wandb.Video ingests a production-path mp4 from disk (size + sha256) with no moviepy."""

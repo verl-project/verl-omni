@@ -16,6 +16,7 @@
 
 import os
 import shutil
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -70,6 +71,31 @@ def test_video_samples_become_wandb_video_with_a_real_mp4(monkeypatch):
         assert os.path.isdir(video_tmp_dir)
     finally:
         shutil.rmtree(video_tmp_dir, ignore_errors=True)
+
+
+def test_video_samples_can_use_persistent_output_dir(monkeypatch, tmp_path):
+    captured = []
+
+    class _FakeVideo:
+        def __init__(self, path, *args, **kwargs):
+            assert os.path.isfile(path), f"wandb.Video got a non-existent path: {path}"
+            captured.append(SimpleNamespace(path=path, kwargs=dict(kwargs)))
+
+    monkeypatch.setattr(wandb, "Video", _FakeVideo)
+
+    output_dir = tmp_path / "wandb_val_media" / "global_step_7"
+    samples = [(f"prompt {i}", _warm_clip(), float(i)) for i in range(2)]
+    wrapped, video_tmp_dir = wrap_val_samples_for_wandb(samples, fps=8, output_dir=output_dir)
+
+    assert video_tmp_dir is None
+    assert len(wrapped) == 2
+    assert len(captured) == 2
+    for captured_video in captured:
+        path = Path(captured_video.path)
+        assert path.parent == output_dir
+        assert path.suffix == ".mp4"
+        assert path.is_file()
+        assert captured_video.kwargs.get("format") == "mp4"
 
 
 def test_image_samples_become_wandb_image_and_no_temp_dir(monkeypatch):
