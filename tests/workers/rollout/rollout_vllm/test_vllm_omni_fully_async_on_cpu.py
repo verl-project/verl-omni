@@ -183,6 +183,22 @@ def test_ar_server_selects_omni_worker_extension():
     assert server._get_worker_extension_cls().endswith(".vLLMOmniColocateWorkerExtension")
 
 
+def test_omni_worker_extension_accepts_vllm_constructor_kwargs(monkeypatch):
+    monkeypatch.setattr(
+        "verl_omni.workers.rollout.vllm_rollout.utils.VLLMOmniHijack.hijack",
+        lambda: None,
+    )
+
+    worker = vLLMOmniColocateWorkerExtension.__new__(
+        vLLMOmniColocateWorkerExtension,
+        vllm_config=object(),
+        local_rank=0,
+        rank=0,
+    )
+
+    assert isinstance(worker, vLLMOmniColocateWorkerExtension)
+
+
 def test_ar_full_weight_update_uses_omni_bucketed_loader(monkeypatch):
     from verl.utils.vllm import patch as vllm_patch
     from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer

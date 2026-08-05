@@ -47,7 +47,7 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
 
     def __new__(cls, **kwargs):
         VLLMOmniHijack.hijack()
-        return super().__new__(cls, **kwargs)
+        return super().__new__(cls)
 
     def set_pending_lora_peft_config(self, peft_config: dict | None = None):
         """Stash the actor's LoRA ``peft_config`` for the next
