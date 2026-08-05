@@ -52,10 +52,6 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             validate = validate.data
         batch.pop("validate", None)
 
-        global_steps = batch.get("global_steps")
-        if isinstance(global_steps, NonTensorData):
-            global_steps = global_steps.data
-
         config = self.rollout_config
         sampling_params = {
             **_config_to_sampling_dict(config.pipeline),
@@ -136,10 +132,10 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         uid = prompt["uid"]
         partition_id = "val" if trajectory["validate"] else "train"
         await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
+        tasks = []
         try:
             config = self.rollout_config
             n = config.val_kwargs.n if trajectory["validate"] else config.n
-            tasks = []
             for session_id in range(n):
                 run_sampling_params = dict(sampling_params)
                 if rollout_base_seed is not None and not trajectory["validate"]:
@@ -153,10 +149,20 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                     )
                 )
                 tasks.append(task)
-            await asyncio.gather(*tasks)
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "finished"})
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            errors = [result for result in results if isinstance(result, BaseException)]
+            for error in errors:
+                logger.error(
+                    f"Error in _run_prompt for uid={uid}",
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+            status = "failure" if errors else "finished"
+            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": status})
         except Exception as e:
             logger.exception(f"Error in _run_prompt for uid={uid}: {e}")
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
 
     async def _run_agent_loop(
@@ -170,7 +176,10 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
     ) -> None:
         """Run one diffusion agent loop session and write its output to TransferQueue."""
         internal: _InternalDiffusionAgentLoopOutput = await super()._run_agent_loop(
-            sampling_params, agent_name=agent_name, **kwargs
+            sampling_params,
+            agent_name=agent_name,
+            validate=trajectory["validate"] if trajectory else False,
+            **kwargs,
         )
         uid = kwargs["uid"]
         non_conflicting_kwargs = {k: v for k, v in kwargs.items() if k not in {"uid", "global_steps"}}
