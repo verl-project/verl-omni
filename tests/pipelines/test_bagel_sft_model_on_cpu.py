@@ -264,7 +264,7 @@ def test_t2i_masked_patch_cannot_affect_valid_predictions():
     assert torch.equal(first.loss, second.loss)
 
 
-def test_t2i_velocity_matches_existing_bagel_for_training_path():
+def test_t2i_original_inputs_match_flowgrpo_forward_and_backward(monkeypatch):
     torch.manual_seed(1)
     config = tiny_config()
     flow_model = BagelForTraining(config)
@@ -273,21 +273,30 @@ def test_t2i_velocity_matches_existing_bagel_for_training_path():
         {name: tensor for name, tensor in sft_model.state_dict().items() if name in flow_model.state_dict()},
         strict=True,
     )
-    text_ids, text_mask = text_batch()
+    text_ids = torch.tensor([[62, 1, 2, 63], [62, 4, 5, 63]])
+    text_mask = torch.ones_like(text_ids, dtype=torch.bool)
     target_patches, position_ids = sft_model._patchify_latents(latent_batch())
     noise = torch.randn_like(target_patches)
     noisy, _, shifted = sft_model._prepare_flow_target(
         target_patches, timestep_logits=torch.tensor([0.2, 0.8]), noise=noise
     )
 
-    expected = flow_model(
+    original_forward = BagelForTraining.forward
+    expected = original_forward(
+        flow_model,
         hidden_states=noisy,
         timestep=shifted,
         text_token_ids=text_ids,
         text_attention_mask=text_mask,
-        image_position_ids=text_mask.sum(dim=-1),
         latent_pos_ids=position_ids,
     )[0]
+    captured_kwargs = {}
+
+    def capture_original_call(self, *args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return original_forward(self, *args, **kwargs)
+
+    monkeypatch.setattr(BagelForTraining, "forward", capture_original_call)
     actual = sft_model.forward_t2i(
         prompt_input_ids=text_ids,
         prompt_attention_mask=text_mask,
@@ -296,7 +305,23 @@ def test_t2i_velocity_matches_existing_bagel_for_training_path():
         noise=noise,
     ).velocity
 
-    assert torch.equal(actual, expected)
+    assert "image_position_ids" not in captured_kwargs
+    assert "latent_attention_mask" not in captured_kwargs
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    probe = torch.linspace(-1, 1, expected.numel()).reshape_as(expected)
+    (expected.float() * probe).sum().backward()
+    (actual.float() * probe).sum().backward()
+    flow_parameters = dict(flow_model.named_parameters())
+    sft_parameters = dict(sft_model.named_parameters())
+    assert flow_parameters.keys() <= sft_parameters.keys()
+    for name, flow_parameter in flow_parameters.items():
+        sft_gradient = sft_parameters[name].grad
+        if flow_parameter.grad is None:
+            assert sft_gradient is None, name
+        else:
+            assert sft_gradient is not None, name
+            torch.testing.assert_close(sft_gradient, flow_parameter.grad, rtol=0, atol=0, msg=name)
 
 
 def test_t2i_is_invariant_to_longer_right_padded_batch_neighbors():
@@ -349,9 +374,12 @@ def test_flow_target_uses_sigmoid_logits_and_timestep_shift():
 
 def test_sft_preserves_flow_generation_state_key_boundary():
     flow_keys = set(BagelForTraining(tiny_config()).state_dict())
-    sft_keys = set(tiny_model().state_dict())
+    model = tiny_model()
+    sft_keys = set(model.state_dict())
 
     assert flow_keys <= sft_keys
+    assert type(model.layers[0]).__name__ == "_BagelSFTMoTLayer"
+    assert model._no_split_modules == [type(model.layers[0]).__name__]
     assert all(not name.startswith(("core.", "model.")) for name in sft_keys)
     assert all(
         name.startswith(("lm_head.", "vit_model.", "connector.", "vit_pos_embed.")) for name in sft_keys - flow_keys

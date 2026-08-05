@@ -33,7 +33,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from .bagel_model import BagelForTraining, BagelTrainingConfig, PositionEmbedding
+from .bagel_model import (
+    BagelForTraining,
+    BagelMLP,
+    BagelMoTAttention,
+    BagelMoTLayer,
+    BagelTrainingConfig,
+    PositionEmbedding,
+    RMSNorm,
+    RotaryEmbedding,
+    TimestepEmbedder,
+    _apply_rotary_emb,
+)
 
 SFTTask = Literal["t2i", "reflect", "edit"]
 
@@ -260,8 +271,162 @@ class BagelSiglipVisionTower(nn.Module):
         return embeddings, one_position_ids.unsqueeze(0).expand(batch_size, -1)
 
 
+class _BagelSFTMoTAttention(BagelMoTAttention):
+    def forward(
+        self,
+        hidden_states: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+        text_mask: Tensor,
+        latent_mask: Tensor,
+        L_ctx: int = 0,
+        key_padding_mask: Tensor | None = None,
+        attention_mask: Tensor | None = None,
+    ) -> Tensor:
+        if attention_mask is None:
+            return super().forward(
+                hidden_states,
+                cos,
+                sin,
+                text_mask,
+                latent_mask,
+                L_ctx,
+                key_padding_mask=key_padding_mask,
+            )
+        if L_ctx or key_padding_mask is not None:
+            raise ValueError("SFT attention_mask cannot be combined with FlowGRPO split attention")
+
+        batch_size, sequence_length, _ = hidden_states.shape
+        text_index = text_mask.nonzero(as_tuple=True)
+        latent_index = latent_mask.nonzero(as_tuple=True)
+
+        query = hidden_states.new_zeros(batch_size, sequence_length, self.num_heads * self.head_dim)
+        key = hidden_states.new_zeros(batch_size, sequence_length, self.num_kv_heads * self.head_dim)
+        value = hidden_states.new_zeros(batch_size, sequence_length, self.num_kv_heads * self.head_dim)
+
+        text_hidden = hidden_states[text_index]
+        query[text_index] = self.q_proj(text_hidden)
+        key[text_index] = self.k_proj(text_hidden)
+        value[text_index] = self.v_proj(text_hidden)
+
+        latent_hidden = hidden_states[latent_index]
+        query[latent_index] = self.q_proj_moe_gen(latent_hidden)
+        key[latent_index] = self.k_proj_moe_gen(latent_hidden)
+        value[latent_index] = self.v_proj_moe_gen(latent_hidden)
+
+        query = query.view(batch_size, sequence_length, self.num_heads, self.head_dim).float()
+        key = key.view(batch_size, sequence_length, self.num_kv_heads, self.head_dim).float()
+        value = value.view(batch_size, sequence_length, self.num_kv_heads, self.head_dim)
+        normalized_query = query.new_zeros(query.shape)
+        normalized_key = key.new_zeros(key.shape)
+        normalized_query[text_index] = self.q_norm(query[text_index])
+        normalized_key[text_index] = self.k_norm(key[text_index])
+        normalized_query[latent_index] = self.q_norm_moe_gen(query[latent_index])
+        normalized_key[latent_index] = self.k_norm_moe_gen(key[latent_index])
+
+        normalized_query, normalized_key = _apply_rotary_emb(
+            normalized_query,
+            normalized_key,
+            cos.unsqueeze(2),
+            sin.unsqueeze(2),
+        )
+        normalized_query = normalized_query.to(torch.bfloat16)
+        normalized_key = normalized_key.to(torch.bfloat16)
+        value = value.to(torch.bfloat16)
+
+        if self.num_kv_heads < self.num_heads:
+            repeats = self.num_heads // self.num_kv_heads
+            normalized_key = normalized_key.unsqueeze(3).expand(-1, -1, -1, repeats, -1)
+            normalized_key = normalized_key.reshape(batch_size, sequence_length, self.num_heads, self.head_dim)
+            value = value.unsqueeze(3).expand(-1, -1, -1, repeats, -1)
+            value = value.reshape(batch_size, sequence_length, self.num_heads, self.head_dim)
+
+        if attention_mask.ndim == 3:
+            attention_mask = attention_mask.unsqueeze(1)
+        if attention_mask.ndim != 4 or attention_mask.shape[0] != batch_size:
+            raise ValueError("attention_mask must have shape (B, L, L) or (B, 1, L, L)")
+        if attention_mask.shape[-2:] != (sequence_length, sequence_length):
+            raise ValueError(
+                f"attention_mask has trailing shape {tuple(attention_mask.shape[-2:])}, "
+                f"expected {(sequence_length, sequence_length)}"
+            )
+
+        attention_output = F.scaled_dot_product_attention(
+            normalized_query.transpose(1, 2),
+            normalized_key.transpose(1, 2),
+            value.transpose(1, 2),
+            attn_mask=attention_mask,
+            is_causal=False,
+        )
+        attention_output = attention_output.transpose(1, 2).contiguous().view(batch_size, sequence_length, -1)
+
+        output = hidden_states.new_zeros(batch_size, sequence_length, self.hidden_size)
+        output[text_index] = self.o_proj(attention_output[text_index].to(self.o_proj.weight.dtype))
+        output[latent_index] = self.o_proj_moe_gen(attention_output[latent_index].to(self.o_proj_moe_gen.weight.dtype))
+        return output
+
+
+class _BagelSFTMoTLayer(BagelMoTLayer):
+    def __init__(self, config: BagelTrainingConfig) -> None:
+        nn.Module.__init__(self)
+        self.self_attn = _BagelSFTMoTAttention(config)
+        self.mlp = BagelMLP(config.hidden_size, config.intermediate_size)
+        self.mlp_moe_gen = BagelMLP(config.hidden_size, config.intermediate_size)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm_moe_gen = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm_moe_gen = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = RotaryEmbedding(config.head_dim, theta=config.rope_theta)
+
+    def forward(
+        self,
+        hidden_states: Tensor,
+        position_ids: Tensor,
+        text_mask: Tensor,
+        latent_mask: Tensor,
+        L_ctx: int = 0,
+        key_padding_mask: Tensor | None = None,
+        attention_mask: Tensor | None = None,
+    ) -> Tensor:
+        if attention_mask is None:
+            return super().forward(
+                hidden_states,
+                position_ids,
+                text_mask,
+                latent_mask,
+                L_ctx,
+                key_padding_mask=key_padding_mask,
+            )
+
+        cos, sin = self.rotary_emb(position_ids)
+        text_index = text_mask.nonzero(as_tuple=True)
+        latent_index = latent_mask.nonzero(as_tuple=True)
+        normalized = hidden_states.new_zeros(hidden_states.shape)
+        normalized[text_index] = self.input_layernorm(hidden_states[text_index])
+        normalized[latent_index] = self.input_layernorm_moe_gen(hidden_states[latent_index])
+        attention_output = self.self_attn(
+            normalized,
+            cos,
+            sin,
+            text_mask,
+            latent_mask,
+            L_ctx,
+            key_padding_mask=key_padding_mask,
+            attention_mask=attention_mask,
+        )
+        hidden_states = hidden_states + attention_output
+
+        residual = hidden_states
+        mlp_output = hidden_states.new_zeros(hidden_states.shape)
+        mlp_output[text_index] = self.mlp(self.post_attention_layernorm(hidden_states[text_index]))
+        mlp_output[latent_index] = self.mlp_moe_gen(self.post_attention_layernorm_moe_gen(hidden_states[latent_index]))
+        return residual + mlp_output
+
+
 class BagelForSFT(BagelForTraining):
     """BAGEL MoT model exposing atomic T2I, reflection, and edit losses."""
+
+    _no_split_modules = ["_BagelSFTMoTLayer"]
 
     def __init__(
         self,
@@ -270,7 +435,16 @@ class BagelForSFT(BagelForTraining):
         vision_tower: nn.Module | None = None,
         vae_encoder: BagelFrozenVAEEncoder | nn.Module | None = None,
     ) -> None:
-        super().__init__(config)
+        nn.Module.__init__(self)
+        self.config = config
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.layers = nn.ModuleList([_BagelSFTMoTLayer(config) for _ in range(config.num_hidden_layers)])
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm_moe_gen = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.time_embedder = TimestepEmbedder(config.hidden_size)
+        self.vae2llm = nn.Linear(config.patch_latent_dim, config.hidden_size)
+        self.llm2vae = nn.Linear(config.hidden_size, config.patch_latent_dim)
+        self.latent_pos_embed = PositionEmbedding(config.max_latent_size, config.hidden_size)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.vit_model = vision_tower
         self.connector = BagelMLPConnector(config.vit_hidden_size, config.hidden_size, config.connector_act)
@@ -322,15 +496,25 @@ class BagelForSFT(BagelForTraining):
             target_patches, timestep_logits=timestep_logits, noise=noise
         )
         model_dtype = self.vae2llm.weight.dtype
-        velocity = super().forward(
-            hidden_states=noisy_patches.to(model_dtype),
-            timestep=shifted_timesteps,
-            text_token_ids=prompt_input_ids,
-            text_attention_mask=prompt_mask,
-            image_position_ids=prompt_mask.sum(dim=-1).to(dtype=torch.long),
-            latent_pos_ids=latent_pos_ids,
-            latent_attention_mask=valid_mask,
-        )[0]
+        noisy_patches = noisy_patches.to(model_dtype)
+        if bool(prompt_mask.all()) and bool(valid_mask.all()):
+            velocity = BagelForTraining.forward(
+                self,
+                hidden_states=noisy_patches,
+                timestep=shifted_timesteps,
+                text_token_ids=prompt_input_ids,
+                text_attention_mask=prompt_mask,
+                latent_pos_ids=latent_pos_ids,
+            )[0]
+        else:
+            velocity = self._forward_t2i_sft_sequence(
+                prompt_input_ids=prompt_input_ids,
+                prompt_mask=prompt_mask,
+                noisy_patches=noisy_patches,
+                shifted_timesteps=shifted_timesteps,
+                latent_pos_ids=latent_pos_ids,
+                valid_mask=valid_mask,
+            )
         loss, per_sample = _normalized_mse(velocity, target_velocity, valid_mask)
         return BagelSFTOutput(
             task="t2i",
@@ -340,6 +524,65 @@ class BagelForSFT(BagelForTraining):
             target=target_velocity,
             valid_mask=valid_mask,
         )
+
+    def _forward_t2i_sft_sequence(
+        self,
+        *,
+        prompt_input_ids: Tensor,
+        prompt_mask: Tensor,
+        noisy_patches: Tensor,
+        shifted_timesteps: Tensor,
+        latent_pos_ids: Tensor,
+        valid_mask: Tensor,
+    ) -> Tensor:
+        batch_size, latent_length, _ = noisy_patches.shape
+        if prompt_input_ids.shape[0] != batch_size:
+            raise ValueError("T2I prompt and target tensors must have the same batch size")
+        prompt_length = prompt_input_ids.shape[1]
+        latent_start = prompt_length + 1
+        sequence_length = latent_start + latent_length + 1
+
+        prompt_embeddings = self.embed_tokens(prompt_input_ids)
+        latent_embeddings = (
+            self.vae2llm(noisy_patches)
+            + self.time_embedder(shifted_timesteps).unsqueeze(1)
+            + self.latent_pos_embed(latent_pos_ids)
+        ).to(prompt_embeddings.dtype)
+        sequence = torch.cat(
+            [
+                prompt_embeddings,
+                self._marker_embedding(self.config.start_of_image_id, batch_size, noisy_patches.device),
+                latent_embeddings,
+                self._marker_embedding(self.config.end_of_image_id, batch_size, noisy_patches.device),
+            ],
+            dim=1,
+        )
+
+        text_mask = torch.zeros(batch_size, sequence_length, dtype=torch.bool, device=sequence.device)
+        text_mask[:, :prompt_length] = prompt_mask
+        text_mask[:, prompt_length] = True
+        text_mask[:, -1] = True
+        latent_mask = torch.zeros_like(text_mask)
+        latent_mask[:, latent_start : latent_start + latent_length] = valid_mask
+        sequence_valid = text_mask | latent_mask
+
+        prompt_positions = torch.arange(prompt_length, device=sequence.device).unsqueeze(0).expand(batch_size, -1)
+        image_positions = prompt_mask.sum(dim=-1, dtype=torch.long).unsqueeze(1)
+        image_positions = image_positions.expand(-1, latent_length + 2)
+        position_ids = torch.cat([prompt_positions, image_positions], dim=1)
+        attention_mask = _segment_attention_mask(
+            sequence_valid,
+            [(0, prompt_length, "causal"), (prompt_length, sequence_length, "noise")],
+        )
+        hidden_states = self._run_sft_sequence(
+            sequence,
+            position_ids=position_ids,
+            text_mask=text_mask,
+            latent_mask=latent_mask,
+            valid_mask=sequence_valid,
+            attention_mask=attention_mask,
+        )
+        return self.llm2vae(hidden_states[:, latent_start : latent_start + latent_length])
 
     def forward_reflect(
         self,
