@@ -126,3 +126,25 @@ class TestDumpGenerations:
         rows = _read_jsonl(tmp_path)
         assert len(rows) == 1
         assert rows[0]["reward"] == 0.0
+
+    def test_wan22_channels_last_singleton_video_batch(self, tmp_path):
+        """Wan22 rollout returns ``[N, 1, F, H, W, C]``; the dump must normalize it
+        to channels-first video (one mp4 per sample, frames and channel order intact)."""
+        imageio = pytest.importorskip("imageio")
+
+        outputs = torch.zeros(2, 1, 8, 16, 16, 3)  # [N, 1, F, H, W, C], solid warm frame
+        outputs[..., 0] = 0.75  # R
+        outputs[..., 1] = 0.35  # G
+        outputs[..., 2] = 0.15  # B
+        _dump(tmp_path, outputs)
+
+        visual = os.path.join(str(tmp_path), "0")
+        mp4s = sorted(f for f in os.listdir(visual) if f.endswith(".mp4"))
+        assert mp4s == ["0.mp4", "1.mp4"]
+
+        reader = imageio.get_reader(os.path.join(visual, "0.mp4"))
+        frames = [frame for frame in reader]
+        reader.close()
+        assert len(frames) == 8  # F survived as the time axis
+        r, g, b = (float(frames[4][..., c].mean()) for c in range(3))
+        assert r > g > b, f"channel order not preserved: R={r:.1f} G={g:.1f} B={b:.1f}"

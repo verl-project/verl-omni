@@ -287,9 +287,17 @@ class BaseRayDiffusionTrainer(ABC):
         """Dump samples to disk as media files plus a JSONL index.
 
         ``outputs`` is a batch of images ``[N, C, H, W]`` (-> ``{i}.jpg``) or videos
-        ``[N, T, C, H, W]`` (-> ``{i}.mp4`` at ``fps``). ``max_samples`` caps how many
+        ``[N, T, C, H, W]`` (-> ``{i}.mp4`` at ``fps``). Channels-last video with a
+        singleton frame dim, ``[N, 1, F, H, W, C]`` (e.g. Wan22 rollout), is also
+        accepted and normalized to ``[N, T, C, H, W]``. ``max_samples`` caps how many
         are written (``None`` = all).
         """
+        # Wan22 rollout returns channels-last video with a singleton dim: [N, 1, F, H, W, C]
+        if outputs.ndim == 6:
+            outputs = outputs.squeeze(1)
+        if outputs.ndim == 5 and outputs.shape[-1] in (1, 3):
+            outputs = outputs.permute(0, 1, 4, 2, 3)
+
         os.makedirs(dump_path, exist_ok=True)
 
         visual_folder = os.path.join(dump_path, f"{self.global_steps}")
