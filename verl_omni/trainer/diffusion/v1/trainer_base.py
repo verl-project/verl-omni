@@ -586,6 +586,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         all_wg = {}
         wg_kwargs = {"device_name": self.config.trainer.device}
+        if OmegaConf.select(self.config.trainer, "ray_master_port_range") is not None:
+            wg_kwargs["master_port_range"] = OmegaConf.to_container(self.config.trainer.ray_master_port_range)
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
             if not class_dict:
                 continue
@@ -829,6 +831,17 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             )
             data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
 
+            # Skip empty validation batches (e.g. all trajectories were dropped
+            # by the off-policy sampler) instead of crashing on downstream
+            # tensor indexing with batch_size=0.
+            if len(data) == 0:
+                logger.warning(
+                    "Validation produced no trajectories for this batch (step=%d); skipping.",
+                    self.global_steps,
+                )
+                tq.kv_clear(keys=batch_meta.keys, partition_id=batch_meta.partition_id)
+                continue
+
             if self.use_rm and self.reward_loop_manager.reward_loop_worker_handles is None:
                 self.checkpoint_manager.sleep_replicas()
                 data = self._compute_reward_colocate(data)
@@ -837,6 +850,20 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             input_ids = data.batch["prompts"]
             input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
             output_images = data.batch["responses"]
+            # Distinguish real generations from aborted/empty ones so the
+            # trainer logs clearly whether validation produced real images.
+            num_real = (
+                int(output_images.numel() > 0 and output_images.shape[-1] > 0)
+                if isinstance(output_images, torch.Tensor)
+                else 0
+            )
+            logger.info(
+                "Validation batch (step=%d): %d trajectories, responses shape=%s, real_images=%s",
+                self.global_steps,
+                len(data),
+                tuple(output_images.shape) if isinstance(output_images, torch.Tensor) else None,
+                num_real,
+            )
             sample_inputs.extend(input_texts)
             sample_outputs.append(output_images)
             uids = data.non_tensor_batch.get("uid")
@@ -1034,6 +1061,17 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             data.batch["advantages"].shape[0]
             if "advantages" in data.batch
             else data.batch["sample_level_scores"].shape[0]
+        )
+        responses = data.batch.get("responses")
+        real_images = 0
+        if isinstance(responses, torch.Tensor) and responses.numel() > 0 and responses.dim() >= 4:
+            real_images = int(responses.shape[0])
+        logger.info(
+            "Train step=%d: %d trajectories, %d real images, responses shape=%s",
+            global_steps,
+            len(data),
+            real_images,
+            tuple(responses.shape) if isinstance(responses, torch.Tensor) else None,
         )
         metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw, num_images=num_images))
         metrics.update(compute_throughput_metrics_diffusion(batch=data, timing_raw=timing_raw, n_gpus=n_gpus))

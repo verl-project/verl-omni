@@ -48,7 +48,6 @@ from verl.utils.fsdp_utils import (
     load_fsdp_optimizer,
     offload_fsdp_model_to_cpu,
     offload_fsdp_optimizer,
-    replace_lora_wrapper,
 )
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import convert_weight_keys
@@ -741,8 +740,6 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                     adapter_name=adapter_name or "default",
                     layer_prefixes=self.model_config.fsdp_layer_prefixes,
                 )
-            if not base_sync_done:
-                params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
         else:
             params = self.module.state_dict()
 

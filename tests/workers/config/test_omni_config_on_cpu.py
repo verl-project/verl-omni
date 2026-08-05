@@ -17,6 +17,7 @@ import json
 import os
 
 import pytest
+from verl.workers.config.model import MtpConfig
 
 from verl_omni.trainer.config.algorithm import OmniAlgoConfig
 from verl_omni.workers.config import OmniModelConfig
@@ -122,6 +123,9 @@ class TestOmniModelConfigLoraFields:
         assert model_cfg.lora_dtype == "fp32"
         assert model_cfg.target_parameters is None
         assert model_cfg.fsdp_layer_prefixes == []
+
+        model_cfg.mtp = MtpConfig(enable=False)
+        assert model_cfg.mtp.enable is False
 
     def test_instantiate_via_hydra(self):
         import os

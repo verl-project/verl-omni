@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from dataclasses import asdict
 from typing import Any, Optional
 
@@ -337,6 +338,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
         prompt_mask: torch.BoolTensor | None = None,
+        extra_prompt_ids: Optional[dict[str, list[int]]] = None,
+        negative_extra_prompt_ids: Optional[dict[str, list[int]]] = None,
         priority: int = 0,
     ) -> DiffusionOutput | TokenOutput:
         prompt_ids = normalize_token_ids(prompt_ids)
@@ -350,6 +353,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             negative_prompt_ids,
             prompt_mask,
             mm_processor_kwargs,
+            extra_prompt_ids,
+            negative_extra_prompt_ids,
         )
         final_res = await self._run_generation(prompt, params, request_id, lora_request, priority)
         return self._process_output(final_res, params, sampling_params)
@@ -430,6 +435,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         negative_prompt_ids: Optional[list[int]],
         prompt_mask: torch.BoolTensor | None = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        extra_prompt_ids: Optional[dict[str, list[int]]] = None,
+        negative_extra_prompt_ids: Optional[dict[str, list[int]]] = None,
     ):
         """Build the engine prompt + sampling params for the active mode.
 
@@ -490,6 +497,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             custom_prompt["modalities"] = ["image"]
         if negative_prompt_ids is not None:
             custom_prompt["negative_prompt_ids"] = negative_prompt_ids
+        # Per-text-encoder token ids for multi-encoder models (e.g. SD3.5),
+        # produced by the agent loop so pipelines never decode/re-encode text.
+        if extra_prompt_ids is not None:
+            custom_prompt["extra_prompt_ids"] = extra_prompt_ids
+        if negative_extra_prompt_ids is not None:
+            custom_prompt["negative_extra_prompt_ids"] = negative_extra_prompt_ids
         if multi_modal_data:
             custom_prompt["multi_modal_data"] = multi_modal_data
             custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
@@ -564,6 +577,27 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             )
 
         # diffusion
+        # Handle aborted requests: the engine may yield a terminal output with
+        # finish_reason="abort" and no images (e.g. when abort_all_requests
+        # synthesizes an abort OutputMessage to unblock the generate() coroutine).
+        # Return a DiffusionOutput with stop_reason="aborted" so the retry client
+        # can retry the whole sample.
+        if final_res is None or not final_res.images:
+            finish_reason = "abort"
+            if final_res is not None and final_res.request_output is not None:
+                finish_reason = getattr(final_res.request_output, "finish_reason", None) or "abort"
+            stop_reason = self._map_stop_reason(finish_reason)
+            logger.debug(
+                "diffusion rollout produced no image (finish_reason=%s); returning %s", finish_reason, stop_reason
+            )
+            return DiffusionOutput(
+                diffusion_output=torch.empty(0),
+                log_probs=None,
+                stop_reason=stop_reason,
+                num_preempted=None,
+                extra_fields={"global_steps": self.global_steps},
+            )
+
         assert final_res is not None
         diffusion_output = final_res.images[0]
         if isinstance(diffusion_output, torch.Tensor):
@@ -618,6 +652,173 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     async def wait_for_requests_to_drain(self):
         # TODO (mike): implement this once DP is supported.
         pass
+
+    # -----------------------------------------------------------------------
+    # Abort: AsyncOmni has no `output_processor` (it routes through an
+    # Orchestrator process and tracks state in `AsyncOmni.request_states`),
+    # so the parent's AsyncLLM-specific implementation must be overridden.
+    # -----------------------------------------------------------------------
+
+    async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
+        """Abort all in-flight requests on the AsyncOmni engine.
+
+        During ``on_step_end`` no new prompts are fed (the feed happens in
+        ``step``/``_add_batch_to_generate``), so the in-flight set monotonically
+        drains and the drain terminates quickly in practice.
+        """
+        engine = self.engine
+        if getattr(engine, "output_processor", None) is not None:
+            return await super().abort_all_requests(reset_prefix_cache)
+
+        try:
+            # ---- Phase 1: drain in-flight requests naturally ----------------
+            # Letting requests finish avoids the Orchestrator race that produces
+            # "Dropping output for unknown req" and avoids whole-sample retries.
+            drain_timeout_s = float(os.getenv("VERL_OMNI_ABORT_DRAIN_TIMEOUT_S", "120"))
+            drain_poll_interval_s = 0.1
+            drained = False
+            drain_start = time.monotonic()
+            last_count = -1
+            while True:
+                in_flight = len(engine.request_states)
+                if in_flight == 0:
+                    drained = True
+                    break
+                if time.monotonic() - drain_start >= drain_timeout_s:
+                    logger.warning(
+                        "abort_all_requests: drain timed out after %.1fs with %d request(s) still in-flight; "
+                        "falling back to hard abort (these may produce 'Dropping output' warnings)",
+                        drain_timeout_s,
+                        in_flight,
+                    )
+                    break
+                if in_flight != last_count:
+                    logger.info(
+                        "abort_all_requests: draining %d in-flight request(s) (%.1fs elapsed)",
+                        in_flight,
+                        time.monotonic() - drain_start,
+                    )
+                    last_count = in_flight
+                await asyncio.sleep(drain_poll_interval_s)
+
+            if drained:
+                if reset_prefix_cache:
+                    await self.clear_kv_cache()
+                logger.info(
+                    "abort_all_requests: drained all in-flight requests in %.2fs; no abort needed",
+                    time.monotonic() - drain_start,
+                )
+                return {"aborted_count": 0, "request_ids": [], "drained": True}
+
+            # ---- Phase 2: hard-abort the remainder (drain timed out) ---------
+            # Snapshot in-flight states (internal_id -> ClientRequestState) BEFORE
+            # engine.abort() pops them from AsyncOmni.request_states. We need the
+            # per-request asyncio.Queue references to unblock the generate() coroutines.
+            in_flight_states: list[tuple[str, Any]] = []
+            seen: set[str] = set()
+            for state in engine.request_states.values():
+                ext = getattr(state, "external_request_id", None)
+                if ext is None or ext in seen:
+                    continue
+                seen.add(ext)
+                in_flight_states.append((state.request_id, state))
+
+            request_ids = [s.external_request_id for _, s in in_flight_states]
+
+            if request_ids:
+                await engine.abort(request_ids)
+
+            # Synthesize terminal abort OutputMessages and put them directly into
+            # each per-request queue so _process_orchestrator_results can drain
+            # and return. Without this, generate() hangs forever because the
+            # Orchestrator already dropped the real abort output.
+            for internal_id, state in in_flight_states:
+                self._enqueue_abort_output(internal_id, state)
+
+            if reset_prefix_cache:
+                await self.clear_kv_cache()
+                logger.info("Prefix cache reset after abort")
+
+            logger.info(f"Aborted {len(request_ids)} requests: {request_ids}")
+            return {"aborted_count": len(request_ids), "request_ids": request_ids}
+        except Exception as e:
+            logger.error(f"Error aborting requests: {e}")
+            return {"aborted_count": 0, "request_ids": [], "error": str(e)}
+
+    def _enqueue_abort_output(self, internal_id: str, req_state: Any) -> None:
+        """Synthesize a terminal abort OutputMessage and put it into a per-request queue.
+
+        ``_process_orchestrator_results`` reads from ``req_state.queue`` and
+        expects ``OutputMessage`` (or ``ErrorMessage``) objects. We build a
+        minimal ``OmniRequestOutput`` carrying a ``RequestOutput`` with
+        ``finish_reason="abort"`` so that ``_process_single_result`` yields it
+        and ``_process_output`` maps it to ``stop_reason="aborted"``.
+        """
+        from vllm.outputs import CompletionOutput, RequestOutput
+        from vllm_omni.engine.messages import OutputMessage
+        from vllm_omni.outputs import OmniRequestOutput
+
+        completion = CompletionOutput(
+            index=0,
+            text="",
+            token_ids=[],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="abort",
+            stop_reason=None,
+        )
+        request_output = RequestOutput(
+            request_id=internal_id,
+            prompt=None,
+            prompt_token_ids=[],
+            prompt_logprobs=None,
+            outputs=[completion],
+            finished=True,
+        )
+        omni_output = OmniRequestOutput(
+            request_id=internal_id,
+            finished=True,
+            request_output=request_output,
+        )
+        # Use the final stage so _process_single_result's stage_meta.final_output
+        # check passes and the output is yielded (not silently dropped).
+        final_stage_id = max(0, getattr(self.engine, "num_stages", 1) - 1)
+        msg = OutputMessage(
+            request_id=internal_id,
+            stage_id=final_stage_id,
+            engine_outputs=omni_output,
+            finished=True,
+        )
+        req_state.queue.put_nowait(msg)
+
+    async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
+        """Abort a single in-flight request on the AsyncOmni engine."""
+        engine = self.engine
+        if getattr(engine, "output_processor", None) is not None:
+            return await super().abort_request(request_id, reset_prefix_cache)
+
+        try:
+            # Snapshot the in-flight state before engine.abort() pops it, so we
+            # can unblock the generate() coroutine with a synthetic abort output.
+            in_flight_state = None
+            for state in engine.request_states.values():
+                if getattr(state, "external_request_id", None) == request_id:
+                    in_flight_state = state
+                    break
+
+            await engine.abort(request_id)
+
+            if in_flight_state is not None:
+                self._enqueue_abort_output(in_flight_state.request_id, in_flight_state)
+
+            if reset_prefix_cache:
+                await self.clear_kv_cache()
+                logger.info(f"Prefix cache reset after abort request {request_id}")
+            logger.info(f"Aborted request: {request_id}")
+            return {"aborted": True, "request_id": request_id}
+        except Exception as e:
+            logger.error(f"Error aborting request {request_id}: {e}")
+            return {"aborted": False, "request_id": request_id, "error": str(e)}
 
 
 class vLLMOmniReplica(vLLMReplica):

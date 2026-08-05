@@ -207,6 +207,9 @@ trainer:
   # Timeout (in seconds) for Ray worker to wait for registration
   ray_wait_register_center_timeout: 300
 
+  # Stable port range used by RayWorkerGroup for torch distributed rendezvous.
+  ray_master_port_range: [20000, 30000]
+
   # Device to run training on (e.g., "cuda", "cpu")
   device: cuda
 
@@ -217,7 +220,7 @@ trainer:
   # V1 trainer mode configs (mirrors verl/trainer/config/ppo_trainer.yaml `trainer.v1`).
   v1:
 
-    # Trainer mode: "sync"
+    # Trainer mode: "sync", "separate_async".
     trainer_mode: sync
 
     # Synchronous diffusion trainer (colocated rollout, no partial rollout).
@@ -229,7 +232,9 @@ trainer:
       # Number of warmup batches to add before the training loop starts.
       num_warmup_batches: 1
 
-    # Asynchronous diffusion trainer with separate trainer and rollout (not implemented yet).
+    # Asynchronous diffusion trainer with separate trainer and rollout.
+    # Requires rollout.nnodes > 0 and a non-naive checkpoint_engine backend
+    # (nccl/nixl/mooncake/...) for trainer -> standalone rollout weight sync.
     separate_async:
 
       # Number of warmup batches to add before the training loop starts.
@@ -237,6 +242,9 @@ trainer:
 
       # Frequency of parameter synchronization between trainer and rollout.
       parameter_sync_step: 4
+
+      # Pause standalone rollout during actor update, resume after weight sync.
+      sync_compatible: false
 
     # Replay buffer sampling strategy.
     sampler:

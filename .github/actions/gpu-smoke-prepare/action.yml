@@ -21,3 +21,6 @@ runs:
         pip3 install veomni==0.1.11 --no-deps
         pip3 install torchcodec librosa soundfile av
         pip3 install "transformers[mistral-common]"
+        # NCCL checkpoint engine (diffusion v1 separate_async weight sync).
+        pip3 install pyzmq
+        pip3 install cupy-cuda12x || pip3 install cupy-cuda13x

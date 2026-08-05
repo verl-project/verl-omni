@@ -1,0 +1,237 @@
+name: l3_nightly
+
+on:
+  schedule:
+    # 22:00 Asia/Shanghai.
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        required: true
+        default: nightly
+        type: choice
+        options:
+          - nightly
+          - baseline
+      num_gpus:
+        description: "Number of GPUs to use"
+        required: false
+        default: "4"
+      model_path:
+        description: "Optional local Qwen-Image model path"
+        required: false
+        default: ""
+      reward_model_path:
+        description: "Optional local Qwen-VL reward model path"
+        required: false
+        default: ""
+      output_root:
+        description: "Output directory for dumps, logs, and reports"
+        required: false
+        default: outputs/debug_dumps
+      baseline_branch:
+        description: "Branch whose latest baseline artifact should be used"
+        required: false
+        default: main
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    types: [labeled]
+    paths:
+      - "verl_omni/**"
+      - "tests/nightly/**"
+      - "pyproject.toml"
+      - ".github/workflows/l3_nightly.yml"
+      - ".github/vllm_omni_pin.txt"
+      - ".github/verl_pin.txt"
+
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && 'nightly' || github.event.inputs.mode || 'nightly' }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm023.dev1"
+  DYNAMIC_RUNNER_ENDPOINT: "https://sd7upeujs1b9g1a958pn0.apigateway-cn-beijing.volceapi.com/runner"
+  BASELINE_ARTIFACT_NAME: l3-nightly-baseline
+  BASELINE_STAGING_ARTIFACT_PREFIX: l3-nightly-baseline-staging
+  CURRENT_ARTIFACT_PREFIX: l3-nightly-current
+  REPORT_ARTIFACT_PREFIX: l3-nightly-reports
+  RUN_MODE: ${{ github.event_name == 'schedule' && 'nightly' || github.event_name == 'pull_request' && 'nightly' || github.event.inputs.mode || 'nightly' }}
+  NUM_GPUS: ${{ github.event.inputs.num_gpus || '4' }}
+  MODEL_PATH: ${{ github.event.inputs.model_path || '' }}
+  REWARD_MODEL_PATH: ${{ github.event.inputs.reward_model_path || '' }}
+  OUTPUT_ROOT: ${{ github.event.inputs.output_root || 'outputs/debug_dumps' }}
+  BASELINE_BRANCH: ${{ github.event.inputs.baseline_branch || 'main' }}
+
+jobs:
+  setup:
+    if: >-
+      github.repository_owner == 'verl-project' && (
+        github.event_name != 'pull_request' ||
+        github.event.label.name == 'L3-nightly-ci'
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      runner-label: ${{ steps.create-runner.outputs.runner-label }}
+      mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download latest L3 baseline artifact
+        if: env.RUN_MODE == 'nightly'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          artifact_row="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" --paginate \
+              --jq ".artifacts[] | select(.name == \"${BASELINE_ARTIFACT_NAME}\" and .expired == false and .workflow_run.head_branch == \"${BASELINE_BRANCH}\") | [.created_at, .id] | @tsv" \
+              | sort -r \
+              | awk 'NR == 1 { print }'
+          )"
+
+          if [ -z "${artifact_row}" ]; then
+            echo "No non-expired ${BASELINE_ARTIFACT_NAME} artifact found for branch ${BASELINE_BRANCH}."
+            echo "Create one with workflow_dispatch mode=baseline before running nightly mode."
+            exit 1
+          fi
+
+          artifact_id="$(printf '%s' "${artifact_row}" | awk '{ print $2 }')"
+          echo "Downloading ${BASELINE_ARTIFACT_NAME} artifact ${artifact_id} from branch ${BASELINE_BRANCH}."
+
+          rm -rf /tmp/l3-nightly-baseline "${OUTPUT_ROOT}/baseline"
+          mkdir -p /tmp/l3-nightly-baseline "${OUTPUT_ROOT}/baseline"
+          gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > /tmp/l3-nightly-baseline.zip
+          unzip -q /tmp/l3-nightly-baseline.zip -d /tmp/l3-nightly-baseline
+
+          shopt -s dotglob nullglob
+          cp -a /tmp/l3-nightly-baseline/* "${OUTPUT_ROOT}/baseline/"
+
+      - name: Upload L3 baseline staging artifact
+        if: env.RUN_MODE == 'nightly'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BASELINE_STAGING_ARTIFACT_PREFIX }}-${{ github.run_id }}
+          path: ${{ env.OUTPUT_ROOT }}/baseline
+          if-no-files-found: error
+          retention-days: 1
+
+      - id: create-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "create"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-image: "${{ env.IMAGE }}"
+
+  l3_nightly_tests:
+    name: L3 Nightly Tests
+    needs: setup
+    runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
+    timeout-minutes: 180
+    env:
+      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        env:
+          PIP_EXTRA_INDEX_URL: https://pypi.org/simple
+        run: |
+          # vllm023.dev1 image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
+          pip3 install ".[gpu,dev]"
+          pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
+          pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
+          pip3 install --no-deps -e .
+          # veomni's [gpu] extra pins torch 2.9 and would conflict with the vLLM stack.
+          # See docs/start/install.md "Optional engine backends".
+          # TODO: rm --no-deps when VeOmni supports torch2.11.
+          pip3 install veomni==0.1.11 --no-deps
+          pip3 install torchcodec librosa soundfile av
+          pip3 install "transformers[mistral-common]"
+
+      - name: Download L3 baseline from setup job
+        if: env.RUN_MODE == 'nightly'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.BASELINE_STAGING_ARTIFACT_PREFIX }}-${{ github.run_id }}
+          path: ${{ env.OUTPUT_ROOT }}/baseline
+
+      - name: Run Qwen-Image FlowGRPO L3 regression
+        run: |
+          set -euo pipefail
+
+          export NUM_GPUS="${NUM_GPUS}"
+          export OUTPUT_ROOT="${OUTPUT_ROOT}"
+          if [ -n "${MODEL_PATH}" ]; then
+            export MODEL_PATH="${MODEL_PATH}"
+          fi
+          if [ -n "${REWARD_MODEL_PATH}" ]; then
+            export REWARD_MODEL_PATH="${REWARD_MODEL_PATH}"
+          fi
+
+          if [ "${RUN_MODE}" = "baseline" ]; then
+            export BOOTSTRAP_MISSING_BASELINE=1
+          else
+            export BOOTSTRAP_MISSING_BASELINE=0
+          fi
+
+          ray stop --force
+          bash tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh
+
+      - name: Upload current nightly artifacts
+        if: always() && env.RUN_MODE == 'nightly'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.CURRENT_ARTIFACT_PREFIX }}-${{ github.run_id }}
+          path: |
+            ${{ env.OUTPUT_ROOT }}/current/**
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Upload baseline artifact
+        if: always() && env.RUN_MODE == 'baseline'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BASELINE_ARTIFACT_NAME }}
+          path: |
+            ${{ env.OUTPUT_ROOT }}/baseline/**
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload reports and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.REPORT_ARTIFACT_PREFIX }}-${{ github.run_id }}
+          path: |
+            ${{ env.OUTPUT_ROOT }}/current/**/metrics.json
+            ${{ env.OUTPUT_ROOT }}/current/**/dump_compare.json
+            ${{ env.OUTPUT_ROOT }}/current/**/metrics.jsonl
+            ${{ env.OUTPUT_ROOT }}/logs/**
+          if-no-files-found: ignore
+          retention-days: 30
+
+  cleanup:
+    runs-on: ubuntu-latest
+    needs: [setup, l3_nightly_tests]
+    if: always() && needs.setup.outputs.mlp-task-id != ''
+    steps:
+      - id: destroy-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "destroy"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-task-id: "${{ needs.setup.outputs.mlp-task-id }}"

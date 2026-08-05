@@ -26,6 +26,8 @@ from typing import Iterable
 
 MAX_GPUS = 8
 GROUP_ORDER = ("ci-core", "ci-e2e-omni", "ci-e2e-diffusion")
+RAY_MASTER_PORT_BASE = 20000
+RAY_MASTER_PORT_STRIDE = 1000
 
 
 @dataclass(frozen=True)
@@ -145,15 +147,18 @@ def build_plan(group_names: Iterable[str]) -> dict[str, object]:
     offset = 0
     groups: list[dict[str, object]] = []
 
-    for group_name in group_names:
+    for group_index, group_name in enumerate(group_names):
         group = GROUPS[group_name]
         devices = ",".join(str(device_id) for device_id in range(offset, offset + group.num_gpus))
+        port_start = RAY_MASTER_PORT_BASE + group_index * RAY_MASTER_PORT_STRIDE
+        port_end = port_start + RAY_MASTER_PORT_STRIDE
         groups.append(
             {
                 "name": group.name,
                 "num_gpus": group.num_gpus,
                 "devices": devices,
                 "script": group.script,
+                "ray_master_port_range": [port_start, port_end],
             }
         )
         offset += group.num_gpus

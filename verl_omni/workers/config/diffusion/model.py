@@ -46,6 +46,7 @@ class DiffusionModelConfig(BaseConfig):
         "local_tokenizer_path",
         "architecture",
         "transformer_config",
+        "extra_tokenizer_map",
     }
 
     path: str = MISSING
@@ -64,6 +65,13 @@ class DiffusionModelConfig(BaseConfig):
     load_tokenizer: bool = True
     tokenizer: Any = None
     processor: Any = None
+
+    # Optional per-text-encoder tokenizers for models with multiple text encoders
+    extra_tokenizers: Optional[dict[str, Any]] = None
+
+    # Loaded tokenizers built from ``extra_tokenizers``:
+    # ``{name: {"tokenizer": PreTrainedTokenizer, "max_length": int | None}}``.
+    extra_tokenizer_map: Any = None
 
     # whether to use shared memory
     use_shm: bool = False
@@ -161,6 +169,21 @@ class DiffusionModelConfig(BaseConfig):
                 self.processor = hf_processor(processor_path, trust_remote_code=self.trust_remote_code)
             else:
                 self.processor = None
+
+            self.extra_tokenizer_map = {}
+            for name, spec in (self.extra_tokenizers or {}).items():
+                path = spec.get("path") if hasattr(spec, "get") else None
+                if not path:
+                    raise ValueError(f"extra_tokenizers[{name!r}] must define a 'path' entry.")
+                if not os.path.isabs(path):
+                    path = os.path.join(self.local_path, path)
+                local_path = copy_to_local(path, use_shm=self.use_shm)
+                tokenizer = hf_tokenizer(local_path, trust_remote_code=self.trust_remote_code, use_fast=True)
+                max_length = spec.get("max_length")
+                self.extra_tokenizer_map[name] = {
+                    "tokenizer": tokenizer,
+                    "max_length": int(max_length) if max_length is not None else None,
+                }
 
         # Ensure target_modules is a str or list[str] (only if not None)
         if self.target_modules is not None:

@@ -95,6 +95,19 @@ def _with_routing_replay_flag(enabled: bool):
     return decorator
 
 
+def _make_update_zmq_handle(base_handle: str, global_steps: int | None) -> str:
+    """Return a per-update IPC handle so repeated LoRA syncs cannot collide."""
+    if not base_handle.startswith("ipc://"):
+        return base_handle
+
+    path = base_handle.removeprefix("ipc://")
+    if path.endswith(".sock"):
+        path = path[: -len(".sock")]
+    step = "none" if global_steps is None else str(global_steps)
+    unique_suffix = f"-step-{step}-pid-{os.getpid()}-{time.time_ns()}"
+    return f"ipc://{path}{unique_suffix}.sock"
+
+
 class TrainingWorker(Worker, DistProfilerExtension):
     """
     TrainingWorker provides a Tinker-like API (https://thinkingmachines.ai/tinker/) as a RayWorkerGroup
@@ -769,6 +782,83 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def get_lora_peft_config(self):
+        """Return the actor's LoRA ``peft_config`` dict, or ``None`` if not a LoRA run.
+
+        Collective-free: ``peft_config`` is adapter metadata (r/alpha/target_modules),
+        not a parameter, so it can be read without summoning FSDP params. Used by the
+        checkpoint engine manager to forward ``peft_config`` to the standalone rollout
+        so it applies LoRA deltas via ``add_lora`` instead of a full ``load_weights``.
+        """
+        if "actor" not in self.role:
+            return None
+        # ``merge=True`` means LoRA deltas are merged into base weights before
+        # sync, so the standalone rollout must use the full-weight path.
+        if self.peft_merge:
+            return None
+        engine = getattr(self.actor, "engine", None)
+        module = getattr(engine, "module", None) if engine is not None else None
+        peft_model = getattr(module, "_fsdp_wrapped_module", module) if module is not None else None
+        if peft_model is None or not hasattr(peft_model, "peft_config"):
+            return None
+        peft_config = peft_model.peft_config.get("default", None)
+        result = peft_config.to_dict() if peft_config is not None else None
+        logger.debug("get_lora_peft_config role=%s -> %s", self.role, "LoRA" if result else "none")
+        return result
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def get_lora_weight_checksum(self):
+        """Return a lightweight checksum of the actor's LoRA adapter weights.
+
+        Collective-free per rank: iterates the peft model's named parameters and
+        sums every ``lora_A``/``lora_B`` tensor (as float32) plus a count. Used by
+        the separate-async diffusion trainer to verify the same source LoRA
+        weights are being pushed to both the colocated and standalone rollout
+        replicas. Returns ``None`` when the actor is not training a LoRA adapter
+        (e.g. ``peft_merge=True`` or no LoRA), so the caller can skip the check.
+        """
+        if "actor" not in self.role:
+            return None
+        if self.peft_merge:
+            return None
+        engine = getattr(self.actor, "engine", None)
+        module = getattr(engine, "module", None) if engine is not None else None
+        peft_model = getattr(module, "_fsdp_wrapped_module", module) if module is not None else None
+        if peft_model is None or not hasattr(peft_model, "peft_config"):
+            return None
+        if peft_model.peft_config.get("default", None) is None:
+            return None
+
+        total_sum = 0.0
+        num_tensors = 0
+        first_lora_a = None
+        first_lora_b = None
+        last_name = None
+        for name, param in peft_model.named_parameters():
+            if "lora_A" in name or "lora_B" in name:
+                try:
+                    total_sum += param.detach().float().sum().item()
+                except Exception:
+                    # Sharded/flat params may not be directly summable; skip
+                    # them but still count so the caller sees the path ran.
+                    pass
+                num_tensors += 1
+                last_name = name
+                if first_lora_a is None and "lora_A" in name:
+                    first_lora_a = name
+                if first_lora_b is None and "lora_B" in name:
+                    first_lora_b = name
+        if num_tensors == 0:
+            return None
+        return {
+            "num_lora_tensors": num_tensors,
+            "sum": total_sum,
+            "first_lora_a": first_lora_a,
+            "first_lora_b": first_lora_b,
+            "last_name": last_name,
+        }
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def copy_adapter(self, source: str = "default", target: str = "old"):
         assert "actor" in self.role, "copy_adapter only supports actor role"
         self.actor.copy_adapter(source=source, target=target)
@@ -852,6 +942,24 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if effective_mode != "naive":
+            actor_module = getattr(self.actor.engine, "module", None)
+            peft_module = getattr(actor_module, "_fsdp_wrapped_module", actor_module)
+            actor_has_lora = peft_module is not None and hasattr(peft_module, "peft_config")
+
+            if actor_has_lora and not self.peft_merge:
+                logger.warning(
+                    "LORA_SYNC_PROOF actor send mode=adapter_only backend=%s global_steps=%s adapter=%s",
+                    effective_mode,
+                    global_steps,
+                    self.config.rollout.rollout_adapter,
+                )
+                per_tensor_param, _ = self.actor.engine.get_per_tensor_param(
+                    base_sync_done=True,
+                    adapter_name=self.config.rollout.rollout_adapter,
+                )
+                await self.checkpoint_engine.send_weights(per_tensor_param)
+                return
+
             per_tensor_param, _ = self.actor.engine.get_per_tensor_param(
                 adapter_name=self.config.rollout.rollout_adapter
             )
@@ -912,14 +1020,20 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # The _execute_method call only carries a small metadata dict (peft_config,
             # base_sync_done, use_shm) — tensor data goes through the ZMQ socket.
             sync_start = time.perf_counter()
+            zmq_handle = _make_update_zmq_handle(self.rollout.zmq_handle, global_steps)
             future = await self.rollout._execute_method(
                 "update_weights_from_ipc",
                 non_block=True,
-                kwargs={"peft_config": peft_config, "base_sync_done": True, "use_shm": self.rollout.use_shm},
+                kwargs={
+                    "peft_config": peft_config,
+                    "base_sync_done": True,
+                    "use_shm": self.rollout.use_shm,
+                    "zmq_handle": zmq_handle,
+                },
             )
             bucket_size_mb = self.config.rollout.checkpoint_engine.update_weights_bucket_megabytes
             sender = BucketedWeightSender(
-                zmq_handle=self.rollout.zmq_handle,
+                zmq_handle=zmq_handle,
                 bucket_size_mb=bucket_size_mb,
                 use_shm=self.rollout.use_shm,
             )

@@ -274,6 +274,7 @@ actor_rollout_ref:
     path: ~/models/Qwen/Qwen-Image
     algorithm: flow_grpo
     tokenizer_path: null
+    extra_tokenizers: null
     use_shm: false
     trust_remote_code: false
     custom_chat_template: null
@@ -497,6 +498,9 @@ trainer:
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
   max_actor_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
+  ray_master_port_range:
+  - 20000
+  - 30000
   device: cuda
   use_v1: false
   v1:
@@ -507,6 +511,7 @@ trainer:
     separate_async:
       num_warmup_batches: 1
       parameter_sync_step: 4
+      sync_compatible: false
     sampler:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop

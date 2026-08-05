@@ -52,6 +52,7 @@ class OmniModelConfig(BaseConfig):
         "generation_config",
         "architectures",
         "share_embeddings_and_output_weights",
+        "mtp",
     }
 
     # note that we separate path, hf_config_path and tokenizer_path in case they are different

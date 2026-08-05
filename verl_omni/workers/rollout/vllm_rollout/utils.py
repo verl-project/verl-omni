@@ -39,6 +39,8 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     2. NPU (Ascend) memory-pool, sleep, and wake_up — via NPUColocateWorkerMixin
     """
 
+    _pending_lora_peft_config: dict | None = None
+
     def __new__(cls, **kwargs):
         set_death_signal()
 
@@ -46,6 +48,18 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         VLLMOmniHijack.hijack()
 
         return super().__new__(cls)
+
+    def set_pending_lora_peft_config(self, peft_config: dict | None = None):
+        """Stash the actor's LoRA ``peft_config`` for the next
+        ``update_weights_from_ipc`` call (separate-async NCCL path only).
+
+        Called out-of-band via ``collective_rpc`` by
+        ``OmniCheckpointEngineManager`` before the NCCL weight broadcast.
+        ``update_weights_from_ipc`` consumes the stash when its ``peft_config``
+        kwarg is absent (the standalone rollout path), then clears it so a
+        later full-weight sync is not misrouted.
+        """
+        self._pending_lora_peft_config = peft_config
 
     def _get_standard_weight_model_and_config(self):
         """Return ``(model, model_config)`` for the standard (non-LoRA) AR weight path.
@@ -63,7 +77,13 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             return model, model_config
         return None
 
-    def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
+    def update_weights_from_ipc(
+        self,
+        peft_config: dict = None,
+        base_sync_done=False,
+        use_shm: bool = False,
+        zmq_handle: str | None = None,
+    ):
         """Update the weights of the rollout model.
 
         For LoRA updates, all LoRA tensors are accumulated across buckets and loaded
@@ -74,9 +94,15 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
 
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
 
+        if peft_config is None and self._pending_lora_peft_config is not None:
+            peft_config = self._pending_lora_peft_config
+            base_sync_done = True
+            # Consume the stash so a subsequent full-weight sync isn't misrouted.
+            self._pending_lora_peft_config = None
+
         assert self.device is not None
         receiver = BucketedWeightReceiver(
-            zmq_handle=self._get_zmq_handle(),
+            zmq_handle=zmq_handle or self._get_zmq_handle(),
             device=self.device,
             use_shm=use_shm,
         )
@@ -95,11 +121,12 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             accumulated_weights: dict[str, torch.Tensor] = {}
             receiver.receive_weights(on_bucket_received=lambda weights: accumulated_weights.update(weights))
             t_recv_end = time.perf_counter()
+            lora_total_bytes = sum(t.element_size() * t.numel() for t in accumulated_weights.values())
             logger.debug(
                 "IPC receive took %.3f ms (%d params, %.2f MB)",
                 (t_recv_end - t_recv_start) * 1000,
                 len(accumulated_weights),
-                sum(t.element_size() * t.numel() for t in accumulated_weights.values()) / (1024 * 1024),
+                lora_total_bytes / (1024 * 1024),
             )
 
             # AR (standard vLLM) workers go through verl's base VLLMHijack, which

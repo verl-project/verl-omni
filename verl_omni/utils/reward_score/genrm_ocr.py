@@ -78,6 +78,22 @@ def _levenshtein_score(text: str, ground_truth: str) -> float:
     return 1.0 if len(text) == 0 else 0.0
 
 
+def _sampling_params() -> dict:
+    params = dict(DEFAULT_SAMPLING_PARAMS)
+    env_overrides = {
+        "temperature": ("GENRM_OCR_TEMPERATURE", float),
+        "top_p": ("GENRM_OCR_TOP_P", float),
+        "max_tokens": ("GENRM_OCR_MAX_TOKENS", int),
+        "seed": ("GENRM_OCR_SEED", int),
+    }
+    for key, (env_name, parser) in env_overrides.items():
+        raw_value = os.environ.get(env_name)
+        if raw_value is None:
+            continue
+        params[key] = parser(raw_value)
+    return params
+
+
 async def compute_score_ocr(
     data_source: str,
     solution_image: np.ndarray | torch.Tensor,
@@ -171,7 +187,7 @@ async def compute_score_ocr(
         chat_complete_request = {
             "messages": messages,
             "model": model_name,
-            **DEFAULT_SAMPLING_PARAMS,
+            **_sampling_params(),
         }
         result = await _chat_complete(
             router_address=reward_router_address,

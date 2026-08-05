@@ -64,11 +64,21 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         }
 
         rollout_base_seed = None
+        global_steps = batch["global_steps"] if "global_steps" in batch else None
+        if isinstance(global_steps, NonTensorData):
+            global_steps = global_steps.data
+        if global_steps is not None:
+            sampling_params["global_steps"] = global_steps
+
         if validate:
             sampling_params.update(_config_to_sampling_dict(config.val_kwargs.pipeline))
             sampling_params.update(_config_to_sampling_dict(config.val_kwargs.algo))
             sampling_params["seed"] = config.val_kwargs.seed
             sampling_params["logprobs"] = False
+            # Re-assert global_steps in case the val_kwargs update above is ever
+            # extended to carry a "global_steps" key in the future.
+            if global_steps is not None:
+                sampling_params["global_steps"] = global_steps
         else:
             sampling_params["global_steps"] = global_steps
             rollout_seed_meta = batch.get("rollout_seed")

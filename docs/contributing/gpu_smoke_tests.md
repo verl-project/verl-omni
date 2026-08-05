@@ -17,7 +17,7 @@ The smoke suite is split by code-change coverage under `tests/gpu_smoke/`:
 |---|---|---|---|
 | [`run_gpu_smoke_core.sh`](../../tests/gpu_smoke/run_gpu_smoke_core.sh) | `ci-core` | 2 | Rollout, engines, agent loop, reward loop |
 | [`run_gpu_smoke_omni_e2e.sh`](../../tests/gpu_smoke/run_gpu_smoke_omni_e2e.sh) | `ci-e2e-omni` | 2 | Qwen3-Omni end-to-end training (GSPO + LoRA) |
-| [`run_gpu_smoke_diffusion_e2e.sh`](../../tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh) | `ci-e2e-diffusion` | 4 | Diffusion end-to-end training (FlowGRPO, online DPO, DiffusionNFT) |
+| [`run_gpu_smoke_diffusion_e2e.sh`](../../tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh) | `ci-e2e-diffusion` | 4 | Diffusion end-to-end training (FlowGRPO, online DPO, DiffusionNFT, v1 separate_async) |
 
 [`run_gpu_smoke_tests.sh`](../../tests/gpu_smoke/run_gpu_smoke_tests.sh) runs all
 groups **sequentially** for local use. 
