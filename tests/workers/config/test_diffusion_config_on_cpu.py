@@ -180,6 +180,11 @@ class TestDiffusionRolloutConfig:
         assert cfg.pipeline.max_sequence_length == 256
         assert cfg.max_prompt_embed_length == 333
 
+    @pytest.mark.parametrize("value", [0, -1])
+    def test_prompt_embed_length_must_be_positive(self, value):
+        with pytest.raises(ValueError, match="max_prompt_embed_length must be positive"):
+            DiffusionRolloutConfig(name="vllm_omni", max_prompt_embed_length=value)
+
     def test_invalid_rollout_adapter_raises(self):
         with pytest.raises(ValueError, match="Invalid diffusion rollout rollout_adapter"):
             DiffusionRolloutConfig(name="vllm_omni", rollout_adapter="bogus")

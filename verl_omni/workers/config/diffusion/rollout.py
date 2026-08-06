@@ -177,6 +177,10 @@ class DiffusionRolloutConfig(BaseConfig):
 
     def __post_init__(self):
         """Validate the diffusion rollout config"""
+        if self.max_prompt_embed_length is not None and self.max_prompt_embed_length <= 0:
+            raise ValueError(
+                f"max_prompt_embed_length must be positive when set, got {self.max_prompt_embed_length}."
+            )
         if self.mode == "sync":
             raise ValueError(
                 "Rollout mode 'sync' has been removed. Please set "

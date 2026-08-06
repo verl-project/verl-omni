@@ -138,9 +138,9 @@ class DiffusionAgentLoopWorker:
         self.tokenizer = self.model_config.tokenizer
         self.processor = self.model_config.processor
 
-        self.max_prompt_embed_length = (
-            self.rollout_config.max_prompt_embed_length or self.rollout_config.pipeline.max_sequence_length
-        )
+        self.max_prompt_embed_length = self.rollout_config.max_prompt_embed_length
+        if self.max_prompt_embed_length is None:
+            self.max_prompt_embed_length = self.rollout_config.pipeline.max_sequence_length
         if self.max_prompt_embed_length <= 0:
             raise ValueError(f"max_prompt_embed_length must be positive, got {self.max_prompt_embed_length}.")
 
