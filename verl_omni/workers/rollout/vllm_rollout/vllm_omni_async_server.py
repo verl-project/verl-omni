@@ -285,20 +285,18 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return ["weights"]
 
     async def wake_up(self, tags: list[str] | None = None):
-        """Override parent to use collective_rpc instead of engine.wake_up().
+        """Wake AR engine stages through the EngineCore via AsyncOmni.wake_up().
 
-        The parent (verl ``1927ad33``+) calls ``self.engine.wake_up(tags=...)``
-        which triggers CUDA initialisation in this HTTP server process when
-        running under vLLM-Omni (AsyncOmni engine).
-        Use ``collective_rpc`` instead.
-
-        # TODO (long): drop this override once vllm-omni wake_up
-        without triggering GPU initialisation.
+        Previously overridden to use collective_rpc("wake_up") to avoid CUDA
+        initialisation in the HTTP server process.  Now that vllm-omni
+        ``AsyncOmni.wake_up()`` routes AR stages through
+        ``EngineCore.wake_up()`` (ZMQ-based, no GPU init), we can call it
+        directly.
         """
         if self.node_rank != 0:
             return
-        await self.engine.collective_rpc(
-            "wake_up", kwargs={"tags": tags if tags is not None else self._get_wake_up_tags()}
+        await self.engine.wake_up(
+            tags=tags if tags is not None else self._get_wake_up_tags(),
         )
         self._invalidate_lora_request_cache()
 
@@ -315,11 +313,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         of the trainable actor and therefore are not included in full-model
         weight syncs. Use level-1 sleep so those weights are offloaded and can
         be restored on wake-up instead of discarded by level-2 sleep.
+
+        Routes through ``AsyncOmni.sleep()``, which for AR stages uses
+        ``EngineCore.sleep()`` to atomically pause the scheduler, abort
+        in-flight requests, and only then sleep the executor.
         """
         # TODO (andy): use `sleep_level=2` in the future when the
         #  trainer side incorporates the whole components of the model.
         self._invalidate_lora_request_cache()
-        await self.engine.collective_rpc("sleep", kwargs={"level": 1})
+        await self.engine.sleep(level=1)
         await self.engine.reset_encoder_cache()
 
     # -----------------------------------------------------------------------
