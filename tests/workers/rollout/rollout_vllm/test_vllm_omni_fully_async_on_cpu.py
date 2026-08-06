@@ -184,6 +184,11 @@ def test_ar_server_selects_omni_worker_extension():
 
 
 def test_omni_worker_extension_accepts_vllm_constructor_kwargs(monkeypatch):
+    death_signal_calls = []
+    monkeypatch.setattr(
+        "verl_omni.workers.rollout.vllm_rollout.utils.set_death_signal",
+        lambda: death_signal_calls.append(True),
+    )
     monkeypatch.setattr(
         "verl_omni.workers.rollout.vllm_rollout.utils.VLLMOmniHijack.hijack",
         lambda: None,
@@ -197,6 +202,7 @@ def test_omni_worker_extension_accepts_vllm_constructor_kwargs(monkeypatch):
     )
 
     assert isinstance(worker, vLLMOmniColocateWorkerExtension)
+    assert death_signal_calls == [True]
 
 
 def test_ar_full_weight_update_uses_omni_bucketed_loader(monkeypatch):
@@ -222,7 +228,7 @@ def test_ar_full_weight_update_uses_omni_bucketed_loader(monkeypatch):
 
     class FakeReceiver:
         def __init__(self, **kwargs):
-            assert kwargs["zmq_handle"] == "ipc:///test-ar-full-weight"
+            assert kwargs["zmq_handle"] == "ipc:///test-ar-full-weight-update-step-1-seq-0.sock"
             assert kwargs["device"] == torch.device("cpu")
             assert kwargs["use_shm"] is True
 
@@ -247,12 +253,13 @@ def test_ar_full_weight_update_uses_omni_bucketed_loader(monkeypatch):
     worker.local_rank = 0
     worker.model_runner = model_runner
     worker._pending_lora_peft_config = None
+    worker._get_zmq_handle = lambda: "ipc:///test-ar-full-weight.sock"
 
     worker.update_weights_from_ipc(
         peft_config=None,
         base_sync_done=False,
         use_shm=True,
-        zmq_handle="ipc:///test-ar-full-weight",
+        zmq_update_id="step-1-seq-0",
     )
 
     assert events == [

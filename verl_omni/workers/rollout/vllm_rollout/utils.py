@@ -16,14 +16,11 @@ import os
 import time
 
 import torch
-from verl.workers.rollout.vllm_rollout.utils import (
-    VLLM_LORA_INT_ID,
-    VLLM_LORA_NAME,
-    VLLM_LORA_PATH,
-)
+from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID, VLLM_LORA_NAME, VLLM_LORA_PATH, set_death_signal
 from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
 
 from verl_omni.utils.vllm_omni import OmniTensorLoRARequest, VLLMOmniHijack
+from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -46,7 +43,11 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     _pending_lora_peft_config: dict | None = None
 
     def __new__(cls, **kwargs):
+        set_death_signal()
+
+        # 1. patch for Lora
         VLLMOmniHijack.hijack()
+
         return super().__new__(cls)
 
     def set_pending_lora_peft_config(self, peft_config: dict | None = None):
@@ -82,7 +83,7 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         peft_config: dict = None,
         base_sync_done=False,
         use_shm: bool = False,
-        zmq_handle: str | None = None,
+        zmq_update_id: str | None = None,
     ):
         """Update the weights of the rollout model.
 
@@ -101,8 +102,11 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             self._pending_lora_peft_config = None
 
         assert self.device is not None
+        zmq_handle = self._get_zmq_handle()
+        if zmq_update_id is not None:
+            zmq_handle = make_update_zmq_handle(zmq_handle, zmq_update_id)
         receiver = BucketedWeightReceiver(
-            zmq_handle=zmq_handle or self._get_zmq_handle(),
+            zmq_handle=zmq_handle,
             device=self.device,
             use_shm=use_shm,
         )
