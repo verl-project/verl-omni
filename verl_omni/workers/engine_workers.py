@@ -65,6 +65,7 @@ from verl_omni.workers.config import (
     DiffusionModelConfig,
     OmniModelConfig,
 )
+from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle, make_update_zmq_id
 from verl_omni.workers.utils.losses import diffusion_loss
 
 logger = logging.getLogger(__file__)
@@ -93,19 +94,6 @@ def _with_routing_replay_flag(enabled: bool):
         return wrapper
 
     return decorator
-
-
-def _make_update_zmq_handle(base_handle: str, global_steps: int | None) -> str:
-    """Return a per-update IPC handle so repeated LoRA syncs cannot collide."""
-    if not base_handle.startswith("ipc://"):
-        return base_handle
-
-    path = base_handle.removeprefix("ipc://")
-    if path.endswith(".sock"):
-        path = path[: -len(".sock")]
-    step = "none" if global_steps is None else str(global_steps)
-    unique_suffix = f"-step-{step}-pid-{os.getpid()}-{time.time_ns()}"
-    return f"ipc://{path}{unique_suffix}.sock"
 
 
 class TrainingWorker(Worker, DistProfilerExtension):
@@ -742,6 +730,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.base_sync_done: bool = "dummy" not in self.config.rollout.load_format
             self.layered_summon = self.config.rollout.get("layered_summon", False)
             self.peft_merge: bool = model_config.lora.get("merge", False)
+            self._zmq_update_seq = 0
 
         # 4. build checkpoint engine
         if "actor" in self.role:
@@ -1017,10 +1006,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             offload_task = asyncio.create_task(asyncio.to_thread(self._offload_actor_and_empty_cache, timings))
 
             # Use ZMQ IPC to transfer LoRA weights, bypassing Ray serialization.
-            # The _execute_method call only carries a small metadata dict (peft_config,
-            # base_sync_done, use_shm) — tensor data goes through the ZMQ socket.
+            # Broadcast only the update id. Each vLLM worker combines it with its
+            # rank-local base handle, preserving the one-sender/one-receiver route.
             sync_start = time.perf_counter()
-            zmq_handle = _make_update_zmq_handle(self.rollout.zmq_handle, global_steps)
+            # update_weights is dispatched ONE_TO_ALL, so every actor rank advances
+            # this sequence exactly once for the same LoRA update.
+            zmq_update_id = make_update_zmq_id(global_steps, self._zmq_update_seq)
+            self._zmq_update_seq += 1
+            zmq_handle = make_update_zmq_handle(self.rollout.zmq_handle, zmq_update_id)
             future = await self.rollout._execute_method(
                 "update_weights_from_ipc",
                 non_block=True,
@@ -1028,7 +1021,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "peft_config": peft_config,
                     "base_sync_done": True,
                     "use_shm": self.rollout.use_shm,
-                    "zmq_handle": zmq_handle,
+                    "zmq_update_id": zmq_update_id,
                 },
             )
             bucket_size_mb = self.config.rollout.checkpoint_engine.update_weights_bucket_megabytes
