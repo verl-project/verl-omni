@@ -145,8 +145,20 @@ actor_rollout_ref.actor.profiler.tool=nsys
 When `global_profiler.tool=nsys` and `steps` is non-empty, the FlowGRPO
 entrypoint launches the Ray TaskRunner under `nsys` using the
 `controller_nsight_options` from `global_profiler.global_tool_config.nsys`.
-Workers are launched with `worker_nsight_options`, including the required
-`capture-range: cudaProfilerApi` flag.
+Workers use `capture-range: cudaProfilerApi`, and the trainer starts and stops
+their collection around the configured steps. The controller records the full
+TaskRunner lifetime when its Nsight options do not specify a capture range. To
+restrict controller collection to the configured steps, add these options:
+
+```bash
++global_profiler.global_tool_config.nsys.controller_nsight_options.capture-range=cudaProfilerApi \
++global_profiler.global_tool_config.nsys.controller_nsight_options.capture-range-end=null \
++global_profiler.global_tool_config.nsys.controller_nsight_options.kill=none
+```
+
+When controller `capture-range-end` is null, it is resolved to the number of
+discrete profiled steps or contiguous step groups before Ray starts the
+TaskRunner.
 
 `*.nsys-rep` files are written by Ray under
 `/tmp/ray/session_latest/logs/nsight/` on each node (this path is fixed by

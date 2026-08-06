@@ -35,6 +35,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
+from verl.plugin.platform import get_platform
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -202,6 +203,16 @@ class BaseRayDiffusionTrainer(ABC):
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
         self.checkpoint_manager = None
+        controller_nsight_options = OmegaConf.select(
+            self.config,
+            "global_profiler.global_tool_config.nsys.controller_nsight_options",
+            default={},
+        )
+        self._controller_nsys_profile_enabled = (
+            OmegaConf.select(self.config, "global_profiler.tool") == "nsys"
+            and controller_nsight_options.get("capture-range") == "cudaProfilerApi"
+        )
+        self._controller_nsys_profile_active = False
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -874,17 +885,44 @@ class BaseRayDiffusionTrainer(ABC):
 
     def _start_profiling(self, do_profile: bool) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
-        if do_profile:
+        if not do_profile:
+            return
+
+        controller_profile_started = False
+        try:
+            if self._controller_nsys_profile_enabled:
+                if self._controller_nsys_profile_active:
+                    raise RuntimeError("Controller Nsight profiling is already active")
+                get_platform().profiler_start()
+                self._controller_nsys_profile_active = True
+                controller_profile_started = True
+
             self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
             if self.use_reference_policy and not self.ref_in_actor:
                 self.ref_policy_wg.start_profile(profile_step=self.global_steps)
+        except Exception:
+            if controller_profile_started:
+                try:
+                    get_platform().profiler_stop()
+                finally:
+                    self._controller_nsys_profile_active = False
+            raise
 
     def _stop_profiling(self, do_profile: bool) -> None:
         """Stop profiling for all worker groups if profiling is enabled."""
-        if do_profile:
+        if not do_profile:
+            return
+
+        try:
             self.actor_rollout_wg.stop_profile()
             if self.use_reference_policy and not self.ref_in_actor:
                 self.ref_policy_wg.stop_profile()
+        finally:
+            if self._controller_nsys_profile_active:
+                try:
+                    get_platform().profiler_stop()
+                finally:
+                    self._controller_nsys_profile_active = False
 
     @abstractmethod
     def fit(self):
