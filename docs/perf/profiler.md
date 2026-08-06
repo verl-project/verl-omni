@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 07/10/2026.
+Last updated: 08/05/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -163,6 +163,40 @@ TaskRunner.
 `*.nsys-rep` files are written by Ray under
 `/tmp/ray/session_latest/logs/nsight/` on each node (this path is fixed by
 Ray). Open them with `nsys-ui`.
+
+### 4a. Continuous `old_log_prob` and `update_actor` timeline
+
+Use the dedicated Qwen-Image recipe to inspect Python control flow while the
+controller waits for old-log-prob inference or an actor update:
+
+```bash
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_8x80g_fsdp2_benchmark_nsys.sh
+```
+
+The default run trains for three steps and captures them in one continuous
+window. Step 2 is the best steady-state sample: step 1 includes profiler
+startup, while step 3 closes the capture. The recipe profiles the Ray
+`TaskRunner` and ActorRollout rank 0 with Python stack sampling and NVTX. Set
+`PROFILE_RANKS=all` only for a follow-up rank-straggler investigation. The
+controller and actor workers each use one CUDA-profiler start/stop pair around
+the same continuous window.
+
+The recipe uses 20 Hz Python stack sampling. CUDA API/kernel tracing, Python
+GIL events, OS-runtime events, native CPU sampling, and context-switch events
+remain disabled to keep the diagnostic focused and low overhead. This mode
+does not provide individual CUDA API or kernel events; enable those only in a
+smaller follow-up capture after the Python-stack diagnosis narrows the phase.
+
+Ray writes one report per target process. A unique capture ID prevents stale
+files in a reused Ray session from entering the result, and the recipe waits
+for stable reports before copying them into `$RUN_DIR/nsight_update_actor`.
+Open the controller and actor reports together with Nsight Systems' multi-report
+view. For reports collected on one host, prefer `TSC` alignment and verify the
+alignment source in **Analysis Summary**. `UTC` is suitable for coarse phase
+analysis but not millisecond-scale cross-process latency comparisons.
+
+This recipe intentionally requires one node. A multi-node variant needs a
+collector on every node and synchronized clocks.
 
 ### 5. Rollout servers (vLLM-Omni)
 
