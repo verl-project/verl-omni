@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import random
+import time
 from typing import Any, Optional
 
 import hydra
@@ -33,11 +34,79 @@ from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import get_dataset_class
-from verl.utils.profiler import simple_timer
 from verl.workers.rollout.llm_server import LLMServerClient
 
 from verl_omni.agent_loop.utils import maybe_per_rollout_seeds
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
+
+_PENDING_REWARD_KEY = "_pending_reward_awaitable"
+_PENDING_REWARD_START_KEY = "_pending_reward_start"
+# Surfaced on DataProto.non_tensor_batch so the trainer can ray.get scores while
+# sleep_replicas / old_log_prob run (reward GPU is a separate pool).
+PENDING_REWARD_REF_KEY = "_pending_reward_ref"
+PENDING_REWARD_START_KEY = "_pending_reward_start"
+
+
+def pop_pending_reward_refs(data: DataProto) -> tuple[list[Any], list[Any]] | None:
+    """Remove deferred GenRM ObjectRefs from ``data`` (gen output or batch)."""
+    refs = data.non_tensor_batch.pop(PENDING_REWARD_REF_KEY, None)
+    starts = data.non_tensor_batch.pop(PENDING_REWARD_START_KEY, None)
+    if refs is None:
+        return None
+    refs_list = list(refs)
+    starts_list = list(starts) if starts is not None else [None] * len(refs_list)
+    if not any(ref is not None for ref in refs_list):
+        return None
+    return refs_list, starts_list
+
+
+def fetch_pending_reward_results(refs: list[Any]) -> list[dict[str, Any]]:
+    """``ray.get`` in-flight GenRM ObjectRefs, preserving row alignment."""
+    results: list[dict[str, Any] | None] = [None] * len(refs)
+    pending_idx = [i for i, ref in enumerate(refs) if ref is not None]
+    fetched = ray.get([refs[i] for i in pending_idx])
+    for i, result in zip(pending_idx, fetched, strict=True):
+        results[i] = result
+    for i, result in enumerate(results):
+        if result is None:
+            raise RuntimeError(f"Missing deferred reward result at row {i}")
+    return results  # type: ignore[return-value]
+
+
+def apply_pending_reward_results(
+    batch: DataProto,
+    results: list[dict[str, Any]],
+    starts: list[Any] | None = None,
+) -> None:
+    """Attach ``rm_scores`` / reward extras from deferred GenRM results."""
+    scores = [float(result["reward_score"]) for result in results]
+    reward_extra_infos = [result.get("reward_extra_info") or {} for result in results]
+    batch.batch["rm_scores"] = torch.tensor(scores, dtype=torch.float32).unsqueeze(-1)
+
+    reward_extra_keys = list(reward_extra_infos[0].keys()) if reward_extra_infos else []
+    for key in reward_extra_keys:
+        batch.non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos], dtype=object)
+    if reward_extra_keys:
+        batch.meta_info["reward_extra_keys"] = reward_extra_keys
+
+    metrics = batch.meta_info.get("metrics")
+    if starts is not None and metrics is not None and len(metrics) == len(starts):
+        now = time.perf_counter()
+        for i, start in enumerate(starts):
+            if start is not None and isinstance(metrics[i], dict):
+                metrics[i]["compute_score"] = now - float(start)
+
+
+def materialize_pending_rewards(batch: DataProto) -> dict[str, float]:
+    """Block on deferred GenRM ObjectRefs and attach ``rm_scores`` in-place."""
+    pending = pop_pending_reward_refs(batch)
+    if pending is None:
+        return {}
+    refs, starts = pending
+    t0 = time.perf_counter()
+    results = fetch_pending_reward_results(refs)
+    apply_pending_reward_results(batch, results, starts)
+    return {"pending_reward_resolve": time.perf_counter() - t0}
 
 
 def _config_to_sampling_dict(config: Optional[BaseConfig]) -> dict:
@@ -119,6 +188,9 @@ class DiffusionAgentLoopWorker:
         self.processor = self.model_config.processor
 
         self.max_prompt_embed_length = self.rollout_config.pipeline.max_sequence_length
+        # Cache Hydra-instantiated agent loops so per-sample fan-out does not
+        # stagger request admission into vLLM-Omni's request-level batcher.
+        self._agent_loop_cache: dict[str, Any] = {}
 
         agent_loop_config_path = self.rollout_config.agent.agent_loop_config_path
         if agent_loop_config_path:
@@ -130,6 +202,28 @@ class DiffusionAgentLoopWorker:
             if self.model_config.processor is not None:
                 self.model_config.processor.chat_template = self.model_config.custom_chat_template
             self.model_config.tokenizer.chat_template = self.model_config.custom_chat_template
+
+    def _get_or_create_agent_loop(self, agent_name: str):
+        agent_loop = self._agent_loop_cache.get(agent_name)
+        if agent_loop is not None:
+            return agent_loop
+
+        assert agent_name in _agent_loop_registry, (
+            f"Agent loop {agent_name} not registered, registered agent loops: {_agent_loop_registry.keys()}"
+        )
+        agent_loop_config = _agent_loop_registry[agent_name]
+        agent_loop = hydra.utils.instantiate(
+            config=agent_loop_config,
+            trainer_config=DictConfigWrap(config=self.config),
+            server_manager=self.server_manager,
+            tokenizer=self.tokenizer,
+            processor=self.processor,
+            dataset_cls=self.dataset_cls,
+            data_config=DictConfigWrap(self.config.data),
+            extra_tokenizer_map=self.model_config.extra_tokenizer_map,
+        )
+        self._agent_loop_cache[agent_name] = agent_loop
+        return agent_loop
 
     async def generate_sequences(self, batch: DataProto) -> DataProto:
         """Generate sequences from agent loop.
@@ -186,13 +280,48 @@ class DiffusionAgentLoopWorker:
             if per_rollout_seeds is not None:
                 task_sampling_params["seed"] = per_rollout_seeds[i]
             tasks.append(
-                asyncio.create_task(self._run_agent_loop(task_sampling_params, validate=is_validate, **kwargs))
+                asyncio.create_task(
+                    self._run_agent_loop(
+                        task_sampling_params,
+                        validate=is_validate,
+                        resolve_reward=False,
+                        **kwargs,
+                    )
+                )
             )
         outputs = await asyncio.gather(*tasks)
 
-        output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
+        # Training: keep GenRM ObjectRefs in-flight and let the trainer await them
+        # in parallel with sleep_replicas / old_log_prob (separate reward GPUs).
+        # Validation / non-Ray fakes: resolve here so callers still see rm_scores.
+        defer_reward_to_trainer = (not is_validate) and self._pending_rewards_are_object_refs(outputs)
+        if not defer_reward_to_trainer:
+            await self._resolve_pending_scores(outputs)
+            return self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
 
+        pending_refs: list[Any] = []
+        pending_starts: list[Any] = []
+        for internal in outputs:
+            pending_refs.append(internal.extra_fields.pop(_PENDING_REWARD_KEY, None))
+            pending_starts.append(internal.extra_fields.pop(_PENDING_REWARD_START_KEY, None))
+
+        output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
+        output.non_tensor_batch[PENDING_REWARD_REF_KEY] = np.array(pending_refs, dtype=object)
+        output.non_tensor_batch[PENDING_REWARD_START_KEY] = np.array(pending_starts, dtype=object)
         return output
+
+    @staticmethod
+    def _pending_rewards_are_object_refs(outputs: list[_InternalDiffusionAgentLoopOutput]) -> bool:
+        """True when every in-flight reward handle is a Ray ObjectRef (trainer-deferrable)."""
+        saw_pending = False
+        for internal in outputs:
+            pending = internal.extra_fields.get(_PENDING_REWARD_KEY)
+            if pending is None:
+                continue
+            saw_pending = True
+            if not isinstance(pending, ray.ObjectRef):
+                return False
+        return saw_pending
 
     async def _run_agent_loop(
         self,
@@ -200,28 +329,17 @@ class DiffusionAgentLoopWorker:
         *,
         agent_name: str,
         validate: bool = False,
+        resolve_reward: bool = True,
         **kwargs,
     ) -> _InternalDiffusionAgentLoopOutput:
-        assert agent_name in _agent_loop_registry, (
-            f"Agent loop {agent_name} not registered, registered agent loops: {_agent_loop_registry.keys()}"
-        )
-
-        agent_loop_config = _agent_loop_registry[agent_name]
-        agent_loop = hydra.utils.instantiate(
-            config=agent_loop_config,
-            trainer_config=DictConfigWrap(config=self.config),
-            server_manager=self.server_manager,
-            tokenizer=self.tokenizer,
-            processor=self.processor,
-            dataset_cls=self.dataset_cls,
-            data_config=DictConfigWrap(self.config.data),
-            extra_tokenizer_map=self.model_config.extra_tokenizer_map,
-        )
+        agent_loop = self._get_or_create_agent_loop(agent_name)
         output: DiffusionAgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
-        return await self._agent_loop_postprocess(output, validate=validate, **kwargs)
+        return await self._agent_loop_postprocess(
+            output, validate=validate, resolve_reward=resolve_reward, **kwargs
+        )
 
     async def _agent_loop_postprocess(
-        self, output, validate: bool = False, **kwargs
+        self, output, validate: bool = False, resolve_reward: bool = True, **kwargs
     ) -> _InternalDiffusionAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
         # Pad extra tensor outputs from vllm-omni (e.g. prompt embeddings).
@@ -267,9 +385,15 @@ class DiffusionAgentLoopWorker:
             kwargs=kwargs,
             validate=validate,
         )
+        if resolve_reward:
+            await self._resolve_pending_score(output)
 
         if "reward_extra_info" in output.extra_fields:
             extra_fields["reward_extra_info"] = output.extra_fields["reward_extra_info"]
+        # Carry unresolved reward futures through to batch resolve.
+        if _PENDING_REWARD_KEY in output.extra_fields:
+            extra_fields[_PENDING_REWARD_KEY] = output.extra_fields[_PENDING_REWARD_KEY]
+            extra_fields[_PENDING_REWARD_START_KEY] = output.extra_fields[_PENDING_REWARD_START_KEY]
 
         return _InternalDiffusionAgentLoopOutput(
             prompt_ids=prompt_ids,
@@ -282,35 +406,68 @@ class DiffusionAgentLoopWorker:
         )
 
     async def _compute_score(self, output, prompts, responses, kwargs, validate: bool = False):
-        """Compute reward score for single sample."""
+        """Launch reward scoring for a single sample without awaiting completion.
+
+        Streaming launch preserves overlap of early GenRM work with later denoising.
+        Callers must ``_resolve_pending_score`` / ``_resolve_pending_scores`` before
+        reading ``reward_score``.
+        """
         enable_async_reward = self.reward_loop_worker_handles is not None
 
         if output.reward_score is None and enable_async_reward:
-            timing = {}
-            with simple_timer("compute_score", timing):
-                batch = TensorDict(
-                    {
-                        "prompts": prompts,  # [1, prompt_length]
-                        "responses": responses,  # [1, C, H, W] or [1, T, C, H, W]
-                    },
-                    batch_size=1,
-                )
-                non_tensor_batch = {
-                    **{k: np.array([v]) for k, v in kwargs.items()},
-                    "__num_turns__": np.array([output.num_turns]),
-                    "tool_extra_fields": np.array([output.extra_fields], dtype=object),
-                }
+            batch = TensorDict(
+                {
+                    "prompts": prompts,  # [1, prompt_length]
+                    "responses": responses,  # [1, C, H, W] or [1, T, C, H, W]
+                },
+                batch_size=1,
+            )
+            non_tensor_batch = {
+                **{k: np.array([v]) for k, v in kwargs.items()},
+                "__num_turns__": np.array([output.num_turns]),
+                "tool_extra_fields": np.array([output.extra_fields], dtype=object),
+            }
 
-                data = DataProto(
-                    batch=batch,
-                    non_tensor_batch=non_tensor_batch,
-                    meta_info={"validate": validate},
-                )
-                selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
-                result = await selected_reward_loop_worker_handle.compute_score.remote(data)
-                output.reward_score = result["reward_score"]
-                output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
-            output.metrics.compute_score = timing["compute_score"]
+            data = DataProto(
+                batch=batch,
+                non_tensor_batch=non_tensor_batch,
+                meta_info={"validate": validate},
+            )
+            selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
+            pending = selected_reward_loop_worker_handle.compute_score.remote(data)
+            if asyncio.iscoroutine(pending):
+                pending = asyncio.create_task(pending)
+            output.extra_fields[_PENDING_REWARD_KEY] = pending
+            output.extra_fields[_PENDING_REWARD_START_KEY] = time.perf_counter()
+
+    async def _resolve_pending_score(self, output) -> None:
+        """Await one sample's in-flight reward RPC and populate score fields."""
+        pending = output.extra_fields.pop(_PENDING_REWARD_KEY, None)
+        start = output.extra_fields.pop(_PENDING_REWARD_START_KEY, None)
+        if pending is None:
+            return
+
+        result = await pending
+        output.reward_score = result["reward_score"]
+        output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
+        if start is not None:
+            output.metrics.compute_score = time.perf_counter() - start
+
+    async def _resolve_pending_scores(self, outputs: list[_InternalDiffusionAgentLoopOutput]) -> None:
+        """Resolve all in-flight reward RPCs after denoise gather completes."""
+
+        async def _resolve_one(internal: _InternalDiffusionAgentLoopOutput) -> None:
+            pending = internal.extra_fields.pop(_PENDING_REWARD_KEY, None)
+            start = internal.extra_fields.pop(_PENDING_REWARD_START_KEY, None)
+            if pending is None:
+                return
+            result = await pending
+            internal.reward_score = result["reward_score"]
+            internal.extra_fields["reward_extra_info"] = result["reward_extra_info"]
+            if start is not None:
+                internal.metrics.compute_score = time.perf_counter() - start
+
+        await asyncio.gather(*[_resolve_one(o) for o in outputs])
 
     def _postprocess(
         self,
@@ -354,7 +511,7 @@ class DiffusionAgentLoopWorker:
 
         # add reward_extra_info to non_tensor_batch
         reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]
-        reward_extra_keys = list(reward_extra_infos[0].keys())
+        reward_extra_keys = list(reward_extra_infos[0].keys()) if reward_extra_infos else []
         for key in reward_extra_keys:
             non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
 

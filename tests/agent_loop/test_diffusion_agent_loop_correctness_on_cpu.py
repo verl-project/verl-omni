@@ -15,13 +15,22 @@
 import asyncio
 from types import MethodType, SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
+from tensordict import TensorDict
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics
 from verl.protocol import DataProto
 
 from verl_omni.agent_loop import diffusion_agent_loop_tq
-from verl_omni.agent_loop.diffusion_agent_loop import DiffusionAgentLoopOutput, DiffusionAgentLoopWorker
+from verl_omni.agent_loop.diffusion_agent_loop import (
+    PENDING_REWARD_REF_KEY,
+    PENDING_REWARD_START_KEY,
+    DiffusionAgentLoopOutput,
+    DiffusionAgentLoopWorker,
+    apply_pending_reward_results,
+    pop_pending_reward_refs,
+)
 from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopWorkerTQ
 
 
@@ -41,6 +50,7 @@ class _FakeRewardLoopWorkerHandle:
 
 class _DummyDiffusionAgentLoopWorker:
     _compute_score = DiffusionAgentLoopWorker._compute_score
+    _resolve_pending_score = DiffusionAgentLoopWorker._resolve_pending_score
 
     def __init__(self, reward_loop_worker_handle: _FakeRewardLoopWorkerHandle):
         self.reward_loop_worker_handles = [reward_loop_worker_handle]
@@ -96,7 +106,36 @@ async def test_async_reward_data_proto_preserves_validate_meta_info(validate: bo
         kwargs={},
         validate=validate,
     )
+    await worker._resolve_pending_score(output)
 
     received_data = reward_loop_worker_handle.compute_score.received_data
     assert received_data is not None
     assert received_data.meta_info == {"validate": validate}
+    assert output.reward_score == 1.0
+
+
+def test_pop_and_apply_pending_reward_results():
+    batch = DataProto(
+        batch=TensorDict({"responses": torch.zeros(2, 3, 2, 2)}, batch_size=2),
+        non_tensor_batch={
+            PENDING_REWARD_REF_KEY: np.array(["ref0", "ref1"], dtype=object),
+            PENDING_REWARD_START_KEY: np.array([0.0, 0.0], dtype=object),
+        },
+        meta_info={"metrics": [{}, {}]},
+    )
+    pending = pop_pending_reward_refs(batch)
+    assert pending is not None
+    refs, starts = pending
+    assert refs == ["ref0", "ref1"]
+    assert PENDING_REWARD_REF_KEY not in batch.non_tensor_batch
+
+    apply_pending_reward_results(
+        batch,
+        [
+            {"reward_score": 0.25, "reward_extra_info": {"acc": 1}},
+            {"reward_score": 0.75, "reward_extra_info": {"acc": 0}},
+        ],
+        starts,
+    )
+    assert torch.allclose(batch.batch["rm_scores"].view(-1), torch.tensor([0.25, 0.75]))
+    assert list(batch.non_tensor_batch["acc"]) == [1, 0]

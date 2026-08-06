@@ -22,6 +22,7 @@ import os
 import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pprint import pprint
 from typing import Any, Literal, Optional
 
@@ -51,6 +52,11 @@ from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
+from verl_omni.agent_loop.diffusion_agent_loop import (
+    apply_pending_reward_results,
+    fetch_pending_reward_results,
+    pop_pending_reward_refs,
+)
 from verl_omni.trainer.config import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import (
     DiffusionAdvantageEstimator,
@@ -441,6 +447,69 @@ class BaseRayDiffusionTrainer(ABC):
         assert self.reward_loop_manager is not None, "RewardLoopManager is None"
         batch_reward = self.reward_loop_manager.compute_rm_score(batch)
         return batch_reward
+
+    def _assemble_sleep_reward_and_old_log_prob(
+        self,
+        batch: DataProto,
+        gen_batch_output: DataProto,
+        timing_raw: dict,
+        metrics: dict,
+        *,
+        curr_step_profile: bool,
+        bypass_recomputing_logprobs: bool,
+        compute_old_log_prob: bool = True,
+    ) -> tuple[DataProto, torch.Tensor, dict[str, list]]:
+        """Ideal sync post-gen pipeline (colocated actor/rollout, separate reward GPUs).
+
+        1. CPU-assemble the training batch while ``sleep_replicas`` runs
+        2. ``ray.get`` deferred GenRM ObjectRefs in parallel with sleep
+        3. After sleep: optional ``old_log_prob`` (may overlap leftover GenRM)
+        4. Finalize ``rm_scores`` / extract reward tensors before advantage
+        """
+        pending = pop_pending_reward_refs(gen_batch_output)
+        pool = ThreadPoolExecutor(max_workers=2)
+        try:
+            sleep_fut = pool.submit(self.checkpoint_manager.sleep_replicas)
+            with marked_timer("assemble_batch", timing_raw, color="cyan"):
+                batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                batch = batch.union(gen_batch_output)
+
+            reward_fut = None
+            if pending is not None:
+                refs, starts = pending
+                reward_fut = pool.submit(lambda r=refs, s=starts: (fetch_pending_reward_results(r), s))
+
+            with marked_timer("sleep_replicas", timing_raw, color="red"):
+                sleep_fut.result()
+
+            # Actor/rollout GPUs are free; recompute old log-probs while GenRM may
+            # still be finishing on the dedicated reward pool.
+            if compute_old_log_prob:
+                if bypass_recomputing_logprobs:
+                    apply_bypass_mode_to_diffusion_batch(batch)
+                else:
+                    with marked_timer("old_log_prob", timing_raw, color="blue"):
+                        old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
+                        if old_log_prob_mfu is not None:
+                            metrics.update({"perf/mfu/actor_infer": old_log_prob_mfu})
+                        batch = batch.union(old_log_prob)
+
+            with marked_timer("reward", timing_raw, color="yellow"):
+                if reward_fut is not None:
+                    results, starts = reward_fut.result()
+                    apply_pending_reward_results(batch, results, starts)
+                elif self.use_rm and "rm_scores" not in batch.batch.keys():
+                    if curr_step_profile:
+                        self.reward_loop_manager.start_profile()
+                    batch_reward = self._compute_reward_colocate(batch)
+                    if curr_step_profile:
+                        self.reward_loop_manager.stop_profile()
+                    batch = batch.union(batch_reward)
+                reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+        finally:
+            pool.shutdown(wait=True)
+
+        return batch, reward_tensor, reward_extra_infos_dict
 
     def _validate(self):
         data_source_lst = []
@@ -1039,7 +1108,6 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                             if self.enable_agent_reward_loop:
                                 self.reward_loop_manager.start_profile()
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                        self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
                             self.llm_server_manager.stop_profile()
                             if self.enable_agent_reward_loop:
@@ -1048,35 +1116,19 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
 
-                    # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    batch = batch.union(gen_batch_output)
-
-                    with marked_timer("reward", timing_raw, color="yellow"):
-                        # compute reward model score
-                        if self.use_rm and "rm_scores" not in batch.batch.keys():
-                            if curr_step_profile:
-                                self.reward_loop_manager.start_profile()
-                            batch_reward = self._compute_reward_colocate(batch)
-                            if curr_step_profile:
-                                self.reward_loop_manager.stop_profile()
-                            batch = batch.union(batch_reward)
-
-                        # extract reward_tensor and reward_extra_infos_dict for training
-                        reward_tensor, reward_extra_infos_dict = extract_reward(batch)
-
-                    # Bypass mode: skip old_log_prob recompute (2 policies).
-                    # Decoupled mode: recompute old_log_probs as proximal anchor (3 policies).
+                    # sleep ∥ GenRM resolve → old_log_prob (may overlap leftover GenRM)
                     rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
-                    bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
-                    if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
-                        apply_bypass_mode_to_diffusion_batch(batch)
-                    else:  # Recompute old_log_probs
-                        with marked_timer("old_log_prob", timing_raw, color="blue"):
-                            old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
-                            if old_log_prob_mfu is not None:
-                                metrics.update({"perf/mfu/actor_infer": old_log_prob_mfu})
-                            batch = batch.union(old_log_prob)
+                    bypass_recomputing_logprobs = bool(
+                        rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+                    )
+                    batch, reward_tensor, reward_extra_infos_dict = self._assemble_sleep_reward_and_old_log_prob(
+                        batch,
+                        gen_batch_output,
+                        timing_raw,
+                        metrics,
+                        curr_step_profile=curr_step_profile,
+                        bypass_recomputing_logprobs=bypass_recomputing_logprobs,
+                    )
 
                     assert "old_log_probs" in batch.batch, f'"old_log_probs" not in {batch.batch.keys()=}'
 
@@ -1494,7 +1546,6 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                                 if self.enable_agent_reward_loop:
                                     self.reward_loop_manager.start_profile()
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                            self.checkpoint_manager.sleep_replicas()
                             if curr_step_profile:
                                 self.llm_server_manager.stop_profile()
                                 if self.enable_agent_reward_loop:
@@ -1502,18 +1553,15 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                             timing_raw.update(gen_batch_output.meta_info["timing"])
                             gen_batch_output.meta_info.pop("timing", None)
 
-                        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                        batch = batch.union(gen_batch_output)
-
-                        with marked_timer("reward", timing_raw, color="yellow"):
-                            if self.use_rm and "rm_scores" not in batch.batch.keys():
-                                if curr_step_profile:
-                                    self.reward_loop_manager.start_profile()
-                                batch_reward = self._compute_reward_colocate(batch)
-                                if curr_step_profile:
-                                    self.reward_loop_manager.stop_profile()
-                                batch = batch.union(batch_reward)
-                            reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+                        batch, reward_tensor, reward_extra_infos_dict = self._assemble_sleep_reward_and_old_log_prob(
+                            batch,
+                            gen_batch_output,
+                            timing_raw,
+                            metrics,
+                            curr_step_profile=curr_step_profile,
+                            bypass_recomputing_logprobs=False,
+                            compute_old_log_prob=False,
+                        )
 
                         with marked_timer("prepare_actor_batch", timing_raw, color="brown"):
                             batch.batch["sample_level_scores"] = reward_tensor

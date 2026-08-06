@@ -607,8 +607,19 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         else:
             diffusion_output = self._to_tensor(diffusion_output).float() / 255.0
 
-        # Extract extra data from custom_output (populated by DiffusionEngine)
-        mm_output = final_res.custom_output or {}
+        # Extract extra data from custom_output / first-class trajectory_* fields.
+        # FlowGRPO adapters prefer trajectory_* (SHM-packed); custom_output keeps
+        # prompt embeds and compat aliases (all_latents / all_log_probs / ...).
+        mm_output = dict(final_res.custom_output or {})
+        traj_latents = getattr(final_res, "trajectory_latents", None)
+        traj_log_probs = getattr(final_res, "trajectory_log_probs", None)
+        traj_timesteps = getattr(final_res, "trajectory_timesteps", None)
+        if traj_latents is not None:
+            mm_output["all_latents"] = traj_latents
+        if traj_log_probs is not None:
+            mm_output["all_log_probs"] = traj_log_probs
+        if traj_timesteps is not None:
+            mm_output["all_timesteps"] = traj_timesteps
 
         if sampling_params.get("logprobs", False):
             all_log_probs = mm_output.get("all_log_probs")
