@@ -17,6 +17,15 @@ TOTAL_EPOCHS=${TOTAL_EPOCHS:-2}
 ENGINE=vllm_omni
 max_prompt_length=256
 
+# Smoke: pin local FLASH_ATTN (product default remains FLASH_ATTN_3_HUB).
+# Use exit-code checks only — importing verl/vllm may print INFO lines on stdout.
+ATTN_BACKEND=_flash_3_varlen_hub
+ROLLOUT_ATTN_BACKEND=FLASH_ATTN
+if ! python3 -c 'from verl_omni.utils.diffusion_attention import fa3_available; raise SystemExit(0 if fa3_available() else 1)' >/dev/null 2>&1; then
+    ATTN_BACKEND=native
+    ROLLOUT_ATTN_BACKEND=TORCH_SDPA
+fi
+
 n_resp_per_prompt=2
 micro_bsz_per_gpu=1
 micro_bsz=$((micro_bsz_per_gpu * NUM_GPUS))
@@ -39,6 +48,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.model_type=diffusion_nft_model \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.model.tokenizer_path=${TOKENIZER_PATH} \
+    actor_rollout_ref.model.attn_backend=${ATTN_BACKEND} \
+    actor_rollout_ref.rollout.rollout_attn_backend=${ROLLOUT_ATTN_BACKEND} \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \
     actor_rollout_ref.model.policy_state_adapters='["default","old"]' \

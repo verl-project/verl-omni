@@ -46,11 +46,6 @@ def bagel_time_shift(shift: float, t):
     return (shift * t) / (1 + (shift - 1) * t)
 
 
-def vllm_omni_num_timesteps(bagel_num_timesteps: int) -> int:
-    """Map official BAGEL step count to vllm-omni 0.22 generate_image input."""
-    return bagel_num_timesteps - 1 if bagel_num_timesteps > 1 else bagel_num_timesteps
-
-
 def setup_bagel_sigmas(
     scheduler: FlowMatchSDEDiscreteScheduler,
     num_steps: int,

@@ -11,12 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Create a small synthetic math parquet dataset for the Qwen3-Omni GSPO e2e test.
+"""Create a small synthetic GSM8K-format parquet dataset for the Qwen3-Omni GSPO e2e test.
 
-Mirrors the MATH-lighteval schema the example recipe uses (``data_source`` +
-chat ``prompt`` + ``reward_model.ground_truth`` parsed by the ``dapo`` reward
-manager), but with trivial arithmetic so the smoke test runs offline without
-downloading a real dataset. This exercises plumbing only, not model quality.
+Mirrors the GSM8K schema the V1 recipe uses (``data_source="openai/gsm8k"`` +
+chat ``prompt`` with ``####`` answer format + plain ``reward_model.ground_truth``
+parsed by the ``naive`` reward manager), but with trivial arithmetic so the smoke
+test runs offline without downloading a real dataset. Exercises plumbing only.
 """
 
 import argparse
@@ -24,10 +24,10 @@ import os
 
 import pandas as pd
 
-DATA_SOURCE = "DigitalLearningGmbH/MATH-lighteval"
-INSTRUCTION = "Solve the problem and put your final answer within \\boxed{}."
+DATA_SOURCE = "openai/gsm8k"
+INSTRUCTION = 'Let\'s think step by step and output the final answer after "####".'
 
-# (question, integer answer) pairs — trivial arithmetic, answer goes in \boxed{}.
+# (question, integer answer) pairs — trivial arithmetic.
 _PROBLEMS = [
     ("What is 2 + 3?", 5),
     ("What is 7 - 4?", 3),
@@ -51,18 +51,23 @@ def build_rows(split: str, n: int):
                     {"role": "user", "content": f"{question} {INSTRUCTION}"},
                 ],
                 "ability": "math",
-                "reward_model": {"style": "rule", "ground_truth": f"\\boxed{{{answer}}}"},
-                "extra_info": {"split": split, "index": i, "answer": str(answer)},
+                "reward_model": {"style": "rule", "ground_truth": str(answer)},
+                "extra_info": {
+                    "split": split,
+                    "index": i,
+                    "answer": str(answer),
+                    "question": question,
+                },
             }
         )
     return rows
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate dummy math parquet data for e2e testing")
+    parser = argparse.ArgumentParser(description="Generate dummy GSM8K-format parquet data for e2e testing")
     parser.add_argument(
         "--local_save_dir",
-        default=os.path.expanduser("~/data/math"),
+        default=os.path.expanduser("~/data/gsm8k"),
         help="Directory to write train.parquet and test.parquet",
     )
     parser.add_argument("--train_size", type=int, default=32, help="Number of training samples")

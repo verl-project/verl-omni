@@ -137,7 +137,11 @@ def _collect_lora_params_non_layered(module, peft_model, adapter_name: str, base
                     full_name = f"{block_prefix}.{param_name}" if block_prefix else param_name
                     lora_params[full_name] = _param_to_cpu(param)
             else:
-                lora_params.update(_collect_base_weights_from_state_dict(submodule.state_dict()))
+                block_prefix = name.replace("_fsdp_wrapped_module.", "")
+                sub_base_params = _collect_base_weights_from_state_dict(submodule.state_dict())
+                for param_name, param in sub_base_params.items():
+                    full_name = f"{block_prefix}.{param_name}" if block_prefix else param_name
+                    lora_params[full_name] = param
     get_torch_device().empty_cache()
     return lora_params
 

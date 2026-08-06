@@ -104,6 +104,9 @@ actor_rollout_ref:
     loss_scale_factor: null
     use_kl_loss: false
     kl_loss_coef: 0.001
+    use_distill_loss: false
+    distill_loss_mode: distill_kl
+    distill_loss_coef: 1.0
     ppo_epochs: 1
     shuffle: false
     data_loader_seed: 42
@@ -220,7 +223,7 @@ actor_rollout_ref:
     n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
     prompt_length: ${oc.select:data.max_prompt_length,512}
     dtype: bfloat16
-    rollout_attn_backend: FLASH_ATTN
+    rollout_attn_backend: FLASH_ATTN_3_HUB
     gpu_memory_utilization: 0.5
     enforce_eager: false
     cudagraph_capture_sizes: null
@@ -312,6 +315,7 @@ actor_rollout_ref:
     path: ~/models/Qwen/Qwen-Image
     algorithm: flow_grpo
     tokenizer_path: null
+    extra_tokenizers: null
     use_shm: false
     trust_remote_code: false
     custom_chat_template: null
@@ -395,26 +399,30 @@ data:
     name: null
   apply_chat_template_kwargs: {}
 reward:
-  num_workers: 8
-  custom_reward_function:
-    path: null
-    name: compute_score
-  reward_functions: {}
-  aggregation: weighted_sum
-  reward_manager:
-    _target_: verl.workers.config.reward_model.RewardManagerConfig
-    source: importlib
-    name: VisualRewardManager
-    module:
-      _target_: verl.trainer.config.config.ModuleConfig
-      path: pkg://verl_omni.reward_loop.reward_manager
   reward_model:
-    enable: false
-    enable_resource_pool: false
-    n_gpus_per_node: 8
-    nnodes: 0
-    model_path: null
     rollout:
+      profiler:
+        _target_: verl.utils.profiler.ProfilerConfig
+        tool: torch
+        enable: false
+        all_ranks: false
+        ranks: []
+        save_path: ${oc.select:global_profiler.save_path,outputs/profile}/reward_model
+        tool_config:
+          nsys:
+            _target_: verl.utils.profiler.config.NsightToolConfig
+            discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
+            name: nsight
+          torch:
+            _target_: verl.utils.profiler.config.TorchProfilerToolConfig
+            contents: []
+            discrete: false
+            name: torch
+          torch_memory:
+            _target_: verl.utils.profiler.config.TorchMemoryToolConfig
+            trace_alloc_max_entries: ${oc.select:global_profiler.global_tool_config.torch_memory.trace_alloc_max_entries,100000}
+            stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+            name: torch_memory
       _target_: verl.workers.config.RolloutConfig
       name: ???
       dtype: bfloat16
@@ -458,6 +466,24 @@ reward:
         transfer_backend: nixl
         bootstrap_port: null
         ib_device: null
+    enable: false
+    enable_resource_pool: false
+    n_gpus_per_node: 8
+    nnodes: 0
+    model_path: null
+  num_workers: 8
+  custom_reward_function:
+    path: null
+    name: compute_score
+  reward_functions: {}
+  aggregation: weighted_sum
+  reward_manager:
+    _target_: verl.workers.config.reward_model.RewardManagerConfig
+    source: importlib
+    name: VisualRewardManager
+    module:
+      _target_: verl.trainer.config.config.ModuleConfig
+      path: pkg://verl_omni.reward_loop.reward_manager
   sandbox_fusion:
     url: null
     max_concurrent: 64
@@ -495,6 +521,10 @@ trainer:
   log_val_generations: 0
   rollout_data_dir: null
   validation_data_dir: null
+  video_fps: 24
+  rollout_data_save_freq: 1
+  rollout_data_max_samples: null
+  validation_data_max_samples: null
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1
@@ -509,7 +539,27 @@ trainer:
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
   max_actor_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
+  ray_master_port_range:
+  - 20000
+  - 30000
   device: cuda
+  use_v1: false
+  v1:
+    trainer_mode: sync
+    sync: {}
+    colocate_async:
+      num_warmup_batches: 1
+    separate_async:
+      num_warmup_batches: 1
+      parameter_sync_step: 4
+      sync_compatible: false
+    sampler:
+      max_off_policy_threshold: 8
+      max_off_policy_strategy: drop
+      custom_sampler:
+        path: null
+        name: null
+      sampler_kwargs: {}
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null
@@ -541,3 +591,34 @@ ray_kwargs:
   ray_init:
     num_cpus: null
   timeline_json_file: null
+transfer_queue:
+  enable: false
+  metrics:
+    enabled: false
+    port: 0
+  backend:
+    storage_backend: SimpleStorage
+    SimpleStorage:
+      total_storage_size: 100000
+      num_data_storage_units: 8
+    MooncakeStore:
+      auto_init: false
+      metadata_server: localhost:50123
+      master_server_address: localhost:50124
+      local_hostname: localhost
+      protocol: tcp
+      global_segment_size: 4294967296
+      local_buffer_size: 1073741824
+      device_name: ''
+skip:
+  _target_: verl.utils.skip.SkipManagerConfig
+  rollout:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache
+  async_rollout:
+    enable: false
+    dump_dir: ~/.verl/rollout_dump
+    steps: []
+    action: cache

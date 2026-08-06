@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Qwen3-Omni Thinker GSPO full-parameter training (FSDP + vLLM-Omni AR rollout).
-# Hardware: Atlas 800T A3 (16x NPUs).
+# Hardware: Atlas 800T A3 (16 × Ascend 910C 64GB).
 set -x
 
 export CPATH=/usr/include${CPATH:+:$CPATH}

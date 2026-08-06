@@ -1,8 +1,10 @@
 # FlowDPPO Trainer
 
+Last updated: 06/30/2026
+
 This example shows how to post-train `Qwen-Image` with Flow-DPPO on an OCR-style image generation task using `vllm-omni` rollout and a visual generative reward model (`Qwen3-VL-8B-Instruct` in this example).
 
-Flow-DPPO reuses the FlowGRPO training stack, but replaces ratio clipping with a divergence-based mask over denoising transitions. For algorithm details, see `docs/algo/flowdppo.md`; for the shared Qwen-Image OCR setup, see `examples/flowgrpo_trainer/README.md`.
+Flow-DPPO reuses the FlowGRPO training stack, but replaces ratio clipping with a divergence-based mask over denoising transitions. For algorithm details, see [Algorithms - Flow-DPPO](../../docs/algo/flowdppo.md); for the shared Qwen-Image OCR setup, see [Examples - FlowGRPO Trainer](https://verl-omni.readthedocs.io/en/latest/examples/flowgrpo_trainer.html).
 
 ## Installation
 
@@ -96,4 +98,4 @@ Flow-DPPO keeps the same data pipeline, rollout backend, reward model, LoRA setu
 - `add_kl_coefficient=True` normalizes transition drift by the scheduler SDE noise scale.
 - `actor_rollout_ref.rollout.algo.sde_type=sde` keeps rollout and replay aligned with the SDE transition variance used by the loss.
 
-See `docs/algo/flowdppo.md` for the mathematical objective and references.
+See [Algorithms - Flow-DPPO](../../docs/algo/flowdppo.md) for the mathematical objective and references.

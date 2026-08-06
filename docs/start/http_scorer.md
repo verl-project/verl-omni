@@ -1,7 +1,7 @@
 (http_scorer)=
 # Using an External HTTP Scorer Service
 
-Last updated: 05/28/2026
+Last updated: 07/17/2026
 
 VeRL-Omni ships a generic HTTP reward client (`verl_omni.utils.reward_score.http_scorer_client`) that sends generated images to an external scorer service over HTTP and returns the score. This is useful when your reward model is too large to co-locate with training, needs a different runtime (e.g., a separate GPU pool), or is shared across multiple experiments.
 
@@ -114,3 +114,4 @@ OCR_REWARD_SERVER_URL=http://<server-ip>:19082 \
 - The HTTP client reuses a single `aiohttp.ClientSession` across calls to avoid per-request connection overhead.
 - Image serialization (tensor to PIL to JPEG) is offloaded to a thread pool via `asyncio.loop.run_in_executor` so it does not block the reward manager's async event loop.
 - The default request timeout is 120 seconds. If your scorer model is slow, consider scaling the service with Gunicorn workers or increasing the timeout in the client code.
+- Reward-server profiling (`reward.reward_model.rollout.profiler.*`, see the [profiler guide](../perf/profiler.md)) only covers model-backed rewards served by VeRL-Omni. With an HTTP scorer, reward inference runs inside your external service — profile it there.

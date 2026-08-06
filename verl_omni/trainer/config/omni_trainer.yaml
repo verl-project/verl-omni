@@ -13,3 +13,81 @@ defaults:
   - omni/model@actor_rollout_ref.model: omni_model
   - _self_
 
+# Config for actor, rollout and reference model.
+actor_rollout_ref:
+
+  # Rollout config.
+  rollout:
+
+    # Use vLLM-Omni as the rollout backend for omni models.
+    name: vllm_omni
+
+  # Actor config.
+  actor:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl_omni.workers.config.omni.OmniActorConfig
+
+    # Mirrors algorithm.trainer_type; used by OmniActorConfig.__post_init__ and worker loss dispatch.
+    trainer_type: ${algorithm.trainer_type}
+
+    # Omni loss config.
+    omni_loss:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl_omni.workers.config.omni.OmniLossConfig
+
+      # Loss function mode.
+      loss_mode: dpo
+
+      # DPO inverse temperature.
+      beta: 0.1
+
+      # DPO label smoothing.
+      label_smoothing: 0.0
+
+      # DPO loss type.
+      loss_type: sigmoid
+
+      # Whether to average log probabilities before DPO.
+      average_log_prob: false
+
+      # Precision for the reference model.
+      refer_model_precision: bfloat16
+
+    # Shuffle training data across PPO epochs.
+    shuffle: false
+
+# Trainer configuration.
+trainer:
+
+  # V1 trainer settings.
+  v1:
+
+    # Use the omni trainer mode for omni models.
+    trainer_mode: omni_sync
+
+
+# Config for the algorithm.
+algorithm:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.trainer.config.OmniAlgoConfig
+
+  # Trainer loop.
+  trainer_type: direct_preference
+
+  # Sample provenance.
+  sample_source: offline
+
+  # True for pair-based algorithms such as offline DPO.
+  paired_preference: true
+
+  # Advantage estimator placeholder inherited by shared trainer utilities.
+  adv_estimator: dpo
+
+  # Whether to normalize advantages by std.
+  norm_adv_by_std_in_grpo: true
+
+  # Whether to normalize advantages using global standard deviation.
+  global_std: true

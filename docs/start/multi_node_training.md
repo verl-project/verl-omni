@@ -1,7 +1,7 @@
 (multi_node_training)=
 # Multi-Node Training
 
-Last updated: 06/15/2026
+Last updated: 07/29/2026
 
 Scale FlowGRPO (or any diffusion RL) training across multiple nodes. This guide
 uses the Qwen-Image OCR LoRA example to explain every change needed when moving
@@ -103,7 +103,8 @@ The environment variables accept overrides so the same script works on any
 cluster size:
 
 ```bash
-NNODES=4 GPUS_PER_NODE=8 bash run_qwen_image_ocr_lora_multi_node.sh
+NNODES=4 GPUS_PER_NODE=8 \
+  bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_multi_node.sh
 ```
 
 ### 2. Batch-size scaling

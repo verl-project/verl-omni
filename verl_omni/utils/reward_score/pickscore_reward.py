@@ -26,6 +26,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 _PROCESSOR_PATH = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
 _MODEL_PATH = "yuvalkirstain/PickScore_v1"
+_MAX_BATCH_SIZE = 16
 
 _inferencer = None
 _score_queue = asyncio.Queue()
@@ -57,6 +58,10 @@ class _PickScoreInferencer:
 
     @torch.no_grad()
     def score(self, prompts: list[str], images: list[Image.Image]) -> torch.Tensor:
+        unique_prompts = list(dict.fromkeys(prompts))
+        prompt_to_index = {prompt: index for index, prompt in enumerate(unique_prompts)}
+        prompt_indices = [prompt_to_index[prompt] for prompt in prompts]
+
         image_inputs = self.processor(
             images=images,
             padding=True,
@@ -67,7 +72,7 @@ class _PickScoreInferencer:
         image_inputs = {k: v.to(device=self.device) for k, v in image_inputs.items()}
 
         text_inputs = self.processor(
-            text=prompts,
+            text=unique_prompts,
             padding=True,
             truncation=True,
             max_length=77,
@@ -80,6 +85,7 @@ class _PickScoreInferencer:
 
         text_embs = _feature_tensor(self.model.get_text_features(**text_inputs))
         text_embs = text_embs / text_embs.norm(p=2, dim=-1, keepdim=True)
+        text_embs = text_embs[prompt_indices]
 
         logit_scale = self.model.logit_scale.exp()
         scores = logit_scale * (text_embs @ image_embs.T)
@@ -100,26 +106,65 @@ def _to_pil_hwc(image) -> Image.Image:
     return image
 
 
-def _score_one(prompt: str, solution_image) -> float:
-    """Called from thread pool.  All heavy work (PIL conversion + CLIP inference)
-    happens here so the event loop is never blocked."""
-    pil_image = _to_pil_hwc(solution_image)
-    scores = _inferencer.score([prompt], [pil_image])
-    return scores[0].item()
+def _score_batch(requests) -> list[float | Exception]:
+    """Convert and score a batch in a thread so the event loop is never blocked."""
+    results = [None] * len(requests)
+    prompts = []
+    images = []
+    valid_indices = []
+
+    for index, (prompt, solution_image, _) in enumerate(requests):
+        try:
+            images.append(_to_pil_hwc(solution_image))
+            prompts.append(prompt)
+            valid_indices.append(index)
+        except Exception as e:
+            results[index] = e
+
+    if valid_indices:
+        try:
+            scores = _inferencer.score(prompts, images).tolist()
+            for index, score in zip(valid_indices, scores, strict=True):
+                results[index] = score
+        except Exception as e:
+            for index in valid_indices:
+                results[index] = e
+
+    return results
 
 
 async def _consumer_loop():
     loop = asyncio.get_running_loop()
     while True:
-        prompt, solution_image, future = await _score_queue.get()
-        if prompt is None:
+        request = await _score_queue.get()
+        if request[0] is None:
             break
-        try:
-            raw_score = await loop.run_in_executor(None, _score_one, prompt, solution_image)
-            future.set_result(raw_score)
-        except Exception as e:
-            logger.exception("PickScore inference failed")
-            future.set_exception(e)
+
+        requests = [request]
+        should_stop = False
+        await asyncio.sleep(0)
+        while len(requests) < _MAX_BATCH_SIZE:
+            try:
+                request = _score_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if request[0] is None:
+                should_stop = True
+                break
+            requests.append(request)
+
+        results = await loop.run_in_executor(None, _score_batch, requests)
+        for (_, _, future), result in zip(requests, results, strict=True):
+            if future.done():
+                continue
+            if isinstance(result, Exception):
+                logger.error("PickScore inference failed", exc_info=(type(result), result, result.__traceback__))
+                future.set_exception(result)
+            else:
+                future.set_result(result)
+
+        if should_stop:
+            break
 
 
 async def _ensure_consumer(device: str):
