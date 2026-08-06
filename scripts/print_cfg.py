@@ -31,6 +31,8 @@ def main(config):
     """
     config_name = HydraConfig.get().job.config_name
 
+    # Omni configs inherit from verl's ppo_trainer. Reverse-merge the raw YAML
+    # so keys absent from the structured schema survive in the printed output.
     raw_path = os.path.join("verl_omni/trainer/config", f"{config_name}.yaml")
     if os.path.exists(raw_path):
         raw = OmegaConf.load(raw_path)
