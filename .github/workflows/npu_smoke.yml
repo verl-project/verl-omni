@@ -57,7 +57,7 @@ jobs:
     runs-on: linux-aarch64-a2b4-8
     timeout-minutes: 120
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/ascend-ci/verl/verl:latest-cann9.0.0-torch_npu2.9.0post2-a3-ubuntu22.04-py3.11-vllm
+      image: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni:ascend910b-cann9.0.0-torchnpu2.10.0-py3.12-ubuntu22.04-aarch64
       options: >-
         --shm-size 16g
     outputs:
