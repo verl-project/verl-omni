@@ -37,7 +37,9 @@ class _RecordingValLogger:
         self.calls.append((list(loggers), samples, step))
 
 
-def _run_val_logging(outputs, *, log_val_generations, video_fps=8, global_steps=0):
+def _run_val_logging(
+    outputs, *, log_val_generations, video_fps=8, global_steps=0, validation_data_dir=None, default_local_dir=None
+):
     """Invoke the unbound ``_maybe_log_val_generations`` with a minimal stub ``self``."""
     val_logger = _RecordingValLogger()
     stub = SimpleNamespace(
@@ -47,6 +49,8 @@ def _run_val_logging(outputs, *, log_val_generations, video_fps=8, global_steps=
                     "log_val_generations": log_val_generations,
                     "logger": ["wandb"],
                     "video_fps": video_fps,
+                    "validation_data_dir": validation_data_dir,
+                    "default_local_dir": default_local_dir,
                 }
             }
         ),
@@ -70,8 +74,8 @@ def _warm_clips(n, t=8, h=32, w=32):
 
 
 class TestMaybeLogValGenerationsWandb:
-    def test_wandb_video_gets_real_decodable_mp4_and_temp_dir_is_cleaned(self, monkeypatch):
-        """wandb.Video gets a real, decodable, correctly-colored mp4, and the temp dir is removed after log()."""
+    def test_wandb_video_gets_real_decodable_mp4_in_persistent_dir(self, monkeypatch, tmp_path):
+        """wandb.Video gets a real mp4 that remains available after log() returns."""
         captured = []
 
         class _FakeVideo:
@@ -88,7 +92,10 @@ class TestMaybeLogValGenerationsWandb:
         monkeypatch.setattr(wandb, "Video", _FakeVideo)
 
         outputs = _warm_clips(2)  # [2, T, C, H, W]
-        val_logger = _run_val_logging(outputs, log_val_generations=2)
+        validation_data_dir = tmp_path / "val"
+        val_logger = _run_val_logging(
+            outputs, log_val_generations=2, global_steps=7, validation_data_dir=str(validation_data_dir)
+        )
 
         # One wandb.Video per retained video sample, each a real mp4 tagged format=mp4.
         assert len(captured) == 2
@@ -99,19 +106,37 @@ class TestMaybeLogValGenerationsWandb:
             assert r > g > b, f"channel order not preserved in wandb mp4: R={r:.1f} G={g:.1f} B={b:.1f}"
             assert r > 128 and b < 128, f"warm frame inverted in wandb mp4: R={r:.1f} B={b:.1f}"
 
-        # tempfile.mkdtemp(prefix="val_video_") is shared across encodes and removed after log().
-        tmp_dirs = {os.path.dirname(c.path) for c in captured}
-        assert len(tmp_dirs) == 1, f"expected one shared temp dir, got {tmp_dirs}"
-        (tmp_dir,) = tmp_dirs
-        assert os.path.basename(tmp_dir).startswith("val_video_")
-        assert not os.path.exists(tmp_dir), "temp video dir was not cleaned up after logging"
+        # Files live under validation_data_dir so wandb can read them during async artifact upload.
+        media_dirs = {os.path.dirname(c.path) for c in captured}
+        expected_dir = validation_data_dir / "wandb_val_media" / "global_step_7"
+        assert media_dirs == {str(expected_dir)}
+        assert expected_dir.is_dir()
+        assert all(os.path.isfile(c.path) for c in captured)
 
         # The backend received the wrapped media (our _FakeVideo instances), not raw tensors.
         assert len(val_logger.calls) == 1
         loggers, samples, step = val_logger.calls[0]
-        assert loggers == ["wandb"] and step == 0
+        assert loggers == ["wandb"] and step == 7
         assert len(samples) == 2
         assert all(isinstance(media, _FakeVideo) for _inp, media, _score in samples)
+
+    def test_wandb_video_uses_default_local_dir_when_validation_dir_is_unset(self, monkeypatch, tmp_path):
+        captured = []
+
+        class _FakeVideo:
+            def __init__(self, data_or_path, *args, **kwargs):
+                captured.append(data_or_path)
+
+        monkeypatch.setattr(wandb, "Video", _FakeVideo)
+
+        default_local_dir = tmp_path / "run"
+        _run_val_logging(
+            _warm_clips(1), log_val_generations=1, global_steps=11, default_local_dir=str(default_local_dir)
+        )
+
+        expected_path = default_local_dir / "wandb_val_media" / "global_step_11" / "0.mp4"
+        assert captured == [str(expected_path)]
+        assert expected_path.is_file()
 
     def test_real_wandb_video_ingests_our_production_mp4(self, tmp_path):
         """The REAL wandb.Video ingests a production-path mp4 from disk (size + sha256) with no moviepy."""

@@ -185,7 +185,9 @@ class DiffusionAgentLoopWorker:
             task_sampling_params = sampling_params.copy()
             if per_rollout_seeds is not None:
                 task_sampling_params["seed"] = per_rollout_seeds[i]
-            tasks.append(asyncio.create_task(self._run_agent_loop(task_sampling_params, **kwargs)))
+            tasks.append(
+                asyncio.create_task(self._run_agent_loop(task_sampling_params, validate=is_validate, **kwargs))
+            )
         outputs = await asyncio.gather(*tasks)
 
         output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
@@ -197,6 +199,7 @@ class DiffusionAgentLoopWorker:
         sampling_params: dict[str, Any],
         *,
         agent_name: str,
+        validate: bool = False,
         **kwargs,
     ) -> _InternalDiffusionAgentLoopOutput:
         assert agent_name in _agent_loop_registry, (
@@ -215,9 +218,11 @@ class DiffusionAgentLoopWorker:
             extra_tokenizer_map=self.model_config.extra_tokenizer_map,
         )
         output: DiffusionAgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
-        return await self._agent_loop_postprocess(output, **kwargs)
+        return await self._agent_loop_postprocess(output, validate=validate, **kwargs)
 
-    async def _agent_loop_postprocess(self, output, **kwargs) -> _InternalDiffusionAgentLoopOutput:
+    async def _agent_loop_postprocess(
+        self, output, validate: bool = False, **kwargs
+    ) -> _InternalDiffusionAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
         # Pad extra tensor outputs from vllm-omni (e.g. prompt embeddings).
         extra_fields = {}
@@ -260,6 +265,7 @@ class DiffusionAgentLoopWorker:
             prompts=prompt_ids,
             responses=response_diffusion_output,
             kwargs=kwargs,
+            validate=validate,
         )
 
         if "reward_extra_info" in output.extra_fields:
@@ -275,7 +281,7 @@ class DiffusionAgentLoopWorker:
             extra_fields=extra_fields,
         )
 
-    async def _compute_score(self, output, prompts, responses, kwargs):
+    async def _compute_score(self, output, prompts, responses, kwargs, validate: bool = False):
         """Compute reward score for single sample."""
         enable_async_reward = self.reward_loop_worker_handles is not None
 
@@ -298,6 +304,7 @@ class DiffusionAgentLoopWorker:
                 data = DataProto(
                     batch=batch,
                     non_tensor_batch=non_tensor_batch,
+                    meta_info={"validate": validate},
                 )
                 selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
                 result = await selected_reward_loop_worker_handle.compute_score.remote(data)

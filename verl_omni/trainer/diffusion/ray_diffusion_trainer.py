@@ -399,11 +399,16 @@ class BaseRayDiffusionTrainer(ABC):
         # Take first N samples after shuffling
         samples = samples[:generations_to_log]
 
-        # Wrap retained media for wandb (after truncation, so videos are not all encoded)
+        # Wrap only retained samples; keep wandb videos in persistent storage.
         video_tmp_dir = None
         if "wandb" in self.config.trainer.logger:
+            validation_data_dir = self.config.trainer.get("validation_data_dir", None)
+            default_local_dir = self.config.trainer.get("default_local_dir", None)
+            wandb_video_dir = validation_data_dir or default_local_dir
+            if wandb_video_dir:
+                wandb_video_dir = os.path.join(wandb_video_dir, "wandb_val_media", f"global_step_{self.global_steps}")
             samples, video_tmp_dir = wrap_val_samples_for_wandb(
-                samples, fps=int(self.config.trainer.get("video_fps", 24))
+                samples, fps=int(self.config.trainer.get("video_fps", 24)), output_dir=wandb_video_dir
             )
 
         # Log to each configured logger
