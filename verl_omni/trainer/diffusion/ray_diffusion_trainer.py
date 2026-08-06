@@ -291,9 +291,10 @@ class BaseRayDiffusionTrainer(ABC):
         are written (``None`` = all).
         """
         os.makedirs(dump_path, exist_ok=True)
+        output_paths = ["skipped_image"] * len(inputs)
 
-        visual_folder = os.path.join(dump_path, f"{self.global_steps}")
-        os.makedirs(visual_folder, exist_ok=True)
+        # visual_folder = os.path.join(dump_path, f"{self.global_steps}")
+        # os.makedirs(visual_folder, exist_ok=True)
 
         n_full = outputs.shape[0]
         n = n_full if max_samples is None else min(max_samples, n_full)
@@ -335,7 +336,7 @@ class BaseRayDiffusionTrainer(ABC):
             entry = {k: v[i] for k, v in base_data.items()}
             lines.append(json.dumps(entry, ensure_ascii=False))
 
-        with open(filename, "w") as f:
+        with open(filename, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 
         print(f"Dumped generations to {filename}")
