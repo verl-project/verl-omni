@@ -11,6 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
+
+from hydra.core.hydra_config import HydraConfig
+from omegaconf import OmegaConf
+
 try:
     import hydra
 except ImportError as e:
@@ -24,6 +29,15 @@ def main(config):
     Args:
         config_dict: Hydra configuration dictionary containing training parameters.
     """
+    config_name = HydraConfig.get().job.config_name
+
+    raw_path = os.path.join("verl_omni/trainer/config", f"{config_name}.yaml")
+    if os.path.exists(raw_path):
+        raw = OmegaConf.load(raw_path)
+        raw.pop("defaults", None)
+        raw.pop("hydra", None)
+        config = OmegaConf.merge(raw, config)
+
     print(config)
 
 
