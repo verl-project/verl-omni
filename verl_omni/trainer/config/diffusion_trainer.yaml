@@ -256,6 +256,12 @@ trainer:
       # drop: drop the trajectory; wait: dropless, wait for trajectories that reach the threshold.
       max_off_policy_strategy: drop
 
+      # Drop a prompt group when any rollout session fails and submit exact replacement prompts.
+      drop_incomplete_groups: false
+
+      # Maximum replacement rounds for incomplete groups within one replay-buffer sample call.
+      max_incomplete_group_refill_rounds: 3
+
       # Custom sampler config.
       custom_sampler:
 

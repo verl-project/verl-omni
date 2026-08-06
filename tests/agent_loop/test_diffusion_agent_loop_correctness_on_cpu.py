@@ -47,21 +47,32 @@ class _DummyDiffusionAgentLoopWorker:
 
 
 @pytest.mark.asyncio
-async def test_run_prompt_publishes_failure_after_siblings_settle(monkeypatch):
+@pytest.mark.parametrize(
+    ("failure_type", "expected_reason"),
+    [
+        (asyncio.CancelledError, "cancelled"),
+        (TimeoutError, "timeout"),
+        (RuntimeError, "runtime_error"),
+        (ValueError, "error"),
+    ],
+)
+async def test_run_prompt_publishes_failure_after_siblings_settle(monkeypatch, failure_type, expected_reason):
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
     worker.rollout_config = SimpleNamespace(n=2, val_kwargs=SimpleNamespace(n=2))
     lifecycle = []
+    terminal_tags = []
 
     async def fake_kv_put(*, key, partition_id, tag):
         assert key == "sample"
         assert partition_id == "train"
         lifecycle.append(tag["status"])
+        terminal_tags.append(tag)
 
     async def fake_run_agent_loop(self, sampling_params, *, session_id, **kwargs):
         del self, sampling_params, kwargs
         if session_id == 0:
-            raise RuntimeError("session failed")
+            raise failure_type("session failed")
         await asyncio.sleep(0.01)
         lifecycle.append("sibling_settled")
 
@@ -76,6 +87,7 @@ async def test_run_prompt_publishes_failure_after_siblings_settle(monkeypatch):
     )
 
     assert lifecycle == ["running", "sibling_settled", "failure"]
+    assert terminal_tags[-1] == {"status": "failure", "failure_reason": expected_reason}
 
 
 @pytest.mark.asyncio
