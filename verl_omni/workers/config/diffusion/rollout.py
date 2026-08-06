@@ -95,6 +95,10 @@ class DiffusionRolloutConfig(BaseConfig):
 
     prompt_length: int = 512
 
+    # Final prompt-embedding sequence length after combining all text encoders.
+    # Falls back to pipeline.max_sequence_length for single-encoder models.
+    max_prompt_embed_length: Optional[int] = None
+
     dtype: str = "bfloat16"
     gpu_memory_utilization: float = 0.5
     enforce_eager: bool = False

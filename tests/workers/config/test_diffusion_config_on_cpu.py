@@ -22,6 +22,7 @@ from verl_omni.workers.config.diffusion.actor import (
 )
 from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
 from verl_omni.workers.config.diffusion.rollout import (
+    DiffusionPipelineConfig,
     DiffusionRolloutAlgoConfig,
     DiffusionRolloutConfig,
     DiffusionSamplingConfig,
@@ -168,6 +169,17 @@ class TestDiffusionSamplingConfig:
 
 
 class TestDiffusionRolloutConfig:
+    def test_prompt_embed_length_is_independent_from_encoder_length(self):
+        pipeline = DiffusionPipelineConfig(max_sequence_length=256)
+        cfg = DiffusionRolloutConfig(
+            name="vllm_omni",
+            pipeline=pipeline,
+            max_prompt_embed_length=333,
+        )
+
+        assert cfg.pipeline.max_sequence_length == 256
+        assert cfg.max_prompt_embed_length == 333
+
     def test_invalid_rollout_adapter_raises(self):
         with pytest.raises(ValueError, match="Invalid diffusion rollout rollout_adapter"):
             DiffusionRolloutConfig(name="vllm_omni", rollout_adapter="bogus")
