@@ -244,6 +244,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 engine_args["enable_dummy_pipeline"] = True
                 engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
+            engine_args["enable_prompt_embed_cache"] = self.config.enable_prompt_embed_cache
+            engine_args["prompt_embed_cache_size"] = self.config.prompt_embed_cache_size
+
         if getattr(self.config, "step_execution", False):
             engine_args["step_execution"] = True
 
@@ -337,7 +340,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         audio_data: Optional[list[Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         negative_prompt_ids: Optional[list[int]] = None,
-        prompt_mask: torch.BoolTensor | None = None,
+        prompt_mask: torch.BoolTensor | list[int] | list[bool] | None = None,
         extra_prompt_ids: Optional[dict[str, list[int]]] = None,
         negative_extra_prompt_ids: Optional[dict[str, list[int]]] = None,
         priority: int = 0,
@@ -433,7 +436,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         multi_modal_data: dict[str, Any],
         lora_request: Optional[LoRARequest],
         negative_prompt_ids: Optional[list[int]],
-        prompt_mask: torch.BoolTensor | None = None,
+        prompt_mask: torch.BoolTensor | list[int] | list[bool] | None = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         extra_prompt_ids: Optional[dict[str, list[int]]] = None,
         negative_extra_prompt_ids: Optional[dict[str, list[int]]] = None,
