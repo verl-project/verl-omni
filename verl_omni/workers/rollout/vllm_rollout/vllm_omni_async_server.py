@@ -282,16 +282,16 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     def _get_wake_up_tags(self) -> list[str]:
-        return ["weights"]
+        return ["kv_cache", "weights"]
 
     async def wake_up(self, tags: list[str] | None = None):
         """Wake AR engine stages through the EngineCore via AsyncOmni.wake_up().
 
         Previously overridden to use collective_rpc("wake_up") to avoid CUDA
-        initialisation in the HTTP server process.  Now that vllm-omni
-        ``AsyncOmni.wake_up()`` routes AR stages through
-        ``EngineCore.wake_up()`` (ZMQ-based, no GPU init), we can call it
-        directly.
+        initialisation in the HTTP server process.  Now that AsyncOmni.wake_up()
+        routes AR stages through EngineCore (ZMQ-based, no GPU init), we call it
+        directly so that AsyncOmni._sleeping_tags is properly cleared and
+        generate() is not rejected.
         """
         if self.node_rank != 0:
             return
@@ -765,7 +765,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             text="",
             token_ids=[],
             cumulative_logprob=None,
-            logprobs=None,
+            logprobs=[],  # empty list (not None) so _process_output won't crash iterating
             finish_reason="abort",
             stop_reason=None,
         )
