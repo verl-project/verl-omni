@@ -193,6 +193,23 @@ VAL_FILE=$HOME/data/mmk12/test.parquet \
 bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh
 ```
 
+For Ascend NPU training, use the NPU variant:
+
+```bash
+TRAIN_FILE=$HOME/data/mmk12/train.parquet \
+VAL_FILE=$HOME/data/mmk12/test.parquet \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_npu.sh
+```
+
+Compared with the GPU script, the NPU variant includes two important Ascend
+settings:
+
+- `export VLLM_ASCEND_ENABLE_NZ=0` disables the NZ format in vLLM Ascend.
+- `actor_rollout_ref.rollout.cudagraph_capture_sizes` limits the graph shapes
+  captured by the rollout engine. Capturing too many shapes can cause runtime
+  errors, so keep this list sparse. The current script uses capture sizes
+  `[1,2,4,16,64,128,512,1024,2048,3072,4096]`.
+
 The script registers the custom reward scorer internally (no yaml edits
 required). Override LR or other fields via "$@" extras:
 
