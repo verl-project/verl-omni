@@ -149,6 +149,7 @@ class TestDiffusionRolloutAlgoConfig:
         assert cfg.sde_type == "sde"
         assert cfg.sde_window_size is None
         assert cfg.sde_window_range is None
+        assert cfg.sde_contiguous is True
 
     def test_invalid_sample_strategy_raises(self):
         with pytest.raises(ValueError, match="Unknown sample_strategy"):

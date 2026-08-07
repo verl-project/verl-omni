@@ -26,6 +26,7 @@ dependencies = [
     "diffusers>=0.37.1",
     "dill",
     "hydra-core",
+    "imageio[ffmpeg]>=2.37.2",
     "pandas",
     "peft",
     "pyarrow>=19.0.0",

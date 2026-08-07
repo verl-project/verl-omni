@@ -120,6 +120,12 @@ All example scripts in this directory:
 |---------|--------|------|-------|
 | LoRA | `examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh` | 3×GPU | 2 actor+rollout, 1 reward pool |
 
+### LTX-2.3
+
+| Variant | Script | GPUs | Notes |
+|---------|--------|------|-------|
+| T2AV LoRA | `examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora.sh` | 8×GPU | Joint audio-video CPS, CLAP + ImageBind rewards |
+
 ### BAGEL
 
 | Variant | Script | GPUs | Notes |

@@ -70,9 +70,11 @@ RUN python3 -m pip config set global.index-url ${PIP_INDEX_URL} && \
 
 # Match useful runtime dependencies from the official vLLM-Ascend A3 Dockerfile.
 # modelscope is useful for model download, and ray is required by distributed workloads.
+# ray>=2.56 no longer clears ASCEND_RT_VISIBLE_DEVICES for actors that request zero
+# NPUs, which is what lets CPU-only reward workers reach the devices they need.
 RUN python3 -m pip install \
         modelscope \
-        'ray>=2.47.1,<=2.48.0' \
+        'ray>=2.56.1' \
         'protobuf>3.20.0'
 
 # Align torch stack for Ascend.

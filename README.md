@@ -123,7 +123,7 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>Diffusion generator</td>
     <td>Text → Video + Audio</td>
     <td>FlowGRPO</td>
-    <td>WIP</td>
+    <td>✅</td>
   </tr>
   <tr>
     <td>BAGEL</td>

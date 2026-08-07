@@ -51,18 +51,20 @@ def test_video_samples_become_wandb_video_with_a_real_mp4_in_output_dir(monkeypa
                     path=path, kwargs=dict(kwargs), rgb=tuple(float(frame[..., c].mean()) for c in range(3))
                 )
             )
+            self.data_or_path = path
 
     monkeypatch.setattr(wandb, "Video", _FakeVideo)
 
     output_dir = tmp_path / "wandb_val_media" / "global_step_3"
     samples = [(f"prompt {i}", _warm_clip(), float(i)) for i in range(2)]
-    wrapped, video_tmp_dir = wrap_val_samples_for_wandb(samples, fps=8, output_dir=str(output_dir))
+    wrapped, video_tmp_dir, media_to_log = wrap_val_samples_for_wandb(samples, fps=8, output_dir=str(output_dir))
 
     assert video_tmp_dir is None
     assert len(wrapped) == 2
     assert len(captured) == 2
-    for (inp, media, score), c in zip(wrapped, captured, strict=True):
-        assert isinstance(media, _FakeVideo)
+    for index, ((inp, media_key, score), c) in enumerate(zip(wrapped, captured, strict=True), start=1):
+        assert media_key == f"val/videos/sample_{index}"
+        assert media_to_log[media_key].data_or_path == c.path
         assert c.path.endswith(".mp4") and c.kwargs.get("format") == "mp4"
         assert os.path.dirname(c.path) == str(output_dir)
         assert os.path.isfile(c.path)
@@ -78,11 +80,12 @@ def test_video_samples_without_output_dir_return_cleanup_temp_dir(monkeypatch):
         def __init__(self, path, *args, **kwargs):
             assert os.path.isfile(path), f"wandb.Video got a non-existent path: {path}"
             captured.append(SimpleNamespace(path=path, kwargs=dict(kwargs)))
+            self.data_or_path = path
 
     monkeypatch.setattr(wandb, "Video", _FakeVideo)
 
     samples = [("prompt", _warm_clip(), 1.0)]
-    wrapped, video_tmp_dir = wrap_val_samples_for_wandb(samples, fps=8)
+    wrapped, video_tmp_dir, media_to_log = wrap_val_samples_for_wandb(samples, fps=8)
 
     try:
         assert video_tmp_dir is not None
@@ -90,6 +93,7 @@ def test_video_samples_without_output_dir_return_cleanup_temp_dir(monkeypatch):
         assert os.path.isdir(video_tmp_dir)
         assert len(wrapped) == 1
         assert len(captured) == 1
+        assert media_to_log["val/videos/sample_1"].data_or_path == captured[0].path
         assert captured[0].path.endswith(".mp4")
         assert captured[0].kwargs.get("format") == "mp4"
         assert os.path.dirname(captured[0].path) == video_tmp_dir
@@ -102,7 +106,8 @@ def test_image_samples_become_wandb_image_and_no_temp_dir(monkeypatch):
     monkeypatch.setattr(wandb, "Image", lambda data, *a, **k: SimpleNamespace(data=data))
 
     samples = [("prompt", torch.rand(3, 16, 16), 1.0)]
-    wrapped, video_tmp_dir = wrap_val_samples_for_wandb(samples)
+    wrapped, video_tmp_dir, media_to_log = wrap_val_samples_for_wandb(samples)
 
     assert video_tmp_dir is None
+    assert media_to_log == {}
     assert len(wrapped) == 1 and wrapped[0][0] == "prompt"
