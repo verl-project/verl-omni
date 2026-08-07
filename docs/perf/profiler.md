@@ -178,7 +178,7 @@ Use the dedicated Qwen-Image recipe to inspect Python control flow while the
 controller waits for old-log-prob inference or an actor update:
 
 ```bash
-bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_8x80g_fsdp2_benchmark_nsys.sh
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_fsdp2_benchmark_nsys.sh
 ```
 
 The default run trains for three steps and captures them in one continuous
@@ -194,6 +194,19 @@ GIL events, OS-runtime events, native CPU sampling, and context-switch events
 remain disabled to keep the diagnostic focused and low overhead. This mode
 does not provide individual CUDA API or kernel events; enable those only in a
 smaller follow-up capture after the Python-stack diagnosis narrows the phase.
+
+> [!WARNING]
+> The recipe does not set `discard-environment` because the option is not
+> available in every Nsight Systems release. If your version supports it, you
+> can set it to `true` for both the controller and workers:
+>
+> ```bash
+> +global_profiler.global_tool_config.nsys.controller_nsight_options.discard-environment='"true"' \
+> +global_profiler.global_tool_config.nsys.worker_nsight_options.discard-environment='"true"'
+> ```
+>
+> Without this option, reports may contain environment variables such as
+> `HF_TOKEN`, so take care when sharing report files.
 
 Ray writes one report per target process. A unique capture ID prevents stale
 files in a reused Ray session from entering the result, and the recipe waits

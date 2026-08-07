@@ -19,7 +19,7 @@
 # for reports from one host, but Nsight Systems may fall back to UTC.
 #
 # Run from the verl-omni repository root:
-#   bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_8x80g_fsdp2_benchmark_nsys.sh
+#   bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_fsdp2_benchmark_nsys.sh
 #
 # Optional environment controls:
 #   RUN_DIR=<path>           output root; also supplies the default profile run ID
@@ -113,7 +113,7 @@ fi
 expected_reports=$((expected_worker_reports + 1))
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-base_recipe="$script_dir/run_qwen_image_ocr_8x80g_fsdp2_benchmark.sh"
+base_recipe="$script_dir/run_qwen_image_ocr_fsdp2_benchmark.sh"
 profile_dst="$RUN_DIR/nsight_update_actor"
 mkdir -p "$profile_dst"
 chmod 700 "$profile_dst"
@@ -142,7 +142,6 @@ bash "$base_recipe" \
     +global_profiler.global_tool_config.nsys.controller_nsight_options.cpuctxsw=none \
     +global_profiler.global_tool_config.nsys.controller_nsight_options.python-sampling='"true"' \
     +global_profiler.global_tool_config.nsys.controller_nsight_options.python-sampling-frequency="$PYTHON_SAMPLE_HZ" \
-    +global_profiler.global_tool_config.nsys.controller_nsight_options.discard-environment='"true"' \
     +global_profiler.global_tool_config.nsys.controller_nsight_options.wait=primary \
     +global_profiler.global_tool_config.nsys.controller_nsight_options.o="\"controller_update_actor_${profile_run_id}_%h_pid%p\"" \
     global_profiler.global_tool_config.nsys.worker_nsight_options.trace='"nvtx"' \
@@ -154,7 +153,6 @@ bash "$base_recipe" \
     +global_profiler.global_tool_config.nsys.worker_nsight_options.cpuctxsw=none \
     +global_profiler.global_tool_config.nsys.worker_nsight_options.python-sampling='"true"' \
     +global_profiler.global_tool_config.nsys.worker_nsight_options.python-sampling-frequency="$PYTHON_SAMPLE_HZ" \
-    +global_profiler.global_tool_config.nsys.worker_nsight_options.discard-environment='"true"' \
     +global_profiler.global_tool_config.nsys.worker_nsight_options.wait=primary \
     +global_profiler.global_tool_config.nsys.worker_nsight_options.o="\"actor_update_${profile_run_id}_rank_%q{RANK}_%h_pid%p\"" \
     "$@" || training_status=$?
