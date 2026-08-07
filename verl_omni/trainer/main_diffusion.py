@@ -28,6 +28,7 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
 )
+from verl_omni.trainer.diffusion.teacher_preflight import validate_teacher_preflight
 from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
 
 
@@ -55,6 +56,8 @@ def run_diffusion(config, task_runner_class=None) -> None:
                 settings, model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    validate_teacher_preflight(config, stack="v0")
+
     # Check if Ray is not initialized
     if not ray.is_initialized():
         # Initialize Ray with a local cluster configuration
@@ -194,6 +197,24 @@ class TaskRunner:
         elif config.algorithm.sample_source == "offline":
             return
 
+    def add_teacher_worker(self, config):
+        """Register the frozen teacher role when the teacher runtime is enabled.
+
+        Teacher identity is an algorithm-level role; teacher GPU placement is a
+        deployment-level config. The MVP implements ``colocated``, i.e. the
+        actor's own pool -- a standalone ``teacher_pool`` changes this mapping
+        and the worker-group construction, not the trainer API.
+        """
+        from verl.trainer.ppo.ray_trainer import Role
+
+        from verl_omni.workers.teacher_workers import DiffusionTeacherWorker
+
+        if not OmegaConf.select(config, "actor_rollout_ref.teacher.enabled", default=False):
+            return
+
+        self.role_worker_mapping[Role.TeacherModel] = ray.remote(DiffusionTeacherWorker)
+        self.mapping[Role.TeacherModel] = "global_pool"
+
     def add_ref_policy_worker(self, config, ref_policy_cls):
         """Add reference policy worker if KL loss or KL reward is used."""
         # Ref policy has been fused into ActorRolloutRefWorker in new model engine.
@@ -224,6 +245,9 @@ class TaskRunner:
 
         # Add a reference policy worker if KL loss is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)
+
+        # Add the frozen teacher if online policy distillation is enabled.
+        self.add_teacher_worker(config)
 
         # Resolve the model path to an on-disk directory (downloads from HDFS or HF Hub
         # if necessary). `use_shm` enables shared-memory copy for faster reloads.

@@ -77,6 +77,24 @@ from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 sys_logger = logging.getLogger(__name__)
 
 
+def _terminate_worker_handles(worker_groups) -> None:
+    """Kill every underlying Ray actor exactly once.
+
+    ``spawn()`` hands each prefixed view the *same* handle list and there is no
+    group-level shutdown, so killing "the teacher group" would take the fused
+    actor with it, while killing only the teacher's view would leave it alive.
+    De-duplicating by object identity avoids calling ``ray.kill`` twice on a
+    handle shared across those prefixed views.
+    """
+    seen: set[int] = set()
+    for worker_group in worker_groups:
+        for handle in getattr(worker_group, "_workers", ()):
+            if id(handle) in seen:
+                continue
+            seen.add(id(handle))
+            ray.kill(handle)
+
+
 def compute_advantage(
     data: DataProto,
     adv_estimator: str,
@@ -197,6 +215,10 @@ class BaseRayDiffusionTrainer(ABC):
         if lora_rank <= 0:
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+
+        # Teacher runtime; stays None unless actor_rollout_ref.teacher.enabled is set.
+        self.teacher_wg = None
+        self.teacher_manager = None
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -633,6 +655,25 @@ class BaseRayDiffusionTrainer(ABC):
             return
         self._init_online_rollout_stack(actor_rollout_resource_pool)
 
+    def _build_teacher_manager(self):
+        """Resolve and validate the teacher before any worker handle is used.
+
+        Runs on the driver, so the non-FSDP-actor and scheduler-grid guards fire
+        here rather than surfacing later as an AttributeError or a corrupt replay.
+        """
+        from verl_omni.pipelines.model_base import DiffusionModelBase
+        from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherModelManager
+        from verl_omni.workers.config.diffusion import DiffusionTeacherConfig
+
+        actor_model_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.model)
+        teacher_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.teacher, DiffusionTeacherConfig)
+        return DiffusionTeacherModelManager(
+            teacher_config=teacher_config,
+            teacher_wg=self.teacher_wg,
+            actor_model_config=actor_model_config,
+            adapter=DiffusionModelBase.get_class(actor_model_config),
+        )
+
     def _init_colocated_workers(self):
         """Create Ray pools and colocated actor/ref worker groups (online and offline)."""
         self.resource_pool_manager.create_resource_pool()
@@ -666,6 +707,15 @@ class BaseRayDiffusionTrainer(ABC):
                 role=str(Role.RefPolicy),
             )
             self.resource_pool_to_cls[resource_pool][str(Role.RefPolicy)] = ref_policy_cls
+
+        # create the frozen teacher if online policy distillation is enabled
+        if Role.TeacherModel in self.role_worker_mapping:
+            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            teacher_cls = RayClassWithInitArgs(
+                cls=self.role_worker_mapping[Role.TeacherModel],
+                config=self.config.actor_rollout_ref,
+            )
+            self.resource_pool_to_cls[teacher_resource_pool][str(Role.TeacherModel)] = teacher_cls
 
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
@@ -714,9 +764,25 @@ class BaseRayDiffusionTrainer(ABC):
                 assert str(Role.ActorRolloutRef) in all_wg, f"{all_wg.keys()=}"
                 self.ref_policy_wg = all_wg[str(Role.ActorRolloutRef)]
 
-        # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
-        self.actor_rollout_wg = all_wg[str(actor_role)]
-        self.actor_rollout_wg.init_model()
+        # The teacher initialises *before* actor/rollout: the ordering below is a
+        # correctness constraint, not a style choice (see the rollout comment).
+        # Once the teacher is booted it co-hosts the fused actors, so an actor or
+        # rollout failure has to tear them down too -- the same cleanup boundary
+        # must span both inits, or a teacher that loaded fine leaks on actor OOM.
+        teacher_present = Role.TeacherModel in self.role_worker_mapping
+        try:
+            if teacher_present:
+                self.teacher_wg = all_wg[str(Role.TeacherModel)]
+                self.teacher_manager = self._build_teacher_manager()
+                self.teacher_wg.init_model()
+
+            # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
+            self.actor_rollout_wg = all_wg[str(actor_role)]
+            self.actor_rollout_wg.init_model()
+        except Exception:
+            if teacher_present:
+                _terminate_worker_handles(all_wg.values())
+            raise
 
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
@@ -920,6 +986,8 @@ class BaseRayDiffusionTrainer(ABC):
             self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
             if self.use_reference_policy and not self.ref_in_actor:
                 self.ref_policy_wg.start_profile(profile_step=self.global_steps)
+            if self.teacher_manager is not None:
+                self.teacher_manager.start_profile(step=self.global_steps)
 
     def _stop_profiling(self, do_profile: bool) -> None:
         """Stop profiling for all worker groups if profiling is enabled."""
@@ -927,6 +995,8 @@ class BaseRayDiffusionTrainer(ABC):
             self.actor_rollout_wg.stop_profile()
             if self.use_reference_policy and not self.ref_in_actor:
                 self.ref_policy_wg.stop_profile()
+            if self.teacher_manager is not None:
+                self.teacher_manager.stop_profile()
 
     @abstractmethod
     def fit(self):
@@ -1143,6 +1213,11 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             ref_log_prob = self._compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+
+                    if self.teacher_manager is not None:
+                        # replay the student's own trajectory under the frozen teacher
+                        with marked_timer(str(Role.TeacherModel), timing_raw, color="purple"):
+                            batch = batch.union(self.teacher_manager.compute_teacher_outputs(batch))
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm

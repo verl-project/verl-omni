@@ -23,6 +23,7 @@ from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_class_from_fqn
 
+from verl_omni.trainer.diffusion.teacher_preflight import validate_teacher_preflight
 from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,8 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
                 settings, model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    validate_teacher_preflight(config, stack="v1")
+
     if not ray.is_initialized():
         default_runtime_env = get_ppo_ray_runtime_env()
         ray_init_kwargs = config.ray_kwargs.get("ray_init", {})

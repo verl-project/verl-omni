@@ -63,6 +63,7 @@ def test_trainer_config_doc():
         "verl_omni/trainer/config/diffusion/actor/diffusion_actor.yaml",
         "verl_omni/trainer/config/diffusion/actor/dp_diffusion_actor.yaml",
         "verl_omni/trainer/config/diffusion/ref/diffusion_ref.yaml",
+        "verl_omni/trainer/config/diffusion/teacher/diffusion_teacher.yaml",
         "verl_omni/trainer/config/diffusion/ref/dp_diffusion_ref.yaml",
         "verl_omni/trainer/config/diffusion/rollout/diffusion_rollout.yaml",
         "verl_omni/trainer/config/diffusion/model/diffusion_model.yaml",
