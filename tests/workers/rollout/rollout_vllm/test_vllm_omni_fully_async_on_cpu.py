@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,13 +25,22 @@ import yaml
 from hydra import compose, initialize_config_dir
 
 from verl_omni.workers.config import OmniModelConfig
-from verl_omni.workers.rollout.vllm_rollout.utils import vLLMOmniColocateWorkerExtension
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import (
     _drop_none_mapping_values,
     vLLMOmniHttpServer,
 )
 
 pytestmark = pytest.mark.cpu
+
+
+@pytest.fixture(scope="module")
+def omni_worker_extension_cls():
+    if sys.version_info < (3, 11):
+        pytest.skip("The pinned vLLM-Omni diffusion worker requires enum.StrEnum from Python 3.11+")
+
+    from verl_omni.workers.rollout.vllm_rollout.utils import vLLMOmniColocateWorkerExtension
+
+    return vLLMOmniColocateWorkerExtension
 
 
 class Config(dict):
@@ -183,7 +193,7 @@ def test_ar_server_selects_omni_worker_extension():
     assert server._get_worker_extension_cls().endswith(".vLLMOmniColocateWorkerExtension")
 
 
-def test_omni_worker_extension_accepts_vllm_constructor_kwargs(monkeypatch):
+def test_omni_worker_extension_accepts_vllm_constructor_kwargs(monkeypatch, omni_worker_extension_cls):
     death_signal_calls = []
     monkeypatch.setattr(
         "verl_omni.workers.rollout.vllm_rollout.utils.set_death_signal",
@@ -194,18 +204,18 @@ def test_omni_worker_extension_accepts_vllm_constructor_kwargs(monkeypatch):
         lambda: None,
     )
 
-    worker = vLLMOmniColocateWorkerExtension.__new__(
-        vLLMOmniColocateWorkerExtension,
+    worker = omni_worker_extension_cls.__new__(
+        omni_worker_extension_cls,
         vllm_config=object(),
         local_rank=0,
         rank=0,
     )
 
-    assert isinstance(worker, vLLMOmniColocateWorkerExtension)
+    assert isinstance(worker, omni_worker_extension_cls)
     assert death_signal_calls == [True]
 
 
-def test_ar_full_weight_update_uses_omni_bucketed_loader(monkeypatch):
+def test_ar_full_weight_update_uses_omni_bucketed_loader(monkeypatch, omni_worker_extension_cls):
     from verl.utils.vllm import patch as vllm_patch
     from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
     from vllm.model_executor.model_loader import utils as model_loader_utils
@@ -248,7 +258,7 @@ def test_ar_full_weight_update_uses_omni_bucketed_loader(monkeypatch):
         lambda processed_model, config, device: events.append(("postprocess", processed_model, config, device)),
     )
 
-    worker = object.__new__(vLLMOmniColocateWorkerExtension)
+    worker = object.__new__(omni_worker_extension_cls)
     worker.device = torch.device("cpu")
     worker.local_rank = 0
     worker.model_runner = model_runner
@@ -270,7 +280,7 @@ def test_ar_full_weight_update_uses_omni_bucketed_loader(monkeypatch):
     ]
 
 
-def test_diffusion_lora_update_accumulates_buckets_before_add(monkeypatch):
+def test_diffusion_lora_update_accumulates_buckets_before_add(monkeypatch, omni_worker_extension_cls):
     from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
 
     class FakeReceiver:
@@ -282,7 +292,7 @@ def test_diffusion_lora_update_accumulates_buckets_before_add(monkeypatch):
             on_bucket_received([("layer.b", torch.zeros(1))])
 
     monkeypatch.setattr(bucketed_weight_transfer, "BucketedWeightReceiver", FakeReceiver)
-    worker = object.__new__(vLLMOmniColocateWorkerExtension)
+    worker = object.__new__(omni_worker_extension_cls)
     worker.device = torch.device("cpu")
     worker.local_rank = 0
     worker.model_runner = None
