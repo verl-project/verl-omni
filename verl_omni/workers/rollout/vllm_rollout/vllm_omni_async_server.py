@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import tempfile
-import time
 from dataclasses import asdict
 from typing import Any, Optional
 
@@ -282,23 +281,21 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     def _get_wake_up_tags(self) -> list[str]:
-        return ["weights"]
+        return ["kv_cache", "weights"]
 
     async def wake_up(self, tags: list[str] | None = None):
-        """Override parent to use collective_rpc instead of engine.wake_up().
+        """Wake AR engine stages through the EngineCore via AsyncOmni.wake_up().
 
-        The parent (verl ``1927ad33``+) calls ``self.engine.wake_up(tags=...)``
-        which triggers CUDA initialisation in this HTTP server process when
-        running under vLLM-Omni (AsyncOmni engine).
-        Use ``collective_rpc`` instead.
-
-        # TODO (long): drop this override once vllm-omni wake_up
-        without triggering GPU initialisation.
+        Previously overridden to use collective_rpc("wake_up") to avoid CUDA
+        initialisation in the HTTP server process.  Now that AsyncOmni.wake_up()
+        routes AR stages through EngineCore (ZMQ-based, no GPU init), we call it
+        directly so that AsyncOmni._sleeping_tags is properly cleared and
+        generate() is not rejected.
         """
         if self.node_rank != 0:
             return
-        await self.engine.collective_rpc(
-            "wake_up", kwargs={"tags": tags if tags is not None else self._get_wake_up_tags()}
+        await self.engine.wake_up(
+            tags=tags if tags is not None else self._get_wake_up_tags(),
         )
         self._invalidate_lora_request_cache()
 
@@ -315,11 +312,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         of the trainable actor and therefore are not included in full-model
         weight syncs. Use level-1 sleep so those weights are offloaded and can
         be restored on wake-up instead of discarded by level-2 sleep.
+
+        Routes through ``AsyncOmni.sleep()``, which for AR stages uses
+        ``EngineCore.sleep()`` to atomically pause the scheduler, abort
+        in-flight requests, and only then sleep the executor.
         """
         # TODO (andy): use `sleep_level=2` in the future when the
         #  trainer side incorporates the whole components of the model.
         self._invalidate_lora_request_cache()
-        await self.engine.collective_rpc("sleep", kwargs={"level": 1})
+        await self.engine.sleep(level=1)
         await self.engine.reset_encoder_cache()
 
     # -----------------------------------------------------------------------
@@ -666,88 +667,41 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort all in-flight requests on the AsyncOmni engine.
 
-        During ``on_step_end`` no new prompts are fed (the feed happens in
-        ``step``/``_add_batch_to_generate``), so the in-flight set monotonically
-        drains and the drain terminates quickly in practice.
+        Pause new admissions, abort unfinished rollouts, and wait for
+        Orchestrator/backend cleanup before returning.
         """
         engine = self.engine
         if getattr(engine, "output_processor", None) is not None:
             return await super().abort_all_requests(reset_prefix_cache)
 
-        try:
-            # ---- Phase 1: drain in-flight requests naturally ----------------
-            # Letting requests finish avoids the Orchestrator race that produces
-            # "Dropping output for unknown req" and avoids whole-sample retries.
-            drain_timeout_s = float(os.getenv("VERL_OMNI_ABORT_DRAIN_TIMEOUT_S", "120"))
-            drain_poll_interval_s = 0.1
-            drained = False
-            drain_start = time.monotonic()
-            last_count = -1
-            while True:
-                in_flight = len(engine.request_states)
-                if in_flight == 0:
-                    drained = True
-                    break
-                if time.monotonic() - drain_start >= drain_timeout_s:
-                    logger.warning(
-                        "abort_all_requests: drain timed out after %.1fs with %d request(s) still in-flight; "
-                        "falling back to hard abort (these may produce 'Dropping output' warnings)",
-                        drain_timeout_s,
-                        in_flight,
-                    )
-                    break
-                if in_flight != last_count:
-                    logger.info(
-                        "abort_all_requests: draining %d in-flight request(s) (%.1fs elapsed)",
-                        in_flight,
-                        time.monotonic() - drain_start,
-                    )
-                    last_count = in_flight
-                await asyncio.sleep(drain_poll_interval_s)
+        await engine.pause_generation(
+            wait_for_inflight_requests=False,
+            clear_cache=False,
+        )
 
-            if drained:
-                if reset_prefix_cache:
-                    await self.clear_kv_cache()
-                logger.info(
-                    "abort_all_requests: drained all in-flight requests in %.2fs; no abort needed",
-                    time.monotonic() - drain_start,
-                )
-                return {"aborted_count": 0, "request_ids": [], "drained": True}
+        # Snapshot queue references before AsyncOmni.abort() removes frontend
+        # request state. The abort call returns only after the Orchestrator has
+        # aborted backend work and released all request bindings.
+        in_flight_states = [
+            (state.request_id, state)
+            for state in engine.request_states.values()
+            if getattr(state, "external_request_id", None) is not None
+        ]
+        request_ids = list(dict.fromkeys(state.external_request_id for _, state in in_flight_states))
 
-            # ---- Phase 2: hard-abort the remainder (drain timed out) ---------
-            # Snapshot in-flight states (internal_id -> ClientRequestState) BEFORE
-            # engine.abort() pops them from AsyncOmni.request_states. We need the
-            # per-request asyncio.Queue references to unblock the generate() coroutines.
-            in_flight_states: list[tuple[str, Any]] = []
-            seen: set[str] = set()
-            for state in engine.request_states.values():
-                ext = getattr(state, "external_request_id", None)
-                if ext is None or ext in seen:
-                    continue
-                seen.add(ext)
-                in_flight_states.append((state.request_id, state))
+        if request_ids:
+            await engine.abort(request_ids)
 
-            request_ids = [s.external_request_id for _, s in in_flight_states]
+        # Deliver terminal abort outputs so FullyAsyncLLMServerClient preserves
+        # partial tokens and retries the unfinished rollout after weight sync.
+        for internal_id, state in in_flight_states:
+            self._enqueue_abort_output(internal_id, state)
 
-            if request_ids:
-                await engine.abort(request_ids)
+        if reset_prefix_cache:
+            await self.clear_kv_cache()
 
-            # Synthesize terminal abort OutputMessages and put them directly into
-            # each per-request queue so _process_orchestrator_results can drain
-            # and return. Without this, generate() hangs forever because the
-            # Orchestrator already dropped the real abort output.
-            for internal_id, state in in_flight_states:
-                self._enqueue_abort_output(internal_id, state)
-
-            if reset_prefix_cache:
-                await self.clear_kv_cache()
-                logger.info("Prefix cache reset after abort")
-
-            logger.info(f"Aborted {len(request_ids)} requests: {request_ids}")
-            return {"aborted_count": len(request_ids), "request_ids": request_ids}
-        except Exception as e:
-            logger.error(f"Error aborting requests: {e}")
-            return {"aborted_count": 0, "request_ids": [], "error": str(e)}
+        logger.info("Aborted %d request(s): %s", len(request_ids), request_ids)
+        return {"aborted_count": len(request_ids), "request_ids": request_ids}
 
     def _enqueue_abort_output(self, internal_id: str, req_state: Any) -> None:
         """Synthesize a terminal abort OutputMessage and put it into a per-request queue.
@@ -767,7 +721,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             text="",
             token_ids=[],
             cumulative_logprob=None,
-            logprobs=None,
+            logprobs=[],  # empty list (not None) so _process_output won't crash iterating
             finish_reason="abort",
             stop_reason=None,
         )

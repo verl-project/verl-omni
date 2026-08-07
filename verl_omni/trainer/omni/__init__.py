@@ -13,5 +13,6 @@
 # limitations under the License.
 
 from verl_omni.trainer.omni.ray_omni_trainer import OmniPPOTrainerSync  # noqa: F401
+from verl_omni.trainer.omni.ray_omni_trainer_colocate_async import OmniPPOTrainerColocateAsync  # noqa: F401
 
-__all__ = ["OmniPPOTrainerSync"]
+__all__ = ["OmniPPOTrainerSync", "OmniPPOTrainerColocateAsync"]
