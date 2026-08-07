@@ -664,15 +664,19 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort all in-flight requests on the AsyncOmni engine.
 
-        During ``on_step_end`` no new prompts are fed (the feed happens in
-        ``step``/``_add_batch_to_generate``), so the in-flight set monotonically
-        drains and the drain terminates quickly in practice.
+        Pause new admissions before observing the in-flight set so a pipelined
+        colocate-async batch cannot enter while the engine is being drained.
         """
         engine = self.engine
         if getattr(engine, "output_processor", None) is not None:
             return await super().abort_all_requests(reset_prefix_cache)
 
         try:
+            await engine.pause_generation(
+                wait_for_inflight_requests=False,
+                clear_cache=False,
+            )
+
             # ---- Phase 1: drain in-flight requests naturally ----------------
             # Letting requests finish avoids the Orchestrator race that produces
             # "Dropping output for unknown req" and avoids whole-sample retries.
