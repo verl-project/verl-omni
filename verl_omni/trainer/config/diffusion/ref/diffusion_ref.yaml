@@ -6,3 +6,8 @@ strategy: ${actor_rollout_ref.actor.strategy}
 
 # The batch size for one forward pass in the computation of log_prob. Local batch size per GPU.
 log_prob_micro_batch_size_per_gpu: null
+
+# Optional checkpoint override for the ref model. When set, the ref worker acts as a
+# distillation teacher: it loads this checkpoint (merged weights, no LoRA) and its
+# per-step means are exposed as teacher_prev_sample_mean for distill losses.
+model_path: null

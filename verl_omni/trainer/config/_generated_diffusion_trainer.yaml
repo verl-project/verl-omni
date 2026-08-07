@@ -111,6 +111,7 @@ actor_rollout_ref:
     rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
     strategy: ${actor_rollout_ref.actor.strategy}
     log_prob_micro_batch_size_per_gpu: null
+    model_path: null
     fsdp_config:
       _target_: verl.workers.config.FSDPEngineConfig
       wrap_policy:
