@@ -51,7 +51,7 @@ def _install_imagebind_modules(monkeypatch, imagebind_model=None):
     monkeypatch.setitem(sys.modules, "imagebind.models.imagebind_model", model_module)
 
 
-def test_to_tchw_accepts_channels_last_video():
+def test_to_tchw_accepts_channels_last_video():  # trufflehog:ignore
     video = torch.zeros(3, 8, 10, 3)
 
     assert imagebind._to_tchw(video).shape == (3, 3, 8, 10)

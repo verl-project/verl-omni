@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+# DEPRECATED: This NPU full-parameter training script uses the legacy
+# verl.trainer.main_ppo entrypoint with external_lib monkey-patches, and is
+# deprecated. It will be removed in v0.3.0.
+# There is no direct NPU V1 equivalent without AVQA data setup. For the AVQA
+# recipe on the V1 trainer, use:
+#   bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh
+# For the general V1 trainer pattern, see:
+#   bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh
+# Developers can adapt verl_omni.trainer.main_omni for new NPU training runs.
+#
 # Qwen3-Omni Thinker GSPO full-parameter training (FSDP + vLLM-Omni AR rollout).
 # Hardware: Atlas 800T A3 (16 × Ascend 910C 64GB).
 set -x
