@@ -21,8 +21,10 @@ import torch
 import torch.nn.functional as F
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.models.boogu_image.pipeline_boogu_image import BooguImagePipeline
+from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
+from verl_omni.pipelines.diffusion_rollout_output import RolloutDiffusionOutput
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.common import QwenImageTokenIdPromptMixin, coalesce_not_none
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
@@ -302,15 +304,17 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
 
     def forward(
         self,
-        req: DiffusionRequestBatch,
+        req: OmniDiffusionRequest | DiffusionRequestBatch,
         noise_level: float = 0.7,
         sde_window_size: int | None = None,
         sde_window_range: tuple[int, int] = (0, 5),
         sde_type: Literal["sde", "cps", "dance_sde"] = "sde",
         logprobs: bool = True,
-    ) -> DiffusionOutput:
+    ) -> DiffusionOutput | list[DiffusionOutput]:
         """End-to-end T2I / Edit (TI2I) generation with rollout-trajectory collection."""
-        prompts = req.prompts
+        request_batch = req if isinstance(req, DiffusionRequestBatch) else DiffusionRequestBatch(requests=[req])
+        return_batch = isinstance(req, DiffusionRequestBatch)
+        prompts = request_batch.prompts
 
         # Parent preprocessing supplies VAE tensors; Qwen3VL still needs the raw
         # image whose pixel grid matches the pre-tokenised placeholders.
@@ -338,9 +342,10 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
 
         if prompt_ids is None:
             # Engine warm-up / dummy run without a usable prompt.
-            return DiffusionOutput(output=None)
+            outputs = [RolloutDiffusionOutput(output=None, custom_output={}) for _ in range(request_batch.num_reqs)]
+            return outputs if return_batch else outputs[0]
 
-        sampling_params = req.sampling_params
+        sampling_params = request_batch.sampling_params_list[0]
         height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
         num_inference_steps = sampling_params.num_inference_steps or 50
@@ -473,24 +478,21 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
             if (ori_height, ori_width) != (height, width):
                 image = F.interpolate(image, size=(ori_height, ori_width), mode="bilinear")
 
-        metadata = {
-            "prompt_embeddings": {
-                "prompt_embeds": prompt_embeds,
-                "prompt_embeds_mask": prompt_embeds_mask,
-                "negative_prompt_embeds": negative_prompt_embeds,
-                "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
-            },
+        custom_output = {
+            "all_latents": all_latents,
+            "all_log_probs": all_log_probs,
+            "all_timesteps": all_timesteps,
+            "prompt_embeds": prompt_embeds,
+            "prompt_embeds_mask": prompt_embeds_mask,
+            "negative_prompt_embeds": negative_prompt_embeds,
+            "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
         }
         if condition_image_latents is not None:
-            metadata["condition_image_latents"] = condition_image_latents
+            custom_output["condition_image_latents"] = condition_image_latents
 
-        return DiffusionOutput(
-            output={
-                "payload": {"image": image},
-                "metadata": metadata,
-            },
-            trajectory_latents=all_latents,
-            trajectory_log_probs=all_log_probs,
-            trajectory_timesteps=all_timesteps,
+        result = RolloutDiffusionOutput(
+            output=image,
+            custom_output=custom_output,
             to_cpu=True,
         )
+        return [result] if return_batch else result
