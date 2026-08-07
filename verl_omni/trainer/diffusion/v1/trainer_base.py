@@ -44,7 +44,6 @@ from verl.single_controller.ray import (
 from verl.trainer.ppo.metric_utils import compute_variance_proxy_metrics, process_validation_metrics
 from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import Role, need_reference_policy, need_reward_model
-from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.config import omega_conf_to_dataclass
@@ -68,6 +67,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     compute_rollout_corr_metrics_from_batch,
     rollout_correction_enabled,
 )
+from verl_omni.trainer.diffusion.v1.replay_buffer import DiffusionReplayBuffer
 from verl_omni.trainer.diffusion.v1.tq_utils import (
     diffusion_tq_batch_to_dataproto,
     sort_diffusion_tq_keys,
@@ -127,14 +127,18 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self.checkpoint_manager = None
         self.global_steps = 0
 
-    def _build_replay_buffer(self) -> ReplayBuffer:
+    def _build_replay_buffer(self) -> DiffusionReplayBuffer:
         sampler_config = self.config.trainer.v1.sampler
-        return ReplayBuffer(
+        return DiffusionReplayBuffer(
             trainer_mode=self.trainer_mode,
             trainer_config=self.config.trainer.v1.get(self.trainer_mode, {}),
             max_off_policy_threshold=sampler_config.max_off_policy_threshold,
             max_off_policy_strategy=sampler_config.max_off_policy_strategy,
             sampler_kwargs=sampler_config.sampler_kwargs,
+            refill_fn=self._add_prompts_to_generate,
+            drop_incomplete_groups=sampler_config.get("drop_incomplete_groups", False),
+            max_incomplete_group_refill_rounds=sampler_config.get("max_incomplete_group_refill_rounds", 3),
+            train_batch_size=self.config.data.train_batch_size,
         )
 
     def init(self):
@@ -246,7 +250,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         for _ in range(self.parameter_sync_step):
             iter_metrics: dict = {}
             batch = self._step_once(iter_metrics, timing_raw, sample_batch_size)
-            metrics.update(iter_metrics)
+            for key, value in iter_metrics.items():
+                if key.startswith("training/rollout_failure/"):
+                    metrics[key] = metrics.get(key, 0) + value
+                else:
+                    metrics[key] = value
             combined_keys.extend(batch.keys)
             combined_tags.extend(batch.tags)
             combined_partition_id = batch.partition_id
@@ -482,7 +490,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             max_samples=self.config.data.get("val_max_samples", -1),
         )
 
-        gen_batch_size = self.config.data.get("gen_batch_size", None) or self.config.data.train_batch_size
+        gen_batch_size = self._generation_batch_size()
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
             batch_size=gen_batch_size,
@@ -648,11 +656,30 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         batch_dict["index"] = np.arange(len(batch_dict["raw_prompt"]))
         return tu.get_tensordict(batch_dict)
 
+    def _generation_batch_size(self) -> int:
+        cached_batch_size = getattr(self, "_effective_generation_batch_size", None)
+        if cached_batch_size is not None:
+            return cached_batch_size
+
+        sampler_config = self.config.trainer.v1.sampler
+        if sampler_config.get("drop_incomplete_groups", False):
+            configured_batch_size = self.config.data.get("gen_batch_size", None)
+            if configured_batch_size not in (None, 1):
+                logger.warning(
+                    "data.gen_batch_size=%s is overridden to 1 because exact incomplete-group refill is enabled",
+                    configured_batch_size,
+                )
+            effective_batch_size = 1
+        else:
+            effective_batch_size = self.config.data.get("gen_batch_size", None) or self.config.data.train_batch_size
+        self._effective_generation_batch_size = effective_batch_size
+        return effective_batch_size
+
     def _next_train_batch(self, num_prompts: int | None = None) -> tu.TensorDict:
         train_batch_size = self.config.data.train_batch_size
         if num_prompts is None:
             num_prompts = train_batch_size
-        gen_batch_size = self.config.data.get("gen_batch_size", None) or train_batch_size
+        gen_batch_size = self._generation_batch_size()
         if num_prompts <= 0 or num_prompts % gen_batch_size != 0:
             raise ValueError(
                 f"num_prompts ({num_prompts}) must be a positive multiple of gen_batch_size ({gen_batch_size})"
