@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 08/05/2026.
+Last updated: 08/07/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -142,9 +142,10 @@ actor_rollout_ref.actor.profiler.all_ranks=True \
 actor_rollout_ref.actor.profiler.tool=nsys
 ```
 
-When `global_profiler.tool=nsys` and `steps` is non-empty, the FlowGRPO
-entrypoint launches the Ray TaskRunner under `nsys` using the
-`controller_nsight_options` from `global_profiler.global_tool_config.nsys`.
+When `global_profiler.tool=nsys` and `steps` is non-empty, the legacy FlowGRPO
+entrypoint (`python -m verl_omni.trainer.main_diffusion`) launches the Ray
+TaskRunner under `nsys` using the `controller_nsight_options` from
+`global_profiler.global_tool_config.nsys`.
 Workers use `capture-range: cudaProfilerApi`, and the trainer starts and stops
 their collection around the configured steps. The controller records the full
 TaskRunner lifetime when its Nsight options do not specify a capture range. To
@@ -159,6 +160,13 @@ restrict controller collection to the configured steps, add these options:
 When controller `capture-range-end` is null, it is resolved to the number of
 discrete profiled steps or contiguous step groups before Ray starts the
 TaskRunner.
+
+This step-scoped controller capture is not supported by
+`verl_omni.trainer.main_diffusion_v1`. The v1 entrypoint can launch its
+TaskRunner under `nsys`, but its trainer does not yet implement the step-based
+profiling lifecycle driven by `global_profiler.steps`, including coordinated
+start/stop control for the controller and workers. Consequently, controller
+`capture-range: cudaProfilerApi` is not supported by the v1 trainer.
 
 `*.nsys-rep` files are written by Ray under
 `/tmp/ray/session_latest/logs/nsight/` on each node (this path is fixed by
