@@ -47,8 +47,8 @@ def test_process_multi_modal_info_uses_qwen_omni_utils_and_reorders_outputs(monk
     images = [object()]
     videos = [object()]
 
-    def fake_process_mm_info(messages, use_audio_in_video):
-        calls.append((messages, use_audio_in_video))
+    def fake_process_mm_info(messages, use_audio_in_video, image_patch_size):
+        calls.append((messages, use_audio_in_video, image_patch_size))
         return audios, images, videos
 
     monkeypatch.setitem(sys.modules, "qwen_omni_utils", SimpleNamespace(process_mm_info=fake_process_mm_info))
@@ -57,4 +57,24 @@ def test_process_multi_modal_info_uses_qwen_omni_utils_and_reorders_outputs(monk
     result = QwenOmniRLHFDataset._process_multi_modal_info(messages, image_patch_size=14, config={})
 
     assert result == (images, videos, audios)
-    assert calls == [(messages, False)]
+    assert calls == [(messages, False, 14)]
+
+
+def test_process_multi_modal_info_can_extract_audio_from_video(monkeypatch):
+    calls = []
+
+    def fake_process_mm_info(messages, use_audio_in_video, image_patch_size):
+        calls.append((messages, use_audio_in_video, image_patch_size))
+        return ["audio"], None, ["video"]
+
+    monkeypatch.setitem(sys.modules, "qwen_omni_utils", SimpleNamespace(process_mm_info=fake_process_mm_info))
+    messages = [{"role": "user", "content": [{"type": "video", "video": "/data/sample.mp4"}]}]
+
+    result = QwenOmniRLHFDataset._process_multi_modal_info(
+        messages,
+        image_patch_size=14,
+        config={"use_audio_in_video": True},
+    )
+
+    assert result == (None, ["video"], ["audio"])
+    assert calls == [(messages, True, 14)]

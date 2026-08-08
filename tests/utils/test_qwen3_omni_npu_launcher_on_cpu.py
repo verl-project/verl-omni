@@ -31,3 +31,27 @@ def test_avqa_npu_launcher_wires_v1_multimodal_training():
     )
     assert all(setting in avqa_launcher for setting in required_settings)
     assert "models.transformers" not in avqa_launcher
+
+
+def test_omnivideo_qi_launcher_wires_v1_gspo_and_qi_reward():
+    launcher_dir = Path(__file__).parents[2] / "examples/gspo_trainer/qwen3_omni"
+    launcher = (launcher_dir / "run_qwen3_omni_thinker_gspo_npu_omnivideo_qi_v1.sh").read_text(encoding="utf-8")
+
+    required_settings = (
+        "python3 -m verl_omni.trainer.main_omni",
+        "+data.use_audio_in_video=true",
+        "++data.mm_processor_kwargs.use_audio_in_video=true",
+        "actor_rollout_ref.actor.policy_loss.loss_mode=gspo",
+        "actor_rollout_ref.actor.clip_ratio_low=3e-4",
+        "actor_rollout_ref.actor.clip_ratio_high=4e-4",
+        "actor_rollout_ref.actor.kl_loss_coef=0.03",
+        "reward.custom_reward_function.path=verl_omni/utils/reward_score/omnivideo_qi.py",
+        "reward.reward_model.enable=${REWARD_MODEL_ENABLE}",
+        "reward.reward_model.enable_resource_pool=false",
+        'reward.reward_model.model_path="${OMNIVIDEO_QI_JUDGE_MODEL}"',
+        "reward.reward_model.rollout.tensor_model_parallel_size=${REWARD_TP}",
+        "reward.reward_model.rollout.free_cache_engine=true",
+        "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    )
+    assert all(setting in launcher for setting in required_settings)
+    assert "OMNIVIDEO_QI_JUDGE_URL:?" not in launcher

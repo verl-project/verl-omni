@@ -34,12 +34,18 @@ class QwenOmniRLHFDataset(RLHFDataset):
         cls,
         messages: list[dict],
         image_patch_size: int,
-        config: DictConfig | dict | None,
+        config: DictConfig,
     ) -> tuple[list[Any] | None, list[Any] | None, list[Any] | None]:
         from qwen_omni_utils import process_mm_info
 
         # Qwen returns (audios, images, videos); verl expects
-        # (images, videos, audios). AVQA uses a standalone audio track rather
-        # than extracting audio from a video.
-        audios, images, videos = process_mm_info(messages, use_audio_in_video=False)
+        # (images, videos, audios). AVQA uses a standalone audio track, while
+        # datasets such as OmniVideo-R1 can read the audio stream directly
+        # from each video to avoid duplicating media on disk.
+        use_audio_in_video = bool(config.get("use_audio_in_video", False))
+        audios, images, videos = process_mm_info(
+            messages,
+            use_audio_in_video=use_audio_in_video,
+            image_patch_size=image_patch_size,
+        )
         return images, videos, audios

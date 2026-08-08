@@ -258,6 +258,97 @@ preserves its `RLHFDataset` base class, sets rollout NPU memory utilization to
 extracts the first `<answer>...</answer>` payload and returns a binary exact-match
 reward against the tagged dataset label.
 
+## OmniVideo-R1 query-intensive grounding
+
+The QI recipe trains Qwen3-Omni on
+[`merged_train_all_qi.jsonl`](https://huggingface.co/datasets/jankin123/OmniVideo-R1/blob/main/merged_train_all_qi.jsonl)
+with video, its audio stream, and question text as input. It implements only the
+paper's first-stage reward:
+
+The repository-wide verl pin remains
+[`8a694930275061f52ebd538c906ef8819af56dbd`](https://github.com/verl-project/verl/commit/8a694930275061f52ebd538c906ef8819af56dbd)
+for compatibility with the other model recipes. OmniVideo-R1 QI specifically
+requires verl commit
+[`ed40bc14f6ecdbb574b7ecfbf3abe9cb11743f98`](https://github.com/verl-project/verl/commit/ed40bc14f6ecdbb574b7ecfbf3abe9cb11743f98),
+which includes the `get_rope_index_kwargs` processor hook required by
+Qwen3-Omni audio/video position IDs. Install it in a separate environment for
+this recipe so the repository default remains unchanged:
+
+```bash
+python3 -m pip install --no-deps --force-reinstall \
+  "verl @ git+https://github.com/verl-project/verl.git@ed40bc14f6ecdbb574b7ecfbf3abe9cb11743f98"
+```
+
+For the NPU Docker images, pass
+`--build-arg VERL_REF=ed40bc14f6ecdbb574b7ecfbf3abe9cb11743f98`
+instead. This recipe is implemented and tested against that commit's V1
+TransferQueue, colocated reward-model lifecycle, and multimodal processor hook.
+
+```text
+R_QI = r_format + r_answer + 0.5 * (r_consistency + r_completeness)
+```
+
+`r_format` validates the strict ordered, non-overlapping
+`<time>/<caption>...<thinking>/<answer>` structure. Multiple-choice answers use
+letter exact match; open-ended answers and both grounding rewards use an
+OpenAI-compatible Qwen3-VL judge. The consistency and completeness prompts
+follow Figures 11 and 12 of the paper. MA contrastive rollout and `r_attention`
+are intentionally out of scope.
+
+### Prepare the QI parquet
+
+Download the annotations plus the corresponding LLaVA-Video-178K and
+VideoVista media. Map annotation path prefixes explicitly to the shared local
+media mount:
+
+```bash
+python examples/gspo_trainer/data_process/omnivideo_r1_qi.py \
+    --input /path/to/merged_train_all_qi.jsonl \
+    --output_dir ~/data/omnivideo_r1_qi \
+    --path_map ./data/LLaVA-Video-178K=/shared/data/LLaVA-Video-178K \
+    --path_map ./data/VideoVista_Train=/shared/data/VideoVista_Train
+```
+
+The converter validates the real 88,173-row JSONL schema, drops missing media,
+caps each policy input at 64 frames, and splits by video path so validation
+cannot share a video with training. By default, Qwen's media loader extracts
+the audio stream directly from each video; use `--no-audio_from_video` and add
+an audio path map only when separately extracted audio files are preferred.
+Install `ffmpeg` on every training worker when extracting audio from video.
+`--max_samples 40 --val_size 8` is useful for a local smoke subset.
+
+### Start the QI judge and train on NPU
+
+The launcher deploys the resource-efficient default judge,
+`Qwen/Qwen3-VL-30B-A3B-Instruct`, through verl's reward-model router on the
+same NPU resource pool as training. Actor rollout and reward inference are
+time-multiplexed: the actor rollout sleeps while the reward model is awake,
+and the reward model releases its cache before actor work resumes. The default
+16-card topology uses reward TP 8 and two replicas.
+
+```bash
+export OMNIVIDEO_QI_JUDGE_MODEL=Qwen/Qwen3-VL-30B-A3B-Instruct
+
+TRAIN_FILE=$HOME/data/omnivideo_r1_qi/train.parquet \
+VAL_FILE=$HOME/data/omnivideo_r1_qi/validation.parquet \
+MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_omnivideo_qi_v1.sh
+```
+
+Set `REWARD_TP` and `REWARD_GPU_MEMORY_UTILIZATION` to tune the colocated
+deployment. To reproduce the paper's judge choice, set
+`OMNIVIDEO_QI_JUDGE_MODEL=Qwen/Qwen3-VL-235B-A22B-Instruct` and increase
+`REWARD_TP` as capacity requires. An existing external service remains
+supported: setting `OMNIVIDEO_QI_JUDGE_URL` disables the colocated server and
+routes QI judge requests to that OpenAI-compatible endpoint.
+
+The recipe follows the paper's GSPO settings: eight rollouts, learning rate
+`1e-6`, clip bounds `3e-4`/`4e-4`, KL coefficient `0.03`, 5% warmup, maximum
+combined sequence length 32,768, and 64 input frames. Its default batch size is
+reduced to 32 for the 16 x 910C topology inherited from the AVQA V1 recipe;
+set `TRAIN_BATCH_SIZE=256` only with capacity comparable to the paper's
+128 x H20 setup.
+
 ## Performance
 
 All GPU results measured on a single node of **4 × H800 80GB**, actor and
