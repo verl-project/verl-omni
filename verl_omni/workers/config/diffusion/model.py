@@ -47,6 +47,7 @@ class DiffusionModelConfig(BaseConfig):
         "architecture",
         "transformer_config",
         "extra_tokenizer_map",
+        "backend",
     }
 
     path: str = MISSING
@@ -57,6 +58,12 @@ class DiffusionModelConfig(BaseConfig):
     local_path: Optional[str] = None
     tokenizer_path: Optional[str] = None
     local_tokenizer_path: Optional[str] = None
+
+    # Training-engine backend this config is bound to (e.g. "fsdp", "fsdp2",
+    # "veomni"). Set by the engine at init time so ``DiffusionModelBase.get_class``
+    # can resolve a backend-specific adapter when one is registered. ``None`` means
+    # the backend-agnostic default adapter is used.
+    backend: Optional[str] = None
 
     # model type, e.g., "diffusion_model"
     model_type: str = "diffusion_model"

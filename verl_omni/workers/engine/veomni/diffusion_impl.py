@@ -34,12 +34,12 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.memory_utils import aggressive_empty_cache
-from verl.utils.model import convert_weight_keys
 from verl.utils.py_functional import append_to_dict
 from verl.utils.torch_dtypes import PrecisionType
 from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
 
+from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.utils import build_scheduler, forward_and_sample_previous_step, prepare_model_inputs
 from verl_omni.workers.config import (
     DiffusionModelConfig,
@@ -52,7 +52,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
-@EngineRegistry.register(model_type="diffusion_model", backend=["veomni"], device=["cuda"])
+@EngineRegistry.register(model_type="diffusion_model", backend=["veomni"], device=["cuda", "npu"])
 class VeOmniDiffusionEngine(BaseEngine):
     """VeOmni-backed diffusion training engine for verl-omni RL loops."""
 
@@ -76,6 +76,11 @@ class VeOmniDiffusionEngine(BaseEngine):
         self.checkpoint_config = checkpoint_config
         self.mode = None
         self.rank = torch.distributed.get_rank()
+
+        # Bind the engine backend onto model_config so that
+        # ``DiffusionModelBase.get_class`` can resolve a backend-specific adapter
+        # when one is registered (e.g. LTX-2.3 has separate fsdp/veomni adapters).
+        self.model_config.backend = engine_config.strategy
 
         self._init_device_mesh()
 
@@ -210,7 +215,7 @@ class VeOmniDiffusionEngine(BaseEngine):
             global_batch_size=dp_size,
             num_train_epochs=1,
             init_device=self.engine_config.init_device,
-            broadcast_model_weights_from_rank0=True,
+            broadcast_model_weights_from_rank0=False,
             enable_full_determinism=self.engine_config.full_determinism,
             seed=self.engine_config.seed,
             optimizer=optimizer,
@@ -227,7 +232,7 @@ class VeOmniDiffusionEngine(BaseEngine):
             model=DiTModelArguments(
                 config_path=config_path,
                 model_path=weights_path,
-                model_config={},
+                model_config={"caption_proj_before_connector": True},
                 tokenizer_path=(
                     self.model_config.local_tokenizer_path or self.model_config.tokenizer_path or config_path
                 ),
@@ -588,12 +593,33 @@ class VeOmniDiffusionEngine(BaseEngine):
         if self.model_config.lora_rank > 0 or self.model_config.lora_adapter_path is not None:
             raise NotImplementedError("VeOmni diffusion backend does not support LoRA weight export yet.")
 
-        load_model_to_gpu(self.module, get_device_id())
-        params = self.module.state_dict()
-        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
-
-        if self._is_offload_param:
-            offload_model_to_cpu(self.module)
+        # When param_offload=False, params already reside on NPU as FSDP2
+        # shards. ``state_dict`` returns DTensors that ``full_tensor()``
+        # can gather lazily, one parameter at a time.
+        #
+        # When param_offload=True, params are on CPU.  We must NOT call
+        # ``load_model_to_gpu`` (→ ``model.to(device)``) because that
+        # triggers FSDP2 unshard of *all* layers at once, exceeding GPU
+        # memory when the rollout engine is co-located.  Instead, keep
+        # params on CPU and let ``full_tensor()`` gather each parameter
+        # individually before moving it to GPU in the generator below.
+        params = self.module.state_dict(keep_vars=True)
+        # Skip ``convert_weight_keys`` for VeOmni models: their
+        # ``_checkpoint_conversion_mapping`` (e.g. ``{"^model\\.diffusion_model\\.":
+        # ""}``) is designed for checkpoint *loading* (stripping the
+        # ``model.diffusion_model.`` prefix).  When ``convert_weight_keys``
+        # reverses the mapping, the empty-string value becomes a regex pattern
+        # that matches every position in the key, inserting
+        # ``model.diffusion_model.`` before *every character* and producing
+        # garbled names like ``m…model.diffusion_model.o…model.diffusion_model.d…``
+        # that the rollout loader cannot match.
+        #
+        # Instead, the registered DiffusionModelBase adapter's
+        # ``convert_export_key`` remaps VeOmni→diffusers parameter names
+        # (e.g. ``adaln_single`` → ``time_embed``) so the exported
+        # state-dict is already in diffusers naming and the rollout adapter
+        # needs no backend-specific key handling.
+        model_cls = DiffusionModelBase.get_class(self.model_config)
 
         device = get_device_id()
         export_dtype = PrecisionType.to_dtype(self.engine_config.model_dtype)
@@ -604,7 +630,8 @@ class VeOmniDiffusionEngine(BaseEngine):
                 tensor = tensor.to(device, non_blocking=True)
                 if tensor.is_floating_point() and tensor.dtype != export_dtype:
                     tensor = tensor.to(export_dtype, non_blocking=True)
-                yield f"transformer.{name}", tensor
+                export_name = model_cls.convert_export_key(f"transformer.{name}")
+                yield export_name, tensor
 
         return param_generator(), None
 
