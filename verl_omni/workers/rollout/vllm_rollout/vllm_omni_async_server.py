@@ -61,8 +61,12 @@ logger.setLevel(logging.INFO)
 _LORA_REQUEST_CACHE_MISS = object()
 
 
-def _strip_none(d: dict) -> dict:
-    return {k: _strip_none(v) if isinstance(v, dict) else v for k, v in d.items() if v is not None}
+def _drop_none_mapping_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _drop_none_mapping_values(item) for key, item in value.items() if item is not None}
+    if isinstance(value, list):
+        return [_drop_none_mapping_values(item) for item in value]
+    return value
 
 
 class vLLMOmniHttpServer(vLLMHttpServer):
@@ -170,7 +174,19 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                     hf_overrides.update(adapter_overrides)
                     engine_kwargs["hf_overrides"] = hf_overrides
 
-            for underscore_key in ("stage_configs_path", "deploy_config", "stage_overrides", "async_chunk"):
+            stage_init_timeout = engine_kwargs.get("stage_init_timeout") or engine_kwargs.get("stage-init-timeout")
+            init_timeout = engine_kwargs.get("init_timeout") or engine_kwargs.get("init-timeout")
+            if stage_init_timeout is not None and init_timeout is None:
+                engine_kwargs["init_timeout"] = max(int(stage_init_timeout), 600)
+
+            for underscore_key in (
+                "stage_configs_path",
+                "deploy_config",
+                "stage_overrides",
+                "async_chunk",
+                "stage_init_timeout",
+                "init_timeout",
+            ):
                 if underscore_key in engine_kwargs:
                     engine_kwargs[underscore_key.replace("_", "-")] = engine_kwargs.pop(underscore_key)
 
@@ -181,12 +197,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         pipeline_id = adapter_cls.get_pipeline_id(pipeline_mode)
 
         device_control_env = get_visible_devices_keyword()
-        devices = os.environ.get(device_control_env, "")
+        visible_devices = os.environ.get(device_control_env, "")
         tp_size = self.config.tensor_model_parallel_size
 
         deploy_dict: dict[str, object] = {"pipeline": pipeline_id}
 
-        if devices:
+        if visible_devices:
+            # Stage configs use logical ids relative to the Ray actor's visible-device set.
+            device_count = len([device for device in visible_devices.split(",") if device.strip()])
+            devices = ",".join(str(device_id) for device_id in range(device_count))
             stage_ids = [s.stage_id for s in stages]
             deploy_dict["stages"] = [
                 {
@@ -228,10 +247,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             engine_args["deploy_config"] = deploy_config
 
         if self._ar_mode:
+            for timeout_key in ("stage_init_timeout", "init_timeout"):
+                timeout_value = getattr(args, timeout_key, None)
+                if timeout_value is not None:
+                    engine_args[timeout_key] = int(timeout_value)
+            engine_args["logprobs_mode"] = getattr(self.config, "logprobs_mode", "processed_logprobs")
             # AR mode: no diffusion pipeline. Drop None entries from
             # compilation_config that OmniEngineArgs may leave behind.
             if isinstance(engine_args.get("compilation_config"), dict):
-                engine_args["compilation_config"] = _strip_none(engine_args["compilation_config"])
+                engine_args["compilation_config"] = _drop_none_mapping_values(engine_args["compilation_config"])
         else:
             import_external_libs(self.config.external_lib)
 
@@ -321,6 +345,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._invalidate_lora_request_cache()
         await self.engine.collective_rpc("sleep", kwargs={"level": 1})
         await self.engine.reset_encoder_cache()
+
+    async def resume_generation(self):
+        if self.node_rank == 0:
+            await self.engine.resume_generation()
 
     # -----------------------------------------------------------------------
     # generate: shared pipeline; mode-specific steps branch on self._ar_mode
