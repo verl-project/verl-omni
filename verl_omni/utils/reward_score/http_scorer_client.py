@@ -24,15 +24,12 @@ rewards_services/api_services/ that accept the standard payload format::
 
 import asyncio
 import io
-import logging
 import pickle
 
 import aiohttp
 import numpy as np
 import torch
 from PIL import Image
-
-logger = logging.getLogger(__name__)
 
 
 def _tensor_to_pil(image: torch.Tensor) -> Image.Image:
@@ -74,6 +71,9 @@ async def compute_score(
 
     Returns:
         dict with "score" key.
+
+    Raises:
+        RuntimeError: If the scorer returns an HTTP error, reports an error, or returns no scores.
     """
     loop = asyncio.get_event_loop()
     image_bytes = await loop.run_in_executor(None, _prepare_image_bytes, solution_image)
@@ -94,14 +94,15 @@ async def compute_score(
     async with session.post(server_url, data=payload) as resp:
         if resp.status != 200:
             error_text = await resp.text()
-            logger.error(f"Scorer server returned {resp.status}: {error_text}")
-            return {"score": 0.0}
+            raise RuntimeError(f"Scorer server returned HTTP {resp.status}: {error_text}")
         response_data = pickle.loads(await resp.read())
 
     if "error" in response_data:
-        logger.error(f"Scorer server error: {response_data['error']}")
-        return {"score": 0.0}
+        raise RuntimeError(f"Scorer server error: {response_data['error']}")
 
     scores = response_data["scores"]
-    score = float(scores[0]) if scores else 0.0
+    if not scores:
+        raise RuntimeError("Scorer server returned no scores")
+
+    score = float(scores[0])
     return {"score": score}

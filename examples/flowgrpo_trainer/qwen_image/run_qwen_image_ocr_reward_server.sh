@@ -83,6 +83,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     "+reward.reward_functions.ocr.path=pkg://verl_omni.utils.reward_score.http_scorer_client" \
     '+reward.reward_functions.ocr.name=compute_score' \
     '+reward.reward_functions.ocr.weight=1.0' \
+    '+reward.reward_functions.ocr.required=true' \
     "+reward.reward_functions.ocr.server_url=$OCR_REWARD_SERVER_URL" \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=flow_grpo \

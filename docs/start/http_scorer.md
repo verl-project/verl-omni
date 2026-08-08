@@ -1,7 +1,7 @@
 (http_scorer)=
 # Using an External HTTP Scorer Service
 
-Last updated: 07/17/2026
+Last updated: 08/09/2026
 
 VeRL-Omni ships a generic HTTP reward client (`verl_omni.utils.reward_score.http_scorer_client`) that sends generated images to an external scorer service over HTTP and returns the score. This is useful when your reward model is too large to co-locate with training, needs a different runtime (e.g., a separate GPU pool), or is shared across multiple experiments.
 
@@ -74,6 +74,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     "+reward.reward_functions.my_reward.path=pkg://verl_omni.utils.reward_score.http_scorer_client" \
     '+reward.reward_functions.my_reward.name=compute_score' \
     '+reward.reward_functions.my_reward.weight=1.0' \
+    '+reward.reward_functions.my_reward.required=true' \
     "+reward.reward_functions.my_reward.server_url=http://<scorer-host>:<port>" \
     ...
 ```
@@ -83,6 +84,7 @@ Key points:
 - **`path`**: Module path using the `pkg://` prefix.
 - **`name`**: The async function to call (`compute_score`).
 - **`weight`**: Reward weight when combining multiple reward functions.
+- **`required`**: Controls what happens when this scorer fails. Set it to `true` to stop training. If it is `false` (the default), the reward manager sets the score to `0` and continues.
 - **`server_url`**: Full URL of your scorer service (no trailing slash).
 
 Any extra key-value pairs added under the same reward function config are forwarded as `**kwargs` to `compute_score`.
