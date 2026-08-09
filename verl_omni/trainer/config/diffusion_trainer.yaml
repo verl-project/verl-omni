@@ -29,6 +29,9 @@ defaults:
   # Reward config.
   - reward@reward: reward
 
+  # Distillation config for diffusion on-policy distillation.
+  - diffusion/distillation@distillation: diffusion_distillation
+
   # load the reference default config, then apply the fields in the current yaml
   # self config override anything above
   - _self_
