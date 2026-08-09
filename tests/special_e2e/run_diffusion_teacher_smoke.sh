@@ -86,6 +86,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.lora_rank=0 \
     actor_rollout_ref.model.lora_adapter_path=null \
     actor_rollout_ref.model.custom_chat_template="\"${custom_chat_template}\"" \
+    "actor_rollout_ref.model.extra_tokenizers={clip: {path: tokenizer, max_length: 77}, t5: {path: tokenizer_3, max_length: ${max_prompt_length}}}" \
     distillation.enabled=True \
     distillation.teacher_models.teacher_model.model_path="${TEACHER_PATH}" \
     "${objective[@]}" \
@@ -108,6 +109,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.pipeline.height=256 \
     actor_rollout_ref.rollout.pipeline.width=256 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=${max_prompt_length} \
+    actor_rollout_ref.rollout.max_prompt_embed_length=$((77 + max_prompt_length)) \
     actor_rollout_ref.rollout.algo.noise_level=1.0 \
     actor_rollout_ref.rollout.algo.sde_type="sde" \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=4 \
