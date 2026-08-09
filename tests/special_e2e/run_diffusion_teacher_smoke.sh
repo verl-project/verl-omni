@@ -86,8 +86,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.lora_rank=0 \
     actor_rollout_ref.model.lora_adapter_path=null \
     actor_rollout_ref.model.custom_chat_template="\"${custom_chat_template}\"" \
-    actor_rollout_ref.teacher.enabled=True \
-    "+actor_rollout_ref.teacher.models.default.model.path=${TEACHER_PATH}" \
+    distillation.enabled=True \
+    distillation.teacher_models.teacher_model.model_path="${TEACHER_PATH}" \
     "${objective[@]}" \
     actor_rollout_ref.actor.optim.lr=1e-4 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${mini_bsz} \

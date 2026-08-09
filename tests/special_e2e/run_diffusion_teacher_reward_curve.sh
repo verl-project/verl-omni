@@ -2,17 +2,12 @@
 # Diffusion OPD teacher-runtime *reward-curve* experiment.
 #
 # NOT a CI smoke. Reproduces the base -> teacher -> student OCR-reward result
-# through the teacher runtime, so the runtime carries its own algorithm evidence
-# instead of borrowing an earlier figure.
+# through the teacher runtime, so the runtime carries its own algorithm evidence.
 #
-# This is the exact, proven command (LoRA rank 32, cps SDE, and a dedicated
-# 1-GPU reward pool serving Qwen2.5-VL-3B at gpu_memory_utilization=0.9,
-# enforce_eager=False -- the config that actually produced that curve). The
-# ONLY deliberate change is the teacher mechanism: the earlier run overloaded
-# the ref slot (`ref.model_path=<teacher>`); this uses the separate teacher
-# runtime (`actor_rollout_ref.teacher.*`). Everything else is held fixed so a
-# difference in the curve is attributable to the runtime, not to a re-tuned
-# recipe.
+# The recipe (LoRA rank 32, cps SDE, and a dedicated 1-GPU reward pool serving
+# Qwen2.5-VL-3B at gpu_memory_utilization=0.9, enforce_eager=False) is held
+# fixed across runs so a difference in the curve is attributable to the teacher
+# runtime, not to a re-tuned recipe.
 #
 # Reward is monitored, not optimised: the loss is pure distill_kl. val reward is
 # the plotted series (base at step 0 via val_before_train, then every TEST_FREQ).
@@ -61,8 +56,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=1 \
-    actor_rollout_ref.teacher.enabled=True \
-    "+actor_rollout_ref.teacher.models.default.model.path=${TEACHER_PATH}" \
+    distillation.enabled=True \
+    distillation.teacher_models.teacher_model.model_path="${TEACHER_PATH}" \
     actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \

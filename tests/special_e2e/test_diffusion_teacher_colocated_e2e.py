@@ -11,20 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Env-gated e2e test for the *colocated* teacher runtime.
+"""Env-gated e2e test for the fused diffusion teacher runtime.
 
-The other GPU test (``tests/workers/test_diffusion_teacher_gpu.py``) exercises a
-standalone teacher worker; the colocated runtime fuses the teacher with the
-actor in one Ray worker via ``create_colocated_worker_cls``.
-This test covers that path by driving ``run_diffusion_teacher_smoke.sh`` through
-the real trainer, so the fused actor + reference + teacher init and the
+The teacher is fused with the actor inside ``ActorRolloutRefWorker``, the same
+way the reference model is. This test drives ``run_diffusion_teacher_smoke.sh``
+through the real trainer, so the fused actor + reference + teacher init and the
 once-per-step teacher hook are asserted, not just described.
 
-It needs a real SD3 checkpoint pair: the tiny builder writes a fast tokenizer
-with no sentencepiece model, so its checkpoint cannot serve rollout, and the
-colocated path builds rollout. The test therefore *skips* unless a GPU is
-present and ``MODEL_PATH``/``TEACHER_PATH`` point at real checkpoints -- the CI
-runners have neither, which is why this is not in the auto-run smoke group.
+It needs a real SD3 checkpoint pair because the fused path also builds rollout.
+The test therefore *skips* unless a GPU is present and
+``MODEL_PATH``/``TEACHER_PATH`` point at real checkpoints -- the CI runners
+have neither, which is why this is not in the auto-run smoke group.
 
 Run:  MODEL_PATH=<sd3.5> TEACHER_PATH=<sd3.5-teacher> \
         pytest tests/special_e2e/test_diffusion_teacher_colocated_e2e.py
