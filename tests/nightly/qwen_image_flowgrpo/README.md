@@ -36,7 +36,7 @@ Workflow trigger modes:
 
 The runner must have:
 
-- 4 GPUs by default, or set `NUM_GPUS` to match the runner.
+- 1 GPU by default, or set `NUM_GPUS` to match the runner.
 - An installed `verl_omni` GPU environment with the rollout and training
   dependencies needed by Qwen-Image FlowGRPO.
 - Local tiny-random policy and reward model directories.
@@ -55,7 +55,7 @@ Generate a local baseline first. This is the default behavior because
 when no baseline exists:
 
 ```bash
-NUM_GPUS=4 \
+NUM_GPUS=1 \
 MODEL_PATH=/path/to/tiny-random/Qwen-Image \
 REWARD_MODEL_PATH=/path/to/tiny-random/qwen3-vl \
 OUTPUT_ROOT=/path/to/debug_dumps \
@@ -65,7 +65,7 @@ bash tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh
 Then run strict nightly mode against the generated baseline:
 
 ```bash
-NUM_GPUS=4 \
+NUM_GPUS=1 \
 MODEL_PATH=/path/to/tiny-random/Qwen-Image \
 REWARD_MODEL_PATH=/path/to/tiny-random/qwen3-vl \
 OUTPUT_ROOT=/path/to/debug_dumps \
@@ -180,9 +180,15 @@ Precision thresholds:
 - `PRECISION_ATOL`, default `1e-4`, maximum allowed absolute error.
 - `PRECISION_RTOL`, default `1e-3`, maximum allowed relative error.
 - `PRECISION_MIN_COS_SIM`, default `0.999`, minimum allowed cosine similarity.
+- `PRECISION_IMAGE_ATOL`, default `2/255` (~`0.00784`), for decoded image
+  tensors (`batch.responses`). One 8-bit LSB is `1/255` ≈ `0.00392` abs.
+- `PRECISION_IMAGE_RTOL`, default `2e-2`, relative tolerance for
+  `batch.responses`.
+- `PRECISION_IMAGE_MIN_COS_SIM`, default `0.999`, cosine similarity floor for
+  `batch.responses`.
 
-Each tensor fails if `max_abs_err > PRECISION_ATOL`,
-`max_rel_err > PRECISION_RTOL`, or `cos_sim < PRECISION_MIN_COS_SIM`.
+Each tensor fails if `max_abs_err > atol`, `max_rel_err > rtol`, or
+`cos_sim < min_cos_sim` for the threshold profile that applies to that key.
 
 ## Failure Triage
 

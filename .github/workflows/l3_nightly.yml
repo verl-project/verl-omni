@@ -17,7 +17,7 @@ on:
       num_gpus:
         description: "Number of GPUs to use"
         required: false
-        default: "4"
+        default: "1"
       model_path:
         description: "Optional local Qwen-Image model path"
         required: false
@@ -64,7 +64,7 @@ env:
   CURRENT_ARTIFACT_PREFIX: l3-nightly-current
   REPORT_ARTIFACT_PREFIX: l3-nightly-reports
   RUN_MODE: ${{ github.event_name == 'schedule' && 'nightly' || github.event_name == 'pull_request' && 'nightly' || github.event.inputs.mode || 'nightly' }}
-  NUM_GPUS: ${{ github.event.inputs.num_gpus || '4' }}
+  NUM_GPUS: ${{ github.event.inputs.num_gpus || '1' }}
   MODEL_PATH: ${{ github.event.inputs.model_path || '' }}
   REWARD_MODEL_PATH: ${{ github.event.inputs.reward_model_path || '' }}
   OUTPUT_ROOT: ${{ github.event.inputs.output_root || 'outputs/debug_dumps' }}
