@@ -55,6 +55,15 @@ actor_rollout_ref:
       # Precision for the reference model.
       refer_model_precision: bfloat16
 
+      # Text cross-entropy weight for supervised Bagel SFT.
+      ce_weight: 1.0
+
+      # Image velocity MSE weight for supervised Bagel SFT.
+      mse_weight: 1.0
+
+      # Label value ignored by supervised cross entropy.
+      ignore_index: -100
+
     # Shuffle training data across PPO epochs.
     shuffle: false
 

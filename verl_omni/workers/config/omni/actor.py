@@ -25,7 +25,7 @@ __all__ = [
 
 @dataclass
 class OmniLossConfig(BaseConfig):
-    """Loss hyperparameters for omni AR direct-preference training.
+    """Loss hyperparameters for omni AR direct-preference and SFT training.
 
     Which config block to use depends on algorithm.trainer_type (OmniAlgoConfig):
 
@@ -35,16 +35,16 @@ class OmniLossConfig(BaseConfig):
       loss_agg_mode, use_kl_loss, and kl_loss_coef. Those are consumed
       by verl.trainer.ppo.core_algos via get_policy_loss_fn(). This
       dataclass is not read on that path.
-    * direct_preference (offline/online DPO): use this block at YAML path
-      actor_rollout_ref.actor.omni_loss. Consumed by
-      verl_omni.trainer.omni.omni_algos (OmniDPOLoss) and
-      OmniDirectPreferenceRayTrainer.
+    * direct_preference (offline/online DPO) and sft (offline supervised
+      training): use this block at YAML path actor_rollout_ref.actor.omni_loss.
+      Consumed by verl_omni.trainer.omni.omni_algos and the corresponding
+      offline trainer.
 
     Field reference (direct_preference only)
     ----------------------------------------
 
     loss_mode:
-        Preference loss registry key. Currently only "dpo" is supported.
+        Omni loss registry key. Currently "dpo" and "bagel_sft" are supported.
     beta:
         DPO inverse temperature β. Scales the log-probability margin between
         policy and reference on chosen vs. rejected pairs before the sigmoid/IPO
@@ -64,6 +64,12 @@ class OmniLossConfig(BaseConfig):
         Parameter dtype for the reference (frozen) policy during ref log-prob
         computation, e.g. "bfloat16" or "float32". Policy (trainable)
         precision is controlled separately by actor.fsdp_config.model_dtype.
+    ce_weight:
+        Text cross-entropy weight for supervised Bagel SFT.
+    mse_weight:
+        Image velocity MSE weight for supervised Bagel SFT.
+    ignore_index:
+        Label value ignored by supervised cross entropy.
     """
 
     loss_mode: str = "dpo"
@@ -72,28 +78,39 @@ class OmniLossConfig(BaseConfig):
     loss_type: str = "sigmoid"
     average_log_prob: bool = False
     refer_model_precision: str = "bfloat16"
+    ce_weight: float = 1.0
+    mse_weight: float = 1.0
+    ignore_index: int = -100
 
     def __post_init__(self):
-        if self.loss_mode not in {"dpo"}:
-            raise ValueError(f"Unsupported omni loss_mode={self.loss_mode!r}; currently supported: ['dpo'].")
+        valid_modes = {"dpo", "bagel_sft"}
+        if self.loss_mode not in valid_modes:
+            raise ValueError(
+                f"Unsupported omni loss_mode={self.loss_mode!r}; currently supported: {sorted(valid_modes)}."
+            )
         if self.loss_type not in {"sigmoid", "ipo"}:
             raise ValueError(f"Invalid omni DPO loss_type={self.loss_type!r}; expected 'sigmoid' or 'ipo'.")
         if self.beta <= 0:
             raise ValueError(f"Omni DPO beta must be positive, got {self.beta}.")
+        if self.ce_weight < 0:
+            raise ValueError(f"Bagel SFT ce_weight must be non-negative, got {self.ce_weight}.")
+        if self.mse_weight < 0:
+            raise ValueError(f"Bagel SFT mse_weight must be non-negative, got {self.mse_weight}.")
 
 
 @dataclass
 class OmniActorConfig(FSDPActorConfig):
     """FSDP actor config for omni model training."""
 
-    trainer_type: str = "direct_preference"  # "direct_preference" or "policy_gradient"
+    trainer_type: str = "direct_preference"  # "direct_preference", "policy_gradient", or "sft"
     omni_loss: OmniLossConfig = field(default_factory=OmniLossConfig)
 
     def __post_init__(self):
         super().__post_init__()
-        if self.trainer_type not in ["direct_preference", "policy_gradient"]:
+        if self.trainer_type not in ["direct_preference", "policy_gradient", "sft"]:
             raise ValueError(
-                f"Invalid omni trainer_type={self.trainer_type}; expected ['direct_preference', 'policy_gradient']."
+                f"Invalid omni trainer_type={self.trainer_type}; "
+                "expected ['direct_preference', 'policy_gradient', 'sft']."
             )
         if self.trainer_type == "direct_preference" and self.omni_loss is None:
             raise ValueError("OmniActorConfig.omni_loss is required for direct_preference training.")

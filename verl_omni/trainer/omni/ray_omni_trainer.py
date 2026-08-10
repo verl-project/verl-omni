@@ -59,7 +59,7 @@ from verl_omni.workers.config import OmniModelConfig
 
 sys_logger = logging.getLogger(__name__)
 
-__all__ = ["OmniPPOTrainerSync", "OmniDirectPreferenceRayTrainer"]
+__all__ = ["OmniPPOTrainerSync", "OmniDirectPreferenceRayTrainer", "SFTRayTrainer"]
 
 
 @register_trainer("omni_sync")
@@ -726,3 +726,109 @@ class OmniDirectPreferenceRayTrainer:
                 if hasattr(self.train_dataset, "on_batch_end"):
                     self.train_dataset.on_batch_end(batch=batch)
         self._shutdown_dataloaders()
+
+
+class SFTRayTrainer(OmniDirectPreferenceRayTrainer):
+    """Offline actor-only trainer for supervised omni-style fine-tuning."""
+
+    def __init__(self, config, *args, **kwargs):
+        del args
+        if config.algorithm.get("sample_source", "offline") != "offline":
+            raise NotImplementedError("SFTRayTrainer requires algorithm.sample_source=offline.")
+
+        self.tokenizer = kwargs.get("tokenizer", None)
+        self.processor = kwargs.get("processor", None)
+        self.config = config
+        self.hybrid_engine = config.actor_rollout_ref.get("hybrid_engine", True)
+        self.role_worker_mapping = kwargs.get("role_worker_mapping", None) or {}
+        self.resource_pool_manager = kwargs.get("resource_pool_manager", None)
+        self.ray_worker_group_cls = kwargs.get("ray_worker_group_cls", RayWorkerGroup)
+        self.device_name = kwargs.get("device_name", None) or OmegaConf.select(
+            self.config, "trainer.device", default=None
+        )
+        self.checkpoint_manager = None
+
+        loss_mode = config.actor_rollout_ref.actor.omni_loss.loss_mode
+        if loss_mode != "bagel_sft":
+            raise NotImplementedError("SFTRayTrainer requires actor_rollout_ref.actor.omni_loss.loss_mode=bagel_sft.")
+
+        self.is_offline = True
+        self.use_reference_policy = False
+        self._has_old_adapter = False
+        self._loss_fn = get_omni_loss_fn(loss_mode)
+        self.global_batch_size = self.config.data.train_batch_size
+        self.ref_in_actor = False
+        self.use_rm = False
+
+        train_dataset = kwargs.get("train_dataset", None)
+        val_dataset = kwargs.get("val_dataset", None)
+        collate_fn = kwargs.get("collate_fn", None)
+        train_sampler = kwargs.get("train_sampler", None)
+        val_sampler = kwargs.get("val_sampler", None)
+        if train_dataset is not None or self.config.data.get("train_files", None) is not None:
+            self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler, val_sampler)
+
+    def _validate(self):
+        print("Skipping validation generation because offline SFT rollout is disabled.")
+        return {"val/offline/skipped": 1.0}
+
+    def fit(self):
+        """Run actor-only supervised fine-tuning over the offline dataloader."""
+        tracking = Tracking(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+            default_backend=self.config.trainer.logger,
+            config=OmegaConf.to_container(self.config, resolve=True),
+        )
+
+        self.global_steps = 0
+        self._load_checkpoint()
+        self.checkpoint_manager.update_weights(self.global_steps)
+        current_epoch = self.global_steps // len(self.train_dataloader)
+
+        progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
+        self.global_steps += 1
+        last_val_metrics = None
+
+        for epoch in range(current_epoch, self.config.trainer.total_epochs):
+            for batch_dict in self.train_dataloader:
+                if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
+                    self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
+
+                metrics = {}
+                timing_raw = {}
+                batch = DataProto.from_single_dict(batch_dict)
+                if "uid" not in batch.non_tensor_batch:
+                    batch.non_tensor_batch["uid"] = np.array(
+                        [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
+                    )
+
+                is_last_step = self.global_steps >= self.total_training_steps
+                with marked_timer("update_actor", timing_raw, color="red"):
+                    actor_output = self._update_actor(batch)
+
+                metrics.update(actor_output.meta_info["metrics"])
+                metrics.update(compute_timing_metrics_diffusion(batch=batch, timing_raw=timing_raw))
+                tracking.log(data=metrics, step=self.global_steps)
+                progress_bar.update(1)
+
+                if self.config.trainer.save_freq > 0 and (
+                    is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                ):
+                    self._save_checkpoint()
+
+                if self.config.trainer.test_freq > 0 and self.global_steps % self.config.trainer.test_freq == 0:
+                    last_val_metrics = self._validate()
+                    if last_val_metrics:
+                        tracking.log(data=last_val_metrics, step=self.global_steps)
+
+                self.global_steps += 1
+                if is_last_step:
+                    if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
+                        self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
+                    pprint(f"Final validation metrics: {last_val_metrics}")
+                    progress_bar.close()
+                    return
+
+                if hasattr(self.train_dataset, "on_batch_end"):
+                    self.train_dataset.on_batch_end(batch=batch)

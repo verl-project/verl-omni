@@ -77,14 +77,48 @@ class _FakeActorConfig:
 class TestOmniLossRegistry:
     def test_builtin_dpo_registered(self, omni_algos):
         assert "dpo" in omni_algos.OMNI_LOSS_REGISTRY
+        assert "bagel_sft" in omni_algos.OMNI_LOSS_REGISTRY
 
     def test_get_existing_loss_fn(self, omni_algos):
         fn = omni_algos.get_omni_loss_fn("dpo")
         assert isinstance(fn, omni_algos.OmniDPOLoss)
+        sft_fn = omni_algos.get_omni_loss_fn("bagel_sft")
+        assert isinstance(sft_fn, omni_algos.BagelSFTLoss)
 
     def test_get_unknown_loss_fn_raises(self, omni_algos):
         with pytest.raises(ValueError, match="Unsupported omni loss mode"):
             omni_algos.get_omni_loss_fn("nonexistent_loss")
+
+
+class TestBagelSFTLossCallable:
+    def test_callable_combines_text_and_image_terms(self, omni_algos, OmniLossConfig):
+        loss_fn = omni_algos.get_omni_loss_fn("bagel_sft")
+        actor_config = _FakeActorConfig(omni_loss=OmniLossConfig(loss_mode="bagel_sft", mse_weight=0.5))
+        logits = torch.randn(2, 4, 8, requires_grad=True)
+        labels = torch.tensor([[1, 2, 3, -100], [2, 3, 4, 5]])
+        image_velocity = torch.zeros(2, 1, 3, 4, requires_grad=True)
+        image_velocity_target = torch.ones(2, 1, 3, 4)
+        image_loss_mask = torch.ones(2, 1, 3)
+
+        result = loss_fn(
+            config=actor_config,
+            model_output={"logits": logits, "image_velocity": image_velocity},
+            data=TensorDict(
+                {
+                    "labels": labels,
+                    "image_velocity_target": image_velocity_target,
+                    "image_loss_mask": image_loss_mask,
+                },
+                batch_size=[2],
+            ),
+        )
+
+        assert result.loss.requires_grad
+        assert "bagel_sft/ce_loss" in result.metrics
+        assert "bagel_sft/mse_loss" in result.metrics
+        result.loss.backward()
+        assert logits.grad is not None
+        assert image_velocity.grad is not None
 
 
 class TestOmniDPOLossComputeLoss:

@@ -34,6 +34,11 @@ class TestOmniAlgoConfig:
         assert cfg.norm_adv_by_std_in_grpo is True
         assert cfg.global_std is True
 
+    def test_accepts_sft_trainer_type(self):
+        cfg = OmniAlgoConfig(trainer_type="sft", sample_source="offline", paired_preference=False)
+        assert cfg.trainer_type == "sft"
+        assert cfg.paired_preference is False
+
     @pytest.mark.parametrize(
         "field_name, value",
         [
@@ -55,6 +60,15 @@ class TestOmniLossConfig:
         assert cfg.loss_type == "sigmoid"
         assert cfg.average_log_prob is False
         assert cfg.refer_model_precision == "bfloat16"
+        assert cfg.ce_weight == pytest.approx(1.0)
+        assert cfg.mse_weight == pytest.approx(1.0)
+        assert cfg.ignore_index == -100
+
+    def test_accepts_bagel_sft_loss_mode(self):
+        cfg = OmniLossConfig(loss_mode="bagel_sft", ce_weight=0.5, mse_weight=0.25)
+        assert cfg.loss_mode == "bagel_sft"
+        assert cfg.ce_weight == pytest.approx(0.5)
+        assert cfg.mse_weight == pytest.approx(0.25)
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -62,6 +76,8 @@ class TestOmniLossConfig:
             {"loss_mode": "flow_grpo"},
             {"loss_type": "invalid"},
             {"beta": 0.0},
+            {"ce_weight": -1.0},
+            {"mse_weight": -1.0},
         ],
     )
     def test_invalid_values_raise(self, kwargs):
@@ -88,6 +104,17 @@ class TestOmniActorConfig:
             trainer_type="policy_gradient",
         )
         assert cfg.trainer_type == "policy_gradient"
+
+    def test_accepts_sft_trainer_type(self):
+        cfg = OmniActorConfig(
+            strategy="fsdp",
+            rollout_n=1,
+            ppo_micro_batch_size_per_gpu=1,
+            trainer_type="sft",
+            omni_loss=OmniLossConfig(loss_mode="bagel_sft"),
+        )
+        assert cfg.trainer_type == "sft"
+        assert cfg.omni_loss.loss_mode == "bagel_sft"
 
 
 class TestOmniModelConfigLoraFields:
