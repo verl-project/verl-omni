@@ -154,6 +154,51 @@ def test_resolve_adapter_path_accepts_exported_peft_adapter(tmp_path):
     assert judge_mod.resolve_adapter_path(str(adapter_path), "base") == str(adapter_path.resolve())
 
 
+def test_resolve_adapter_path_finds_nested_lora_adapter(tmp_path):
+    checkpoint = tmp_path / "global_step_1"
+    adapter_path = checkpoint / "actor" / "lora_adapter"
+    adapter_path.mkdir(parents=True)
+    (adapter_path / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (adapter_path / "adapter_model.bin").write_bytes(b"fake")
+
+    assert judge_mod.resolve_adapter_path(str(checkpoint), "base") == str(adapter_path.resolve())
+
+
+def test_resolve_adapter_path_exports_fsdp_checkpoint(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "global_step_1" / "actor"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "fsdp_config.json").write_text("{}", encoding="utf-8")
+    (checkpoint / "lora_train_meta.json").write_text("{}", encoding="utf-8")
+
+    calls = []
+
+    def fake_export_fsdp_lora_adapter(*, input_dir, output_dir, base_model_name_or_path):
+        calls.append(
+            {
+                "input_dir": Path(input_dir),
+                "output_dir": Path(output_dir),
+                "base_model_name_or_path": base_model_name_or_path,
+            }
+        )
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "adapter_config.json").write_text("{}", encoding="utf-8")
+        (output_dir / "adapter_model.safetensors").write_bytes(b"fake")
+
+    monkeypatch.setattr(judge_mod, "_export_fsdp_lora_adapter", fake_export_fsdp_lora_adapter)
+
+    resolved = judge_mod.resolve_adapter_path(str(checkpoint.parent), "base-model")
+
+    assert resolved == str((checkpoint / "lora_adapter").resolve())
+    assert calls == [
+        {
+            "input_dir": checkpoint.resolve(),
+            "output_dir": (checkpoint / "lora_adapter").resolve(),
+            "base_model_name_or_path": "base-model",
+        }
+    ]
+
+
 def test_run_uses_mock_generation_and_judge_endpoints(tmp_path, monkeypatch):
     data_path = tmp_path / "eval.jsonl"
     rows = [
@@ -178,10 +223,19 @@ def test_run_uses_mock_generation_and_judge_endpoints(tmp_path, monkeypatch):
         for row in rows:
             f.write(json.dumps(row) + "\n")
 
+    adapter_path = tmp_path / "lora_adapter"
+    adapter_path.mkdir()
+    (adapter_path / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (adapter_path / "adapter_model.safetensors").write_bytes(b"fake")
+
     calls = []
+    lora_loads = []
 
     def fake_wait_for_server(*_args, **_kwargs):
         return None
+
+    def fake_load_lora_adapter(*, router_address, lora_name, lora_path):
+        lora_loads.append({"router_address": router_address, "lora_name": lora_name, "lora_path": lora_path})
 
     def fake_post(_router_address, payload):
         calls.append(payload)
@@ -208,6 +262,7 @@ def test_run_uses_mock_generation_and_judge_endpoints(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(judge_mod, "wait_for_server", fake_wait_for_server)
+    monkeypatch.setattr(judge_mod, "load_lora_adapter", fake_load_lora_adapter)
     monkeypatch.setattr(judge_mod, "_post_chat_completion", fake_post)
 
     args = SimpleNamespace(
@@ -216,11 +271,13 @@ def test_run_uses_mock_generation_and_judge_endpoints(tmp_path, monkeypatch):
         max_samples=-1,
         seed=1,
         model_path="base",
-        adapter_path="adapter",
+        adapter_path=str(adapter_path),
         generation_router_address="127.0.0.1:8000",
         trained_generation_router_address=None,
         reference_model_name="reference",
         trained_model_name="trained",
+        max_loras=1,
+        max_lora_rank=64,
         launch_generation_server=False,
         generation_server_host="127.0.0.1",
         generation_server_port=8000,
@@ -248,3 +305,12 @@ def test_run_uses_mock_generation_and_judge_endpoints(tmp_path, monkeypatch):
     assert summary["by_modality"]["audio"]["total"] == 1
     assert Path(args.output_jsonl).read_text(encoding="utf-8").count("\n") == 2
     assert len(calls) == 6
+    assert lora_loads == [
+        {
+            "router_address": "127.0.0.1:8000",
+            "lora_name": "trained",
+            "lora_path": str(adapter_path.resolve()),
+        }
+    ]
+    assert "--lora-modules" not in judge_mod.DEFAULT_QWEN_SERVER_COMMAND
+    assert "--enable-lora" in judge_mod.DEFAULT_QWEN_SERVER_COMMAND

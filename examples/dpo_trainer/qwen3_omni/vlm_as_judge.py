@@ -16,12 +16,15 @@
 
 The script expects OpenAI-compatible chat-completion endpoints:
 
-1. a Qwen3-Omni / vLLM-Omni generation endpoint that can serve the base model
-   and the trained LoRA adapter, or two separate generation endpoints;
+1. a Qwen3-Omni / vLLM-Omni generation endpoint that serves the base model with
+   ``--enable-lora``. The trained adapter is attached at runtime through
+   ``POST /v1/load_lora_adapter`` (a ``LoRARequest``), then selected by
+   ``model=<trained_model_name>`` on chat completions. Requires vLLM-Omni with
+   the LoRA-request forwarding fix (``c588208`` / issue #5369) or newer.
 2. a MiniCPM-o judge endpoint, by default ``openbmb/MiniCPM-o-4_5``.
 
 It reads held-out Omni-Preference rows, generates one answer with the reference
-model and one with the trained model for each prompt, then asks MiniCPM-o to
+model and one with the trained LoRA for each prompt, then asks MiniCPM-o to
 score and compare the two answers under the original multimodal input.
 """
 
@@ -54,7 +57,7 @@ logger = logging.getLogger("qwen3_omni_minicpm_judge")
 DEFAULT_QWEN_SERVER_COMMAND = (
     "vllm serve {model} --host {host} --port {port} --dtype bfloat16 "
     "--trust-remote-code --served-model-name {reference_model_name} "
-    "--enable-lora --lora-modules {trained_model_name}={adapter_path}"
+    "--enable-lora --max-loras {max_loras} --max-lora-rank {max_lora_rank}"
 )
 DEFAULT_JUDGE_SERVER_COMMAND = (
     "vllm serve {model} --host {host} --port {port} --dtype bfloat16 --trust-remote-code --enforce-eager"
@@ -62,6 +65,8 @@ DEFAULT_JUDGE_SERVER_COMMAND = (
 DEFAULT_JUDGE_MODEL = "openbmb/MiniCPM-o-4_5"
 DEFAULT_GENERATION_MODEL_NAME = "qwen3-omni-reference"
 DEFAULT_TRAINED_MODEL_NAME = "qwen3-omni-trained"
+DEFAULT_MAX_LORAS = 1
+DEFAULT_MAX_LORA_RANK = 64
 MEDIA_KEYS = (("image", "images"), ("video", "videos"), ("audio", "audios"))
 MEDIA_CONTENT_TYPES = {
     "image": ("image_url", "image_url"),
@@ -210,7 +215,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-path", required=True, help="Base Qwen3-Omni model path or HF repo id for server launch."
     )
-    parser.add_argument("--adapter-path", required=True, help="Trained LoRA adapter path for server launch.")
+    parser.add_argument(
+        "--adapter-path",
+        required=True,
+        help="PEFT LoRA adapter directory, or a verl FSDP / global_step checkpoint. "
+        "Non-PEFT checkpoints are exported via export_fsdp_lora_adapter, then loaded "
+        "at runtime via POST /v1/load_lora_adapter as a LoRARequest.",
+    )
     parser.add_argument("--generation-router-address", default="127.0.0.1:8000")
     parser.add_argument(
         "--trained-generation-router-address",
@@ -219,13 +230,26 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--reference-model-name", default=DEFAULT_GENERATION_MODEL_NAME)
     parser.add_argument("--trained-model-name", default=DEFAULT_TRAINED_MODEL_NAME)
+    parser.add_argument(
+        "--max-loras",
+        type=int,
+        default=DEFAULT_MAX_LORAS,
+        help="Passed to vLLM --max-loras when launching the generation server.",
+    )
+    parser.add_argument(
+        "--max-lora-rank",
+        type=int,
+        default=DEFAULT_MAX_LORA_RANK,
+        help="Passed to vLLM --max-lora-rank when launching the generation server.",
+    )
     parser.add_argument("--launch-generation-server", action="store_true")
     parser.add_argument("--generation-server-host", default="127.0.0.1")
     parser.add_argument("--generation-server-port", type=int, default=8000)
     parser.add_argument(
         "--generation-server-command",
         default=DEFAULT_QWEN_SERVER_COMMAND,
-        help="Command template used with --launch-generation-server.",
+        help="Command template used with --launch-generation-server. "
+        "Must enable LoRA without static --lora-modules; adapters are loaded via LoRARequest.",
     )
     parser.add_argument("--generation-max-tokens", type=int, default=512)
     parser.add_argument("--generation-temperature", type=float, default=0.0)
@@ -416,16 +440,50 @@ def build_multimodal_content(sample: EvalSample, *, include_media: bool = True) 
     return content
 
 
-def _post_chat_completion(router_address: str, payload: dict[str, Any]) -> dict[str, Any]:
-    url = f"http://{router_address}/v1/chat/completions"
+def _post_json(router_address: str, path: str, payload: dict[str, Any]) -> dict[str, Any] | str:
+    url = f"http://{router_address}{path}"
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=None) as response:
-            return json.loads(response.read().decode("utf-8"))
+            body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"POST {url} failed with HTTP {exc.code}: {body}") from exc
+    if not body:
+        return {}
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        return body
+
+
+def _post_chat_completion(router_address: str, payload: dict[str, Any]) -> dict[str, Any]:
+    response = _post_json(router_address, "/v1/chat/completions", payload)
+    if not isinstance(response, dict):
+        raise RuntimeError(f"Expected JSON object from chat completions, got: {response!r}")
+    return response
+
+
+def load_lora_adapter(
+    *,
+    router_address: str,
+    lora_name: str,
+    lora_path: str,
+) -> None:
+    """Register a PEFT adapter on a running vLLM-Omni server via LoRARequest.
+
+    This uses ``POST /v1/load_lora_adapter`` instead of static ``--lora-modules``.
+    Chat completions then select the adapter with ``model=<lora_name>``, which
+    resolves to a ``LoRARequest`` forwarded into ``AsyncOmni.generate()``.
+    """
+
+    result = _post_json(
+        router_address,
+        "/v1/load_lora_adapter",
+        {"lora_name": lora_name, "lora_path": lora_path},
+    )
+    logger.info("Loaded LoRA adapter via LoRARequest: name=%s path=%s result=%s", lora_name, lora_path, result)
 
 
 def wait_for_server(router_address: str, timeout_s: float, *, name: str) -> None:
@@ -592,21 +650,48 @@ def write_jsonl_row(path: Path, row: dict[str, Any]) -> None:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def _export_fsdp_lora_adapter(
+    *,
+    input_dir: Path,
+    output_dir: Path,
+    base_model_name_or_path: str | None,
+) -> None:
+    from verl_omni.utils.fsdp_utils import export_fsdp_lora_adapter
+
+    export_fsdp_lora_adapter(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        base_model_name_or_path=base_model_name_or_path,
+    )
+
+
 def _is_peft_adapter_dir(path: Path) -> bool:
-    return (path / "adapter_config.json").is_file() and (path / "adapter_model.safetensors").is_file()
+    return (path / "adapter_config.json").is_file() and (
+        (path / "adapter_model.safetensors").is_file() or (path / "adapter_model.bin").is_file()
+    )
 
 
 def _is_fsdp_lora_checkpoint_dir(path: Path) -> bool:
     return (path / "fsdp_config.json").is_file() and (path / "lora_train_meta.json").is_file()
 
 
-def resolve_adapter_path(adapter_path: str, base_model_name_or_path: str | None) -> str:
-    """Return a PEFT adapter path, exporting verl FSDP LoRA checkpoints when needed."""
+def resolve_adapter_path(adapter_path: str, base_model_name_or_path: str | None = None) -> str:
+    """Return a PEFT LoRA adapter directory for ``/v1/load_lora_adapter``.
+
+    Accepts a PEFT adapter directory directly. For verl FSDP / ``global_step_*``
+    checkpoints, reuses an existing ``lora_adapter/`` export when present,
+    otherwise converts the checkpoint with ``export_fsdp_lora_adapter``.
+    """
 
     path = Path(os.path.expanduser(adapter_path)).resolve()
     if _is_peft_adapter_dir(path):
         logger.info("Using PEFT LoRA adapter: %s", path)
         return str(path)
+
+    for candidate in (path / "lora_adapter", path / "actor" / "lora_adapter"):
+        if _is_peft_adapter_dir(candidate):
+            logger.info("Using exported PEFT LoRA adapter: %s", candidate)
+            return str(candidate)
 
     fsdp_checkpoint_dir = path
     if not _is_fsdp_lora_checkpoint_dir(fsdp_checkpoint_dir) and _is_fsdp_lora_checkpoint_dir(path / "actor"):
@@ -616,9 +701,7 @@ def resolve_adapter_path(adapter_path: str, base_model_name_or_path: str | None)
         output_dir = fsdp_checkpoint_dir / "lora_adapter"
         if not _is_peft_adapter_dir(output_dir):
             logger.info("Exporting FSDP LoRA checkpoint %s to %s", fsdp_checkpoint_dir, output_dir)
-            from verl_omni.utils.fsdp_utils import export_fsdp_lora_adapter
-
-            export_fsdp_lora_adapter(
+            _export_fsdp_lora_adapter(
                 input_dir=fsdp_checkpoint_dir,
                 output_dir=output_dir,
                 base_model_name_or_path=base_model_name_or_path,
@@ -628,8 +711,9 @@ def resolve_adapter_path(adapter_path: str, base_model_name_or_path: str | None)
         return str(output_dir)
 
     raise FileNotFoundError(
-        f"`--adapter-path` must point to a PEFT LoRA adapter directory, a verl FSDP actor checkpoint, "
-        f"or a global_step checkpoint containing actor/. Got: {adapter_path}"
+        f"`--adapter-path` must point to a PEFT LoRA adapter directory "
+        f"(adapter_config.json + adapter_model.safetensors|.bin), a verl FSDP "
+        f"actor checkpoint, or a global_step checkpoint containing actor/. Got: {adapter_path}"
     )
 
 
@@ -641,6 +725,8 @@ def _format_command(template: str, *, model: str, host: str, port: int, args: ar
         adapter_path=args.adapter_path,
         reference_model_name=args.reference_model_name,
         trained_model_name=args.trained_model_name,
+        max_loras=args.max_loras,
+        max_lora_rank=args.max_lora_rank,
     )
 
 
@@ -655,8 +741,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if output_path.exists():
         output_path.unlink()
 
-    if args.launch_generation_server:
-        args.adapter_path = resolve_adapter_path(args.adapter_path, args.model_path)
+    args.adapter_path = resolve_adapter_path(args.adapter_path, args.model_path)
 
     generation_command = (
         _format_command(
@@ -701,6 +786,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     ):
         if trained_router != args.generation_router_address:
             wait_for_server(trained_router, args.server_timeout_s, name="trained-generation")
+
+        # Attach the trained adapter through LoRARequest instead of --lora-modules.
+        if trained_router == args.generation_router_address:
+            load_lora_adapter(
+                router_address=trained_router,
+                lora_name=args.trained_model_name,
+                lora_path=args.adapter_path,
+            )
+
         for sample_id, sample in enumerate(samples):
             logger.info(
                 "Evaluating sample %d/%d uid=%s modality=%s", sample_id + 1, len(samples), sample.uid, sample.modality

@@ -203,6 +203,7 @@ for step in 25 50 75 100; do
       --max-samples "${MAX_SAMPLES}" \
       --model-path "${MODEL_PATH}" \
       --adapter-path "${CKPT_ROOT}/global_step_${step}" \
+      --max-lora-rank 64 \
       --launch-generation-server \
       --generation-router-address 127.0.0.1:8000 \
       --judge-router-address 127.0.0.1:8001
@@ -211,9 +212,24 @@ done
 ```
 
 `vlm_as_judge.py` compares base-model answers with LoRA-adapter answers and
-writes per-sample judge results plus summary metrics. `--adapter-path` may point
-directly to `global_step_*`; the script exports the FSDP LoRA checkpoint to a
-PEFT adapter if needed.
+writes per-sample judge results plus summary metrics. Launch the generation
+server with `--enable-lora` (no static `--lora-modules`); the script registers
+the PEFT adapter through `POST /v1/load_lora_adapter` as a `LoRARequest`.
+`--adapter-path` may point to a PEFT adapter directory or a `global_step_*` /
+FSDP checkpoint; non-PEFT paths are auto-exported via
+`export_fsdp_lora_adapter` when needed.
+
+This LoRA-request path needs the vLLM-Omni fix that forwards `lora_request`
+into `AsyncOmni.generate()` ([`c588208`](https://github.com/vllm-project/vllm-omni/commit/c588208cc6132b08f5066420468e047ca581fbdc),
+issue [#5369](https://github.com/vllm-project/vllm-omni/issues/5369)). Install
+that commit (or any newer revision that already contains the fix) with:
+
+```bash
+uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@c588208"
+```
+
+If your vLLM-Omni build is newer than `c588208` and already includes this
+forwarding fix, you do not need to pin this commit.
 
 ## SD3.5 Offline DPO
 
