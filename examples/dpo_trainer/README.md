@@ -2,12 +2,14 @@
 
 Last updated: 06/30/2026
 
-This directory contains examples for **direct-preference** diffusion training
-(DPO and related losses). Two workflows are supported:
+This directory contains examples for **direct-preference** training (DPO and
+related losses). Three workflows are supported:
 
 1. **Qwen-Image online DPO** — rollout and reward run each training step;
    preference pairs are formed from live samples.
-2. **SD3.5 offline DPO** — win/lose pairs and precomputed tensors are prepared
+2. **Qwen3-Omni offline DPO** — multimodal preference pairs are prepared ahead
+   of time; training updates a thinker-only LoRA adapter.
+3. **SD3.5 offline DPO** — win/lose pairs and precomputed tensors are prepared
    ahead of time; training reads them from parquet without rollout or reward
    workers.
 
@@ -84,6 +86,134 @@ This script uses a 16-NPU global distribution strategy with:
 
 > **Note:** Reward curves may differ between runs because online DPO depends on stochastic diffusion rollouts and the example scripts do not fix the data seed.
 
+
+## Qwen3-Omni Offline DPO
+
+This workflow trains Qwen3-Omni on offline image/video/audio preference pairs
+from Omni-Preference. Training does not run rollout or online reward scoring; it
+loads `[chosen, rejected]` answer pairs from parquet and optimizes a LoRA adapter
+with the omni DPO loss.
+
+### Dataset
+
+Prepare Omni-Preference parquet files by following
+[`data_process/omni_preference_dpo_dataset.md`](data_process/omni_preference_dpo_dataset.md).
+The training script expects:
+
+```text
+${DATA_DIR}/image/train.parquet
+${DATA_DIR}/image/test.parquet
+${DATA_DIR}/video/train.parquet
+${DATA_DIR}/video/test.parquet
+${DATA_DIR}/audio/train.parquet
+${DATA_DIR}/audio/test.parquet
+```
+
+Each row is one preference pair with a multimodal prompt, `chosen`, `rejected`,
+`win_score`, `lose_score`, media paths, and modality metadata.
+
+### Training
+
+Run the LoRA DPO example:
+
+```bash
+DATA_DIR=/path/to/Omni-Preference/parquet_dpo \
+MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+bash examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh
+```
+
+Common overrides:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+TOTAL_TRAINING_STEPS=100 \
+TRAIN_BATCH_SIZE=32 \
+VAL_BATCH_SIZE=32 \
+bash examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh
+```
+
+Key settings:
+
+- `algorithm.sample_source=offline`: read preference pairs from parquet; no
+  rollout or reward worker is used.
+- `algorithm.paired_preference=true`: treat adjacent chosen/rejected rows as one
+  DPO pair after collation.
+- `data.balance_max_samples_by_modality=true`: split `val_max_samples` evenly
+  across image/video/audio validation rows.
+- `data.val_max_samples`: total validation sample cap. With the default three
+  modalities, `96` means `32` per modality.
+- `ModalityGroupedBatchSampler`: keeps batches single-modality, which is required
+  by the offline MLLM DPO collator.
+- `actor_rollout_ref.model.lora_rank`, `lora_alpha`, `target_modules`: LoRA
+  configuration for the trainable thinker modules.
+- `actor_rollout_ref.model.exclude_modules`: freezes talker, code2wav, visual,
+  and audio tower modules in the example.
+- `actor_rollout_ref.actor.omni_loss.*`: DPO loss options such as `beta`,
+  `label_smoothing`, `loss_type`, and whether to average log-probs.
+- `trainer.save_freq` / `trainer.test_freq`: checkpoint and validation interval
+  in training steps.
+
+### Performance
+
+> Measured on 4× NVIDIA H800 GPUs. Offline DPO reads preference pairs directly,
+> so no reward model is used during training.
+
+| Script | Model | Algorithm | # Cards | Reward Model | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / Card / Seconds) | Time per Step (Seconds) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh` | Qwen3-Omni-30B-A3B-Instruct | Offline DPO + LoRA | 4 | None | 32×2=64 | 2 | 0.1533 | 106.95 |
+
+### Validation
+
+Training-time validation reports offline DPO metrics on held-out parquet rows.
+For model-quality comparison, use the MiniCPM-o judge script after checkpoints
+are saved:
+
+Start a MiniCPM-o OpenAI-compatible judge server first:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 \
+HF_HOME=${HF_HOME:-$HOME/.cache/huggingface} \
+HF_MODULES_CACHE=${HF_MODULES_CACHE:-$HOME/.cache/huggingface/modules} \
+VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-XFORMERS} \
+VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0} \
+vllm serve openbmb/MiniCPM-o-4_5 \
+  --host 127.0.0.1 \
+  --port 8001 \
+  --dtype bfloat16 \
+  --trust-remote-code \
+  --enforce-eager
+```
+
+Then evaluate each checkpoint and modality:
+
+```bash
+CKPT_ROOT=checkpoints/omni-preference-dpo/qwen3-omni-offline-dpo-lora
+DATA_DIR=/path/to/Omni-Preference/parquet_dpo
+MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct
+OUT_DIR=outputs/qwen3_omni_judge_eval
+MAX_SAMPLES=60
+
+mkdir -p "${OUT_DIR}"
+
+for step in 25 50 75 100; do
+  for modality in image video audio; do
+    CUDA_VISIBLE_DEVICES=0,1,2 python3 examples/dpo_trainer/qwen3_omni/vlm_as_judge.py \
+      --data-files "${DATA_DIR}/${modality}/test.parquet" \
+      --output-jsonl "${OUT_DIR}/global_step_${step}_${modality}.jsonl" \
+      --max-samples "${MAX_SAMPLES}" \
+      --model-path "${MODEL_PATH}" \
+      --adapter-path "${CKPT_ROOT}/global_step_${step}" \
+      --launch-generation-server \
+      --generation-router-address 127.0.0.1:8000 \
+      --judge-router-address 127.0.0.1:8001
+  done
+done
+```
+
+`vlm_as_judge.py` compares base-model answers with LoRA-adapter answers and
+writes per-sample judge results plus summary metrics. `--adapter-path` may point
+directly to `global_step_*`; the script exports the FSDP LoRA checkpoint to a
+PEFT adapter if needed.
 
 ## SD3.5 Offline DPO
 

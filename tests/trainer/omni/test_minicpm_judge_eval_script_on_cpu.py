@@ -24,11 +24,11 @@ from types import SimpleNamespace
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SCRIPT_PATH = REPO_ROOT / "examples" / "dpo_trainer" / "qwen3_omni" / "compare_ref_vs_trained_minicpm_judge.py"
+SCRIPT_PATH = REPO_ROOT / "examples" / "dpo_trainer" / "qwen3_omni" / "vlm_as_judge.py"
 
 
 def _load_script_module():
-    spec = importlib.util.spec_from_file_location("compare_ref_vs_trained_minicpm_judge", SCRIPT_PATH)
+    spec = importlib.util.spec_from_file_location("vlm_as_judge", SCRIPT_PATH)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load script from {SCRIPT_PATH}")
     module = importlib.util.module_from_spec(spec)
@@ -38,6 +38,12 @@ def _load_script_module():
 
 
 judge_mod = _load_script_module()
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
 
 
 def test_build_multimodal_content_requires_local_media_files(tmp_path):
@@ -114,6 +120,38 @@ def test_parse_judge_response_maps_randomized_labels_back_to_models():
     assert result.trained_score == 8
     assert result.reference_score == 6
     assert result.trained_dimension_scores["accuracy"] == 7
+
+
+def test_read_samples_applies_max_samples_per_data_file(tmp_path):
+    image_path = tmp_path / "image.jsonl"
+    audio_path = tmp_path / "audio.jsonl"
+    _write_jsonl(
+        image_path,
+        [
+            {"uid": "image-0", "data_source": "omni_preference/image", "prompt": [{"role": "user", "content": "i0"}]},
+            {"uid": "image-1", "data_source": "omni_preference/image", "prompt": [{"role": "user", "content": "i1"}]},
+        ],
+    )
+    _write_jsonl(
+        audio_path,
+        [
+            {"uid": "audio-0", "data_source": "omni_preference/audio", "prompt": [{"role": "user", "content": "a0"}]},
+            {"uid": "audio-1", "data_source": "omni_preference/audio", "prompt": [{"role": "user", "content": "a1"}]},
+        ],
+    )
+
+    samples = judge_mod.read_samples([str(image_path), str(audio_path)], max_samples=1)
+
+    assert [sample.uid for sample in samples] == ["image-0", "audio-0"]
+
+
+def test_resolve_adapter_path_accepts_exported_peft_adapter(tmp_path):
+    adapter_path = tmp_path / "lora_adapter"
+    adapter_path.mkdir()
+    (adapter_path / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (adapter_path / "adapter_model.safetensors").write_bytes(b"fake")
+
+    assert judge_mod.resolve_adapter_path(str(adapter_path), "base") == str(adapter_path.resolve())
 
 
 def test_run_uses_mock_generation_and_judge_endpoints(tmp_path, monkeypatch):

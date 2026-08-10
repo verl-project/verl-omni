@@ -199,7 +199,10 @@ def parse_args() -> argparse.Namespace:
         "--output-jsonl", required=True, help="Where per-sample generation and judge results are written."
     )
     parser.add_argument(
-        "--max-samples", type=int, default=-1, help="Maximum number of samples to evaluate after loading."
+        "--max-samples",
+        type=int,
+        default=-1,
+        help="Maximum number of samples to evaluate from each input data file.",
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed used for A/B judge order.")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -362,6 +365,8 @@ def read_samples(data_files: list[str], max_samples: int) -> list[EvalSample]:
             dataframe = pd.read_json(path)
         else:
             dataframe = pd.read_parquet(path)
+        if max_samples > 0:
+            dataframe = dataframe.head(max_samples)
         for index, row in enumerate(dataframe.to_dict(orient="records")):
             prompt_text, media = _prompt_to_text_and_media(row.get("prompt", []), row)
             modality = _infer_modality(row, media)
@@ -376,8 +381,6 @@ def read_samples(data_files: list[str], max_samples: int) -> list[EvalSample]:
                     raw_prompt=row.get("prompt", []),
                 )
             )
-            if 0 < max_samples <= len(samples):
-                return samples
     return samples
 
 
@@ -589,6 +592,47 @@ def write_jsonl_row(path: Path, row: dict[str, Any]) -> None:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def _is_peft_adapter_dir(path: Path) -> bool:
+    return (path / "adapter_config.json").is_file() and (path / "adapter_model.safetensors").is_file()
+
+
+def _is_fsdp_lora_checkpoint_dir(path: Path) -> bool:
+    return (path / "fsdp_config.json").is_file() and (path / "lora_train_meta.json").is_file()
+
+
+def resolve_adapter_path(adapter_path: str, base_model_name_or_path: str | None) -> str:
+    """Return a PEFT adapter path, exporting verl FSDP LoRA checkpoints when needed."""
+
+    path = Path(os.path.expanduser(adapter_path)).resolve()
+    if _is_peft_adapter_dir(path):
+        logger.info("Using PEFT LoRA adapter: %s", path)
+        return str(path)
+
+    fsdp_checkpoint_dir = path
+    if not _is_fsdp_lora_checkpoint_dir(fsdp_checkpoint_dir) and _is_fsdp_lora_checkpoint_dir(path / "actor"):
+        fsdp_checkpoint_dir = path / "actor"
+
+    if _is_fsdp_lora_checkpoint_dir(fsdp_checkpoint_dir):
+        output_dir = fsdp_checkpoint_dir / "lora_adapter"
+        if not _is_peft_adapter_dir(output_dir):
+            logger.info("Exporting FSDP LoRA checkpoint %s to %s", fsdp_checkpoint_dir, output_dir)
+            from verl_omni.utils.fsdp_utils import export_fsdp_lora_adapter
+
+            export_fsdp_lora_adapter(
+                input_dir=fsdp_checkpoint_dir,
+                output_dir=output_dir,
+                base_model_name_or_path=base_model_name_or_path,
+            )
+        else:
+            logger.info("Reusing exported PEFT LoRA adapter: %s", output_dir)
+        return str(output_dir)
+
+    raise FileNotFoundError(
+        f"`--adapter-path` must point to a PEFT LoRA adapter directory, a verl FSDP actor checkpoint, "
+        f"or a global_step checkpoint containing actor/. Got: {adapter_path}"
+    )
+
+
 def _format_command(template: str, *, model: str, host: str, port: int, args: argparse.Namespace) -> str:
     return template.format(
         model=model,
@@ -610,6 +654,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.exists():
         output_path.unlink()
+
+    if args.launch_generation_server:
+        args.adapter_path = resolve_adapter_path(args.adapter_path, args.model_path)
 
     generation_command = (
         _format_command(
