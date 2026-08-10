@@ -38,9 +38,6 @@ __all__ = [
 @dataclass
 class DiffusionLossConfig(BaseConfig):
     loss_mode: str = "flow_grpo"
-    ce_weight: float = 1.0
-    mse_weight: float = 1.0
-    ignore_index: int = -100
     clip_ratio: float = 0.0001
     adv_clip_max: float = 5.0
     mix_beta: float = 0.5
