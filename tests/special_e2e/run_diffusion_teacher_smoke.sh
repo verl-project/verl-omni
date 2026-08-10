@@ -12,21 +12,26 @@
 # Reward is the pure-CPU jpeg compressibility score, so no reward-model server is
 # needed -- this smoke is about the teacher runtime, not about reward quality.
 #
-# MODEL_PATH/TEACHER_PATH must be real SD3 checkpoints: the online path serves
-# rollout through vllm-omni, whose SD3 pipeline builds the *slow* T5Tokenizer, and
-# build_sd3_tiny_random.py writes a fast tokenizer with no sentencepiece model
-# (`TypeError: argument 'vocab' ...`). The tiny checkpoint is therefore usable by
-# the offline-DPO recipe but not by any rollout-backed recipe, this one included.
+# By default the script builds two tiny random SD3 checkpoints (different seeds,
+# so the step-1 KL is positive) and needs no downloads; set MODEL_PATH and
+# TEACHER_PATH to run against real checkpoints instead.
 #
 # Override via env: NUM_GPUS, MODEL_PATH, TEACHER_PATH, DATA_DIR, TOTAL_TRAIN_STEPS, SMOKE
 set -euo pipefail
 
 NUM_GPUS=${NUM_GPUS:-1}
-MODEL_PATH=${MODEL_PATH:?set MODEL_PATH to an SD3 checkpoint (see note above)}
-TEACHER_PATH=${TEACHER_PATH:?set TEACHER_PATH to a second SD3 checkpoint}
+MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/sd3-teacher-smoke-student}
+TEACHER_PATH=${TEACHER_PATH:-${HOME}/models/tiny-random/sd3-teacher-smoke-teacher}
 DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_diffusion_teacher}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-1}
 SMOKE=${SMOKE:-distill}
+
+if [[ ! -f "${MODEL_PATH}/model_index.json" ]]; then
+    python3 tests/special_e2e/build_sd3_tiny_random.py --output-dir "${MODEL_PATH}" --seed 0
+fi
+if [[ ! -f "${TEACHER_PATH}/model_index.json" ]]; then
+    python3 tests/special_e2e/build_sd3_tiny_random.py --output-dir "${TEACHER_PATH}" --seed 1
+fi
 
 ENGINE=vllm_omni
 max_prompt_length=128
