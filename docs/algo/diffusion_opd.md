@@ -81,6 +81,12 @@ The teacher reuses the reference model's scoring configuration:
 Supported scope: the policy-gradient trainer with online sampling, FSDP/FSDP2
 engines, and a single teacher. Unsupported combinations raise at startup.
 
+A complete working recipe is
+[`examples/diffusionopd_trainer/sd35/run_sd35_medium_ocr_distill.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionopd_trainer/sd35/run_sd35_medium_ocr_distill.sh):
+SD3.5-Medium distills from an OCR-tuned teacher while the OCR reward is
+monitored only, showing the student reach the teacher's reward level through
+distillation alone.
+
 Pure distillation — the student imitates the teacher, task reward is only
 monitored:
 
