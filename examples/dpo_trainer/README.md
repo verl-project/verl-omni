@@ -166,12 +166,14 @@ Key settings:
 
 Training-time validation reports offline DPO metrics on held-out parquet rows.
 For model-quality comparison, use the MiniCPM-o judge script after checkpoints
-are saved:
+are saved.
 
-Start a MiniCPM-o OpenAI-compatible judge server first:
+#### 1. Start the MiniCPM-o judge server
+
+Keep the judge on a separate GPU from generation:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 \
+CUDA_VISIBLE_DEVICES=4 \
 HF_HOME=${HF_HOME:-$HOME/.cache/huggingface} \
 HF_MODULES_CACHE=${HF_MODULES_CACHE:-$HOME/.cache/huggingface/modules} \
 VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-XFORMERS} \
@@ -184,7 +186,12 @@ vllm serve openbmb/MiniCPM-o-4_5 \
   --enforce-eager
 ```
 
-Then evaluate each checkpoint and modality:
+#### 2. Run multi-GPU Transformers + LoRA evaluation
+
+`vlm_as_judge.py` uses Hugging Face Transformers (not vLLM-Omni). Multi-GPU
+placement is controlled only by `CUDA_VISIBLE_DEVICES`; the default
+`--device-map meta-offload-non-thinker` keeps `talker` / `code2wav` on the meta
+device and auto-shards the thinker across the visible GPUs.
 
 ```bash
 CKPT_ROOT=checkpoints/omni-preference-dpo/qwen3-omni-offline-dpo-lora
@@ -197,30 +204,41 @@ mkdir -p "${OUT_DIR}"
 
 for step in 25 50 75 100; do
   for modality in image video audio; do
-    CUDA_VISIBLE_DEVICES=1 python3 examples/dpo_trainer/qwen3_omni/vlm_as_judge.py \
+    CUDA_VISIBLE_DEVICES=0,1,2,3 python3 examples/dpo_trainer/qwen3_omni/vlm_as_judge.py \
       --data-files "${DATA_DIR}/${modality}/test.parquet" \
       --output-jsonl "${OUT_DIR}/global_step_${step}_${modality}.jsonl" \
       --max-samples "${MAX_SAMPLES}" \
       --model-path "${MODEL_PATH}" \
       --adapter-path "${CKPT_ROOT}/global_step_${step}" \
+      --device-map meta-offload-non-thinker \
       --judge-router-address 127.0.0.1:8001
   done
 done
 ```
 
-`vlm_as_judge.py` compares base-model answers with LoRA-adapter answers and
-writes per-sample judge results plus summary metrics. Generation uses Hugging
-Face Transformers (`Qwen3OmniMoeForConditionalGeneration.generate`) rather than
-vLLM-Omni: the script loads the base checkpoint, unfuses Qwen3-Omni MoE experts
-so PEFT keys match verl training, attaches the adapter with
-`PeftModel.from_pretrained`, then toggles adapters off/on for reference vs
-trained answers. Multimodal prompts are prepared with `qwen_omni_utils.process_mm_info`.
-`--adapter-path` may point to a PEFT adapter directory or a `global_step_*` /
-FSDP checkpoint; non-PEFT paths are auto-exported via `export_fsdp_lora_adapter`
-when needed.
+`--adapter-path` may be any of:
 
-Requires `transformers`, `peft`, `accelerate`, and `qwen-omni-utils` in the
-environment (FlashAttention 2 is optional via `--attn-implementation flash_attention_2`).
+- a PEFT directory (`adapter_config.json` + `adapter_model.safetensors|.bin`)
+- `.../global_step_N` (uses `actor/lora_adapter` when present)
+- `.../global_step_N/actor` (FSDP dir with `fsdp_config.json` + `lora_train_meta.json`)
+
+If the PEFT export is missing, the script runs `export_fsdp_lora_adapter` into
+`actor/lora_adapter/` automatically.
+
+#### Notes
+
+- Generation loads the base model, unfuses Qwen3-Omni MoE experts so PEFT keys
+  match verl training, attaches the adapter with `PeftModel.from_pretrained`,
+  then disables adapters for the reference answer and enables them for the
+  trained answer. Multimodal prompts use `qwen_omni_utils.process_mm_info`.
+- `--device-map` options:
+  - `meta-offload-non-thinker` (default): lowest VRAM for text-only eval
+  - `auto`: plain Accelerate `device_map="auto"`
+  - `cuda` / `cpu`: place the whole model on one device (not recommended for 30B)
+- Qwen3-Omni-30B thinker typically needs multiple 80GB GPUs; 4 visible devices
+  is a practical starting point.
+- Requires `transformers`, `peft`, `accelerate`, and `qwen-omni-utils`.
+  FlashAttention 2 is optional via `--attn-implementation flash_attention_2`.
 
 ## SD3.5 Offline DPO
 

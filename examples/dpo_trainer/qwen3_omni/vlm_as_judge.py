@@ -229,6 +229,16 @@ def parse_args() -> argparse.Namespace:
         help="Attention implementation passed to from_pretrained (e.g. sdpa, flash_attention_2).",
     )
     parser.add_argument(
+        "--device-map",
+        default="meta-offload-non-thinker",
+        choices=["auto", "meta-offload-non-thinker", "cuda", "cpu"],
+        help="How to place Qwen3-Omni modules. "
+        "'meta-offload-non-thinker' keeps talker/code2wav on the meta device (no VRAM) and "
+        "shards thinker with accelerate auto placement; "
+        "'auto' is plain device_map='auto'; "
+        "'cuda'/'cpu' place the whole model on one device.",
+    )
+    parser.add_argument(
         "--use-audio-in-video",
         action="store_true",
         help="Forward use_audio_in_video=True to process_mm_info / processor / generate.",
@@ -722,6 +732,74 @@ def _move_inputs_to_model(inputs: Any, model: Any) -> Any:
     return moved
 
 
+META_OFFLOAD_MODULE_PREFIXES = ("talker", "code2wav")
+
+
+def _concrete_dtype_for_memory_planning(dtype: str | torch.dtype) -> torch.dtype:
+    if isinstance(dtype, torch.dtype):
+        return dtype
+    if dtype == "auto":
+        return torch.bfloat16
+    return getattr(torch, str(dtype))
+
+
+def build_omni_device_map(
+    model_path: str,
+    *,
+    dtype: str | torch.dtype,
+    strategy: str,
+) -> str | dict[str, Any]:
+    """Resolve a transformers/accelerate device_map for Qwen3-Omni.
+
+    ``meta-offload-non-thinker`` keeps talker/code2wav on the meta device so their
+    weights are never materialized into VRAM, then auto-shards the remaining
+    modules (primarily thinker) across visible GPUs. Loading still uses Accelerate
+    meta-init via ``low_cpu_mem_usage=True``.
+    """
+    if strategy == "auto":
+        return "auto"
+    if strategy in {"cuda", "cpu"}:
+        return strategy
+
+    if strategy != "meta-offload-non-thinker":
+        raise ValueError(f"Unsupported device-map strategy: {strategy}")
+
+    from accelerate import init_empty_weights
+    from accelerate.utils import get_balanced_memory, infer_auto_device_map
+    from transformers import AutoConfig, Qwen3OmniMoeForConditionalGeneration
+
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    plan_dtype = _concrete_dtype_for_memory_planning(dtype)
+    with init_empty_weights():
+        empty = Qwen3OmniMoeForConditionalGeneration.from_config(config, trust_remote_code=True)
+
+    offload_prefixes = [name for name in META_OFFLOAD_MODULE_PREFIXES if hasattr(empty, name)]
+    # Drop non-thinker modules before memory planning so thinker can use that VRAM.
+    for prefix in offload_prefixes:
+        try:
+            delattr(empty, prefix)
+        except Exception:
+            setattr(empty, prefix, None)
+
+    no_split = list(getattr(empty, "_no_split_modules", None) or [])
+    max_memory = get_balanced_memory(empty, dtype=plan_dtype, no_split_module_classes=no_split)
+    device_map = infer_auto_device_map(
+        empty,
+        max_memory=max_memory,
+        no_split_module_classes=no_split,
+        dtype=plan_dtype,
+    )
+    for prefix in offload_prefixes:
+        device_map[prefix] = "meta"
+
+    logger.info(
+        "Built meta-offload device_map: offload=%s placed_modules=%d",
+        offload_prefixes,
+        len(device_map),
+    )
+    return device_map
+
+
 def _adapter_context(model: Any, *, trained: bool):
     """Enable LoRA for trained generation; disable it for the reference baseline."""
     if trained:
@@ -773,22 +851,33 @@ class TransformersOmniGenerator(AbstractContextManager):
 
         self._process_mm_info = process_mm_info
         dtype = _resolve_torch_dtype(self.args.dtype)
+        device_map = build_omni_device_map(
+            self.args.model_path,
+            dtype=dtype,
+            strategy=self.args.device_map,
+        )
         logger.info(
-            "Loading Qwen3-Omni with transformers: model=%s dtype=%s attn=%s",
+            "Loading Qwen3-Omni with transformers: model=%s dtype=%s attn=%s device_map=%s",
             self.args.model_path,
             self.args.dtype,
             self.args.attn_implementation,
+            self.args.device_map,
         )
         model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
             self.args.model_path,
             dtype=dtype,
-            device_map="auto",
+            device_map=device_map,
+            low_cpu_mem_usage=True,
             attn_implementation=self.args.attn_implementation,
             trust_remote_code=True,
         )
+        # Text-only eval: drop talker if it was materialized.
         disable_talker = getattr(model, "disable_talker", None)
         if callable(disable_talker):
-            disable_talker()
+            try:
+                disable_talker()
+            except Exception as exc:
+                logger.warning("disable_talker() failed after load: %s", exc)
 
         converted = unfuse_qwen3_omni_thinker_experts(model)
         logger.info("Unfused %d Qwen3-Omni thinker expert module(s) before LoRA load", converted)
@@ -798,7 +887,11 @@ class TransformersOmniGenerator(AbstractContextManager):
             self.args.trained_model_name,
             self.args.adapter_path,
         )
-        self.model = PeftModel.from_pretrained(model, self.args.adapter_path).eval()
+        self.model = PeftModel.from_pretrained(
+            model,
+            self.args.adapter_path,
+            low_cpu_mem_usage=True,
+        ).eval()
         self.processor = Qwen3OmniMoeProcessor.from_pretrained(self.args.model_path, trust_remote_code=True)
         return self
 
