@@ -171,7 +171,7 @@ are saved:
 Start a MiniCPM-o OpenAI-compatible judge server first:
 
 ```bash
-CUDA_VISIBLE_DEVICES=3 \
+CUDA_VISIBLE_DEVICES=5 \
 HF_HOME=${HF_HOME:-$HOME/.cache/huggingface} \
 HF_MODULES_CACHE=${HF_MODULES_CACHE:-$HOME/.cache/huggingface/modules} \
 VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-XFORMERS} \
@@ -190,6 +190,7 @@ Then evaluate each checkpoint and modality:
 CKPT_ROOT=checkpoints/omni-preference-dpo/qwen3-omni-offline-dpo-lora
 DATA_DIR=/path/to/Omni-Preference/parquet_dpo
 MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct
+DEPLOY_CONFIG=examples/gspo_trainer/qwen3_omni/qwen3_omni_thinker_only.yaml
 OUT_DIR=outputs/qwen3_omni_judge_eval
 MAX_SAMPLES=60
 
@@ -197,30 +198,36 @@ mkdir -p "${OUT_DIR}"
 
 for step in 25 50 75 100; do
   for modality in image video audio; do
-    CUDA_VISIBLE_DEVICES=0,1,2 python3 examples/dpo_trainer/qwen3_omni/vlm_as_judge.py \
+    CUDA_VISIBLE_DEVICES=0,1,2,3 python3 examples/dpo_trainer/qwen3_omni/vlm_as_judge.py \
       --data-files "${DATA_DIR}/${modality}/test.parquet" \
       --output-jsonl "${OUT_DIR}/global_step_${step}_${modality}.jsonl" \
       --max-samples "${MAX_SAMPLES}" \
       --model-path "${MODEL_PATH}" \
       --adapter-path "${CKPT_ROOT}/global_step_${step}" \
-      --max-lora-rank 64 \
-      --launch-generation-server \
-      --generation-router-address 127.0.0.1:8000 \
+      --deploy-config "${DEPLOY_CONFIG}" \
       --judge-router-address 127.0.0.1:8001
   done
 done
 ```
 
 `vlm_as_judge.py` compares base-model answers with LoRA-adapter answers and
-writes per-sample judge results plus summary metrics. Launch the generation
-server with `--enable-lora` (no static `--lora-modules`); the script registers
-the PEFT adapter through `POST /v1/load_lora_adapter` as a `LoRARequest`.
+writes per-sample judge results plus summary metrics. The script starts a real
+`AsyncOmni` engine from `--model-path` and `--deploy-config`, then generates
+the reference answer with no adapter and the trained answer with a `LoRARequest`.
+Optional `--tensor-parallel-size` can pin TP explicitly; otherwise TP and
+`runtime.devices` are derived from `CUDA_VISIBLE_DEVICES` (remapped to
+`0..(N-1)`) and written into a temporary deploy YAML before engine start.
+Legacy `stage_args` YAMLs (such as `qwen3_omni_thinker_only.yaml`) are passed
+to AsyncOmni via `stage_configs_path` so local TP/devices are honored; using
+`deploy_config` for those files would fall back to the registry multi-stage
+pipeline.
 `--adapter-path` may point to a PEFT adapter directory or a `global_step_*` /
-FSDP checkpoint; non-PEFT paths are auto-exported via
-`export_fsdp_lora_adapter` when needed.
+FSDP checkpoint; non-PEFT paths are auto-exported via `export_fsdp_lora_adapter`
+when needed.
 
-This LoRA-request path needs the vLLM-Omni fix that forwards `lora_request`
-into `AsyncOmni.generate()` ([`c588208`](https://github.com/vllm-project/vllm-omni/commit/c588208cc6132b08f5066420468e047ca581fbdc),
+This direct `AsyncOmni.generate(..., lora_request=...)` path needs the vLLM-Omni
+fix that forwards `lora_request` into generation
+([`c588208`](https://github.com/vllm-project/vllm-omni/commit/c588208cc6132b08f5066420468e047ca581fbdc),
 issue [#5369](https://github.com/vllm-project/vllm-omni/issues/5369)). Install
 that commit (or any newer revision that already contains the fix) with:
 
@@ -229,7 +236,8 @@ uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@c5
 ```
 
 If your vLLM-Omni build is newer than `c588208` and already includes this
-forwarding fix, you do not need to pin this commit.
+forwarding fix, you do not need to pin this commit. You may need to update `vllm` to match 
+the versiono of `vllm-omni`.    
 
 ## SD3.5 Offline DPO
 

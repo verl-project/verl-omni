@@ -14,14 +14,13 @@
 # limitations under the License.
 """Compare reference and trained Qwen3-Omni answers with a MiniCPM-o judge.
 
-The script expects OpenAI-compatible chat-completion endpoints:
+The script expects:
 
-1. a Qwen3-Omni / vLLM-Omni generation endpoint that serves the base model with
-   ``--enable-lora``. The trained adapter is attached at runtime through
-   ``POST /v1/load_lora_adapter`` (a ``LoRARequest``), then selected by
-   ``model=<trained_model_name>`` on chat completions. Requires vLLM-Omni with
-   the LoRA-request forwarding fix (``c588208`` / issue #5369) or newer.
-2. a MiniCPM-o judge endpoint, by default ``openbmb/MiniCPM-o-4_5``.
+1. a Qwen3-Omni / vLLM-Omni generation backend. By default this uses a real
+   ``AsyncOmni`` engine and passes ``LoRARequest`` directly to
+   ``AsyncOmni.generate()``.
+2. a MiniCPM-o OpenAI-compatible judge endpoint, by default
+   ``openbmb/MiniCPM-o-4_5``.
 
 It reads held-out Omni-Preference rows, generates one answer with the reference
 model and one with the trained LoRA for each prompt, then asks MiniCPM-o to
@@ -31,7 +30,9 @@ score and compare the two answers under the original multimodal input.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
+import importlib.util
 import json
 import logging
 import mimetypes
@@ -40,6 +41,7 @@ import random
 import re
 import signal
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -51,22 +53,15 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import yaml
 
 logger = logging.getLogger("qwen3_omni_minicpm_judge")
 
-DEFAULT_QWEN_SERVER_COMMAND = (
-    "vllm serve {model} --host {host} --port {port} --dtype bfloat16 "
-    "--trust-remote-code --served-model-name {reference_model_name} "
-    "--enable-lora --max-loras {max_loras} --max-lora-rank {max_lora_rank}"
-)
 DEFAULT_JUDGE_SERVER_COMMAND = (
     "vllm serve {model} --host {host} --port {port} --dtype bfloat16 --trust-remote-code --enforce-eager"
 )
 DEFAULT_JUDGE_MODEL = "openbmb/MiniCPM-o-4_5"
-DEFAULT_GENERATION_MODEL_NAME = "qwen3-omni-reference"
 DEFAULT_TRAINED_MODEL_NAME = "qwen3-omni-trained"
-DEFAULT_MAX_LORAS = 1
-DEFAULT_MAX_LORA_RANK = 64
 MEDIA_KEYS = (("image", "images"), ("video", "videos"), ("audio", "audios"))
 MEDIA_CONTENT_TYPES = {
     "image": ("image_url", "image_url"),
@@ -219,37 +214,22 @@ def parse_args() -> argparse.Namespace:
         "--adapter-path",
         required=True,
         help="PEFT LoRA adapter directory, or a verl FSDP / global_step checkpoint. "
-        "Non-PEFT checkpoints are exported via export_fsdp_lora_adapter, then loaded "
-        "at runtime via POST /v1/load_lora_adapter as a LoRARequest.",
+        "Non-PEFT checkpoints are exported via export_fsdp_lora_adapter, then used "
+        "as the trained LoRARequest.",
     )
-    parser.add_argument("--generation-router-address", default="127.0.0.1:8000")
-    parser.add_argument(
-        "--trained-generation-router-address",
-        default=None,
-        help="Optional separate endpoint for the trained model. Defaults to --generation-router-address.",
-    )
-    parser.add_argument("--reference-model-name", default=DEFAULT_GENERATION_MODEL_NAME)
     parser.add_argument("--trained-model-name", default=DEFAULT_TRAINED_MODEL_NAME)
     parser.add_argument(
-        "--max-loras",
-        type=int,
-        default=DEFAULT_MAX_LORAS,
-        help="Passed to vLLM --max-loras when launching the generation server.",
+        "--deploy-config",
+        required=True,
+        help="Real vLLM-Omni deploy/stage YAML used by AsyncOmni.",
     )
     parser.add_argument(
-        "--max-lora-rank",
+        "--tensor-parallel-size",
         type=int,
-        default=DEFAULT_MAX_LORA_RANK,
-        help="Passed to vLLM --max-lora-rank when launching the generation server.",
-    )
-    parser.add_argument("--launch-generation-server", action="store_true")
-    parser.add_argument("--generation-server-host", default="127.0.0.1")
-    parser.add_argument("--generation-server-port", type=int, default=8000)
-    parser.add_argument(
-        "--generation-server-command",
-        default=DEFAULT_QWEN_SERVER_COMMAND,
-        help="Command template used with --launch-generation-server. "
-        "Must enable LoRA without static --lora-modules; adapters are loaded via LoRARequest.",
+        default=None,
+        help="Override stage-0 tensor_parallel_size in --deploy-config before AsyncOmni starts. "
+        "runtime.devices is always derived from CUDA_VISIBLE_DEVICES as 0..(N-1). "
+        "If omitted, TP defaults to the CUDA_VISIBLE_DEVICES count when that env is set.",
     )
     parser.add_argument("--generation-max-tokens", type=int, default=512)
     parser.add_argument("--generation-temperature", type=float, default=0.0)
@@ -276,6 +256,125 @@ def configure_logging(level: str) -> None:
         level=getattr(logging, level.upper()),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+
+def _parse_cuda_visible_devices(value: str | None = None) -> list[str] | None:
+    raw = os.environ["CUDA_VISIBLE_DEVICES"] if value is None and "CUDA_VISIBLE_DEVICES" in os.environ else value
+    if raw is None:
+        return None
+    parts = [part.strip() for part in str(raw).split(",")]
+    devices = [part for part in parts if part]
+    if not devices:
+        raise ValueError(f"CUDA_VISIBLE_DEVICES must list at least one GPU id, got: {raw!r}")
+    return devices
+
+
+def _devices_string_for_count(count: int) -> str:
+    if count < 1:
+        raise ValueError(f"device count must be >= 1, got: {count}")
+    return ",".join(str(idx) for idx in range(count))
+
+
+def resolve_parallelism_overrides(
+    *,
+    tensor_parallel_size: int | None,
+    cuda_visible_devices: str | None = None,
+) -> tuple[int | None, str | None]:
+    """Resolve TP/devices from optional CLI TP and CUDA_VISIBLE_DEVICES.
+
+    ``runtime.devices`` always uses remapped ids ``0..(N-1)`` matching the
+    visible CUDA device count. Returns ``(None, None)`` when neither an
+    explicit TP nor ``CUDA_VISIBLE_DEVICES`` is available.
+    """
+    visible = _parse_cuda_visible_devices(cuda_visible_devices)
+    if tensor_parallel_size is None and visible is None:
+        return None, None
+
+    if visible is not None:
+        visible_count = len(visible)
+        if tensor_parallel_size is None:
+            tensor_parallel_size = visible_count
+        elif tensor_parallel_size != visible_count:
+            raise ValueError(
+                f"--tensor-parallel-size ({tensor_parallel_size}) must match "
+                f"CUDA_VISIBLE_DEVICES count ({visible_count}): {','.join(visible)}"
+            )
+    assert tensor_parallel_size is not None
+    if tensor_parallel_size < 1:
+        raise ValueError(f"--tensor-parallel-size must be >= 1, got: {tensor_parallel_size}")
+    return tensor_parallel_size, _devices_string_for_count(tensor_parallel_size)
+
+
+def _stage_entries(config_data: dict[str, Any]) -> list[dict[str, Any]]:
+    if isinstance(config_data.get("stage_args"), list) and config_data["stage_args"]:
+        return config_data["stage_args"]
+    if isinstance(config_data.get("stages"), list) and config_data["stages"]:
+        return config_data["stages"]
+    raise ValueError("Deploy config must contain a non-empty stage_args or stages list.")
+
+
+def apply_deploy_config_overrides(
+    deploy_config: str | Path,
+    *,
+    tensor_parallel_size: int | None = None,
+) -> tuple[Path, Path | None]:
+    """Rewrite stage-0 TP/devices into a temp YAML when overrides are set.
+
+    Devices are taken from ``CUDA_VISIBLE_DEVICES`` (remapped to ``0..(N-1)``).
+    Returns ``(config_path_to_use, temp_path_or_none)``. Callers should delete
+    ``temp_path_or_none`` after the engine shuts down.
+    """
+    source = Path(os.path.expanduser(str(deploy_config))).resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"Deploy config YAML does not exist: {source}")
+
+    tp, device_ids = resolve_parallelism_overrides(tensor_parallel_size=tensor_parallel_size)
+    if tp is None:
+        return source, None
+
+    with source.open("r", encoding="utf-8") as f:
+        config_data = yaml.safe_load(f)
+    if not isinstance(config_data, dict):
+        raise ValueError(f"Deploy config must be a YAML mapping: {source}")
+
+    stage0 = _stage_entries(config_data)[0]
+    if not isinstance(stage0, dict):
+        raise ValueError("stage-0 entry must be a mapping.")
+
+    runtime = stage0.get("runtime")
+    if runtime is None:
+        runtime = {}
+        stage0["runtime"] = runtime
+    if not isinstance(runtime, dict):
+        raise ValueError("stage-0 runtime must be a mapping.")
+    runtime["devices"] = device_ids
+
+    engine_args = stage0.get("engine_args")
+    if engine_args is None:
+        engine_args = {}
+        stage0["engine_args"] = engine_args
+    if not isinstance(engine_args, dict):
+        raise ValueError("stage-0 engine_args must be a mapping.")
+    engine_args["tensor_parallel_size"] = tp
+
+    fd, temp_name = tempfile.mkstemp(prefix="vlm_as_judge_deploy_", suffix=".yaml")
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(config_data, f, sort_keys=False)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+    logger.info(
+        "Wrote overridden deploy config: source=%s tp=%s devices=%s cuda_visible_devices=%s temp=%s",
+        source,
+        tp,
+        device_ids,
+        os.environ.get("CUDA_VISIBLE_DEVICES"),
+        temp_path,
+    )
+    return temp_path, temp_path
 
 
 def _as_python(value: Any) -> Any:
@@ -465,27 +564,6 @@ def _post_chat_completion(router_address: str, payload: dict[str, Any]) -> dict[
     return response
 
 
-def load_lora_adapter(
-    *,
-    router_address: str,
-    lora_name: str,
-    lora_path: str,
-) -> None:
-    """Register a PEFT adapter on a running vLLM-Omni server via LoRARequest.
-
-    This uses ``POST /v1/load_lora_adapter`` instead of static ``--lora-modules``.
-    Chat completions then select the adapter with ``model=<lora_name>``, which
-    resolves to a ``LoRARequest`` forwarded into ``AsyncOmni.generate()``.
-    """
-
-    result = _post_json(
-        router_address,
-        "/v1/load_lora_adapter",
-        {"lora_name": lora_name, "lora_path": lora_path},
-    )
-    logger.info("Loaded LoRA adapter via LoRARequest: name=%s path=%s result=%s", lora_name, lora_path, result)
-
-
 def wait_for_server(router_address: str, timeout_s: float, *, name: str) -> None:
     deadline = time.monotonic() + timeout_s
     url = f"http://{router_address}/v1/models"
@@ -510,25 +588,6 @@ def _message_text(response: dict[str, Any]) -> str:
     if isinstance(content, list):
         return "\n".join(str(item.get("text", item)) if isinstance(item, dict) else str(item) for item in content)
     return "" if content is None else str(content)
-
-
-def generate_answer(
-    *,
-    sample: EvalSample,
-    router_address: str,
-    model_name: str,
-    max_tokens: int,
-    temperature: float,
-    top_p: float,
-) -> str:
-    payload = {
-        "model": model_name,
-        "messages": [{"role": "user", "content": build_multimodal_content(sample)}],
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "top_p": top_p,
-    }
-    return _message_text(_post_chat_completion(router_address, payload)).strip()
 
 
 def build_judge_prompt(answer_a: str, answer_b: str) -> str:
@@ -656,9 +715,15 @@ def _export_fsdp_lora_adapter(
     output_dir: Path,
     base_model_name_or_path: str | None,
 ) -> None:
-    from verl_omni.utils.fsdp_utils import export_fsdp_lora_adapter
+    repo_root = Path(__file__).resolve().parents[3]
+    module_path = repo_root / "verl_omni" / "utils" / "fsdp_utils.py"
+    spec = importlib.util.spec_from_file_location("_verl_omni_fsdp_utils_for_judge", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load FSDP utils from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
 
-    export_fsdp_lora_adapter(
+    module.export_fsdp_lora_adapter(
         input_dir=input_dir,
         output_dir=output_dir,
         base_model_name_or_path=base_model_name_or_path,
@@ -676,7 +741,7 @@ def _is_fsdp_lora_checkpoint_dir(path: Path) -> bool:
 
 
 def resolve_adapter_path(adapter_path: str, base_model_name_or_path: str | None = None) -> str:
-    """Return a PEFT LoRA adapter directory for ``/v1/load_lora_adapter``.
+    """Return a PEFT LoRA adapter directory for ``LoRARequest``.
 
     Accepts a PEFT adapter directory directly. For verl FSDP / ``global_step_*``
     checkpoints, reuses an existing ``lora_adapter/`` export when present,
@@ -722,12 +787,111 @@ def _format_command(template: str, *, model: str, host: str, port: int, args: ar
         model=model,
         host=host,
         port=port,
-        adapter_path=args.adapter_path,
-        reference_model_name=args.reference_model_name,
         trained_model_name=args.trained_model_name,
-        max_loras=args.max_loras,
-        max_lora_rank=args.max_lora_rank,
     )
+
+
+def _async_omni_output_text(output: Any) -> str:
+    request_output = getattr(output, "request_output", output)
+    outputs = getattr(request_output, "outputs", None)
+    if outputs:
+        first_output = outputs[0]
+        for attr in ("text", "output_text"):
+            text = getattr(first_output, attr, None)
+            if text is not None:
+                return str(text).strip()
+    text = getattr(request_output, "text", None)
+    if text is not None:
+        return str(text).strip()
+    return str(output).strip()
+
+
+def choose_async_omni_config_kwarg(config_path: str | Path) -> dict[str, str]:
+    """Pick AsyncOmni YAML kwarg based on file schema.
+
+    Legacy thinker-only YAMLs use ``stage_args`` and must be passed as
+    ``stage_configs_path``. Passing them as ``deploy_config`` makes vLLM-Omni
+    fall back to the registry multi-stage pipeline and ignore local TP/devices.
+    """
+    path = Path(config_path)
+    with path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if isinstance(data, dict) and isinstance(data.get("stage_args"), list):
+        return {"stage_configs_path": str(path)}
+    return {"deploy_config": str(path)}
+
+
+class AsyncOmniGenerator(AbstractContextManager):
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.engine = None
+        self.sampling_params_cls = None
+        self.lora_request = None
+        self._temp_deploy_config: Path | None = None
+
+    def __enter__(self):
+        if not self.args.deploy_config:
+            raise ValueError("--deploy-config is required for AsyncOmni generation.")
+
+        deploy_config, self._temp_deploy_config = apply_deploy_config_overrides(
+            self.args.deploy_config,
+            tensor_parallel_size=getattr(self.args, "tensor_parallel_size", None),
+        )
+
+        from vllm import SamplingParams
+        from vllm_omni.entrypoints import AsyncOmni
+        from vllm_omni.lora.request import LoRARequest
+
+        self.sampling_params_cls = SamplingParams
+        config_kwargs = choose_async_omni_config_kwarg(deploy_config)
+        logger.info("Starting AsyncOmni with %s", config_kwargs)
+        self.engine = AsyncOmni(model=self.args.model_path, **config_kwargs)
+        self.lora_request = LoRARequest(self.args.trained_model_name, 1, self.args.adapter_path)
+
+        stage_client = self.engine.engine.stage_clients[0]
+        loaded = asyncio.run(stage_client.add_lora_async(self.lora_request))
+        if not loaded:
+            raise RuntimeError(f"Failed to load LoRA adapter: {self.args.adapter_path}")
+        logger.info(
+            "Loaded AsyncOmni LoRA adapter: name=%s path=%s", self.args.trained_model_name, self.args.adapter_path
+        )
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if self.engine is not None:
+            self.engine.shutdown()
+        if self._temp_deploy_config is not None:
+            self._temp_deploy_config.unlink(missing_ok=True)
+            self._temp_deploy_config = None
+        return False
+
+    def generate(self, sample: EvalSample, *, trained: bool) -> str:
+        return asyncio.run(self._generate(sample, self.lora_request if trained else None))
+
+    async def _generate(self, sample: EvalSample, lora_request) -> str:
+        if self.engine is None or self.sampling_params_cls is None:
+            raise RuntimeError("AsyncOmniGenerator is not initialized.")
+
+        sampling_params = self.sampling_params_cls(
+            max_tokens=self.args.generation_max_tokens,
+            temperature=self.args.generation_temperature,
+            top_p=self.args.generation_top_p,
+        )
+        final_output = None
+        async for output in self.engine.generate(
+            sample.prompt_text,
+            sampling_params_list=[sampling_params],
+            output_modalities=["text"],
+            lora_request=lora_request,
+        ):
+            final_output = output
+        if final_output is None:
+            raise RuntimeError(f"AsyncOmni returned no output for sample {sample.uid}.")
+        return _async_omni_output_text(final_output)
+
+
+def build_generation_client(args: argparse.Namespace) -> AbstractContextManager:
+    return AsyncOmniGenerator(args)
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -742,18 +906,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         output_path.unlink()
 
     args.adapter_path = resolve_adapter_path(args.adapter_path, args.model_path)
-
-    generation_command = (
-        _format_command(
-            args.generation_server_command,
-            model=args.model_path,
-            host=args.generation_server_host,
-            port=args.generation_server_port,
-            args=args,
-        )
-        if args.launch_generation_server
-        else None
-    )
     judge_command = (
         _format_command(
             args.judge_server_command,
@@ -766,17 +918,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         else None
     )
 
-    trained_router = args.trained_generation_router_address or args.generation_router_address
     overall = SummaryStats()
     by_modality: dict[str, SummaryStats] = defaultdict(SummaryStats)
 
     with (
-        ManagedServer(
-            command=generation_command,
-            router_address=args.generation_router_address,
-            timeout_s=args.server_timeout_s,
-            name="generation",
-        ),
+        build_generation_client(args) as generation_client,
         ManagedServer(
             command=judge_command,
             router_address=args.judge_router_address,
@@ -784,37 +930,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             name="judge",
         ),
     ):
-        if trained_router != args.generation_router_address:
-            wait_for_server(trained_router, args.server_timeout_s, name="trained-generation")
-
-        # Attach the trained adapter through LoRARequest instead of --lora-modules.
-        if trained_router == args.generation_router_address:
-            load_lora_adapter(
-                router_address=trained_router,
-                lora_name=args.trained_model_name,
-                lora_path=args.adapter_path,
-            )
-
         for sample_id, sample in enumerate(samples):
             logger.info(
                 "Evaluating sample %d/%d uid=%s modality=%s", sample_id + 1, len(samples), sample.uid, sample.modality
             )
-            reference_text = generate_answer(
-                sample=sample,
-                router_address=args.generation_router_address,
-                model_name=args.reference_model_name,
-                max_tokens=args.generation_max_tokens,
-                temperature=args.generation_temperature,
-                top_p=args.generation_top_p,
-            )
-            trained_text = generate_answer(
-                sample=sample,
-                router_address=trained_router,
-                model_name=args.trained_model_name,
-                max_tokens=args.generation_max_tokens,
-                temperature=args.generation_temperature,
-                top_p=args.generation_top_p,
-            )
+            reference_text = generation_client.generate(sample, trained=False)
+            trained_text = generation_client.generate(sample, trained=True)
             judge_result = judge_pair(
                 sample=sample,
                 reference_text=reference_text,
