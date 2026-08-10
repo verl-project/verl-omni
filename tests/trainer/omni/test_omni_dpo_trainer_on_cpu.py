@@ -171,6 +171,7 @@ class TestOmniDirectPreferenceRayTrainerHelpers:
 def _batch_dict(modality: str, chosen_token: int, rejected_token: int):
     return {
         "modality": np.array([modality, modality], dtype=object),
+        "extra_info": np.array([{"modality": modality}, {"modality": modality}], dtype=object),
         "input_ids": torch.tensor([[1, chosen_token], [1, rejected_token]]),
         "labels": torch.tensor([[-100, chosen_token], [-100, rejected_token]]),
         "attention_mask": torch.tensor([[1, 1], [1, 1]]),
