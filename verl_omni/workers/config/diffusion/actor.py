@@ -61,7 +61,6 @@ class DiffusionLossConfig(BaseConfig):
             "dance_grpo",
             "distill_kl",
             "distill_fm_mse",
-            "bagel_sft",
         ]
         if self.loss_mode not in valid_modes:
             raise ValueError(f"Invalid diffusion loss_mode: {self.loss_mode}. Must be one of {valid_modes}")

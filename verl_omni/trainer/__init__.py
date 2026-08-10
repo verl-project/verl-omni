@@ -12,4 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import verl_omni.trainer.omni  # noqa: F401
+import os
+
+if os.getenv("VERL_OMNI_SKIP_AUTO_IMPORTS") != "1":
+    import verl_omni.trainer.omni  # noqa: F401

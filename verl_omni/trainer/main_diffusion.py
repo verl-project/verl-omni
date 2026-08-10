@@ -27,7 +27,6 @@ from verl.utils.device import auto_set_device, is_cuda_available
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
-    SFTRayTrainer,
 )
 from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
 
@@ -107,11 +106,8 @@ def _get_trainer_cls(config):
         return PolicyGradientRayTrainer
     if trainer_type == "direct_preference":
         return DirectPreferenceRayTrainer
-    if trainer_type == "sft":
-        return SFTRayTrainer
     raise ValueError(
-        f"Unsupported diffusion trainer_type {trainer_type!r}. "
-        "Expected one of: 'policy_gradient', 'direct_preference', 'sft'."
+        f"Unsupported diffusion trainer_type {trainer_type!r}. Expected one of: 'policy_gradient', 'direct_preference'."
     )
 
 

@@ -16,7 +16,7 @@ model_name=${BAGEL_MODEL_PATH:-~/models/ByteDance-Seed/BAGEL-7B-MoT}
 
 NUM_GPUS=${NUM_GPUS:-4}
 
-python3 -m verl_omni.trainer.main_diffusion \
+python3 -m verl_omni.trainer.main_omni \
     data.train_files=$UNICOT_TRAIN_FILE \
     data.val_files=$UNICOT_VAL_FILE \
     data.train_batch_size=8 \
@@ -30,7 +30,10 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.custom_cls.val_split=train \
     algorithm.trainer_type=sft \
     algorithm.sample_source=offline \
+    algorithm.paired_preference=False \
+    algorithm.adv_estimator=bagel_sft \
     actor_rollout_ref.model.path=$model_name \
+    actor_rollout_ref.model._target_=verl_omni.workers.config.diffusion.DiffusionModelConfig \
     actor_rollout_ref.model.tokenizer_path=$model_name \
     actor_rollout_ref.model.model_type=bagel_sft_model \
     actor_rollout_ref.model.algorithm=bagel_sft \
@@ -41,9 +44,9 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.lora_dtype=float32 \
     actor_rollout_ref.model.target_modules="['q_proj_moe_gen','k_proj_moe_gen','v_proj_moe_gen','o_proj_moe_gen','mlp_moe_gen.gate_proj','mlp_moe_gen.up_proj','mlp_moe_gen.down_proj']" \
     actor_rollout_ref.model.fsdp_layer_prefixes="['layers.']" \
-    actor_rollout_ref.actor.diffusion_loss.loss_mode=bagel_sft \
-    actor_rollout_ref.actor.diffusion_loss.ce_weight=1.0 \
-    actor_rollout_ref.actor.diffusion_loss.mse_weight=1.0 \
+    actor_rollout_ref.actor.omni_loss.loss_mode=bagel_sft \
+    actor_rollout_ref.actor.omni_loss.ce_weight=1.0 \
+    actor_rollout_ref.actor.omni_loss.mse_weight=1.0 \
     actor_rollout_ref.actor.optim.lr=2e-5 \
     actor_rollout_ref.actor.optim.weight_decay=0.0 \
     actor_rollout_ref.actor.ppo_mini_batch_size=8 \

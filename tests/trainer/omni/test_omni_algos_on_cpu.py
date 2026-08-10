@@ -77,10 +77,13 @@ class _FakeActorConfig:
 class TestOmniLossRegistry:
     def test_builtin_dpo_registered(self, omni_algos):
         assert "dpo" in omni_algos.OMNI_LOSS_REGISTRY
+        assert "bagel_sft" in omni_algos.OMNI_LOSS_REGISTRY
 
     def test_get_existing_loss_fn(self, omni_algos):
         fn = omni_algos.get_omni_loss_fn("dpo")
         assert isinstance(fn, omni_algos.OmniDPOLoss)
+        sft_fn = omni_algos.get_omni_loss_fn("bagel_sft")
+        assert isinstance(sft_fn, omni_algos.BagelSFTLoss)
 
     def test_get_unknown_loss_fn_raises(self, omni_algos):
         with pytest.raises(ValueError, match="Unsupported omni loss mode"):

@@ -13,6 +13,10 @@
 # limitations under the License.
 """CPU tests for verl_omni worker config dataclasses."""
 
+import os
+
+os.environ.setdefault("VERL_OMNI_SKIP_AUTO_IMPORTS", "1")
+
 import pytest
 
 from verl_omni.trainer.config.algorithm import DiffusionAlgoConfig
@@ -68,6 +72,10 @@ class TestDiffusionLossConfig:
     def test_invalid_loss_mode_raises(self):
         with pytest.raises(ValueError, match="Invalid diffusion loss_mode"):
             DiffusionLossConfig(loss_mode="not_a_valid_mode")
+
+    def test_bagel_sft_is_not_diffusion_loss_mode(self):
+        with pytest.raises(ValueError, match="Invalid diffusion loss_mode"):
+            DiffusionLossConfig(loss_mode="bagel_sft")
 
     @pytest.mark.parametrize(
         "kwargs, match",

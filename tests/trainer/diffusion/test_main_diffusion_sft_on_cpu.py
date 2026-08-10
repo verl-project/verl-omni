@@ -18,11 +18,14 @@ from pathlib import Path
 os.environ.setdefault("VERL_OMNI_SKIP_AUTO_IMPORTS", "1")
 
 
-def test_main_diffusion_routes_sft_trainer_in_source():
+def test_main_omni_routes_sft_trainer_in_source():
     root = Path(__file__).resolve().parents[3]
-    main_diffusion = (root / "verl_omni" / "trainer" / "main_diffusion.py").read_text()
-    ray_trainer = (root / "verl_omni" / "trainer" / "diffusion" / "ray_diffusion_trainer.py").read_text()
+    main_omni = (root / "verl_omni" / "trainer" / "main_omni.py").read_text()
+    omni_trainer = (root / "verl_omni" / "trainer" / "omni" / "ray_omni_trainer.py").read_text()
+    diffusion_trainer = (root / "verl_omni" / "trainer" / "diffusion" / "ray_diffusion_trainer.py").read_text()
 
-    assert 'trainer_type == "sft"' in main_diffusion
-    assert "return SFTRayTrainer" in main_diffusion
-    assert "class SFTRayTrainer" in ray_trainer
+    assert 'trainer_type == "sft"' in main_omni
+    assert "return SFTRayTrainer" in main_omni
+    assert 'trainer_type in {"direct_preference", "sft"}' in main_omni
+    assert "class SFTRayTrainer" in omni_trainer
+    assert "class SFTRayTrainer" not in diffusion_trainer

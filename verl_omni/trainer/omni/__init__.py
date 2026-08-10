@@ -12,6 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from verl_omni.trainer.omni.ray_omni_trainer import OmniDirectPreferenceRayTrainer, OmniPPOTrainerSync  # noqa: F401
+import os
 
-__all__ = ["OmniPPOTrainerSync", "OmniDirectPreferenceRayTrainer"]
+if os.getenv("VERL_OMNI_SKIP_AUTO_IMPORTS") != "1":
+    from verl_omni.trainer.omni.ray_omni_trainer import (  # noqa: F401
+        OmniDirectPreferenceRayTrainer,
+        OmniPPOTrainerSync,
+        SFTRayTrainer,
+    )
+
+    __all__ = ["OmniPPOTrainerSync", "OmniDirectPreferenceRayTrainer", "SFTRayTrainer"]
+else:
+    __all__ = []

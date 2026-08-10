@@ -28,6 +28,7 @@ __all__ = [
     "OMNI_LOSS_REGISTRY",
     "register_omni_loss",
     "get_omni_loss_fn",
+    "BagelSFTLoss",
     "OmniDPOLoss",
 ]
 
@@ -56,6 +57,96 @@ def get_omni_loss_fn(name: str):
     if name not in OMNI_LOSS_REGISTRY:
         raise ValueError(f"Unsupported omni loss mode: {name}. Supported modes are: {list(OMNI_LOSS_REGISTRY.keys())}")
     return OMNI_LOSS_REGISTRY[name]
+
+
+def _format_available_keys(mapping: Any) -> str:
+    try:
+        keys = sorted(str(key) for key in mapping.keys())
+    except AttributeError:
+        return f"<{type(mapping).__name__} has no keys()>"
+    return "[" + ", ".join(keys) + "]"
+
+
+@register_omni_loss("bagel_sft")
+class BagelSFTLoss:
+    """Supervised BAGEL loss for Uni-COT text spans and generated image spans."""
+
+    required_model_output_keys: tuple[str, ...] = ("logits",)
+    required_data_keys: tuple[str, ...] = ("labels",)
+
+    def validate_inputs(self, *, model_output: dict[str, Any], data: TensorDict) -> None:
+        missing_model_output = [key for key in self.required_model_output_keys if key not in model_output]
+        missing_data = [key for key in self.required_data_keys if key not in data]
+        if not missing_model_output and not missing_data:
+            return
+
+        details = ["Omni Bagel SFT loss is missing required inputs."]
+        if missing_model_output:
+            details.append(f"Missing model_output keys: {missing_model_output}.")
+            details.append(f"Available model_output keys: {_format_available_keys(model_output)}.")
+        if missing_data:
+            details.append(f"Missing data keys: {missing_data}.")
+            details.append(f"Available data keys: {_format_available_keys(data)}.")
+        raise KeyError(" ".join(details))
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        image_velocity: torch.Tensor | None = None,
+        image_velocity_target: torch.Tensor | None = None,
+        image_loss_mask: torch.Tensor | None = None,
+        ce_weight: float = 1.0,
+        mse_weight: float = 1.0,
+        ignore_index: int = -100,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute weighted text CE and optional image velocity MSE losses."""
+        shift_logits = logits[:, :-1].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+        ce_loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.shape[-1]),
+            shift_labels.view(-1),
+            ignore_index=ignore_index,
+        )
+
+        total_loss = ce_loss * ce_weight
+        metrics: dict[str, Any] = {
+            "bagel_sft/ce_loss": ce_loss.detach().float(),
+            "bagel_sft/text_tokens": (shift_labels != ignore_index).sum().detach().float(),
+        }
+
+        if image_velocity is not None and image_velocity_target is not None:
+            mse = (image_velocity.float() - image_velocity_target.float()).pow(2)
+            if image_loss_mask is not None:
+                mask = image_loss_mask.to(device=mse.device, dtype=mse.dtype)
+                while mask.ndim < mse.ndim:
+                    mask = mask.unsqueeze(-1)
+                mask = mask.expand_as(mse)
+                mse_loss = (mse * mask).sum() / mask.sum().clamp_min(1.0)
+            else:
+                mse_loss = mse.mean()
+            total_loss = total_loss + mse_loss * mse_weight
+            metrics["bagel_sft/mse_loss"] = mse_loss.detach().float()
+        else:
+            metrics["bagel_sft/mse_loss"] = logits.new_tensor(0.0)
+
+        return total_loss, metrics
+
+    def __call__(self, *, config: Any, model_output: dict[str, Any], data: TensorDict) -> OmniLossResult:
+        loss_cfg: OmniLossConfig = config.omni_loss
+        loss, metrics = self.compute_loss(
+            logits=model_output["logits"],
+            labels=data["labels"],
+            image_velocity=model_output.get("image_velocity", None),
+            image_velocity_target=data.get("image_velocity_target", None),
+            image_loss_mask=data.get("image_loss_mask", None),
+            ce_weight=float(getattr(loss_cfg, "ce_weight", 1.0)),
+            mse_weight=float(getattr(loss_cfg, "mse_weight", 1.0)),
+            ignore_index=int(getattr(loss_cfg, "ignore_index", -100)),
+        )
+        return OmniLossResult(loss=loss, metrics=metrics)
 
 
 @register_omni_loss("dpo")
