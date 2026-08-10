@@ -189,11 +189,37 @@ startup, while step 3 closes the capture. The recipe profiles the Ray
 controller and actor workers each use one CUDA-profiler start/stop pair around
 the same continuous window.
 
-The recipe uses 20 Hz Python stack sampling. CUDA API/kernel tracing, Python
-GIL events, OS-runtime events, native CPU sampling, and context-switch events
-remain disabled to keep the diagnostic focused and low overhead. This mode
-does not provide individual CUDA API or kernel events; enable those only in a
-smaller follow-up capture after the Python-stack diagnosis narrows the phase.
+The recipe uses 20 Hz Python stack sampling. Python GIL events, OS-runtime
+events, native CPU sampling, and context-switch events remain disabled to keep
+the diagnostic focused and low overhead.
+
+Although the recipe sets `trace="nvtx"`, `capture-range=cudaProfilerApi`
+requires CUDA tracing for `cudaProfilerStart` and `cudaProfilerStop`. Nsight
+Systems therefore enables CUDA tracing automatically for both the controller
+and workers. The GUI only shows **CUDA API** and **CUDA HW** tracks when the
+report contains corresponding CUDA activity. The controller in the example
+below has no such tracks, while the worker does. Setting
+`cuda-memory-usage=false`, `sample=none`, or `cpuctxsw=none` does not disable
+CUDA tracing; those options disable CUDA memory-usage tracking, native CPU
+sampling, and context-switch tracing, respectively.
+
+The following screenshot shows aligned controller and worker reports from an
+example capture:
+
+![Aligned Nsight Systems controller and worker timelines](../assets/nsys_controller_actor_timeline.png)
+
+In the controller process:
+
+- **NVTX** ranges show the duration of each training phase.
+- **Python Backtrace** shows individual sampling points after zooming in on the
+  timeline. Hover over a sampling point to see its captured Python call stack.
+
+The worker process has the same **NVTX** and **Python Backtrace** information.
+It also has these tracks:
+
+- Expand **CUDA HW** with the triangle on the left, then zoom in to see the
+  kernels executed on each CUDA stream.
+- Zoom in on **CUDA API** to see each host-side CUDA API call.
 
 > [!WARNING]
 > The recipe does not set `discard-environment` because the option is not
