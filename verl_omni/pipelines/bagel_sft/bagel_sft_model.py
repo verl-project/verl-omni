@@ -14,8 +14,7 @@
 
 """BAGEL model wrapper for supervised fine-tuning.
 
-This module deliberately lives outside ``bagel_flow_grpo`` so the existing
-FlowGRPO velocity-replay contract remains unchanged.  ``BagelForSFT`` reuses
+``BagelForSFT`` reuses
 the BAGEL MoT backbone and adds the text head and SFT output contract required
 for interleaved text and image supervision.
 """
