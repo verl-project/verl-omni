@@ -15,10 +15,14 @@
 
 import logging
 import warnings
+from contextlib import nullcontext
+from typing import Callable
 
 import torch
+from tensordict import TensorDict
 from torch.distributed.tensor import DTensor
 from transformers import AutoModelForMultimodalLM
+from verl.utils import tensordict_utils as tu
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.device import get_device_id
 from verl.utils.fsdp_utils import (
@@ -31,7 +35,8 @@ from verl.utils.fsdp_utils import (
 )
 from verl.utils.model import convert_weight_keys
 from verl.workers.engine.base import EngineRegistry
-from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
+from verl.workers.engine.fsdp.transformer_impl import EngineTrainModeCtx, FSDPEngineWithLMHead
+from verl.workers.engine.utils import postprocess_batch_func, prepare_micro_batches
 
 from verl_omni.utils.fsdp_utils import collect_lora_params
 from verl_omni.workers.config import OmniModelConfig
@@ -215,3 +220,123 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
                     submodule.cast_input_dtype_enabled = False
 
         return module
+
+
+class BagelSFTTrainModeCtx(EngineTrainModeCtx):
+    """Train-mode context that preserves BAGEL SFT frozen generation layers."""
+
+    def __enter__(self):
+        super().__enter__()
+        module = self.engine.module
+        inner = module.module if hasattr(module, "module") else module
+        if not hasattr(inner, "layers"):
+            return
+        inner.training = False
+        for layer in inner.layers:
+            layer_inner = layer.module if hasattr(layer, "module") else layer
+            layer_inner.training = False
+            if hasattr(layer_inner, "self_attn"):
+                layer_inner.self_attn.training = False
+
+
+@EngineRegistry.register(model_type="bagel_sft_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+class BagelSFTOmniFSDPEngine(OmniFSDPEngine):
+    """Omni-based FSDP engine for BAGEL supervised fine-tuning."""
+
+    def _build_module(self):
+        from verl.utils.torch_dtypes import PrecisionType
+
+        from verl_omni.pipelines.bagel_sft.bagel_sft_model import BagelForSFT
+
+        torch_dtype = self.engine_config.model_dtype
+        if torch_dtype is None:
+            torch_dtype = torch.float32 if not self.engine_config.forward_only else torch.bfloat16
+        torch_dtype = PrecisionType.to_dtype(torch_dtype)
+
+        logger.info("Loading BagelForSFT from %s", self.model_config.local_path)
+        module = BagelForSFT.from_pretrained(self.model_config.local_path, torch_dtype=torch_dtype)
+        if getattr(self.model_config, "enable_gradient_checkpointing", False) and hasattr(
+            module, "gradient_checkpointing_enable"
+        ):
+            module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        return module
+
+    def train_mode(self, **kwargs):
+        return BagelSFTTrainModeCtx(self, **kwargs)
+
+    def forward_backward_batch(
+        self, data: TensorDict, loss_function: Callable, forward_only: bool = False
+    ) -> list[TensorDict]:
+        tu.assign_non_tensor(data, use_dynamic_bsz=False)
+        micro_batches, indices = prepare_micro_batches(
+            data=data,
+            dp_group=self.get_data_parallel_group(),
+            same_micro_num_in_dp=True,
+        )
+
+        output_lst = []
+        gradient_accumulation_steps = len(micro_batches)
+        ctx = torch.no_grad() if forward_only else nullcontext()
+        for micro_batch in micro_batches:
+            micro_batch = micro_batch.to(get_device_id())
+            tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
+            with ctx:
+                loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
+                if not forward_only:
+                    loss.backward()
+            output_lst.append(
+                {
+                    "model_output": [meta_info["model_output"]],
+                    "loss": [meta_info["loss"]],
+                    "metrics": [meta_info["metrics"]],
+                }
+            )
+
+        return postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)
+
+    def prepare_model_inputs(self, micro_batch: TensorDict):
+        return {
+            "input_ids": micro_batch["input_ids"],
+            "attention_mask": micro_batch.get("attention_mask", None),
+            "image_hidden_states": micro_batch.get("image_hidden_states", None),
+            "timesteps": micro_batch.get("timesteps", None),
+            "latent_pos_ids": micro_batch.get("latent_pos_ids", None),
+        }
+
+    def prepare_model_outputs(self, output, micro_batch: TensorDict):
+        del micro_batch
+        model_output = {"logits": output.logits}
+        if output.image_velocity is not None:
+            model_output["image_velocity"] = output.image_velocity
+        return model_output
+
+    def forward_step(self, micro_batch: TensorDict, loss_function, forward_only):
+        raw_output = self.module(**self.prepare_model_inputs(micro_batch=micro_batch))
+        model_output = self.prepare_model_outputs(output=raw_output, micro_batch=micro_batch)
+
+        if loss_function is not None:
+            data_dict = {"labels": micro_batch["labels"]}
+            if micro_batch.get("image_velocity_target", None) is not None:
+                data_dict["image_velocity_target"] = micro_batch["image_velocity_target"]
+            if micro_batch.get("image_loss_mask", None) is not None:
+                data_dict["image_loss_mask"] = micro_batch["image_loss_mask"]
+            data = tu.get_tensordict(data_dict)
+            tu.assign_non_tensor(
+                data,
+                gradient_accumulation_steps=tu.get_non_tensor_data(
+                    micro_batch, "gradient_accumulation_steps", default=None
+                ),
+                sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
+            )
+            loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
+        else:
+            assert forward_only, "forward_only must be True when loss_function is None"
+            loss = torch.tensor(1.0, device=model_output["logits"].device)
+            metrics = {}
+
+        output = {
+            "model_output": model_output,
+            "loss": loss.detach().item(),
+            "metrics": metrics,
+        }
+        return loss, output

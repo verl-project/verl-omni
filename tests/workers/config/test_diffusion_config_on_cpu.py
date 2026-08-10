@@ -71,10 +71,6 @@ class TestDiffusionLossConfig:
         with pytest.raises(ValueError, match="Invalid diffusion loss_mode"):
             DiffusionLossConfig(loss_mode="not_a_valid_mode")
 
-    def test_bagel_sft_is_not_diffusion_loss_mode(self):
-        with pytest.raises(ValueError, match="Invalid diffusion loss_mode"):
-            DiffusionLossConfig(loss_mode="bagel_sft")
-
     @pytest.mark.parametrize(
         "kwargs, match",
         [

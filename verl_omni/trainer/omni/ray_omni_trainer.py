@@ -50,7 +50,6 @@ from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_timing_metrics_diffusion,
 )
 from verl_omni.trainer.diffusion.diffusion_trainer_utils import NoOpCheckpointManager
-from verl_omni.trainer.diffusion.ray_diffusion_trainer import DirectPreferenceRayTrainer
 from verl_omni.trainer.omni.omni_algos import (
     get_omni_loss_fn,
 )
@@ -729,15 +728,26 @@ class OmniDirectPreferenceRayTrainer:
         self._shutdown_dataloaders()
 
 
-class SFTRayTrainer(DirectPreferenceRayTrainer):
+class SFTRayTrainer(OmniDirectPreferenceRayTrainer):
     """Offline actor-only trainer for supervised omni-style fine-tuning."""
 
     def __init__(self, config, *args, **kwargs):
+        del args
         if config.algorithm.get("sample_source", "offline") != "offline":
             raise NotImplementedError("SFTRayTrainer requires algorithm.sample_source=offline.")
-        from verl_omni.trainer.diffusion.ray_diffusion_trainer import BaseRayDiffusionTrainer
 
-        BaseRayDiffusionTrainer.__init__(self, config, *args, **kwargs)
+        self.tokenizer = kwargs.get("tokenizer", None)
+        self.processor = kwargs.get("processor", None)
+        self.config = config
+        self.hybrid_engine = config.actor_rollout_ref.get("hybrid_engine", True)
+        self.role_worker_mapping = kwargs.get("role_worker_mapping", None) or {}
+        self.resource_pool_manager = kwargs.get("resource_pool_manager", None)
+        self.ray_worker_group_cls = kwargs.get("ray_worker_group_cls", RayWorkerGroup)
+        self.device_name = kwargs.get("device_name", None) or OmegaConf.select(
+            self.config, "trainer.device", default=None
+        )
+        self.checkpoint_manager = None
+
         loss_mode = config.actor_rollout_ref.actor.omni_loss.loss_mode
         if loss_mode != "bagel_sft":
             raise NotImplementedError("SFTRayTrainer requires actor_rollout_ref.actor.omni_loss.loss_mode=bagel_sft.")
@@ -746,6 +756,21 @@ class SFTRayTrainer(DirectPreferenceRayTrainer):
         self.use_reference_policy = False
         self._has_old_adapter = False
         self._loss_fn = get_omni_loss_fn(loss_mode)
+        self.global_batch_size = self.config.data.train_batch_size
+        self.ref_in_actor = False
+        self.use_rm = False
+
+        train_dataset = kwargs.get("train_dataset", None)
+        val_dataset = kwargs.get("val_dataset", None)
+        collate_fn = kwargs.get("collate_fn", None)
+        train_sampler = kwargs.get("train_sampler", None)
+        val_sampler = kwargs.get("val_sampler", None)
+        if train_dataset is not None or self.config.data.get("train_files", None) is not None:
+            self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler, val_sampler)
+
+    def _validate(self):
+        print("Skipping validation generation because offline SFT rollout is disabled.")
+        return {"val/offline/skipped": 1.0}
 
     def fit(self):
         """Run actor-only supervised fine-tuning over the offline dataloader."""
