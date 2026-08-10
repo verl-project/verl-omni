@@ -69,7 +69,7 @@ def _format_available_keys(mapping: Any) -> str:
 
 @register_omni_loss("bagel_sft")
 class BagelSFTLoss:
-    """Supervised BAGEL loss for Uni-COT text spans and generated image spans."""
+    """Supervised BAGEL loss for text spans and generated image spans."""
 
     required_model_output_keys: tuple[str, ...] = ("logits",)
     required_data_keys: tuple[str, ...] = ("labels",)

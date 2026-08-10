@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""BAGEL model wrapper for Uni-COT supervised fine-tuning.
+"""BAGEL model wrapper for supervised fine-tuning.
 
 This module deliberately lives outside ``bagel_flow_grpo`` so the existing
 FlowGRPO velocity-replay contract remains unchanged.  ``BagelForSFT`` reuses
 the BAGEL MoT backbone and adds the text head and SFT output contract required
-for interleaved Uni-COT supervision.
+for interleaved text and image supervision.
 """
 
 from __future__ import annotations
@@ -159,7 +159,7 @@ class BagelForSFT(BagelForTraining):
             input_ids: Text tokens for CE and image conditioning.
             attention_mask: Text padding mask.
             image_hidden_states: Optional noisy target latents, either
-                ``(B, L, D)`` or ``(B, N, L, D)`` for multiple Uni-COT diagrams.
+                ``(B, L, D)`` or ``(B, N, L, D)`` for multiple image spans.
             timesteps: Flow timesteps for image spans.
             latent_pos_ids: Latent patch position IDs.
         """

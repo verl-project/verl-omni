@@ -2,7 +2,7 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 
-"""Training adapter for BAGEL Uni-COT SFT."""
+"""Training adapter for BAGEL SFT."""
 
 from __future__ import annotations
 

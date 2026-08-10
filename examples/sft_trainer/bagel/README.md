@@ -1,4 +1,4 @@
-# BAGEL Uni-COT SFT
+# BAGEL Example SFT
 
 
 ## Data Source
@@ -24,31 +24,33 @@ bagel_example
     └── llava_ov_si.jsonl
 ```
 
-Convert the example data into the Uni-COT schema consumed by
-`UniCOTSFTDataset`:
+The SFT example consumes this BAGEL example directory directly through
+`BagelExampleSFTDataset`; no intermediate JSONL conversion is required.
 
 ```bash
-python examples/sft_trainer/bagel/prepare_unicot_sft_data.py \
-  --bagel_example_dir /data/bagel_example \
-  --output_dir /data/bagel_example/unicot_sft
+python examples/sft_trainer/bagel/verify_bagel_example_data.py \
+  --bagel_example_dir /data/bagel_example
 ```
 
-The converter writes:
+The verifier smoke-checks the native BAGEL example layout:
 
 ```text
-bagel_example/unicot_sft
-├── train.jsonl
-├── val.jsonl
-└── images/
+bagel_example
+├── t2i/
+├── editing/
+│   ├── seedxedit_multi/
+│   └── parquet_info/
+└── vlm/
+    ├── images/
+    └── llava_ov_si.jsonl
 ```
 
-Each JSONL row contains `image_list`, `instruction_list`, `output_text_list`,
-and `task_type`. Local `.json`, `.jsonl`, and `.parquet` files are supported for
-converted shards.
+The adapter reuses the BAGEL data readers for local `.json`, `.jsonl`, and
+`.parquet` shards in the example dataset.
 
 ## Task Mapping
 
-`unicot_data_config.yaml` mirrors BAGEL's native data grouping:
+`bagel_example_data_config.yaml` mirrors BAGEL's native data grouping:
 
 - `t2i_pretrain`: text-to-image.  No context image is consumed; each
   `<image_start>` opens the next target image from `image_list`.
@@ -57,9 +59,8 @@ converted shards.
 - `vlm_sft`: visual-language supervised fine-tuning.  `image_list[0]` is
   context and text spans are trained with CE; no generated image is required.
 
-Rows can specify `task_type` as `t2i`, `editing`, or `vlm_sft`.  If absent,
-the dataset uses the default Uni-COT reasoning behavior, where the first image
-is treated as context.
+The current SFT path supports BAGEL example-format data with `t2i_pretrain`,
+`unified_edit`, and `vlm_sft` groups.
 
 ## Optional Preprocessing Columns
 
@@ -72,16 +73,17 @@ preprocessing job can materialize these optional columns:
 - `timesteps`: sampled flow timesteps.
 - `latent_pos_ids`: BAGEL latent patch position ids.
 
-When these columns are present, `unicot_sft_collate_fn` stacks them into the
-training batch and `BagelSFTDiffusersFSDPEngine` forwards them to the SFT loss.
+When these columns are present, `bagel_example_sft_collate_fn` stacks them into
+the training batch and `BagelSFTDiffusersFSDPEngine` forwards them to the SFT
+loss.
 
 ## Launch
 
 ```bash
-bash examples/sft_trainer/bagel/run_bagel_unicot_lora.sh
+bash examples/sft_trainer/bagel/run_bagel_example_lora.sh
 ```
 
-Important defaults are based on the referenced TorchUMM BAGEL Uni-COT config:
+Important defaults are based on the referenced BAGEL example-data config:
 
 - `lr=2e-5`
 - `lora_rank=256`
@@ -89,5 +91,5 @@ Important defaults are based on the referenced TorchUMM BAGEL Uni-COT config:
 - `save_freq=500`
 - `total_training_steps=3000`
 
-Override `BAGEL_EXAMPLE_DIR`, `UNICOT_TRAIN_FILE`, `UNICOT_VAL_FILE`,
-`UNICOT_DATA_CONFIG`, `BAGEL_MODEL_PATH`, or `NUM_GPUS` as needed.
+Override `BAGEL_EXAMPLE_DIR`, `BAGEL_DATA_CONFIG`, `BAGEL_MODEL_PATH`, or
+`NUM_GPUS` as needed.

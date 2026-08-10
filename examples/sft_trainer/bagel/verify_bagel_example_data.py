@@ -2,19 +2,18 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 
-"""Smoke-check BAGEL example data conversion and Uni-COT SFT batching.
+"""Smoke-check BAGEL example-format SFT batching.
 
 This script downloads nothing and trains nothing. It assumes the official
-``bagel_example`` directory already exists, converts a small slice into the
-local Uni-COT JSONL schema, then verifies that ``UniCOTSFTDataset`` and its
-collate function return the batch contract expected by BAGEL SFT.
+``bagel_example`` directory already exists, then verifies that
+``BagelExampleSFTDataset`` and its collate function return the packed batch
+contract expected by BAGEL SFT.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -24,145 +23,119 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import torch  # noqa: E402
-from prepare_unicot_sft_data import _write_jsonl, convert_editing, convert_t2i, convert_vlm  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 
-from verl_omni.utils.dataset.unicot_sft_dataset import (  # noqa: E402
-    IGNORE_INDEX,
-    UniCOTSFTDataset,
-    unicot_sft_collate_fn,
-)
+from bagel_example_sft_dataset import BagelExampleSFTDataset, bagel_example_sft_collate_fn  # noqa: E402
 
 
 class ByteTokenizer:
     """Tiny tokenizer for data smoke checks without model/tokenizer downloads."""
 
+    def __init__(self) -> None:
+        self.special_tokens_map: dict[str, str] = {}
+        self._vocab: dict[str, int] = {}
+
+    def add_tokens(self, tokens: list[str]) -> int:
+        added = 0
+        for token in tokens:
+            if token not in self._vocab:
+                self._vocab[token] = len(self._vocab) + 1
+                added += 1
+        return added
+
+    def convert_tokens_to_ids(self, token: str) -> int:
+        if token not in self._vocab:
+            self._vocab[token] = len(self._vocab) + 1
+        return self._vocab[token]
+
     def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
         del add_special_tokens
-        return [byte + 1 for byte in text.encode("utf-8")]
+        offset = len(self._vocab) + 1
+        return [offset + byte for byte in text.encode("utf-8")]
 
 
-def _convert_example_data(
-    bagel_example_dir: Path,
-    output_dir: Path,
-    *,
-    limit_per_task: int,
-) -> dict[str, int]:
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-
-    image_dir = output_dir / "images"
-    rows: list[dict[str, Any]] = []
-    t2i_rows = convert_t2i(bagel_example_dir / "t2i", image_dir, limit_per_task)
-    editing_rows = convert_editing(bagel_example_dir / "editing" / "seedxedit_multi", image_dir, limit_per_task)
-    vlm_rows = convert_vlm(
-        bagel_example_dir / "vlm" / "llava_ov_si.jsonl",
+def _require_example_layout(bagel_example_dir: Path) -> None:
+    required_paths = (
+        bagel_example_dir / "t2i",
+        bagel_example_dir / "editing" / "seedxedit_multi",
+        bagel_example_dir / "editing" / "parquet_info" / "seedxedit_multi.json",
         bagel_example_dir / "vlm" / "images",
-        limit_per_task,
+        bagel_example_dir / "vlm" / "llava_ov_si.jsonl",
     )
-    for row_idx in range(max(len(t2i_rows), len(editing_rows), len(vlm_rows))):
-        for task_rows in (t2i_rows, editing_rows, vlm_rows):
-            if row_idx < len(task_rows):
-                rows.append(task_rows[row_idx])
-
-    if not rows:
-        raise RuntimeError(f"No rows were converted from {bagel_example_dir}.")
-
-    _write_jsonl(rows, output_dir / "train.jsonl")
-    _write_jsonl(rows[: min(len(rows), 3)], output_dir / "val.jsonl")
-    return {"t2i": len(t2i_rows), "editing": len(editing_rows), "vlm_sft": len(vlm_rows)}
+    missing = [str(path) for path in required_paths if not path.exists()]
+    if missing:
+        raise RuntimeError(f"Missing BAGEL example data paths: {missing}")
 
 
-def _assert_image_paths_exist(batch: dict[str, Any]) -> None:
-    missing_paths = []
-    for key in ("context_image_paths", "generated_image_paths"):
-        for sample_paths in batch[key]:
-            for image_path in sample_paths:
-                if not Path(image_path).exists():
-                    missing_paths.append(image_path)
-    if missing_paths:
-        raise AssertionError(f"Batch references missing image files: {missing_paths[:5]}")
-
-
-def _assert_batch_contract(batch: dict[str, Any], *, batch_size: int) -> None:
+def _assert_batch_contract(batch: dict[str, Any]) -> None:
     required_keys = {
-        "input_ids",
-        "labels",
-        "attention_mask",
-        "unicot_sft_events",
-        "context_image_paths",
-        "generated_image_paths",
-        "task_type",
-        "data_source",
-        "extra_info",
+        "sequence_length",
+        "sample_lens",
+        "packed_text_ids",
+        "packed_text_indexes",
+        "packed_position_ids",
+        "batch_data_indexes",
     }
     missing = required_keys.difference(batch)
     if missing:
         raise AssertionError(f"Missing batch keys: {sorted(missing)}")
 
-    for key in ("input_ids", "labels", "attention_mask"):
+    for key in ("packed_text_ids", "packed_text_indexes", "packed_position_ids"):
         value = batch[key]
         if not isinstance(value, torch.Tensor):
             raise AssertionError(f"{key} must be a tensor, got {type(value)!r}.")
-        if value.ndim != 2 or value.shape[0] != batch_size:
-            raise AssertionError(f"{key} must have shape (B, L), got {tuple(value.shape)}.")
-
-    if batch["input_ids"].shape != batch["labels"].shape:
-        raise AssertionError("input_ids and labels must have the same shape.")
-    if batch["input_ids"].shape != batch["attention_mask"].shape:
-        raise AssertionError("input_ids and attention_mask must have the same shape.")
-    if not torch.all(batch["input_ids"][batch["attention_mask"] == 0] == 0):
-        raise AssertionError("Padded input_ids must be 0 where attention_mask is 0.")
-    if not torch.all(batch["labels"][batch["attention_mask"] == 0] == IGNORE_INDEX):
-        raise AssertionError("Padded labels must be IGNORE_INDEX where attention_mask is 0.")
-    if not torch.any(batch["labels"] != IGNORE_INDEX):
-        raise AssertionError("Batch has no supervised text tokens.")
-
-    for key in ("unicot_sft_events", "context_image_paths", "generated_image_paths", "task_type"):
-        if len(batch[key]) != batch_size:
-            raise AssertionError(f"{key} must contain one entry per sample.")
-    if not set(batch["task_type"]).issubset({"t2i", "editing", "vlm_sft"}):
-        raise AssertionError(f"Unexpected task types: {batch['task_type']}")
-
-    _assert_image_paths_exist(batch)
+        if value.ndim != 1:
+            raise AssertionError(f"{key} must be rank-1, got shape {tuple(value.shape)}.")
+    if batch["sequence_length"] <= 0:
+        raise AssertionError("sequence_length must be positive.")
+    if int(batch["packed_text_indexes"].max()) >= batch["sequence_length"]:
+        raise AssertionError("packed_text_indexes must stay within sequence_length.")
+    if "packed_label_ids" not in batch and "padded_images" not in batch:
+        raise AssertionError("Batch should contain text or image supervision.")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Verify BAGEL toy data can be loaded as Uni-COT SFT batches.")
+    parser = argparse.ArgumentParser(description="Verify BAGEL example data can be loaded as SFT packed batches.")
     parser.add_argument("--bagel_example_dir", type=Path, required=True)
-    parser.add_argument("--output_dir", type=Path, required=True)
-    parser.add_argument("--data_config", type=Path, default=Path("examples/sft_trainer/bagel/unicot_data_config.yaml"))
-    parser.add_argument("--limit_per_task", type=int, default=4)
-    parser.add_argument("--batch_size", type=int, default=3)
+    parser.add_argument(
+        "--data_config",
+        type=Path,
+        default=Path("examples/sft_trainer/bagel/bagel_example_data_config.yaml"),
+    )
     args = parser.parse_args()
 
-    counts = _convert_example_data(args.bagel_example_dir, args.output_dir, limit_per_task=args.limit_per_task)
-    if any(count == 0 for count in counts.values()):
-        raise RuntimeError(f"Expected at least one row per task, got {counts}.")
+    _require_example_layout(args.bagel_example_dir)
 
-    dataset = UniCOTSFTDataset(
-        args.output_dir / "train.jsonl",
+    dataset = BagelExampleSFTDataset(
         tokenizer=ByteTokenizer(),
-        config={"dataset_config_file": str(args.data_config), "max_text_length": 2048},
-        is_train=True,
+        config={
+            "dataloader_num_workers": 1,
+            "custom_cls": {
+                "bagel_example_dir": str(args.bagel_example_dir),
+                "dataset_config_file": str(args.data_config),
+                "expected_num_tokens": 512,
+                "max_num_tokens": 1024,
+                "max_num_tokens_per_sample": 1024,
+                "prefer_buffer_before": 512,
+                "max_buffer_size": 4,
+                "use_flex": True,
+                "num_packed_batches": 1,
+            },
+        },
     )
-    if len(dataset) < args.batch_size:
-        raise RuntimeError(f"Dataset has {len(dataset)} rows, smaller than batch_size={args.batch_size}.")
 
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, collate_fn=unicot_sft_collate_fn)
-    batch = next(iter(loader))
-    _assert_batch_contract(batch, batch_size=args.batch_size)
+    loader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=bagel_example_sft_collate_fn)
+    batch = next(iter(loader)).to_dict()
+    _assert_batch_contract(batch)
 
     summary = {
-        "converted_counts": counts,
-        "dataset_len": len(dataset),
         "batch_keys": sorted(batch.keys()),
-        "input_ids_shape": list(batch["input_ids"].shape),
-        "labels_shape": list(batch["labels"].shape),
-        "attention_mask_shape": list(batch["attention_mask"].shape),
-        "task_type": batch["task_type"],
-        "context_image_counts": [len(paths) for paths in batch["context_image_paths"]],
-        "generated_image_counts": [len(paths) for paths in batch["generated_image_paths"]],
+        "sequence_length": batch["sequence_length"],
+        "sample_lens": batch["sample_lens"],
+        "packed_text_ids_shape": list(batch["packed_text_ids"].shape),
+        "packed_text_indexes_shape": list(batch["packed_text_indexes"].shape),
+        "has_text_loss": "packed_label_ids" in batch,
+        "has_image_loss": "padded_images" in batch,
     }
     print(json.dumps(summary, indent=2, sort_keys=True))
 
