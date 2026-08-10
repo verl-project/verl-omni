@@ -89,11 +89,9 @@ python3 -m verl_omni.trainer.main_omni \
     algorithm.paired_preference=False \
     algorithm.adv_estimator=bagel_sft \
     "actor_rollout_ref.model.path=$model_name" \
-    actor_rollout_ref.model._target_=verl_omni.workers.config.diffusion.DiffusionModelConfig \
     "actor_rollout_ref.model.tokenizer_path=$model_name" \
     actor_rollout_ref.model.model_type=bagel_sft_model \
-    actor_rollout_ref.model.algorithm=bagel_sft \
-    +actor_rollout_ref.model.architecture=OmniBagelForConditionalGeneration \
+    actor_rollout_ref.model.architecture=OmniBagelForConditionalGeneration \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.model.lora_rank=256 \
     actor_rollout_ref.model.lora_alpha=512 \

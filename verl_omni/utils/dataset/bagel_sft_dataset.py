@@ -12,7 +12,6 @@ import re
 import subprocess
 import traceback
 
-import decord  # pyright: ignore[reportMissingImports]
 import numpy as np
 import pyarrow.fs as pf
 import pyarrow.parquet as pq
@@ -262,23 +261,37 @@ def get_frame_indices(num_frames, vlen, sample="rand", fix_start=None, input_fps
     return frame_indices
 
 
-def read_frames_decord(video_path, num_frames, sample="rand", fix_start=None, clip=None, min_num_frames=4):
-    video_reader = decord.VideoReader(video_path, num_threads=1)
-    vlen = len(video_reader)
-    fps = video_reader.get_avg_fps()
+def read_frames_pyav(video_path, num_frames, sample="rand", fix_start=None, clip=None, min_num_frames=4):
+    try:
+        import av
+    except ImportError as exc:
+        raise ImportError("PyAV (`pip install av`) is required to decode video files for BAGEL SFT.") from exc
+
+    container = av.open(video_path)
+    try:
+        if not container.streams.video:
+            raise ValueError(f"Video {video_path} contains no video streams.")
+        stream = container.streams.video[0]
+        fps = float(stream.average_rate) if stream.average_rate else 1.0
+        frames = [frame.to_image().convert("RGB") for frame in container.decode(video=0)]
+    finally:
+        container.close()
+
+    if not frames:
+        raise ValueError(f"Video {video_path} contains no decodable frames.")
+
+    vlen = len(frames)
     if clip:
         start, end = clip
         duration = end - start
-        vlen = int(duration * fps)
         start_index = int(start * fps)
+        end_index = min(start_index + int(duration * fps), vlen)
+        frames = frames[start_index:end_index]
+        vlen = len(frames)
 
     t_num_frames = np.random.randint(min_num_frames, num_frames + 1)
     frame_indices = get_frame_indices(t_num_frames, vlen, sample=sample, fix_start=fix_start, input_fps=fps)
-    if clip:
-        frame_indices = [f + start_index for f in frame_indices]
-    frames = video_reader.get_batch(frame_indices).asnumpy()
-    frames = [Image.fromarray(frames[i]) for i in range(frames.shape[0])]
-    return frames
+    return [frames[i] for i in frame_indices]
 
 
 def extract_frame_number(filename):
@@ -313,7 +326,7 @@ class FrameSampler:
         self.sample = sample
 
     def __call__(self, file_name):
-        fn = read_frames_folder if file_name.endswith("/") else read_frames_decord
+        fn = read_frames_folder if file_name.endswith("/") else read_frames_pyav
         frames = fn(file_name, num_frames=self.max_num_frames, min_num_frames=self.min_num_frames, sample=self.sample)
         return frames
 

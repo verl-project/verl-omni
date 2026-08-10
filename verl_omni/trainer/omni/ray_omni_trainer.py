@@ -25,7 +25,7 @@ from typing import Optional
 import numpy as np
 import torch
 from omegaconf import OmegaConf, open_dict
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import Dataset, IterableDataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from verl.protocol import DataProto
@@ -165,7 +165,12 @@ class OmniDirectPreferenceRayTrainer:
             )
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
 
-        if train_sampler is None:
+        train_is_iterable = isinstance(self.train_dataset, IterableDataset)
+        val_is_iterable = isinstance(self.val_dataset, IterableDataset)
+
+        if train_is_iterable:
+            train_sampler = None
+        elif train_sampler is None:
             train_sampler_config = self.config.data.get("train_sampler", self.config.data.get("sampler", None))
             train_sampler = create_rl_sampler(self.config.data, self.train_dataset, sampler_config=train_sampler_config)
         if collate_fn is None:
@@ -185,7 +190,9 @@ class OmniDirectPreferenceRayTrainer:
         if val_batch_size is None:
             val_batch_size = len(self.val_dataset)
 
-        if val_sampler is None:
+        if val_is_iterable:
+            val_sampler = None
+        elif val_sampler is None:
             val_sampler_config = self.config.data.get("val_sampler", None)
             if val_sampler_config is not None:
                 val_sampler = create_rl_sampler(self.config.data, self.val_dataset, sampler_config=val_sampler_config)
@@ -194,7 +201,7 @@ class OmniDirectPreferenceRayTrainer:
             dataset=self.val_dataset,
             batch_size=val_batch_size,
             num_workers=num_workers,
-            shuffle=False if val_sampler is not None else self.config.data.get("validation_shuffle", True),
+            shuffle=False if val_is_iterable or val_sampler is not None else self.config.data.get("validation_shuffle", True),
             drop_last=False,
             collate_fn=collate_fn,
             sampler=val_sampler,
@@ -772,6 +779,23 @@ class SFTRayTrainer(OmniDirectPreferenceRayTrainer):
         print("Skipping validation generation because offline SFT rollout is disabled.")
         return {"val/offline/skipped": 1.0}
 
+    @staticmethod
+    def _packed_bagel_batch_to_model_inputs(batch_dict):
+        sequence_length = int(batch_dict["sequence_length"])
+        input_ids = torch.zeros((1, sequence_length), dtype=batch_dict["packed_text_ids"].dtype)
+        labels = torch.full((1, sequence_length), -100, dtype=batch_dict["packed_text_ids"].dtype)
+        attention_mask = torch.ones((1, sequence_length), dtype=torch.long)
+
+        input_ids[0, batch_dict["packed_text_indexes"].long()] = batch_dict["packed_text_ids"]
+        if "ce_loss_indexes" in batch_dict and "packed_label_ids" in batch_dict:
+            labels[0, batch_dict["ce_loss_indexes"].long()] = batch_dict["packed_label_ids"]
+
+        return {
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": attention_mask,
+        }
+
     def fit(self):
         """Run actor-only supervised fine-tuning over the offline dataloader."""
         tracking = Tracking(
@@ -797,6 +821,10 @@ class SFTRayTrainer(OmniDirectPreferenceRayTrainer):
 
                 metrics = {}
                 timing_raw = {}
+                if hasattr(batch_dict, "to_dict"):
+                    batch_dict = batch_dict.to_dict()
+                if "packed_text_ids" in batch_dict:
+                    batch_dict = self._packed_bagel_batch_to_model_inputs(batch_dict)
                 batch = DataProto.from_single_dict(batch_dict)
                 if "uid" not in batch.non_tensor_batch:
                     batch.non_tensor_batch["uid"] = np.array(

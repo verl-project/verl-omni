@@ -17,11 +17,13 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Optional
 
 from omegaconf import MISSING
 from transformers import AutoConfig
 from verl.base_config import BaseConfig
+from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
 from verl.workers.config.model import MtpConfig
@@ -167,6 +169,20 @@ class OmniModelConfig(BaseConfig):
 
         # Build hf_config so the FSDP engine can load and wrap the model.
         self.local_hf_config_path = copy_to_local(self.hf_config_path, use_shm=self.use_shm)
+        if self.model_type == "bagel_sft_model":
+            with open(os.path.join(self.local_hf_config_path, "config.json")) as f:
+                raw_config = json.load(f)
+            self.hf_config = SimpleNamespace(**raw_config)
+            self.share_embeddings_and_output_weights = bool(raw_config.get("tie_word_embeddings", False))
+            self.architectures = raw_config.get("architectures", None)
+            if self.load_tokenizer:
+                self.local_tokenizer_path = copy_to_local(self.tokenizer_path, use_shm=self.use_shm)
+                self.tokenizer = hf_tokenizer(
+                    self.local_tokenizer_path, trust_remote_code=self.trust_remote_code, use_fast=True
+                )
+                self.processor = None
+            return
+
         attn_implementation = self.override_config.get("attn_implementation", "flash_attention_2")
         self.hf_config = AutoConfig.from_pretrained(
             self.local_hf_config_path,

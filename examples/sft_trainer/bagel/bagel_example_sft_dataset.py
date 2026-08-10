@@ -10,6 +10,7 @@ patches those paths from the launch config, then delegates packing to
 from __future__ import annotations
 
 import copy
+import json
 import os
 from typing import Any
 
@@ -41,16 +42,33 @@ def _read_yaml(path: str) -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+def _localize_parquet_info(parquet_info_file: str, parquet_data_dir: str) -> str:
+    parquet_info_file = os.path.abspath(os.path.expanduser(parquet_info_file))
+    parquet_data_dir = os.path.abspath(os.path.expanduser(parquet_data_dir))
+    with open(parquet_info_file, encoding="utf-8") as f:
+        parquet_info = json.load(f)
+
+    localized_info = {}
+    for path, info in parquet_info.items():
+        localized_info[os.path.join(parquet_data_dir, os.path.basename(path))] = info
+
+    localized_path = os.path.join(os.path.dirname(parquet_info_file), "seedxedit_multi.local.json")
+    with open(localized_path, "w", encoding="utf-8") as f:
+        json.dump(localized_info, f)
+    return localized_path
+
+
 def _patch_bagel_example_paths(bagel_example_dir: str, parquet_info_file: str | None = None) -> None:
     bagel_example_dir = os.path.abspath(os.path.expanduser(bagel_example_dir))
+    seedxedit_multi_dir = os.path.join(bagel_example_dir, "editing", "seedxedit_multi")
     parquet_info_file = parquet_info_file or os.path.join(
         bagel_example_dir, "editing", "parquet_info", "seedxedit_multi.json"
     )
     DATASET_INFO["t2i_pretrain"]["t2i"]["data_dir"] = os.path.join(bagel_example_dir, "t2i")
-    DATASET_INFO["unified_edit"]["seedxedit_multi"]["data_dir"] = os.path.join(
-        bagel_example_dir, "editing", "seedxedit_multi"
+    DATASET_INFO["unified_edit"]["seedxedit_multi"]["data_dir"] = seedxedit_multi_dir
+    DATASET_INFO["unified_edit"]["seedxedit_multi"]["parquet_info_path"] = _localize_parquet_info(
+        parquet_info_file, seedxedit_multi_dir
     )
-    DATASET_INFO["unified_edit"]["seedxedit_multi"]["parquet_info_path"] = parquet_info_file
     DATASET_INFO["vlm_sft"]["llava_ov"]["data_dir"] = os.path.join(bagel_example_dir, "vlm", "images")
     DATASET_INFO["vlm_sft"]["llava_ov"]["jsonl_path"] = os.path.join(bagel_example_dir, "vlm", "llava_ov_si.jsonl")
 
