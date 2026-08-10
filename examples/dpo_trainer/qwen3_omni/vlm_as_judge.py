@@ -771,7 +771,8 @@ def build_omni_device_map(
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     plan_dtype = _concrete_dtype_for_memory_planning(dtype)
     with init_empty_weights():
-        empty = Qwen3OmniMoeForConditionalGeneration.from_config(config, trust_remote_code=True)
+        # Qwen3-Omni exposes `_from_config` (PreTrainedModel), not public `from_config`.
+        empty = Qwen3OmniMoeForConditionalGeneration._from_config(config)
 
     offload_prefixes = [name for name in META_OFFLOAD_MODULE_PREFIXES if hasattr(empty, name)]
     # Drop non-thinker modules before memory planning so thinker can use that VRAM.
