@@ -26,6 +26,8 @@ from openai.types.chat import ChatCompletion
 from PIL import Image
 from transformers import PreTrainedTokenizer
 
+from verl_omni.utils.reward_score.reward_utils import visual_tensor_to_uint8
+
 DEFAULT_UNIFIED_REWARD_MODEL_PATH = "CodeGoat24/UnifiedReward-2.0-qwen3vl-2b"
 DEFAULT_UNIFIED_REWARD_SAMPLING_PARAMS = {"temperature": 0.0, "top_p": 1.0, "max_tokens": 512}
 UNIFIED_REWARD_SCORE_PATTERN = re.compile(
@@ -56,10 +58,11 @@ async def _chat_complete(
 def _to_pil(image) -> Image.Image:
     """Normalize a tensor / array / PIL image to a uint8 RGB PIL image."""
     if isinstance(image, torch.Tensor):
-        image = image.float().permute(1, 2, 0).cpu().numpy()
+        image = visual_tensor_to_uint8(image).permute(1, 2, 0).cpu().numpy()
     if isinstance(image, np.ndarray):
         assert image.shape[-1] == 3, "must be in HWC format"
-        image = (image * 255).round().clip(0, 255).astype(np.uint8)
+        if image.dtype != np.uint8:
+            image = (image * 255).round().clip(0, 255).astype(np.uint8)
         image = Image.fromarray(image)
     assert isinstance(image, Image.Image)
     return image

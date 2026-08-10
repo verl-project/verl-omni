@@ -31,7 +31,23 @@ assert _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 video_tensor_to_pil_frames = _MODULE.video_tensor_to_pil_frames
+visual_tensor_to_uint8 = _MODULE.visual_tensor_to_uint8
 pil_image_to_base64 = _MODULE.pil_image_to_base64
+
+
+def test_visual_tensor_transport_uses_uint8():
+    visual = torch.tensor([0.0, 0.25, 0.5, 1.0, float("nan"), float("inf"), -float("inf")])
+
+    transported = visual_tensor_to_uint8(visual)
+
+    assert transported.dtype == torch.uint8
+    assert transported.tolist() == [0, 64, 128, 255, 0, 255, 0]
+
+
+def test_visual_tensor_to_uint8_preserves_existing_transport_tensor():
+    transported = torch.tensor([0, 1, 255], dtype=torch.uint8)
+
+    assert visual_tensor_to_uint8(transported) is transported
 
 
 def test_video_tensor_to_pil_frames_clips_before_uint8_quantization():
@@ -52,6 +68,14 @@ def test_video_tensor_to_pil_frames_clips_before_uint8_quantization():
     pixels = np.asarray(frames[0])
     assert pixels.dtype == np.uint8
     assert pixels.tolist() == [[[0, 0, 64], [0, 128, 191], [255, 255, 255], [255, 0, 0]]]
+
+
+def test_video_tensor_to_pil_frames_accepts_uint8_transport():
+    video = torch.tensor([[[[0]], [[1]], [[255]]]], dtype=torch.uint8)
+
+    frames = video_tensor_to_pil_frames(video)
+
+    assert np.asarray(frames[0]).tolist() == [[[0, 1, 255]]]
 
 
 @pytest.mark.parametrize("shape", [(3, 4, 5), (2, 4, 4, 5), (2, 3, 4, 5, 1)])

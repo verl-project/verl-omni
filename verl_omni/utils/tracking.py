@@ -17,7 +17,7 @@
 import os
 import tempfile
 
-from verl_omni.utils.reward_score.reward_utils import video_tensor_to_pil_frames
+from verl_omni.utils.reward_score.reward_utils import video_tensor_to_pil_frames, visual_tensor_to_uint8
 
 
 def wrap_val_samples_for_wandb(samples, fps=24, output_dir=None):
@@ -44,6 +44,6 @@ def wrap_val_samples_for_wandb(samples, fps=24, output_dir=None):
             export_to_video(video_tensor_to_pil_frames(out), video_path, fps=fps)
             media = wandb.Video(video_path, format="mp4")
         else:
-            media = wandb.Image(out.float(), file_type="jpg")
+            media = wandb.Image(visual_tensor_to_uint8(out), file_type="jpg", normalize=False)
         wrapped.append((inp, media, score))
     return wrapped, video_tmp_dir

@@ -51,3 +51,12 @@ def test_compute_score_accepts_single_image_tensor():
 
     assert isinstance(score, float)
     assert score < 0
+
+
+def test_jpeg_reward_accepts_uint8_without_rescaling():
+    image = torch.tensor([[[[0, 64, 128, 255]]]], dtype=torch.uint8).expand(1, 3, 8, 4).contiguous()
+
+    uint8_scores, _ = jpeg_incompressibility()(image, prompts=None)
+    float_scores, _ = jpeg_incompressibility()(image.float() / 255, prompts=None)
+
+    np.testing.assert_array_equal(uint8_scores, float_scores)

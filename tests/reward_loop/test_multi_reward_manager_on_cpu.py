@@ -53,6 +53,12 @@ async def reward_async(data_source, solution_image, ground_truth, extra_info):
     return 0.8
 
 
+async def reward_asserts_uint8_contract(data_source, solution_image, ground_truth, extra_info):
+    """Verify reward managers do not reverse the selected transport format."""
+    assert solution_image.dtype == torch.uint8
+    return int(solution_image[0, 0, 0])
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -188,6 +194,18 @@ class TestMultiVisualRewardManagerRunSingle:
 
         assert result["reward_score"] != pytest.approx(0.0)
         assert "reward/jpeg" in result["reward_extra_info"]
+
+    def test_uint8_transport_is_forwarded_to_custom_reward(self):
+        reward_fns = {
+            "contract": {"path": DUMMY_REWARDS_PATH, "name": "reward_asserts_uint8_contract", "weight": 1.0},
+        }
+        manager = _build_manager(reward_fns)
+        data = _make_single_data()
+        data.batch["responses"] = torch.full_like(data.batch["responses"], 128, dtype=torch.uint8)
+
+        result = manager.loop.run_until_complete(manager.run_single(data))
+
+        assert result["reward_score"] == pytest.approx(128)
 
 
 class TestMultiVisualRewardManagerInit:

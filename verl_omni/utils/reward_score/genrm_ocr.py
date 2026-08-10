@@ -31,6 +31,8 @@ from openai.types.chat import ChatCompletion
 from PIL import Image
 from transformers import PreTrainedTokenizer
 
+from verl_omni.utils.reward_score.reward_utils import visual_tensor_to_uint8
+
 DEFAULT_GRM_PROMPT = (
     "Please output only the text content from the image without any additional descriptions or formatting."
 )
@@ -51,10 +53,11 @@ async def _chat_complete(router_address: str, chat_complete_request: dict) -> Ch
 def _to_pil(image) -> Image.Image:
     """Normalize a tensor / array / PIL image to a uint8 RGB PIL image."""
     if isinstance(image, torch.Tensor):
-        image = image.float().permute(1, 2, 0).cpu().numpy()
+        image = visual_tensor_to_uint8(image).permute(1, 2, 0).cpu().numpy()
     if isinstance(image, np.ndarray):
         assert image.shape[-1] == 3, "must be in HWC format"
-        image = (image * 255).round().clip(0, 255).astype(np.uint8)
+        if image.dtype != np.uint8:
+            image = (image * 255).round().clip(0, 255).astype(np.uint8)
         image = Image.fromarray(image)
     assert isinstance(image, Image.Image)
     return image

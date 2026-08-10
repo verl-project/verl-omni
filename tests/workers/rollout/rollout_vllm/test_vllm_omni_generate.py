@@ -192,6 +192,7 @@ def _build_rollout_cfg(*, step_execution: bool = False) -> Any:
         "step_execution": step_execution,
         "max_model_len": 1058,
         "dtype": "bfloat16",
+        "response_transport_dtype": "uint8",
         "load_format": "auto",
         "enforce_eager": True,
         "enable_chunked_prefill": False,
@@ -337,7 +338,8 @@ def _assert_valid_diffusion_output(output: DiffusionOutput, *, index: int, expec
     h, w = len(output.diffusion_output[0]), len(output.diffusion_output[0][0])
     assert h > 0 and w > 0, f"Request {index}: image dimensions must be positive"
     assert output.stop_reason in ("completed", "aborted", None), f"Request {index}: unexpected stop_reason"
-    assert 0.0 <= output.diffusion_output[0][0][0] <= 1.0, f"Request {index}: pixel values must be in [0, 1]"
+    assert output.diffusion_output.dtype == torch.uint8
+    assert 0 <= output.diffusion_output[0][0][0] <= 255, f"Request {index}: pixel values must be in [0, 255]"
     if expect_logprobs:
         lp = output.log_probs
         assert lp is not None, f"Request {index}: log_probs should be present when logprobs=True"

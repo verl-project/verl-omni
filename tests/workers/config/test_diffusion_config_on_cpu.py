@@ -168,6 +168,15 @@ class TestDiffusionSamplingConfig:
 
 
 class TestDiffusionRolloutConfig:
+    def test_response_transport_dtype_defaults_to_float32(self):
+        config = DiffusionRolloutConfig(name="vllm_omni")
+
+        assert config.response_transport_dtype == "float32"
+
+    def test_invalid_response_transport_dtype_raises(self):
+        with pytest.raises(ValueError, match="response_transport_dtype"):
+            DiffusionRolloutConfig(name="vllm_omni", response_transport_dtype="float16")
+
     def test_invalid_rollout_adapter_raises(self):
         with pytest.raises(ValueError, match="Invalid diffusion rollout rollout_adapter"):
             DiffusionRolloutConfig(name="vllm_omni", rollout_adapter="bogus")

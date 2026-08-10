@@ -99,10 +99,18 @@ def test_video_samples_without_output_dir_return_cleanup_temp_dir(monkeypatch):
 
 
 def test_image_samples_become_wandb_image_and_no_temp_dir(monkeypatch):
-    monkeypatch.setattr(wandb, "Image", lambda data, *a, **k: SimpleNamespace(data=data))
+    captured = []
+
+    def _fake_image(data, *args, **kwargs):
+        captured.append((data, kwargs))
+        return SimpleNamespace(data=data)
+
+    monkeypatch.setattr(wandb, "Image", _fake_image)
 
     samples = [("prompt", torch.rand(3, 16, 16), 1.0)]
     wrapped, video_tmp_dir = wrap_val_samples_for_wandb(samples)
 
     assert video_tmp_dir is None
     assert len(wrapped) == 1 and wrapped[0][0] == "prompt"
+    assert captured[0][0].dtype == torch.uint8
+    assert captured[0][1]["normalize"] is False

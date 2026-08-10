@@ -51,6 +51,7 @@ from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase, VllmOmniPipelineBase
+from verl_omni.utils.reward_score.reward_utils import visual_tensor_to_uint8
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig, OmniModelConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
 
@@ -63,6 +64,13 @@ _LORA_REQUEST_CACHE_MISS = object()
 
 def _strip_none(d: dict) -> dict:
     return {k: _strip_none(v) if isinstance(v, dict) else v for k, v in d.items() if v is not None}
+
+
+def _diffusion_output_type(sampling_params: dict) -> str:
+    output_type = sampling_params.get("output_type")
+    if output_type is None:
+        output_type = (sampling_params.get("extra_args") or {}).get("output_type")
+    return output_type or "image"
 
 
 class vLLMOmniHttpServer(vLLMHttpServer):
@@ -591,7 +599,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 "diffusion rollout produced no image (finish_reason=%s); returning %s", finish_reason, stop_reason
             )
             return DiffusionOutput(
-                diffusion_output=torch.empty(0),
+                diffusion_output=torch.empty(
+                    0,
+                    dtype=(
+                        torch.uint8
+                        if _diffusion_output_type(sampling_params) != "latent"
+                        and self.config.response_transport_dtype == "uint8"
+                        else torch.float32
+                    ),
+                ),
                 log_probs=None,
                 stop_reason=stop_reason,
                 num_preempted=None,
@@ -600,7 +616,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         assert final_res is not None
         diffusion_output = final_res.images[0]
-        if isinstance(diffusion_output, torch.Tensor):
+        output_type = _diffusion_output_type(sampling_params)
+        use_uint8_transport = output_type != "latent" and self.config.response_transport_dtype == "uint8"
+        if use_uint8_transport:
+            if isinstance(diffusion_output, np.ndarray):
+                diffusion_output = torch.from_numpy(diffusion_output)
+            elif not isinstance(diffusion_output, torch.Tensor):
+                diffusion_output = self._to_tensor(diffusion_output)
+            diffusion_output = visual_tensor_to_uint8(diffusion_output)
+        elif isinstance(diffusion_output, torch.Tensor):
             diffusion_output = diffusion_output.float()
         elif isinstance(diffusion_output, np.ndarray):
             diffusion_output = torch.from_numpy(diffusion_output).float()

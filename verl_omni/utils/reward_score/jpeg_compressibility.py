@@ -23,11 +23,13 @@ import numpy as np
 import torch
 from PIL import Image
 
+from verl_omni.utils.reward_score.reward_utils import visual_tensor_to_uint8
+
 
 def jpeg_incompressibility():
     def _fn(images, prompts):
         if isinstance(images, torch.Tensor):
-            images = (images * 255).round().clamp(0, 255).to(torch.uint8).cpu().numpy()
+            images = visual_tensor_to_uint8(images).cpu().numpy()
             images = images.transpose(0, 2, 3, 1)  # NCHW -> NHWC
         images = [Image.fromarray(image) for image in images]
         buffers = [io.BytesIO() for _ in images]
