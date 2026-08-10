@@ -12,11 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import sys
 from types import SimpleNamespace
-
-os.environ.setdefault("VERL_OMNI_SKIP_AUTO_IMPORTS", "1")
 
 import torch
 

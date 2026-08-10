@@ -15,8 +15,6 @@
 
 import os
 
-os.environ.setdefault("VERL_OMNI_SKIP_AUTO_IMPORTS", "1")
-
 import pytest
 
 from verl_omni.trainer.config.algorithm import DiffusionAlgoConfig
@@ -202,7 +200,6 @@ class TestDiffusionRolloutConfig:
 class TestDiffusionModelConfigPolicyAdapters:
     def test_policy_state_adapters_via_hydra(self, tmp_path):
         import json
-        import os
         from unittest.mock import patch
 
         from hydra import compose, initialize_config_dir
@@ -238,8 +235,6 @@ class TestDiffusionModelConfigPolicyAdapters:
 
 class TestFSDPDiffusionActorConfig:
     def test_instantiate_via_hydra(self):
-        import os
-
         from hydra import compose, initialize_config_dir
         from verl.utils.config import omega_conf_to_dataclass
 
@@ -262,7 +257,6 @@ class TestFSDPDiffusionActorConfig:
 
     def test_engine_strategy_synced(self):
         """After __post_init__, engine.strategy must mirror actor.strategy."""
-        import os
 
         from hydra import compose, initialize_config_dir
         from verl.utils.config import omega_conf_to_dataclass
@@ -282,8 +276,6 @@ class TestFSDPDiffusionActorConfig:
         assert actor_cfg.engine.strategy == "fsdp2"
 
     def test_loss_config_clip_ratio_respected(self):
-        import os
-
         from hydra import compose, initialize_config_dir
         from verl.utils.config import omega_conf_to_dataclass
 

@@ -14,24 +14,24 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import sys
 from pathlib import Path
 from typing import Any
 
-os.environ.setdefault("VERL_OMNI_SKIP_AUTO_IMPORTS", "1")
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import torch
-from torch.utils.data import DataLoader
+import torch  # noqa: E402
+from prepare_unicot_sft_data import _write_jsonl, convert_editing, convert_t2i, convert_vlm  # noqa: E402
+from torch.utils.data import DataLoader  # noqa: E402
 
-from verl_omni.utils.dataset.unicot_sft_dataset import IGNORE_INDEX, UniCOTSFTDataset, unicot_sft_collate_fn
-
-from prepare_unicot_sft_data import convert_editing, convert_t2i, convert_vlm, _write_jsonl
+from verl_omni.utils.dataset.unicot_sft_dataset import (  # noqa: E402
+    IGNORE_INDEX,
+    UniCOTSFTDataset,
+    unicot_sft_collate_fn,
+)
 
 
 class ByteTokenizer:

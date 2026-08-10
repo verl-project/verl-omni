@@ -12,10 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from pathlib import Path
-
-os.environ.setdefault("VERL_OMNI_SKIP_AUTO_IMPORTS", "1")
 
 
 def test_main_omni_routes_sft_trainer_in_source():

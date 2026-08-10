@@ -16,8 +16,6 @@
 import json
 import os
 
-os.environ.setdefault("VERL_OMNI_SKIP_AUTO_IMPORTS", "1")
-
 import pytest
 from verl.workers.config.model import MtpConfig
 
