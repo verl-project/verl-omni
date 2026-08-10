@@ -4,7 +4,8 @@
 # Two runs over one SD3 checkpoint pair:
 #   SMOKE=distill      pure distillation -- teacher is a *distinct* checkpoint and
 #                      `diffusion_loss.loss_mode=distill_kl` is the only objective.
-#   SMOKE=coexistence  actor + reference + teacher live at once, with use_kl_loss on.
+#   SMOKE=coexistence  actor + reference + teacher live at once: flow_grpo plus the
+#                      auxiliary distill term (use_distill_loss, distill_kl) and use_kl_loss.
 #                      lora_rank/lora_adapter_path are pinned empty on purpose: either
 #                      one set makes main_diffusion fold the ref into the actor, and the
 #                      run would pass while holding only two model states.
@@ -36,12 +37,9 @@ fi
 ENGINE=vllm_omni
 max_prompt_length=128
 
-ATTN_BACKEND=_flash_3_varlen_hub
-ROLLOUT_ATTN_BACKEND=FLASH_ATTN
-if ! python3 -c 'from verl_omni.utils.diffusion_attention import fa3_available; raise SystemExit(0 if fa3_available() else 1)' >/dev/null 2>&1; then
-    ATTN_BACKEND=native
-    ROLLOUT_ATTN_BACKEND=TORCH_SDPA
-fi
+# The tiny checkpoints have head_dim 4, below flash-attention's minimum of 8.
+ATTN_BACKEND=native
+ROLLOUT_ATTN_BACKEND=TORCH_SDPA
 
 n_resp_per_prompt=2
 micro_bsz_per_gpu=1
