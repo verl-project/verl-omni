@@ -16,9 +16,11 @@
 
 The script expects:
 
-1. a Qwen3-Omni / vLLM-Omni generation backend. By default this uses a real
-   ``AsyncOmni`` engine and passes ``LoRARequest`` directly to
-   ``AsyncOmni.generate()``.
+1. a transformers Qwen3-Omni generation backend. The base model is loaded via
+   ``Qwen3OmniMoeForConditionalGeneration``, the PEFT LoRA adapter is attached
+   with ``PeftModel.from_pretrained``, and answers are produced with
+   ``model.generate()``. Reference answers disable adapters; trained answers
+   enable them.
 2. a MiniCPM-o OpenAI-compatible judge endpoint, by default
    ``openbmb/MiniCPM-o-4_5``.
 
@@ -30,7 +32,6 @@ score and compare the two answers under the original multimodal input.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import base64
 import importlib.util
 import json
@@ -41,19 +42,18 @@ import random
 import re
 import signal
 import subprocess
-import tempfile
 import time
 import urllib.error
 import urllib.request
 from collections import defaultdict
 from collections.abc import Sequence
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import yaml
+import torch
 
 logger = logging.getLogger("qwen3_omni_minicpm_judge")
 
@@ -69,6 +69,7 @@ MEDIA_CONTENT_TYPES = {
     "audio": ("audio_url", "audio_url"),
 }
 JUDGE_DIMENSIONS = ("fluency", "relevance", "accuracy", "reasoning_quality", "safety")
+_MODALITY_PREFIX_RE = re.compile(r"^<(image|video|audio)>\s*", flags=re.IGNORECASE)
 
 
 @dataclass
@@ -207,29 +208,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0, help="Random seed used for A/B judge order.")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
-    parser.add_argument(
-        "--model-path", required=True, help="Base Qwen3-Omni model path or HF repo id for server launch."
-    )
+    parser.add_argument("--model-path", required=True, help="Base Qwen3-Omni model path or HF repo id.")
     parser.add_argument(
         "--adapter-path",
         required=True,
         help="PEFT LoRA adapter directory, or a verl FSDP / global_step checkpoint. "
-        "Non-PEFT checkpoints are exported via export_fsdp_lora_adapter, then used "
-        "as the trained LoRARequest.",
+        "Non-PEFT checkpoints are exported via export_fsdp_lora_adapter, then loaded "
+        "with PeftModel.from_pretrained for trained generation.",
     )
     parser.add_argument("--trained-model-name", default=DEFAULT_TRAINED_MODEL_NAME)
     parser.add_argument(
-        "--deploy-config",
-        required=True,
-        help="Real vLLM-Omni deploy/stage YAML used by AsyncOmni.",
+        "--dtype",
+        default="bfloat16",
+        choices=["auto", "bfloat16", "float16", "float32"],
+        help="Torch dtype used when loading Qwen3-Omni.",
     )
     parser.add_argument(
-        "--tensor-parallel-size",
-        type=int,
-        default=None,
-        help="Override stage-0 tensor_parallel_size in --deploy-config before AsyncOmni starts. "
-        "runtime.devices is always derived from CUDA_VISIBLE_DEVICES as 0..(N-1). "
-        "If omitted, TP defaults to the CUDA_VISIBLE_DEVICES count when that env is set.",
+        "--attn-implementation",
+        default="sdpa",
+        help="Attention implementation passed to from_pretrained (e.g. sdpa, flash_attention_2).",
+    )
+    parser.add_argument(
+        "--use-audio-in-video",
+        action="store_true",
+        help="Forward use_audio_in_video=True to process_mm_info / processor / generate.",
     )
     parser.add_argument("--generation-max-tokens", type=int, default=512)
     parser.add_argument("--generation-temperature", type=float, default=0.0)
@@ -256,125 +258,6 @@ def configure_logging(level: str) -> None:
         level=getattr(logging, level.upper()),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-
-
-def _parse_cuda_visible_devices(value: str | None = None) -> list[str] | None:
-    raw = os.environ["CUDA_VISIBLE_DEVICES"] if value is None and "CUDA_VISIBLE_DEVICES" in os.environ else value
-    if raw is None:
-        return None
-    parts = [part.strip() for part in str(raw).split(",")]
-    devices = [part for part in parts if part]
-    if not devices:
-        raise ValueError(f"CUDA_VISIBLE_DEVICES must list at least one GPU id, got: {raw!r}")
-    return devices
-
-
-def _devices_string_for_count(count: int) -> str:
-    if count < 1:
-        raise ValueError(f"device count must be >= 1, got: {count}")
-    return ",".join(str(idx) for idx in range(count))
-
-
-def resolve_parallelism_overrides(
-    *,
-    tensor_parallel_size: int | None,
-    cuda_visible_devices: str | None = None,
-) -> tuple[int | None, str | None]:
-    """Resolve TP/devices from optional CLI TP and CUDA_VISIBLE_DEVICES.
-
-    ``runtime.devices`` always uses remapped ids ``0..(N-1)`` matching the
-    visible CUDA device count. Returns ``(None, None)`` when neither an
-    explicit TP nor ``CUDA_VISIBLE_DEVICES`` is available.
-    """
-    visible = _parse_cuda_visible_devices(cuda_visible_devices)
-    if tensor_parallel_size is None and visible is None:
-        return None, None
-
-    if visible is not None:
-        visible_count = len(visible)
-        if tensor_parallel_size is None:
-            tensor_parallel_size = visible_count
-        elif tensor_parallel_size != visible_count:
-            raise ValueError(
-                f"--tensor-parallel-size ({tensor_parallel_size}) must match "
-                f"CUDA_VISIBLE_DEVICES count ({visible_count}): {','.join(visible)}"
-            )
-    assert tensor_parallel_size is not None
-    if tensor_parallel_size < 1:
-        raise ValueError(f"--tensor-parallel-size must be >= 1, got: {tensor_parallel_size}")
-    return tensor_parallel_size, _devices_string_for_count(tensor_parallel_size)
-
-
-def _stage_entries(config_data: dict[str, Any]) -> list[dict[str, Any]]:
-    if isinstance(config_data.get("stage_args"), list) and config_data["stage_args"]:
-        return config_data["stage_args"]
-    if isinstance(config_data.get("stages"), list) and config_data["stages"]:
-        return config_data["stages"]
-    raise ValueError("Deploy config must contain a non-empty stage_args or stages list.")
-
-
-def apply_deploy_config_overrides(
-    deploy_config: str | Path,
-    *,
-    tensor_parallel_size: int | None = None,
-) -> tuple[Path, Path | None]:
-    """Rewrite stage-0 TP/devices into a temp YAML when overrides are set.
-
-    Devices are taken from ``CUDA_VISIBLE_DEVICES`` (remapped to ``0..(N-1)``).
-    Returns ``(config_path_to_use, temp_path_or_none)``. Callers should delete
-    ``temp_path_or_none`` after the engine shuts down.
-    """
-    source = Path(os.path.expanduser(str(deploy_config))).resolve()
-    if not source.is_file():
-        raise FileNotFoundError(f"Deploy config YAML does not exist: {source}")
-
-    tp, device_ids = resolve_parallelism_overrides(tensor_parallel_size=tensor_parallel_size)
-    if tp is None:
-        return source, None
-
-    with source.open("r", encoding="utf-8") as f:
-        config_data = yaml.safe_load(f)
-    if not isinstance(config_data, dict):
-        raise ValueError(f"Deploy config must be a YAML mapping: {source}")
-
-    stage0 = _stage_entries(config_data)[0]
-    if not isinstance(stage0, dict):
-        raise ValueError("stage-0 entry must be a mapping.")
-
-    runtime = stage0.get("runtime")
-    if runtime is None:
-        runtime = {}
-        stage0["runtime"] = runtime
-    if not isinstance(runtime, dict):
-        raise ValueError("stage-0 runtime must be a mapping.")
-    runtime["devices"] = device_ids
-
-    engine_args = stage0.get("engine_args")
-    if engine_args is None:
-        engine_args = {}
-        stage0["engine_args"] = engine_args
-    if not isinstance(engine_args, dict):
-        raise ValueError("stage-0 engine_args must be a mapping.")
-    engine_args["tensor_parallel_size"] = tp
-
-    fd, temp_name = tempfile.mkstemp(prefix="vlm_as_judge_deploy_", suffix=".yaml")
-    temp_path = Path(temp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            yaml.safe_dump(config_data, f, sort_keys=False)
-    except Exception:
-        temp_path.unlink(missing_ok=True)
-        raise
-
-    logger.info(
-        "Wrote overridden deploy config: source=%s tp=%s devices=%s cuda_visible_devices=%s temp=%s",
-        source,
-        tp,
-        device_ids,
-        os.environ.get("CUDA_VISIBLE_DEVICES"),
-        temp_path,
-    )
-    return temp_path, temp_path
 
 
 def _as_python(value: Any) -> Any:
@@ -741,7 +624,7 @@ def _is_fsdp_lora_checkpoint_dir(path: Path) -> bool:
 
 
 def resolve_adapter_path(adapter_path: str, base_model_name_or_path: str | None = None) -> str:
-    """Return a PEFT LoRA adapter directory for ``LoRARequest``.
+    """Return a PEFT LoRA adapter directory for ``PeftModel.from_pretrained``.
 
     Accepts a PEFT adapter directory directly. For verl FSDP / ``global_step_*``
     checkpoints, reuses an existing ``lora_adapter/`` export when present,
@@ -791,107 +674,190 @@ def _format_command(template: str, *, model: str, host: str, port: int, args: ar
     )
 
 
-def _async_omni_output_text(output: Any) -> str:
-    request_output = getattr(output, "request_output", output)
-    outputs = getattr(request_output, "outputs", None)
-    if outputs:
-        first_output = outputs[0]
-        for attr in ("text", "output_text"):
-            text = getattr(first_output, attr, None)
-            if text is not None:
-                return str(text).strip()
-    text = getattr(request_output, "text", None)
-    if text is not None:
-        return str(text).strip()
-    return str(output).strip()
+def _strip_modality_placeholders(text: str) -> str:
+    return _MODALITY_PREFIX_RE.sub("", text.strip())
 
 
-def choose_async_omni_config_kwarg(config_path: str | Path) -> dict[str, str]:
-    """Pick AsyncOmni YAML kwarg based on file schema.
+def build_generation_conversation(sample: EvalSample) -> list[dict[str, Any]]:
+    """Build a Qwen3-Omni chat conversation for transformers + process_mm_info."""
+    content: list[dict[str, Any]] = []
+    for modality, media_key in MEDIA_KEYS:
+        for media_path in sample.media[media_key]:
+            content.append({"type": modality, modality: media_path})
+    question = _strip_modality_placeholders(sample.prompt_text)
+    if not question and not content:
+        raise ValueError(f"Sample {sample.uid} has neither text nor media for generation.")
+    if question:
+        content.append({"type": "text", "text": question})
+    return [{"role": "user", "content": content}]
 
-    Legacy thinker-only YAMLs use ``stage_args`` and must be passed as
-    ``stage_configs_path``. Passing them as ``deploy_config`` makes vLLM-Omni
-    fall back to the registry multi-stage pipeline and ignore local TP/devices.
-    """
-    path = Path(config_path)
-    with path.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    if isinstance(data, dict) and isinstance(data.get("stage_args"), list):
-        return {"stage_configs_path": str(path)}
-    return {"deploy_config": str(path)}
+
+def _resolve_torch_dtype(dtype: str) -> str | torch.dtype:
+    if dtype == "auto":
+        return "auto"
+    return getattr(torch, dtype)
 
 
-class AsyncOmniGenerator(AbstractContextManager):
+def _resolve_model_device(model: Any) -> torch.device:
+    device = getattr(model, "device", None)
+    if isinstance(device, torch.device):
+        return device
+    if isinstance(device, str):
+        return torch.device(device)
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
+def _move_inputs_to_model(inputs: Any, model: Any) -> Any:
+    device = _resolve_model_device(model)
+    dtype = getattr(model, "dtype", None)
+    moved = inputs.to(device)
+    if dtype is None or not hasattr(moved, "items"):
+        return moved
+    for key, value in list(moved.items()):
+        if torch.is_tensor(value) and torch.is_floating_point(value):
+            moved[key] = value.to(dtype)
+    return moved
+
+
+def _adapter_context(model: Any, *, trained: bool):
+    """Enable LoRA for trained generation; disable it for the reference baseline."""
+    if trained:
+        enable_adapters = getattr(model, "enable_adapters", None)
+        if callable(enable_adapters):
+            enable_adapters()
+        return nullcontext()
+
+    disable_adapter = getattr(model, "disable_adapter", None)
+    if callable(disable_adapter):
+        return disable_adapter()
+
+    disable_adapters = getattr(model, "disable_adapters", None)
+    enable_adapters = getattr(model, "enable_adapters", None)
+    if callable(disable_adapters) and callable(enable_adapters):
+        disable_adapters()
+
+        class _ReenableAdapters:
+            def __enter__(self):
+                return model
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                enable_adapters()
+                return False
+
+        return _ReenableAdapters()
+
+    raise RuntimeError("Loaded model does not expose PEFT adapter enable/disable APIs.")
+
+
+class TransformersOmniGenerator(AbstractContextManager):
+    """Qwen3-Omni generation via transformers ``generate`` with a PEFT LoRA adapter."""
+
     def __init__(self, args: argparse.Namespace):
         self.args = args
-        self.engine = None
-        self.sampling_params_cls = None
-        self.lora_request = None
-        self._temp_deploy_config: Path | None = None
+        self.model = None
+        self.processor = None
 
     def __enter__(self):
-        if not self.args.deploy_config:
-            raise ValueError("--deploy-config is required for AsyncOmni generation.")
+        from peft import PeftModel
+        from qwen_omni_utils import process_mm_info
+        from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
 
-        deploy_config, self._temp_deploy_config = apply_deploy_config_overrides(
-            self.args.deploy_config,
-            tensor_parallel_size=getattr(self.args, "tensor_parallel_size", None),
+        # Install PEFT remapping patches used during verl Qwen3-Omni LoRA training,
+        # then unfuse MoE experts so adapter keys match the training module layout.
+        from verl_omni.models.transformers.qwen3_omni_thinker_experts import (
+            unfuse_qwen3_omni_thinker_experts,
         )
 
-        from vllm import SamplingParams
-        from vllm_omni.entrypoints import AsyncOmni
-        from vllm_omni.lora.request import LoRARequest
-
-        self.sampling_params_cls = SamplingParams
-        config_kwargs = choose_async_omni_config_kwarg(deploy_config)
-        logger.info("Starting AsyncOmni with %s", config_kwargs)
-        self.engine = AsyncOmni(model=self.args.model_path, **config_kwargs)
-        self.lora_request = LoRARequest(self.args.trained_model_name, 1, self.args.adapter_path)
-
-        stage_client = self.engine.engine.stage_clients[0]
-        loaded = asyncio.run(stage_client.add_lora_async(self.lora_request))
-        if not loaded:
-            raise RuntimeError(f"Failed to load LoRA adapter: {self.args.adapter_path}")
+        self._process_mm_info = process_mm_info
+        dtype = _resolve_torch_dtype(self.args.dtype)
         logger.info(
-            "Loaded AsyncOmni LoRA adapter: name=%s path=%s", self.args.trained_model_name, self.args.adapter_path
+            "Loading Qwen3-Omni with transformers: model=%s dtype=%s attn=%s",
+            self.args.model_path,
+            self.args.dtype,
+            self.args.attn_implementation,
         )
+        model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
+            self.args.model_path,
+            dtype=dtype,
+            device_map="auto",
+            attn_implementation=self.args.attn_implementation,
+            trust_remote_code=True,
+        )
+        disable_talker = getattr(model, "disable_talker", None)
+        if callable(disable_talker):
+            disable_talker()
+
+        converted = unfuse_qwen3_omni_thinker_experts(model)
+        logger.info("Unfused %d Qwen3-Omni thinker expert module(s) before LoRA load", converted)
+
+        logger.info(
+            "Loading PEFT LoRA adapter: name=%s path=%s",
+            self.args.trained_model_name,
+            self.args.adapter_path,
+        )
+        self.model = PeftModel.from_pretrained(model, self.args.adapter_path).eval()
+        self.processor = Qwen3OmniMoeProcessor.from_pretrained(self.args.model_path, trust_remote_code=True)
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        if self.engine is not None:
-            self.engine.shutdown()
-        if self._temp_deploy_config is not None:
-            self._temp_deploy_config.unlink(missing_ok=True)
-            self._temp_deploy_config = None
+        self.model = None
+        self.processor = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         return False
 
     def generate(self, sample: EvalSample, *, trained: bool) -> str:
-        return asyncio.run(self._generate(sample, self.lora_request if trained else None))
+        if self.model is None or self.processor is None:
+            raise RuntimeError("TransformersOmniGenerator is not initialized.")
 
-    async def _generate(self, sample: EvalSample, lora_request) -> str:
-        if self.engine is None or self.sampling_params_cls is None:
-            raise RuntimeError("AsyncOmniGenerator is not initialized.")
-
-        sampling_params = self.sampling_params_cls(
-            max_tokens=self.args.generation_max_tokens,
-            temperature=self.args.generation_temperature,
-            top_p=self.args.generation_top_p,
+        conversation = build_generation_conversation(sample)
+        use_audio_in_video = bool(self.args.use_audio_in_video)
+        text = self.processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
+        audios, images, videos = self._process_mm_info(conversation, use_audio_in_video=use_audio_in_video)
+        inputs = self.processor(
+            text=text,
+            audio=audios,
+            images=images,
+            videos=videos,
+            return_tensors="pt",
+            padding=True,
+            use_audio_in_video=use_audio_in_video,
         )
-        final_output = None
-        async for output in self.engine.generate(
-            sample.prompt_text,
-            sampling_params_list=[sampling_params],
-            output_modalities=["text"],
-            lora_request=lora_request,
-        ):
-            final_output = output
-        if final_output is None:
-            raise RuntimeError(f"AsyncOmni returned no output for sample {sample.uid}.")
-        return _async_omni_output_text(final_output)
+        inputs = _move_inputs_to_model(inputs, self.model)
+
+        generate_kwargs: dict[str, Any] = {
+            "max_new_tokens": self.args.generation_max_tokens,
+            "return_audio": False,
+            "thinker_return_dict_in_generate": True,
+            "use_audio_in_video": use_audio_in_video,
+        }
+        if self.args.generation_temperature and self.args.generation_temperature > 0:
+            generate_kwargs["do_sample"] = True
+            generate_kwargs["temperature"] = self.args.generation_temperature
+            generate_kwargs["top_p"] = self.args.generation_top_p
+        else:
+            generate_kwargs["do_sample"] = False
+
+        with torch.inference_mode(), _adapter_context(self.model, trained=trained):
+            text_ids, _audio = self.model.generate(**inputs, **generate_kwargs)
+
+        sequences = getattr(text_ids, "sequences", text_ids)
+        prompt_len = inputs["input_ids"].shape[1]
+        decoded = self.processor.batch_decode(
+            sequences[:, prompt_len:],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+        if not decoded:
+            raise RuntimeError(f"Transformers generate returned no text for sample {sample.uid}.")
+        return str(decoded[0]).strip()
 
 
 def build_generation_client(args: argparse.Namespace) -> AbstractContextManager:
-    return AsyncOmniGenerator(args)
+    return TransformersOmniGenerator(args)
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
