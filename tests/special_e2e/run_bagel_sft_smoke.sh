@@ -41,13 +41,13 @@ python3 -m verl_omni.trainer.main_omni \
     algorithm.adv_estimator=bagel_sft \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.tokenizer_path="${MODEL_PATH}" \
-    actor_rollout_ref.model.model_type=bagel_sft_model \
+    actor_rollout_ref.model.model_type=omni_sft_model \
     actor_rollout_ref.model.architecture=OmniBagelForConditionalGeneration \
     actor_rollout_ref.model.trust_remote_code=false \
     actor_rollout_ref.model.lora_rank=0 \
     actor_rollout_ref.model.fsdp_layer_prefixes="['layers.']" \
     actor_rollout_ref.actor.strategy=fsdp \
-    actor_rollout_ref.actor.omni_loss.loss_mode=bagel_sft \
+    actor_rollout_ref.actor.omni_loss.loss_mode=omni_sft \
     actor_rollout_ref.actor.omni_loss.ce_weight=1.0 \
     actor_rollout_ref.actor.omni_loss.mse_weight=1.0 \
     actor_rollout_ref.actor.optim.lr=1e-5 \

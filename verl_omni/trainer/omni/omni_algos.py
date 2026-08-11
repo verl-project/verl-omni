@@ -28,7 +28,7 @@ __all__ = [
     "OMNI_LOSS_REGISTRY",
     "register_omni_loss",
     "get_omni_loss_fn",
-    "BagelSFTLoss",
+    "OmniSFTLoss",
     "OmniDPOLoss",
 ]
 
@@ -67,9 +67,9 @@ def _format_available_keys(mapping: Any) -> str:
     return "[" + ", ".join(keys) + "]"
 
 
-@register_omni_loss("bagel_sft")
-class BagelSFTLoss:
-    """Supervised BAGEL loss for text spans and generated image spans."""
+@register_omni_loss("omni_sft")
+class OmniSFTLoss:
+    """Supervised omni loss for text spans and generated image spans."""
 
     required_model_output_keys: tuple[str, ...] = ("logits",)
     required_data_keys: tuple[str, ...] = ("labels",)
@@ -80,7 +80,7 @@ class BagelSFTLoss:
         if not missing_model_output and not missing_data:
             return
 
-        details = ["Omni Bagel SFT loss is missing required inputs."]
+        details = ["Omni SFT loss is missing required inputs."]
         if missing_model_output:
             details.append(f"Missing model_output keys: {missing_model_output}.")
             details.append(f"Available model_output keys: {_format_available_keys(model_output)}.")
@@ -113,8 +113,8 @@ class BagelSFTLoss:
 
         total_loss = ce_loss * ce_weight
         metrics: dict[str, Any] = {
-            "bagel_sft/ce_loss": ce_loss.detach().float(),
-            "bagel_sft/text_tokens": (shift_labels != ignore_index).sum().detach().float(),
+            "omni_sft/ce_loss": ce_loss.detach().float(),
+            "omni_sft/text_tokens": (shift_labels != ignore_index).sum().detach().float(),
         }
 
         if image_velocity is not None and image_velocity_target is not None:
@@ -128,9 +128,9 @@ class BagelSFTLoss:
             else:
                 mse_loss = mse.mean()
             total_loss = total_loss + mse_loss * mse_weight
-            metrics["bagel_sft/mse_loss"] = mse_loss.detach().float()
+            metrics["omni_sft/mse_loss"] = mse_loss.detach().float()
         else:
-            metrics["bagel_sft/mse_loss"] = logits.new_tensor(0.0)
+            metrics["omni_sft/mse_loss"] = logits.new_tensor(0.0)
 
         return total_loss, metrics
 

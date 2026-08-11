@@ -44,9 +44,22 @@ from verl_omni.workers.config import OmniModelConfig
 logger = logging.getLogger(__name__)
 
 
+class OmniTrainModeCtx(EngineTrainModeCtx):
+    """Train-mode context with model-adapter hooks."""
+
+    def __enter__(self):
+        super().__enter__()
+        from verl_omni.pipelines.model_base import OmniModelBase
+
+        OmniModelBase.get_class(self.engine.model_config).configure_train_mode(self.engine.module)
+
+
 @EngineRegistry.register(model_type="omni_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class OmniFSDPEngine(FSDPEngineWithLMHead):
     """FSDP engine for omni models"""
+
+    def train_mode(self, **kwargs):
+        return OmniTrainModeCtx(self, **kwargs)
 
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
@@ -161,6 +174,19 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             torch_dtype = torch.float32 if not self.engine_config.forward_only else torch.bfloat16
 
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
+        adapter_cls = OmniModelBase.get_class_by_name(
+            architecture,
+            self.model_config.model_stage,
+            self.model_config.get("external_lib"),
+        )
+
+        module = adapter_cls.build_module(self.model_config, torch_dtype)
+        if module is not None:
+            if getattr(self.model_config, "enable_gradient_checkpointing", False) and hasattr(
+                module, "gradient_checkpointing_enable"
+            ):
+                module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+            return module.to(torch_dtype)
 
         # Use the stage sub-config for the meta-tensor decision; fall back to the umbrella config.
         stage_config = getattr(
@@ -187,11 +213,6 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
                 trust_remote_code=self.model_config.trust_remote_code,
             )
 
-            adapter_cls = OmniModelBase.get_class_by_name(
-                architecture,
-                self.model_config.model_stage,
-                self.model_config.get("external_lib"),
-            )
             module = adapter_cls.configure_model(module, self.model_config)
 
             module.to(torch_dtype)
@@ -222,47 +243,9 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         return module
 
 
-class BagelSFTTrainModeCtx(EngineTrainModeCtx):
-    """Train-mode context that preserves BAGEL SFT frozen generation layers."""
-
-    def __enter__(self):
-        super().__enter__()
-        module = self.engine.module
-        inner = module.module if hasattr(module, "module") else module
-        if not hasattr(inner, "layers"):
-            return
-        inner.training = False
-        for layer in inner.layers:
-            layer_inner = layer.module if hasattr(layer, "module") else layer
-            layer_inner.training = False
-            if hasattr(layer_inner, "self_attn"):
-                layer_inner.self_attn.training = False
-
-
-@EngineRegistry.register(model_type="bagel_sft_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
-class BagelSFTOmniFSDPEngine(OmniFSDPEngine):
-    """Omni-based FSDP engine for BAGEL supervised fine-tuning."""
-
-    def _build_module(self):
-        from verl.utils.torch_dtypes import PrecisionType
-
-        from verl_omni.pipelines.bagel_sft.bagel_sft_model import BagelForSFT
-
-        torch_dtype = self.engine_config.model_dtype
-        if torch_dtype is None:
-            torch_dtype = torch.float32 if not self.engine_config.forward_only else torch.bfloat16
-        torch_dtype = PrecisionType.to_dtype(torch_dtype)
-
-        logger.info("Loading BagelForSFT from %s", self.model_config.local_path)
-        module = BagelForSFT.from_pretrained(self.model_config.local_path, torch_dtype=torch_dtype)
-        if getattr(self.model_config, "enable_gradient_checkpointing", False) and hasattr(
-            module, "gradient_checkpointing_enable"
-        ):
-            module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        return module
-
-    def train_mode(self, **kwargs):
-        return BagelSFTTrainModeCtx(self, **kwargs)
+@EngineRegistry.register(model_type="omni_sft_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+class OmniSFTFSDPEngine(OmniFSDPEngine):
+    """Omni-based FSDP engine for supervised fine-tuning."""
 
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False

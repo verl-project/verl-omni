@@ -201,7 +201,9 @@ class OmniDirectPreferenceRayTrainer:
             dataset=self.val_dataset,
             batch_size=val_batch_size,
             num_workers=num_workers,
-            shuffle=False if val_is_iterable or val_sampler is not None else self.config.data.get("validation_shuffle", True),
+            shuffle=False
+            if val_is_iterable or val_sampler is not None
+            else self.config.data.get("validation_shuffle", True),
             drop_last=False,
             collate_fn=collate_fn,
             sampler=val_sampler,
@@ -756,8 +758,8 @@ class SFTRayTrainer(OmniDirectPreferenceRayTrainer):
         self.checkpoint_manager = None
 
         loss_mode = config.actor_rollout_ref.actor.omni_loss.loss_mode
-        if loss_mode != "bagel_sft":
-            raise NotImplementedError("SFTRayTrainer requires actor_rollout_ref.actor.omni_loss.loss_mode=bagel_sft.")
+        if loss_mode != "omni_sft":
+            raise NotImplementedError("SFTRayTrainer requires actor_rollout_ref.actor.omni_loss.loss_mode=omni_sft.")
 
         self.is_offline = True
         self.use_reference_policy = False

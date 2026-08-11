@@ -582,7 +582,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             "diffusion_model",
             "diffusion_dpo_model",
             "diffusion_nft_model",
-            "bagel_sft_model",
+            "omni_sft_model",
         )
 
         # 1. build reference model
@@ -707,7 +707,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 "diffusion_nft_model",
             ):
                 self.loss_fn = partial(diffusion_loss, config=actor_config)
-            elif model_config.get("model_type", "language_model") == "bagel_sft_model" or (
+            elif model_config.get("model_type", "language_model") == "omni_sft_model" or (
                 model_config.get("model_type", "language_model") == "omni_model"
                 and getattr(actor_config, "trainer_type", "policy_gradient") == "direct_preference"
             ):

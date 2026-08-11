@@ -90,7 +90,7 @@ python3 -m verl_omni.trainer.main_omni \
     algorithm.adv_estimator=bagel_sft \
     "actor_rollout_ref.model.path=$model_name" \
     "actor_rollout_ref.model.tokenizer_path=$model_name" \
-    actor_rollout_ref.model.model_type=bagel_sft_model \
+    actor_rollout_ref.model.model_type=omni_sft_model \
     actor_rollout_ref.model.architecture=OmniBagelForConditionalGeneration \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.model.lora_rank=256 \
@@ -98,7 +98,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.lora_dtype=float32 \
     actor_rollout_ref.model.target_modules="['q_proj_moe_gen','k_proj_moe_gen','v_proj_moe_gen','o_proj_moe_gen','mlp_moe_gen.gate_proj','mlp_moe_gen.up_proj','mlp_moe_gen.down_proj']" \
     actor_rollout_ref.model.fsdp_layer_prefixes="['layers.']" \
-    actor_rollout_ref.actor.omni_loss.loss_mode=bagel_sft \
+    actor_rollout_ref.actor.omni_loss.loss_mode=omni_sft \
     actor_rollout_ref.actor.omni_loss.ce_weight=1.0 \
     actor_rollout_ref.actor.omni_loss.mse_weight=1.0 \
     actor_rollout_ref.actor.optim.lr=2e-5 \

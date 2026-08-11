@@ -5,6 +5,6 @@
 """BAGEL supervised fine-tuning support."""
 
 from .bagel_sft_model import BagelForSFT, BagelSFTOutput
-from .training_adapter import BagelSFTDiffusion
+from .omni_sft_adapter import BagelOmniSFTAdapter
 
-__all__ = ["BagelForSFT", "BagelSFTOutput", "BagelSFTDiffusion"]
+__all__ = ["BagelForSFT", "BagelSFTOutput", "BagelOmniSFTAdapter"]

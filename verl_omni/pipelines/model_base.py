@@ -540,6 +540,25 @@ class OmniModelBase(ABC):
             ) from None
 
     @classmethod
+    def build_hf_config(cls, model_config) -> Any | None:
+        """Build a model-specific HF config object, or return ``None`` to use ``AutoConfig``."""
+        return None
+
+    @classmethod
+    def build_module(cls, model_config, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
+        """Load the model without ``AutoModelForMultimodalLM``.
+
+        Return ``None`` to use the default ``AutoModelForMultimodalLM`` path.
+        Override this for models that transformers cannot load directly.
+        """
+        return None
+
+    @classmethod
+    def configure_train_mode(cls, module) -> None:
+        """Hook called after ``module.train()`` for architecture-specific overrides."""
+        return
+
+    @classmethod
     @abstractmethod
     def get_strip_modules(cls, model_config) -> list[str]:
         """Return submodule prefixes to strip before FSDP init.

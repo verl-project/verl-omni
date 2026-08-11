@@ -44,7 +44,7 @@ class OmniLossConfig(BaseConfig):
     ----------------------------------------
 
     loss_mode:
-        Omni loss registry key. Currently "dpo" and "bagel_sft" are supported.
+        Omni loss registry key. Currently "dpo" and "omni_sft" are supported.
     beta:
         DPO inverse temperature β. Scales the log-probability margin between
         policy and reference on chosen vs. rejected pairs before the sigmoid/IPO
@@ -65,9 +65,9 @@ class OmniLossConfig(BaseConfig):
         computation, e.g. "bfloat16" or "float32". Policy (trainable)
         precision is controlled separately by actor.fsdp_config.model_dtype.
     ce_weight:
-        Text cross-entropy weight for supervised Bagel SFT.
+        Text cross-entropy weight for supervised omni SFT.
     mse_weight:
-        Image velocity MSE weight for supervised Bagel SFT.
+        Image velocity MSE weight for supervised omni SFT.
     ignore_index:
         Label value ignored by supervised cross entropy.
     """
@@ -83,7 +83,7 @@ class OmniLossConfig(BaseConfig):
     ignore_index: int = -100
 
     def __post_init__(self):
-        valid_modes = {"dpo", "bagel_sft"}
+        valid_modes = {"dpo", "omni_sft"}
         if self.loss_mode not in valid_modes:
             raise ValueError(
                 f"Unsupported omni loss_mode={self.loss_mode!r}; currently supported: {sorted(valid_modes)}."
@@ -93,9 +93,9 @@ class OmniLossConfig(BaseConfig):
         if self.beta <= 0:
             raise ValueError(f"Omni DPO beta must be positive, got {self.beta}.")
         if self.ce_weight < 0:
-            raise ValueError(f"Bagel SFT ce_weight must be non-negative, got {self.ce_weight}.")
+            raise ValueError(f"Omni SFT ce_weight must be non-negative, got {self.ce_weight}.")
         if self.mse_weight < 0:
-            raise ValueError(f"Bagel SFT mse_weight must be non-negative, got {self.mse_weight}.")
+            raise ValueError(f"Omni SFT mse_weight must be non-negative, got {self.mse_weight}.")
 
 
 @dataclass

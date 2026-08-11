@@ -64,9 +64,9 @@ class TestOmniLossConfig:
         assert cfg.mse_weight == pytest.approx(1.0)
         assert cfg.ignore_index == -100
 
-    def test_accepts_bagel_sft_loss_mode(self):
-        cfg = OmniLossConfig(loss_mode="bagel_sft", ce_weight=0.5, mse_weight=0.25)
-        assert cfg.loss_mode == "bagel_sft"
+    def test_accepts_omni_sft_loss_mode(self):
+        cfg = OmniLossConfig(loss_mode="omni_sft", ce_weight=0.5, mse_weight=0.25)
+        assert cfg.loss_mode == "omni_sft"
         assert cfg.ce_weight == pytest.approx(0.5)
         assert cfg.mse_weight == pytest.approx(0.25)
 
@@ -111,10 +111,10 @@ class TestOmniActorConfig:
             rollout_n=1,
             ppo_micro_batch_size_per_gpu=1,
             trainer_type="sft",
-            omni_loss=OmniLossConfig(loss_mode="bagel_sft"),
+            omni_loss=OmniLossConfig(loss_mode="omni_sft"),
         )
         assert cfg.trainer_type == "sft"
-        assert cfg.omni_loss.loss_mode == "bagel_sft"
+        assert cfg.omni_loss.loss_mode == "omni_sft"
 
 
 class TestOmniModelConfigLoraFields:

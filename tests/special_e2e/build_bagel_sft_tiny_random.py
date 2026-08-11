@@ -15,7 +15,7 @@
 """Build a tiny local BAGEL SFT checkpoint with random weights.
 
 The real BAGEL checkpoint is too large for a smoke test.  This script creates
-the minimum artifact layout that ``bagel_sft_model`` expects:
+the minimum artifact layout that ``omni_sft_model`` expects:
 ``config.json``, tokenizer files, and ``ema.safetensors`` with BAGEL-style
 checkpoint key prefixes.
 """
