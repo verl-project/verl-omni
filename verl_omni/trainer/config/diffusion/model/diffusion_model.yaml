@@ -112,6 +112,9 @@ pipeline:
   # Wan2.2 video number of frames
   num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
 
+  # Audio-video frame rate
+  frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
+
 # Rollout Algorithm configuration
 algo:
 
@@ -124,8 +127,11 @@ algo:
   # SDE variant: "sde" or "cps"
   sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
 
-  # Number of consecutive denoising steps in the active SDE window; null = all steps
+  # Number of denoising steps selected from sde_window_range; null = all steps
   sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
 
-  # [start, end] envelope of valid window-start positions; null = entire trajectory
+  # [start, end) range of eligible denoising steps; null = entire trajectory
   sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
+
+  # Whether selected SDE steps must form one consecutive window
+  sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}

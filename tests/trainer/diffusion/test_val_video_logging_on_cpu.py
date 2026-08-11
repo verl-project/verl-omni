@@ -77,6 +77,7 @@ class TestMaybeLogValGenerationsWandb:
     def test_wandb_video_gets_real_decodable_mp4_in_persistent_dir(self, monkeypatch, tmp_path):
         """wandb.Video gets a real mp4 that remains available after log() returns."""
         captured = []
+        logged_media = []
 
         class _FakeVideo:
             def __init__(self, data_or_path, *args, **kwargs):
@@ -90,6 +91,10 @@ class TestMaybeLogValGenerationsWandb:
                 self.data_or_path = data_or_path
 
         monkeypatch.setattr(wandb, "Video", _FakeVideo)
+        monkeypatch.setattr(wandb, "run", object())
+        monkeypatch.setattr(
+            wandb, "log", lambda payload, step, commit=False: logged_media.append((payload, step, commit))
+        )
 
         outputs = _warm_clips(2)  # [2, T, C, H, W]
         validation_data_dir = tmp_path / "val"
@@ -113,12 +118,19 @@ class TestMaybeLogValGenerationsWandb:
         assert expected_dir.is_dir()
         assert all(os.path.isfile(c.path) for c in captured)
 
-        # The backend received the wrapped media (our _FakeVideo instances), not raw tensors.
+        # Videos are top-level media because wandb 0.27 serializes table videos as the string "Video" offline.
+        assert len(logged_media) == 1
+        media_payload, media_step, commit = logged_media[0]
+        assert media_step == 7 and commit is False
+        assert list(media_payload) == ["val/videos/sample_1", "val/videos/sample_2"]
+        assert all(isinstance(media, _FakeVideo) for media in media_payload.values())
+
+        # The table contains stable keys pointing to the top-level media, not unsupported nested Video objects.
         assert len(val_logger.calls) == 1
         loggers, samples, step = val_logger.calls[0]
         assert loggers == ["wandb"] and step == 7
         assert len(samples) == 2
-        assert all(isinstance(media, _FakeVideo) for _inp, media, _score in samples)
+        assert [media_key for _inp, media_key, _score in samples] == list(media_payload)
 
     def test_wandb_video_uses_default_local_dir_when_validation_dir_is_unset(self, monkeypatch, tmp_path):
         captured = []

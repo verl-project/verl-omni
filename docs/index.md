@@ -61,6 +61,7 @@ algo/diffusion_dpo.md
 algo/diffusionnft.md
 algo/grpo_guard.md
 algo/mixgrpo.md
+algo/diffusion_opd.md
 algo/performance.md
 ```
 
@@ -76,6 +77,7 @@ examples/diffusionnft_trainer.md
 examples/grpoguard_trainer.md
 examples/gspo_trainer.md
 examples/mixgrpo_trainer.md
+examples/diffusionopd_trainer.md
 examples/flowgrpo_trainer_sd35_drm.md
 examples/bagel/flowgrpo_trainer_bagel.md
 examples/qwen_image_edit/flowgrpo_trainer_qwen_image_edit.md

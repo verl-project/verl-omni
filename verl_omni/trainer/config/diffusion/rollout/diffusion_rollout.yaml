@@ -26,6 +26,10 @@ n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
 # same as data.max_prompt_length if it exists
 prompt_length: ${oc.select:data.max_prompt_length,512}
 
+# Final prompt-embedding sequence length after combining all text encoders.
+# null falls back to pipeline.max_sequence_length for single-encoder models.
+max_prompt_embed_length: null
+
 # for vllm-omni rollout
 # Rollout model parameters type. Align with actor model's FSDP/Megatron type.
 dtype: bfloat16
@@ -160,6 +164,9 @@ val_kwargs:
     # Wan2.2 number of frames (validation)
     num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
 
+    # Audio-video frame rate (validation)
+    frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
+
 # Rollout Algorithm configuration for validation
   algo:
 
@@ -172,11 +179,14 @@ val_kwargs:
     # SDE variant: "sde" or "cps"
     sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
 
-    # Number of consecutive denoising steps in the active SDE window; null = all steps
+    # Number of denoising steps selected from sde_window_range; null = all steps
     sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
 
-    # [start, end] envelope of valid window-start positions; null = entire trajectory
+    # [start, end) range of eligible denoising steps; null = entire trajectory
     sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
+
+    # Whether selected SDE steps must form one consecutive window
+    sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
 
 # Rollout Algorithm configuration
 algo:
@@ -190,11 +200,14 @@ algo:
   # SDE variant: "sde" or "cps"
   sde_type: sde
 
-  # Length of the active SDE window; null = all steps
+  # Number of denoising steps selected from sde_window_range; null = all steps
   sde_window_size: null
 
-  # [start, end) range for random window start-index sampling
+  # [start, end) range of eligible denoising steps; null = entire trajectory
   sde_window_range: null
+
+  # Whether selected SDE steps must form one consecutive window
+  sde_contiguous: true
 
   # MixGRPO sliding-window scheduler configs
 
@@ -234,6 +247,9 @@ pipeline:
 
   # Wan2.2 number of frames
   num_frames: 1
+
+  # Audio-video frame rate
+  frame_rate: 24.0
 
 # support logging rollout prob for debugging purpose
 calculate_log_probs: False

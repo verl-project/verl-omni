@@ -39,6 +39,7 @@ class DiffusionModelConfig(BaseConfig):
     _mutable_fields = {
         "model_type",
         "algorithm",
+        "mtp",
         "tokenizer_path",
         "tokenizer",
         "processor",

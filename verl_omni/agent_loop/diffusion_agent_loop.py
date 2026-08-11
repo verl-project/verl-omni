@@ -46,6 +46,26 @@ def _config_to_sampling_dict(config: Optional[BaseConfig]) -> dict:
     return {k: v for k, v in config.items() if not k.startswith("_")}
 
 
+def _pad_prompt_extra_field(key: str, value: torch.Tensor, target_length: int) -> torch.Tensor:
+    if key in {"prompt_embeds", "negative_prompt_embeds"}:
+        current_length = int(value.shape[0])
+        if current_length > target_length:
+            raise ValueError(
+                f"{key} sequence length {current_length} exceeds max_prompt_embed_length={target_length}. "
+                "Configure max_prompt_embed_length for the final embedding sequence, not only one text encoder."
+            )
+        return F.pad(value, (0, 0, 0, target_length - current_length), value=0)
+    if key in {"prompt_embeds_mask", "negative_prompt_embeds_mask"}:
+        current_length = int(value.shape[0])
+        if current_length > target_length:
+            raise ValueError(
+                f"{key} sequence length {current_length} exceeds max_prompt_embed_length={target_length}. "
+                "Configure max_prompt_embed_length for the final embedding sequence, not only one text encoder."
+            )
+        return F.pad(value, (0, target_length - current_length), value=0)
+    return value
+
+
 class DiffusionAgentLoopOutput(BaseModel):
     """Agent loop output."""
 
@@ -118,7 +138,11 @@ class DiffusionAgentLoopWorker:
         self.tokenizer = self.model_config.tokenizer
         self.processor = self.model_config.processor
 
-        self.max_prompt_embed_length = self.rollout_config.pipeline.max_sequence_length
+        self.max_prompt_embed_length = self.rollout_config.max_prompt_embed_length
+        if self.max_prompt_embed_length is None:
+            self.max_prompt_embed_length = self.rollout_config.pipeline.max_sequence_length
+        if self.max_prompt_embed_length <= 0:
+            raise ValueError(f"max_prompt_embed_length must be positive, got {self.max_prompt_embed_length}.")
 
         agent_loop_config_path = self.rollout_config.agent.agent_loop_config_path
         if agent_loop_config_path:
@@ -228,12 +252,7 @@ class DiffusionAgentLoopWorker:
         extra_fields = {}
         for k, v in output.extra_fields.items():
             if isinstance(v, torch.Tensor):
-                if k in ["prompt_embeds", "negative_prompt_embeds"]:
-                    pad_tuple = (0, 0, 0, self.max_prompt_embed_length - v.shape[0])
-                    v = F.pad(v, pad_tuple, value=0)
-                elif k in ["prompt_embeds_mask", "negative_prompt_embeds_mask"]:
-                    pad_tuple = (0, self.max_prompt_embed_length - v.shape[0])
-                    v = F.pad(v, pad_tuple, value=0)
+                v = _pad_prompt_extra_field(k, v, self.max_prompt_embed_length)
                 extra_fields[k] = v.unsqueeze(0)
             else:
                 extra_fields[k] = v
@@ -354,7 +373,7 @@ class DiffusionAgentLoopWorker:
 
         # add reward_extra_info to non_tensor_batch
         reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]
-        reward_extra_keys = list(reward_extra_infos[0].keys())
+        reward_extra_keys = sorted(set.intersection(*(set(info) for info in reward_extra_infos)))
         for key in reward_extra_keys:
             non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
 

@@ -22,6 +22,7 @@ from verl_omni.workers.config.diffusion.actor import (
 )
 from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
 from verl_omni.workers.config.diffusion.rollout import (
+    DiffusionPipelineConfig,
     DiffusionRolloutAlgoConfig,
     DiffusionRolloutConfig,
     DiffusionSamplingConfig,
@@ -149,6 +150,7 @@ class TestDiffusionRolloutAlgoConfig:
         assert cfg.sde_type == "sde"
         assert cfg.sde_window_size is None
         assert cfg.sde_window_range is None
+        assert cfg.sde_contiguous is True
 
     def test_invalid_sample_strategy_raises(self):
         with pytest.raises(ValueError, match="Unknown sample_strategy"):
@@ -168,6 +170,22 @@ class TestDiffusionSamplingConfig:
 
 
 class TestDiffusionRolloutConfig:
+    def test_prompt_embed_length_is_independent_from_encoder_length(self):
+        pipeline = DiffusionPipelineConfig(max_sequence_length=256)
+        cfg = DiffusionRolloutConfig(
+            name="vllm_omni",
+            pipeline=pipeline,
+            max_prompt_embed_length=333,
+        )
+
+        assert cfg.pipeline.max_sequence_length == 256
+        assert cfg.max_prompt_embed_length == 333
+
+    @pytest.mark.parametrize("value", [0, -1])
+    def test_prompt_embed_length_must_be_positive(self, value):
+        with pytest.raises(ValueError, match="max_prompt_embed_length must be positive"):
+            DiffusionRolloutConfig(name="vllm_omni", max_prompt_embed_length=value)
+
     def test_invalid_rollout_adapter_raises(self):
         with pytest.raises(ValueError, match="Invalid diffusion rollout rollout_adapter"):
             DiffusionRolloutConfig(name="vllm_omni", rollout_adapter="bogus")

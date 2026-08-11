@@ -222,6 +222,7 @@ actor_rollout_ref:
     nnodes: 0
     n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
     prompt_length: ${oc.select:data.max_prompt_length,512}
+    max_prompt_embed_length: null
     dtype: bfloat16
     rollout_attn_backend: FLASH_ATTN_3_HUB
     gpu_memory_utilization: 0.5
@@ -263,18 +264,21 @@ actor_rollout_ref:
         max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
         guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
         num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
+        frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
       algo:
         _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
         noise_level: 0.0
         sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
         sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
         sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
+        sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
     algo:
       _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
       noise_level: 1.0
       sde_type: sde
       sde_window_size: null
       sde_window_range: null
+      sde_contiguous: true
       sample_strategy: random
       iters_per_group: 1
       sde_window_seed: 0
@@ -287,6 +291,7 @@ actor_rollout_ref:
       max_sequence_length: 512
       guidance_scale: null
       num_frames: 1
+      frame_rate: 24.0
     calculate_log_probs: false
     rollout_adapter: default
     agent:
@@ -348,12 +353,14 @@ actor_rollout_ref:
       max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
       guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
       num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
+      frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
     algo:
       _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
       noise_level: ${oc.select:actor_rollout_ref.rollout.algo.noise_level,1.0}
       sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
       sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
       sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
+      sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
     model_type: diffusion_model
   hybrid_engine: true
   nccl_timeout: 600
@@ -488,6 +495,13 @@ reward:
     url: null
     max_concurrent: 64
     memory_limit_mb: 1024
+distillation:
+  _target_: verl_omni.workers.config.diffusion.DiffusionDistillationConfig
+  enabled: false
+  teacher_models:
+    teacher_model:
+      _target_: verl_omni.workers.config.diffusion.DiffusionDistillationTeacherModelConfig
+      model_path: null
 algorithm:
   _target_: verl_omni.trainer.config.DiffusionAlgoConfig
   trainer_type: policy_gradient

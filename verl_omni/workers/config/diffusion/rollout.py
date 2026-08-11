@@ -42,6 +42,7 @@ class DiffusionRolloutAlgoConfig(BaseConfig):
     sde_type: str = "sde"
     sde_window_size: Optional[int] = None
     sde_window_range: Optional[list[int]] = None
+    sde_contiguous: bool = True
 
     # MixGRPO-only configs
     sample_strategy: str = "random"
@@ -69,6 +70,9 @@ class DiffusionPipelineConfig(BaseConfig):
     # Wan2.2 video generation: number of frames (81 = ~3s at 24fps)
     num_frames: int = 1
 
+    # Audio-video generation frame rate.
+    frame_rate: float = 24.0
+
 
 @dataclass
 class DiffusionSamplingConfig(BaseConfig):
@@ -94,6 +98,10 @@ class DiffusionRolloutConfig(BaseConfig):
     seed: Optional[int] = None
 
     prompt_length: int = 512
+
+    # Final prompt-embedding sequence length after combining all text encoders.
+    # Falls back to pipeline.max_sequence_length for single-encoder models.
+    max_prompt_embed_length: Optional[int] = None
 
     dtype: str = "bfloat16"
     gpu_memory_utilization: float = 0.5
@@ -173,6 +181,8 @@ class DiffusionRolloutConfig(BaseConfig):
 
     def __post_init__(self):
         """Validate the diffusion rollout config"""
+        if self.max_prompt_embed_length is not None and self.max_prompt_embed_length <= 0:
+            raise ValueError(f"max_prompt_embed_length must be positive when set, got {self.max_prompt_embed_length}.")
         if self.mode == "sync":
             raise ValueError(
                 "Rollout mode 'sync' has been removed. Please set "

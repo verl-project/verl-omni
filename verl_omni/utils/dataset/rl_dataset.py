@@ -122,22 +122,25 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
     )
 
 
-def create_rl_sampler(data_config: DictConfig, dataset):
+def create_rl_sampler(data_config: DictConfig, dataset, sampler_config: DictConfig | dict | None = None):
     """Create an RL dataset sampler with optional verl-omni custom classes.
 
-    When ``data_config.sampler`` provides both ``class_path`` and
-    ``class_name``, the sampler class is loaded dynamically and initialized with
-    the dataset, data config, and optional ``sampler_kwargs``. Otherwise, sampler
-    creation falls back to the upstream verl implementation.
+    When a sampler config provides both ``class_path`` and ``class_name``, the
+    sampler class is loaded dynamically and initialized with the dataset, data
+    config, and optional ``sampler_kwargs``. If ``sampler_config`` is omitted,
+    this falls back to the legacy ``data_config.sampler`` field.
 
     Args:
         data_config: Data config that may contain a custom sampler definition.
         dataset: Dataset instance to sample from.
+        sampler_config: Optional explicit sampler config, e.g.
+            ``data.train_sampler`` or ``data.val_sampler``.
 
     Returns:
         Sampler instance used by the RL DataLoader.
     """
-    sampler_config = data_config.get("sampler", None)
+    if sampler_config is None:
+        sampler_config = data_config.get("sampler", None)
     if sampler_config is not None:
         class_path = sampler_config.get("class_path", None)
         class_name = sampler_config.get("class_name", None)
