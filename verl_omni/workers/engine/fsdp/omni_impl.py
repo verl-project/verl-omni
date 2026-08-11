@@ -286,9 +286,8 @@ class BagelSFTOmniFSDPEngine(OmniFSDPEngine):
                     loss.backward()
             output_lst.append(
                 {
-                    "model_output": [meta_info["model_output"]],
-                    "loss": [meta_info["loss"]],
-                    "metrics": [meta_info["metrics"]],
+                    "loss": meta_info["loss"],
+                    "metrics": meta_info["metrics"],
                 }
             )
 

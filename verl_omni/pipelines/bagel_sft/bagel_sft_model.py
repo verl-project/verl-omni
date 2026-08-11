@@ -67,6 +67,22 @@ class BagelForSFT(BagelForTraining):
         if self.lm_head.weight.shape == self.embed_tokens.weight.shape:
             self.lm_head.weight = self.embed_tokens.weight
 
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.embed_tokens
+
+    def set_input_embeddings(self, value: nn.Embedding) -> None:
+        self.embed_tokens = value
+        self.tie_lm_head()
+
+    def enable_input_require_grads(self) -> None:
+        def make_inputs_require_grads(_module, _inputs, output):
+            output.requires_grad_(True)
+
+        self.embed_tokens.register_forward_hook(make_inputs_require_grads)
+
+    def prepare_inputs_for_generation(self, input_ids: Tensor, **kwargs) -> dict:
+        return {"input_ids": input_ids, **kwargs}
+
     def _forward_text_logits(
         self,
         input_ids: Tensor,
@@ -185,6 +201,11 @@ class BagelForSFT(BagelForTraining):
         config = BagelTrainingConfig.from_model_path(model_path)
         ckpt_path = os.path.join(model_path, "ema.safetensors")
         state_dict = load_file(ckpt_path)
+        if "latent_pos_embed.pos_embed" in state_dict:
+            actual_len = state_dict["latent_pos_embed.pos_embed"].shape[0]
+            grid = int(actual_len**0.5)
+            if grid * grid == actual_len and grid != config.max_latent_size:
+                config.max_latent_size = grid
 
         model = cls(config)
         mapped = _map_checkpoint_to_training(state_dict, config)

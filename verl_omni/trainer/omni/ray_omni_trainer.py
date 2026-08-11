@@ -836,7 +836,8 @@ class SFTRayTrainer(OmniDirectPreferenceRayTrainer):
                     actor_output = self._update_actor(batch)
 
                 metrics.update(actor_output.meta_info["metrics"])
-                metrics.update(compute_timing_metrics_diffusion(batch=batch, timing_raw=timing_raw))
+                num_samples = batch.batch["input_ids"].shape[0]
+                metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw, num_images=num_samples))
                 tracking.log(data=metrics, step=self.global_steps)
                 progress_bar.update(1)
 

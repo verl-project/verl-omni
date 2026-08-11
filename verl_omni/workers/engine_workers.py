@@ -347,7 +347,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
             for batch_idx, mini_batch_td in enumerate(dataloader):
                 # add global token num
                 if "input_ids" in mini_batch_td:
-                    global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()  # (total_nnz,)
+                    input_ids = mini_batch_td["input_ids"]
+                    if hasattr(input_ids, "offsets"):
+                        global_token_num = input_ids.offsets().diff().tolist()  # (total_nnz,)
+                    elif "attention_mask" in mini_batch_td:
+                        global_token_num = mini_batch_td["attention_mask"].sum(dim=-1).tolist()
+                    else:
+                        global_token_num = [input_ids.shape[-1]] * input_ids.shape[0]
                     # allgather from dp rank
                     global_token_num_output = [None] * torch.distributed.get_world_size(
                         self.engine.get_data_parallel_group()
