@@ -187,7 +187,15 @@ class BaseRayDiffusionTrainer(ABC):
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
-        self.use_reference_policy = need_reference_policy(self.config)
+        # ref.model_path turns the ref worker into a distillation teacher; its outputs
+        # are additionally exposed as teacher_* keys.
+        self.teacher_in_ref = config.actor_rollout_ref.ref.get("model_path") is not None
+        self.use_reference_policy = need_reference_policy(self.config) or self.teacher_in_ref
+        if self.teacher_in_ref and need_reference_policy(self.config):
+            raise ValueError(
+                "ref.model_path repurposes the ref worker as the distillation teacher, which conflicts "
+                "with use_kl_loss/use_kl_in_reward needing the ref to hold the initial policy weights."
+            )
 
         self.use_rm = need_reward_model(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
@@ -201,7 +209,9 @@ class BaseRayDiffusionTrainer(ABC):
         lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
         if lora_rank <= 0:
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        self.ref_in_actor = (
+            lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        ) and not self.teacher_in_ref
 
         self.use_teacher_policy = is_distillation_enabled(config.get("distillation"))
         validate_distillation_config(config)
@@ -965,9 +975,10 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         # gather output
         log_probs = tu.get(output, "log_probs")
         prev_sample_mean = tu.get(output, "prev_sample_mean")
-        ref_log_prob = tu.get_tensordict(
-            {"ref_log_prob": log_probs.float(), "ref_prev_sample_mean": prev_sample_mean.float()}
-        )
+        ref_output = {"ref_log_prob": log_probs.float(), "ref_prev_sample_mean": prev_sample_mean.float()}
+        if self.teacher_in_ref:
+            ref_output["teacher_prev_sample_mean"] = prev_sample_mean.float()
+        ref_log_prob = tu.get_tensordict(ref_output)
         return DataProto.from_tensordict(ref_log_prob)
 
     def _compute_teacher_prev_sample_mean(self, batch: DataProto) -> DataProto:
@@ -1312,6 +1323,11 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         **kwargs,
     ):
         super().__init__(config, *args, **kwargs)
+        if self.teacher_in_ref:
+            raise NotImplementedError(
+                "ref.model_path (teacher-in-ref) is only wired for the policy-gradient trainer; "
+                "the direct-preference path consumes ref_noise_pred from the initial policy."
+            )
         self.is_offline = config.algorithm.get("sample_source", "online") == "offline"
         loss_mode = config.actor_rollout_ref.actor.diffusion_loss.loss_mode
         # DPO needs trainer-side ref noise preds; DiffusionNFT computes ref in the actor engine.

@@ -141,11 +141,15 @@ class TaskRunner:
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
+        # A teacher checkpoint override always needs a standalone ref model, even for
+        # LoRA runs where the KL ref would otherwise be the actor without adapters.
+        teacher_in_ref = config.actor_rollout_ref.ref.get("model_path") is not None
+
         if config.algorithm.sample_source == "offline":
             if not hasattr(Role, "Actor"):
                 raise ValueError("Offline training without rollout requires verl Role.Actor support.")
             role = Role.Actor
-        elif need_reference_policy(config) and not ref_in_actor:
+        elif teacher_in_ref or (need_reference_policy(config) and not ref_in_actor):
             role = Role.ActorRolloutRef
         else:
             role = Role.ActorRollout
