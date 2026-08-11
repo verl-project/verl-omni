@@ -1,4 +1,4 @@
-# Copyright 2026 Bytedance Ltd. and/or its affiliates
+# Copyright 2026 Bytedace Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -43,7 +43,9 @@ from verl.utils.fs import local_mkdir_safe
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import Tracking
+from verl.workers.config import DistillationConfig
 
+from verl_omni.experimental.teacher_loop import OmniMultiTeacherModelManager
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
     compute_throughput_metrics_diffusion,
@@ -71,6 +73,24 @@ class OmniPPOTrainerSync(PPOTrainerSync):
         model_config: OmniModelConfig = omega_conf_to_dataclass(self.config.actor_rollout_ref.model, OmniModelConfig)
         self.tokenizer = model_config.tokenizer
         self.processor = model_config.processor
+
+    def init(self):
+        # Temporarily disable teacher policy to prevent super().init() from creating
+        # the default MultiTeacherModelManager (which uses HFModelConfig).
+        # We'll create OmniMultiTeacherModelManager manually below.
+        use_teacher = self.use_teacher_policy
+        self.use_teacher_policy = False
+        super().init()
+        self.use_teacher_policy = use_teacher
+
+        if use_teacher:
+            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            self.teacher_model_manager = OmniMultiTeacherModelManager(
+                config=self.config,
+                resource_pool=teacher_resource_pool,
+            )
+            # Initialize distillation_config (skipped by super().init() because we disabled use_teacher_policy)
+            self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
 
 
 class OmniDirectPreferenceRayTrainer:
