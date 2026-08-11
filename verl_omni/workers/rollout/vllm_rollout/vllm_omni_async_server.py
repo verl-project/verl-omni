@@ -688,10 +688,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if request_ids:
             await engine.abort(request_ids)
 
-        # Deliver terminal abort outputs so FullyAsyncLLMServerClient preserves
-        # partial tokens and retries the unfinished rollout after weight sync.
-        for internal_id, state in in_flight_states:
-            self._enqueue_abort_output(internal_id, state)
+        # AR abort outputs come from vLLM-Omni's OutputProcessor and retain the
+        # cumulative token IDs and logprobs. Diffusion has no resumable prefix,
+        # so keep the empty terminal output used to retry the whole sample.
+        if not self._ar_mode:
+            for internal_id, state in in_flight_states:
+                self._enqueue_abort_output(internal_id, state)
 
         if reset_prefix_cache:
             await self.clear_kv_cache()
@@ -752,13 +754,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return await super().abort_request(request_id, reset_prefix_cache)
 
         try:
-            # Snapshot the in-flight state before engine.abort() pops it, so we
-            # can unblock the generate() coroutine with a synthetic abort output.
+            # Diffusion needs the in-flight queue after engine.abort() pops its
+            # frontend state; AR receives its cumulative abort output from the
+            # vLLM-Omni OutputProcessor.
             in_flight_state = None
-            for state in engine.request_states.values():
-                if getattr(state, "external_request_id", None) == request_id:
-                    in_flight_state = state
-                    break
+            if not self._ar_mode:
+                for state in engine.request_states.values():
+                    if getattr(state, "external_request_id", None) == request_id:
+                        in_flight_state = state
+                        break
 
             await engine.abort(request_id)
 
