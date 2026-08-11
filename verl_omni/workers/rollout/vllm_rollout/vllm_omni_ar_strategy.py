@@ -23,6 +23,7 @@ import yaml
 from verl.utils.device import get_visible_devices_keyword
 from verl.workers.config import RolloutConfig
 from verl.workers.rollout.replica import TokenOutput
+from verl.workers.rollout.vllm_rollout.utils import extract_prompt_logprobs
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 from vllm import SamplingParams
 from vllm_omni.lora.request import LoRARequest
@@ -237,6 +238,11 @@ class ARStrategy(OmniStrategyBase):
             raise RuntimeError("AR mode expects outputs with token IDs, but got None or empty.")
 
         extra_fields = {"global_steps": self.server.global_steps}
+        extract_prompt_logprobs(
+            output=req_output,
+            num_prompt_logprobs=params.prompt_logprobs,
+            result_dict=extra_fields,
+        )
         token_ids = req_output.outputs[0].token_ids
         log_probs = None
         if params.logprobs is not None:

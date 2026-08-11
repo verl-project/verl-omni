@@ -43,7 +43,9 @@ from verl.utils.fs import local_mkdir_safe
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import Tracking
+from verl.workers.config import DistillationConfig
 
+from verl_omni.experimental.teacher_loop import OmniMultiTeacherModelManager
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
     compute_throughput_metrics_diffusion,
@@ -56,6 +58,7 @@ from verl_omni.trainer.omni.omni_algos import (
 from verl_omni.utils.dataset.offline_mllm_dpo_dataset import get_batch_modality
 from verl_omni.utils.metrics_utils import GroupedMetricMean
 from verl_omni.workers.config import OmniModelConfig
+from verl_omni.workers.utils.padding import patched_padding_template
 
 sys_logger = logging.getLogger(__name__)
 
@@ -82,6 +85,24 @@ class OmniPPOTrainerSync(PPOTrainerSync):
     def on_step_end(self):
         super().on_step_end()
         self.checkpoint_manager.resume_generation_replicas()
+
+    def init(self):
+        # Temporarily disable teacher policy to prevent super().init() from creating
+        # the default MultiTeacherModelManager (which uses HFModelConfig).
+        # We'll create OmniMultiTeacherModelManager manually below.
+        use_teacher = self.use_teacher_policy
+        self.use_teacher_policy = False
+        super().init()
+        self.use_teacher_policy = use_teacher
+
+        if use_teacher:
+            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            self.teacher_model_manager = OmniMultiTeacherModelManager(
+                config=self.config,
+                resource_pool=teacher_resource_pool,
+            )
+            # Initialize distillation_config (skipped by super().init() because we disabled use_teacher_policy)
+            self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
 
 
 class OmniDirectPreferenceRayTrainer:
