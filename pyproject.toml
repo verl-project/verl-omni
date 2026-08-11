@@ -35,7 +35,9 @@ dependencies = [
     "safetensors>=0.4.5",
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
     "torchdata",
-    "transformers",
+    # TODO: Remove this cap after the Qwen3-Omni adapter and tests support the
+    # FSDP `_no_split_modules` metadata change introduced in Transformers 5.15.0.
+    "transformers<=5.14.1",
     "wandb",
     "packaging>=20.0",
     "uvicorn",
