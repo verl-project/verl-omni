@@ -1,0 +1,52 @@
+CKPT_ROOT=checkpoints/omni-preference-dpo/qwen3-omni-offline-dpo-lora
+DATA_DIR=${HOME}/didan-new/Omni-Preference/parquet_dpo
+MODEL_PATH=/scratch/fq9hpsac/huggingface/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/snapshots/26291f793822fb6be9555850f06dfe95f2d7e695
+OUT_DIR=outputs/qwen3_omni_judge_eval
+MAX_SAMPLES=60
+
+CUDA_DEVICES=6
+STEPS=(25 50 75 100)
+MODALITIES=(image video audio)
+
+mkdir -p "${OUT_DIR}"
+
+HF_ENABLE_PARALLEL_LOADING=true \
+HF_PARALLEL_LOADING_WORKERS=8 \
+CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" .venv/bin/python examples/dpo_trainer/qwen3_omni/vlm_as_judge.py \
+  --data-dir "${DATA_DIR}" \
+  --modalities "${MODALITIES[@]}" \
+  --output-jsonl "${OUT_DIR}/reference.jsonl" \
+  --stage reference \
+  --max-samples "${MAX_SAMPLES}" \
+  --model-path "${MODEL_PATH}" \
+  --device-map cuda
+
+for step in "${STEPS[@]}"; do
+  HF_ENABLE_PARALLEL_LOADING=true \
+  HF_PARALLEL_LOADING_WORKERS=8 \
+  CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}" .venv/bin/python examples/dpo_trainer/qwen3_omni/vlm_as_judge.py \
+    --data-dir "${DATA_DIR}" \
+    --modalities "${MODALITIES[@]}" \
+    --output-jsonl "${OUT_DIR}/global_step_${step}.trained.jsonl" \
+    --stage trained \
+    --max-samples "${MAX_SAMPLES}" \
+    --model-path "${MODEL_PATH}" \
+    --device-map cuda \
+    --adapter-path "${CKPT_ROOT}/global_step_${step}"
+done
+
+for step in "${STEPS[@]}"; do
+  HF_ENABLE_PARALLEL_LOADING=true \
+  HF_PARALLEL_LOADING_WORKERS=8 \
+  .venv/bin/python examples/dpo_trainer/qwen3_omni/vlm_as_judge.py \
+    --data-dir "${DATA_DIR}" \
+    --modalities "${MODALITIES[@]}" \
+    --output-jsonl "${OUT_DIR}/global_step_${step}.jsonl" \
+    --summary-json "${OUT_DIR}/global_step_${step}.summary.json" \
+    --reference-jsonl "${OUT_DIR}/reference.jsonl" \
+    --trained-jsonl "${OUT_DIR}/global_step_${step}.trained.jsonl" \
+    --stage judge \
+    --max-samples "${MAX_SAMPLES}" \
+    --judge-max-tokens 4096 \
+    --judge-router-address 127.0.0.1:8001
+done

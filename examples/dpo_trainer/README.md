@@ -173,7 +173,7 @@ are saved.
 Keep the judge on a separate GPU from generation:
 
 ```bash
-CUDA_VISIBLE_DEVICES=4 \
+CUDA_VISIBLE_DEVICES=1 \
 HF_HOME=${HF_HOME:-$HOME/.cache/huggingface} \
 HF_MODULES_CACHE=${HF_MODULES_CACHE:-$HOME/.cache/huggingface/modules} \
 VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-XFORMERS} \
@@ -186,33 +186,55 @@ vllm serve openbmb/MiniCPM-o-4_5 \
   --enforce-eager
 ```
 
-#### 2. Run multi-GPU Transformers + LoRA evaluation
+#### 2. Run staged Transformers + LoRA evaluation
 
-`vlm_as_judge.py` uses Hugging Face Transformers (not vLLM-Omni). Multi-GPU
-placement is controlled only by `CUDA_VISIBLE_DEVICES`; the default
-`--device-map meta-offload-non-thinker` keeps `talker` / `code2wav` on the meta
-device and auto-shards the thinker across the visible GPUs.
+`vlm_as_judge.py` uses Hugging Face Transformers. Qwen3-Omni
+generation is currently run on a single visible CUDA device. The default
+`--device-map cuda-offload-non-thinker` keeps the active thinker path on
+`cuda:0` (within `CUDA_VISIBLE_DEVICES`) and offloads unused `talker` /
+`code2wav` modules to CPU.
+
+Evaluation is staged so expensive generation can be resumed and inspected:
+
+1. `reference`: load the original Qwen3-Omni weights only and cache generated
+   texts.
+2. `trained`: load Qwen3-Omni + the LoRA adapter and cache generated texts.
+3. `judge`: read the paired cached texts and send them to the MiniCPM-o judge.
+
+`--stage all` runs the three stages in that order. The cache files default to
+`<output>.reference.jsonl` and `<output>.trained.jsonl`; the final judge output
+is `<output>.jsonl`. All stages iterate samples in dataset order and use
+`(data_file, index, uid)` as the stable join key.
+
+The repository root [`eval_vlm_as_judge.sh`](qwen3_omni/eval_vlm_as_judge.sh) is the runnable example.
+It keeps reference and trained generation as resumable cache stages, then runs
+the judge stage over the cached outputs. Adjust the path variables, checkpoint
+steps, modalities, and judge address for your environment:
 
 ```bash
 CKPT_ROOT=checkpoints/omni-preference-dpo/qwen3-omni-offline-dpo-lora
 DATA_DIR=/path/to/Omni-Preference/parquet_dpo
-MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct
+MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct/
 OUT_DIR=outputs/qwen3_omni_judge_eval
 MAX_SAMPLES=60
+CUDA_DEVICES=1
+STEPS=(25 50 75 100)
+MODALITIES=(image video audio)
 
 mkdir -p "${OUT_DIR}"
 
-for step in 25 50 75 100; do
-  for modality in image video audio; do
-    CUDA_VISIBLE_DEVICES=0,1,2,3 python3 examples/dpo_trainer/qwen3_omni/vlm_as_judge.py \
-      --data-files "${DATA_DIR}/${modality}/test.parquet" \
-      --output-jsonl "${OUT_DIR}/global_step_${step}_${modality}.jsonl" \
-      --max-samples "${MAX_SAMPLES}" \
-      --model-path "${MODEL_PATH}" \
-      --adapter-path "${CKPT_ROOT}/global_step_${step}" \
-      --device-map meta-offload-non-thinker \
-      --judge-router-address 127.0.0.1:8001
-  done
+for step in "${STEPS[@]}"; do
+  .venv/bin/python examples/dpo_trainer/qwen3_omni/vlm_as_judge.py \
+    --data-dir "${DATA_DIR}" \
+    --modalities "${MODALITIES[@]}" \
+    --output-jsonl "${OUT_DIR}/global_step_${step}.jsonl" \
+    --summary-json "${OUT_DIR}/global_step_${step}.summary.json" \
+    --reference-jsonl "${OUT_DIR}/reference.jsonl" \
+    --trained-jsonl "${OUT_DIR}/global_step_${step}.trained.jsonl" \
+    --stage judge \
+    --max-samples "${MAX_SAMPLES}" \
+    --judge-max-tokens 4096 \
+    --judge-router-address 127.0.0.1:8001
 done
 ```
 
@@ -227,16 +249,11 @@ If the PEFT export is missing, the script runs `export_fsdp_lora_adapter` into
 
 #### Notes
 
-- Generation loads the base model, unfuses Qwen3-Omni MoE experts so PEFT keys
-  match verl training, attaches the adapter with `PeftModel.from_pretrained`,
-  then disables adapters for the reference answer and enables them for the
-  trained answer. Multimodal prompts use `qwen_omni_utils.process_mm_info`.
-- `--device-map` options:
-  - `meta-offload-non-thinker` (default): lowest VRAM for text-only eval
-  - `auto`: plain Accelerate `device_map="auto"`
-  - `cuda` / `cpu`: place the whole model on one device (not recommended for 30B)
-- Qwen3-Omni-30B thinker typically needs multiple 80GB GPUs; 4 visible devices
-  is a practical starting point.
+- The reference stage does not attach PEFT; it uses the base Qwen3-Omni weights
+  directly.
+- The trained stage unfuses Qwen3-Omni MoE experts so exported PEFT keys match
+  verl training, then attaches the adapter with `PeftModel.from_pretrained`.
+- If one stage fails, rerun only the missing stage. 
 - Requires `transformers`, `peft`, `accelerate`, and `qwen-omni-utils`.
   FlashAttention 2 is optional via `--attn-implementation flash_attention_2`.
 
