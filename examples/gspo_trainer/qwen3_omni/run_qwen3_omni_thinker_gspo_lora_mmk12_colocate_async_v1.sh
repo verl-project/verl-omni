@@ -81,7 +81,7 @@ python3 -m verl_omni.trainer.main_omni \
     trainer.balance_batch=True \
     trainer.critic_warmup=0 \
     trainer.v1.trainer_mode=omni_colocate_async \
-    trainer.v1.omni_colocate_async.num_warmup_batches=1 \
+    trainer.v1.omni_colocate_async.num_warmup_batches=2 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name=gspo \
     trainer.experiment_name=qwen3_omni_thinker_lora_mmk12_colocate_async \
