@@ -137,6 +137,7 @@ def _merge_fsdp_lora_tensors(rank_paths: list[Path]) -> tuple[OrderedDict[str, t
     lora_params = OrderedDict()
     target_modules = set()
     for key in lora_keys:
+        placement = placements[key]
         if placement is None:
             merged = torch.cat(lora_shards[key], dim=0).contiguous()
         elif len(placement) == 1 and placement[0].is_shard():
