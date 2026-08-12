@@ -1,10 +1,10 @@
-CKPT_ROOT=checkpoints/omni-preference-dpo/qwen3-omni-offline-dpo-lora
-DATA_DIR=${HOME}/didan-new/Omni-Preference/parquet_dpo
-MODEL_PATH=/scratch/fq9hpsac/huggingface/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/snapshots/26291f793822fb6be9555850f06dfe95f2d7e695
-OUT_DIR=outputs/qwen3_omni_judge_eval
+CKPT_ROOT=${CKPT_ROOT:-checkpoints/omni-preference-dpo/qwen3-omni-offline-dpo-lora}
+DATA_DIR=${DATA_DIR:-data/omni-preference/parquet_dpo}
+MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-Omni-30B-A3B-Instruct}
+OUT_DIR=${OUT_DIR:-outputs/qwen3_omni_judge_eval}
 MAX_SAMPLES=60
 
-CUDA_DEVICES=6
+CUDA_DEVICES=${CUDA_DEVICES:-0}
 STEPS=(25 50 75 100)
 MODALITIES=(image video audio)
 

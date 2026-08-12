@@ -22,8 +22,8 @@ else
 fi
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
-MODEL_PATH=${MODEL_PATH:-/scratch/fq9hpsac/huggingface/hub/models--Qwen--Qwen3-Omni-30B-A3B-Instruct/snapshots/26291f793822fb6be9555850f06dfe95f2d7e695}
-DATA_DIR=${DATA_DIR:-${HOME}/didan-new/Omni-Preference/parquet_dpo}
+MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-Omni-30B-A3B-Instruct}
+DATA_DIR=${DATA_DIR:-data/omni-preference/parquet_dpo}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-100}
 NUM_GPUS=${NUM_GPUS:-4}
 
