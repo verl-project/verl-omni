@@ -537,3 +537,44 @@ def test_merged_lora_per_tensor_param_with_lora_context_manager():
         actor, backup = entered[0]
         assert actor is module
         assert backup is True
+
+
+class TestAdapterNameForwarding:
+    def test_get_per_tensor_param_routes_adapter_name(self):
+        # A non-default adapter must reach collect_lora_params and select the
+        # matching peft_config; silently falling back to "default" broadcasts
+        # the wrong adapter in async LoRA sync.
+        import torch.nn as nn
+
+        omni_impl = _get_omni_impl_module()
+
+        module = nn.Module()
+        module.thinker = nn.Linear(2, 2)
+        old_cfg, default_cfg = MagicMock(), MagicMock()
+        old_cfg.to_dict.return_value = {"adapter": "old"}
+        default_cfg.to_dict.return_value = {"adapter": "default"}
+        module.peft_config = {"default": default_cfg, "old": old_cfg}
+
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine.module = module
+        engine.model_config = _make_mock_model_config()
+        engine._uses_fsdp2_cpu_offload_policy = True
+        engine._is_offload_param = False
+        engine._qat_enabled = False
+
+        captured = {}
+
+        def fake_collect(module, layered_summon, base_sync_done, adapter_name="default", **kwargs):
+            captured["adapter_name"] = adapter_name
+            return {"w": torch.zeros(1)}
+
+        with (
+            patch.object(omni_impl, "log_gpu_memory_usage", MagicMock()),
+            patch.object(omni_impl, "collect_lora_params", side_effect=fake_collect),
+            patch.object(omni_impl, "convert_weight_keys", side_effect=lambda params, module: params),
+        ):
+            per_tensor_param, peft_config = engine.get_per_tensor_param(base_sync_done=True, adapter_name="old")
+
+        assert captured["adapter_name"] == "old"
+        assert peft_config == {"adapter": "old"}
+        assert dict(per_tensor_param).keys() == {"w"}

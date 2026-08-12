@@ -17,7 +17,7 @@ VeRL-Omni targets RL post-training for three families of generative models:
 - **Specialized rollout** via [vLLM-Omni](https://github.com/vllm-project/vllm-omni) for high-throughput diffusion and multimodal generation.
 - **Flexible reward pipelines** spanning rule-based rewards, model-based rewards, and multimodal reward computation.
 - **Modular training backends** that plug into existing parallelism (FSDP, USP) and other optimizations rather than rebuilding the stack from scratch.
-- **End-to-end examples and benchmarks** validating co-located sync and fully-async RL on the model families above.
+- **End-to-end examples and benchmarks** validating co-located sync and separate-async RL on the model families above.
 - **High training throughput** — on our reference Qwen-Image FlowGRPO setup, VeRL-Omni achieves **up to ~25% higher end-to-end throughput** than the diffusers-based [`flow_grpo`](https://github.com/yifan123/flow_grpo) reference implementation, driven by vLLM-Omni rollout, FSDP/USP training, and asynchronous reward computation on a dedicated GPU pool.
 
 See {doc}`start/models` for the full model catalogue and which algorithms run on each model.
@@ -46,6 +46,7 @@ examples/config.md
 
 algo/async_reward.md
 algo/rollout_correction.md
+algo/separate_async_omni.md
 start/rollout_batching.md
 start/http_scorer.md
 start/diffusion_v1.md

@@ -60,12 +60,14 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
         if hasattr(peft_model, "peft_config"):  # LoRA
             if not merge_lora:
-                peft_config = peft_model.peft_config.get("default", None)
+                adapter_name = kwargs.get("adapter_name", "default")
+                peft_config = peft_model.peft_config.get(adapter_name, None)
                 # DIFF vs upstream: use verl_omni's fixed collect_lora_params
                 params = collect_lora_params(
                     module=self.module,
                     layered_summon=layered_summon,
                     base_sync_done=base_sync_done,
+                    adapter_name=adapter_name,
                 )
                 if not base_sync_done:
                     params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
