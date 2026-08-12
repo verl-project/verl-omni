@@ -171,7 +171,7 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td rowspan="2">Omni-modality</td>
     <td rowspan="2">Text / Image / Video / Audio</td>
     <td>DPO</td>
-    <td>WIP</td>
+    <td>✅</td>
   </tr>
     <tr>
     <td>GSPO</td>

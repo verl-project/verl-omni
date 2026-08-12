@@ -651,11 +651,13 @@ def test_direct_preference_prepare_model_outputs_for_inference():
 
 def test_postprocess_batch_func_converts_preference_outputs_to_nested_tensor():
     """DPO inference postprocess reuses the base jagged NestedTensor path."""
-    omni_impl = _get_omni_impl_module()
-    data = TensorDict({}, batch_size=[3])
-    omni_impl.tu.assign_non_tensor(data, use_dynamic_bsz=False)
+    from verl.utils import tensordict_utils as tu
+    from verl.workers.engine.fsdp.transformer_impl import postprocess_batch_func
 
-    outputs = omni_impl.postprocess_batch_func(
+    data = TensorDict({}, batch_size=[3])
+    tu.assign_non_tensor(data, use_dynamic_bsz=False)
+
+    outputs = postprocess_batch_func(
         output_lst=[
             {
                 "model_output": {"log_probs": torch.tensor([[1.0], [2.0]])},
