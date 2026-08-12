@@ -555,19 +555,20 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 raise RuntimeError("AR mode expects request_output with token IDs, but got None.")
 
             extra_fields = {"global_steps": self.global_steps}
-            token_ids = req_output.outputs[0].token_ids
+            completion = req_output.outputs[0]
+            token_ids = getattr(completion, "cumulative_token_ids", None)
+            if token_ids is None:
+                token_ids = completion.token_ids
             log_probs = None
             if params.logprobs is not None:
-                log_probs = [
-                    logprobs[token_ids[i]].logprob for i, logprobs in enumerate(req_output.outputs[0].logprobs)
-                ]
+                log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(completion.logprobs)]
 
-            finish_reason = req_output.outputs[0].finish_reason
+            finish_reason = completion.finish_reason
             stop_reason = self._map_stop_reason(finish_reason)
 
             num_preempted = None
-            if hasattr(req_output.outputs[0], "num_preempted"):
-                num_preempted = req_output.outputs[0].num_preempted
+            if hasattr(completion, "num_preempted"):
+                num_preempted = completion.num_preempted
 
             return TokenOutput(
                 token_ids=token_ids,
@@ -685,14 +686,16 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         ]
         request_ids = list(dict.fromkeys(state.external_request_id for _, state in in_flight_states))
 
+        output_request_ids = set()
         if request_ids:
-            await engine.abort(request_ids)
+            output_request_ids = set(await engine.abort_with_output_ids(request_ids))
 
         # AR abort outputs come from vLLM-Omni's OutputProcessor and retain the
-        # cumulative token IDs and logprobs. Diffusion has no resumable prefix,
-        # so keep the empty terminal output used to retry the whole sample.
-        if not self._ar_mode:
-            for internal_id, state in in_flight_states:
+        # cumulative token IDs and logprobs. A request not yet admitted by a
+        # stage has no OutputProcessor state, so synthesize a terminal response
+        # only for that missing case. Diffusion always retries the whole sample.
+        for internal_id, state in in_flight_states:
+            if not self._ar_mode or internal_id not in output_request_ids:
                 self._enqueue_abort_output(internal_id, state)
 
         if reset_prefix_cache:
@@ -754,19 +757,17 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return await super().abort_request(request_id, reset_prefix_cache)
 
         try:
-            # Diffusion needs the in-flight queue after engine.abort() pops its
-            # frontend state; AR receives its cumulative abort output from the
-            # vLLM-Omni OutputProcessor.
             in_flight_state = None
-            if not self._ar_mode:
-                for state in engine.request_states.values():
-                    if getattr(state, "external_request_id", None) == request_id:
-                        in_flight_state = state
-                        break
+            for state in engine.request_states.values():
+                if getattr(state, "external_request_id", None) == request_id:
+                    in_flight_state = state
+                    break
 
-            await engine.abort(request_id)
+            output_request_ids = set(await engine.abort_with_output_ids(request_id))
 
-            if in_flight_state is not None:
+            if in_flight_state is not None and (
+                not self._ar_mode or in_flight_state.request_id not in output_request_ids
+            ):
                 self._enqueue_abort_output(in_flight_state.request_id, in_flight_state)
 
             if reset_prefix_cache:
