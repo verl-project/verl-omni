@@ -13,8 +13,6 @@ export CPATH=/usr/include${CPATH:+:$CPATH}
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5,6,7}
 export WANDB_MODE=${WANDB_MODE:-online}
-QWEN3_OMNI_EXTERNAL_LIB=${QWEN3_OMNI_EXTERNAL_LIB:-verl_omni.models.transformers.qwen3_omni_thinker_experts}
-export VERL_USE_EXTERNAL_MODULES=${VERL_USE_EXTERNAL_MODULES:-${QWEN3_OMNI_EXTERNAL_LIB}}
 if [ -n "${CONDA_PREFIX:-}" ]; then
     export LD_LIBRARY_PATH="${CONDA_PREFIX}/cuda-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 else
@@ -35,9 +33,7 @@ PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-2}
 LORA_RANK=${LORA_RANK:-32}
 LORA_ALPHA=${LORA_ALPHA:-64}
 LORA_DROPOUT=${LORA_DROPOUT:-0.05}
-# The external lib unfuses Qwen3-Omni MoE experts before PEFT attaches LoRA, so expert LoRA
-# should target the unfused nn.Linear names instead of PEFT target_parameters on fused tensors.
-LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-'["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"]'}
+LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-'["q_proj","k_proj","v_proj","o_proj"]'}
 ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-sdpa}
 LR=${LR:-1.0e-6}
 SAVE_FREQ=${SAVE_FREQ:-25}
@@ -96,7 +92,6 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.model_type=omni_model \
     actor_rollout_ref.model.tokenizer_path="${MODEL_PATH}" \
     actor_rollout_ref.model.trust_remote_code=true \
-    actor_rollout_ref.model.external_lib="${QWEN3_OMNI_EXTERNAL_LIB}" \
     +actor_rollout_ref.model.override_config.attn_implementation="${ATTN_IMPLEMENTATION}" \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.model.lora_rank="${LORA_RANK}" \

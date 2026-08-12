@@ -1348,15 +1348,6 @@ class TransformersOmniGenerator(AbstractContextManager):
         if self.load_adapter:
             from peft import PeftConfig, PeftModel
 
-            # Install PEFT remapping patches used during verl Qwen3-Omni LoRA training,
-            # then unfuse MoE experts so adapter keys match the training module layout.
-            from verl_omni.models.transformers.qwen3_omni_thinker_experts import (
-                unfuse_qwen3_omni_thinker_experts,
-            )
-
-            converted = unfuse_qwen3_omni_thinker_experts(model, clone_weights=False)
-            logger.info("Unfused %d Qwen3-Omni thinker expert module(s) before LoRA load", converted)
-
             logger.info(
                 "Loading PEFT LoRA adapter: name=%s path=%s",
                 self.args.trained_model_name,
@@ -1365,7 +1356,7 @@ class TransformersOmniGenerator(AbstractContextManager):
             peft_config = PeftConfig.from_pretrained(self.args.adapter_path)
             peft_config.exclude_modules = (
                 r"^(?!.*thinker\.model\.layers\.).*"
-                r"(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$"
+                r"(q_proj|k_proj|v_proj|o_proj)$"
             )
             self.model = PeftModel.from_pretrained(
                 model,
