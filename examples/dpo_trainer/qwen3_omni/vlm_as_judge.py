@@ -204,7 +204,8 @@ def parse_args() -> argparse.Namespace:
         "--data-files",
         nargs="+",
         default=[],
-        help="Held-out Omni-Preference parquet/json/jsonl files. Not required when summarizing cached judge jsonl files.",
+        help="Held-out Omni-Preference parquet/json/jsonl files. "
+        "Not required when summarizing cached judge jsonl files.",
     )
     parser.add_argument(
         "--data-dir",
@@ -1634,7 +1635,8 @@ def run_judge_stage(args: argparse.Namespace, *, reference_path: Path, trained_p
 def validate_args_for_uncached_run(args: argparse.Namespace) -> None:
     if not resolve_eval_data_files(args):
         raise ValueError(
-            "--data-files or both --data-dir and --modalities are required when no cached judge jsonl files are available."
+            "--data-files or both --data-dir and --modalities are required "
+            "when no cached judge jsonl files are available."
         )
     if args.stage in {"reference", "trained", "all"} and not args.model_path:
         raise ValueError(
