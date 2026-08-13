@@ -30,7 +30,17 @@ from verl.utils.fsdp_utils import collect_lora_params as _upstream_collect_lora_
 from verl.utils.fsdp_utils import fsdp_version
 from verl.utils.fsdp_utils import layered_summon_lora_params as _upstream_layered_summon_lora_params
 
-__all__ = ["collect_lora_params", "export_fsdp_lora_adapter", "fsdp_summon_full_params"]
+__all__ = [
+    "collect_lora_params",
+    "export_fsdp_lora_adapter",
+    "fsdp_summon_full_params",
+    "split_fused_moe_lora_targets",
+]
+
+# Fused MoE experts (e.g. Qwen3OmniMoeThinkerTextExperts) are nn.Module + 3D
+# nn.Parameter, not nn.Linear. PEFT must target them via target_parameters.
+_FUSED_MOE_EXPERTS_MODULE = "experts"
+_FUSED_MOE_DEFAULT_TARGET_PARAMETERS = ("gate_up_proj", "down_proj")
 
 
 def _get_fsdp_module_cls():
@@ -104,7 +114,38 @@ def _normalize_peft_config(config: dict) -> dict:
             config[key] = config[key].value
     if config.get("target_modules") is not None:
         config["target_modules"] = sorted(config["target_modules"])
+    if config.get("target_parameters") is not None:
+        config["target_parameters"] = sorted(config["target_parameters"])
     return config
+
+
+def split_fused_moe_lora_targets(
+    target_modules: Sequence[str] | set[str] | str | None,
+    target_parameters: Sequence[str] | None = None,
+) -> tuple[list[str], list[str] | None]:
+    """Move fused MoE ``experts`` module names onto ``target_parameters``.
+
+    ``export_fsdp_lora_adapter`` infers ``target_modules`` from the last path
+    segment of LoRA keys. Fused-expert ParamWrapper keys look like
+    ``...mlp.experts.lora_A.weight``, so the inferred name is ``experts``.
+    PEFT cannot wrap ``Qwen3OmniMoeThinkerTextExperts`` as ``nn.Linear``; those
+    adapters must use ``target_parameters=['gate_up_proj', 'down_proj']``.
+    """
+    if target_modules is None:
+        modules: list[str] = []
+    elif isinstance(target_modules, str):
+        modules = [target_modules]
+    else:
+        modules = list(target_modules)
+
+    params = [] if target_parameters is None else list(target_parameters)
+    if _FUSED_MOE_EXPERTS_MODULE not in modules:
+        return sorted(modules), (sorted(params) if params else None)
+
+    modules = [name for name in modules if name != _FUSED_MOE_EXPERTS_MODULE]
+    if not params:
+        params = list(_FUSED_MOE_DEFAULT_TARGET_PARAMETERS)
+    return sorted(modules), sorted(params)
 
 
 def _discover_fsdp_rank_paths(input_dir: Path, world_size: int) -> list[Path]:
@@ -156,11 +197,14 @@ def _merge_fsdp_lora_tensors(rank_paths: list[Path]) -> tuple[OrderedDict[str, t
 
 
 def _build_peft_lora_config(meta: dict, target_modules: list[str], base_model_name_or_path: str | None) -> dict:
+    modules, params = split_fused_moe_lora_targets(target_modules, meta.get("target_parameters"))
     peft_dict = {
         "r": int(meta["r"]),
         "lora_alpha": int(meta["lora_alpha"]),
-        "target_modules": target_modules,
+        "target_modules": modules,
     }
+    if params:
+        peft_dict["target_parameters"] = params
     if meta.get("task_type") is not None:
         peft_dict["task_type"] = meta["task_type"]
 
@@ -196,8 +240,8 @@ def export_fsdp_lora_adapter(
     Returns:
         A summary dictionary with:
         ``output_dir`` (str), ``target_modules`` (list[str]),
-        ``adapter_tensors`` (int), ``adapter_size_mib`` (float), and
-        ``world_size`` (int).
+        ``target_parameters`` (list[str] | None), ``adapter_tensors`` (int),
+        ``adapter_size_mib`` (float), and ``world_size`` (int).
     """
     input_dir = Path(input_dir).expanduser().resolve()
     output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else input_dir / "lora_adapter"
@@ -222,7 +266,8 @@ def export_fsdp_lora_adapter(
     adapter_size = (output_dir / "adapter_model.safetensors").stat().st_size / (1024**2)
     return {
         "output_dir": str(output_dir),
-        "target_modules": target_modules,
+        "target_modules": peft_config.get("target_modules"),
+        "target_parameters": peft_config.get("target_parameters"),
         "adapter_tensors": len(lora_params),
         "adapter_size_mib": adapter_size,
         "world_size": world_size,

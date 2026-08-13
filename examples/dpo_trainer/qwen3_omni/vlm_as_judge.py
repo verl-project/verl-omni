@@ -1051,12 +1051,7 @@ def load_generation_cache(path: Path, role: str) -> dict[tuple[str, int, str], d
     return cache
 
 
-def _export_fsdp_lora_adapter(
-    *,
-    input_dir: Path,
-    output_dir: Path,
-    base_model_name_or_path: str | None,
-) -> None:
+def _load_fsdp_utils_module():
     repo_root = Path(__file__).resolve().parents[3]
     module_path = repo_root / "verl_omni" / "utils" / "fsdp_utils.py"
     spec = importlib.util.spec_from_file_location("_verl_omni_fsdp_utils_for_judge", module_path)
@@ -1064,7 +1059,16 @@ def _export_fsdp_lora_adapter(
         raise ImportError(f"Cannot load FSDP utils from {module_path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
 
+
+def _export_fsdp_lora_adapter(
+    *,
+    input_dir: Path,
+    output_dir: Path,
+    base_model_name_or_path: str | None,
+) -> None:
+    module = _load_fsdp_utils_module()
     module.export_fsdp_lora_adapter(
         input_dir=input_dir,
         output_dir=output_dir,
@@ -1302,6 +1306,34 @@ def _adapter_context(model: Any, *, trained: bool):
     return nullcontext()
 
 
+THINKER_ATTN_EXCLUDE_MODULES = r"^(?!.*thinker\.model\.layers\.).*(q_proj|k_proj|v_proj|o_proj)$"
+
+
+def _prepare_generation_peft_config(peft_config: Any, _model: Any):
+    """Rewrite fused-MoE LoRA configs so PEFT can inject them.
+
+    FSDP export infers ``target_modules=['experts', ...]`` from keys like
+    ``...mlp.experts.lora_A.weight``. PEFT cannot wrap
+    ``Qwen3OmniMoeThinkerTextExperts`` as Linear; fused experts must use
+    ``target_parameters=['gate_up_proj', 'down_proj']``.
+    """
+    modules, params = _load_fsdp_utils_module().split_fused_moe_lora_targets(
+        getattr(peft_config, "target_modules", None),
+        getattr(peft_config, "target_parameters", None),
+    )
+    peft_config.target_modules = modules
+    if params:
+        peft_config.target_parameters = params
+    peft_config.exclude_modules = THINKER_ATTN_EXCLUDE_MODULES
+    logger.info(
+        "Prepared PEFT LoRA config: target_modules=%s target_parameters=%s exclude_modules=%s",
+        peft_config.target_modules,
+        getattr(peft_config, "target_parameters", None),
+        peft_config.exclude_modules,
+    )
+    return peft_config
+
+
 class TransformersOmniGenerator(AbstractContextManager):
     """Qwen3-Omni generation via transformers ``generate`` with a PEFT LoRA adapter."""
 
@@ -1354,10 +1386,9 @@ class TransformersOmniGenerator(AbstractContextManager):
                 self.args.trained_model_name,
                 self.args.adapter_path,
             )
-            peft_config = PeftConfig.from_pretrained(self.args.adapter_path)
-            peft_config.exclude_modules = (
-                r"^(?!.*thinker\.model\.layers\.).*"
-                r"(q_proj|k_proj|v_proj|o_proj)$"
+            peft_config = _prepare_generation_peft_config(
+                PeftConfig.from_pretrained(self.args.adapter_path),
+                model,
             )
             self.model = PeftModel.from_pretrained(
                 model,

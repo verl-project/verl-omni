@@ -7,7 +7,8 @@
 #   OfflineMLLMDPODataset + ModalityGroupedBatchSampler ->
 #   OmniDirectPreferenceRayTrainer (actor-only, offline) ->
 #   FSDP LoRA actor update with ref-in-actor (base weights as reference) ->
-#   save actor checkpoint.
+#   save actor checkpoint ->
+#   vlm_as_judge.py --stage trained on each saved LoRA checkpoint.
 #
 # This is a plumbing smoke test (random weights, 1–2 steps): it checks the
 # pipeline runs without errors, NOT model quality.
@@ -19,8 +20,9 @@
 #
 # Override via env: NUM_GPUS, MODEL_PATH, DATA_DIR, TRAIN_SIZE, VAL_SIZE,
 # TOTAL_TRAINING_STEPS, PPO_MINI_BATCH_SIZE, PPO_MICRO_BATCH_SIZE_PER_GPU,
-# LORA_RANK, LORA_ALPHA, LORA_TARGET_MODULES,
-# IMAGE_RATIO, VIDEO_RATIO, AUDIO_RATIO, VAL_BATCH_SIZE, TEST_FREQ
+# LORA_RANK, LORA_ALPHA, LORA_TARGET_MODULES, LORA_TARGET_PARAMS,
+# IMAGE_RATIO, VIDEO_RATIO, AUDIO_RATIO, VAL_BATCH_SIZE, TEST_FREQ,
+# EVAL_MAX_SAMPLES, EVAL_GENERATION_MAX_TOKENS, EVAL_DEVICE_MAP, EVAL_CUDA_DEVICES
 set -xeuo pipefail
 
 export NCCL_IB_DISABLE=1
@@ -38,7 +40,13 @@ PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
 LORA_RANK=${LORA_RANK:-8}
 LORA_ALPHA=${LORA_ALPHA:-16}
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-'["q_proj","k_proj","v_proj","o_proj"]'}
+LORA_TARGET_PARAMS=${LORA_TARGET_PARAMS:-'["gate_up_proj","down_proj"]'}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-4}
+EVAL_MAX_SAMPLES=${EVAL_MAX_SAMPLES:-1}
+EVAL_GENERATION_MAX_TOKENS=${EVAL_GENERATION_MAX_TOKENS:-16}
+EVAL_DEVICE_MAP=${EVAL_DEVICE_MAP:-cuda}
+EVAL_CUDA_DEVICES=${EVAL_CUDA_DEVICES:-${CUDA_VISIBLE_DEVICES:-0}}
+IFS=' ' read -r -a EVAL_MODALITIES <<< "${EVAL_MODALITIES:-image video audio}"
 VAL_BATCH_SIZE=${VAL_BATCH_SIZE:-2}
 TEST_FREQ=${TEST_FREQ:-1}
 ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-sdpa}
@@ -115,6 +123,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.lora_rank="${LORA_RANK}" \
     actor_rollout_ref.model.lora_alpha="${LORA_ALPHA}" \
     actor_rollout_ref.model.target_modules="${LORA_TARGET_MODULES}" \
+    actor_rollout_ref.model.target_parameters="${LORA_TARGET_PARAMS}" \
     actor_rollout_ref.model.exclude_modules="${EXCLUDE_MODULES}" \
     actor_rollout_ref.model.use_remove_padding=true \
     actor_rollout_ref.actor.trainer_type=direct_preference \
@@ -154,5 +163,45 @@ if [ ! -f "${ADAPTER_PATH}/fsdp_config.json" ] || [ ! -f "${ADAPTER_PATH}/lora_t
     echo "Expected FSDP LoRA actor checkpoint not found at ${ADAPTER_PATH}" >&2
     exit 1
 fi
+
+# Trained-stage generation on saved LoRA checkpoints.
+EVAL_OUT_DIR="${EVAL_OUT_DIR:-${CHECKPOINT_DIR}/vlm_as_judge}"
+mkdir -p "${EVAL_OUT_DIR}"
+
+if [ -n "${EVAL_STEPS:-}" ]; then
+    read -r -a STEPS <<< "${EVAL_STEPS}"
+else
+    STEPS=()
+    for ((step = 1; step <= TOTAL_TRAINING_STEPS; step++)); do
+        STEPS+=("${step}")
+    done
+fi
+
+if [ "${#STEPS[@]}" -eq 0 ]; then
+    echo "No checkpoints selected for trained-stage eval under ${CHECKPOINT_DIR}" >&2
+    exit 1
+fi
+
+export HF_ENABLE_PARALLEL_LOADING=true
+export HF_PARALLEL_LOADING_WORKERS=8
+export CUDA_VISIBLE_DEVICES="${EVAL_CUDA_DEVICES}"
+
+for step in "${STEPS[@]}"; do
+    trained_jsonl="${EVAL_OUT_DIR}/global_step_${step}.trained.jsonl"
+    python3 "${REPO_ROOT}/examples/dpo_trainer/qwen3_omni/vlm_as_judge.py" \
+        --data-dir "${DATA_DIR}" \
+        --modalities "${EVAL_MODALITIES[@]}" \
+        --output-jsonl "${trained_jsonl}" \
+        --stage trained \
+        --max-samples "${EVAL_MAX_SAMPLES}" \
+        --model-path "${MODEL_PATH}" \
+        --device-map "${EVAL_DEVICE_MAP}" \
+        --generation-max-tokens "${EVAL_GENERATION_MAX_TOKENS}" \
+        --adapter-path "${CHECKPOINT_DIR}/global_step_${step}"
+    if [ ! -s "${trained_jsonl}" ]; then
+        echo "Expected trained-stage jsonl not found at ${trained_jsonl}" >&2
+        exit 1
+    fi
+done
 
 echo "Qwen3-Omni multimodal offline MLLM DPO + LoRA smoke test passed."
