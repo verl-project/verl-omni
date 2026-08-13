@@ -186,6 +186,7 @@ export CUDA_VISIBLE_DEVICES="${EVAL_CUDA_DEVICES}"
 
 # vlm_as_judge.py imports qwen_omni_utils for Qwen3-Omni multimodal inputs.
 python3 -m pip install --no-cache-dir "qwen-omni-utils"
+pip install --upgrade transformers peft
 
 for step in "${STEPS[@]}"; do
     trained_jsonl="${EVAL_OUT_DIR}/global_step_${step}.trained.jsonl"
