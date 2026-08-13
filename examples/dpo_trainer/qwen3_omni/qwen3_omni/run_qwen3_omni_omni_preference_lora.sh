@@ -34,6 +34,7 @@ LORA_RANK=${LORA_RANK:-32}
 LORA_ALPHA=${LORA_ALPHA:-64}
 LORA_DROPOUT=${LORA_DROPOUT:-0.05}
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-'["q_proj","k_proj","v_proj","o_proj"]'}
+LORA_TARGET_PARAMS=${LORA_TARGET_PARAMS:-'["gate_up_proj","down_proj"]'}
 ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-sdpa}
 LR=${LR:-1.0e-6}
 SAVE_FREQ=${SAVE_FREQ:-25}
@@ -68,6 +69,7 @@ python3 -m verl_omni.trainer.main_omni \
     algorithm.sample_source=offline \
     algorithm.paired_preference=true \
     data.train_files="${TRAIN_FILES}" \
+    data.dataloader_num_workers=2 \
     data.val_files="${VAL_FILES}" \
     data.train_batch_size="${TRAIN_BATCH_SIZE}" \
     data.val_batch_size="${VAL_BATCH_SIZE}" \
@@ -98,6 +100,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.lora_alpha="${LORA_ALPHA}" \
     actor_rollout_ref.model.lora.dropout="${LORA_DROPOUT}" \
     actor_rollout_ref.model.target_modules="${LORA_TARGET_MODULES}" \
+    actor_rollout_ref.model.target_parameters="${LORA_TARGET_PARAMS}" \
     actor_rollout_ref.model.exclude_modules="${EXCLUDE_MODULES}" \
     actor_rollout_ref.model.use_remove_padding=true \
     actor_rollout_ref.actor.trainer_type=direct_preference \
