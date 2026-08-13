@@ -184,6 +184,9 @@ export HF_ENABLE_PARALLEL_LOADING=true
 export HF_PARALLEL_LOADING_WORKERS=8
 export CUDA_VISIBLE_DEVICES="${EVAL_CUDA_DEVICES}"
 
+# vlm_as_judge.py imports qwen_omni_utils for Qwen3-Omni multimodal inputs.
+python3 -m pip install --no-cache-dir "qwen-omni-utils"
+
 for step in "${STEPS[@]}"; do
     trained_jsonl="${EVAL_OUT_DIR}/global_step_${step}.trained.jsonl"
     python3 "${REPO_ROOT}/examples/dpo_trainer/qwen3_omni/vlm_as_judge.py" \
