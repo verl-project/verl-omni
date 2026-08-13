@@ -186,6 +186,21 @@ class TestDiffusionRolloutConfig:
         with pytest.raises(ValueError, match="max_prompt_embed_length must be positive"):
             DiffusionRolloutConfig(name="vllm_omni", max_prompt_embed_length=value)
 
+    def test_prompt_embed_cache_config(self):
+        cfg = DiffusionRolloutConfig(
+            name="vllm_omni",
+            enable_prompt_embed_cache=True,
+            prompt_embed_cache_size=64,
+            enable_prompt_embed_cache_routing_affinity=True,
+        )
+        assert cfg.enable_prompt_embed_cache is True
+        assert cfg.prompt_embed_cache_size == 64
+        assert cfg.enable_prompt_embed_cache_routing_affinity is True
+
+    def test_invalid_prompt_embed_cache_size_raises(self):
+        with pytest.raises(ValueError, match="prompt_embed_cache_size must be positive"):
+            DiffusionRolloutConfig(name="vllm_omni", prompt_embed_cache_size=0)
+
     def test_invalid_rollout_adapter_raises(self):
         with pytest.raises(ValueError, match="Invalid diffusion rollout rollout_adapter"):
             DiffusionRolloutConfig(name="vllm_omni", rollout_adapter="bogus")

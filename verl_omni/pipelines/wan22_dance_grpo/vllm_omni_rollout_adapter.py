@@ -248,8 +248,8 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
 
     def encode_prompt(
         self,
-        prompt_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        prompt_ids: torch.Tensor | list[int] | None,
+        attention_mask: torch.Tensor | list[int] | list[bool] | None = None,
         num_videos_per_prompt: int = 1,
         prompt_embeds: torch.Tensor | None = None,
         max_sequence_length: int = 512,
@@ -273,9 +273,23 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         if prompt_embeds is not None:
             prompt_embeds_mask = torch.ones(prompt_embeds.shape[:2], device=prompt_embeds.device, dtype=torch.long)
             return prompt_embeds, prompt_embeds_mask
-
+        if prompt_ids is None:
+            raise ValueError("`prompt_ids` must be provided when `prompt_embeds` is None.")
         device = self.device
         dtype = self.text_encoder.dtype
+
+        if isinstance(prompt_ids, list):
+            prompt_ids = torch.tensor(prompt_ids, device=device, dtype=torch.long)
+        elif isinstance(prompt_ids, torch.Tensor):
+            prompt_ids = prompt_ids.to(device)
+        else:
+            raise TypeError("`prompt_ids` must be a tensor or list.")
+        if isinstance(attention_mask, list):
+            attention_mask = torch.tensor(attention_mask, device=device)
+        elif isinstance(attention_mask, torch.Tensor):
+            attention_mask = attention_mask.to(device)
+        elif attention_mask is not None:
+            raise TypeError("`attention_mask` must be a tensor or list.")
 
         if prompt_ids.ndim == 1:
             prompt_ids = prompt_ids.unsqueeze(0)
@@ -307,9 +321,9 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         self,
         req: OmniDiffusionRequest,
         prompt_ids: torch.Tensor | list[int] | None = None,
-        prompt_mask: torch.Tensor | None = None,
+        prompt_mask: torch.Tensor | list[int] | list[bool] | None = None,
         negative_prompt_ids: torch.Tensor | list[int] | None = None,
-        negative_prompt_mask: torch.Tensor | None = None,
+        negative_prompt_mask: torch.Tensor | list[int] | list[bool] | None = None,
         image: Any = None,
         height: int = 480,
         width: int = 832,
@@ -474,13 +488,24 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         else:
             latents_generator = generator
 
-        if isinstance(prompt_ids, list):
-            prompt_ids = torch.tensor(prompt_ids, device=device, dtype=torch.long)
-        if isinstance(negative_prompt_ids, list):
-            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=device, dtype=torch.long)
-        if negative_prompt_ids is not None and negative_prompt_ids.numel() == 0:
-            negative_prompt_ids = torch.zeros_like(prompt_ids, device=device, dtype=torch.long)
-            negative_prompt_mask = torch.zeros_like(negative_prompt_ids, device=device, dtype=torch.bool)
+        if isinstance(negative_prompt_ids, list) and not negative_prompt_ids:
+            if isinstance(prompt_ids, list):
+                negative_prompt_ids = [0] * len(prompt_ids)
+                negative_prompt_mask = [False] * len(prompt_ids)
+            elif isinstance(prompt_ids, torch.Tensor):
+                negative_prompt_ids = torch.zeros_like(prompt_ids, device=device, dtype=torch.long)
+                negative_prompt_mask = torch.zeros_like(negative_prompt_ids, device=device, dtype=torch.bool)
+            else:
+                raise TypeError("`prompt_ids` must be a tensor or list when `negative_prompt_ids` is empty.")
+        elif isinstance(negative_prompt_ids, torch.Tensor) and negative_prompt_ids.numel() == 0:
+            if isinstance(prompt_ids, torch.Tensor):
+                negative_prompt_ids = torch.zeros_like(prompt_ids, device=device, dtype=torch.long)
+                negative_prompt_mask = torch.zeros_like(negative_prompt_ids, device=device, dtype=torch.bool)
+            elif isinstance(prompt_ids, list):
+                negative_prompt_ids = torch.zeros(len(prompt_ids), device=device, dtype=torch.long)
+                negative_prompt_mask = torch.zeros_like(negative_prompt_ids, device=device, dtype=torch.bool)
+            else:
+                raise TypeError("`prompt_ids` must be a tensor or list when `negative_prompt_ids` is empty.")
 
         num_videos_per_prompt = sampling_params.num_outputs_per_prompt or 1
         max_sequence_length = sampling_params.max_sequence_length or 512
