@@ -340,6 +340,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                     )
                     engine_args["max_num_seqs"] = 1
 
+            engine_args["enable_prompt_embed_cache"] = self.config.enable_prompt_embed_cache
+            engine_args["prompt_embed_cache_size"] = self.config.prompt_embed_cache_size
+
         if getattr(self.config, "step_execution", False):
             engine_args["step_execution"] = True
 
