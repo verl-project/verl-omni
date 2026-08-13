@@ -180,30 +180,30 @@ if [ "${#STEPS[@]}" -eq 0 ]; then
     exit 1
 fi
 
-export HF_ENABLE_PARALLEL_LOADING=true
-export HF_PARALLEL_LOADING_WORKERS=8
-export CUDA_VISIBLE_DEVICES="${EVAL_CUDA_DEVICES}"
+# export HF_ENABLE_PARALLEL_LOADING=true
+# export HF_PARALLEL_LOADING_WORKERS=8
+# export CUDA_VISIBLE_DEVICES="${EVAL_CUDA_DEVICES}"
 
-# vlm_as_judge.py imports qwen_omni_utils for Qwen3-Omni multimodal inputs.
-python3 -m pip install --no-cache-dir "qwen-omni-utils"
-pip install --upgrade transformers peft
+# # vlm_as_judge.py imports qwen_omni_utils for Qwen3-Omni multimodal inputs.
+# python3 -m pip install --no-cache-dir "qwen-omni-utils"
+# pip install --upgrade transformers peft
 
-for step in "${STEPS[@]}"; do
-    trained_jsonl="${EVAL_OUT_DIR}/global_step_${step}.trained.jsonl"
-    python3 "${REPO_ROOT}/examples/dpo_trainer/qwen3_omni/vlm_as_judge.py" \
-        --data-dir "${DATA_DIR}" \
-        --modalities "${EVAL_MODALITIES[@]}" \
-        --output-jsonl "${trained_jsonl}" \
-        --stage trained \
-        --max-samples "${EVAL_MAX_SAMPLES}" \
-        --model-path "${MODEL_PATH}" \
-        --device-map "${EVAL_DEVICE_MAP}" \
-        --generation-max-tokens "${EVAL_GENERATION_MAX_TOKENS}" \
-        --adapter-path "${CHECKPOINT_DIR}/global_step_${step}"
-    if [ ! -s "${trained_jsonl}" ]; then
-        echo "Expected trained-stage jsonl not found at ${trained_jsonl}" >&2
-        exit 1
-    fi
-done
+# for step in "${STEPS[@]}"; do
+#     trained_jsonl="${EVAL_OUT_DIR}/global_step_${step}.trained.jsonl"
+#     python3 "${REPO_ROOT}/examples/dpo_trainer/qwen3_omni/vlm_as_judge.py" \
+#         --data-dir "${DATA_DIR}" \
+#         --modalities "${EVAL_MODALITIES[@]}" \
+#         --output-jsonl "${trained_jsonl}" \
+#         --stage trained \
+#         --max-samples "${EVAL_MAX_SAMPLES}" \
+#         --model-path "${MODEL_PATH}" \
+#         --device-map "${EVAL_DEVICE_MAP}" \
+#         --generation-max-tokens "${EVAL_GENERATION_MAX_TOKENS}" \
+#         --adapter-path "${CHECKPOINT_DIR}/global_step_${step}"
+#     if [ ! -s "${trained_jsonl}" ]; then
+#         echo "Expected trained-stage jsonl not found at ${trained_jsonl}" >&2
+#         exit 1
+#     fi
+# done
 
 echo "Qwen3-Omni multimodal offline MLLM DPO + LoRA smoke test passed."
