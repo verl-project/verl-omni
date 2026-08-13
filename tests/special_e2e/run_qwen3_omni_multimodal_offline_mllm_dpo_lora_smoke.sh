@@ -73,11 +73,9 @@ if [ "${NUM_GPUS}" -lt 2 ]; then
     echo "Warning: NUM_GPUS=${NUM_GPUS}; LoRA FSDP smoke is most reliable with NUM_GPUS>=2." >&2
 fi
 
-# ── Build multimodal tiny-random checkpoint if missing ───────────────────────
-if [ ! -f "${MODEL_PATH}/config.json" ] || [ ! -f "${MODEL_PATH}/chat_template.json" ] || [ ! -f "${MODEL_PATH}/preprocessor_config.json" ]; then
-    python3 "${REPO_ROOT}/tests/special_e2e/build_qwen3_omni_multimodal_tiny_random.py" \
-        --output-dir "${MODEL_PATH}"
-fi
+# Build or refresh the multimodal tiny-random checkpoint when missing or incomplete.
+python3 "${REPO_ROOT}/tests/special_e2e/build_qwen3_omni_multimodal_tiny_random.py" \
+    --output-dir "${MODEL_PATH}"
 
 # ── Build dummy Omni-Preference parquet if missing ───────────────────────────
 if [ ! -f "${DATA_DIR}/image/train.parquet" ]; then

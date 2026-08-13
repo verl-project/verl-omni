@@ -243,10 +243,16 @@ def build(output_dir: str, *, seed: int = 42, dtype: torch.dtype = torch.bfloat1
     text.bos_token_id = tokenizer.bos_token_id
     text.eos_token_id = tokenizer.eos_token_id
     text.pad_token_id = tokenizer.pad_token_id
+    # Thinker M-RoPE / generation reads these off thinker_config (vision_start_token_id is
+    # not declared on Qwen3OmniMoeThinkerConfig but is required at runtime).
     placeholder_token_ids = {
         "image_token_id": tokenizer.convert_tokens_to_ids(_MM_EXTRA_SPECIAL_TOKENS["image_token"]),
         "video_token_id": tokenizer.convert_tokens_to_ids(_MM_EXTRA_SPECIAL_TOKENS["video_token"]),
         "audio_token_id": tokenizer.convert_tokens_to_ids(_MM_EXTRA_SPECIAL_TOKENS["audio_token"]),
+        "vision_start_token_id": tokenizer.convert_tokens_to_ids(_MM_EXTRA_SPECIAL_TOKENS["vision_bos_token"]),
+        "vision_end_token_id": tokenizer.convert_tokens_to_ids(_MM_EXTRA_SPECIAL_TOKENS["vision_eos_token"]),
+        "audio_start_token_id": tokenizer.convert_tokens_to_ids(_MM_EXTRA_SPECIAL_TOKENS["audio_bos_token"]),
+        "audio_end_token_id": tokenizer.convert_tokens_to_ids(_MM_EXTRA_SPECIAL_TOKENS["audio_eos_token"]),
     }
     for sub_config in (config.thinker_config, config.talker_config):
         for name, token_id in placeholder_token_ids.items():
@@ -298,6 +304,26 @@ def _write_chat_template_config(output_dir: str) -> None:
         json.dump({"chat_template": _CHATML_TEMPLATE}, f, indent=2, sort_keys=True)
 
 
+def _checkpoint_has_required_mm_token_ids(output_dir: str) -> bool:
+    """Return True when thinker_config carries the multimodal token ids generation needs."""
+    import json
+
+    config_path = os.path.join(output_dir, "config.json")
+    if not os.path.isfile(config_path):
+        return False
+    with open(config_path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    thinker = cfg.get("thinker_config") or {}
+    required = (
+        "image_token_id",
+        "video_token_id",
+        "audio_token_id",
+        "vision_start_token_id",
+        "audio_start_token_id",
+    )
+    return all(thinker.get(name) is not None for name in required)
+
+
 def ensure_tiny_qwen3_omni_multimodal_checkpoint(
     output_dir: str,
     *,
@@ -308,7 +334,11 @@ def ensure_tiny_qwen3_omni_multimodal_checkpoint(
     """Build the tiny checkpoint only if it is not already present."""
     output_dir = os.path.expanduser(output_dir)
     required_files = ("config.json", "chat_template.json", "preprocessor_config.json")
-    if skip_if_exists and all(os.path.isfile(os.path.join(output_dir, name)) for name in required_files):
+    if (
+        skip_if_exists
+        and all(os.path.isfile(os.path.join(output_dir, name)) for name in required_files)
+        and _checkpoint_has_required_mm_token_ids(output_dir)
+    ):
         return output_dir
     return build(output_dir, seed=seed, dtype=dtype)
 
