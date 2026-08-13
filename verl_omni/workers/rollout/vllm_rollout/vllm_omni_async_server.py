@@ -32,7 +32,7 @@ from verl.utils.import_utils import import_external_libs
 from verl.utils.net_utils import get_free_port
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.config import RolloutConfig
-from verl.workers.rollout.replica import TokenOutput
+from verl.workers.rollout.replica import CONTROL_METHOD_CONCURRENCY, TokenOutput
 from verl.workers.rollout.utils import run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
@@ -58,6 +58,7 @@ logger.setLevel(logging.INFO)
 
 # Sentinel: ``None`` is a valid cached value (LoRA not loaded).
 _LORA_REQUEST_CACHE_MISS = object()
+_CONTROL_CONCURRENCY_GROUP = "control"
 
 
 def _strip_none(d: dict) -> dict:
@@ -218,6 +219,30 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # Server lifecycle
     # -----------------------------------------------------------------------
 
+    async def launch_server(self, *args, **kwargs):
+        self._server_loop = asyncio.get_running_loop()
+        return await super().launch_server(*args, **kwargs)
+
+    async def _run_on_server_loop(self, coro):
+        """Run engine operations on the event loop that owns AsyncOmni."""
+        server_loop = getattr(self, "_server_loop", None)
+        if server_loop is None or server_loop is asyncio.get_running_loop():
+            return await coro
+        future = asyncio.run_coroutine_threadsafe(coro, server_loop)
+        return await asyncio.wrap_future(future)
+
+    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
+    async def collective_rpc(
+        self,
+        method,
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict[str, Any] | None = None,
+    ):
+        return await self._run_on_server_loop(
+            super().collective_rpc(method=method, timeout=timeout, args=args, kwargs=kwargs)
+        )
+
     async def run_server(self, args: argparse.Namespace):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
@@ -283,7 +308,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _get_wake_up_tags(self) -> list[str]:
         return ["kv_cache", "weights"]
 
+    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
     async def wake_up(self, tags: list[str] | None = None):
+        return await self._run_on_server_loop(self._wake_up(tags))
+
+    async def _wake_up(self, tags: list[str] | None = None):
         """Wake AR engine stages through the EngineCore via AsyncOmni.wake_up().
 
         Previously overridden to use collective_rpc("wake_up") to avoid CUDA
@@ -299,10 +328,22 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         )
         self._invalidate_lora_request_cache()
 
+    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
     async def set_global_steps(self, global_steps: int):
+        return await self._run_on_server_loop(self._set_global_steps(global_steps))
+
+    async def _set_global_steps(self, global_steps: int):
         if global_steps != self.global_steps:
             self._invalidate_lora_request_cache()
         await super().set_global_steps(global_steps)
+
+    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
+    async def sleep(self):
+        return await self._run_on_server_loop(super().sleep())
+
+    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
+    async def clear_kv_cache(self):
+        return await self._run_on_server_loop(super().clear_kv_cache())
 
     async def _sleep_hybrid(self):
         """Preserve non-actor pipeline weights during hybrid training sleep.
@@ -651,6 +692,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             extra_fields=extra_fields,
         )
 
+    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
     async def wait_for_requests_to_drain(self):
         # TODO (mike): implement this once DP is supported.
         pass
@@ -661,7 +703,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # so the parent's AsyncLLM-specific implementation must be overridden.
     # -----------------------------------------------------------------------
 
+    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
     async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
+        return await self._run_on_server_loop(self._abort_all_requests(reset_prefix_cache))
+
+    async def _abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort all in-flight requests on the AsyncOmni engine.
 
         Pause new admissions, abort unfinished rollouts, and wait for
@@ -687,7 +733,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         request_ids = list(dict.fromkeys(state.external_request_id for _, state in in_flight_states))
 
         output_request_ids = set()
-        if request_ids:
+        if request_ids or self._ar_mode:
             output_request_ids = set(
                 await engine.abort_with_output_ids(
                     request_ids,
@@ -708,6 +754,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         logger.info("Aborted %d request(s): %s", len(request_ids), request_ids)
         return {"aborted_count": len(request_ids), "request_ids": request_ids}
+
+    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
+    async def resume_generation(self):
+        return await self._run_on_server_loop(super().resume_generation())
 
     def _enqueue_abort_output(self, internal_id: str, req_state: Any) -> None:
         """Synthesize a terminal abort OutputMessage and put it into a per-request queue.
@@ -755,7 +805,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         )
         req_state.queue.put_nowait(msg)
 
+    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
+        return await self._run_on_server_loop(self._abort_request(request_id, reset_prefix_cache))
+
+    async def _abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a single in-flight request on the AsyncOmni engine."""
         engine = self.engine
         if getattr(engine, "output_processor", None) is not None:
@@ -795,7 +849,9 @@ class vLLMOmniReplica(vLLMReplica):
         is_reward_model: bool = False,
     ):
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
-        self.server_class = ray.remote(vLLMOmniHttpServer)
+        self.server_class = ray.remote(concurrency_groups={_CONTROL_CONCURRENCY_GROUP: CONTROL_METHOD_CONCURRENCY})(
+            vLLMOmniHttpServer
+        )
 
     def _validate_launch_requirements(self) -> None:
         """No-op: the parent check validates vllm.__version__ which is
