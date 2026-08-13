@@ -688,7 +688,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         output_request_ids = set()
         if request_ids:
-            output_request_ids = set(await engine.abort_with_output_ids(request_ids))
+            output_request_ids = set(
+                await engine.abort_with_output_ids(
+                    request_ids,
+                    pause=self._ar_mode,
+                )
+            )
 
         # AR abort outputs come from vLLM-Omni's OutputProcessor and retain the
         # cumulative token IDs and logprobs. A request not yet admitted by a
