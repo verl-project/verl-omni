@@ -1,6 +1,6 @@
 # DPO Training
 
-Last updated: 06/30/2026
+Last updated: 08/14/2026
 
 This directory contains examples for **direct-preference** training (DPO and
 related losses). Three workflows are supported:
@@ -126,11 +126,12 @@ Common overrides:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
-TOTAL_TRAINING_STEPS=100 \
+TOTAL_TRAINING_STEPS=200 \
 TRAIN_BATCH_SIZE=32 \
 VAL_BATCH_SIZE=32 \
 bash examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh
 ```
+
 
 Key settings:
 
@@ -144,8 +145,9 @@ Key settings:
   modalities, `96` means `32` per modality.
 - `ModalityGroupedBatchSampler`: keeps batches single-modality, which is required
   by the offline MLLM DPO collator.
-- `actor_rollout_ref.model.lora_rank`, `lora_alpha`, `target_modules`: LoRA
-  configuration for the trainable thinker modules.
+- `actor_rollout_ref.model.lora_rank`, `lora_alpha`, `target_modules`,
+  `target_parameters`: LoRA on thinker attention (`q/k/v/o_proj`) and MoE
+  (`gate_up_proj`, `down_proj`) modules. Rank defaults to 32, alpha to 64.
 - `actor_rollout_ref.model.exclude_modules`: freezes talker, code2wav, visual,
   and audio tower modules in the example.
 - `actor_rollout_ref.actor.omni_loss.*`: DPO loss options such as `beta`,
@@ -158,9 +160,9 @@ Key settings:
 > Measured on 4× NVIDIA H800 GPUs. Offline DPO reads preference pairs directly,
 > so no reward model is used during training.
 
-| Script | Model | Algorithm | # Cards | Reward Model | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / Card / Seconds) | Time per Step (Seconds) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh` | Qwen3-Omni-30B-A3B-Instruct | Offline DPO + LoRA | 4 | None | 32×2=64 | 2 | 0.1533 | 106.95 |
+| Script | Model | Algorithm | # Cards | Reward Model | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / Card / Seconds) | Time per Step (Seconds) | Val Accuracy | Val Reward Margin | W&B Report |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh` | Qwen3-Omni-30B-A3B-Instruct | Offline DPO + LoRA | 4 | None | 32×2=64 | 2 | 1.35 | 14.07 | 0.90742 | 0.843 | [W&B report](https://api.wandb.ai/links/didan/iumxl2zr) |
 
 ### Validation
 
@@ -218,7 +220,7 @@ MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct/
 OUT_DIR=outputs/qwen3_omni_judge_eval
 MAX_SAMPLES=60
 CUDA_DEVICES=1
-STEPS=(25 50 75 100)
+STEPS=(50 100 150 200)
 MODALITIES=(image video audio)
 
 mkdir -p "${OUT_DIR}"

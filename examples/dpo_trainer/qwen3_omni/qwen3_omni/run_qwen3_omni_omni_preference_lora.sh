@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Qwen3-Omni offline DPO + LoRA training on Omni-Preference.
 #
-# Defaults are set for a short real-data run (~100 optimizer steps). Override
+# Defaults are set for a short real-data run (~200 optimizer steps). Override
 # paths and batch sizes with environment variables, or append Hydra overrides.
 set -xeuo pipefail
 
@@ -22,7 +22,7 @@ export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-Omni-30B-A3B-Instruct}
 DATA_DIR=${DATA_DIR:-data/omni-preference/parquet_dpo}
-TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-100}
+TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-200}
 NUM_GPUS=${NUM_GPUS:-4}
 
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
@@ -37,8 +37,8 @@ LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-'["q_proj","k_proj","v_proj","o_proj"
 LORA_TARGET_PARAMS=${LORA_TARGET_PARAMS:-'["gate_up_proj","down_proj"]'}
 ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-sdpa}
 LR=${LR:-1.0e-6}
-SAVE_FREQ=${SAVE_FREQ:-25}
-TEST_FREQ=${TEST_FREQ:-25}
+SAVE_FREQ=${SAVE_FREQ:-50}
+TEST_FREQ=${TEST_FREQ:-50}
 VAL_MAX_SAMPLES=${VAL_MAX_SAMPLES:-96}
 
 IMAGE_RATIO=${IMAGE_RATIO:-1.0}

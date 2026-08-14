@@ -5,7 +5,7 @@ OUT_DIR=${OUT_DIR:-outputs/qwen3_omni_judge_eval}
 MAX_SAMPLES=60
 
 CUDA_DEVICES=${CUDA_DEVICES:-0}
-STEPS=(25 50 75 100)
+STEPS=(50 100 150 200)
 MODALITIES=(image video audio)
 
 mkdir -p "${OUT_DIR}"
