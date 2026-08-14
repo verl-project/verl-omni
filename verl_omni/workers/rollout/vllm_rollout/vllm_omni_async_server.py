@@ -302,11 +302,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         raise NotImplementedError("vLLM-Omni headless mode is not implemented yet.")
 
     # -----------------------------------------------------------------------
-    # wake_up hook: Omni does not restore KV cache on wake-up
+    # wake_up hook: restore every tag released by level-1 sleep
     # -----------------------------------------------------------------------
 
     def _get_wake_up_tags(self) -> list[str]:
-        return ["weights"]
+        """Return all CuMem tags that vLLM-Omni marks asleep."""
+        return ["kv_cache", "weights"]
 
     async def wake_up(self, tags: list[str] | None = None):
         """Override parent to use collective_rpc instead of engine.wake_up().

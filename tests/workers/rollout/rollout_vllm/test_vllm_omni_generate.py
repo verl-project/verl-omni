@@ -174,7 +174,7 @@ def _assert_training_step_execution_contract(
     assert output.extra_fields["prompt_embeds"].shape[:-1] == output.extra_fields["prompt_embeds_mask"].shape
 
 
-def _build_rollout_cfg(*, step_execution: bool = False) -> Any:
+def _build_rollout_cfg(*, step_execution: bool = False, enable_sleep_mode: bool = False) -> Any:
     from tests.utils.smoke_attention import resolve_smoke_attention_backends
 
     _, rollout_attn_backend = resolve_smoke_attention_backends()
@@ -196,7 +196,7 @@ def _build_rollout_cfg(*, step_execution: bool = False) -> Any:
         "enforce_eager": True,
         "enable_chunked_prefill": False,
         "enable_prefix_caching": False,
-        "enable_sleep_mode": False,
+        "enable_sleep_mode": enable_sleep_mode,
         "free_cache_engine": True,
         "disable_log_stats": True,
         "n": 1,
@@ -235,7 +235,13 @@ def _build_model_cfg(*, attn_backend: str | None = None, algorithm: str = "flow_
     )
 
 
-def _launch_server(*, step_execution: bool = False, algorithm: str = "flow_grpo"):
+def _launch_server(
+    *,
+    step_execution: bool = False,
+    algorithm: str = "flow_grpo",
+    enable_sleep_mode: bool = False,
+    rollout_mode: RolloutMode = RolloutMode.STANDALONE,
+):
     ray.init(
         runtime_env={
             "env_vars": {
@@ -257,9 +263,9 @@ def _launch_server(*, step_execution: bool = False, algorithm: str = "flow_grpo"
         },
         max_concurrency=16,
     ).remote(
-        config=_build_rollout_cfg(step_execution=step_execution),
+        config=_build_rollout_cfg(step_execution=step_execution, enable_sleep_mode=enable_sleep_mode),
         model_config=_build_model_cfg(algorithm=algorithm),
-        rollout_mode=RolloutMode.STANDALONE,
+        rollout_mode=rollout_mode,
         workers=[],
         replica_rank=0,
         node_rank=0,
@@ -290,6 +296,18 @@ def init_server():
 def init_step_execution_server():
     """Function-scoped step-execution server (cannot share with request-level)."""
     server = _launch_server(step_execution=True)
+    yield server
+    _shutdown_server()
+
+
+@pytest.fixture
+def init_sleep_server():
+    """Function-scoped server with CuMem sleep mode enabled."""
+    server = _launch_server(
+        step_execution=False,
+        enable_sleep_mode=True,
+        rollout_mode=RolloutMode.HYBRID,
+    )
     yield server
     _shutdown_server()
 
@@ -371,6 +389,22 @@ def test_generate_request_level_batch(init_server):
         _assert_valid_diffusion_output(output, index=i, expect_logprobs=True)
 
     print(f"All {len(_PROMPTS)} request-level-batched generates returned valid DiffusionOutput")
+
+
+def test_generate_after_repeated_sleep_wakeup(init_sleep_server):
+    """A level-1 sleep/wake must restore every allocation needed by the next forward."""
+    prompt = _PROMPTS[0]
+
+    for cycle in range(3):
+        output = _generate_concurrent(
+            init_sleep_server,
+            [prompt],
+            logprobs_first_only=False,
+        )[0]
+        _assert_valid_diffusion_output(output, index=cycle, expect_logprobs=True)
+
+        ray.get(init_sleep_server.sleep.remote(), timeout=600)
+        ray.get(init_sleep_server.wake_up.remote(), timeout=600)
 
 
 def test_flow_grpo_step_execution_contract(init_step_execution_server):
