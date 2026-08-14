@@ -61,7 +61,7 @@ Qwen-Image T2I helpers). Rollout uses vLLM-Omni
 `QwenImageEditPipeline` architecture is not supported.
 
 For dataset layout, launch overrides, and sequence-parallel constraints, see
-[Examples - Qwen-Image-Edit-2511 FlowGRPO training](../examples/flowgrpo_trainer/qwen_image_edit/README.md).
+[Examples - Qwen-Image-Edit-2511 FlowGRPO training](../../examples/flowgrpo_trainer/qwen_image_edit/README.md).
 
 **Supported trainers:**
 
