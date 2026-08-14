@@ -164,7 +164,7 @@ BAGEL uses a per-stage deploy YAML that overrides top-level vLLM engine argument
 | **Stage config** | Auto-generated deploy config via `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name="qwen3_omni_moe"` |
 
 For version requirements and detailed setup instructions, see
-[Examples - Qwen3-Omni Thinker GSPO Trainer](../examples/gspo_trainer.md).
+[Examples - Qwen3-Omni Thinker GSPO Trainer](../../examples/gspo_trainer/README.md).
 
 **Supported trainers:**
 
