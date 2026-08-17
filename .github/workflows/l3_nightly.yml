@@ -138,7 +138,7 @@ jobs:
     timeout-minutes: 180
     env:
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com,github.com,api.github.com,codeload.github.com,.github.com,.actions.githubusercontent.com,.blob.core.windows.net"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0"
     steps:
