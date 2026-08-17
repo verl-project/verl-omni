@@ -234,6 +234,9 @@ def _decode_video_path(video_path: str) -> tuple[torch.Tensor, float]:
     if not container.streams.video:
         container.close()
         raise ValueError(f"Video {video_path} contains no video streams.")
+    if not container.streams.video:
+        container.close()
+        raise ValueError(f"Video {video_path} contains no video streams.")
     stream = container.streams.video[0]
     video_fps = float(stream.average_rate) if stream.average_rate else 2.0
     frames = [frame.to_image().convert("RGB") for frame in container.decode(video=0)]
@@ -501,11 +504,10 @@ def process_qwen3_omni_sample(
     model_inputs["image_mask"] = image_mask
     model_inputs["video_mask"] = video_mask
     model_inputs["audio_mask"] = audio_mask
-    input_ids[image_mask | video_mask | audio_mask] = 0
-    model_inputs["input_ids"] = input_ids
+    model_inputs["input_ids"] = raw_input_ids
     model_inputs["attention_mask"] = model_inputs["attention_mask"].squeeze(0)
 
-    labels = torch.full_like(input_ids, fill_value=IGNORE_INDEX)
+    labels = torch.full_like(raw_input_ids, fill_value=IGNORE_INDEX)
     assistant_loss_mask = _assistant_token_mask_from_template(
         input_conversations,
         processor,
@@ -513,6 +515,6 @@ def process_qwen3_omni_sample(
         raw_input_ids,
         (image_token_id, video_token_id, audio_token_id),
     )
-    labels[assistant_loss_mask] = input_ids[assistant_loss_mask]
+    labels[assistant_loss_mask] = raw_input_ids[assistant_loss_mask]
     model_inputs["labels"] = labels
     return [model_inputs]

@@ -31,6 +31,26 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
 from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
 
 
+def _count_controller_capture_ranges(profile_steps: list[int], profile_continuous_steps: bool) -> int:
+    """Return the number of CUDA profiler capture ranges emitted by the controller."""
+    steps = sorted(set(profile_steps))
+    if not profile_continuous_steps:
+        return len(steps)
+    return sum(index == 0 or step != steps[index - 1] + 1 for index, step in enumerate(steps))
+
+
+def _resolve_controller_nsight_options(config) -> dict:
+    """Resolve controller Nsight options for the configured profiling steps."""
+    nsight_options = OmegaConf.to_container(config.global_profiler.global_tool_config.nsys.controller_nsight_options)
+    if nsight_options.get("capture-range") == "cudaProfilerApi" and nsight_options.get("capture-range-end") is None:
+        capture_count = _count_controller_capture_ranges(
+            OmegaConf.select(config, "global_profiler.steps"),
+            OmegaConf.select(config, "global_profiler.profile_continuous_steps", default=False),
+        )
+        nsight_options["capture-range-end"] = f"repeat-shutdown:{capture_count}"
+    return nsight_options
+
+
 @hydra.main(config_path="./config", config_name="diffusion_trainer", version_base=None)
 def main(config):
     """Main entry point for diffusion model training with Hydra configuration management.
@@ -84,9 +104,7 @@ def run_diffusion(config, task_runner_class=None) -> None:
         from verl.utils.import_utils import is_nvtx_available
 
         assert is_nvtx_available(), "nvtx is not available in CUDA platform. Please 'pip3 install nvtx'"
-        nsight_options = OmegaConf.to_container(
-            config.global_profiler.global_tool_config.nsys.controller_nsight_options
-        )
+        nsight_options = _resolve_controller_nsight_options(config)
         runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
     else:
         runner = task_runner_class.remote()

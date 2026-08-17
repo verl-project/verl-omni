@@ -18,6 +18,7 @@ import os
 import time
 from contextlib import nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from functools import partial
 from itertools import chain
 from typing import Optional
@@ -65,8 +66,9 @@ from verl_omni.workers.config import (
     DiffusionModelConfig,
     OmniModelConfig,
 )
+from verl_omni.workers.config.diffusion import DiffusionDistillationTeacherModelConfig
 from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle, make_update_zmq_id
-from verl_omni.workers.utils.losses import diffusion_loss
+from verl_omni.workers.utils.losses import diffusion_loss, omni_loss
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -510,6 +512,39 @@ class TrainingWorker(Worker, DistProfilerExtension):
         return self.engine.load_checkpoint(local_path, hdfs_path, del_local_after_load)
 
 
+def build_teacher_training_config(
+    config: DictConfig,
+    model_config: DiffusionModelConfig,
+    teacher_model_config: DiffusionDistillationTeacherModelConfig,
+) -> TrainingWorkerConfig:
+    """Derive the frozen teacher's training config from the ref-shaped scoring config."""
+    teacher_config: DiffusionActorConfig = omega_conf_to_dataclass(config.ref)
+    teacher_config.model_config = replace(
+        deepcopy(model_config),
+        path=teacher_model_config.model_path,
+        lora_rank=0,
+        lora_adapter_path=None,
+        load_tokenizer=False,
+        tokenizer=None,
+        processor=None,
+        mtp=MtpConfig(enable=False),
+    )
+    teacher_training_config = TrainingWorkerConfig(
+        model_type=teacher_config.model_config.get("model_type", "language_model"),
+        model_config=teacher_config.model_config,
+        engine_config=teacher_config.engine,
+        optimizer_config=teacher_config.optim,
+        checkpoint_config=teacher_config.checkpoint,
+    )
+    infer_micro_bsz = config.ref.get("log_prob_micro_batch_size_per_gpu", None)
+    if infer_micro_bsz is None:
+        infer_micro_bsz = config.ref.get("ppo_micro_batch_size_per_gpu", None)
+    if infer_micro_bsz is None:
+        infer_micro_bsz = config.actor.ppo_micro_batch_size_per_gpu
+    teacher_training_config.engine_config.infer_micro_batch_size_per_gpu = infer_micro_bsz
+    return teacher_training_config
+
+
 class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     """Hybrid worker that includes actor model, rollout and optional ref model.
     For standalone actor or rollout, use ActorWorker or BaseRollout respectively.
@@ -527,6 +562,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.role = role
         self.actor: TrainingWorker = None
         self.ref: TrainingWorker = None
+        self.teacher: TrainingWorker = None
         self.rollout: BaseRollout = None
         assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
@@ -596,6 +632,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             # The ref model does not need to enable MTP; force it to false.
             ref_config.model_config = deepcopy(model_config)
+            if ref_config.model_config.get("model_type", "language_model") == "omni_model":
+                ref_config.model_config.trainer_type = self.config.actor.get("trainer_type", "policy_gradient")
             ref_config.model_config.mtp = MtpConfig(enable=False)
 
             # construct TrainingWorkerConfig
@@ -633,6 +671,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if "actor" in self.role:
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
             actor_config.model_config = model_config
+            if actor_config.model_config.get("model_type", "language_model") == "omni_model":
+                actor_config.model_config.trainer_type = getattr(actor_config, "trainer_type", "policy_gradient")
             distillation_config: Optional[DistillationConfig] = (
                 omega_conf_to_dataclass(self.distillation_config) if self.distillation_enabled else None
             )
@@ -686,22 +726,43 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 else:
                     assert self.config.rollout.get("log_prob_micro_batch_size_per_gpu") is not None
                     assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
-            if self.distillation_enabled:
+            actor_model_type = actor_config.model_config.get("model_type", "language_model")
+            # Diffusion distillation lives inside diffusion_loss; distillation_ppo_loss is token-level only.
+            if is_diffusion:
+                self.loss_fn = partial(diffusion_loss, config=actor_config)
+            elif actor_model_type == "omni_model" and actor_config.trainer_type == "direct_preference":
+                self.loss_fn = partial(omni_loss, config=actor_config)
+            elif self.distillation_enabled:
                 self.loss_fn = partial(
                     distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
                 )
-            elif model_config.get("model_type", "language_model") in (
-                "diffusion_model",
-                "diffusion_dpo_model",
-                "diffusion_nft_model",
-            ):
-                self.loss_fn = partial(diffusion_loss, config=actor_config)
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
             self.actor = TrainingWorker(config=actor_training_config)
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
+
+        # 2.5 build frozen teacher for diffusion on-policy distillation
+        if self.distillation_enabled and is_diffusion and "actor" in self.role:
+            if self.config.actor.strategy not in ("fsdp", "fsdp2"):
+                raise NotImplementedError(
+                    f"The diffusion distillation teacher supports fsdp/fsdp2, got {self.config.actor.strategy!r}."
+                )
+            distillation_config = omega_conf_to_dataclass(self.distillation_config)
+            teacher_training_config = build_teacher_training_config(
+                config=self.config,
+                model_config=model_config,
+                teacher_model_config=distillation_config.teacher_models["teacher_model"],
+            )
+            self.teacher = TrainingWorker(config=teacher_training_config)
+            self.teacher.reset()
+            if self.teacher.engine.scheduler.config != self.actor.engine.scheduler.config:
+                raise ValueError(
+                    "Teacher and student resolved different scheduler configs; the teacher must replay "
+                    "the student's trajectories on the same noise schedule."
+                )
+            self.set_dispatch_collect(mesh_name="teacher", **self.teacher.get_dispatch_collect())
 
         # 3. build rollout engine
         if "rollout" in self.role:
@@ -753,6 +814,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @_with_routing_replay_flag(enabled=False)
     def infer_ref_batch(self, data: TensorDict) -> TensorDict:
         output = self.ref.infer_batch(data=data)
+        return output.cpu() if output is not None else None
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="teacher"))
+    @DistProfiler.annotate(color="olive", role="infer_teacher_batch")
+    @_with_routing_replay_flag(enabled=False)
+    def infer_teacher_batch(self, data: TensorDict) -> TensorDict:
+        output = self.teacher.infer_batch(data=data)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))

@@ -15,6 +15,8 @@
 
 from typing import Any
 
+from verl.trainer.distillation import is_distillation_enabled
+
 OLD_POLICY_DECAY_SCHEDULES = {
     "copy": (0, 0.0, 0.0),
     "linear_to_0_5": (0, 0.001, 0.5),
@@ -35,6 +37,30 @@ def old_policy_decay(step: int, schedule: str) -> float:
     else:
         raise ValueError(f"Unsupported old_policy_decay_schedule: {schedule}")
     return 0.0 if step < warmup_steps else min((step - warmup_steps) * ramp_rate, max_decay)
+
+
+def validate_distillation_config(config) -> None:
+    """Cross-check the distillation switch against the losses that consume teacher outputs."""
+    actor = config.actor_rollout_ref.actor
+    distill_active = actor.diffusion_loss.get("loss_mode", "flow_grpo") == "distill_kl" or actor.use_distill_loss
+    enabled = is_distillation_enabled(config.get("distillation"))
+    if enabled and not distill_active:
+        raise ValueError(
+            "distillation.enabled=true but no distillation loss is active; set "
+            "actor.diffusion_loss.loss_mode=distill_kl or actor.use_distill_loss=true."
+        )
+    if distill_active and not enabled:
+        raise ValueError(
+            "A distillation loss is active but no teacher is configured; set distillation.enabled=true "
+            "and distillation.teacher_models.teacher_model.model_path."
+        )
+    if enabled and actor.use_distill_loss and actor.distill_loss_mode != "distill_kl":
+        raise NotImplementedError(
+            f"The teacher runtime produces teacher_prev_sample_mean, which only distill_kl consumes, "
+            f"but got distill_loss_mode={actor.distill_loss_mode!r} (distill_fm_mse has no producer here)."
+        )
+    if enabled and config.algorithm.trainer_type != "policy_gradient":
+        raise NotImplementedError("Diffusion distillation requires algorithm.trainer_type=policy_gradient.")
 
 
 class NoOpCheckpointManager:

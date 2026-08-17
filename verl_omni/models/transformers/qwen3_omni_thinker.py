@@ -13,10 +13,24 @@
 # limitations under the License.
 """Qwen3-Omni Thinker patches: route via AutoModelForMultimodalLM, fix FSDP-init
 blockers, unfuse MoE experts for PEFT LoRA (tf5+), and extend verl's hf_processor
-for Qwen3-Omni."""
+for Qwen3-Omni.
+
+DEPRECATED: This module will be removed in v0.3.0. The V1 trainer
+(verl_omni.trainer.main_omni) handles Qwen3-Omni natively — no monkey-patches
+needed. Please migrate to V1 scripts (e.g., run_qwen3_omni_thinker_gspo_lora_v1.sh).
+"""
 
 import logging
+import warnings
 
+warnings.warn(
+    "The module 'verl_omni.models.transformers.qwen3_omni_thinker' is deprecated "
+    "and will be removed in v0.3.0. The V1 trainer (verl_omni.trainer.main_omni) "
+    "handles Qwen3-Omni natively — no monkey-patches needed. "
+    "Please migrate to V1 scripts (e.g., run_qwen3_omni_thinker_gspo_lora_v1.sh).",
+    FutureWarning,
+    stacklevel=2,
+)
 logger = logging.getLogger(__name__)
 
 

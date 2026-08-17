@@ -33,4 +33,8 @@ run_test 5 "visual reward manager" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
     pytest -s tests/reward_loop/test_visual_reward_manager.py
 
+run_test 6 "diffusion composite agent loop" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    pytest -s tests/agent_loop/test_composite_agent_loop.py
+
 gpu_smoke_summary

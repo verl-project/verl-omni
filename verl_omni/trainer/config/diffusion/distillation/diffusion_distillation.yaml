@@ -1,0 +1,17 @@
+# Target class for this configuration
+_target_: verl_omni.workers.config.diffusion.DiffusionDistillationConfig
+
+# Whether on-policy distillation is enabled.
+enabled: false
+
+# Teacher entries. Single-teacher setups configure the `teacher_model` entry.
+teacher_models:
+
+  # The single supported teacher.
+  teacher_model:
+
+    # Target class for this configuration
+    _target_: verl_omni.workers.config.diffusion.DiffusionDistillationTeacherModelConfig
+
+    # Local path to the frozen teacher checkpoint (same pipeline family as the student).
+    model_path: null

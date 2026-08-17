@@ -11,8 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
+
+from omegaconf import OmegaConf
+
 try:
     import hydra
+    from hydra.core.hydra_config import HydraConfig
 except ImportError as e:
     raise ImportError("Please install hydra-core via 'pip install hydra-core' and retry.") from e
 
@@ -24,6 +29,20 @@ def main(config):
     Args:
         config_dict: Hydra configuration dictionary containing training parameters.
     """
+    import verl_omni
+
+    config_name = HydraConfig.get().job.config_name
+
+    # Omni configs inherit from verl's ppo_trainer. Reverse-merge the raw YAML
+    # so keys absent from the structured schema survive in the printed output.
+    config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer", "config")
+    raw_path = os.path.join(config_dir, f"{config_name}.yaml")
+    if os.path.exists(raw_path):
+        raw = OmegaConf.load(raw_path)
+        raw.pop("defaults", None)
+        raw.pop("hydra", None)
+        config = OmegaConf.merge(raw, config)
+
     print(config)
 
 

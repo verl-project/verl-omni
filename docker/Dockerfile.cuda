@@ -93,4 +93,4 @@ RUN uv pip install -e ".[ocr]"
 # Optional: VeOmni engine backend ("Optional engine backends")
 FROM base AS veomni
 RUN uv pip install veomni==0.1.11 --no-deps \
-    && uv pip install torchcodec librosa soundfile av
+    && uv pip install torchcodec librosa soundfile av audioread

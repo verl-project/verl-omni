@@ -21,7 +21,11 @@ from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics
 from verl.protocol import DataProto
 
 from verl_omni.agent_loop import diffusion_agent_loop_tq
-from verl_omni.agent_loop.diffusion_agent_loop import DiffusionAgentLoopOutput, DiffusionAgentLoopWorker
+from verl_omni.agent_loop.diffusion_agent_loop import (
+    DiffusionAgentLoopOutput,
+    DiffusionAgentLoopWorker,
+    _pad_prompt_extra_field,
+)
 from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopWorkerTQ
 
 
@@ -44,6 +48,35 @@ class _DummyDiffusionAgentLoopWorker:
 
     def __init__(self, reward_loop_worker_handle: _FakeRewardLoopWorkerHandle):
         self.reward_loop_worker_handles = [reward_loop_worker_handle]
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "expected_shape"),
+    [
+        ("prompt_embeds", torch.ones(2, 4), (3, 4)),
+        ("negative_prompt_embeds", torch.ones(2, 4), (3, 4)),
+        ("prompt_embeds_mask", torch.ones(2), (3,)),
+        ("negative_prompt_embeds_mask", torch.ones(2), (3,)),
+    ],
+)
+def test_pad_prompt_extra_field_pads_without_truncation(key, value, expected_shape):
+    padded = _pad_prompt_extra_field(key, value, target_length=3)
+
+    assert padded.shape == expected_shape
+    assert torch.equal(padded[:2], value)
+    assert torch.count_nonzero(padded[2:]) == 0
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("prompt_embeds", torch.ones(4, 2)),
+        ("prompt_embeds_mask", torch.ones(4)),
+    ],
+)
+def test_pad_prompt_extra_field_rejects_truncation(key, value):
+    with pytest.raises(ValueError, match="exceeds max_prompt_embed_length=3"):
+        _pad_prompt_extra_field(key, value, target_length=3)
 
 
 @pytest.mark.asyncio

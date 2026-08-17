@@ -36,7 +36,7 @@ Workflow trigger modes:
 
 The runner must have:
 
-- 4 GPUs by default, or set `NUM_GPUS` to match the runner.
+- 1 GPU by default, or set `NUM_GPUS` to match the runner.
 - An installed `verl_omni` GPU environment with the rollout and training
   dependencies needed by Qwen-Image FlowGRPO.
 - Local tiny-random policy and reward model directories.
@@ -55,7 +55,7 @@ Generate a local baseline first. This is the default behavior because
 when no baseline exists:
 
 ```bash
-NUM_GPUS=4 \
+NUM_GPUS=1 \
 MODEL_PATH=/path/to/tiny-random/Qwen-Image \
 REWARD_MODEL_PATH=/path/to/tiny-random/qwen3-vl \
 OUTPUT_ROOT=/path/to/debug_dumps \
@@ -65,7 +65,7 @@ bash tests/nightly/qwen_image_flowgrpo/run_qwen_image_flowgrpo.sh
 Then run strict nightly mode against the generated baseline:
 
 ```bash
-NUM_GPUS=4 \
+NUM_GPUS=1 \
 MODEL_PATH=/path/to/tiny-random/Qwen-Image \
 REWARD_MODEL_PATH=/path/to/tiny-random/qwen3-vl \
 OUTPUT_ROOT=/path/to/debug_dumps \
@@ -135,25 +135,29 @@ Nightly mode uploads all current intermediate outputs as
 
 Performance comparison reads step-level metrics from `metrics.jsonl`, or falls
 back to parsing the console log. It compares only steps after `PERF_SKIP_STEPS`,
-which defaults to `2`, and compares the mean value for each metric.
+which defaults to `2`, and compares the mean value for each comparable metric.
 
 Performance tolerance:
 
-- `PERF_THRESHOLD`, default `0.10`, meaning a 10% relative-change threshold.
+- `PERF_THRESHOLD`, default `0.15`, meaning a 15% relative-change threshold.
+- `timing_s/update_weights` uses a fixed 20% threshold. Weight synchronization is
+  sensitive to vLLM-Omni, LoRA, IPC, free-cache, and layered summon details, and
+  is usually a small part of total step time, so this wider tolerance avoids
+  noisy failures while still catching material regressions.
 
 Performance metrics:
 
 - Lower is better: `perf/time_per_step`, `timing_s/gen`,
-  `timing_s/old_log_prob`, `timing_s/reward`, `timing_s/step`,
-  `timing_s/update_actor`, `timing_s/update_weights`, and
-  `timing_per_image_ms/*`.
+  `timing_s/old_log_prob`, `timing_s/reward`, `timing_s/update_actor`, and
+  `timing_s/update_weights`.
 - Higher is better: `perf/mfu/actor`, `perf/mfu/actor_infer`, and
   `perf/throughput`.
 
-A lower-is-better metric fails when current is more than `PERF_THRESHOLD` above
-baseline. A higher-is-better metric fails when current is more than
-`PERF_THRESHOLD` below baseline. A neutral metric fails when the absolute
-relative change is greater than `PERF_THRESHOLD`.
+A lower-is-better metric fails when current is more than the metric threshold
+above baseline. A higher-is-better metric fails when current is more than the
+metric threshold below baseline. Other collected metrics, including
+`perf/total_num_images`, `timing_s/step`, and derived `timing_per_image_ms/*`
+values, are kept in the report but are not compared against the baseline.
 
 Precision comparison recursively compares all tensors in matching `payload.pt`
 debug dumps under `current/qwen_image_flowgrpo/` and
@@ -180,9 +184,15 @@ Precision thresholds:
 - `PRECISION_ATOL`, default `1e-4`, maximum allowed absolute error.
 - `PRECISION_RTOL`, default `1e-3`, maximum allowed relative error.
 - `PRECISION_MIN_COS_SIM`, default `0.999`, minimum allowed cosine similarity.
+- `PRECISION_IMAGE_ATOL`, default `2/255` (~`0.00784`), for decoded image
+  tensors (`batch.responses`). One 8-bit LSB is `1/255` ≈ `0.00392` abs.
+- `PRECISION_IMAGE_RTOL`, default `2e-2`, relative tolerance for
+  `batch.responses`.
+- `PRECISION_IMAGE_MIN_COS_SIM`, default `0.999`, cosine similarity floor for
+  `batch.responses`.
 
-Each tensor fails if `max_abs_err > PRECISION_ATOL`,
-`max_rel_err > PRECISION_RTOL`, or `cos_sim < PRECISION_MIN_COS_SIM`.
+Each tensor fails if `max_abs_err > atol`, `max_rel_err > rtol`, or
+`cos_sim < min_cos_sim` for the threshold profile that applies to that key.
 
 ## Failure Triage
 

@@ -1,7 +1,7 @@
 (http_scorer)=
 # Using an External HTTP Scorer Service
 
-Last updated: 07/17/2026
+Last updated: 08/09/2026
 
 VeRL-Omni ships a generic HTTP reward client (`verl_omni.utils.reward_score.http_scorer_client`) that sends generated images to an external scorer service over HTTP and returns the score. This is useful when your reward model is too large to co-locate with training, needs a different runtime (e.g., a separate GPU pool), or is shared across multiple experiments.
 
@@ -74,7 +74,10 @@ python3 -m verl_omni.trainer.main_diffusion \
     "+reward.reward_functions.my_reward.path=pkg://verl_omni.utils.reward_score.http_scorer_client" \
     '+reward.reward_functions.my_reward.name=compute_score' \
     '+reward.reward_functions.my_reward.weight=1.0' \
+    '+reward.reward_functions.my_reward.required=true' \
     "+reward.reward_functions.my_reward.server_url=http://<scorer-host>:<port>" \
+    '+reward.reward_functions.my_reward.max_retries=2' \
+    '+reward.reward_functions.my_reward.retry_backoff=0.5' \
     ...
 ```
 
@@ -83,7 +86,12 @@ Key points:
 - **`path`**: Module path using the `pkg://` prefix.
 - **`name`**: The async function to call (`compute_score`).
 - **`weight`**: Reward weight when combining multiple reward functions.
+- **`required`**: Controls what happens when this scorer fails. Set it to `true` to stop training. If it is `false` (the default), the reward manager sets the score to `0` and continues.
 - **`server_url`**: Full URL of your scorer service (no trailing slash).
+- **`max_retries`**: Number of retries after the initial attempt (default: `2`, for at most 3 attempts total).
+- **`retry_backoff`**: Initial retry delay in seconds (default: `0.5`). The delay doubles after each failed attempt.
+
+The client retries connection and response-transfer failures, timeouts, and HTTP 408/429/5xx responses. It fails immediately without retrying for other 4xx responses, HTTP 200 responses containing an `error` field, and malformed success responses. Once the retry budget is exhausted, the final error is passed to the reward manager, where `required` determines whether training stops or continues with a zero score.
 
 Any extra key-value pairs added under the same reward function config are forwarded as `**kwargs` to `compute_score`.
 
@@ -113,5 +121,5 @@ OCR_REWARD_SERVER_URL=http://<server-ip>:19082 \
 
 - The HTTP client reuses a single `aiohttp.ClientSession` across calls to avoid per-request connection overhead.
 - Image serialization (tensor to PIL to JPEG) is offloaded to a thread pool via `asyncio.loop.run_in_executor` so it does not block the reward manager's async event loop.
-- The default request timeout is 120 seconds. If your scorer model is slow, consider scaling the service with Gunicorn workers or increasing the timeout in the client code.
+- Each attempt has a 120-second timeout. With the default retry settings, a persistent retryable failure can make three attempts before it is reported.
 - Reward-server profiling (`reward.reward_model.rollout.profiler.*`, see the [profiler guide](../perf/profiler.md)) only covers model-backed rewards served by VeRL-Omni. With an HTTP scorer, reward inference runs inside your external service — profile it there.

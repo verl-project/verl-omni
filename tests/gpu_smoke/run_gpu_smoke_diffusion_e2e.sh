@@ -28,4 +28,12 @@ run_test 3 "FlowGRPO v1 separate_async trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_flowgrpo_qwen_image_v1_separate_async.sh
 
+run_test 4 "Diffusion OPD teacher distill e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" SMOKE=distill \
+    bash tests/special_e2e/run_diffusion_teacher_smoke.sh
+
+run_test 5 "Diffusion OPD actor+ref+teacher e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" SMOKE=coexistence \
+    bash tests/special_e2e/run_diffusion_teacher_smoke.sh
+
 gpu_smoke_summary

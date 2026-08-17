@@ -26,16 +26,19 @@ dependencies = [
     "diffusers>=0.37.1",
     "dill",
     "hydra-core",
+    "imageio[ffmpeg]>=2.37.2",
     "pandas",
     "peft",
-    "pyarrow>=19.0.0",
+    "pyarrow>=19.0.0,<25.0.0",  # 25.0.0 breaks pd.read_parquet with ArrowInvalid: column length mismatch
     "pybind11",
     "pylatexenc",
     "ray[default]",
     "safetensors>=0.4.5",
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
     "torchdata",
-    "transformers",
+    # TODO: Remove this cap after the Qwen3-Omni adapter and tests support the
+    # FSDP `_no_split_modules` metadata change introduced in Transformers 5.15.0.
+    "transformers<=5.14.1",
     "wandb",
     "packaging>=20.0",
     "uvicorn",

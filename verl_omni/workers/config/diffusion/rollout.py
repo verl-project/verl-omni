@@ -42,6 +42,7 @@ class DiffusionRolloutAlgoConfig(BaseConfig):
     sde_type: str = "sde"
     sde_window_size: Optional[int] = None
     sde_window_range: Optional[list[int]] = None
+    sde_contiguous: bool = True
 
     # MixGRPO-only configs
     sample_strategy: str = "random"
@@ -69,6 +70,9 @@ class DiffusionPipelineConfig(BaseConfig):
     # Wan2.2 video generation: number of frames (81 = ~3s at 24fps)
     num_frames: int = 1
 
+    # Audio-video generation frame rate.
+    frame_rate: float = 24.0
+
 
 @dataclass
 class DiffusionSamplingConfig(BaseConfig):
@@ -77,6 +81,11 @@ class DiffusionSamplingConfig(BaseConfig):
     seed: int = 42
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
     algo: DiffusionRolloutAlgoConfig = field(default_factory=DiffusionRolloutAlgoConfig)
+
+    # for llm part when needed
+    temperature: float = 1.0
+    top_k: int = 0
+    top_p: float = 1.0
 
 
 @dataclass
@@ -89,11 +98,22 @@ class DiffusionRolloutConfig(BaseConfig):
     n_gpus_per_node: int = 8
     n: int = 1
 
+    # for llm part when needed
+    temperature: float = 1.0
+    top_k: int = 0
+    top_p: float = 1.0
+    repetition_penalty: float = 1.0
+    max_new_tokens: int = 256
+
     # Base seed for deterministic training rollout RNG. Per-step base is
     # ``seed + global_step - 1``. null disables rollout seeding.
     seed: Optional[int] = None
 
     prompt_length: int = 512
+
+    # Final prompt-embedding sequence length after combining all text encoders.
+    # Falls back to pipeline.max_sequence_length for single-encoder models.
+    max_prompt_embed_length: Optional[int] = None
 
     dtype: str = "bfloat16"
     # Pixel response representation after rollout. ``float32`` preserves the
@@ -136,6 +156,8 @@ class DiffusionRolloutConfig(BaseConfig):
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
 
     calculate_log_probs: bool = False
+    llm_calculate_log_probs: bool = False
+
     rollout_adapter: str = "default"
 
     agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
@@ -176,6 +198,8 @@ class DiffusionRolloutConfig(BaseConfig):
 
     def __post_init__(self):
         """Validate the diffusion rollout config"""
+        if self.max_prompt_embed_length is not None and self.max_prompt_embed_length <= 0:
+            raise ValueError(f"max_prompt_embed_length must be positive when set, got {self.max_prompt_embed_length}.")
         if self.mode == "sync":
             raise ValueError(
                 "Rollout mode 'sync' has been removed. Please set "

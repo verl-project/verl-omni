@@ -12,4 +12,8 @@ run_test 0 "Qwen3-Omni Thinker GSPO LoRA e2e (V1)" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS=2 \
     bash tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_v1_smoke.sh
 
+run_test 1 "Qwen3-Omni multimodal offline MLLM DPO LoRA e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS=2 \
+    bash tests/special_e2e/run_qwen3_omni_multimodal_offline_mllm_dpo_lora_smoke.sh
+
 gpu_smoke_summary
