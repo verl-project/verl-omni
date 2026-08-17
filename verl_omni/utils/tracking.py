@@ -25,7 +25,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from verl_omni.utils.reward_score.reward_utils import video_tensor_to_pil_frames, visual_tensor_to_uint8
+from verl_omni.utils.reward_score.reward_utils import video_tensor_to_pil_frames
 
 
 def batch_items(values: Any, batch_size: int, name: str) -> list[Any]:
@@ -165,7 +165,7 @@ def wrap_val_samples_for_wandb(samples, fps=24, output_dir=None):
             media_to_log[media_key] = wandb.Video(video_path, format="mp4")
             media = media_key
         else:
-            media = wandb.Image(visual_tensor_to_uint8(out), file_type="jpg", normalize=False)
+            media = wandb.Image(out, file_type="jpg", normalize=False)
         wrapped.append((inp, media, score))
     return wrapped, video_tmp_dir, media_to_log
 

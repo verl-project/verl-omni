@@ -51,7 +51,6 @@ from vllm_omni.lora.request import LoRARequest
 from vllm_omni.outputs import OmniRequestOutput
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase, VllmOmniPipelineBase
-from verl_omni.utils.reward_score.reward_utils import visual_tensor_to_uint8
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig, OmniModelConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
 
@@ -75,6 +74,15 @@ def _diffusion_output_type(sampling_params: dict) -> str:
     if output_type is None:
         output_type = (sampling_params.get("extra_args") or {}).get("output_type")
     return output_type or "image"
+
+
+def _pixel_output_to_uint8(output: torch.Tensor) -> torch.Tensor:
+    """Quantize a rollout pixel tensor from float ``[0, 1]`` to uint8 once."""
+    if output.dtype == torch.uint8:
+        return output
+    output = output.detach().to(dtype=torch.float32)
+    output = torch.nan_to_num(output, nan=0.0, posinf=1.0, neginf=0.0).clamp_(0, 1)
+    return output.mul_(255).round_().to(dtype=torch.uint8)
 
 
 class vLLMOmniHttpServer(vLLMHttpServer):
@@ -618,6 +626,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # synthesizes an abort OutputMessage to unblock the generate() coroutine).
         # Return a DiffusionOutput with stop_reason="aborted" so the retry client
         # can retry the whole sample.
+        output_type = _diffusion_output_type(sampling_params)
         if final_res is None or not final_res.images:
             finish_reason = "abort"
             if final_res is not None and final_res.request_output is not None:
@@ -629,12 +638,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return DiffusionOutput(
                 diffusion_output=torch.empty(
                     0,
-                    dtype=(
-                        torch.uint8
-                        if _diffusion_output_type(sampling_params) != "latent"
-                        and self.config.response_transport_dtype == "uint8"
-                        else torch.float32
-                    ),
+                    dtype=torch.float32 if output_type == "latent" else torch.uint8,
                 ),
                 log_probs=None,
                 stop_reason=stop_reason,
@@ -644,20 +648,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         assert final_res is not None
         diffusion_output = final_res.images[0]
-        output_type = _diffusion_output_type(sampling_params)
-        use_uint8_transport = output_type != "latent" and self.config.response_transport_dtype == "uint8"
-        if use_uint8_transport:
+        if output_type == "latent":
+            diffusion_output = torch.as_tensor(diffusion_output).float()
+        else:
             if isinstance(diffusion_output, np.ndarray):
                 diffusion_output = torch.from_numpy(diffusion_output)
             elif not isinstance(diffusion_output, torch.Tensor):
                 diffusion_output = self._to_tensor(diffusion_output)
-            diffusion_output = visual_tensor_to_uint8(diffusion_output)
-        elif isinstance(diffusion_output, torch.Tensor):
-            diffusion_output = diffusion_output.float()
-        elif isinstance(diffusion_output, np.ndarray):
-            diffusion_output = torch.from_numpy(diffusion_output).float()
-        else:
-            diffusion_output = self._to_tensor(diffusion_output).float() / 255.0
+            diffusion_output = _pixel_output_to_uint8(diffusion_output)
 
         # Extract extra data from custom_output (populated by DiffusionEngine)
         custom_output = final_res.custom_output or {}

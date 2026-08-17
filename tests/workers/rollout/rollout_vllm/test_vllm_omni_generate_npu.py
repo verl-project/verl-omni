@@ -82,7 +82,6 @@ def init_server():
             "max_num_seqs": 64,
             "max_model_len": 1058,
             "dtype": "bfloat16",
-            "response_transport_dtype": "uint8",
             "load_format": "auto",
             "enforce_eager": True,
             "enable_chunked_prefill": False,

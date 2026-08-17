@@ -116,9 +116,6 @@ class DiffusionRolloutConfig(BaseConfig):
     max_prompt_embed_length: Optional[int] = None
 
     dtype: str = "bfloat16"
-    # Pixel response representation after rollout. ``float32`` preserves the
-    # historical custom-reward contract; ``uint8`` reduces downstream IPC.
-    response_transport_dtype: str = "float32"
     gpu_memory_utilization: float = 0.5
     enforce_eager: bool = False
     cudagraph_capture_sizes: Optional[list] = None
@@ -208,11 +205,6 @@ class DiffusionRolloutConfig(BaseConfig):
         if self.rollout_adapter not in ("default", "old"):
             raise ValueError(
                 f"Invalid diffusion rollout rollout_adapter: {self.rollout_adapter}. Must be one of ['default', 'old']."
-            )
-        if self.response_transport_dtype not in ("float32", "uint8"):
-            raise ValueError(
-                "Invalid diffusion rollout response_transport_dtype: "
-                f"{self.response_transport_dtype}. Must be one of ['float32', 'uint8']."
             )
 
         if self.pipeline_model_parallel_size > 1:

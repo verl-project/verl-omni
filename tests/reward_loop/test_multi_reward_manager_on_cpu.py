@@ -54,7 +54,7 @@ async def reward_async(data_source, solution_image, ground_truth, extra_info):
 
 
 async def reward_asserts_uint8_contract(data_source, solution_image, ground_truth, extra_info):
-    """Verify reward managers do not reverse the selected transport format."""
+    """Verify reward managers preserve the uint8 response contract."""
     assert solution_image.dtype == torch.uint8
     return int(solution_image[0, 0, 0])
 
@@ -77,7 +77,7 @@ def _make_config(reward_functions: dict):
 def _make_single_data() -> DataProto:
     """Create a single-item DataProto for run_single."""
     return DataProto.from_dict(
-        tensors={"responses": torch.randn(1, 3, 64, 64)},
+        tensors={"responses": torch.randint(256, (1, 3, 64, 64), dtype=torch.uint8)},
         non_tensors={
             "data_source": ["test_source"],
             "reward_model": [{"ground_truth": "hello"}],
@@ -182,7 +182,7 @@ class TestMultiVisualRewardManagerRunSingle:
         }
         manager = _build_manager(reward_fns)
         data = DataProto.from_dict(
-            tensors={"responses": torch.randn(1, 3, 64, 64)},
+            tensors={"responses": torch.randint(256, (1, 3, 64, 64), dtype=torch.uint8)},
             non_tensors={
                 "data_source": ["jpeg_compressibility"],
                 "reward_model": [{"ground_truth": "hello"}],
@@ -195,7 +195,7 @@ class TestMultiVisualRewardManagerRunSingle:
         assert result["reward_score"] != pytest.approx(0.0)
         assert "reward/jpeg" in result["reward_extra_info"]
 
-    def test_uint8_transport_is_forwarded_to_custom_reward(self):
+    def test_uint8_response_is_forwarded_to_custom_reward(self):
         reward_fns = {
             "contract": {"path": DUMMY_REWARDS_PATH, "name": "reward_asserts_uint8_contract", "weight": 1.0},
         }

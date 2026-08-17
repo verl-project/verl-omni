@@ -192,7 +192,6 @@ def _build_rollout_cfg(*, step_execution: bool = False) -> Any:
         "step_execution": step_execution,
         "max_model_len": 1058,
         "dtype": "bfloat16",
-        "response_transport_dtype": "uint8",
         "load_format": "auto",
         "enforce_eager": True,
         "enable_chunked_prefill": False,

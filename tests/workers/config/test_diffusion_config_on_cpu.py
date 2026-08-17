@@ -170,15 +170,6 @@ class TestDiffusionSamplingConfig:
 
 
 class TestDiffusionRolloutConfig:
-    def test_response_transport_dtype_defaults_to_float32(self):
-        config = DiffusionRolloutConfig(name="vllm_omni")
-
-        assert config.response_transport_dtype == "float32"
-
-    def test_invalid_response_transport_dtype_raises(self):
-        with pytest.raises(ValueError, match="response_transport_dtype"):
-            DiffusionRolloutConfig(name="vllm_omni", response_transport_dtype="float16")
-
     def test_prompt_embed_length_is_independent_from_encoder_length(self):
         pipeline = DiffusionPipelineConfig(max_sequence_length=256)
         cfg = DiffusionRolloutConfig(

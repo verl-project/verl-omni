@@ -21,8 +21,6 @@ import torch
 from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
 
-from verl_omni.utils.reward_score.reward_utils import visual_tensor_to_uint8
-
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
@@ -98,12 +96,10 @@ class _PickScoreInferencer:
 
 def _to_pil_hwc(image) -> Image.Image:
     if isinstance(image, torch.Tensor):
-        image = visual_tensor_to_uint8(image).cpu().numpy()
+        image = image.cpu().numpy()
     if isinstance(image, np.ndarray):
         if image.ndim == 3 and image.shape[0] in (1, 3):
             image = image.transpose(1, 2, 0)
-        if image.dtype != np.uint8:
-            image = (image * 255).round().clip(0, 255).astype(np.uint8)
         image = Image.fromarray(image)
     assert isinstance(image, Image.Image)
     return image

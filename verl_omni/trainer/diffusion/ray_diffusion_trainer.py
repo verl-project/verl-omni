@@ -77,7 +77,6 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     compute_rollout_corr_metrics_from_batch,
     rollout_correction_enabled,
 )
-from verl_omni.utils.reward_score.reward_utils import visual_tensor_to_uint8
 from verl_omni.utils.tracking import _export_video, batch_items, log_wandb_media, wrap_val_samples_for_wandb
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
@@ -343,7 +342,7 @@ class BaseRayDiffusionTrainer(ABC):
                 )
                 output_paths.append(video_path)
         else:
-            images_pil = visual_tensor_to_uint8(outputs[:n]).cpu().permute(0, 2, 3, 1).numpy()
+            images_pil = outputs[:n].cpu().permute(0, 2, 3, 1).numpy()
             for i, image in enumerate(images_pil):
                 image_path = os.path.join(visual_folder, f"{i}.jpg")
                 Image.fromarray(image).save(image_path)

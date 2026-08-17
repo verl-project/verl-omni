@@ -26,7 +26,7 @@ from ..utils.gpu_test_topology import resolve_reward_loop_gpu_topology
 
 def create_data_samples(tokenizer, data_source="ocr") -> DataProto:
     prompts = ['a photo of displaying "OCR"'] * 3
-    responses = [torch.randn((3, 512, 512))] * 3
+    responses = [torch.randint(256, (3, 512, 512), dtype=torch.uint8)] * 3
     data_source = [data_source] * len(responses)
     reward_info = [{"ground_truth": "OCR"}] * len(responses)
     extra_info = [{}] * len(responses)

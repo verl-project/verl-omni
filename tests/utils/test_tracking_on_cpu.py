@@ -30,10 +30,10 @@ from verl_omni.utils.tracking import wrap_val_samples_for_wandb  # noqa: E402
 
 def _warm_clip(t=8, h=32, w=32):
     """A solid warm clip ``[T, C, H, W]`` with R > G > B, so an inverted encode is detectable."""
-    clip = torch.zeros(t, 3, h, w)
-    clip[:, 0] = 0.75  # R
-    clip[:, 1] = 0.35  # G
-    clip[:, 2] = 0.15  # B
+    clip = torch.zeros(t, 3, h, w, dtype=torch.uint8)
+    clip[:, 0] = 191  # R
+    clip[:, 1] = 89  # G
+    clip[:, 2] = 38  # B
     return clip
 
 
@@ -111,7 +111,7 @@ def test_image_samples_become_wandb_image_and_no_temp_dir(monkeypatch):
 
     monkeypatch.setattr(wandb, "Image", _fake_image)
 
-    samples = [("prompt", torch.rand(3, 16, 16), 1.0)]
+    samples = [("prompt", torch.randint(256, (3, 16, 16), dtype=torch.uint8), 1.0)]
     wrapped, video_tmp_dir, media_to_log = wrap_val_samples_for_wandb(samples)
 
     assert video_tmp_dir is None

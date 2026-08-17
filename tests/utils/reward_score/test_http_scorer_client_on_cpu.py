@@ -64,7 +64,7 @@ async def _run_retry_e2e():
     server_url = f"http://127.0.0.1:{sock.getsockname()[1]}/score"
 
     kwargs = {
-        "solution_image": torch.zeros(3, 2, 2),
+        "solution_image": torch.zeros(3, 2, 2, dtype=torch.uint8),
         "ground_truth": "prompt",
         "server_url": server_url,
         "max_retries": 2,

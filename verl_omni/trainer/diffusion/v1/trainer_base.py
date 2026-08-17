@@ -72,7 +72,6 @@ from verl_omni.trainer.diffusion.v1.tq_utils import (
     diffusion_tq_batch_to_dataproto,
     sort_diffusion_tq_keys,
 )
-from verl_omni.utils.reward_score.reward_utils import visual_tensor_to_uint8
 from verl_omni.workers.engine_workers import ActorRolloutRefWorker
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
@@ -1021,9 +1020,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         if "wandb" in self.config.trainer.logger:
             import wandb
 
-            outputs = [
-                wandb.Image(visual_tensor_to_uint8(image), file_type="jpg", normalize=False) for image in outputs
-            ]
+            outputs = [wandb.Image(image, file_type="jpg", normalize=False) for image in outputs]
         samples = list(zip(inputs, outputs, scores, strict=True))
         samples.sort(key=lambda x: x[0])
         rng = np.random.RandomState(42)
@@ -1059,7 +1056,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         os.makedirs(visual_folder, exist_ok=True)
 
         output_paths = []
-        images_pil = visual_tensor_to_uint8(outputs).cpu()
+        images_pil = outputs.cpu()
         # images: [N, C, H, W] -> [N, H, W, C]
         if images_pil.dim() == 4:
             images_pil = images_pil.permute(0, 2, 3, 1).numpy()

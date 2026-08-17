@@ -30,13 +30,12 @@ import aiohttp
 import torch
 from PIL import Image
 
-from verl_omni.utils.reward_score.reward_utils import visual_tensor_to_uint8
 
 def _tensor_to_pil(image: torch.Tensor) -> Image.Image:
-    """Convert a CHW float01 or uint8 tensor to an RGB PIL image."""
+    """Convert a CHW uint8 tensor to an RGB PIL image."""
     if image.ndim == 4:
         image = image[0]
-    image = visual_tensor_to_uint8(image).permute(1, 2, 0).cpu().numpy()
+    image = image.permute(1, 2, 0).cpu().numpy()
     return Image.fromarray(image)
 
 
