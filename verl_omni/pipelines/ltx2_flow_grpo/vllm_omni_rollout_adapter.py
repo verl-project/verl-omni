@@ -16,7 +16,7 @@
 
 import copy
 import os
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 import torch
@@ -34,7 +34,7 @@ from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
-from .common import calculate_shift, normalize_ltx_output_type
+from .common import calculate_shift, normalize_ltx_output_type, remap_veomni_to_diffusers_key
 
 __all__ = ["LTX23PipelineWithLogProb"]
 
@@ -44,6 +44,18 @@ class LTX23PipelineWithLogProb(LTX23Pipeline):
     """Sample LTX-2.3 with CPS/SDE transitions and return joint log-probs."""
 
     supports_request_batch = False
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Remap VeOmni-style checkpoint keys to diffusers naming before loading.
+
+        The pretrained checkpoint may use VeOmni parameter names (e.g.
+        ``adaln_single``, ``patchify_proj``, ``q_norm``) while the vLLM-Omni
+        rollout model expects diffusers names (``time_embed``, ``proj_in``,
+        ``norm_q``).  Remap here so both initial safetensors loading and
+        training-time weight sync load into the correct parameters.
+        """
+        remapped = ((remap_veomni_to_diffusers_key(name), tensor) for name, tensor in weights)
+        return super().load_weights(remapped)
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
