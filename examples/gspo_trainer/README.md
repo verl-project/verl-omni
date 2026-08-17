@@ -17,6 +17,9 @@ Both **GPU** and **NPU** training platforms are supported:
   **16 × Ascend 910C 64GB**.
 - [`run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh)
   — **NPU**, **full-parameter V1** for text + image + audio AVQA training.
+- [`run_qwen3_omni_thinker_geo3k_megatron_fully_async.sh`](qwen3_omni/run_qwen3_omni_thinker_geo3k_megatron_fully_async.sh)
+  — **GPU**, **full-parameter Megatron**, image-to-text Geo3K training with
+  standalone fully asynchronous rollout replicas.
 
 For the base environment setup, see the [installation guide](../../docs/start/install.md).
 
@@ -146,6 +149,37 @@ Healthy signals (gsm8k, 4×H800, LoRA r=32):
 - `actor/loss` ≈ 1e-5, `actor/grad_norm` ∈ [1e-3, 1e-2], no OOM
   (`actor/perf/max_memory_allocated_gb` < 45).
 - `val-core/openai/gsm8k/acc/mean@1` rising with steps.
+
+## Training with `Geo3K` using fully asynchronous Megatron
+
+This recipe extends the text-only full-model fully-async path to
+image-conditioned geometry reasoning. Prepare the public Geometry3K dataset
+with the bundled converter:
+
+```bash
+python examples/gspo_trainer/data_process/geo3k.py \
+    --local_save_dir "$HOME/data/geo3k"
+```
+
+The converter keeps the source image bytes and adds an explicit
+`<think>...</think>\boxed{...}` response contract that matches verl's Geo3K
+rule reward.
+
+Start a Ray cluster containing four 8-GPU nodes, then run the launcher once on
+the Ray head. Its default resource split assigns four training GPUs and four
+standalone rollout GPUs per node (16 + 16 GPUs total):
+
+```bash
+RAY_ADDRESS=auto \
+MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_geo3k_megatron_fully_async.sh
+```
+
+The default validation profile uses TP4 vLLM-Omni rollout replicas, eight
+responses per prompt, a 3,072-token context, full validation every ten trainer
+steps, and 150 total training steps. Override any Hydra field by appending it
+to the command. The launcher assumes the Ray cluster is already running; Ray
+bootstrap policy is intentionally left to the deployment environment.
 
 ## Training with `MMK12`
 
