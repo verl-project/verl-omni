@@ -32,6 +32,7 @@ _GIT_PIN_FILES = {
 _ENV_PIN_KEYS = {
     "kernels_pip": "NIGHTLY_PIN_KERNELS",
     "fa3_fwd_pip": "NIGHTLY_PIN_FA3_FWD",
+    "flash_attn_pip": "NIGHTLY_PIN_FLASH_ATTN",
     "transformers_pip": "NIGHTLY_PIN_TRANSFORMERS",
 }
 

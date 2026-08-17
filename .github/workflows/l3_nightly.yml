@@ -143,6 +143,7 @@ jobs:
       HF_HUB_ENABLE_HF_TRANSFER: "0"
       NIGHTLY_PIN_KERNELS: "0.14.1"
       NIGHTLY_PIN_FA3_FWD: "0.0.3"
+      NIGHTLY_PIN_FLASH_ATTN: "2.8.3"
       NIGHTLY_PIN_TRANSFORMERS: "5.14.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -157,6 +158,7 @@ jobs:
           pip3 install ".[gpu,dev,audio]"
           pip3 install "kernels==${NIGHTLY_PIN_KERNELS}"
           pip3 install "fa3-fwd==${NIGHTLY_PIN_FA3_FWD}"
+          pip3 install "flash-attn==${NIGHTLY_PIN_FLASH_ATTN}"
           pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
           pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
           pip3 install --no-deps -e .
@@ -166,7 +168,7 @@ jobs:
           pip3 install veomni==0.1.11 --no-deps
           pip3 install torchcodec librosa soundfile av audioread
           pip3 install "transformers[mistral-common]==${NIGHTLY_PIN_TRANSFORMERS}"
-          python3 -c "import importlib.metadata as m; print('[NIGHTLY] pinned deps:', 'transformers='+m.version('transformers'), 'kernels='+m.version('kernels'), 'fa3-fwd='+m.version('fa3-fwd'))"
+          python3 -c "import importlib.metadata as m; print('[NIGHTLY] pinned deps:', 'transformers='+m.version('transformers'), 'kernels='+m.version('kernels'), 'fa3-fwd='+m.version('fa3-fwd'), 'flash-attn='+m.version('flash-attn'))"
 
       - name: Download L3 baseline from setup job
         if: env.RUN_MODE == 'nightly'
