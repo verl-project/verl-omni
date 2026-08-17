@@ -63,6 +63,8 @@ jobs:
             mode="rollout"
           elif [[ ",${pr_labels}," == *",ci-npu-flowgrpo,"* ]]; then
             mode="flowgrpo"
+          else
+            mode="all"
           fi
 
           echo "mode=${mode}" >> "$GITHUB_OUTPUT"
