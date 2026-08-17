@@ -635,8 +635,19 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         else:
             diffusion_output = self._to_tensor(diffusion_output).float() / 255.0
 
-        # Extract extra data from custom_output (populated by DiffusionEngine)
-        custom_output = final_res.custom_output or {}
+        # Extract replay data from legacy custom_output or the newer
+        # multimodal trajectory payload used by vLLM-Omni custom pipelines.
+        custom_output = getattr(final_res, "custom_output", None) or {}
+        multimodal_output = getattr(final_res, "multimodal_output", None) or {}
+        if isinstance(multimodal_output, dict):
+            multimodal_output = dict(multimodal_output)
+        else:
+            multimodal_output = {}
+        trajectory_output = multimodal_output.pop("trajectory", None)
+        if not custom_output and isinstance(trajectory_output, dict):
+            custom_output = {
+                k: v for k, v in trajectory_output.items() if k not in ("latents", "log_probs", "timesteps")
+            }
 
         if sampling_params.get("logprobs", False):
             all_log_probs = custom_output.get("all_log_probs")
@@ -656,10 +667,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return value
 
         extra_fields = {k: _maybe_unbatch(v) for k, v in custom_output.items() if k != "all_log_probs"}
-        multimodal_output = final_res.multimodal_output or {}
-        if isinstance(multimodal_output, dict):
-            for key, value in multimodal_output.items():
-                extra_fields.setdefault(key, _maybe_unbatch(value))
+        for key, value in multimodal_output.items():
+            extra_fields.setdefault(key, _maybe_unbatch(value))
         extra_fields["global_steps"] = self.global_steps
 
         if final_res.request_output is not None and hasattr(final_res.request_output, "finish_reason"):

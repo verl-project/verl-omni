@@ -165,8 +165,13 @@ class TestDiffusionSamplingConfig:
     def test_defaults(self):
         cfg = DiffusionSamplingConfig()
         assert cfg.pipeline.num_inference_steps == 10
+        assert cfg.pipeline.shift is None
         assert cfg.seed == 42
         assert isinstance(cfg.algo, DiffusionRolloutAlgoConfig)
+
+    def test_pipeline_shift_can_be_set_explicitly(self):
+        cfg = DiffusionPipelineConfig(shift=3.0)
+        assert cfg.shift == pytest.approx(3.0)
 
 
 class TestDiffusionRolloutConfig:

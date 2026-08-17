@@ -222,6 +222,7 @@ actor_rollout_ref:
         true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.true_cfg_scale,1.0}
         max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
         guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
+        shift: ${oc.select:actor_rollout_ref.rollout.pipeline.shift,null}
         num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
         frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
       algo:
@@ -249,6 +250,7 @@ actor_rollout_ref:
       true_cfg_scale: 1.0
       max_sequence_length: 512
       guidance_scale: null
+      shift: null
       num_frames: 1
       frame_rate: 24.0
     calculate_log_probs: false
@@ -317,6 +319,7 @@ actor_rollout_ref:
       true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.true_cfg_scale,1.0}
       max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
       guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
+      shift: ${oc.select:actor_rollout_ref.rollout.pipeline.shift,null}
       num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
       frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
     algo:
