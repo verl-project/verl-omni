@@ -30,7 +30,9 @@ TOTAL_TRAINING_STEPS=100
 ATTN_BACKEND=native
 
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-256}
-REQUEST_BATCH_MAX_WAIT_MS=${REQUEST_BATCH_MAX_WAIT_MS:-10}
+# Longer admission wait coalesces per-sample HTTP generates into fewer
+# request-level waves (stable window tracks max_wait/2 in vllm-omni).
+REQUEST_BATCH_MAX_WAIT_MS=${REQUEST_BATCH_MAX_WAIT_MS:-100}
 ROLLOUT_ATTN_BACKEND=TORCH_SDPA
 
 if [ "${FA3:-0}" = "1" ]; then

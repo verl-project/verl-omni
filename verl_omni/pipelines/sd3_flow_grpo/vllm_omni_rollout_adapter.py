@@ -512,10 +512,11 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
 
         self._current_timestep = None
         output = self._decode_latents(latents, output_type)
+        # Put SDE trajectory on first-class trajectory_* fields so vLLM-Omni's
+        # SHM / async D2H packer can move them efficiently. Keep prompt embeds
+        # (and optional clean latents) in custom_output for the trainer.
+        # verl's vllm_omni_async_server maps trajectory_* → all_* extra_fields.
         custom_output = {
-            "all_latents": all_latents,
-            "all_log_probs": all_log_probs,
-            "all_timesteps": all_timesteps,
             "prompt_embeds": prompt_embeds,
             "prompt_embeds_mask": prompt_embeds_mask,
             "pooled_prompt_embeds": pooled_prompt_embeds,
@@ -528,6 +529,9 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
 
         result = DiffusionOutput(
             output=output,
+            trajectory_latents=all_latents,
+            trajectory_log_probs=all_log_probs,
+            trajectory_timesteps=all_timesteps,
             custom_output=custom_output,
             to_cpu=True,
         )
