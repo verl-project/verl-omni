@@ -16,10 +16,13 @@
 
 import os
 import shutil
+from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
+from PIL import Image
 
 pytest.importorskip("diffusers")
 wandb = pytest.importorskip("wandb")
@@ -126,3 +129,43 @@ def test_image_samples_reject_non_uint8_input(monkeypatch):
 
     with pytest.raises(ValueError, match=r"Expected a uint8 image tensor, got torch\.float32\."):
         wrap_val_samples_for_wandb([("prompt", torch.rand(3, 16, 16), 1.0)])
+
+
+def test_uint8_image_is_logged_by_real_wandb_offline_run(monkeypatch, tmp_path):
+    """Exercise W&B image encoding and logging without an account or network access."""
+    for name in ("cache", "config", "data"):
+        directory = tmp_path / f"wandb-{name}"
+        directory.mkdir()
+        monkeypatch.setenv(f"WANDB_{name.upper()}_DIR", str(directory))
+    monkeypatch.setenv("WANDB_ERROR_REPORTING", "false")
+    monkeypatch.setenv("WANDB_SILENT", "true")
+
+    image = torch.empty((3, 32, 48), dtype=torch.uint8)
+    expected_colors = np.array([[16, 32, 64], [96, 128, 160], [192, 224, 240]], dtype=np.float32)
+    for index, color in enumerate(expected_colors):
+        image[:, :, index * 16 : (index + 1) * 16] = torch.from_numpy(color.astype(np.uint8)).view(3, 1, 1)
+
+    run = wandb.init(
+        project="verl-omni-offline-verification",
+        mode="offline",
+        dir=str(tmp_path),
+        settings=wandb.Settings(silent=True),
+    )
+    assert run.offline
+    run_dir = Path(run.dir)
+    try:
+        wrapped, video_tmp_dir, media_to_log = wrap_val_samples_for_wandb([("synthetic", image, 1.0)])
+        assert video_tmp_dir is None
+        assert media_to_log == {}
+        wandb.log({"verification/image": wrapped[0][1]}, step=1)
+    finally:
+        run.finish()
+
+    logged_images = list((run_dir / "media" / "images").rglob("*.jpg"))
+    assert len(logged_images) == 1
+
+    decoded = np.asarray(Image.open(logged_images[0]).convert("RGB"), dtype=np.float32)
+    decoded_colors = np.stack(
+        [decoded[:, index * 16 + 4 : (index + 1) * 16 - 4].mean(axis=(0, 1)) for index in range(3)]
+    )
+    np.testing.assert_allclose(decoded_colors, expected_colors, atol=3)
