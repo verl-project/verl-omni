@@ -39,12 +39,20 @@ def _request_output(diffusion_output, multimodal_output=None):
 
 
 def test_pixel_output_is_always_uint8(diffusion_server):
-    pixels = torch.tensor([0.0, 0.25, 0.5, 1.0])
+    pixels = torch.tensor([-1.0, 0.0, 0.25, 0.5, 1.0, 2.0])
 
     output = diffusion_server._process_output(_request_output(pixels), params=None, sampling_params={})
 
     assert output.diffusion_output.dtype == torch.uint8
-    assert output.diffusion_output.tolist() == [0, 64, 128, 255]
+    assert output.diffusion_output.tolist() == [0, 0, 64, 128, 255, 255]
+
+
+@pytest.mark.parametrize("nonfinite", [float("nan"), float("inf"), -float("inf")])
+def test_pixel_output_rejects_nonfinite_values(diffusion_server, nonfinite):
+    pixels = torch.tensor([0.0, nonfinite, 1.0])
+
+    with pytest.raises(ValueError, match="Pixel rollout output must contain only finite values"):
+        diffusion_server._process_output(_request_output(pixels), params=None, sampling_params={})
 
 
 def test_pixel_quantization_preserves_float_audio(diffusion_server):

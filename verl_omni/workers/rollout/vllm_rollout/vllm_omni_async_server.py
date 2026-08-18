@@ -81,7 +81,9 @@ def _pixel_output_to_uint8(output: torch.Tensor) -> torch.Tensor:
     if output.dtype == torch.uint8:
         return output
     output = output.detach().to(dtype=torch.float32)
-    output = torch.nan_to_num(output, nan=0.0, posinf=1.0, neginf=0.0).clamp_(0, 1)
+    if not bool(torch.isfinite(output).all()):
+        raise ValueError("Pixel rollout output must contain only finite values")
+    output = output.clamp_(0, 1)
     return output.mul_(255).round_().to(dtype=torch.uint8)
 
 
