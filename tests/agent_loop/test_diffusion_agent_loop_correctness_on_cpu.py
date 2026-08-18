@@ -27,6 +27,7 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
     _pad_prompt_extra_field,
 )
 from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopWorkerTQ
+from verl_omni.agent_loop.single_turn_agent_loop import DiffusionSingleTurnAgentLoop
 
 
 class _FakeRemoteComputeScore:
@@ -48,6 +49,42 @@ class _DummyDiffusionAgentLoopWorker:
 
     def __init__(self, reward_loop_worker_handle: _FakeRewardLoopWorkerHandle):
         self.reward_loop_worker_handles = [reward_loop_worker_handle]
+
+
+@pytest.mark.parametrize(
+    ("cache_enabled", "affinity_enabled", "expected_request_id"),
+    [
+        (True, True, "sample-uid"),
+        (True, False, None),
+        (False, True, None),
+    ],
+)
+def test_prompt_cache_routing_affinity(cache_enabled, affinity_enabled, expected_request_id):
+    agent_loop = object.__new__(DiffusionSingleTurnAgentLoop)
+    agent_loop.rollout_config = SimpleNamespace(
+        enable_prompt_embed_cache=cache_enabled,
+        enable_prompt_embed_cache_routing_affinity=affinity_enabled,
+    )
+
+    request_id = agent_loop._get_routing_request_id("sample-uid")
+
+    if expected_request_id is None:
+        assert request_id != "sample-uid"
+    else:
+        assert request_id == expected_request_id
+
+
+def test_prompt_cache_routing_affinity_requires_sample_uid():
+    agent_loop = object.__new__(DiffusionSingleTurnAgentLoop)
+    agent_loop.rollout_config = SimpleNamespace(
+        enable_prompt_embed_cache=True,
+        enable_prompt_embed_cache_routing_affinity=True,
+    )
+
+    first_request_id = agent_loop._get_routing_request_id(None)
+    second_request_id = agent_loop._get_routing_request_id(None)
+
+    assert first_request_id != second_request_id
 
 
 @pytest.mark.parametrize(
