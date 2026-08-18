@@ -60,6 +60,13 @@ async def reward_asserts_uint8_contract(data_source, solution_image, ground_trut
     return int(solution_image[0, 0, 0])
 
 
+async def reward_asserts_float_latent_contract(data_source, solution_image, ground_truth, extra_info):
+    """Verify reward managers preserve floating-point latent responses."""
+    assert solution_image.dtype == torch.float32
+    assert solution_image.shape == (16, 2, 2)
+    return float(solution_image[0, 0, 0])
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -93,13 +100,40 @@ def _build_manager(reward_functions: dict) -> MultiVisualRewardManager:
     return MultiVisualRewardManager(config, tokenizer, compute_score=None)
 
 
-def _build_visual_manager() -> VisualRewardManager:
+def _build_visual_latent_manager() -> VisualRewardManager:
     config = _make_config({})
-    return VisualRewardManager(config, MagicMock(), reward_fixed_score)
+    OmegaConf.update(config, "actor_rollout_ref.rollout.pipeline.output_type", "latent", force_add=True)
+    return VisualRewardManager(config, MagicMock(), reward_asserts_float_latent_contract)
 
 
-def _build_fixed_multi_manager() -> MultiVisualRewardManager:
-    return _build_manager({"fixed": {"path": DUMMY_REWARDS_PATH, "name": "reward_fixed_score", "weight": 1.0}})
+def _build_latent_multi_manager() -> MultiVisualRewardManager:
+    manager = _build_manager(
+        {
+            "latent": {
+                "path": DUMMY_REWARDS_PATH,
+                "name": "reward_asserts_float_latent_contract",
+                "weight": 1.0,
+            }
+        }
+    )
+    OmegaConf.update(manager.config, "actor_rollout_ref.rollout.pipeline.output_type", "latent", force_add=True)
+    return manager
+
+
+def _build_visual_pixel_manager() -> VisualRewardManager:
+    return VisualRewardManager(_make_config({}), MagicMock(), reward_asserts_uint8_contract)
+
+
+def _build_pixel_multi_manager() -> MultiVisualRewardManager:
+    return _build_manager(
+        {
+            "pixel": {
+                "path": DUMMY_REWARDS_PATH,
+                "name": "reward_asserts_uint8_contract",
+                "weight": 1.0,
+            }
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -135,14 +169,58 @@ class TestFilterKwargs:
 
 
 class TestMultiVisualRewardManagerRunSingle:
-    @pytest.mark.parametrize("manager_factory", [_build_visual_manager, _build_fixed_multi_manager])
-    def test_rejects_non_uint8_responses(self, manager_factory):
+    @pytest.mark.parametrize("manager_factory", [_build_visual_latent_manager, _build_latent_multi_manager])
+    def test_float_latent_response_is_forwarded_to_reward(self, manager_factory):
+        manager = manager_factory()
+        data = _make_single_data()
+        data.batch["responses"] = torch.full((1, 16, 2, 2), 0.5)
+
+        result = manager.loop.run_until_complete(manager.run_single(data))
+
+        assert result["reward_score"] == pytest.approx(0.5)
+
+    @pytest.mark.parametrize("manager_factory", [_build_visual_pixel_manager, _build_pixel_multi_manager])
+    def test_float_pixel_response_is_rejected(self, manager_factory):
         manager = manager_factory()
         data = _make_single_data()
         data.batch["responses"] = data.batch["responses"].float()
 
-        with pytest.raises(ValueError, match=r"Expected visual responses to be a uint8 tensor, got torch\.float32\."):
+        with pytest.raises(
+            ValueError,
+            match=r"Expected uint8 pixel responses for output_type='image', got torch\.float32\.",
+        ):
             manager.loop.run_until_complete(manager.run_single(data))
+
+    @pytest.mark.parametrize("manager_factory", [_build_visual_latent_manager, _build_latent_multi_manager])
+    def test_uint8_latent_response_is_rejected(self, manager_factory):
+        manager = manager_factory()
+        data = _make_single_data()
+
+        with pytest.raises(ValueError, match=r"Expected floating-point latent responses, got torch\.uint8\."):
+            manager.loop.run_until_complete(manager.run_single(data))
+
+    @pytest.mark.parametrize("manager_factory", [_build_visual_pixel_manager, _build_pixel_multi_manager])
+    def test_validation_uses_validation_output_type(self, manager_factory):
+        manager = manager_factory()
+        OmegaConf.update(
+            manager.config,
+            "actor_rollout_ref.rollout.val_kwargs.pipeline.output_type",
+            "latent",
+            force_add=True,
+        )
+        manager.compute_score = reward_asserts_float_latent_contract
+        manager.is_async_reward_score = True
+        if isinstance(manager, MultiVisualRewardManager):
+            manager._sub_rewards[0]["fn"] = reward_asserts_float_latent_contract
+            manager._sub_rewards[0]["is_async"] = True
+
+        data = _make_single_data()
+        data.batch["responses"] = torch.full((1, 16, 2, 2), 0.5)
+        data.meta_info["validate"] = True
+
+        result = manager.loop.run_until_complete(manager.run_single(data))
+
+        assert result["reward_score"] == pytest.approx(0.5)
 
     def test_weighted_aggregation(self):
         """Two reward functions with different weights produce correct combined score."""

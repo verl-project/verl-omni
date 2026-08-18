@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 07/20/2026.
+Last updated: 08/18/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -405,8 +405,27 @@ Your subclass must do four things:
      ([`diffusion_agent_loop.py`](../../verl_omni/agent_loop/diffusion_agent_loop.py))
      reads these field names verbatim — **do not rename them**.
 
+### 4.1 Rollout response contract
+
+The rollout server normalizes the representation transported in `responses`:
+
+- Pixel-valued outputs are quantized once to `torch.uint8` in `[0, 255]`.
+  Images reach a single-sample reward scorer as `(C, H, W)` and videos as
+  `(T, C, H, W)`.
+- `output_type=latent` keeps `responses` in floating point. With
+  `output_type=both`, the pixel response is uint8 and the clean latent remains a
+  separate floating-point field in `extra_info`.
+- Generated audio is transported separately and is not quantized to uint8.
+
+Reward managers validate `responses` against the active training or validation
+`output_type` and then forward it without dtype conversion. A pixel scorer that
+needs normalized model input must convert locally with
+`solution_image.float() / 255.0`; this normalizes the quantized pixels but cannot
+restore precision discarded at the rollout boundary. Do not multiply uint8 pixels
+by 255 again before PIL, JPEG, or HTTP serialization.
+
 (request-level-batching)=
-### 4.1 Request-level batching (optional)
+### 4.2 Request-level batching (optional)
 
 To let vLLM-Omni pack multiple requests into one transformer forward
 (`max_num_seqs > 1`), extend the rollout adapter as follows. Reference
