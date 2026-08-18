@@ -68,6 +68,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     compute_rollout_corr_metrics_from_batch,
     rollout_correction_enabled,
 )
+from verl_omni.trainer.diffusion.v1.metrics import DiffusionMetricsAggregator
 from verl_omni.trainer.diffusion.v1.tq_utils import (
     diffusion_tq_batch_to_dataproto,
     sort_diffusion_tq_keys,
@@ -126,6 +127,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         self.checkpoint_manager = None
         self.global_steps = 0
+        # Local update index within the parameter-sync cycle.
+        self.local_trigger_step = 0
 
     def _build_replay_buffer(self) -> ReplayBuffer:
         sampler_config = self.config.trainer.v1.sampler
@@ -133,16 +136,21 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         if sampler_config.get("drop_incomplete_groups", False):
             if self.trainer_mode != "sync":
                 raise ValueError("drop_incomplete_groups is only supported with trainer_mode='sync'")
+        if sampler_config.get("drop_incomplete_groups", False) or self.trainer_mode == "separate_async":
             if isinstance(max_refill_rounds, bool) or not isinstance(max_refill_rounds, int) or max_refill_rounds <= 0:
                 raise ValueError("max_incomplete_group_refill_rounds must be a positive integer")
 
-        return ReplayBuffer(
+        replay_buffer = ReplayBuffer(
             trainer_mode=self.trainer_mode,
             trainer_config=self.config.trainer.v1.get(self.trainer_mode, {}),
             max_off_policy_threshold=sampler_config.max_off_policy_threshold,
             max_off_policy_strategy=sampler_config.max_off_policy_strategy,
             sampler_kwargs=sampler_config.sampler_kwargs,
         )
+        if self.trainer_mode == "separate_async":
+            # Pinned verl must treat each synchronized outer step as one model version.
+            replay_buffer.parameter_sync_step = 1
+        return replay_buffer
 
     def init(self):
         """Initialize workers, rollout server, reward loop, checkpoint engine."""
@@ -247,21 +255,21 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         with marked_timer("feed", timing_raw):
             self._add_batch_to_generate()
 
+        metrics_aggregator = DiffusionMetricsAggregator()
         combined_keys: list = []
         combined_tags: list = []
         combined_partition_id = "train"
-        for _ in range(self.parameter_sync_step):
+        for trigger_idx in range(self.parameter_sync_step):
+            self.local_trigger_step = trigger_idx
             iter_metrics: dict = {}
             batch = self._step_once(iter_metrics, timing_raw, sample_batch_size)
-            for key, value in iter_metrics.items():
-                if key.startswith("training/rollout_failure/"):
-                    metrics[key] = metrics.get(key, 0) + value
-                else:
-                    metrics[key] = value
+            sample_count = sum(not tag.get("is_padding", False) for tag in batch.tags)
+            metrics_aggregator.add_step_metrics(iter_metrics, sample_count=sample_count)
             combined_keys.extend(batch.keys)
             combined_tags.extend(batch.tags)
             combined_partition_id = batch.partition_id
 
+        metrics.update(metrics_aggregator.get_aggregated_metrics())
         return KVBatchMeta(partition_id=combined_partition_id, keys=combined_keys, tags=combined_tags)
 
     def _step_once(self, metrics: dict, timing_raw: dict, sample_batch_size: int) -> KVBatchMeta:
@@ -696,9 +704,72 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         parts = key.rsplit("_", 2)
         return parts[0] if len(parts) == 3 else key
 
+    def _sample_complete_separate_async_batch(self, batch_size: int) -> tuple[KVBatchMeta, dict]:
+        """Replace stale or incomplete groups until one exact local batch is ready."""
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        max_incomplete_refill_rounds = self.config.trainer.v1.sampler.get("max_incomplete_group_refill_rounds", 3)
+        refill_rounds = 0
+        remaining_batch_size = batch_size
+        keys: list[str] = []
+        tags: list[dict] = []
+        sampling_metrics = DiffusionMetricsAggregator()
+        failure_metrics: Counter = Counter()
+
+        while remaining_batch_size > 0:
+            batch, current_metrics = self.replay_buffer.sample(
+                global_steps=self.global_steps,
+                partition_id="train",
+                batch_size=remaining_batch_size,
+            )
+
+            grouped_rows: dict[str, list[tuple[str, dict]]] = defaultdict(list)
+            for key, tag in zip(batch.keys, batch.tags, strict=False):
+                grouped_rows[self._trajectory_uid(key)].append((key, tag))
+
+            complete_groups = [rows for rows in grouped_rows.values() if len(rows) == rollout_n]
+            incomplete_keys = [key for rows in grouped_rows.values() if len(rows) != rollout_n for key, _tag in rows]
+            if incomplete_keys:
+                tq.kv_clear(partition_id="train", keys=incomplete_keys)
+            for rows in complete_groups:
+                keys.extend(key for key, _tag in rows)
+                tags.extend(tag for _key, tag in rows)
+
+            sampling_metrics.add_step_metrics(current_metrics, sample_count=len(batch.tags))
+            missing_groups = remaining_batch_size - len(complete_groups)
+            if missing_groups == 0:
+                break
+
+            dropped_samples = current_metrics.get("training/off_policy/dropped_samples", 0)
+            stale_groups = math.ceil(float(dropped_samples) / rollout_n)
+            incomplete_groups = max(missing_groups - stale_groups, 0)
+            if incomplete_groups:
+                if refill_rounds >= max_incomplete_refill_rounds:
+                    raise RuntimeError(
+                        f"Exceeded max_incomplete_group_refill_rounds={max_incomplete_refill_rounds} "
+                        "while assembling a complete separate_async mini-batch"
+                    )
+                refill_rounds += 1
+                failure_metrics["training/rollout_failure/evicted_groups"] += incomplete_groups
+                failure_metrics["training/rollout_failure/evicted_trajectories"] += len(incomplete_keys)
+                failure_metrics["training/rollout_failure/refilled_prompts"] += incomplete_groups
+                failure_metrics["training/rollout_failure/refill_rounds"] += 1
+
+            generation_batch_size = self._generation_batch_size()
+            refill_size = math.ceil(missing_groups / generation_batch_size) * generation_batch_size
+            if self._add_prompts_to_generate(refill_size) != refill_size:
+                raise RuntimeError(f"Failed to submit {refill_size} replacement prompts")
+            remaining_batch_size = missing_groups
+
+        return (
+            KVBatchMeta(partition_id="train", keys=keys, tags=tags),
+            {**sampling_metrics.get_aggregated_metrics(), **failure_metrics},
+        )
+
     def _sample_training_batch(self, batch_size: int) -> tuple[KVBatchMeta, dict]:
         """Use the upstream replay buffer and replace only selected failed groups."""
         sampler_config = self.config.trainer.v1.sampler
+        if self.trainer_mode == "separate_async":
+            return self._sample_complete_separate_async_batch(batch_size)
         if not sampler_config.get("drop_incomplete_groups", False):
             return self.replay_buffer.sample(
                 global_steps=self.global_steps,
@@ -812,6 +883,19 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 dp_size = int(info) + 1 if info is not None else 1
         actor_global_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         actor_global_mini_batch_size *= self.config.actor_rollout_ref.rollout.n
+        if self.trainer_mode == "separate_async":
+            if len(data) != actor_global_mini_batch_size:
+                raise ValueError(
+                    "separate_async local batch must contain exactly "
+                    f"ppo_mini_batch_size * rollout.n = {actor_global_mini_batch_size} trajectories, "
+                    f"but received {len(data)}; refusing to pad copied trajectories"
+                )
+            if len(data) % dp_size != 0:
+                raise ValueError(
+                    f"separate_async local batch size {len(data)} must be divisible by actor DP size {dp_size}"
+                )
+            return data
+
         batch_multiple = math.lcm(dp_size, actor_global_mini_batch_size)
         if len(data) % batch_multiple != 0:
             data, _ = pad_dataproto_to_divisor(data, size_divisor=batch_multiple)
