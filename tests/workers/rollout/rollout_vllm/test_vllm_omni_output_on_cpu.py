@@ -29,8 +29,13 @@ def diffusion_server():
     return server
 
 
-def _request_output(diffusion_output):
-    return SimpleNamespace(images=[diffusion_output], custom_output={}, multimodal_output={}, request_output=None)
+def _request_output(diffusion_output, multimodal_output=None):
+    return SimpleNamespace(
+        images=[diffusion_output],
+        custom_output={},
+        multimodal_output=multimodal_output or {},
+        request_output=None,
+    )
 
 
 def test_pixel_output_is_always_uint8(diffusion_server):
@@ -40,6 +45,22 @@ def test_pixel_output_is_always_uint8(diffusion_server):
 
     assert output.diffusion_output.dtype == torch.uint8
     assert output.diffusion_output.tolist() == [0, 64, 128, 255]
+
+
+def test_pixel_quantization_preserves_float_audio(diffusion_server):
+    pixels = torch.tensor([0.0, 0.5, 1.0])
+    audio = torch.tensor([[0.125, -0.25, 0.5]], dtype=torch.float32)
+
+    output = diffusion_server._process_output(
+        _request_output(pixels, {"audio": audio, "audio_sample_rate": 48_000}),
+        params=None,
+        sampling_params={},
+    )
+
+    assert output.diffusion_output.dtype == torch.uint8
+    assert output.extra_fields["audio"].dtype == torch.float32
+    torch.testing.assert_close(output.extra_fields["audio"], audio[0])
+    assert output.extra_fields["audio_sample_rate"] == 48_000
 
 
 @pytest.mark.parametrize(
