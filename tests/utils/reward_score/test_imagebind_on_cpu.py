@@ -60,6 +60,12 @@ def test_to_tchw_accepts_channels_last_video():  # trufflehog:ignore
     assert converted.max() == 1.0
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.int32])
+def test_to_tchw_rejects_non_uint8_video(dtype):
+    with pytest.raises(ValueError, match=rf"Expected uint8 video input, got {dtype}\."):
+        imagebind._to_tchw(torch.zeros(3, 8, 10, 3, dtype=dtype))
+
+
 @pytest.mark.parametrize(
     ("mode", "expected_modalities", "expected_score"),
     [

@@ -67,6 +67,15 @@ def _read_jsonl(dump_path, global_steps=0):
 
 
 class TestDumpGenerations:
+    def test_rejects_non_uint8_outputs(self, tmp_path):
+        outputs = torch.zeros(1, 3, 16, 16)
+
+        with pytest.raises(
+            ValueError,
+            match=r"Expected generation outputs to be a uint8 tensor, got torch\.float32\.",
+        ):
+            _dump(tmp_path, outputs)
+
     def test_video_batch_writes_one_mp4_per_sample(self, tmp_path):
         outputs = torch.randint(256, (2, 8, 3, 16, 16), dtype=torch.uint8)  # [N, T, C, H, W]
         _dump(tmp_path, outputs)

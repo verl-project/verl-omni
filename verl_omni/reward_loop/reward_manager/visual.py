@@ -22,6 +22,12 @@ from verl.utils.reward_score import default_compute_score as _upstream_default_c
 from verl_omni.utils.reward_score import default_compute_score_image
 
 
+def _validate_visual_response(response_visual) -> None:
+    if not isinstance(response_visual, torch.Tensor) or response_visual.dtype != torch.uint8:
+        dtype = getattr(response_visual, "dtype", type(response_visual))
+        raise ValueError(f"Expected visual responses to be a uint8 tensor, got {dtype}.")
+
+
 class VisualRewardManager(RewardManagerBase):
     """The reward manager for visual response."""
 
@@ -46,6 +52,7 @@ class VisualRewardManager(RewardManagerBase):
         assert len(data) == 1, "Only support single data item"
         data_item = data[0]
         response_visual = data_item.batch["responses"]
+        _validate_visual_response(response_visual)
         data_source = data_item.non_tensor_batch["data_source"]
         ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
         extra_info = data_item.non_tensor_batch.get("extra_info", {})

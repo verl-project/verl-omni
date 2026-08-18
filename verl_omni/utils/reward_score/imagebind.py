@@ -137,7 +137,10 @@ def _preprocess_audio(audio, source_rate: int, device: str) -> torch.Tensor:
 
 
 def _to_tchw(video) -> torch.Tensor:
-    video = torch.as_tensor(video).detach().float().cpu() / 255.0
+    video = torch.as_tensor(video)
+    if video.dtype != torch.uint8:
+        raise ValueError(f"Expected uint8 video input, got {video.dtype}.")
+    video = video.detach().float().cpu() / 255.0
     while video.ndim > 4 and video.shape[0] == 1:
         video = video[0]
     if video.ndim != 4:

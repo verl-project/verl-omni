@@ -1018,6 +1018,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         if generations_to_log == 0:
             return
         if "wandb" in self.config.trainer.logger:
+            for image in outputs:
+                if not isinstance(image, torch.Tensor) or image.dtype != torch.uint8:
+                    raise ValueError(f"Expected a uint8 image tensor, got {getattr(image, 'dtype', type(image))}.")
             import wandb
 
             outputs = [wandb.Image(image, file_type="jpg", normalize=False) for image in outputs]
@@ -1030,6 +1033,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
     def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
         """Dump validation/rollout samples as images + JSONL (runs in background)."""
+        if not isinstance(outputs, torch.Tensor) or outputs.dtype != torch.uint8:
+            dtype = getattr(outputs, "dtype", type(outputs))
+            raise ValueError(f"Expected generation outputs to be a uint8 tensor, got {dtype}.")
+
         future = self._dump_executor.submit(
             self._write_generations,
             inputs,

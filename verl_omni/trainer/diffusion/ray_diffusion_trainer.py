@@ -318,6 +318,10 @@ class BaseRayDiffusionTrainer(ABC):
         ``[N, T, C, H, W]`` (-> ``{i}.mp4`` at ``fps``). ``max_samples`` caps how many
         are written (``None`` = all). Optional generated audio is muxed into video files.
         """
+        if not isinstance(outputs, torch.Tensor) or outputs.dtype != torch.uint8:
+            dtype = getattr(outputs, "dtype", type(outputs))
+            raise ValueError(f"Expected generation outputs to be a uint8 tensor, got {dtype}.")
+
         os.makedirs(dump_path, exist_ok=True)
 
         visual_folder = os.path.join(dump_path, f"{self.global_steps}")

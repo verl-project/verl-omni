@@ -23,6 +23,7 @@ from omegaconf import OmegaConf
 from verl import DataProto
 
 from verl_omni.reward_loop.reward_manager.multi import MultiVisualRewardManager, _filter_kwargs
+from verl_omni.reward_loop.reward_manager.visual import VisualRewardManager
 
 # Path to this file — load_extern_object will import dummy functions from here.
 DUMMY_REWARDS_PATH = "tests/reward_loop/test_multi_reward_manager_on_cpu.py"
@@ -92,6 +93,15 @@ def _build_manager(reward_functions: dict) -> MultiVisualRewardManager:
     return MultiVisualRewardManager(config, tokenizer, compute_score=None)
 
 
+def _build_visual_manager() -> VisualRewardManager:
+    config = _make_config({})
+    return VisualRewardManager(config, MagicMock(), reward_fixed_score)
+
+
+def _build_fixed_multi_manager() -> MultiVisualRewardManager:
+    return _build_manager({"fixed": {"path": DUMMY_REWARDS_PATH, "name": "reward_fixed_score", "weight": 1.0}})
+
+
 # ---------------------------------------------------------------------------
 # _filter_kwargs
 # ---------------------------------------------------------------------------
@@ -125,6 +135,15 @@ class TestFilterKwargs:
 
 
 class TestMultiVisualRewardManagerRunSingle:
+    @pytest.mark.parametrize("manager_factory", [_build_visual_manager, _build_fixed_multi_manager])
+    def test_rejects_non_uint8_responses(self, manager_factory):
+        manager = manager_factory()
+        data = _make_single_data()
+        data.batch["responses"] = data.batch["responses"].float()
+
+        with pytest.raises(ValueError, match=r"Expected visual responses to be a uint8 tensor, got torch\.float32\."):
+            manager.loop.run_until_complete(manager.run_single(data))
+
     def test_weighted_aggregation(self):
         """Two reward functions with different weights produce correct combined score."""
         reward_fns = {

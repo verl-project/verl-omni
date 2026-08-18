@@ -119,3 +119,10 @@ def test_image_samples_become_wandb_image_and_no_temp_dir(monkeypatch):
     assert len(wrapped) == 1 and wrapped[0][0] == "prompt"
     assert captured[0][0].dtype == torch.uint8
     assert captured[0][1]["normalize"] is False
+
+
+def test_image_samples_reject_non_uint8_input(monkeypatch):
+    monkeypatch.setattr(wandb, "Image", lambda *args, **kwargs: pytest.fail("wandb.Image should not be called"))
+
+    with pytest.raises(ValueError, match=r"Expected a uint8 image tensor, got torch\.float32\."):
+        wrap_val_samples_for_wandb([("prompt", torch.rand(3, 16, 16), 1.0)])

@@ -27,6 +27,8 @@ def video_tensor_to_pil_frames(video: torch.Tensor) -> list[Image.Image]:
     PIL (not NumPy) frames avoid ``export_to_video`` rescaling already-uint8 input
     by 255, which would invert colors modulo 256.
     """
+    if video.dtype != torch.uint8:
+        raise ValueError(f"Expected a uint8 video tensor, got {video.dtype}")
     if video.ndim != 4 or video.shape[1] != 3:
         raise ValueError(f"Expected an RGB video tensor with shape [T, 3, H, W], got {tuple(video.shape)}")
 

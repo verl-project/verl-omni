@@ -46,6 +46,12 @@ def test_video_tensor_to_pil_frames_preserves_uint8_pixels():
     assert pixels.tolist() == [[[0, 64, 255], [1, 128, 32], [255, 191, 0]]]
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.int32])
+def test_video_tensor_to_pil_frames_rejects_non_uint8(dtype):
+    with pytest.raises(ValueError, match=f"Expected a uint8 video tensor, got {dtype}"):
+        video_tensor_to_pil_frames(torch.zeros((1, 3, 4, 5), dtype=dtype))
+
+
 @pytest.mark.parametrize("shape", [(3, 4, 5), (2, 4, 4, 5), (2, 3, 4, 5, 1)])
 def test_video_tensor_to_pil_frames_rejects_non_tchw_rgb(shape):
     with pytest.raises(ValueError, match="Expected an RGB video tensor"):
