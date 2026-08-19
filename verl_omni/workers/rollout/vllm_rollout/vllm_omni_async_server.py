@@ -80,7 +80,7 @@ def _pixel_output_to_uint8(output: torch.Tensor) -> torch.Tensor:
     """Quantize a rollout pixel tensor from float ``[0, 1]`` to uint8 once."""
     if output.dtype == torch.uint8:
         return output
-    output = output.detach().to(dtype=torch.float32)
+    output = output.detach().to(dtype=torch.float32, copy=True)
     if not bool(torch.isfinite(output).all()):
         raise ValueError("Pixel rollout output must contain only finite values")
     output = output.clamp_(0, 1)
