@@ -174,7 +174,7 @@ jobs:
           uv pip install --system --break-system-packages ".[gpu,dev,audio]"
           uv pip install --system --break-system-packages "kernels==${NIGHTLY_PIN_KERNELS}"
           uv pip install --system --break-system-packages "fa3-fwd==${NIGHTLY_PIN_FA3_FWD}"
-          uv pip install --system --break-system-packages "flash-attn==${NIGHTLY_PIN_FLASH_ATTN}"
+          uv pip install --system --break-system-packages --no-build-isolation-package flash-attn "flash-attn==${NIGHTLY_PIN_FLASH_ATTN}"
           uv pip install --system --break-system-packages "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
           uv pip install --system --break-system-packages --no-deps --reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
           uv pip install --system --break-system-packages --no-deps -e .
