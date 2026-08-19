@@ -5,9 +5,8 @@
 #
 # Override pinned versions (defaults match pyproject.toml extras):
 #   docker build -f docker/Dockerfile.cuda -t verl-omni:gpu \
-#     --build-arg VLLM_VERSION=0.24.0 \
+#     --build-arg VLLM_VERSION=0.27.0 \
 #     --build-arg KERNELS_VERSION=0.14.1 \
-#     --build-arg VLLM_OMNI_VERSION=0.24.0 \
 #     --build-arg VERL_GIT_REF=8a694930275061f52ebd538c906ef8819af56dbd .
 #
 # Build with dev extras (pytest, pre-commit, …):
@@ -18,9 +17,8 @@
 
 ARG CUDA_VERSION=13.0.2
 ARG UBUNTU_VERSION=22.04
-ARG VLLM_VERSION=0.24.0
+ARG VLLM_VERSION=0.27.0
 ARG KERNELS_VERSION=0.14.1
-ARG VLLM_OMNI_VERSION=0.24.0
 # Default: read from .github/verl_pin.txt at build time (override with VERL_GIT_REF).
 ARG VERL_GIT_REF=
 
@@ -29,7 +27,6 @@ FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu${UBUNTU_VERSION} AS base
 ARG DEBIAN_FRONTEND=noninteractive
 ARG VLLM_VERSION
 ARG KERNELS_VERSION
-ARG VLLM_OMNI_VERSION
 ARG VERL_GIT_REF
 
 # Python >= 3.10 (3.12 recommended), CUDA >= 12.8
@@ -57,7 +54,7 @@ RUN ulimit -n 65536 \
 WORKDIR /workspace/verl-omni
 
 COPY pyproject.toml setup.py README.md ./
-COPY .github/verl_pin.txt ./.github/verl_pin.txt
+COPY .github/verl_pin.txt .github/vllm_omni_pin.txt ./.github/
 COPY verl_omni ./verl_omni
 
 # Step 1 — gpu extra: vllm, kernels, liger-kernel
@@ -67,10 +64,11 @@ RUN echo "Installing vllm==${VLLM_VERSION} kernels==${KERNELS_VERSION}" \
         "kernels==${KERNELS_VERSION}" \
         liger-kernel
 
-# Step 2 — vllm-omni + train extras (verl from .github/verl_pin.txt, same as CI)
+# Step 2 — vllm-omni from git pin + train extras (verl from .github/verl_pin.txt)
 RUN VERL_REF="${VERL_GIT_REF:-$(tr -d '[:space:]' < .github/verl_pin.txt)}" \
-    && echo "Installing vllm-omni==${VLLM_OMNI_VERSION} verl@${VERL_REF}" \
-    && uv pip install "vllm-omni==${VLLM_OMNI_VERSION}" \
+    && VLLM_OMNI_REF="$(tr -d '[:space:]' < .github/vllm_omni_pin.txt)" \
+    && echo "Installing vllm-omni@${VLLM_OMNI_REF} verl@${VERL_REF}" \
+    && uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@${VLLM_OMNI_REF}" \
     && uv pip install --no-deps \
         "verl @ git+https://github.com/verl-project/verl.git@${VERL_REF}"
 

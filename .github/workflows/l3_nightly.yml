@@ -57,7 +57,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm023.dev1"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd7upeujs1b9g1a958pn0.apigateway-cn-beijing.volceapi.com/runner"
   BASELINE_ARTIFACT_NAME: l3-nightly-baseline
   BASELINE_STAGING_ARTIFACT_PREFIX: l3-nightly-baseline-staging
@@ -137,30 +137,60 @@ jobs:
     runs-on: ["${{ needs.setup.outputs.runner-label || 'L20x8' }}"]
     timeout-minutes: 180
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      HTTP_PROXY: "http://100.68.174.87:3128"
+      HTTPS_PROXY: "http://100.68.174.87:3128"
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0"
+      UV_LINK_MODE: copy
+      UV_SYSTEM_PYTHON: "1"
+      UV_BREAK_SYSTEM_PACKAGES: "1"
+      PIP_BREAK_SYSTEM_PACKAGES: "1"
+      NIGHTLY_PIN_KERNELS: "0.14.1"
+      NIGHTLY_PIN_FA3_FWD: "0.0.3"
+      NIGHTLY_PIN_FLASH_ATTN: "2.8.3"
+      NIGHTLY_PIN_TRANSFORMERS: "5.14.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
 
+      - name: Keep the uv cache on the runner's persistent HOME
+        run: |
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
+
       - name: Install dependencies
         env:
+          UV_EXTRA_INDEX_URL: https://pypi.org/simple
           PIP_EXTRA_INDEX_URL: https://pypi.org/simple
+          UV_SYSTEM_PYTHON: "1"
+          UV_BREAK_SYSTEM_PACKAGES: "1"
+          PIP_BREAK_SYSTEM_PACKAGES: "1"
         run: |
-          # vllm023.dev1 image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
-          pip3 install ".[gpu,dev,audio]"
-          pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-          pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
-          pip3 install --no-deps -e .
+          export UV_CACHE_DIR="${UV_CACHE_DIR:-${HOME}/.cache/uv}"
+          git config --global http.postBuffer 524288000 || true
+          # Base image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
+          uv pip install --system --break-system-packages ".[gpu,dev,audio]"
+          uv pip install --system --break-system-packages "kernels==${NIGHTLY_PIN_KERNELS}"
+          uv pip install --system --break-system-packages "fa3-fwd==${NIGHTLY_PIN_FA3_FWD}"
+          uv pip install --system --break-system-packages "flash-attn==${NIGHTLY_PIN_FLASH_ATTN}"
+          uv pip install --system --break-system-packages "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
+          uv pip install --system --break-system-packages --no-deps --reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
+          uv pip install --system --break-system-packages --no-deps -e .
           # veomni's [gpu] extra pins torch 2.9 and would conflict with the vLLM stack.
           # See docs/start/install.md "Optional engine backends".
           # TODO: rm --no-deps when VeOmni supports torch2.11.
-          pip3 install veomni==0.1.11 --no-deps
-          pip3 install torchcodec librosa soundfile av audioread
-          pip3 install "transformers[mistral-common]"
+          uv pip install --system --break-system-packages veomni==0.1.11 --no-deps
+          uv pip install --system --break-system-packages torchcodec librosa soundfile av audioread
+          uv pip install --system --break-system-packages "transformers[mistral-common]==${NIGHTLY_PIN_TRANSFORMERS}"
+          python3 -c "import importlib.metadata as m; print('[NIGHTLY] pinned deps:', 'transformers='+m.version('transformers'), 'kernels='+m.version('kernels'), 'fa3-fwd='+m.version('fa3-fwd'), 'flash-attn='+m.version('flash-attn'))"
+          # TODO: Remove this FusedMoE compatibility patch after verl is upgraded to 0.9.0 (which natively supports vLLM 0.27 MoE modular refactor).
+          # vLLM 0.27 compatibility: install lazy .pth hook so all Ray workers/subprocesses alias FusedMoE
+          python3 -c "import site, os; code = '''import importlib.util, sys\nfrom importlib.abc import Loader, MetaPathFinder\n\nclass _MoEHookFinder(MetaPathFinder):\n    def find_spec(self, fullname, path, target=None):\n        if fullname == \'vllm.model_executor.layers.fused_moe.layer\':\n            sys.meta_path.remove(self)\n            try:\n                spec = importlib.util.find_spec(fullname)\n                if spec and spec.loader:\n                    orig_loader = spec.loader\n                    class _HookedLoader(Loader):\n                        def create_module(self, spec):\n                            return orig_loader.create_module(spec)\n                        def exec_module(self, module):\n                            orig_loader.exec_module(module)\n                            if not hasattr(module, \'FusedMoE\'):\n                                import vllm.model_executor.layers.fused_moe as _m\n                                module.FusedMoE = getattr(_m, \'FusedMoEExpertsModular\', getattr(_m, \'FusedMoEMethodBase\', object))\n                    spec.loader = _HookedLoader()\n                return spec\n            finally:\n                sys.meta_path.insert(0, self)\n        return None\n\nsys.meta_path.insert(0, _MoEHookFinder())\n'''; [open(os.path.join(p, '_vllm_moe_compat.py'), 'w').write(code) for p in set(site.getsitepackages()) if os.path.exists(p)]; [open(os.path.join(p, 'verl_omni_vllm_compat.pth'), 'w').write('import _vllm_moe_compat\n') for p in set(site.getsitepackages()) if os.path.exists(p)]"
+          if ! command -v python >/dev/null 2>&1; then
+            ln -sfn "$(command -v python3)" /usr/local/bin/python
+          fi
 
       - name: Download L3 baseline from setup job
         if: env.RUN_MODE == 'nightly'

@@ -10,31 +10,31 @@ gpu_smoke_init "ci-core" 2 "$@"
 # before the rollout generate smoke so workers start on a clean GPU.
 run_test 0 "diffusion agent loop" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
-    pytest -s tests/agent_loop/test_diffusion_agent_loop.py
+    python3 -m pytest -s tests/agent_loop/test_diffusion_agent_loop.py
 
 run_test 1 "vllm-omni rollout" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
-    pytest -s tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py
+    python3 -m pytest -s tests/workers/rollout/rollout_vllm/test_vllm_omni_generate.py
 
 run_test 2 "diffusers FSDP engine" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
-    pytest -s tests/workers/test_diffusers_fsdp_engine.py
+    python3 -m pytest -s tests/workers/test_diffusers_fsdp_engine.py
 
 # Skips itself if the optional `veomni` backend is not installed (importorskip).
 run_test 3 "diffusers VeOmni engine" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
-    pytest -s tests/workers/test_diffusers_veomni_engine.py
+    python3 -m pytest -s tests/workers/test_diffusers_veomni_engine.py
 
 run_test 4 "diffusion rollout seed multi-worker" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
-    pytest -s tests/agent_loop/test_diffusion_rollout_seed_gpu.py
+    python3 -m pytest -s tests/agent_loop/test_diffusion_rollout_seed_gpu.py
 
 run_test 5 "visual reward manager" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
-    pytest -s tests/reward_loop/test_visual_reward_manager.py
+    python3 -m pytest -s tests/reward_loop/test_visual_reward_manager.py
 
 run_test 6 "diffusion composite agent loop" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
-    pytest -s tests/agent_loop/test_composite_agent_loop.py
+    python3 -m pytest -s tests/agent_loop/test_composite_agent_loop.py
 
 gpu_smoke_summary

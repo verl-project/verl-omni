@@ -37,10 +37,26 @@ from verl_omni.pipelines.bagel_flow_grpo.common import (
     maybe_to_cpu,
     setup_bagel_sigmas,
 )
+from verl_omni.pipelines.diffusion_rollout_output import rollout_output
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_bagel_trajectory(output: DiffusionOutput) -> tuple[Any, Any, Any]:
+    """Read BAGEL's payload trajectory, preferring native top-level fields."""
+    latents = output.trajectory_latents
+    timesteps = output.trajectory_timesteps
+    log_probs = output.trajectory_log_probs
+    if isinstance(output.output, dict):
+        payload = output.output.get("payload")
+        trajectory = payload.get("trajectory") if isinstance(payload, dict) else None
+        if isinstance(trajectory, dict):
+            latents = latents if latents is not None else trajectory.get("latents")
+            timesteps = timesteps if timesteps is not None else trajectory.get("timesteps")
+            log_probs = log_probs if log_probs is not None else trajectory.get("log_probs")
+    return latents, timesteps, log_probs
 
 
 # TODO: Drop decode→re-tokenize helpers once vllm-omni BagelPipeline accepts
@@ -340,9 +356,7 @@ class BagelPipelineWithLogProb(BagelPipeline):
         output = super().forward(req)
 
         # Slice trajectory to the SDE window so training only sees noisy steps.
-        traj_latents = output.trajectory_latents
-        traj_timesteps = output.trajectory_timesteps
-        traj_log_probs = output.trajectory_log_probs
+        traj_latents, traj_timesteps, traj_log_probs = _extract_bagel_trajectory(output)
 
         if sde_window is not None:
             begin, end = sde_window
@@ -350,15 +364,35 @@ class BagelPipelineWithLogProb(BagelPipeline):
                 traj_latents = traj_latents[begin : end + 1]
             if traj_timesteps is not None:
                 traj_timesteps = traj_timesteps[begin:end]
+            if traj_log_probs is not None:
+                traj_log_probs = traj_log_probs[begin:end]
 
-        return DiffusionOutput(
-            output=maybe_to_cpu(output.output),
-            custom_output={
-                "all_latents": maybe_to_cpu(traj_latents.unsqueeze(0)) if traj_latents is not None else None,
-                "all_timesteps": maybe_to_cpu(traj_timesteps.unsqueeze(0)) if traj_timesteps is not None else None,
-                "all_log_probs": maybe_to_cpu(traj_log_probs.unsqueeze(0)) if traj_log_probs is not None else None,
-            },
-            trajectory_latents=None,
-            trajectory_timesteps=None,
-            trajectory_log_probs=None,
+        # BAGEL trajectories are time-major; add a batch axis for training consumers.
+        if traj_latents is not None:
+            traj_latents = traj_latents.unsqueeze(0)
+        if traj_timesteps is not None:
+            traj_timesteps = traj_timesteps.unsqueeze(0)
+        if traj_log_probs is not None:
+            traj_log_probs = traj_log_probs.unsqueeze(0)
+
+        media = output.output
+        media_key = "image"
+        metadata = None
+        if isinstance(media, dict) and isinstance(media.get("payload"), dict):
+            payload = dict(media["payload"])
+            metadata = dict(media.get("metadata") or {})
+            for key in ("image", "video", "output", "audio", "text"):
+                if key in payload:
+                    media = payload[key]
+                    media_key = key
+                    break
+
+        return rollout_output(
+            media=maybe_to_cpu(media),
+            media_key=media_key,
+            trajectory_latents=maybe_to_cpu(traj_latents),
+            trajectory_timesteps=maybe_to_cpu(traj_timesteps),
+            trajectory_log_probs=maybe_to_cpu(traj_log_probs),
+            metadata=metadata,
+            to_cpu=False,
         )

@@ -101,7 +101,8 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             # Consume the stash so a subsequent full-weight sync isn't misrouted.
             self._pending_lora_peft_config = None
 
-        assert self.device is not None
+        if self.device is None:
+            raise RuntimeError("Worker device is not set.")
         zmq_handle = self._get_zmq_handle()
         if zmq_update_id is not None:
             zmq_handle = make_update_zmq_handle(zmq_handle, zmq_update_id)
@@ -187,8 +188,13 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
 
                 process_weights_after_loading(model, model_config, self.device)
             else:
-                # Diffusion pipeline worker: use its own loader.
-                receiver.receive_weights(on_bucket_received=lambda weights: self.load_weights(weights))
+                # Diffusion pipeline worker: load via the pipeline. vllm-omni
+                # 0.26 removed DiffusionWorker/DiffusionModelRunner.load_weights;
+                # each pipeline exposes load_weights via AutoWeightsLoader.
+                pipeline = getattr(getattr(self, "model_runner", None), "pipeline", None)
+                if pipeline is None or not hasattr(pipeline, "load_weights"):
+                    raise RuntimeError("Diffusion pipeline worker has no load_weights-capable pipeline")
+                receiver.receive_weights(on_bucket_received=lambda weights: pipeline.load_weights(weights))
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.

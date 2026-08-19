@@ -5,7 +5,7 @@ Last updated: 07/20/2026.
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
 algorithm. The contracts described below (registry hooks, adapter
-classmethods, scheduler choice, custom-output field names) are specific to
+classmethods, scheduler choice, rollout output field names) are specific to
 the FlowGRPO trainer; other RL algorithms may impose different requirements.
 Use
 [`integrating_a_new_policy_gradient_algorithm_for_diffusion_model.md`](integrating_a_new_policy_gradient_algorithm_for_diffusion_model.md)
@@ -399,9 +399,10 @@ Your subclass must do four things:
 4. **Override `forward(req, ...)`** so that:
    - Sampling parameters come from `req.sampling_params` (use
      `extra_args` for SDE-specific knobs).
+   - Trajectory and metadata fields are returned via `rollout_output(...)`
+     from [`verl_omni.pipelines.diffusion_rollout_output`](../../verl_omni/pipelines/diffusion_rollout_output.py).
    - `prompt_embeds`, `prompt_embeds_mask`, `negative_prompt_embeds`,
-     and `negative_prompt_embeds_mask` are placed in the returned
-     `DiffusionOutput.custom_output`. The diffusion agent loop
+     and `negative_prompt_embeds_mask` are placed in `prompt_embeddings`. The diffusion agent loop
      ([`diffusion_agent_loop.py`](../../verl_omni/agent_loop/diffusion_agent_loop.py))
      reads these field names verbatim — **do not rename them**.
 
