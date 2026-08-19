@@ -166,6 +166,13 @@ def patch_hf_processor_for_qwen3_omni() -> None:
 
     _vt.hf_processor = _patched_hf_processor
 
+    # ``verl.utils`` re-exports ``hf_processor`` by value.  Fully-async
+    # workers import it from that package, so updating tokenizer.py alone
+    # leaves those workers holding the original unsupported implementation.
+    import verl.utils as _vu
+
+    _vu.hf_processor = _patched_hf_processor
+
 
 def apply_qwen3_omni_thinker_patches() -> None:
     """Apply all Qwen3-Omni Thinker patches (idempotent registrations)."""

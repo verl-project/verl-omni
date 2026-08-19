@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import fcntl
 import getpass
+import hashlib
 import json
 import logging
 import os
@@ -31,7 +32,6 @@ import ray
 import torch
 import torchvision.transforms as T
 import vllm_omni.entrypoints.cli.serve
-from vllm_omni.entrypoints.cli.serve import run_headless as run_omni_headless
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import import_external_libs
 from verl.utils.tokenizer import normalize_token_ids
@@ -39,16 +39,17 @@ from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import TokenOutput
 from verl.workers.rollout.utils import run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
-    SuppressSignalInThread,
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
     VLLM_LORA_PATH,
+    SuppressSignalInThread,
 )
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
 from vllm import SamplingParams
 from vllm.entrypoints.openai.api_server import build_app
 from vllm_omni.engine.arg_utils import OmniEngineArgs
 from vllm_omni.entrypoints import AsyncOmni
+from vllm_omni.entrypoints.cli.serve import run_headless as run_omni_headless
 from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
 from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
@@ -57,14 +58,20 @@ from vllm_omni.utils.tracking_parser import TrackingNamespace
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
+from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.placement_guard import (
     estimate_outer_rollout_replicas,
     validate_vllm_omni_rollout_placement,
 )
-from verl_omni.workers.rollout.replica import DiffusionOutput
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
+_image_binding_audit_count = 0
+
+
+def _image_binding_audit_enabled() -> bool:
+    return bool(os.environ.get("VERL_OMNI_IMAGE_BINDING_AUDIT_JSONL", ""))
 
 
 def _append_vllm_logprob_debug_jsonl(event: str, payload: dict[str, Any]) -> None:
@@ -72,7 +79,11 @@ def _append_vllm_logprob_debug_jsonl(event: str, payload: dict[str, Any]) -> Non
     if not output_path:
         return
     try:
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        base_path = Path(output_path)
+        process_path = base_path.with_name(
+            f"{base_path.stem}.{socket.gethostname()}.{os.getpid()}{base_path.suffix}"
+        )
+        process_path.parent.mkdir(parents=True, exist_ok=True)
         record = {
             "event": event,
             "time": time.time(),
@@ -80,10 +91,87 @@ def _append_vllm_logprob_debug_jsonl(event: str, payload: dict[str, Any]) -> Non
             "host": socket.gethostname(),
             **payload,
         }
-        with open(output_path, "a", encoding="utf-8") as fout:
+        with open(process_path, "a", encoding="utf-8") as fout:
             fout.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
     except Exception:
         logger.exception("Failed to append vLLM-Omni logprob debug jsonl")
+
+
+def _image_binding_fingerprint(value: Any) -> dict[str, Any]:
+    """Return a stable fingerprint for PIL, tensor, ndarray, or byte payloads."""
+    digest = hashlib.sha256()
+    summary: dict[str, Any] = {"type": type(value).__name__}
+    try:
+        if hasattr(value, "mode") and hasattr(value, "size") and callable(getattr(value, "tobytes", None)):
+            mode = str(value.mode)
+            width, height = value.size
+            summary.update({"mode": mode, "size": [int(width), int(height)]})
+            digest.update(f"PIL\0{mode}\0{width}x{height}\0".encode())
+            digest.update(value.tobytes())
+        elif torch.is_tensor(value):
+            tensor = value.detach().cpu().contiguous()
+            summary.update({"dtype": str(tensor.dtype), "shape": list(tensor.shape)})
+            digest.update(f"tensor\0{tensor.dtype}\0{tuple(tensor.shape)}\0".encode())
+            digest.update(tensor.numpy().tobytes())
+        elif isinstance(value, np.ndarray):
+            array = np.ascontiguousarray(value)
+            summary.update({"dtype": str(array.dtype), "shape": list(array.shape)})
+            digest.update(f"ndarray\0{array.dtype}\0{array.shape}\0".encode())
+            digest.update(array.tobytes())
+        elif isinstance(value, bytes):
+            summary["num_bytes"] = len(value)
+            digest.update(b"bytes\0")
+            digest.update(value)
+        else:
+            encoded = repr(value).encode("utf-8", errors="replace")
+            summary["repr_len"] = len(encoded)
+            digest.update(b"repr\0")
+            digest.update(encoded)
+    except Exception as exc:
+        summary["fingerprint_error"] = f"{type(exc).__name__}: {exc}"
+        digest.update(repr(value).encode("utf-8", errors="replace"))
+    summary["sha256"] = digest.hexdigest()
+    return summary
+
+
+def _token_fingerprint(token_ids: list[int]) -> str:
+    payload = ",".join(str(int(token_id)) for token_id in token_ids).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _append_image_binding_audit(event: str, payload: dict[str, Any]) -> None:
+    global _image_binding_audit_count
+
+    output_path = os.environ.get("VERL_OMNI_IMAGE_BINDING_AUDIT_JSONL", "")
+    if not output_path:
+        return
+    try:
+        limit = int(os.environ.get("VERL_OMNI_IMAGE_BINDING_AUDIT_LIMIT", "512"))
+    except ValueError:
+        limit = 512
+    if limit <= 0 or _image_binding_audit_count >= limit:
+        return
+    _image_binding_audit_count += 1
+
+    try:
+        base_path = Path(output_path)
+        process_path = base_path.with_name(
+            f"{base_path.stem}.{socket.gethostname()}.{os.getpid()}{base_path.suffix}"
+        )
+        process_path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "event": event,
+            "time": time.time(),
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            **payload,
+        }
+        with open(process_path, "a", encoding="utf-8") as fout:
+            fcntl.flock(fout.fileno(), fcntl.LOCK_EX)
+            fout.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            fcntl.flock(fout.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        logger.exception("Failed to append image binding audit jsonl")
 
 
 class vLLMOmniHttpServer(vLLMHttpServer):
@@ -337,7 +425,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 or "verl_omni_vllm_worker_master"
             )
             actor_slot = int(os.environ.get("VERL_OMNI_VLLM_PORT_ACTOR_SLOT", "0") or 0)
-            start_offset = (zlib.crc32(f"{seed}_worker_master".encode("utf-8")) + actor_slot * 17) % pool_size
+            start_offset = (zlib.crc32(f"{seed}_worker_master".encode()) + actor_slot * 17) % pool_size
             candidates = [pool_start + ((start_offset + idx) % pool_size) for idx in range(pool_size)]
 
         lock_root = Path(
@@ -372,7 +460,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 continue
 
             os.ftruncate(fd, 0)
-            os.write(fd, f"host={host}\npid={pid}\nport={port}\n".encode("utf-8"))
+            os.write(fd, f"host={host}\npid={pid}\nport={port}\n".encode())
             self._vllm_worker_master_port_lock_fd = fd
             self._vllm_worker_master_port_lock_path = str(lock_path)
             os.environ["VERL_OMNI_VLLM_WORKER_MASTER_PORT_LEASE"] = str(lock_path)
@@ -468,7 +556,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             )
         preferred_actor_slot = int(os.environ.get("VERL_OMNI_VLLM_PORT_ACTOR_SLOT", "-1") or -1)
         if preferred_actor_slot < 0:
-            preferred_actor_slot = (int(self.replica_rank) * max(int(self.nnodes), 1) + int(self.node_rank)) % actor_slots
+            preferred_actor_slot = (
+                int(self.replica_rank) * max(int(self.nnodes), 1) + int(self.node_rank)
+            ) % actor_slots
         actor_slot = self._claim_vllm_port_actor_slot(
             seed=seed,
             block_index=block_index,
@@ -544,7 +634,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 os.close(fd)
                 continue
             os.ftruncate(fd, 0)
-            os.write(fd, f"host={host}\npid={pid}\nslot={slot}\n".encode("utf-8"))
+            os.write(fd, f"host={host}\npid={pid}\nslot={slot}\n".encode())
             self._vllm_port_slot_lock_fd = fd
             self._vllm_port_actor_slot = slot
             return slot
@@ -840,19 +930,52 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         priority: int = 0,
     ) -> DiffusionOutput | TokenOutput:
         prompt_ids = normalize_token_ids(prompt_ids)
+        trace_request_id = request_id.split(".", 1)[0]
+        audit_enabled = _image_binding_audit_enabled()
+        if audit_enabled:
+            _append_image_binding_audit(
+                "rollout_server_ingress",
+                {
+                    "trace_request_id": trace_request_id,
+                    "engine_request_id": request_id,
+                    "replica_rank": self.replica_rank,
+                    "prompt_token_count": len(prompt_ids),
+                    "prompt_token_sha256": _token_fingerprint(prompt_ids),
+                    "images": [_image_binding_fingerprint(image) for image in image_data or []],
+                    "audios": [_image_binding_fingerprint(audio) for audio in audio_data or []],
+                    "audio_sampling_rate": (
+                        mm_processor_kwargs.get("sampling_rate") if audio_data and mm_processor_kwargs else None
+                    ),
+                },
+            )
         self._validate_generate_multimodal_args(
             image_data=image_data,
             video_data=video_data,
             audio_data=audio_data,
             mm_processor_kwargs=mm_processor_kwargs,
         )
-        multi_modal_data = self._build_multi_modal_data(image_data, video_data)
+        multi_modal_data = self._build_multi_modal_data(image_data, video_data, audio_data)
         lora_request = await self._resolve_lora_request()
         prompt, params = self._preprocess_input(
             prompt_ids, sampling_params, multi_modal_data, lora_request, negative_prompt_ids, prompt_mask
         )
+        if mm_processor_kwargs:
+            prompt["mm_processor_kwargs"] = dict(mm_processor_kwargs)
         final_res = await self._run_generation(prompt, params, request_id, lora_request, priority)
-        return self._process_output(final_res, params, sampling_params)
+        output = self._process_output(final_res, params, sampling_params)
+        if audit_enabled and isinstance(output, TokenOutput):
+            _append_image_binding_audit(
+                "rollout_server_result",
+                {
+                    "trace_request_id": trace_request_id,
+                    "engine_request_id": request_id,
+                    "replica_rank": self.replica_rank,
+                    "response_token_count": len(output.token_ids),
+                    "response_token_sha256": _token_fingerprint(output.token_ids),
+                    "response_token_head": output.token_ids[:16],
+                },
+            )
+        return output
 
     # -----------------------------------------------------------------------
     # Shared helpers for the AR and diffusion generate paths
@@ -866,21 +989,39 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         audio_data: Optional[list[Any]],
         mm_processor_kwargs: Optional[dict[str, Any]],
     ) -> None:
-        """Fail clearly for multimodal inputs that are not wired for this mode."""
+        """Reject multimodal inputs that are not wired for the active mode.
+
+        AR rollout currently supports image- and audio-conditioned text generation
+        only for the Qwen3-Omni thinker. Keep this capability check tied to the loaded
+        HF model type rather than treating every AR pipeline as multimodal.
+        """
         if self._ar_mode:
-            provided = []
-            if image_data is not None:
-                provided.append("image_data")
+            unsupported = []
+            hf_config = getattr(getattr(self, "model_config", None), "hf_config", None)
+            supports_qwen3_omni_inputs = getattr(hf_config, "model_type", None) == "qwen3_omni_moe"
+            if image_data is not None and not supports_qwen3_omni_inputs:
+                unsupported.append("image_data")
             if video_data is not None:
-                provided.append("video_data")
-            if audio_data is not None:
-                provided.append("audio_data")
+                unsupported.append("video_data")
+            if audio_data is not None and not supports_qwen3_omni_inputs:
+                unsupported.append("audio_data")
             if mm_processor_kwargs:
-                provided.append("mm_processor_kwargs")
-            if provided:
+                if audio_data is None or not supports_qwen3_omni_inputs:
+                    unsupported.append("mm_processor_kwargs")
+                else:
+                    unknown_kwargs = set(mm_processor_kwargs) - {"sampling_rate"}
+                    if unknown_kwargs:
+                        raise ValueError(
+                            "Qwen3-Omni audio rollout only permits per-request sampling_rate; "
+                            f"got unsupported processor kwargs: {sorted(unknown_kwargs)}"
+                        )
+                    sampling_rate = mm_processor_kwargs.get("sampling_rate")
+                    if sampling_rate is not None and int(sampling_rate) != 16000:
+                        raise ValueError(f"Qwen3-Omni audio rollout requires sampling_rate=16000, got {sampling_rate}")
+            if unsupported:
                 raise NotImplementedError(
-                    "vLLM-Omni AR text rollout currently supports token-only prompts; "
-                    f"got unsupported multimodal args: {', '.join(provided)}"
+                    "vLLM-Omni AR text rollout supports images and audio only for the Qwen3-Omni thinker; "
+                    f"got unsupported multimodal args: {', '.join(unsupported)}"
                 )
             return
 
@@ -896,13 +1037,19 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             )
 
     @staticmethod
-    def _build_multi_modal_data(image_data: Optional[list[Any]], video_data: Optional[list[Any]]) -> dict[str, Any]:
-        """Assemble the vLLM multi_modal_data dict from optional image/video inputs."""
+    def _build_multi_modal_data(
+        image_data: Optional[list[Any]],
+        video_data: Optional[list[Any]],
+        audio_data: Optional[list[Any]],
+    ) -> dict[str, Any]:
+        """Assemble the vLLM multi_modal_data dict from validated AR inputs."""
         multi_modal_data: dict[str, Any] = {}
         if image_data is not None:
             multi_modal_data["image"] = image_data
         if video_data is not None:
             multi_modal_data["video"] = video_data
+        if audio_data is not None:
+            multi_modal_data["audio"] = audio_data
         return multi_modal_data
 
     async def _resolve_lora_request(self) -> Optional[LoRARequest]:

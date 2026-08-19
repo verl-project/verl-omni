@@ -11,6 +11,7 @@ ASYNC_ROOT="$(cd -- "${REPO_ROOT}/.." && pwd)"
 VERL_ROOT="${ASYNC_ROOT}/verl"
 VLLM_OMNI_ROOT="${ASYNC_ROOT}/vllm-omni"
 MEGATRON_BRIDGE_REPO=${MEGATRON_BRIDGE_REPO:-${ASYNC_ROOT}/megatron-bridge}
+RUNTIME_COMPAT_DIR="${REPO_ROOT}/tests/special_e2e/runtime_compat"
 cd "${VERL_ROOT}"
 
 CONDA_ENV=${CONDA_ENV:-/nfs/ml-training-ssd/users/liuwei/verl_mega_async}
@@ -35,7 +36,10 @@ export VERL_PPO_LOGGING_LEVEL=${VERL_PPO_LOGGING_LEVEL:-INFO}
 export HYDRA_FULL_ERROR=${HYDRA_FULL_ERROR:-1}
 export NVTE_ALLOW_NONDETERMINISTIC_ALGO=${NVTE_ALLOW_NONDETERMINISTIC_ALGO:-1}
 export CPATH=/usr/include${CPATH:+:$CPATH}
-export PYTHONPATH="${REPO_ROOT}:${VERL_ROOT}:${MEGATRON_BRIDGE_REPO}/src:${VLLM_OMNI_ROOT}:${PYTHONPATH:-}"
+# sitecustomize in this local-only directory supplies the missing package
+# version metadata for the optional nvidia-resiliency-ext checkpoint API.  It
+# must be first so both this driver and Ray workers import it at startup.
+export PYTHONPATH="${RUNTIME_COMPAT_DIR}:${REPO_ROOT}:${VERL_ROOT}:${MEGATRON_BRIDGE_REPO}/src:${VLLM_OMNI_ROOT}:${PYTHONPATH:-}"
 
 export CUDA_HOME=${VERL_CUDA_HOME:-/usr/local/cuda-12.6}
 _clean_ld_parts=()
@@ -97,17 +101,25 @@ RUN_ID_RAW="${RUN_ID:-${LUBAN_JOB_ID:-${AIP_JOB_ID:-${VC_JOB_ID:-$(date +%Y%m%d_
 RUN_ID="$(printf '%s' "${RUN_ID_RAW}" | tr -c 'A-Za-z0-9_.-' '_')"
 EXP_NAME=${EXP_NAME:-qwen3_omni_megatron_full_32gpu_fully_async_${RUN_ID}}
 PROFILE_LABEL=${PROFILE_LABEL:-32-GPU fully-async resource split 1-step}
+export TENSORBOARD_DIR=${TENSORBOARD_DIR:-${OUTPUT_ROOT}/tensorboard/${EXP_NAME}}
 CKPT_DIR=${CKPT_DIR:-${OUTPUT_ROOT}/ckpts/${EXP_NAME}}
 LOG_DIR=${LOG_DIR:-${OUTPUT_ROOT}/logs}
+RUN_CONFIG_DIR=${RUN_CONFIG_DIR:-${OUTPUT_ROOT}/config}
 LOG_NODE_RANK_HINT=${DISTRIBUTED_NODE_RANK:-${NODE_RANK:-${RAY_NODE_RANK:-}}}
-if [[ -z "${LOG_NODE_RANK_HINT}" && -n "${TASK_ROLE:-}" && "${TASK_INDEX:-}" =~ ^[0-9]+$ ]]; then
-  if [[ "${TASK_ROLE}" == "master" || "${TASK_ROLE}" == "head" || "${TASK_ROLE}" == "chief" ]]; then
-    LOG_NODE_RANK_HINT="${TASK_INDEX}"
+LOG_TASK_ROLE_HINT=${DISTRIBUTED_TASK_ROLE:-${VC_TASK_ROLE:-${ROLE_NAME:-${TASK_ROLE:-}}}}
+LOG_TASK_INDEX_HINT=${VC_TASK_INDEX:-${VK_TASK_INDEX:-${TASK_INDEX:-}}}
+if [[ -z "${LOG_NODE_RANK_HINT}" && -n "${LOG_TASK_ROLE_HINT}" && "${LOG_TASK_INDEX_HINT}" =~ ^[0-9]+$ ]]; then
+  if [[ "${LOG_TASK_ROLE_HINT}" == "master" || "${LOG_TASK_ROLE_HINT}" == "head" || "${LOG_TASK_ROLE_HINT}" == "chief" ]]; then
+    LOG_NODE_RANK_HINT="${LOG_TASK_INDEX_HINT}"
   else
-    LOG_NODE_RANK_HINT=$((TASK_INDEX + 1))
+    LOG_NODE_RANK_HINT=$((LOG_TASK_INDEX_HINT + 1))
   fi
 fi
-if [[ -z "${LOG_NODE_RANK_HINT}" || "${LOG_NODE_RANK_HINT}" == "0" ]]; then
+if [[ -z "${LOG_NODE_RANK_HINT}" ]]; then
+  LOG_HOST_TAG="$(hostname -s 2>/dev/null || hostname)"
+  LOG_HOST_TAG="$(printf '%s' "${LOG_HOST_TAG}" | tr -c 'A-Za-z0-9_.-' '_')"
+  LOG_FILE=${LOG_FILE:-${LOG_DIR}/${EXP_NAME}.host${LOG_HOST_TAG}.pid$$.log}
+elif [[ "${LOG_NODE_RANK_HINT}" == "0" ]]; then
   LOG_FILE=${LOG_FILE:-${LOG_DIR}/${EXP_NAME}.log}
 else
   LOG_FILE=${LOG_FILE:-${LOG_DIR}/${EXP_NAME}.node${LOG_NODE_RANK_HINT}.log}
@@ -121,6 +133,66 @@ fi
 fail() {
   echo "[error] $*" >&2
   exit 1
+}
+
+persist_run_config_snapshot() {
+  if [[ "${NODE_RANK}" != "0" ]]; then
+    return
+  fi
+
+  local snapshot_tmp checksum_tmp source_path target_name name arg arg_index
+  local -a snapshot_files
+  mkdir -p "${RUN_CONFIG_DIR}"
+
+  for source_path in "${SUBMITTED_WRAPPER_PATH:-}" "${BASH_SOURCE[0]}" "${STAGE_CONFIG}"; do
+    if [[ -z "${source_path}" || ! -f "${source_path}" ]]; then
+      continue
+    fi
+    if [[ "${source_path}" == "${SUBMITTED_WRAPPER_PATH:-}" ]]; then
+      target_name=submitted_wrapper.sh
+    elif [[ "${source_path}" == "${BASH_SOURCE[0]}" ]]; then
+      target_name=base_launcher.sh
+    else
+      target_name=stage_config.yaml
+    fi
+    snapshot_tmp="${RUN_CONFIG_DIR}/.${target_name}.tmp.$$"
+    cp -- "${source_path}" "${snapshot_tmp}"
+    mv -f -- "${snapshot_tmp}" "${RUN_CONFIG_DIR}/${target_name}"
+  done
+
+  snapshot_tmp="${RUN_CONFIG_DIR}/.resolved_config.env.tmp.$$"
+  {
+    for name in RUN_ID EXP_NAME PROFILE_LABEL MODEL_PATH TRAIN_FILES VAL_FILES STAGE_CONFIG \
+      OUTPUT_ROOT LOG_DIR LOG_FILE LOG_NODE_RANK_HINT TENSORBOARD_DIR CKPT_DIR CACHE_ROOT RAY_TMPDIR \
+      RAY_CONTROL_ROOT RAY_HEAD_PORT_FILE NNODES GPUS_PER_NODE TRAIN_NNODES TRAIN_GPUS_PER_NODE \
+      ROLLOUT_NNODES ROLLOUT_GPUS_PER_NODE TOTAL_EPOCHS TOTAL_TRAINING_STEPS \
+      TOTAL_ROLLOUT_STEPS TEST_FREQ VAL_MAX_SAMPLES MAX_PROMPT_LENGTH \
+      MAX_RESPONSE_LENGTH MAX_MODEL_LEN PPO_MINI_BATCH_SIZE N_RESP_PER_PROMPT \
+      ROLLOUT_MAX_NUM_SEQS ROLLOUT_MAX_NUM_BATCHED_TOKENS \
+      ROLLOUT_GPU_MEMORY_UTILIZATION ASYNC_MAX_QUEUE_SIZE \
+      ASYNC_MAX_CONCURRENT_SAMPLES VERL_OMNI_ROLLOUT_CORR_DEBUG_JSONL \
+      VERL_OMNI_IMAGE_BINDING_AUDIT_JSONL; do
+      printf '%s=%q\n' "${name}" "${!name:-}"
+    done
+    arg_index=0
+    for arg in "$@"; do
+      printf 'LAUNCH_ARG_%03d=%q\n' "${arg_index}" "${arg}"
+      arg_index=$((arg_index + 1))
+    done
+  } > "${snapshot_tmp}"
+  mv -f -- "${snapshot_tmp}" "${RUN_CONFIG_DIR}/resolved_config.env"
+
+  snapshot_files=(base_launcher.sh stage_config.yaml resolved_config.env)
+  if [[ -f "${RUN_CONFIG_DIR}/submitted_wrapper.sh" ]]; then
+    snapshot_files=(submitted_wrapper.sh "${snapshot_files[@]}")
+  fi
+  checksum_tmp="${RUN_CONFIG_DIR}/.SHA256SUMS.tmp.$$"
+  (
+    cd "${RUN_CONFIG_DIR}"
+    sha256sum "${snapshot_files[@]}" > "${checksum_tmp}"
+  )
+  mv -f -- "${checksum_tmp}" "${RUN_CONFIG_DIR}/SHA256SUMS"
+  echo "[info] Persisted run configuration snapshot: ${RUN_CONFIG_DIR}"
 }
 
 is_true() {
@@ -334,11 +406,12 @@ claim_ray_component_port_block() {
 }
 
 negotiate_ray_head_port() {
-  local selected_file wait_seconds safe_seed preferred_port pool_start pool_end pool_size i port
+  local selected_file wait_seconds poll_seconds safe_seed preferred_port pool_start pool_end pool_size i port
   local lock_root lock_file fd tmp_file
 
   selected_file=$1
   wait_seconds=$2
+  poll_seconds=${RAY_HEAD_PORT_FILE_POLL_SECONDS}
   safe_seed="$(printf '%s' "${RAY_PORT_SEED}" | tr -c 'A-Za-z0-9_.-' '_')"
 
   if [[ "${NODE_RANK}" == "0" ]]; then
@@ -387,7 +460,7 @@ negotiate_ray_head_port() {
   fi
 
   echo "[info] Waiting for Ray head port file ${selected_file}"
-  for ((i = 0; i < wait_seconds; i++)); do
+  for ((i = 0; i < wait_seconds; i += poll_seconds)); do
     if [[ -s "${selected_file}" ]]; then
       RAY_PORT="$(tr -d '[:space:]' < "${selected_file}")"
       if [[ ! "${RAY_PORT}" =~ ^[0-9]+$ ]]; then
@@ -396,7 +469,7 @@ negotiate_ray_head_port() {
       echo "[info] Ray worker rank ${NODE_RANK} using negotiated head port ${RAY_PORT}"
       return 0
     fi
-    sleep 1
+    sleep "${poll_seconds}"
   done
   fail "Timed out waiting ${wait_seconds}s for Ray head port file ${selected_file}"
 }
@@ -509,7 +582,7 @@ validate_static_config() {
   for name in NNODES GPUS_PER_NODE TRAIN_NNODES TRAIN_GPUS_PER_NODE ROLLOUT_NNODES \
     ROLLOUT_GPUS_PER_NODE MAX_PROMPT_LENGTH MAX_RESPONSE_LENGTH PPO_MINI_BATCH_SIZE \
     PPO_MICRO_BATCH_SIZE_PER_GPU LOG_PROB_MICRO_BATCH_SIZE_PER_GPU N_RESP_PER_PROMPT \
-    TOTAL_TRAINING_STEPS REQUIRE_BATCHES TOTAL_ROLLOUT_STEPS ACTOR_TP ACTOR_PP \
+    TOTAL_EPOCHS TOTAL_TRAINING_STEPS REQUIRE_BATCHES TOTAL_ROLLOUT_STEPS ACTOR_TP ACTOR_PP \
     ACTOR_CP ACTOR_EP ACTOR_ETP REF_TP REF_PP REF_CP REF_EP REF_ETP ROLLOUT_TP \
     ROLLOUT_DP ROLLOUT_AGENT_NUM_WORKERS ROLLOUT_MAX_NUM_SEQS \
     ROLLOUT_MAX_NUM_BATCHED_TOKENS STAGE_INIT_TIMEOUT INIT_TIMEOUT \
@@ -597,6 +670,8 @@ validate_static_config() {
   require_port RAY_MAX_WORKER_PORT
   require_port RAY_HEAD_PORT_POOL_START
   require_port RAY_HEAD_PORT_POOL_END
+  require_positive_int RAY_HEAD_PORT_FILE_WAIT_SECONDS
+  require_positive_int RAY_HEAD_PORT_FILE_POLL_SECONDS
   require_port RAY_COMPONENT_PORT_POOL_START
   require_port RAY_COMPONENT_PORT_POOL_END
   require_positive_int RAY_COMPONENT_PORT_SPAN
@@ -713,6 +788,7 @@ N_RESP_PER_PROMPT=${N_RESP_PER_PROMPT:-4}
 ROLLOUT_AGENT_NUM_WORKERS=${ROLLOUT_AGENT_NUM_WORKERS:-4}
 IGNORE_EOS=${IGNORE_EOS:-True}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-1}
+TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
 REQUIRE_BATCHES=${REQUIRE_BATCHES:-1}
 TOTAL_ROLLOUT_STEPS=${TOTAL_ROLLOUT_STEPS:-$((PPO_MINI_BATCH_SIZE * REQUIRE_BATCHES * TOTAL_TRAINING_STEPS))}
 LR_WARMUP_STEPS=${LR_WARMUP_STEPS:-0}
@@ -908,6 +984,7 @@ CONFIG_ONLY=${CONFIG_ONLY:-0}
 RAY_ONLY=${RAY_ONLY:-0}
 RAY_HEAD_PORT_NEGOTIATE=${RAY_HEAD_PORT_NEGOTIATE:-1}
 RAY_HEAD_PORT_FILE_WAIT_SECONDS=${RAY_HEAD_PORT_FILE_WAIT_SECONDS:-300}
+RAY_HEAD_PORT_FILE_POLL_SECONDS=${RAY_HEAD_PORT_FILE_POLL_SECONDS:-1}
 
 export VERL_OMNI_SKIP_WEIGHT_UPDATE=${VERL_OMNI_SKIP_WEIGHT_UPDATE:-0}
 export VERL_OMNI_STOP_AFTER_TOTAL_TRAINING_STEPS=${VERL_OMNI_STOP_AFTER_TOTAL_TRAINING_STEPS:-0}
@@ -941,6 +1018,8 @@ export VERL_OMNI_ROLLOUT_CORR_DEBUG_JSONL_ROWS=${VERL_OMNI_ROLLOUT_CORR_DEBUG_JS
 export VERL_OMNI_MULTISTAGE_LOGPROB_DEBUG_JSONL=${VERL_OMNI_MULTISTAGE_LOGPROB_DEBUG_JSONL:-}
 export VERL_OMNI_MULTISTAGE_LOGPROB_DEBUG_ROWS=${VERL_OMNI_MULTISTAGE_LOGPROB_DEBUG_ROWS:-4}
 export VERL_OMNI_MULTISTAGE_LOGPROB_DEBUG_TOKENS=${VERL_OMNI_MULTISTAGE_LOGPROB_DEBUG_TOKENS:-16}
+export VERL_OMNI_IMAGE_BINDING_AUDIT_JSONL=${VERL_OMNI_IMAGE_BINDING_AUDIT_JSONL:-}
+export VERL_OMNI_IMAGE_BINDING_AUDIT_LIMIT=${VERL_OMNI_IMAGE_BINDING_AUDIT_LIMIT:-512}
 export VERL_OMNI_FIXED_SEQUENCE_SCORE_JSONL=${VERL_OMNI_FIXED_SEQUENCE_SCORE_JSONL:-}
 export VERL_OMNI_FIXED_SEQUENCE_SCORE_OUTPUT=${VERL_OMNI_FIXED_SEQUENCE_SCORE_OUTPUT:-}
 export VERL_OMNI_FIXED_SEQUENCE_SCORE_ROWS=${VERL_OMNI_FIXED_SEQUENCE_SCORE_ROWS:-8}
@@ -1282,6 +1361,7 @@ echo "[info] Omni master ZMQ port pool: base=${VERL_OMNI_MASTER_ZMQ_PORT_BASE} p
 echo "[info] vLLM-Omni timeouts: stage_init=${STAGE_INIT_TIMEOUT}s init=${INIT_TIMEOUT}s vllm_startup_handshake=${VERL_OMNI_VLLM_STARTUP_HANDSHAKE_TIMEOUT}s"
 echo "[info] Stage core crash diagnostics: ${VERL_OMNI_STAGE_CORE_DIAG_DIR}"
 echo "[info] LOG_FILE=${LOG_FILE}"
+echo "[info] TENSORBOARD_DIR=${TENSORBOARD_DIR}"
 
 for env_name in MASTER_ADDR MASTER_PORT VC_MASTER_HOSTS MASTER_HOST TORCH_MASTER_ADDR \
   DISTRIBUTED_PYTORCH_PORT LUBAN_AVAILABLE_PORT_0 LUBAN_AVAILABLE_PORT_1 \
@@ -1290,6 +1370,8 @@ for env_name in MASTER_ADDR MASTER_PORT VC_MASTER_HOSTS MASTER_HOST TORCH_MASTER
   POD_INDEX INDEX VC_TASK_INDEX VK_TASK_INDEX MATRIX_TASK_INDEX AIP_WORKER_INDEX RANK LOCAL_RANK WORLD_SIZE; do
   echo "[info] env ${env_name}=${!env_name:-}"
 done
+
+persist_run_config_snapshot "$@"
 
 if [[ "${CONFIG_ONLY}" == "1" ]]; then
   echo "[info] CONFIG_ONLY=1, static configuration preflight passed. Stop before Ray startup."
@@ -1429,7 +1511,7 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     trainer.save_freq=-1 \
     trainer.test_freq=-1 \
     trainer.resume_mode=disable \
-    trainer.total_epochs=1 \
+    trainer.total_epochs="${TOTAL_EPOCHS}" \
     trainer.total_training_steps="${TOTAL_TRAINING_STEPS}" \
     trainer.default_local_dir="${CKPT_DIR}" \
     rollout.nnodes="${ROLLOUT_NNODES}" \
@@ -1488,6 +1570,7 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_VLLM_DIST_MASTER_PORT=\"${VERL_OMNI_VLLM_DIST_MASTER_PORT}\" \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_LOGGING_LEVEL=\"${VERL_LOGGING_LEVEL}\" \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_PPO_LOGGING_LEVEL=\"${VERL_PPO_LOGGING_LEVEL}\" \
+    ++ray_kwargs.ray_init.runtime_env.env_vars.TENSORBOARD_DIR=\"${TENSORBOARD_DIR}\" \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_SKIP_PIPELINES=\"${VERL_OMNI_SKIP_PIPELINES}\" \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_SKIP_REWARD_LOOP=\"${VERL_OMNI_SKIP_REWARD_LOOP}\" \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_SKIP_WEIGHT_UPDATE=\"${VERL_OMNI_SKIP_WEIGHT_UPDATE}\" \
@@ -1522,6 +1605,8 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_MULTISTAGE_LOGPROB_DEBUG_JSONL=\"${VERL_OMNI_MULTISTAGE_LOGPROB_DEBUG_JSONL}\" \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_MULTISTAGE_LOGPROB_DEBUG_ROWS=\"${VERL_OMNI_MULTISTAGE_LOGPROB_DEBUG_ROWS}\" \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_MULTISTAGE_LOGPROB_DEBUG_TOKENS=\"${VERL_OMNI_MULTISTAGE_LOGPROB_DEBUG_TOKENS}\" \
+    ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_IMAGE_BINDING_AUDIT_JSONL=\"${VERL_OMNI_IMAGE_BINDING_AUDIT_JSONL}\" \
+    ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_IMAGE_BINDING_AUDIT_LIMIT=\"${VERL_OMNI_IMAGE_BINDING_AUDIT_LIMIT}\" \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_FIXED_SEQUENCE_SCORE_JSONL=\"${VERL_OMNI_FIXED_SEQUENCE_SCORE_JSONL}\" \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_FIXED_SEQUENCE_SCORE_OUTPUT=\"${VERL_OMNI_FIXED_SEQUENCE_SCORE_OUTPUT}\" \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_FIXED_SEQUENCE_SCORE_ROWS=\"${VERL_OMNI_FIXED_SEQUENCE_SCORE_ROWS}\" \

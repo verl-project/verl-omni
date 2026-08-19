@@ -111,8 +111,8 @@ def _install_lightweight_imports():
 
 _install_lightweight_imports()
 
-from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
-from verl_omni.workers.rollout.vllm_rollout import vllm_omni_async_server as server_mod
+from verl_omni.workers.rollout.vllm_rollout import vllm_omni_async_server as server_mod  # noqa: E402
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer  # noqa: E402
 
 _restore_lightweight_imports()
 
@@ -439,11 +439,60 @@ def test_configure_omni_distributed_args_preserves_legacy_port_without_env(monke
     assert args.headless is True
 
 
-def test_ar_text_rollout_rejects_multimodal_inputs():
+def test_ar_qwen3_omni_thinker_accepts_images_and_16khz_audio_but_rejects_video():
     server = object.__new__(vLLMOmniHttpServer)
     server._ar_mode = True
+    server.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_omni_moe"))
 
-    with pytest.raises(NotImplementedError, match="AR text rollout currently supports token-only prompts"):
+    server._validate_generate_multimodal_args(
+        image_data=["image"],
+        video_data=None,
+        audio_data=None,
+        mm_processor_kwargs=None,
+    )
+    server._validate_generate_multimodal_args(
+        image_data=None,
+        video_data=None,
+        audio_data=["audio"],
+        mm_processor_kwargs={"sampling_rate": 16000},
+    )
+
+    with pytest.raises(NotImplementedError, match="video_data"):
+        server._validate_generate_multimodal_args(
+            image_data=["image"],
+            video_data=["video"],
+            audio_data=["audio"],
+            mm_processor_kwargs={"sampling_rate": 16000},
+        )
+
+
+def test_ar_qwen3_omni_audio_rejects_unvalidated_processor_kwargs_and_wrong_rate():
+    server = object.__new__(vLLMOmniHttpServer)
+    server._ar_mode = True
+    server.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_omni_moe"))
+
+    with pytest.raises(ValueError, match="unsupported processor kwargs"):
+        server._validate_generate_multimodal_args(
+            image_data=None,
+            video_data=None,
+            audio_data=["audio"],
+            mm_processor_kwargs={"sampling_rate": 16000, "use_audio_in_video": True},
+        )
+    with pytest.raises(ValueError, match="requires sampling_rate=16000"):
+        server._validate_generate_multimodal_args(
+            image_data=None,
+            video_data=None,
+            audio_data=["audio"],
+            mm_processor_kwargs={"sampling_rate": 8000},
+        )
+
+
+def test_ar_non_qwen3_omni_model_rejects_images():
+    server = object.__new__(vLLMOmniHttpServer)
+    server._ar_mode = True
+    server.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen2_5_omni"))
+
+    with pytest.raises(NotImplementedError, match="image_data"):
         server._validate_generate_multimodal_args(
             image_data=["image"],
             video_data=None,
@@ -456,7 +505,7 @@ def test_ar_text_rollout_rejects_multimodal_inputs():
             image_data=None,
             video_data=None,
             audio_data=["audio"],
-            mm_processor_kwargs={"fps": 1},
+            mm_processor_kwargs={"sampling_rate": 16000},
         )
 
 
@@ -499,6 +548,35 @@ def test_ar_preprocess_input_normalizes_true_logprobs_to_sampled_token_only():
     )
 
     assert params.logprobs == 0
+
+
+def test_ar_preprocess_input_forwards_qwen3_omni_images_to_vllm():
+    server = object.__new__(vLLMOmniHttpServer)
+    server._ar_mode = True
+    server.config = _Config(
+        max_model_len=16,
+        prompt_length=8,
+        response_length=4,
+        repetition_penalty=1.0,
+    )
+
+    prompt, _params = server._preprocess_input(
+        prompt_ids=[1, 2, 3],
+        sampling_params={},
+        multi_modal_data={"image": ["image"]},
+        lora_request=None,
+        negative_prompt_ids=None,
+    )
+
+    assert prompt == {"prompt_token_ids": [1, 2, 3], "multi_modal_data": {"image": ["image"]}}
+
+
+def test_build_multi_modal_data_forwards_audio_to_vllm():
+    waveform = object()
+
+    multi_modal_data = vLLMOmniHttpServer._build_multi_modal_data(None, None, [waveform])
+
+    assert multi_modal_data == {"audio": [waveform]}
 
 
 class _FakeLogprob:

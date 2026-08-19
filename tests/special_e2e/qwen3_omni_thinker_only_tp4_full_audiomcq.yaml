@@ -1,0 +1,44 @@
+# Full-model TP4 vLLM-Omni thinker stage for the AudioMCQ Gate E.
+# Audio admission is explicit so a text-only stage cannot silently pass.
+stage_args:
+  - stage_id: 0
+    stage_type: llm
+    runtime:
+      devices: "0,1,2,3"
+      num_replicas: 1
+    engine_args:
+      model_stage: thinker
+      model_arch: Qwen3OmniMoeThinkerForConditionalGeneration
+      worker_type: ar
+      scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
+      engine_output_type: text
+      hf_config_name: thinker_config
+
+      tensor_parallel_size: 4
+      distributed_executor_backend: "mp"
+      disable_custom_all_reduce: true
+
+      limit_mm_per_prompt:
+        image: 0
+        video: 0
+        audio: 1
+
+      gpu_memory_utilization: 0.40
+      max_model_len: 1024
+      max_num_seqs: 8
+      max_num_batched_tokens: 4096
+      enable_chunked_prefill: true
+
+      dtype: bfloat16
+      load_format: safetensors
+      trust_remote_code: true
+      enable_prefix_caching: false
+      enforce_eager: true
+
+      enable_lora: false
+      enable_sleep_mode: false
+      logprobs_mode: raw_logprobs
+      disable_log_stats: true
+    final_output: true
+    final_output_type: text
+    is_comprehension: true
