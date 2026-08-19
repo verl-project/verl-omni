@@ -64,48 +64,50 @@ def test_reward_model_genrm():
                 "VLLM_LOGGING_LEVEL": "INFO",
                 "VLLM_USE_V1": "1",
             }
-        }
+        },
+        ignore_reinit_error=True,
     )
-    with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config")):
-        config = compose(config_name="diffusion_trainer")
+    try:
+        with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config")):
+            config = compose(config_name="diffusion_trainer")
 
-    rollout_model_name = os.path.expanduser("~/models/tiny-random/Qwen-Image")
-    reward_model_name = os.path.expanduser("~/models/tiny-random/qwen3-vl")
-    reward_model_gpus, tp_size = resolve_reward_loop_gpu_topology()
+        rollout_model_name = os.path.expanduser("~/models/tiny-random/Qwen-Image")
+        reward_model_name = os.path.expanduser("~/models/tiny-random/qwen3-vl")
+        reward_model_gpus, tp_size = resolve_reward_loop_gpu_topology()
 
-    config.actor_rollout_ref.model.path = rollout_model_name
-    config.actor_rollout_ref.model.tokenizer_path = os.path.join(rollout_model_name, "tokenizer")
-    config.reward.custom_reward_function.path = "verl_omni/utils/reward_score/genrm_ocr.py"
-    config.reward.custom_reward_function.name = "compute_score_ocr"
-    config.reward.num_workers = 1
-    config.reward.reward_model.enable = True
-    config.reward.reward_model.enable_resource_pool = True
-    config.reward.reward_model.n_gpus_per_node = reward_model_gpus
-    config.reward.reward_model.nnodes = 1
-    config.reward.reward_model.model_path = reward_model_name
-    config.reward.reward_model.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
-    config.reward.reward_model.rollout.gpu_memory_utilization = 0.9
-    config.reward.reward_model.rollout.tensor_model_parallel_size = tp_size
-    config.reward.reward_model.rollout.skip_tokenizer_init = False
-    config.reward.reward_model.rollout.prompt_length = 2048
-    config.reward.reward_model.rollout.response_length = 32
+        config.actor_rollout_ref.model.path = rollout_model_name
+        config.actor_rollout_ref.model.tokenizer_path = os.path.join(rollout_model_name, "tokenizer")
+        config.reward.custom_reward_function.path = "verl_omni/utils/reward_score/genrm_ocr.py"
+        config.reward.custom_reward_function.name = "compute_score_ocr"
+        config.reward.num_workers = 1
+        config.reward.reward_model.enable = True
+        config.reward.reward_model.enable_resource_pool = True
+        config.reward.reward_model.n_gpus_per_node = reward_model_gpus
+        config.reward.reward_model.nnodes = 1
+        config.reward.reward_model.model_path = reward_model_name
+        config.reward.reward_model.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
+        config.reward.reward_model.rollout.gpu_memory_utilization = 0.9
+        config.reward.reward_model.rollout.tensor_model_parallel_size = tp_size
+        config.reward.reward_model.rollout.skip_tokenizer_init = False
+        config.reward.reward_model.rollout.prompt_length = 2048
+        config.reward.reward_model.rollout.response_length = 32
 
-    # 1. init reward model manager
-    reward_loop_manager = RewardLoopManager(config)
+        # 1. init reward model manager
+        reward_loop_manager = RewardLoopManager(config)
 
-    # 2. init test data
-    rollout_tokenizer = hf_tokenizer(config.actor_rollout_ref.model.tokenizer_path)
-    data = create_data_samples(rollout_tokenizer)
+        # 2. init test data
+        rollout_tokenizer = hf_tokenizer(config.actor_rollout_ref.model.tokenizer_path)
+        data = create_data_samples(rollout_tokenizer)
 
-    # 3. generate responses
-    outputs = reward_loop_manager.compute_rm_score(data)
+        # 3. generate responses
+        outputs = reward_loop_manager.compute_rm_score(data)
 
-    for idx, output in enumerate(outputs):
-        print(f"GRM Response {idx}:\n{output.non_tensor_batch['genrm_response']}\n")
-        print(f"Score:\n{output.batch['rm_scores']}\n")
-        print("=" * 50 + "\n")
-
-    ray.shutdown()
+        for idx, output in enumerate(outputs):
+            print(f"GRM Response {idx}:\n{output.non_tensor_batch['genrm_response']}\n")
+            print(f"Score:\n{output.batch['rm_scores']}\n")
+            print("=" * 50 + "\n")
+    finally:
+        ray.shutdown()
 
 
 def test_rule_reward():
@@ -117,30 +119,32 @@ def test_rule_reward():
                 "VLLM_LOGGING_LEVEL": "INFO",
                 "VLLM_USE_V1": "1",
             }
-        }
+        },
+        ignore_reinit_error=True,
     )
-    with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config")):
-        config = compose(config_name="diffusion_trainer")
+    try:
+        with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config")):
+            config = compose(config_name="diffusion_trainer")
 
-    rollout_model_name = os.path.expanduser("~/models/tiny-random/Qwen-Image")
+        rollout_model_name = os.path.expanduser("~/models/tiny-random/Qwen-Image")
 
-    config.actor_rollout_ref.model.path = rollout_model_name
-    config.actor_rollout_ref.model.tokenizer_path = os.path.join(rollout_model_name, "tokenizer")
-    config.reward.num_workers = 1
-    config.reward.reward_model.enable = False
+        config.actor_rollout_ref.model.path = rollout_model_name
+        config.actor_rollout_ref.model.tokenizer_path = os.path.join(rollout_model_name, "tokenizer")
+        config.reward.num_workers = 1
+        config.reward.reward_model.enable = False
 
-    # 1. init reward model manager
-    reward_loop_manager = RewardLoopManager(config)
+        # 1. init reward model manager
+        reward_loop_manager = RewardLoopManager(config)
 
-    # 2. init test data
-    rollout_tokenizer = hf_tokenizer(config.actor_rollout_ref.model.tokenizer_path)
-    data = create_data_samples(rollout_tokenizer, data_source="jpeg_compressibility")
+        # 2. init test data
+        rollout_tokenizer = hf_tokenizer(config.actor_rollout_ref.model.tokenizer_path)
+        data = create_data_samples(rollout_tokenizer, data_source="jpeg_compressibility")
 
-    # 3. generate responses
-    outputs = reward_loop_manager.compute_rm_score(data)
+        # 3. generate responses
+        outputs = reward_loop_manager.compute_rm_score(data)
 
-    for idx, output in enumerate(outputs):
-        print(f"Rule-based Reward Score:\n{output.batch['rm_scores']}\n")
-        print("=" * 50 + "\n")
-
-    ray.shutdown()
+        for idx, output in enumerate(outputs):
+            print(f"Rule-based Reward Score:\n{output.batch['rm_scores']}\n")
+            print("=" * 50 + "\n")
+    finally:
+        ray.shutdown()

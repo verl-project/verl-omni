@@ -24,6 +24,7 @@ from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
+from verl_omni.pipelines.diffusion_rollout_output import rollout_output
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.common import build_img_shapes, coalesce_not_none
 from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
@@ -287,7 +288,7 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
         else:
             # Both prompt_token_ids and prompt_embeds are None (e.g. during warmup/dummy run).
             # Return a minimal dummy output to avoid crashing.
-            outputs = [DiffusionOutput(output=None, custom_output={}) for _ in range(request_batch.num_reqs)]
+            outputs = [DiffusionOutput(output=None) for _ in range(request_batch.num_reqs)]
             return outputs if return_batch else outputs[0]
 
         has_neg_prompt = negative_prompt_ids is not None or (
@@ -413,16 +414,18 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
             llm_kwargs=llm_kwargs,
         )
 
-        result = DiffusionOutput(
-            output=image,
-            custom_output={
-                "all_latents": all_latents,
-                "all_log_probs": all_log_probs,
-                "all_timesteps": all_timesteps,
+        result = rollout_output(
+            media=image,
+            trajectory_latents=all_latents,
+            trajectory_log_probs=all_log_probs,
+            trajectory_timesteps=all_timesteps,
+            prompt_embeddings={
                 "prompt_embeds": prompt_embeds,
                 "prompt_embeds_mask": prompt_embeds_mask,
                 "negative_prompt_embeds": negative_prompt_embeds,
                 "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
+            },
+            rl={
                 "llm_response_ids": llm_response_ids,
                 "llm_all_log_probs": llm_all_log_probs,
                 "text_encoder_responses": text_encoder_responses,

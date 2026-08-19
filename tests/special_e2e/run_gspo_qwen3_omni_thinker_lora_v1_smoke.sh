@@ -12,10 +12,10 @@
 # Override via env: NUM_GPUS, MODEL_PATH, DATA_DIR, TOTAL_TRAIN_STEPS
 set -xeuo pipefail
 
-# The image is built with transformers 5.3.0; pip install ".[gpu,dev]" upgrades
+# The image is built with transformers 5.3.0; uv pip install ".[gpu,dev]" upgrades
 # to latest (5.14.x), which breaks vllm-omni (tie_word_embeddings removed) and
 # accelerate (unpatched _is_hf_initialized). Match our known-good local versions.
-pip3 install transformers==5.12.1 accelerate==1.14.0 peft==0.19.1
+uv pip install --system --break-system-packages transformers==5.12.1 accelerate==1.14.0 peft==0.19.1
 
 # NCCL / accelerator env guards
 export NCCL_IB_DISABLE=1

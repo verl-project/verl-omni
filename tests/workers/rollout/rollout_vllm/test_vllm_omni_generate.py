@@ -90,8 +90,9 @@ def _assert_non_empty_tensor(value, field_name: str) -> None:
 def _assert_flow_grpo_step_execution_contract(output: DiffusionOutput) -> None:
     """Validate the FlowGRPO trajectory contract in step-execution mode.
 
-    vLLMOmniHttpServer maps all_log_probs to DiffusionOutput.log_probs
-    and the remaining custom_output fields to DiffusionOutput.extra_fields.
+    vLLMOmniHttpServer maps OmniRequestOutput.trajectory_* to
+    DiffusionOutput.log_probs / extra_fields["all_*"] and prompt/rl metadata
+    groups to DiffusionOutput.extra_fields.
     """
     expected_extra_fields = {
         "all_latents",

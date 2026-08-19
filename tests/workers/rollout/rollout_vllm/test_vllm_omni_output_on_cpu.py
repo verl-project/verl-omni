@@ -32,9 +32,10 @@ def diffusion_server():
 def _request_output(diffusion_output, multimodal_output=None):
     return SimpleNamespace(
         images=[diffusion_output],
-        custom_output={},
         multimodal_output=multimodal_output or {},
-        request_output=None,
+        trajectory_latents=None,
+        trajectory_log_probs=None,
+        trajectory_timesteps=None,
     )
 
 
@@ -71,7 +72,10 @@ def test_pixel_quantization_preserves_float_audio(diffusion_server):
     audio = torch.tensor([[0.125, -0.25, 0.5]], dtype=torch.float32)
 
     output = diffusion_server._process_output(
-        _request_output(pixels, {"audio": audio, "audio_sample_rate": 48_000}),
+        _request_output(
+            pixels,
+            {"metadata": {"rl": {"audio": audio, "audio_sample_rate": 48_000}}},
+        ),
         params=None,
         sampling_params={},
     )

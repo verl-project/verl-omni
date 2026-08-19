@@ -367,7 +367,7 @@ class DiffusionI2IModelBase(DiffusionModelBase):
                 "this key is reserved by the MFU FLOPs counter for the denoised "
                 "latent. The rollout adapter likely output 'image_latents' instead "
                 "of 'condition_image_latents'. Check the rollout adapter's "
-                "custom_output keys."
+                "rl metadata keys."
             )
 
         hidden_states = model_inputs["hidden_states"]

@@ -20,6 +20,7 @@ from typing import Any, Literal
 import torch
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
+from vllm_omni.diffusion.models.qwen_image import pipeline_qwen_image_edit_plus
 from vllm_omni.diffusion.models.qwen_image.pipeline_qwen_image_edit_plus import (
     VAE_IMAGE_SIZE,
     QwenImageEditPlusPipeline,
@@ -27,6 +28,10 @@ from vllm_omni.diffusion.models.qwen_image.pipeline_qwen_image_edit_plus import 
 )
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
+from verl_omni.pipelines.diffusion_rollout_output import (
+    rollout_output,
+    wrap_rollout_postprocessor,
+)
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.common import (
     QwenImageTokenIdPromptMixin,
@@ -37,6 +42,17 @@ from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.pipelines.utils import ImageGenerationRequest
 
 __all__ = ["QwenImageEditPlusPipelineWithLogProb"]
+
+_QWEN_EDIT_POST_PROCESS_FACTORY = pipeline_qwen_image_edit_plus.get_qwen_image_edit_plus_post_process_func
+
+
+def get_rollout_post_process_func(od_config):
+    """Postprocess Qwen-Image-Edit media while preserving rollout metadata."""
+    return wrap_rollout_postprocessor(_QWEN_EDIT_POST_PROCESS_FACTORY(od_config))
+
+
+# vllm-omni resolves the built-in architecture's factory in the engine process.
+pipeline_qwen_image_edit_plus.get_qwen_image_edit_plus_post_process_func = get_rollout_post_process_func
 
 
 def _maybe_to_cpu(value):
@@ -409,7 +425,7 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
         elif prompt_embeds is not None:
             batch_size = prompt_embeds.shape[0]
         else:
-            return DiffusionOutput(output=None, custom_output={})
+            return DiffusionOutput(output=None)
 
         if isinstance(negative_prompt_ids, list):
             negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
@@ -531,17 +547,20 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
             latents = latents / latents_std + latents_mean
             image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
 
-        return DiffusionOutput(
-            output=_maybe_to_cpu(image),
-            custom_output={
-                "all_latents": _maybe_to_cpu(all_latents),
-                "all_log_probs": _maybe_to_cpu(all_log_probs),
-                "all_timesteps": _maybe_to_cpu(all_timesteps),
+        return rollout_output(
+            media=_maybe_to_cpu(image),
+            trajectory_latents=_maybe_to_cpu(all_latents),
+            trajectory_log_probs=_maybe_to_cpu(all_log_probs),
+            trajectory_timesteps=_maybe_to_cpu(all_timesteps),
+            prompt_embeddings={
                 "prompt_embeds": _maybe_to_cpu(prompt_embeds),
                 "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
                 "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds),
                 "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
+            },
+            rl={
                 "condition_image_latents": _maybe_to_cpu(condition_image_latents),
                 "img_shapes": img_shapes,
             },
+            to_cpu=False,
         )
