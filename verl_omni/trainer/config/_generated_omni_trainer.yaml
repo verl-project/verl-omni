@@ -811,7 +811,7 @@ algorithm:
   _target_: verl_omni.trainer.config.OmniAlgoConfig
   gamma: 1.0
   lam: 1.0
-  adv_estimator: dpo
+  adv_estimator: grpo
   norm_adv_by_std_in_grpo: true
   use_kl_in_reward: false
   kl_penalty: kl
@@ -825,9 +825,9 @@ algorithm:
   pf_ppo:
     reweight_method: pow
     weight_pow: 2.0
-  trainer_type: direct_preference
-  sample_source: offline
-  paired_preference: true
+  trainer_type: policy_gradient
+  sample_source: online
+  paired_preference: false
   global_std: true
 distillation:
   _target_: verl.workers.config.DistillationConfig
