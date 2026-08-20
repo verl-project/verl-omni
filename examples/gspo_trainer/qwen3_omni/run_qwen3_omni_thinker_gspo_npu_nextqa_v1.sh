@@ -101,7 +101,7 @@ python3 -m verl_omni.trainer.main_omni \
     algorithm.use_kl_in_reward=false \
     reward.reward_manager.source=register \
     reward.reward_manager.name=naive \
-    reward.custom_reward_function.path=verl_omni/utils/reward_score/nextqa_reward.py \
+    reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py \
     reward.custom_reward_function.name=compute_score \
     trainer.val_before_train=true \
     trainer.balance_batch=true \

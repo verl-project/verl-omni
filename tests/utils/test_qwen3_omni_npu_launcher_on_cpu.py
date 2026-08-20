@@ -48,7 +48,7 @@ def test_nextqa_npu_launcher_wires_video_gspo_training():
         "actor_rollout_ref.rollout.name=vllm_omni",
         "engine_kwargs.vllm_omni.pipeline_name=qwen3_omni_moe",
         "reward.reward_manager.source=register",
-        "reward.custom_reward_function.path=verl_omni/utils/reward_score/nextqa_reward.py",
+        "reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py",
         "trainer.total_training_steps=${TOTAL_TRAINING_STEPS}",
     )
     assert all(setting in launcher for setting in required_settings)

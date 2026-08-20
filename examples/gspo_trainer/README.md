@@ -327,11 +327,12 @@ visual-only ablation without rebuilding the parquet, launch with
 
 ### Reward
 
-[`nextqa_reward.py`](../../verl_omni/utils/reward_score/nextqa_reward.py)
-implements the Relax `multiple_choice` semantics: it extracts a single A--E
-letter from the first `<answer>...</answer>` tag and gives `1.0` only for an
-exact letter match, otherwise `0.0`. The returned `format` metric is diagnostic
-only and is not added to the optimization reward.
+The recipe reuses the shared
+[`choice_reward.py`](../../verl_omni/utils/reward_score/choice_reward.py)
+multiple-choice scorer. It extracts the first `<answer>...</answer>` payload
+and gives `1.0` only for an exact match with the tagged dataset label,
+otherwise `0.0`. The dataset converter guarantees that every label is one of
+the five option letters A--E.
 
 ### Run NPU training
 
