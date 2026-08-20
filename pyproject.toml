@@ -61,7 +61,7 @@ audio = [
 # CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
 gpu = [
     "vllm==0.27.0",
-    "kernels==0.14.1",
+    "kernels==0.16.0",
     "liger-kernel",
 ]
 # Training stack (install in step 2).
