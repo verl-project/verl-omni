@@ -18,6 +18,7 @@ import logging
 import os
 import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import asdict
 from typing import Any, Optional
 
@@ -67,6 +68,38 @@ def _drop_none_mapping_values(value: Any) -> Any:
     if isinstance(value, list):
         return [_drop_none_mapping_values(item) for item in value]
     return value
+
+
+def _diffusion_output_type(sampling_params: dict) -> str:
+    output_type = sampling_params.get("output_type")
+    if output_type is None:
+        output_type = (sampling_params.get("extra_args") or {}).get("output_type")
+    return output_type or "image"
+
+
+def _pixel_output_to_uint8(output: torch.Tensor) -> torch.Tensor:
+    """Quantize a rollout pixel tensor from float ``[0, 1]`` to uint8 once."""
+    if output.dtype == torch.uint8:
+        return output
+    output = output.detach().to(dtype=torch.float32, copy=True)
+    if not bool(torch.isfinite(output).all()):
+        raise ValueError("Pixel rollout output must contain only finite values")
+    output = output.clamp_(0, 1)
+    return output.mul_(255).round_().to(dtype=torch.uint8)
+
+
+def _rollout_metadata_groups(multimodal_output: Any) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(multimodal_output, Mapping):
+        return ()
+    metadata = multimodal_output.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return ()
+    groups = []
+    for name in ("prompt_embeddings", "rl"):
+        group = metadata.get(name)
+        if isinstance(group, Mapping):
+            groups.append(group)
+    return tuple(groups)
 
 
 class vLLMOmniHttpServer(vLLMHttpServer):
@@ -242,6 +275,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
 
+        # In vLLM 0.27, asdict converts the default FaultToleranceConfig dataclass into a dict.
+        # OmniEngineArgs.__post_init__ auto-enables enable_fault_tolerance when fault_tolerance_config
+        # is a dict, which causes create_engine_config to fail without an external load balancer.
+        # Strip fault_tolerance_config when fault tolerance was not explicitly enabled.
+        if not engine_args.get("enable_fault_tolerance"):
+            engine_args.pop("fault_tolerance_config", None)
+
         deploy_config = getattr(args, "deploy_config", None)
         if deploy_config:
             engine_args["deploy_config"] = deploy_config
@@ -268,6 +308,26 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 engine_args["enable_dummy_pipeline"] = True
                 engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
+                # vllm-omni 0.26 hard-fails engine startup when max_num_seqs>1 on a
+                # pipeline without request-level batching (0.24 ran serially instead).
+                # Restore the serial behavior for single-request pipelines.
+                pipeline_cls = VllmOmniPipelineBase.get_class(
+                    architecture=self.model_config.architecture,
+                    algorithm=self.model_config.algorithm,
+                )
+                step_execution = getattr(self.config, "step_execution", False)
+                if (
+                    pipeline_cls is not None
+                    and not getattr(pipeline_cls, "supports_request_batch", False)
+                    and not step_execution
+                    and int(engine_args.get("max_num_seqs") or 1) > 1
+                ):
+                    logger.info(
+                        "Pipeline %s does not support request-level batching; clamping max_num_seqs to 1.",
+                        pipeline_cls.__name__,
+                    )
+                    engine_args["max_num_seqs"] = 1
+
         if getattr(self.config, "step_execution", False):
             engine_args["step_execution"] = True
 
@@ -281,8 +341,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # rollout_attn_backend only exists on the diffusion rollout config, not AR text rollouts.
         attn_backend = getattr(self.config, "rollout_attn_backend", None)
         if attn_backend is not None:
-            engine_args["diffusion_attention_backend"] = attn_backend
-            logger.info("Setting diffusion_attention_backend=%s from rollout config", attn_backend)
+            engine_args.pop("diffusion_attention_backend", None)
+            engine_args["diffusion_attention_config"] = self.config.to_vllm_omni_attention_config()
+            logger.info(
+                "Setting diffusion_attention_config.default.backend=%s from rollout config",
+                attn_backend,
+            )
 
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
@@ -577,9 +641,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             if final_res is None:
                 raise RuntimeError("AR mode: vLLM-Omni engine yielded no output for the prompt.")
 
-            req_output = final_res.request_output
-            if req_output is None:
-                raise RuntimeError("AR mode expects request_output with token IDs, but got None.")
+            req_output = getattr(final_res, "request_output", None) or final_res
+            if not req_output.outputs:
+                raise RuntimeError("AR mode expects outputs with token IDs, but got None or empty.")
 
             extra_fields = {"global_steps": self.global_steps}
             token_ids = req_output.outputs[0].token_ids
@@ -595,6 +659,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             num_preempted = None
             if hasattr(req_output.outputs[0], "num_preempted"):
                 num_preempted = req_output.outputs[0].num_preempted
+            elif hasattr(req_output, "num_preempted"):
+                num_preempted = req_output.num_preempted
 
             return TokenOutput(
                 token_ids=token_ids,
@@ -610,16 +676,24 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # synthesizes an abort OutputMessage to unblock the generate() coroutine).
         # Return a DiffusionOutput with stop_reason="aborted" so the retry client
         # can retry the whole sample.
+        output_type = _diffusion_output_type(sampling_params)
         if final_res is None or not final_res.images:
             finish_reason = "abort"
-            if final_res is not None and final_res.request_output is not None:
-                finish_reason = getattr(final_res.request_output, "finish_reason", None) or "abort"
+            if final_res is not None:
+                req_out = getattr(final_res, "request_output", None) or final_res
+                if hasattr(req_out, "outputs") and req_out.outputs:
+                    finish_reason = getattr(req_out.outputs[0], "finish_reason", None) or "abort"
+                else:
+                    finish_reason = getattr(req_out, "finish_reason", None) or "abort"
             stop_reason = self._map_stop_reason(finish_reason)
             logger.debug(
                 "diffusion rollout produced no image (finish_reason=%s); returning %s", finish_reason, stop_reason
             )
             return DiffusionOutput(
-                diffusion_output=torch.empty(0),
+                diffusion_output=torch.empty(
+                    0,
+                    dtype=torch.float32 if output_type == "latent" else torch.uint8,
+                ),
                 log_probs=None,
                 stop_reason=stop_reason,
                 num_preempted=None,
@@ -628,22 +702,21 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         assert final_res is not None
         diffusion_output = final_res.images[0]
-        if isinstance(diffusion_output, torch.Tensor):
-            diffusion_output = diffusion_output.float()
-        elif isinstance(diffusion_output, np.ndarray):
-            diffusion_output = torch.from_numpy(diffusion_output).float()
+        if isinstance(diffusion_output, dict):
+            for key in ("video", "image", "output", "audio"):
+                if key in diffusion_output and diffusion_output[key] is not None:
+                    diffusion_output = diffusion_output[key]
+                    break
+        if output_type == "latent":
+            diffusion_output = torch.as_tensor(diffusion_output).float()
         else:
-            diffusion_output = self._to_tensor(diffusion_output).float() / 255.0
+            if isinstance(diffusion_output, np.ndarray):
+                diffusion_output = torch.from_numpy(diffusion_output)
+            elif not isinstance(diffusion_output, torch.Tensor):
+                diffusion_output = self._to_tensor(diffusion_output)
+            diffusion_output = _pixel_output_to_uint8(diffusion_output)
 
-        # Extract extra data from custom_output (populated by DiffusionEngine)
-        custom_output = final_res.custom_output or {}
-
-        if sampling_params.get("logprobs", False):
-            all_log_probs = custom_output.get("all_log_probs")
-            log_probs = all_log_probs[0] if all_log_probs is not None else None
-        else:
-            log_probs = None
-
+        # Native vllm-omni 0.26 contract: trajectory_* + multimodal metadata.
         def _maybe_unbatch(value: Any) -> Any:
             if value is None:
                 return None
@@ -655,23 +728,37 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 return value[0] if value else None
             return value
 
-        extra_fields = {k: _maybe_unbatch(v) for k, v in custom_output.items() if k != "all_log_probs"}
-        multimodal_output = final_res.multimodal_output or {}
-        if isinstance(multimodal_output, dict):
-            for key, value in multimodal_output.items():
-                extra_fields.setdefault(key, _maybe_unbatch(value))
-        extra_fields["global_steps"] = self.global_steps
+        if sampling_params.get("logprobs", False):
+            log_probs = _maybe_unbatch(final_res.trajectory_log_probs)
+        else:
+            log_probs = None
 
-        if final_res.request_output is not None and hasattr(final_res.request_output, "finish_reason"):
-            finish_reason = final_res.request_output.finish_reason or "stop"
+        extra_fields: dict[str, Any] = {"global_steps": self.global_steps}
+        if final_res.trajectory_latents is not None:
+            extra_fields["all_latents"] = _maybe_unbatch(final_res.trajectory_latents)
+        if final_res.trajectory_timesteps is not None:
+            extra_fields["all_timesteps"] = _maybe_unbatch(final_res.trajectory_timesteps)
+        for metadata_group in _rollout_metadata_groups(final_res.multimodal_output):
+            for key, value in metadata_group.items():
+                if key in extra_fields:
+                    raise ValueError(f"Duplicate rollout metadata field: {key}")
+                extra_fields[key] = _maybe_unbatch(value)
+
+        req_output = getattr(final_res, "request_output", None) or final_res
+        if hasattr(req_output, "outputs") and req_output.outputs:
+            finish_reason = req_output.outputs[0].finish_reason or "stop"
+        elif hasattr(req_output, "finish_reason"):
+            finish_reason = req_output.finish_reason or "stop"
         else:
             finish_reason = "stop"
 
         stop_reason = self._map_stop_reason(finish_reason)
 
         num_preempted = None
-        if final_res.request_output is not None and hasattr(final_res.request_output, "num_preempted"):
-            num_preempted = final_res.request_output.num_preempted
+        if hasattr(req_output, "outputs") and req_output.outputs and hasattr(req_output.outputs[0], "num_preempted"):
+            num_preempted = req_output.outputs[0].num_preempted
+        elif hasattr(req_output, "num_preempted"):
+            num_preempted = req_output.num_preempted
 
         return DiffusionOutput(
             diffusion_output=diffusion_output,
@@ -782,11 +869,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         ``_process_orchestrator_results`` reads from ``req_state.queue`` and
         expects ``OutputMessage`` (or ``ErrorMessage``) objects. We build a
-        minimal ``OmniRequestOutput`` carrying a ``RequestOutput`` with
-        ``finish_reason="abort"`` so that ``_process_single_result`` yields it
-        and ``_process_output`` maps it to ``stop_reason="aborted"``.
+        minimal ``OmniRequestOutput`` with ``finish_reason="abort"`` so that
+        ``_process_single_result`` yields it and ``_process_output`` maps it
+        to ``stop_reason="aborted"``.
         """
-        from vllm.outputs import CompletionOutput, RequestOutput
+        from vllm.outputs import CompletionOutput
         from vllm_omni.engine.messages import OutputMessage
         from vllm_omni.outputs import OmniRequestOutput
 
@@ -799,18 +886,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             finish_reason="abort",
             stop_reason=None,
         )
-        request_output = RequestOutput(
-            request_id=internal_id,
-            prompt=None,
-            prompt_token_ids=[],
-            prompt_logprobs=None,
-            outputs=[completion],
-            finished=True,
-        )
         omni_output = OmniRequestOutput(
             request_id=internal_id,
+            outputs=[completion],
             finished=True,
-            request_output=request_output,
         )
         # Use the final stage so _process_single_result's stage_meta.final_output
         # check passes and the output is yielded (not silently dropped).

@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm023.dev1"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd7upeujs1b9g1a958pn0.apigateway-cn-beijing.volceapi.com/runner"
 
 jobs:
@@ -44,25 +44,46 @@ jobs:
     # Informational only — failures here do not block PRs
     continue-on-error: true
     env:
-      HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
+      HTTP_PROXY: "http://100.68.174.87:3128"
+      HTTPS_PROXY: "http://100.68.174.87:3128"
       NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0"
+      UV_LINK_MODE: copy
+      UV_SYSTEM_PYTHON: "1"
+      UV_BREAK_SYSTEM_PACKAGES: "1"
+      PIP_BREAK_SYSTEM_PACKAGES: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+      - name: Keep the uv cache on the runner's persistent HOME
+        run: |
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - name: Install dependencies (verl latest main)
         # Informational only — install issues against latest verl must not fail the workflow.
         continue-on-error: true
         env:
+          UV_EXTRA_INDEX_URL: https://pypi.org/simple
           PIP_EXTRA_INDEX_URL: https://pypi.org/simple
+          UV_SYSTEM_PYTHON: "1"
+          UV_BREAK_SYSTEM_PACKAGES: "1"
+          PIP_BREAK_SYSTEM_PACKAGES: "1"
         run: |
-          # vllm023.dev1 image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
-          pip3 install ".[gpu,dev,audio]"
-          pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-          pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@main"
-          pip3 install --no-deps -e .
+          export UV_CACHE_DIR="${UV_CACHE_DIR:-${HOME}/.cache/uv}"
+          git config --global http.postBuffer 524288000 || true
+          # Base image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
+          uv pip install --system --break-system-packages ".[gpu,dev,audio]"
+          uv pip install --system --break-system-packages "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
+          uv pip install --system --break-system-packages --no-deps --reinstall "verl @ git+https://github.com/verl-project/verl.git@main"
+          uv pip install --system --break-system-packages --no-deps -e .
+          # TODO: Remove this FusedMoE compatibility patch after verl is upgraded to 0.9.0 (which natively supports vLLM 0.27 MoE modular refactor).
+          # vLLM 0.27 compatibility: install lazy .pth hook so all Ray workers/subprocesses alias FusedMoE
+          python3 -c "import site, os; code = '''import importlib.util, sys\nfrom importlib.abc import Loader, MetaPathFinder\n\nclass _MoEHookFinder(MetaPathFinder):\n    def find_spec(self, fullname, path, target=None):\n        if fullname == \'vllm.model_executor.layers.fused_moe.layer\':\n            sys.meta_path.remove(self)\n            try:\n                spec = importlib.util.find_spec(fullname)\n                if spec and spec.loader:\n                    orig_loader = spec.loader\n                    class _HookedLoader(Loader):\n                        def create_module(self, spec):\n                            return orig_loader.create_module(spec)\n                        def exec_module(self, module):\n                            orig_loader.exec_module(module)\n                            if not hasattr(module, \'FusedMoE\'):\n                                import vllm.model_executor.layers.fused_moe as _m\n                                module.FusedMoE = getattr(_m, \'FusedMoEExpertsModular\', getattr(_m, \'FusedMoEMethodBase\', object))\n                    spec.loader = _HookedLoader()\n                return spec\n            finally:\n                sys.meta_path.insert(0, self)\n        return None\n\nsys.meta_path.insert(0, _MoEHookFinder())\n'''; [open(os.path.join(p, '_vllm_moe_compat.py'), 'w').write(code) for p in set(site.getsitepackages()) if os.path.exists(p)]; [open(os.path.join(p, 'verl_omni_vllm_compat.pth'), 'w').write('import _vllm_moe_compat\n') for p in set(site.getsitepackages()) if os.path.exists(p)]"
+          if ! command -v python >/dev/null 2>&1; then
+            ln -sfn "$(command -v python3)" /usr/local/bin/python
+          fi
       - name: Run GPU smoke tests (verl latest main)
         # Informational only — failures here are expected when latest verl drifts and must not fail the workflow.
         continue-on-error: true

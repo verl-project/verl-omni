@@ -197,6 +197,10 @@ class DiffusionRolloutConfig(BaseConfig):
     # For multi-stage generation (e.g, text rewriting -> image generation)
     ar: Optional[DiffusionARConfig] = field(default_factory=DiffusionARConfig)
 
+    def to_vllm_omni_attention_config(self) -> dict:
+        """Convert the rollout backend to vLLM-Omni's canonical config form."""
+        return {"default": {"backend": self.rollout_attn_backend}}
+
     def __post_init__(self):
         """Validate the diffusion rollout config"""
         if self.max_prompt_embed_length is not None and self.max_prompt_embed_length <= 0:

@@ -24,7 +24,7 @@ from verl_omni.utils.reward_score.jpeg_compressibility import (
 
 
 def test_jpeg_incompressibility_accepts_tensor_batch():
-    images = torch.zeros(2, 3, 8, 8, dtype=torch.float32)
+    images = torch.zeros(2, 3, 8, 8, dtype=torch.uint8)
 
     scores, meta = jpeg_incompressibility()(images, prompts=None)
 
@@ -35,7 +35,7 @@ def test_jpeg_incompressibility_accepts_tensor_batch():
 
 
 def test_jpeg_compressibility_is_negative_scaled_incompressibility():
-    images = torch.ones(1, 3, 8, 8, dtype=torch.float32)
+    images = torch.full((1, 3, 8, 8), 255, dtype=torch.uint8)
 
     incompressible_scores, _ = jpeg_incompressibility()(images, prompts=None)
     compressible_scores, meta = jpeg_compressibility()(images, prompts=None)
@@ -45,7 +45,7 @@ def test_jpeg_compressibility_is_negative_scaled_incompressibility():
 
 
 def test_compute_score_accepts_single_image_tensor():
-    image = torch.zeros(3, 8, 8, dtype=torch.float32)
+    image = torch.zeros(3, 8, 8, dtype=torch.uint8)
 
     score = compute_score(image)
 

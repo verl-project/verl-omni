@@ -46,12 +46,8 @@ permissions:
   pull-requests: read
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm023.dev1"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
   DYNAMIC_RUNNER_ENDPOINT: "https://sd7upeujs1b9g1a958pn0.apigateway-cn-beijing.volceapi.com/runner"
-  HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-  NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
-  HF_ENDPOINT: "https://hf-mirror.com"
-  HF_HUB_ENABLE_HF_TRANSFER: "0"
 
 jobs:
   setup_runner:
@@ -102,16 +98,16 @@ jobs:
               "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
               --paginate \
               --jq '.[].filename' > changed_files.txt
-            plan_json="$(python tests/gpu_smoke/select_gpu_smoke_groups.py --changed-files-file changed_files.txt)"
+            plan_json="$(python3 tests/gpu_smoke/select_gpu_smoke_groups.py --changed-files-file changed_files.txt)"
           elif [[ "${mode}" == "all" ]]; then
-            plan_json="$(python tests/gpu_smoke/select_gpu_smoke_groups.py --all)"
+            plan_json="$(python3 tests/gpu_smoke/select_gpu_smoke_groups.py --all)"
           else
-            plan_json="$(python tests/gpu_smoke/select_gpu_smoke_groups.py --groups "${mode}")"
+            plan_json="$(python3 tests/gpu_smoke/select_gpu_smoke_groups.py --groups "${mode}")"
           fi
 
           echo "Resolved GPU smoke plan: ${plan_json}"
           echo "groups-json=${plan_json}" >> "$GITHUB_OUTPUT"
-          PLAN_JSON="${plan_json}" python - <<'PY' >> "$GITHUB_OUTPUT"
+          PLAN_JSON="${plan_json}" python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json
           import os
 
@@ -133,10 +129,26 @@ jobs:
     if: needs.setup_runner.outputs.mode != 'none'
     runs-on: ["${{ needs.setup_runner.outputs.runner-label || needs.setup_runner.outputs.runner-size || 'L20x8' }}"]
     timeout-minutes: ${{ needs.setup_runner.outputs.group-count == '1' && 45 || 90 }}
+    env:
+      # Match verl gpu_unit_tests.yml: uppercase-only proxy keys. GitHub Actions
+      # treats env names as case-insensitive, so http_proxy duplicates HTTP_PROXY.
+      HTTP_PROXY: "http://100.68.174.87:3128"
+      HTTPS_PROXY: "http://100.68.174.87:3128"
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      UV_LINK_MODE: copy
+      UV_SYSTEM_PYTHON: "1"
+      UV_BREAK_SYSTEM_PACKAGES: "1"
+      PIP_BREAK_SYSTEM_PACKAGES: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+      - name: Keep the uv cache on the runner's persistent HOME
+        run: |
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
       - uses: ./.github/actions/gpu-smoke-prepare
       - name: Run selected GPU smoke tests
         env:
@@ -147,7 +159,7 @@ jobs:
           set -euo pipefail
           mkdir -p logs/gpu_smoke/parallel
 
-          python - <<'PY' > /tmp/gpu_smoke_groups.tsv
+          python3 - <<'PY' > /tmp/gpu_smoke_groups.tsv
           import json
           import os
 

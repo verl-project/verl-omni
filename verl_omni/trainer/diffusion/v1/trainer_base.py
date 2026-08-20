@@ -1018,9 +1018,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         if generations_to_log == 0:
             return
         if "wandb" in self.config.trainer.logger:
+            for image in outputs:
+                if not isinstance(image, torch.Tensor) or image.dtype != torch.uint8:
+                    raise ValueError(f"Expected a uint8 image tensor, got {getattr(image, 'dtype', type(image))}.")
             import wandb
 
-            outputs = [wandb.Image(image.float(), file_type="jpg") for image in outputs]
+            outputs = [wandb.Image(image, file_type="jpg", normalize=False) for image in outputs]
         samples = list(zip(inputs, outputs, scores, strict=True))
         samples.sort(key=lambda x: x[0])
         rng = np.random.RandomState(42)
@@ -1030,6 +1033,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
     def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
         """Dump validation/rollout samples as images + JSONL (runs in background)."""
+        if not isinstance(outputs, torch.Tensor) or outputs.dtype != torch.uint8:
+            dtype = getattr(outputs, "dtype", type(outputs))
+            raise ValueError(f"Expected generation outputs to be a uint8 tensor, got {dtype}.")
+
         future = self._dump_executor.submit(
             self._write_generations,
             inputs,
@@ -1056,13 +1063,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         os.makedirs(visual_folder, exist_ok=True)
 
         output_paths = []
-        images_pil = outputs.cpu().float()
+        images_pil = outputs.cpu()
         # images: [N, C, H, W] -> [N, H, W, C]
         if images_pil.dim() == 4:
             images_pil = images_pil.permute(0, 2, 3, 1).numpy()
         else:
             images_pil = images_pil.numpy()
-        images_pil = (images_pil * 255).round().clip(0, 255).astype("uint8")
         for i, image in enumerate(images_pil):
             image_path = os.path.join(visual_folder, f"{i}.jpg")
             Image.fromarray(image).save(image_path)

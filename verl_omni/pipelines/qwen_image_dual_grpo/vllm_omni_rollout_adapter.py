@@ -25,6 +25,7 @@ from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
+from verl_omni.pipelines.diffusion_rollout_output import rollout_output
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.common import build_img_shapes, coalesce_not_none
 from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
@@ -311,9 +312,9 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
             # list[int]
 
             image = torch.tensor([1.0])  # dummy image
-            result = DiffusionOutput(
-                output=image,
-                custom_output={
+            result = rollout_output(
+                media=image,
+                rl={
                     "ar_response_ids": ar_response_ids,
                     "ar_all_log_probs": ar_all_log_probs,
                     "refined_prompt": messages,  # formatted prompt
@@ -389,7 +390,7 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
         else:
             # Both prompt_token_ids and prompt_embeds are None (e.g. during warmup/dummy run).
             # Return a minimal dummy output to avoid crashing.
-            outputs = [DiffusionOutput(output=None, custom_output={}) for _ in range(request_batch.num_reqs)]
+            outputs = [DiffusionOutput(output=None) for _ in range(request_batch.num_reqs)]
             return outputs if return_batch else outputs[0]
 
         has_neg_prompt = negative_prompt_ids is not None or (
@@ -493,13 +494,12 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
             latents = latents / latents_std + latents_mean
             image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
 
-        # save results
-        result = DiffusionOutput(
-            output=image,
-            custom_output={
-                "all_latents": all_latents,
-                "all_log_probs": all_log_probs,
-                "all_timesteps": all_timesteps,
+        result = rollout_output(
+            media=image,
+            trajectory_latents=all_latents,
+            trajectory_log_probs=all_log_probs,
+            trajectory_timesteps=all_timesteps,
+            prompt_embeddings={
                 "prompt_embeds": prompt_embeds,
                 "prompt_embeds_mask": prompt_embeds_mask,
                 "negative_prompt_embeds": negative_prompt_embeds,

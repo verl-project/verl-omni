@@ -9,6 +9,7 @@ cd "${REPO_ROOT}"
 
 log()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 pass() { echo "[PASS] $*"; }
+skip() { echo "[SKIP] $*"; }
 fail() { echo "[FAIL] $*"; }
 sep()  { printf '%0.s-' {1..78}; echo; }
 
@@ -157,6 +158,9 @@ run_test() {
     if [[ "${rc}" -eq 0 ]]; then
         TEST_RESULTS+=("PASS")
         pass "[${id}] ${name}  (${elapsed}s)"
+    elif [[ "${rc}" -eq 5 ]]; then
+        TEST_RESULTS+=("SKIP")
+        skip "[${id}] ${name}  (${elapsed}s) (skipped)"
     else
         TEST_RESULTS+=("FAIL")
         fail "[${id}] ${name}  (${elapsed}s)  exit=${rc}"
