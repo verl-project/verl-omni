@@ -20,7 +20,8 @@ table over discarded KV). Until upstream ships, wrap the serializer so an
 explicit False re-emits `--no-enable-prefix-caching`.
 
 TODO(verl-upstream): drop this shim once verl serializes explicit False on
-Optional[bool] engine args as `--no-<flag>` and verl-omni pins that release.
+Optional[bool] engine args as `--no-<flag>` (verl-project/verl#7508) and
+verl-omni pins that release.
 """
 
 import importlib
