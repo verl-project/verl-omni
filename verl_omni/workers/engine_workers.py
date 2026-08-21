@@ -68,7 +68,7 @@ from verl_omni.workers.config import (
 )
 from verl_omni.workers.config.diffusion import DiffusionDistillationTeacherModelConfig
 from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle, make_update_zmq_id
-from verl_omni.workers.utils.losses import diffusion_loss
+from verl_omni.workers.utils.losses import diffusion_loss, omni_loss
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -632,6 +632,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             # The ref model does not need to enable MTP; force it to false.
             ref_config.model_config = deepcopy(model_config)
+            if ref_config.model_config.get("model_type", "language_model") == "omni_model":
+                ref_config.model_config.trainer_type = self.config.actor.get("trainer_type", "policy_gradient")
             ref_config.model_config.mtp = MtpConfig(enable=False)
 
             # construct TrainingWorkerConfig
@@ -669,6 +671,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if "actor" in self.role:
             actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
             actor_config.model_config = model_config
+            if actor_config.model_config.get("model_type", "language_model") == "omni_model":
+                actor_config.model_config.trainer_type = getattr(actor_config, "trainer_type", "policy_gradient")
             distillation_config: Optional[DistillationConfig] = (
                 omega_conf_to_dataclass(self.distillation_config) if self.distillation_enabled else None
             )
@@ -722,9 +726,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 else:
                     assert self.config.rollout.get("log_prob_micro_batch_size_per_gpu") is not None
                     assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
+            actor_model_type = actor_config.model_config.get("model_type", "language_model")
             # Diffusion distillation lives inside diffusion_loss; distillation_ppo_loss is token-level only.
             if is_diffusion:
                 self.loss_fn = partial(diffusion_loss, config=actor_config)
+            elif actor_model_type == "omni_model" and actor_config.trainer_type == "direct_preference":
+                self.loss_fn = partial(omni_loss, config=actor_config)
             elif self.distillation_enabled:
                 self.loss_fn = partial(
                     distillation_ppo_loss, config=actor_config, distillation_config=distillation_config

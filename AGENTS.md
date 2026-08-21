@@ -74,6 +74,16 @@ Co-authored-by: GitHub Copilot
 Signed-off-by: Your Name <your.email@example.com>
 ```
 
+Other examples:
+
+```text
+Co-authored-by: Cursor <cursoragent@cursor.com>
+Co-authored-by: OpenAI Codex <noreply@openai.com>
+Co-authored-by: Claude Code
+```
+
+Use the identity of the tool that actually contributed.
+
 ### Resolving agent reviews
 
 Review comments from agent bots (e.g., gemini-code-assist) can be outdated or wrong. Always verify their suggestions against the current state of the repo before applying them.

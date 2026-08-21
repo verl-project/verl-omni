@@ -455,7 +455,7 @@ def _prepare_qwen3_omni_processor(processor):
                     kwargs["audio"] = audios
             else:
                 kwargs.pop("audio", None)
-            kwargs = {key: value for key, value in kwargs.items() if value != []}
+            kwargs = {key: value for key, value in kwargs.items() if not (isinstance(value, list) and len(value) == 0)}
             return processor(*args, **kwargs)
 
     def get_rope_index(*args, **kwargs):

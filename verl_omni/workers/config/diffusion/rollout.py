@@ -82,6 +82,11 @@ class DiffusionSamplingConfig(BaseConfig):
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
     algo: DiffusionRolloutAlgoConfig = field(default_factory=DiffusionRolloutAlgoConfig)
 
+    # for llm part when needed
+    temperature: float = 1.0
+    top_k: int = 0
+    top_p: float = 1.0
+
 
 @dataclass
 class DiffusionRolloutConfig(BaseConfig):
@@ -92,6 +97,13 @@ class DiffusionRolloutConfig(BaseConfig):
     nnodes: int = 0
     n_gpus_per_node: int = 8
     n: int = 1
+
+    # for llm part when needed
+    temperature: float = 1.0
+    top_k: int = 0
+    top_p: float = 1.0
+    repetition_penalty: float = 1.0
+    max_new_tokens: int = 256
 
     # Base seed for deterministic training rollout RNG. Per-step base is
     # ``seed + global_step - 1``. null disables rollout seeding.
@@ -141,6 +153,8 @@ class DiffusionRolloutConfig(BaseConfig):
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
 
     calculate_log_probs: bool = False
+    llm_calculate_log_probs: bool = False
+
     rollout_adapter: str = "default"
 
     agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
@@ -178,6 +192,10 @@ class DiffusionRolloutConfig(BaseConfig):
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
     external_lib: Optional[str] = None
+
+    def to_vllm_omni_attention_config(self) -> dict:
+        """Convert the rollout backend to vLLM-Omni's canonical config form."""
+        return {"default": {"backend": self.rollout_attn_backend}}
 
     def __post_init__(self):
         """Validate the diffusion rollout config"""

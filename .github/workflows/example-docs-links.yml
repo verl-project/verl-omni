@@ -1,0 +1,39 @@
+name: example_docs_links
+
+on:
+  push:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "examples/**"
+      - "docs/examples/**"
+      - "docs/index.md"
+      - "tests/special_sanity/check_example_docs_symlinks.py"
+      - ".github/workflows/example-docs-links.yml"
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "examples/**"
+      - "docs/examples/**"
+      - "docs/index.md"
+      - "tests/special_sanity/check_example_docs_symlinks.py"
+      - ".github/workflows/example-docs-links.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  example_docs_links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Check example README docs symlinks
+        run: python3 tests/special_sanity/check_example_docs_symlinks.py

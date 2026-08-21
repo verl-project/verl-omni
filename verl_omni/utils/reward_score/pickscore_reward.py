@@ -96,11 +96,10 @@ class _PickScoreInferencer:
 
 def _to_pil_hwc(image) -> Image.Image:
     if isinstance(image, torch.Tensor):
-        image = image.float().cpu().numpy()
+        image = image.cpu().numpy()
     if isinstance(image, np.ndarray):
         if image.ndim == 3 and image.shape[0] in (1, 3):
             image = image.transpose(1, 2, 0)
-        image = (image * 255).round().clip(0, 255).astype(np.uint8)
         image = Image.fromarray(image)
     assert isinstance(image, Image.Image)
     return image

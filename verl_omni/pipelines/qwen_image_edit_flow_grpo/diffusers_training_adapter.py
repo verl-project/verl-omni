@@ -63,7 +63,7 @@ class QwenImageEditPlusFlowGRPO(DiffusionI2IModelBase, QwenImage):
                     "QwenImageEditPlusFlowGRPO.prepare_condition: "
                     "micro_batch has 'image_latents' but not 'condition_image_latents'. "
                     "The rollout adapter likely output the wrong key. "
-                    "Use 'condition_image_latents' in custom_output to avoid "
+                    "Use 'condition_image_latents' in rollout rl metadata to avoid "
                     "colliding with the MFU FLOPs counter."
                 )
             return None

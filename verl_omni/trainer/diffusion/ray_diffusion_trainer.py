@@ -35,6 +35,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
+from verl.plugin.platform import get_platform
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -209,6 +210,16 @@ class BaseRayDiffusionTrainer(ABC):
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
         self.checkpoint_manager = None
+        controller_nsight_options = OmegaConf.select(
+            self.config,
+            "global_profiler.global_tool_config.nsys.controller_nsight_options",
+            default={},
+        )
+        self._controller_nsys_profile_enabled = (
+            OmegaConf.select(self.config, "global_profiler.tool") == "nsys"
+            and controller_nsight_options.get("capture-range") == "cudaProfilerApi"
+        )
+        self._controller_nsys_profile_active = False
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -307,6 +318,10 @@ class BaseRayDiffusionTrainer(ABC):
         ``[N, T, C, H, W]`` (-> ``{i}.mp4`` at ``fps``). ``max_samples`` caps how many
         are written (``None`` = all). Optional generated audio is muxed into video files.
         """
+        if not isinstance(outputs, torch.Tensor) or outputs.dtype != torch.uint8:
+            dtype = getattr(outputs, "dtype", type(outputs))
+            raise ValueError(f"Expected generation outputs to be a uint8 tensor, got {dtype}.")
+
         os.makedirs(dump_path, exist_ok=True)
 
         visual_folder = os.path.join(dump_path, f"{self.global_steps}")
@@ -331,8 +346,7 @@ class BaseRayDiffusionTrainer(ABC):
                 )
                 output_paths.append(video_path)
         else:
-            images_pil = outputs[:n].cpu().float().permute(0, 2, 3, 1).numpy()
-            images_pil = (images_pil * 255).round().clip(0, 255).astype("uint8")
+            images_pil = outputs[:n].cpu().permute(0, 2, 3, 1).numpy()
             for i, image in enumerate(images_pil):
                 image_path = os.path.join(visual_folder, f"{i}.jpg")
                 Image.fromarray(image).save(image_path)
@@ -925,17 +939,44 @@ class BaseRayDiffusionTrainer(ABC):
 
     def _start_profiling(self, do_profile: bool) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
-        if do_profile:
+        if not do_profile:
+            return
+
+        controller_profile_started = False
+        try:
+            if self._controller_nsys_profile_enabled:
+                if self._controller_nsys_profile_active:
+                    raise RuntimeError("Controller Nsight profiling is already active")
+                get_platform().profiler_start()
+                self._controller_nsys_profile_active = True
+                controller_profile_started = True
+
             self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
             if self.use_reference_policy and not self.ref_in_actor:
                 self.ref_policy_wg.start_profile(profile_step=self.global_steps)
+        except Exception:
+            if controller_profile_started:
+                try:
+                    get_platform().profiler_stop()
+                finally:
+                    self._controller_nsys_profile_active = False
+            raise
 
     def _stop_profiling(self, do_profile: bool) -> None:
         """Stop profiling for all worker groups if profiling is enabled."""
-        if do_profile:
+        if not do_profile:
+            return
+
+        try:
             self.actor_rollout_wg.stop_profile()
             if self.use_reference_policy and not self.ref_in_actor:
                 self.ref_policy_wg.stop_profile()
+        finally:
+            if self._controller_nsys_profile_active:
+                try:
+                    get_platform().profiler_stop()
+                finally:
+                    self._controller_nsys_profile_active = False
 
     @abstractmethod
     def fit(self):

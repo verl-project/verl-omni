@@ -7,6 +7,7 @@ CONFIG_SPECS=(
     "diffusion_trainer:_generated_diffusion_trainer.yaml:--config-name=diffusion_trainer.yaml"
     "diffusion_trainer:_generated_diffusion_veomni_trainer.yaml:--config-name=diffusion_trainer.yaml diffusion/model_engine=veomni_diffusion"
     "omni_trainer:_generated_omni_trainer.yaml:--config-name=omni_trainer.yaml"
+    "omni_megatron_trainer:_generated_omni_megatron_trainer.yaml:--config-name=omni_megatron_trainer.yaml"
 )
 
 VERL_CONFIG_DIR=$(python3 -c "import verl.trainer.config; print(verl.trainer.config.__path__[0])" 2>/dev/null || echo "")
@@ -47,7 +48,7 @@ generate_config() {
 for spec in "${CONFIG_SPECS[@]}"; do
     IFS=':' read -r config_name output_file config_arg <<< "$spec"
     extra_arg=""
-    if [ "$config_name" = "omni_trainer" ]; then
+    if [ "$config_name" = "omni_trainer" ] || [ "$config_name" = "omni_megatron_trainer" ]; then
         if [ -n "$VERL_CONFIG_DIR" ]; then
             extra_arg=" $OMNI_EXTRA_ARG"
         else

@@ -29,6 +29,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from tensordict import TensorDict
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -101,6 +102,11 @@ def _get_omni_impl_module():
     if _OMNI_IMPL_FQN in sys.modules:
         _omni_impl_cache = sys.modules[_OMNI_IMPL_FQN]
         return _omni_impl_cache
+
+    root_mod = sys.modules.setdefault("verl_omni", types.ModuleType("verl_omni"))
+    root_mod.__path__ = [_VERL_OMNI_DIR]
+    utils_mod = sys.modules.setdefault("verl_omni.utils", types.ModuleType("verl_omni.utils"))
+    utils_mod.__path__ = [os.path.join(_VERL_OMNI_DIR, "utils")]
 
     # Pre-mock verl_omni sub-packages whose ``__init__.py`` triggers CUDA.
     for modname in (
@@ -222,15 +228,60 @@ def test_engine_get_engine_cls_resolves_to_omni_fsdp_engine():
 
     _get_omni_impl_module()
 
-    os.environ["VERL_ENGINE_DEVICE"] = "cuda"
-    try:
+    with patch("verl.workers.engine.base.get_device_name", return_value="cuda"):
         for backend in ("fsdp", "fsdp2"):
             cls = EngineRegistry.get_engine_cls("omni_model", backend)
             assert cls.__name__ == "OmniFSDPEngine", (
                 f"get_engine_cls('omni_model', '{backend}') returned {cls.__name__}, expected OmniFSDPEngine"
             )
-    finally:
-        os.environ.pop("VERL_ENGINE_DEVICE", None)
+
+
+def test_direct_preference_reuses_base_train_and_infer_batch_methods():
+    """DPO should branch inside the engine lifecycle, not via a separate train/infer API."""
+    omni_impl = _get_omni_impl_module()
+
+    assert omni_impl.OmniFSDPEngine.train_batch is omni_impl.FSDPEngineWithLMHead.train_batch
+    assert omni_impl.OmniFSDPEngine.infer_batch is omni_impl.FSDPEngineWithLMHead.infer_batch
+
+
+def test_policy_gradient_prepare_model_inputs_delegates_to_base_engine():
+    """Policy-gradient omni input preparation stays on verl's language-model path."""
+    omni_impl = _get_omni_impl_module()
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.model_config = _make_mock_model_config(trainer_type="policy_gradient")
+    engine._trainer_type = "policy_gradient"
+    micro_batch = TensorDict({}, batch_size=[0])
+
+    with patch.object(
+        omni_impl.FSDPEngineWithLMHead,
+        "prepare_model_inputs",
+        return_value=({"input_ids": torch.ones(1, 1, dtype=torch.long)}, {"base": True}),
+    ) as mock_prepare:
+        model_inputs, output_args = engine.prepare_model_inputs(micro_batch)
+
+    mock_prepare.assert_called_once_with(micro_batch)
+    assert set(model_inputs) == {"input_ids"}
+    assert output_args == {"base": True}
+
+
+def test_direct_preference_prepare_model_inputs_delegates_to_base_engine():
+    """DPO input preparation reuses verl's language-model path."""
+    omni_impl = _get_omni_impl_module()
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.model_config = _make_mock_model_config(trainer_type="direct_preference")
+    engine._trainer_type = "direct_preference"
+    micro_batch = TensorDict({"input_ids": torch.ones(2, 3, dtype=torch.long)}, batch_size=[])
+
+    with patch.object(
+        omni_impl.FSDPEngineWithLMHead,
+        "prepare_model_inputs",
+        return_value=({"input_ids": torch.ones(2, 3, dtype=torch.long)}, {"base": True}),
+    ) as mock_base_prepare:
+        model_inputs, output_args = engine.prepare_model_inputs(micro_batch)
+
+    mock_base_prepare.assert_called_once_with(micro_batch)
+    assert set(model_inputs) == {"input_ids"}
+    assert output_args == {"base": True}
 
 
 # ---------------------------------------------------------------------------
@@ -537,3 +588,94 @@ def test_merged_lora_per_tensor_param_with_lora_context_manager():
         actor, backup = entered[0]
         assert actor is module
         assert backup is True
+
+
+# ---------------------------------------------------------------------------
+# Direct preference forward lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_direct_preference_prepare_model_outputs_for_training():
+    """Training output preparation reuses verl's language-model path."""
+    omni_impl = _get_omni_impl_module()
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.model_config = _make_mock_model_config(trainer_type="direct_preference")
+    engine._trainer_type = "direct_preference"
+
+    micro_batch = TensorDict({"input_ids": torch.ones(2, 3, dtype=torch.long)}, batch_size=[])
+    raw_output = types.SimpleNamespace(logits=torch.zeros(4, 3, 8))
+
+    with patch.object(
+        omni_impl.FSDPEngineWithLMHead,
+        "prepare_model_outputs",
+        return_value={"log_probs": torch.ones(2, 3)},
+    ) as mock_prepare:
+        model_output = engine.prepare_model_outputs(
+            output=raw_output,
+            output_args={"base": True},
+            micro_batch=micro_batch,
+            logits_processor_func=object(),
+        )
+
+    mock_prepare.assert_called_once()
+    assert set(model_output) == {"log_probs"}
+    torch.testing.assert_close(model_output["log_probs"], torch.ones(2, 3))
+
+
+def test_direct_preference_prepare_model_outputs_for_inference():
+    """Reference inference output preparation reuses verl's language-model path."""
+    omni_impl = _get_omni_impl_module()
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.model_config = _make_mock_model_config(trainer_type="direct_preference")
+    engine._trainer_type = "direct_preference"
+
+    micro_batch = TensorDict({"input_ids": torch.ones(2, 3, dtype=torch.long)}, batch_size=[])
+    raw_output = types.SimpleNamespace(logits=torch.zeros(4, 3, 8))
+
+    with patch.object(
+        omni_impl.FSDPEngineWithLMHead,
+        "prepare_model_outputs",
+        return_value={"log_probs": torch.ones(2, 3)},
+    ) as mock_prepare:
+        model_output = engine.prepare_model_outputs(
+            output=raw_output,
+            output_args={"base": True},
+            micro_batch=micro_batch,
+            logits_processor_func=None,
+        )
+
+    mock_prepare.assert_called_once()
+    assert set(model_output) == {"log_probs"}
+    torch.testing.assert_close(model_output["log_probs"], torch.ones(2, 3))
+
+
+def test_postprocess_batch_func_converts_preference_outputs_to_nested_tensor():
+    """DPO inference postprocess reuses the base jagged NestedTensor path."""
+    from verl.utils import tensordict_utils as tu
+    from verl.workers.engine.fsdp.transformer_impl import postprocess_batch_func
+
+    data = TensorDict({}, batch_size=[3])
+    tu.assign_non_tensor(data, use_dynamic_bsz=False)
+
+    outputs = postprocess_batch_func(
+        output_lst=[
+            {
+                "model_output": {"log_probs": torch.tensor([[1.0], [2.0]])},
+                "loss": 0.0,
+                "metrics": {"metric": 1.0},
+            },
+            {
+                "model_output": {"log_probs": torch.tensor([[3.0]])},
+                "loss": 0.0,
+                "metrics": {"metric": 2.0},
+            },
+        ],
+        indices=None,
+        data=data,
+    )
+
+    log_probs = outputs["model_output"]["log_probs"]
+    assert log_probs.is_nested
+    torch.testing.assert_close(log_probs.values(), torch.tensor([1.0, 2.0, 3.0]))
+    assert outputs["loss"] == [0.0, 0.0]
+    assert outputs["metrics"]["metric"] == [1.0, 2.0]

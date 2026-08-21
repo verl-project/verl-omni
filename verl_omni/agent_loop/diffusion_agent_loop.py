@@ -74,7 +74,7 @@ class DiffusionAgentLoopOutput(BaseModel):
     prompt_ids: list[int]
     """Prompt token ids."""
     response_diffusion_output: Any
-    """Response diffusion output (torch.Tensor): image tensor (CHW) / video tensor (TCHW)."""
+    """Response pixels (CHW/TCHW) as uint8 values in [0, 255], or floating-point latents."""
     response_logprobs: Optional[Any] = None
     """Log probabilities for the response tokens. (torch.Tensor)"""
     reward_score: Optional[float] = None
@@ -95,7 +95,7 @@ class _InternalDiffusionAgentLoopOutput(DiffusionAgentLoopOutput):
     prompt_ids: torch.Tensor
     """Padded prompt token ids."""
     response_diffusion_output: torch.Tensor
-    """Response diffusion output: image (NCHW format) / video (NTCHW format)."""
+    """Response pixels (NCHW/NTCHW) as uint8 values in [0, 255], or floating-point latents."""
     response_logprobs: Optional[torch.Tensor] = None
     """Log probabilities over denoising timesteps."""
     extra_fields: dict[str, Any] = {}
@@ -165,8 +165,9 @@ class DiffusionAgentLoopWorker:
             DataProto: Output batch with the following fields.
 
             - ``prompts``: ``[bsz, prompt_length]`` prompt token ids from dataset.
-            - ``responses``: diffusion output, typically ``[bsz, C, H, W]`` (image)
-              or ``[bsz, T, C, H, W]`` (video).
+            - ``responses``: uint8 pixel output in ``[0, 255]``, typically
+              ``[bsz, C, H, W]`` (image) or ``[bsz, T, C, H, W]`` (video).
+              Latent output remains floating point.
             - ``rm_scores`` (optional): ``[bsz, 1]`` reward model scores.
             - ``meta_info``:
 

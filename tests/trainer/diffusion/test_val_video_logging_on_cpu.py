@@ -66,10 +66,10 @@ def _run_val_logging(
 
 def _warm_clips(n, t=8, h=32, w=32):
     """``n`` solid warm clips ``[N, T, C, H, W]`` with R > G > B, so an inverted encode is detectable."""
-    clips = torch.zeros(n, t, 3, h, w)
-    clips[:, :, 0] = 0.75  # R
-    clips[:, :, 1] = 0.35  # G
-    clips[:, :, 2] = 0.15  # B
+    clips = torch.zeros(n, t, 3, h, w, dtype=torch.uint8)
+    clips[:, :, 0] = 191  # R
+    clips[:, :, 1] = 89  # G
+    clips[:, :, 2] = 38  # B
     return clips
 
 

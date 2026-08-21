@@ -252,6 +252,12 @@ actor_rollout_ref:
       num_frames: 1
       frame_rate: 24.0
     calculate_log_probs: false
+    llm_calculate_log_probs: false
+    temperature: 1.0
+    top_k: 0
+    top_p: 1.0
+    repetition_penalty: 1.0
+    max_new_tokens: 256
     rollout_adapter: default
     agent:
       _target_: verl.workers.config.AgentLoopConfig
@@ -529,6 +535,8 @@ trainer:
     sampler:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop
+      drop_incomplete_groups: false
+      max_incomplete_group_refill_rounds: 3
       custom_sampler:
         path: null
         name: null
