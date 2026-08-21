@@ -44,7 +44,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
 from vllm import SamplingParams
 from vllm.entrypoints.openai.api_server import build_app
-from vllm_omni.engine.arg_utils import OmniEngineArgs
+from vllm_omni.engine.arg_utils import OmniEngineArgs, orchestrator_field_names
 from vllm_omni.entrypoints import AsyncOmni
 from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
 from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
@@ -281,6 +281,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # Strip fault_tolerance_config when fault tolerance was not explicitly enabled.
         if not engine_args.get("enable_fault_tolerance"):
             engine_args.pop("fault_tolerance_config", None)
+
+        # ``from_cli_args`` only retains OmniEngineArgs fields. Restore the
+        # OrchestratorArgs fields forwarded by verl before creating AsyncOmni.
+        for key in orchestrator_field_names() - engine_args.keys():
+            value = getattr(args, key, None)
+            if value is not None:
+                engine_args[key] = value
 
         deploy_config = getattr(args, "deploy_config", None)
         if deploy_config:
@@ -741,7 +748,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         extra_fields: dict[str, Any] = {"global_steps": self.global_steps}
         if final_res.trajectory_latents is not None:
-            extra_fields["all_latents"] = _maybe_unbatch(final_res.trajectory_latents)
+            if isinstance(final_res.trajectory_latents, Mapping):
+                for key, value in final_res.trajectory_latents.items():
+                    if key not in {"all_log_probs", "all_timesteps"}:
+                        extra_fields[key] = _maybe_unbatch(value)
+            else:
+                extra_fields["all_latents"] = _maybe_unbatch(final_res.trajectory_latents)
         if final_res.trajectory_timesteps is not None:
             extra_fields["all_timesteps"] = _maybe_unbatch(final_res.trajectory_timesteps)
         for metadata_group in _rollout_metadata_groups(final_res.multimodal_output):
