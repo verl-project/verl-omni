@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Register agentic_tool_agent (forces Reflection after successful judge_image).
+from . import agentic_tool_agent_loop as _agentic_tool_agent_loop  # noqa: F401
 # The MiniMax H3 agent loop lives in its pipeline package; import it here so the
 # @register decorator fires when the agent_loop package is imported. Do not
 # re-export the class from the pipeline package __init__ (import cycle).
