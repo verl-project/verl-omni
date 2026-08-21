@@ -31,3 +31,25 @@ def test_avqa_npu_launcher_wires_v1_multimodal_training():
     )
     assert all(setting in avqa_launcher for setting in required_settings)
     assert "models.transformers" not in avqa_launcher
+
+
+def test_nextqa_npu_launcher_wires_video_gspo_training():
+    launcher_dir = Path(__file__).parents[2] / "examples/gspo_trainer/qwen3_omni"
+    launcher = (launcher_dir / "run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh").read_text(encoding="utf-8")
+
+    required_settings = (
+        "python3 -m verl_omni.trainer.main_omni",
+        "data.custom_cls.name=QwenOmniRLHFDataset",
+        "USE_AUDIO_IN_VIDEO=${USE_AUDIO_IN_VIDEO:-true}",
+        "++data.mm_processor_kwargs.use_audio_in_video=${USE_AUDIO_IN_VIDEO}",
+        "++data.mm_processor_kwargs.sampling_rate=16000",
+        "actor_rollout_ref.actor.strategy=fsdp2",
+        "actor_rollout_ref.actor.policy_loss.loss_mode=gspo",
+        "actor_rollout_ref.rollout.name=vllm_omni",
+        "engine_kwargs.vllm_omni.pipeline_name=qwen3_omni_moe",
+        "reward.reward_manager.source=register",
+        "reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py",
+        "trainer.total_training_steps=${TOTAL_TRAINING_STEPS}",
+    )
+    assert all(setting in launcher for setting in required_settings)
+    assert "models.transformers" not in launcher

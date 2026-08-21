@@ -1,12 +1,13 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
-Last updated: 08/03/2026
+Last updated: 08/20/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
-the async rollout backend. Three input recipes are supported: **text → text**
-(`gsm8k`), **image → text** (`MMK12`), and
-**text + image + audio → text** (`AVQA-R1-6K`).
+the async rollout backend. Four input recipes are supported: **text → text**
+(`gsm8k`), **image → text** (`MMK12`), **text + image + audio → text**
+(`AVQA-R1-6K`), and **video frames + video audio + text → text**
+(`TinyLLaVA-Video-R1-NextQA`).
 
 Both **GPU** and **NPU** training platforms are supported:
 
@@ -17,6 +18,8 @@ Both **GPU** and **NPU** training platforms are supported:
   **16 × Ascend 910C 64GB**.
 - [`run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh)
   — **NPU**, **full-parameter V1** for text + image + audio AVQA training.
+- [`run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh)
+  — **NPU**, **full-parameter V1** for video question answering on NextQA.
 
 For the base environment setup, see the [installation guide](../../docs/start/install.md).
 
@@ -284,6 +287,74 @@ preserves its `RLHFDataset` base class, sets rollout NPU memory utilization to
 extracts the first `<answer>...</answer>` payload and returns a binary exact-match
 reward against the tagged dataset label.
 
+## Training with `TinyLLaVA-Video-R1-NextQA`
+
+This recipe follows Relax quick-start task4 while using verl-omni's GSPO loss,
+Qwen3-Omni V1 trainer, `vllm-omni` rollout, and Ascend NPU FSDP2 actor. Each
+sample contains one video and a five-way question. Both sampled frames and the
+video's audio track are passed to Qwen3-Omni; the expected completion ends in a
+single tag such as `<answer>C</answer>`.
+
+### Prepare the dataset
+
+```bash
+hf download --repo-type dataset Zhang199/TinyLLaVA-Video-R1-training-data \
+    --local-dir /path/to/NextQA
+unzip /path/to/NextQA/NextQA.zip -d /path/to/NextQA
+
+python examples/gspo_trainer/data_process/nextqa.py \
+    --input_dir /path/to/NextQA \
+    --output_dir $HOME/data/nextqa
+```
+
+The converter validates the JSONL schema, five choices, tagged label, media
+path, and path traversal. It writes `train.parquet` and `validation.parquet`
+using a deterministic 95/5 split by distinct video, so questions sharing the
+same clip cannot leak across splits. Absolute media paths are stored in the
+parquet and must be mounted identically on every Ray worker.
+
+Video sampling follows the Relax task4 budget: 1 FPS, 32--128 visual tokens per
+frame (`25088--100352` pixels), and at most 32 frames. These values are embedded
+in each parquet video item for `qwen_omni_utils.process_mm_info`; override them
+at conversion time with `--fps`, `--min_pixels`, `--max_pixels`, or
+`--max_frames`. Install the loader with `pip install -e ".[audio]"` and make
+`ffmpeg` available on every worker.
+
+The launcher enables `use_audio_in_video=true` and decodes audio at 16 kHz.
+Clips must therefore contain an audio stream that `ffmpeg` can decode. To run a
+visual-only ablation without rebuilding the parquet, launch with
+`USE_AUDIO_IN_VIDEO=false`.
+
+### Reward
+
+The recipe reuses the shared
+[`choice_reward.py`](../../verl_omni/utils/reward_score/choice_reward.py)
+multiple-choice scorer. It extracts the first `<answer>...</answer>` payload
+and gives `1.0` only for an exact match with the tagged dataset label,
+otherwise `0.0`. The dataset converter guarantees that every label is one of
+the five option letters A--E.
+
+### Run NPU training
+
+The default is one 16-NPU node. The script runs 32 prompts × 8 samples per
+rollout for 200 optimizer steps and accepts Hydra overrides after the script
+name.
+
+```bash
+TRAIN_FILE=$HOME/data/nextqa/train.parquet \
+VAL_FILE=$HOME/data/nextqa/validation.parquet \
+MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh
+```
+
+For the task4 two-node topology, first create the Ray cluster across both
+machines, then launch on the head node with:
+
+```bash
+N_GPUS_PER_NODE=8 NNODES=2 \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh
+```
+
 ## Performance
 
 All GPU results measured on a single node of **4 × H800 80GB**, actor and
@@ -323,12 +394,14 @@ examples/gspo_trainer/
 │   ├── run_qwen3_omni_thinker_gspo_lora.sh           ← deprecated (old main_ppo entrypoint)
 │   ├── run_qwen3_omni_thinker_gspo_npu.sh            ← launch script (NPU, full-parameter)
 │   ├── run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh    ← V1 launch script (NPU, AVQA)
+│   ├── run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh  ← V1 launch script (NPU, NextQA video)
 │   ├── config/
 │   │   └── qwen3_omni_thinker_gspo.yaml              ← old recipe config (deprecated path only)
 │   ├── qwen3_omni_thinker_only.yaml                  ← old vllm-omni stage config (deprecated path only)
 │   └── qwen3_omni_thinker_only_npu.yaml              ← old vllm-omni stage config (deprecated path only)
 ├── data_process/
 │   ├── mmk12.py                                      ← MMK12 → verl RL parquet converter
-│   └── avqa.py                                       ← AVQA → verl RL parquet converter
+│   ├── avqa.py                                       ← AVQA → verl RL parquet converter
+│   └── nextqa.py                                     ← NextQA → verl RL parquet converter
 └── README.md                                         ← (this file)
 ```

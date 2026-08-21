@@ -26,7 +26,9 @@ class QwenOmniRLHFDataset(RLHFDataset):
 
     verl turns parquet media columns into structured messages. Qwen's
     ``process_mm_info`` then resolves image/audio/video paths into the media
-    objects expected by the Qwen3-Omni processor and vLLM-Omni rollout.
+    objects expected by the Qwen3-Omni processor and vLLM-Omni rollout. Video
+    audio extraction is controlled by ``data.mm_processor_kwargs.use_audio_in_video``
+    and remains disabled by default.
     """
 
     @classmethod
@@ -38,8 +40,11 @@ class QwenOmniRLHFDataset(RLHFDataset):
     ) -> tuple[list[Any] | None, list[Any] | None, list[Any] | None]:
         from qwen_omni_utils import process_mm_info
 
+        mm_processor_kwargs = config.get("mm_processor_kwargs", {}) if config is not None else {}
+        use_audio_in_video = bool(mm_processor_kwargs.get("use_audio_in_video", False))
+
         # Qwen returns (audios, images, videos); verl expects
-        # (images, videos, audios). AVQA uses a standalone audio track rather
-        # than extracting audio from a video.
-        audios, images, videos = process_mm_info(messages, use_audio_in_video=False)
+        # (images, videos, audios). AVQA keeps the default because it supplies
+        # a standalone audio track; video tasks can opt into the video audio.
+        audios, images, videos = process_mm_info(messages, use_audio_in_video=use_audio_in_video)
         return images, videos, audios

@@ -58,3 +58,12 @@ def test_process_multi_modal_info_uses_qwen_omni_utils_and_reorders_outputs(monk
 
     assert result == (images, videos, audios)
     assert calls == [(messages, False)]
+
+    result = QwenOmniRLHFDataset._process_multi_modal_info(
+        messages,
+        image_patch_size=14,
+        config={"mm_processor_kwargs": {"use_audio_in_video": True}},
+    )
+
+    assert result == (images, videos, audios)
+    assert calls == [(messages, False), (messages, True)]
