@@ -53,9 +53,19 @@ from vllm_omni.outputs import OmniRequestOutput
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase, VllmOmniPipelineBase
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig, OmniModelConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
+from verl_omni.workers.rollout.vllm_rollout.prefix_caching import (
+    install_prefix_caching_cli_fix,
+    warn_if_prefix_caching_mismatch,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
+
+
+# Honor an explicit ``rollout.enable_prefix_caching=False``: verl's CLI
+# serializer drops explicit-False booleans, which silently re-enables prefix
+# caching and corrupts rollouts after sleep/wake (see prefix_caching.py).
+install_prefix_caching_cli_fix()
 
 # Sentinel: ``None`` is a valid cached value (LoRA not loaded).
 _LORA_REQUEST_CACHE_MISS = object()
@@ -294,6 +304,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             self._temp_deploy_ctx = None
 
         self.engine = engine_client
+        # Warn if the engine's effective prefix caching differs from the config.
+        warn_if_prefix_caching_mismatch(self.engine, self.config)
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
 
     async def run_headless(self, args: argparse.Namespace):
