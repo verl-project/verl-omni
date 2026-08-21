@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Register agentic_tool_agent (forces Reflection after successful judge_image).
+from . import agentic_tool_agent_loop as _agentic_tool_agent_loop  # noqa: F401
 from .composite_agent_loop import CompositeAgentLoopWorker
 from .diffusion_agent_loop import DiffusionAgentLoopOutput, DiffusionAgentLoopWorker
 from .diffusion_agent_loop_tq import (
