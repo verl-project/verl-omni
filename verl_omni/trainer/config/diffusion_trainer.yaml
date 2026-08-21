@@ -39,7 +39,10 @@ defaults:
 # config for actor, rollout and reference model
 actor_rollout_ref:
 
-  # Whether it's a hybrid engine, currently only supports hybrid engine
+  # Run rollout servers on resources separate from the trainer
+  separate: false
+
+  # Whether to colocate actor and rollout in a hybrid engine
   hybrid_engine: true
 
   # Timeout for operations executed against the process group
