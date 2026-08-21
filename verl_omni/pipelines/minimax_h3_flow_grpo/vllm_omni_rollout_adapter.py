@@ -360,7 +360,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             key: value.detach().cpu() if isinstance(value, torch.Tensor) else value
             for key, value in self._flow_grpo_trajectory.items()
         }
-        # vLLM-Omni v0.26.0rc1 exposes structured trajectory payloads here.
+        # vLLM-Omni attaches structured trajectory payloads here.
         output.trajectory_latents = trajectory
         output.trajectory_timesteps = trajectory["all_timesteps"]
         output.trajectory_log_probs = trajectory["all_log_probs"]

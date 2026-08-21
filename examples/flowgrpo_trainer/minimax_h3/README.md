@@ -82,8 +82,8 @@ H3 supports text-encoder TP sizes `1`, `2`, `4`, and `8`. The configured reward
 devices must also be visible to the reward worker.
 
 Both scripts use a training batch size of 8, a PPO mini-batch size of 8, a
-per-device micro-batch size of 1, and 100 total training steps. The GPU recipe
-generates eight rollouts per prompt, while the NPU recipe generates one. The
+per-device micro-batch size of 1, and 100 total training steps. Both recipes
+generate eight rollouts per prompt by default. The
 default `256x448`, 107-frame output is intended for integration debugging
 rather than final-quality generation.
 

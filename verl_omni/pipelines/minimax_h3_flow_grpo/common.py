@@ -25,6 +25,8 @@ from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 H3_VIDEO_SHIFT = 12.0
 H3_AUDIO_SHIFT = 3.0
+H3_VIDEO_LOG_PROB_WEIGHT = 0.5
+H3_AUDIO_LOG_PROB_WEIGHT = 0.5
 
 H3_VIDEO_WIDTH = 96
 H3_AUDIO_WIDTH = 32
@@ -92,10 +94,10 @@ def combine_log_probs(
     video_numel: int,
     audio_numel: int,
 ) -> torch.Tensor:
-    """Combine the per-modality mean log densities with equal weight."""
+    """Combine per-modality mean log densities using explicit H3 weights."""
     if video_numel <= 0 or audio_numel <= 0:
         raise ValueError("MiniMax H3 video and audio latent sizes must be positive.")
-    return 0.5 * (video_log_prob + audio_log_prob)
+    return H3_VIDEO_LOG_PROB_WEIGHT * video_log_prob + H3_AUDIO_LOG_PROB_WEIGHT * audio_log_prob
 
 
 def flatten_joint_latents(video: torch.Tensor, audio: torch.Tensor) -> torch.Tensor:
