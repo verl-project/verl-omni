@@ -98,6 +98,17 @@ def validate_separate_config(config) -> None:
     if config.actor_rollout_ref.hybrid_engine:
         raise ValueError("Separate mode requires actor_rollout_ref.hybrid_engine=false.")
 
+    model = config.actor_rollout_ref.model
+    lora_rank = (model.get("lora") or {}).get("rank", 0) or 0
+    legacy_lora_rank = model.get("lora_rank", 0) or 0
+    lora_adapter_path = model.get("lora_adapter_path")
+    if lora_rank > 0 or legacy_lora_rank > 0 or lora_adapter_path is not None:
+        raise ValueError(
+            "Separate mode currently supports full finetuning only; "
+            "actor_rollout_ref.model.lora.rank, actor_rollout_ref.model.lora_rank, and "
+            "actor_rollout_ref.model.lora_adapter_path must respectively be 0, 0, and null."
+        )
+
     rollout = config.actor_rollout_ref.rollout
     if rollout.nnodes <= 0 or rollout.n_gpus_per_node <= 0:
         raise ValueError("Separate mode requires positive rollout nnodes and n_gpus_per_node.")

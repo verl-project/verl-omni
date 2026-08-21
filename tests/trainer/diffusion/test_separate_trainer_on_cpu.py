@@ -48,6 +48,7 @@ def test_separate_config_defaults_to_colocated(separate_config):
     assert config.actor_rollout_ref.separate is False
     assert separate_config.actor_rollout_ref.separate is True
     ray_diffusion_trainer.validate_separate_config(config)
+    ray_diffusion_trainer.validate_separate_config(separate_config)
 
 
 def test_config_without_separate_field_uses_colocated_mapping(monkeypatch):
@@ -80,6 +81,27 @@ def test_run_diffusion_validates_before_ray_initialization(monkeypatch, separate
 
     with pytest.raises(ValueError, match="actor_rollout_ref.hybrid_engine=false"):
         main_diffusion.run_diffusion(separate_config)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        ("actor_rollout_ref.model.lora.rank", 8),
+        ("actor_rollout_ref.model.lora_rank", 8),
+        ("actor_rollout_ref.model.lora_adapter_path", "/tmp/adapter"),
+    ],
+)
+def test_lora_separate_fails_before_ray_initialization(monkeypatch, separate_config, path, value):
+    config = copy.deepcopy(separate_config)
+    OmegaConf.update(config, path, value, force_add=True)
+    monkeypatch.setattr(
+        main_diffusion.ray,
+        "is_initialized",
+        lambda: pytest.fail("Ray must not be inspected before separate LoRA validation"),
+    )
+
+    with pytest.raises(ValueError, match="Separate mode currently supports full finetuning only"):
+        main_diffusion.run_diffusion(config)
 
 
 @pytest.mark.parametrize(
