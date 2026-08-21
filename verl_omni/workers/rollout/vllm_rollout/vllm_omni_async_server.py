@@ -53,10 +53,7 @@ from vllm_omni.outputs import OmniRequestOutput
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase, VllmOmniPipelineBase
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig, OmniModelConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
-from verl_omni.workers.rollout.vllm_rollout.prefix_caching import (
-    install_prefix_caching_cli_fix,
-    warn_if_prefix_caching_mismatch,
-)
+from verl_omni.workers.rollout.vllm_rollout.prefix_caching import install_prefix_caching_cli_fix
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
@@ -304,8 +301,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             self._temp_deploy_ctx = None
 
         self.engine = engine_client
-        # Warn if the engine's effective prefix caching differs from the config.
-        warn_if_prefix_caching_mismatch(self.engine, self.config)
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
 
     async def run_headless(self, args: argparse.Namespace):

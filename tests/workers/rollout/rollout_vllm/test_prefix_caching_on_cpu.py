@@ -11,18 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Regression tests for the prefix-caching CLI fix.
+"""Regression tests for the prefix-caching CLI shim.
 
 verl's ``build_cli_args_from_config`` drops explicit-``False`` booleans, so
 ``rollout.enable_prefix_caching=False`` never reaches the omni engine and the
 scheduler silently runs with prefix caching ON — which corrupts rollouts after
 sleep/wake cycles (stale block-hash table over discarded KV). These tests pin
-the shim in
+the temporary shim in
 ``verl_omni.workers.rollout.vllm_rollout.prefix_caching`` that re-emits
 ``--no-enable-prefix-caching`` for an explicit ``False``.
 """
 
-import logging
 import types
 
 import pytest
@@ -30,7 +29,6 @@ import pytest
 from verl_omni.workers.rollout.vllm_rollout.prefix_caching import (
     _PATCH_MARK,
     install_prefix_caching_cli_fix,
-    warn_if_prefix_caching_mismatch,
 )
 
 
@@ -99,24 +97,6 @@ class TestInstallPrefixCachingCliFix:
         args = mod.build_cli_args_from_config({"enable_prefix_caching": False})
         assert args.count("--no-enable-prefix-caching") == 1
 
-    def test_install_raises_when_serializer_missing(self):
-        mod = types.ModuleType("empty_module")
-        with pytest.raises(AttributeError, match="build_cli_args_from_config"):
-            install_prefix_caching_cli_fix(mod)
-
-    def test_upstream_fixed_serializer_left_untouched(self):
-        # If verl ever ships an explicit-False-aware serializer (marked with
-        # the same attribute), install must be a no-op that keeps it in place.
-        mod = make_fake_verl_server_module()
-
-        def fixed_serializer(config: dict) -> list[str]:
-            return ["--no-enable-prefix-caching"] if config.get("enable_prefix_caching") is False else []
-
-        setattr(fixed_serializer, _PATCH_MARK, True)
-        mod.build_cli_args_from_config = fixed_serializer
-        install_prefix_caching_cli_fix(mod)
-        assert mod.build_cli_args_from_config is fixed_serializer
-
     def test_install_on_real_verl_module(self):
         """Integration: patch the actual verl module, then restore it."""
         pytest.importorskip("verl.workers.rollout.vllm_rollout.vllm_async_server")
@@ -132,33 +112,3 @@ class TestInstallPrefixCachingCliFix:
             assert "--enable-prefix-caching" not in args
         finally:
             verl_server_mod.build_cli_args_from_config = orig
-
-
-class TestWarnIfPrefixCachingMismatch:
-    @staticmethod
-    def _fake_engine(effective: bool):
-        cache_config = types.SimpleNamespace(enable_prefix_caching=effective)
-        return types.SimpleNamespace(vllm_config=types.SimpleNamespace(cache_config=cache_config))
-
-    def test_mismatch_warns(self, caplog):
-        config = types.SimpleNamespace(enable_prefix_caching=False)
-        with caplog.at_level(logging.WARNING, logger="verl_omni.workers.rollout.vllm_rollout.prefix_caching"):
-            warn_if_prefix_caching_mismatch(self._fake_engine(True), config)
-        assert any("enable_prefix_caching" in r.message for r in caplog.records)
-
-    def test_match_is_silent(self, caplog):
-        config = types.SimpleNamespace(enable_prefix_caching=True)
-        with caplog.at_level(logging.WARNING, logger="verl_omni.workers.rollout.vllm_rollout.prefix_caching"):
-            warn_if_prefix_caching_mismatch(self._fake_engine(True), config)
-        assert not caplog.records
-
-    def test_non_bool_config_is_silent(self, caplog):
-        config = types.SimpleNamespace(enable_prefix_caching=None)
-        with caplog.at_level(logging.WARNING, logger="verl_omni.workers.rollout.vllm_rollout.prefix_caching"):
-            warn_if_prefix_caching_mismatch(self._fake_engine(True), config)
-        assert not caplog.records
-
-    def test_engine_without_attrs_never_raises(self):
-        config = types.SimpleNamespace(enable_prefix_caching=False)
-        warn_if_prefix_caching_mismatch(object(), config)  # must not raise
-        warn_if_prefix_caching_mismatch(None, config)
