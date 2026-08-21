@@ -1,5 +1,7 @@
 # MiniMax H3 FL2VA First-Frame Data
 
+Last updated: 08/21/2026
+
 Offline data pipeline for MiniMax H3 FL2VA (text+image to audio-video) RL
 training: turn a prompt list into FLUX reference images, pair them into
 train/test JSONL, and feed the FL2VA `prepare_data.py` converter.

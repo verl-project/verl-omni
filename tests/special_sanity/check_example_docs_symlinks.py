@@ -93,9 +93,7 @@ def expected_docs_path_and_target(readme_path: str) -> tuple[str, str]:
         docs_path = f"docs/examples/{model}/{trainer}_{model}.md"
         target = f"../../../examples/{trainer}/{model}/README.md"
         return docs_path, target
-    raise ValueError(
-        f"unsupported nested README depth (only trainer or trainer/model allowed): {readme_path}"
-    )
+    raise ValueError(f"unsupported nested README depth (only trainer or trainer/model allowed): {readme_path}")
 
 
 def parse_examples_toctree(index_text: str) -> set[str]:
@@ -115,14 +113,10 @@ def main() -> int:
     errors: list[str] = []
     all_staged = staged_files()
     example_readmes = sorted(
-        path
-        for path in all_staged
-        if path.startswith("examples/") and path.endswith("/README.md")
+        path for path in all_staged if path.startswith("examples/") and path.endswith("/README.md")
     )
     docs_example_files = {
-        path: meta
-        for path, meta in all_staged.items()
-        if path.startswith("docs/examples/") and path.endswith(".md")
+        path: meta for path, meta in all_staged.items() if path.startswith("docs/examples/") and path.endswith(".md")
     }
 
     expected_docs_for_readme: dict[str, str] = {}
@@ -140,17 +134,12 @@ def main() -> int:
 
         mode, sha = docs_example_files[docs_path]
         if mode != GIT_SYMLINK_MODE:
-            errors.append(
-                f"{docs_path} must be a git symlink (mode {GIT_SYMLINK_MODE}), found mode {mode}"
-            )
+            errors.append(f"{docs_path} must be a git symlink (mode {GIT_SYMLINK_MODE}), found mode {mode}")
             continue
 
         actual_target = blob_text(sha)
         if actual_target != expected_target:
-            errors.append(
-                f"{docs_path} symlink target mismatch: "
-                f"expected {expected_target!r}, got {actual_target!r}"
-            )
+            errors.append(f"{docs_path} symlink target mismatch: expected {expected_target!r}, got {actual_target!r}")
             continue
 
         rel = _normalize_relpath(docs_path, actual_target)
@@ -169,8 +158,7 @@ def main() -> int:
         toctree_key = docs_path.removeprefix("docs/")
         if toctree_key not in toctree_entries:
             errors.append(
-                f"{docs_path} is not listed in the Examples toctree in docs/index.md "
-                f"(expected entry {toctree_key!r})"
+                f"{docs_path} is not listed in the Examples toctree in docs/index.md (expected entry {toctree_key!r})"
             )
 
     example_readme_set = set(example_readmes)
@@ -195,10 +183,7 @@ def main() -> int:
             print(f"  - {err}")
         return 1
 
-    print(
-        f"OK: {len(example_readmes)} examples/**/README.md pages "
-        f"are git-symlinked under docs/examples/"
-    )
+    print(f"OK: {len(example_readmes)} examples/**/README.md pages are git-symlinked under docs/examples/")
     return 0
 
 
