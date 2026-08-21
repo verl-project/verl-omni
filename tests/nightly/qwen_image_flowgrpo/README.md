@@ -185,8 +185,8 @@ Precision thresholds:
   for `frac_abs_over_atol`.
 - `PRECISION_MEAN_ATOL`, default `1e-4`, maximum mean absolute error.
 - `PRECISION_RMSE_ATOL`, default `1e-3`, maximum RMSE.
-- `PRECISION_P99_ATOL`, default `1e-3`, maximum 99th percentile absolute error.
-- `PRECISION_MAX_FRAC_ABS_OVER_ATOL`, default `1e-2`, maximum fraction of
+- `PRECISION_P99_ATOL`, default `2e-3`, maximum 99th percentile absolute error.
+- `PRECISION_MAX_FRAC_ABS_OVER_ATOL`, default `2e-2`, maximum fraction of
   elements whose absolute error exceeds `PRECISION_ATOL`.
 - `PRECISION_MIN_COS_SIM`, default `0.999`, minimum cosine similarity.
 
