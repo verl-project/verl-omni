@@ -83,6 +83,7 @@ examples/bagel/flowgrpo_trainer_bagel.md
 examples/qwen_image_edit/flowgrpo_trainer_qwen_image_edit.md
 examples/ltx2/flowgrpo_trainer_ltx2.md
 examples/minimax_h3/diffusionnft_trainer_minimax_h3.md
+examples/minimax_h3/flowgrpo_trainer_minimax_h3.md
 ```
 
 ```{toctree}
