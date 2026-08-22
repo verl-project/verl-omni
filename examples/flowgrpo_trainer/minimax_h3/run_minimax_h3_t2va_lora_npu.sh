@@ -20,6 +20,7 @@ TEXT_ENCODER_TP=${TEXT_ENCODER_TP:-$ROLLOUT_TP}
 REWARD_DEVICE=${REWARD_DEVICE:-npu}
 REWARD_NUM_WORKERS=${REWARD_NUM_WORKERS:-1}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-100}
+ASPECT_RATIO=${ASPECT_RATIO:-16:9}
 
 train_path=$DATA_DIR/train.parquet
 test_path=$DATA_DIR/test.parquet
@@ -92,6 +93,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.pipeline.height=256 \
     actor_rollout_ref.rollout.pipeline.width=448 \
+    actor_rollout_ref.rollout.pipeline.aspect_ratio=$ASPECT_RATIO \
     actor_rollout_ref.rollout.pipeline.num_frames=107 \
     actor_rollout_ref.rollout.pipeline.frame_rate=24 \
     actor_rollout_ref.rollout.pipeline.num_inference_steps=50 \

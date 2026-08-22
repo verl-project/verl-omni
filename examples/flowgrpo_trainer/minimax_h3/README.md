@@ -1,9 +1,10 @@
-# MiniMax H3 FL2VA FlowGRPO
+# MiniMax H3 T2VA FlowGRPO
 
-This recipe trains `MiniMaxAI/MiniMax-H3` FL2VA LoRA adapters with a
+This recipe currently trains `MiniMaxAI/MiniMax-H3` T2VA LoRA adapters with a
 Diffusers + FSDP actor, vLLM-Omni rollout, joint audio-video CPS transitions,
-and the CLAP plus ImageBind rewards on GPU and Ascend NPU. It covers the FL2VA
-model family, including its T2VA path.
+and the CLAP plus ImageBind rewards on GPU and Ascend NPU.
+
+FL2VA and Ref2VA training are TODOs and are not covered by these launchers yet.
 
 ## Install model dependencies
 
@@ -70,7 +71,7 @@ The script sources the Ascend toolkit and ATB environments from
 `ASCEND_HOME_PATH`, which defaults to `/usr/local/Ascend/ascend-toolkit`.
 
 Both launch scripts accept `WORKSPACE`, `MODEL_PATH`, `DATA_DIR`, `OUTPUT_DIR`,
-`ACTOR_CONFIG_PATH`, `NUM_GPUS`, `ROLLOUT_TP`, `TEXT_ENCODER_TP`,
+`ACTOR_CONFIG_PATH`, `ASPECT_RATIO`, `NUM_GPUS`, `ROLLOUT_TP`, `TEXT_ENCODER_TP`,
 `REWARD_NUM_WORKERS`, `REWARD_DEVICE`, `CLAP_MODEL_PATH`,
 `IMAGEBIND_MODEL_PATH`, and `TOTAL_TRAINING_STEPS` through environment
 variables. The NPU script additionally accepts `ASCEND_HOME_PATH`. Extra Hydra

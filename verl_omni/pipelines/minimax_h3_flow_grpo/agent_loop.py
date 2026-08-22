@@ -58,7 +58,6 @@ class MiniMaxH3DiffusionSingleTurnAgentLoop(DiffusionSingleTurnAgentLoop):
     async def run(self, sampling_params: dict[str, Any], **kwargs):
         sampling_params = {
             **sampling_params,
-            "aspect_ratio": "16:9",
             "verl_raw_prompt": messages_to_text(kwargs["raw_prompt"]),
         }
         return await super().run(sampling_params, **kwargs)
