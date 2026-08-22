@@ -1,94 +1,216 @@
 # MiniMax H3 T2VA FlowGRPO
 
-This recipe currently trains `MiniMaxAI/MiniMax-H3` T2VA LoRA adapters with a
-Diffusers + FSDP actor, vLLM-Omni rollout, joint audio-video CPS transitions,
-and the CLAP plus ImageBind rewards on GPU and Ascend NPU.
+Last updated: 08/23/2026
 
-FL2VA and Ref2VA training are TODOs and are not covered by these launchers yet.
+This recipe trains `MiniMaxAI/MiniMax-H3` LoRA adapters with FlowGRPO for
+text-to-audio-video (T2VA) generation. The provided launchers configure a
+Diffusers H3 Actor and vLLM-Omni rollout for joint video and audio generation,
+with CLAP and ImageBind as the default alignment rewards.
 
-## Install model dependencies
+The launchers support NVIDIA GPUs and Ascend NPUs. FL2VA and Ref2VA training
+are not yet supported by the FlowGRPO adapters.
 
-Install the standard verl-omni environment first. MiniMax H3 currently requires
-a newer Diffusers commit than the repository-wide baseline:
+## Install
+
+Follow the project [installation guide](../../../docs/start/install.md). In
+particular, install the platform backend, the repository-pinned vLLM-Omni
+revision, and the training dependencies in that order. Run the commands below
+from the verl-omni repository root.
+
+For NVIDIA GPU:
+
+```bash
+uv pip install -e ".[gpu]" --torch-backend=auto
+uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
+uv pip install -e ".[train,dev]"
+```
+
+For Ascend NPU:
+
+```bash
+uv pip install vllm==0.27.0
+uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@$(cat .github/vllm_ascend_pin.txt)"
+uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
+uv pip install -e ".[train,dev]"
+```
+
+Install the tested Diffusers revision that provides
+`MiniMaxH3Transformer3DModel`:
 
 ```bash
 uv pip install "diffusers @ git+https://github.com/huggingface/diffusers.git@d6726f38a0c5ca6c06a8f227fb7bade3486ed98d"
 ```
 
-## Prepare model
+## Prepare the checkpoint
 
-Download MiniMax H3 and point `MODEL_PATH` to the `FL2VA` directory:
+Download the complete MiniMax H3 repository rather than only one subfolder:
 
 ```bash
+export MODEL_ROOT="$HOME/models/MiniMax-H3"
+
 huggingface-cli download MiniMaxAI/MiniMax-H3 \
-  --local-dir "$HOME/models/MiniMax-H3"
-export MODEL_PATH="$HOME/models/MiniMax-H3/FL2VA"
+  --local-dir "$MODEL_ROOT"
 ```
 
-The scripts derive `ACTOR_CONFIG_PATH` as `$(dirname "$MODEL_PATH")/transformer`.
-Override both variables when using a different local layout.
+The recipe uses two representations from that download:
 
-## Prepare data
+```text
+MiniMax-H3/
+|-- FL2VA/             # vLLM-Omni T2VA/FL2VA rollout pipeline
+|   `-- transformer/
+`-- transformer/       # Diffusers Actor weights and config
+```
 
-## Install reward dependencies
+Set the corresponding paths before launching:
 
-CLAP uses the existing `transformers` and `torchaudio` dependencies. ImageBind
-is optional software under the CC-BY-NC-SA 4.0 non-commercial license:
+```bash
+export MODEL_PATH="$MODEL_ROOT/FL2VA"
+export ACTOR_CONFIG_PATH="$MODEL_ROOT/transformer"
+```
+
+The scripts derive `ACTOR_CONFIG_PATH` as `$(dirname "$MODEL_PATH")/transformer`
+when it is not set explicitly. Do not replace the official `FL2VA/transformer`
+with a symlink to the root Diffusers transformer; rollout and Actor loading use
+different checkpoint layouts.
+
+## Prepare the data
+
+T2VA uses prompt-only data and reuses the MiniMax H3 DiffusionNFT converter.
+Prepare an input directory containing either:
+
+- `train.txt` and `test.txt`, with one prompt per line; or
+- `train.jsonl` and `test.jsonl`, with a `prompt`, `text`, or `caption` field.
+
+Convert the splits to verl-omni parquet files:
+
+```bash
+export RAW_PROMPT_DIR=/path/to/raw_prompts
+export DATA_DIR="$HOME/data/vid_prompt/verl_omni"
+
+python3 examples/diffusionnft_trainer/minimax_h3/prepare_t2av_data.py \
+  --input_dir "$RAW_PROMPT_DIR" \
+  --output_dir "$DATA_DIR"
+```
+
+This writes `$DATA_DIR/train.parquet` and `$DATA_DIR/test.parquet`, the paths
+consumed by both launchers. Use `--train_size` or `--val_size` to create a
+smaller debugging dataset.
+
+## Prepare the rewards
+
+CLAP uses the existing `transformers` and `torchaudio` dependencies. The
+default CLAP checkpoint is downloaded from `laion/larger_clap_general` unless
+`CLAP_MODEL_PATH` points to a local copy.
+
+ImageBind is distributed separately under the CC-BY-NC-SA 4.0 non-commercial
+license. Install it and its video dependency separately:
 
 ```bash
 uv pip install 'git+https://github.com/facebookresearch/ImageBind.git'
 uv pip install 'git+https://github.com/facebookresearch/pytorchvideo.git'
 ```
 
-Download the ImageBind checkpoint separately and set `IMAGEBIND_MODEL_PATH` to
-its location. The scripts default to `.checkpoints/imagebind_huge.pth`. Review
-the ImageBind license before enabling this reward in your environment.
+Download `imagebind_huge.pth` and set its location:
+
+```bash
+export IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth
+```
+
+By default, CLAP runs on `$REWARD_DEVICE:0` and ImageBind on
+`$REWARD_DEVICE:1`, where `REWARD_DEVICE` is `cuda` for the GPU launcher and
+`npu` for the NPU launcher. Both devices must be visible to the reward worker.
+
 
 ## Launch
 
-### GPU
+### NVIDIA GPU
 
 ```bash
+MODEL_PATH="$MODEL_ROOT/FL2VA" \
+DATA_DIR="$HOME/data/vid_prompt/verl_omni" \
+IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
 bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh
 ```
 
-The GPU recipe defaults to 8 GPUs, vLLM-Omni DiT and text-encoder tensor
-parallel size 4, one reward worker, Actor `_flash_3_varlen_hub`, and rollout
-`FLASH_ATTN_3_HUB`. CLAP and ImageBind run on `cuda:0` and `cuda:1`,
-respectively. On GPUs without the required FA3 support, override the Actor
-attention backend with `native` and the rollout backend with `TORCH_SDPA`.
+The GPU launcher uses Actor `_flash_3_varlen_hub` and rollout
+`FLASH_ATTN_3_HUB`. On hardware without FA3 support, append compatible Hydra
+overrides:
+
+```bash
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh \
+  actor_rollout_ref.model.attn_backend=native \
+  actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA
+```
 
 ### Ascend NPU
 
 ```bash
+MODEL_PATH="$MODEL_ROOT/FL2VA" \
+DATA_DIR="$HOME/data/vid_prompt/verl_omni" \
+IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
 bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_npu.sh
 ```
 
-The NPU recipe defaults to 8 NPUs, vLLM-Omni DiT and text-encoder tensor
-parallel size 4, one reward worker, Actor `_native_npu`, and rollout
-`TORCH_SDPA`. CLAP and ImageBind run on `npu:0` and `npu:1`, respectively.
-The script sources the Ascend toolkit and ATB environments from
-`ASCEND_HOME_PATH`, which defaults to `/usr/local/Ascend/ascend-toolkit`.
+The NPU launcher uses Actor `_native_npu`, rollout `TORCH_SDPA`, parameter and
+optimizer offload, and vLLM-Omni CPU offload. It sources the Ascend toolkit and
+ATB environments from `ASCEND_HOME_PATH`, which defaults to
+`/usr/local/Ascend/ascend-toolkit`.
 
-Both launch scripts accept `WORKSPACE`, `MODEL_PATH`, `DATA_DIR`, `OUTPUT_DIR`,
-`ACTOR_CONFIG_PATH`, `ASPECT_RATIO`, `NUM_GPUS`, `ROLLOUT_TP`, `TEXT_ENCODER_TP`,
-`REWARD_NUM_WORKERS`, `REWARD_DEVICE`, `CLAP_MODEL_PATH`,
-`IMAGEBIND_MODEL_PATH`, and `TOTAL_TRAINING_STEPS` through environment
-variables. The NPU script additionally accepts `ASCEND_HOME_PATH`. Extra Hydra
-overrides can be appended to either command.
+Both launchers default to offline W&B logging. Set `WANDB_MODE=online` and the
+usual W&B credentials to upload a run. Checkpoints and logs are written under
+`outputs/<launcher-name>/` unless `OUTPUT_DIR` is set.
 
-`DATA_DIR` must contain `train.parquet` and `test.parquet`. `NUM_GPUS` must be
-divisible by `ROLLOUT_TP`, and `TEXT_ENCODER_TP` must not exceed `ROLLOUT_TP`.
-H3 supports text-encoder TP sizes `1`, `2`, `4`, and `8`. The configured reward
-devices must also be visible to the reward worker.
+## Default configuration
 
-Both scripts use a training batch size of 8, a PPO mini-batch size of 8, a
-per-device micro-batch size of 1, and 100 total training steps. Both recipes
-generate eight rollouts per prompt by default. The
-default `256x448`, 107-frame output is intended for integration debugging
-rather than final-quality generation.
+| Setting | Default |
+| --- | --- |
+| Devices | 8 GPU or NPU |
+| Rollout DiT TP | 4 |
+| Text-encoder TP | Same as rollout TP |
+| Training batch size | 32 |
+| PPO mini-batch / per-device micro-batch | 16 / 1 |
+| Rollouts per prompt | 8 |
+| LoRA rank / alpha | 64 / 128 |
+| Learning rate | `3e-4` |
+| Output | `256x448`, 107 frames at 24 FPS |
+| Rollout inference steps | 50 |
+| CPS window | 3 contiguous transitions from `[0, 50]` |
+| Total training steps | 100 |
 
-For each 50-step rollout, the recipe samples three contiguous SDE transitions
-from the configured range `[0, 50]` (clamped to the available transitions).
-Video and audio use separate FlowMatch sigma schedules, and their mean
-transition log-probabilities contribute equally to FlowGRPO training.
+`NUM_GPUS` must be divisible by `ROLLOUT_TP`. `TEXT_ENCODER_TP` cannot exceed
+`ROLLOUT_TP`; H3 supports text-encoder TP sizes 1, 2, 4, and 8. The recipe uses
+an Actor micro-batch of 1 because samples with different packed
+video/audio/text layouts cannot share one H3 forward. A larger micro-batch is
+valid only when every sample has the same packed layout.
+
+MiniMax H3 requires a named `ASPECT_RATIO`, one of `21:9`, `16:9`, `4:3`,
+`1:1`, `3:4`, or `9:16`. The explicit height and width select the generated
+canvas and must be multiples of 32; the default is `256x448` with
+`ASPECT_RATIO=16:9`.
+
+Common environment overrides are:
+
+| Variable | Purpose |
+| --- | --- |
+| `WORKSPACE` | Base directory for default model and data paths |
+| `MODEL_PATH` | Official `MiniMax-H3/FL2VA` rollout pipeline |
+| `ACTOR_CONFIG_PATH` | Root Diffusers Actor weights and config directory |
+| `DATA_DIR` | Directory containing `train.parquet` and `test.parquet` |
+| `OUTPUT_DIR` | Checkpoint and log root |
+| `NUM_GPUS` | Devices per node |
+| `ROLLOUT_TP` | vLLM-Omni DiT tensor parallel size |
+| `TEXT_ENCODER_TP` | H3 text-encoder tensor parallel size |
+| `REWARD_NUM_WORKERS` | Number of reward workers |
+| `REWARD_DEVICE` | Reward device type, such as `cuda` or `npu` |
+| `CLAP_MODEL_PATH` | CLAP model ID or local path |
+| `IMAGEBIND_MODEL_PATH` | Local ImageBind checkpoint path |
+| `ASPECT_RATIO` | Named H3 canvas ratio |
+| `TOTAL_TRAINING_STEPS` | Number of trainer steps |
+
+Extra Hydra overrides may be appended to either launcher command.
+
+## Current limitations
+
+- Only T2VA rollout and training are supported. FL2VA and Ref2VA are TODOs.
+- CLAP and ImageBind are required by the provided launchers; change the reward
+  configuration explicitly if either reward is unavailable.
