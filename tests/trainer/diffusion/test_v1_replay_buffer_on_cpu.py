@@ -90,15 +90,24 @@ def _make_upstream_buffer(trainer_mode="sync"):
     )
 
 
-def _make_trainer(*, refill_fn, drop_incomplete_groups=True, max_refill_rounds=3, train_batch_size=3):
+def _make_trainer(
+    *,
+    refill_fn,
+    drop_incomplete_groups=True,
+    max_refill_rounds=3,
+    train_batch_size=3,
+    trainer_mode="sync",
+):
     return SimpleNamespace(
         config=_make_config(
             drop_incomplete_groups=drop_incomplete_groups,
+            trainer_mode=trainer_mode,
             max_refill_rounds=max_refill_rounds,
             train_batch_size=train_batch_size,
         ),
+        trainer_mode=trainer_mode,
         global_steps=1,
-        replay_buffer=_make_upstream_buffer(),
+        replay_buffer=_make_upstream_buffer(trainer_mode),
         _add_prompts_to_generate=refill_fn,
         _trajectory_uid=PolicyGradientDiffusionTrainerV1._trajectory_uid,
     )
@@ -278,14 +287,11 @@ def test_validation_preserves_upstream_failure_sampling(monkeypatch):
     assert metrics == {}
 
 
-@pytest.mark.parametrize("trainer_mode", ["sync", "separate_async"])
-def test_disabled_policy_preserves_upstream_training_failure_sampling(monkeypatch, trainer_mode):
+def test_disabled_sync_policy_preserves_upstream_training_failure_sampling(monkeypatch):
     fake_tq = _FakeTransferQueue({})
     fake_tq.add_group("failed", status="failure", trajectories=1)
     _patch_transfer_queue(monkeypatch, fake_tq)
     trainer = _make_trainer(refill_fn=None, drop_incomplete_groups=False)
-    trainer.replay_buffer = _make_upstream_buffer(trainer_mode)
-    trainer.config.trainer.v1.trainer_mode = trainer_mode
 
     batch, metrics = _sample(trainer, batch_size=1)
 

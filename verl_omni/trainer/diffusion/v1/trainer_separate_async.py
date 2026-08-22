@@ -39,7 +39,10 @@ from enum import Enum
 
 import ray
 from omegaconf import DictConfig
+from transfer_queue import KVBatchMeta
+from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
+from verl.trainer.ppo.utils import Role
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.workers.rollout.llm_server import LLMServerManager
@@ -49,6 +52,7 @@ from verl_omni.trainer.diffusion.v1.trainer_base import (
     register_diffusion_trainer,
 )
 from verl_omni.workers.checkpoint_engine import OmniCheckpointEngineManager
+from verl_omni.workers.detach_actor_worker import DiffusionDetachActorWorker
 from verl_omni.workers.rollout.diffusion_llm_server import DiffusionWholeSampleRetryLLMServerClient
 
 logger = logging.getLogger(__name__)
@@ -75,19 +79,23 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
     - ``on_sample_end``: switch to trainer mode (abort + sleep colocated
       replicas, remove them from the standalone load balancer). When
       ``sync_compatible`` is True, also pause the standalone rollout.
-    - ``on_step_end``: every ``parameter_sync_step``, push actor weights into
-      the standalone rollout replicas. Colocated replicas stay slept during
-      training (they share GPUs with the actor) and are only synced at init
-      and when switching to rollout mode. When ``sync_compatible`` is True,
-      resume standalone generation after weight sync.
+    - ``on_step_end``: after ``parameter_sync_step`` local actor updates, push
+      actor weights into the standalone rollout replicas. Colocated replicas
+      stay slept during training (they share GPUs with the actor) and are only
+      synced at init and when switching to rollout mode. When
+      ``sync_compatible`` is True, resume standalone generation after weight
+      sync.
     """
 
     def __init__(self, config: DictConfig):
         train_batch_size = config.data.train_batch_size
         ppo_mini_batch_size = config.actor_rollout_ref.actor.ppo_mini_batch_size
-        assert train_batch_size == ppo_mini_batch_size, (
-            f"train_batch_size must equal ppo_mini_batch_size in separate async training, "
-            f"got {train_batch_size} and {ppo_mini_batch_size}"
+        parameter_sync_step = config.trainer.v1.separate_async.parameter_sync_step
+        assert parameter_sync_step > 0, f"parameter_sync_step must be positive, got {parameter_sync_step}"
+        assert train_batch_size == parameter_sync_step * ppo_mini_batch_size, (
+            "train_batch_size must equal parameter_sync_step * ppo_mini_batch_size "
+            f"in separate async training, but got train_batch_size={train_batch_size}, "
+            f"parameter_sync_step={parameter_sync_step}, ppo_mini_batch_size={ppo_mini_batch_size}"
         )
         assert config.actor_rollout_ref.rollout.nnodes > 0, (
             "actor_rollout_ref.rollout.nnodes must be > 0 in separate async training"
@@ -101,6 +109,48 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
 
         super().__init__(config)
 
+    def _init_resource_pool_mgr(self):
+        super()._init_resource_pool_mgr()
+        role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
+        self.role_worker_mapping[role] = ray.remote(DiffusionDetachActorWorker)
+
+    def _compute_old_log_prob(self, data: DataProto) -> DataProto:
+        """Compute every local update's proximal log-probs with cycle-start weights."""
+        if self.parameter_sync_step == 1:
+            return super()._compute_old_log_prob(data)
+
+        if self.local_trigger_step == 0:
+            try:
+                self.actor_rollout_wg.save_model_to_cpu(0)
+                return super()._compute_old_log_prob(data)
+            except BaseException:
+                self.actor_rollout_wg.clear_cpu_model(0)
+                raise
+
+        snapshot_id = self.local_trigger_step
+        snapshot_saved = False
+        try:
+            self.actor_rollout_wg.save_model_to_cpu(snapshot_id)
+            snapshot_saved = True
+            self.actor_rollout_wg.restore_model_from_cpu(0)
+            return super()._compute_old_log_prob(data)
+        finally:
+            try:
+                if snapshot_saved:
+                    self.actor_rollout_wg.restore_model_from_cpu(snapshot_id)
+            finally:
+                self.actor_rollout_wg.clear_cpu_model(snapshot_id)
+                if self.local_trigger_step == self.parameter_sync_step - 1:
+                    self.actor_rollout_wg.clear_cpu_model(0)
+
+    def step(self, metrics: dict, timing_raw: dict) -> KVBatchMeta:
+        """Run one parameter-sync cycle and always release its base snapshot."""
+        try:
+            return super().step(metrics, timing_raw)
+        finally:
+            if self.parameter_sync_step > 1:
+                self.actor_rollout_wg.clear_cpu_model(0)
+
     def _init_online_rollout_stack(self, actor_rollout_resource_pool):
         """Build colocated rollout stack (naive ckpt) + standalone rollout stack.
 
@@ -109,8 +159,6 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         standalone ``LLMServerManager`` / ``CheckpointEngineManager`` pair uses
         the configured non-naive backend for trainer -> standalone weight sync.
         """
-        from verl.trainer.ppo.utils import Role
-
         from verl_omni.reward_loop import OmniRewardLoopManager
 
         resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
@@ -212,13 +260,12 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
 
     def on_step_end(self):
         with marked_timer("update_weights", self.timing_raw, color="red"):
-            if self.global_steps % self.config.trainer.v1.separate_async.parameter_sync_step == 0:
-                logger.warning(
-                    "LORA_SYNC_PROOF separate_async on_step_end: sending weights to "
-                    "STANDALONE checkpoint manager (global_steps=%s)",
-                    self.global_steps,
-                )
-                self.standalone_checkpoint_manager.update_weights(self.global_steps)
+            logger.warning(
+                "LORA_SYNC_PROOF separate_async on_step_end: sending weights to "
+                "STANDALONE checkpoint manager (global_steps=%s)",
+                self.global_steps,
+            )
+            self.standalone_checkpoint_manager.update_weights(self.global_steps)
             if self.sync_compatible and self._standalone_paused:
                 # Sync-compatible mode: resume standalone generation after the
                 # actor update + weight sync so the next generate phase uses
