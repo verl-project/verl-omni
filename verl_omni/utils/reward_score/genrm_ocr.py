@@ -101,6 +101,7 @@ async def compute_score_ocr(
     reward_router_address: str,
     reward_model_tokenizer: PreTrainedTokenizer = None,
     model_name: Optional[str] = None,
+    sampling_params: dict = None,
 ):
     """Compute an image OCR score via a generative reward model (GRM).
 
@@ -182,11 +183,11 @@ async def compute_score_ocr(
                 ],
             },
         ]
-        # TODO: make sampling params configurable
+        params = {**_sampling_params(), **(sampling_params or {})}
         chat_complete_request = {
             "messages": messages,
             "model": model_name,
-            **_sampling_params(),
+            **params,
         }
         result = await _chat_complete(
             router_address=reward_router_address,

@@ -444,6 +444,8 @@ reward:
         bootstrap_port: null
         ib_device: null
     enable: false
+    full_determinism: false
+    seed: 42
     enable_resource_pool: false
     n_gpus_per_node: 8
     nnodes: 0
