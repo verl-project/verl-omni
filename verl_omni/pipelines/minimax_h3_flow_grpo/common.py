@@ -91,13 +91,12 @@ def sample_h3_transition(
 def combine_log_probs(
     video_log_prob: torch.Tensor,
     audio_log_prob: torch.Tensor,
-    video_numel: int,
-    audio_numel: int,
+    *,
+    video_weight: float = H3_VIDEO_LOG_PROB_WEIGHT,
+    audio_weight: float = H3_AUDIO_LOG_PROB_WEIGHT,
 ) -> torch.Tensor:
     """Combine per-modality mean log densities using explicit H3 weights."""
-    if video_numel <= 0 or audio_numel <= 0:
-        raise ValueError("MiniMax H3 video and audio latent sizes must be positive.")
-    return H3_VIDEO_LOG_PROB_WEIGHT * video_log_prob + H3_AUDIO_LOG_PROB_WEIGHT * audio_log_prob
+    return video_weight * video_log_prob + audio_weight * audio_log_prob
 
 
 def flatten_joint_latents(video: torch.Tensor, audio: torch.Tensor) -> torch.Tensor:

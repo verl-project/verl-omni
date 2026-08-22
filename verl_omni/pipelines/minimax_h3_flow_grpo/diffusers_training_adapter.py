@@ -230,7 +230,7 @@ class MiniMaxH3FlowGRPO(DiffusionModelBase):
         video_weight = video[0].numel()
         audio_weight = audio[0].numel()
         total_weight = video_weight + audio_weight
-        log_prob = combine_log_probs(video_log_prob, audio_log_prob, video_weight, audio_weight)
+        log_prob = combine_log_probs(video_log_prob, audio_log_prob)
         mean = flatten_joint_latents(video_out[2], audio_out[2])
         video_std = video_out[3].reshape(-1).mean()
         audio_std = audio_out[3].reshape(-1).mean()

@@ -101,7 +101,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
     @staticmethod
     def _inject_raw_prompt(request: OmniDiffusionRequest) -> None:
         extra_args = request.sampling_params.extra_args or {}
-        raw_prompt = extra_args.pop("verl_raw_prompt", None)
+        raw_prompt = extra_args.pop("raw_prompt", None)
         if not isinstance(raw_prompt, str) or not raw_prompt:
             raise ValueError("MiniMax H3 rollout requires a non-empty raw prompt.")
         if isinstance(request.prompt, dict):
@@ -316,8 +316,6 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
                             combine_log_probs(
                                 video_log_prob,
                                 audio_log_prob,
-                                video_rows.numel(),
-                                audio_rows.numel(),
                             )
                         )
                         step_indices.append(step)

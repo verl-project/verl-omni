@@ -56,9 +56,12 @@ class MiniMaxH3DiffusionSingleTurnAgentLoop(DiffusionSingleTurnAgentLoop):
         self.loop = get_event_loop()
 
     async def run(self, sampling_params: dict[str, Any], **kwargs):
+        # MiniMax H3 in vLLM-Omni consumes the raw prompt text. Its text-encoder
+        # path is complicated by tensor parallelism, so we avoid duplicating it
+        # with a prompt-ID-based encoder and pass the original text directly.
         sampling_params = {
             **sampling_params,
-            "verl_raw_prompt": messages_to_text(kwargs["raw_prompt"]),
+            "raw_prompt": messages_to_text(kwargs["raw_prompt"]),
         }
         return await super().run(sampling_params, **kwargs)
 
