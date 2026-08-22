@@ -246,7 +246,8 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: null
     disable_log_stats: true
     'n': 1
-    seed: null
+    seed: 42
+    full_determinism: false
     multi_turn:
       _target_: verl.workers.config.MultiTurnConfig
       enable: false
@@ -471,6 +472,8 @@ reward:
       top_p: 1
       do_sample: true
       'n': 1
+      seed: 42
+      full_determinism: false
       prompt_length: 2048
       response_length: 2048
       quantization: null

@@ -170,12 +170,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
             is_collect=self.engine.is_mp_src_rank_with_outputs(),
         )
 
-        if hasattr(self.model_config, "hf_config"):
+        if getattr(self.model_config, "hf_config", None) is not None:
             self.flops_counter = FlopsCounter(self.model_config.hf_config)
         elif self.config.model_type in ("diffusion_model", "diffusion_dpo_model", "diffusion_nft_model"):
             self.flops_counter = DiffusionFlopsCounter(
-                architecture=self.model_config.architecture,
-                transformer_config=self.model_config.transformer_config,
+                architecture=getattr(self.model_config, "architecture", None),
+                transformer_config=getattr(self.model_config, "transformer_config", None),
             )
         else:
             self.flops_counter = None

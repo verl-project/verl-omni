@@ -48,6 +48,7 @@ class DiffusionModelConfig(BaseConfig):
         "architecture",
         "transformer_config",
         "extra_tokenizer_map",
+        "hf_config",
     }
 
     path: str = MISSING
@@ -58,6 +59,7 @@ class DiffusionModelConfig(BaseConfig):
     local_path: Optional[str] = None
     tokenizer_path: Optional[str] = None
     local_tokenizer_path: Optional[str] = None
+    hf_config: Any = None
 
     # model type, e.g., "diffusion_model"
     model_type: str = "diffusion_model"

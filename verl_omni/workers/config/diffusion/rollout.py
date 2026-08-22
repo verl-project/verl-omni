@@ -97,7 +97,16 @@ class DiffusionSamplingConfig(BaseConfig):
 
 @dataclass
 class DiffusionRolloutConfig(BaseConfig):
-    _mutable_fields = {"max_model_len", "load_format", "engine_kwargs", "prompt_length", "expert_parallel_size"}
+    _mutable_fields = {
+        "max_model_len",
+        "load_format",
+        "engine_kwargs",
+        "prompt_length",
+        "expert_parallel_size",
+        "full_determinism",
+        "seed",
+        "max_num_seqs",
+    }
 
     name: Optional[str] = MISSING
     mode: str = "async"
@@ -114,7 +123,8 @@ class DiffusionRolloutConfig(BaseConfig):
 
     # Base seed for deterministic training rollout RNG. Per-step base is
     # ``seed + global_step - 1``. null disables rollout seeding.
-    seed: Optional[int] = None
+    seed: Optional[int] = 42
+    full_determinism: bool = False
 
     prompt_length: int = 512
 

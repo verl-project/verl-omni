@@ -87,6 +87,8 @@ reward_model:
     top_p: 1
     do_sample: true
     n: 1
+    seed: 42
+    full_determinism: false
 
     prompt_length: 2048
     response_length: 2048

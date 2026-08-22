@@ -111,7 +111,10 @@ n: 1
 
 # Base seed for deterministic training rollout RNG.
 # Per-step base is ``seed + global_step - 1``. null disables rollout seeding.
-seed: null
+seed: 42
+
+# Whether to enable full determinism for reproducibility.
+full_determinism: False
 
 # Multi-turn interaction config for tools or chat.
 multi_turn:
