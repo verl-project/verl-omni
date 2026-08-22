@@ -14,6 +14,7 @@
 
 from . import (
     bagel_flow_grpo,
+    boogu_image_flow_grpo,
     ltx2_flow_grpo,
     minimax_h3_diffusion_nft,
     qwen3_omni,
@@ -28,6 +29,7 @@ from . import (
     wan22_dance_grpo,
 )
 from .bagel_flow_grpo import *  # noqa: F401, F403
+from .boogu_image_flow_grpo import *  # noqa: F401, F403
 from .ltx2_flow_grpo import *  # noqa: F401, F403
 from .minimax_h3_diffusion_nft import *  # noqa: F401, F403
 from .qwen3_omni import *  # noqa: F401, F403
@@ -54,3 +56,4 @@ __all__ += list(wan22_dance_grpo.__all__)
 __all__ += list(qwen_image_dpo.__all__)
 __all__ += list(qwen_image_dual_grpo.__all__)
 __all__ += list(qwen_image_edit_flow_grpo.__all__)
+__all__ += list(boogu_image_flow_grpo.__all__)
