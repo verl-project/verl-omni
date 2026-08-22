@@ -59,6 +59,9 @@ free_cache_engine: True
 # TP size for rollout
 tensor_model_parallel_size: 2
 
+# Text-encoder TP shard size: 1 or tensor_model_parallel_size.
+text_encoder_tp_size: 1
+
 # DP size for rollout
 data_parallel_size: 1
 
@@ -170,6 +173,10 @@ val_kwargs:
     # Flow-matching sigma-schedule shift for the video stream (validation)
     video_flow_shift: ${oc.select:actor_rollout_ref.rollout.pipeline.video_flow_shift,12.0}
 
+    # Optional request-contract fields for pipelines that accept a task label or frame indices (validation)
+    task: ${oc.select:actor_rollout_ref.rollout.pipeline.task,null}
+    frame_indices: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_indices,null}
+
     # Named canvas aspect ratio for compatible pipelines (validation)
     aspect_ratio: ${oc.select:actor_rollout_ref.rollout.pipeline.aspect_ratio,null}
 
@@ -259,6 +266,10 @@ pipeline:
 
   # Flow-matching sigma-schedule shift for the video stream
   video_flow_shift: 12.0
+
+  # Optional request-contract fields for pipelines that accept a task label or frame indices
+  task: null
+  frame_indices: null
 
   # Named canvas aspect ratio for compatible pipelines
   aspect_ratio: null

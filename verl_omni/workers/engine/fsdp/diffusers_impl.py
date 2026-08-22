@@ -75,6 +75,26 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
+def _cast_loaded_diffusers_module(module: torch.nn.Module, torch_dtype: torch.dtype) -> None:
+    """Cast ordinary models while preserving diffusers-declared fp32 islands."""
+    keep_in_fp32 = getattr(module, "_keep_in_fp32_modules", None)
+    if keep_in_fp32:
+        logger.info(
+            "Preserving mixed precision declared by %s._keep_in_fp32_modules=%s",
+            type(module).__name__,
+            keep_in_fp32,
+        )
+        return
+    module.to(torch_dtype)
+
+
+def _fsdp_param_dtype(module: torch.nn.Module, configured_dtype: torch.dtype) -> Optional[torch.dtype]:
+    """Keep checkpoint parameter dtypes when an architecture declares fp32 islands."""
+    if getattr(module, "_keep_in_fp32_modules", None):
+        return None
+    return configured_dtype
+
+
 class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
     """Base Diffusers engine using PyTorch FullyShardedDataParallel (FSDP).
 
@@ -286,8 +306,8 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                 else:
                     raise e
 
-            # some parameters may not in torch_dtype
-            module.to(torch_dtype)
+            # Keep architecture-declared fp32 islands; a blanket to(dtype) would flatten them.
+            _cast_loaded_diffusers_module(module, torch_dtype)
 
             if self.model_config.enable_gradient_checkpointing:
                 module.enable_gradient_checkpointing()
@@ -318,6 +338,8 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             reduce_dtype = torch.float32
             buffer_dtype = torch.float32
 
+        # None preserves fp32 islands; a real dtype makes FSDP flatten them.
+        param_dtype = _fsdp_param_dtype(module, param_dtype)
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
 
         auto_wrap_policy = get_fsdp_wrap_policy(

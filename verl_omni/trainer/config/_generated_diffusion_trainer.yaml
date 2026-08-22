@@ -189,6 +189,7 @@ actor_rollout_ref:
     cudagraph_capture_sizes: null
     free_cache_engine: true
     tensor_model_parallel_size: 2
+    text_encoder_tp_size: 1
     data_parallel_size: 1
     expert_parallel_size: 1
     pipeline_model_parallel_size: 1
@@ -225,6 +226,8 @@ actor_rollout_ref:
         num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
         frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
         video_flow_shift: ${oc.select:actor_rollout_ref.rollout.pipeline.video_flow_shift,12.0}
+        task: ${oc.select:actor_rollout_ref.rollout.pipeline.task,null}
+        frame_indices: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_indices,null}
         aspect_ratio: ${oc.select:actor_rollout_ref.rollout.pipeline.aspect_ratio,null}
       algo:
         _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
@@ -254,6 +257,8 @@ actor_rollout_ref:
       num_frames: 1
       frame_rate: 24.0
       video_flow_shift: 12.0
+      task: null
+      frame_indices: null
       aspect_ratio: null
     calculate_log_probs: false
     llm_calculate_log_probs: false
@@ -323,6 +328,8 @@ actor_rollout_ref:
       guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
       num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
       frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
+      task: ${oc.select:actor_rollout_ref.rollout.pipeline.task,null}
+      frame_indices: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_indices,null}
       video_flow_shift: ${oc.select:actor_rollout_ref.rollout.pipeline.video_flow_shift,12.0}
     algo:
       _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
@@ -512,6 +519,7 @@ trainer:
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1
+  max_ckpt_to_keep: null
   esi_redundant_time: 0
   resume_mode: auto
   resume_from_path: null

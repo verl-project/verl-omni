@@ -32,6 +32,7 @@ from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
     build_layout_from_meta,
     h3_dit_timestep,
     h3_velocity_to_flow_match,
+    keyframe_indices_to_anchors,
     pack_video_audio_rows,
     unpack_video_audio_rows,
 )
@@ -91,6 +92,16 @@ class TestMiniMaxH3DiffusionNFTRegistry:
     def test_registered_for_minimax_h3_diffusion_nft(self):
         resolved = DiffusionModelBase.get_class_by_name("MiniMaxH3Pipeline", "diffusion_nft")
         assert resolved is MiniMaxH3DiffusionNFT
+
+    def test_prepare_processor_files_adds_qwen3_vl_model_type(self, tmp_path):
+        processor_dir = tmp_path / "processor"
+        processor_dir.mkdir()
+
+        prepared = MiniMaxH3DiffusionNFT.prepare_processor_files(str(tmp_path))
+
+        assert prepared == str(processor_dir)
+        assert (processor_dir / "config.json").read_text() == '{"model_type": "qwen3_vl"}'
+        assert MiniMaxH3DiffusionNFT.prepare_processor_files(str(tmp_path)) == prepared
 
     def test_importing_the_package_registers_the_algorithm(self):
         # Registration is an import side effect and ``verl_omni/pipelines/__init__.py`` is the only
@@ -166,6 +177,24 @@ class TestMiniMaxH3BuildLayoutFromMeta:
         assert torch.equal(token_tags[text_indices], torch.full((_TEXT_LEN,), TEXT_TAG))
         assert torch.equal(token_tags[audio_indices], torch.full((_NUM_AUDIO_ROWS,), AUDIO_TAG))
         assert torch.equal(token_tags[video_indices], torch.full((_NUM_VIDEO_ROWS,), VIDEO_TAG))
+
+    @pytest.mark.parametrize(
+        ("frame_indices", "anchors", "condition_rows"),
+        [([0], ("first",), 4), ([-1], ("last",), 4), ([0, -1], ("first", "last"), 8)],
+    )
+    def test_fl2va_keyframe_signatures_add_fixed_condition_rows(self, frame_indices, anchors, condition_rows):
+        assert keyframe_indices_to_anchors(frame_indices) == anchors
+        text_tags = torch.tensor([VIDEO_TAG, TEXT_TAG] + [TEXT_TAG] * (_TEXT_LEN - 2))
+        _, token_tags, video_indices, _, text_indices, num_cond_video, _ = build_layout_from_meta(
+            _META, _TEXT_LEN, keyframe_anchors=anchors, text_token_tags=text_tags
+        )
+        assert num_cond_video == condition_rows
+        assert video_indices.shape[0] == _NUM_VIDEO_ROWS + condition_rows
+        assert torch.equal(token_tags[text_indices], text_tags)
+
+    def test_invalid_fl2va_keyframe_signature_is_rejected(self):
+        with pytest.raises(ValueError, match="frame_indices"):
+            keyframe_indices_to_anchors([1])
 
     def test_inconsistent_meta_is_rejected(self):
         # audio_t=4 does not divide Na=6 evenly -> derived rows disagree with meta.
@@ -251,6 +280,36 @@ class TestMiniMaxH3Forward:
         )
         assert module.call_args_list[0].kwargs["encoder_hidden_states"].shape == (1, 5, _TEXT_DIM)
         assert module.call_args_list[1].kwargs["encoder_hidden_states"].shape == (1, _TEXT_LEN, _TEXT_DIM)
+
+    def test_fl2va_injects_condition_rows_and_crops_their_velocity(self):
+        video_rows, audio_rows = _rows(batch=1)
+        condition_rows = torch.randn(1, 8, VIDEO_ROW_WIDTH)
+        text_tags = torch.tensor([[VIDEO_TAG, TEXT_TAG] + [TEXT_TAG] * (_TEXT_LEN - 2)])
+        micro_batch = _micro_batch(batch=1)
+        micro_batch["condition_video_rows"] = condition_rows
+        micro_batch["keyframe_frame_indices"] = torch.tensor([[0, -1]])
+        micro_batch["prompt_token_tags"] = text_tags
+        model_inputs, _ = MiniMaxH3DiffusionNFT.prepare_model_inputs(
+            module=MagicMock(),
+            model_config=MagicMock(),
+            latents=pack_video_audio_rows(video_rows, audio_rows),
+            timesteps=torch.tensor([500.0]),
+            prompt_embeds=torch.randn(1, _TEXT_LEN, _TEXT_DIM),
+            prompt_embeds_mask=torch.ones(1, _TEXT_LEN, dtype=torch.long),
+            negative_prompt_embeds=None,
+            negative_prompt_embeds_mask=None,
+            micro_batch=micro_batch,
+            step=0,
+        )
+        module = _module(_identity)
+        output = MiniMaxH3DiffusionNFT.forward(module, MagicMock(), model_inputs)
+
+        kwargs = module.call_args.kwargs
+        assert kwargs["hidden_states"].shape == (1, 12, VIDEO_ROW_WIDTH)
+        torch.testing.assert_close(kwargs["hidden_states"][0, :8], condition_rows[0])
+        assert kwargs["timestep"].tolist() == pytest.approx([0.5, 0.999])
+        assert torch.equal(kwargs["token_tags"][:_TEXT_LEN].cpu(), text_tags[0])
+        torch.testing.assert_close(output, -pack_video_audio_rows(video_rows, audio_rows))
 
     def test_non_tuple_output_raises(self):
         video_rows, audio_rows = _rows()

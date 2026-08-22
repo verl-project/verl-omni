@@ -190,6 +190,23 @@ class TestDiffusionRolloutConfig:
         with pytest.raises(ValueError, match="Invalid diffusion rollout rollout_adapter"):
             DiffusionRolloutConfig(name="vllm_omni", rollout_adapter="bogus")
 
+    def test_text_encoder_tp_size_defaults_to_one(self):
+        cfg = DiffusionRolloutConfig(name="vllm_omni")
+        assert cfg.text_encoder_tp_size == 1
+
+    def test_text_encoder_tp_size_equal_to_tp_is_allowed(self):
+        cfg = DiffusionRolloutConfig(name="vllm_omni", tensor_model_parallel_size=4, text_encoder_tp_size=4)
+        assert cfg.text_encoder_tp_size == 4
+
+    @pytest.mark.parametrize("etp", [2, 3])
+    def test_intermediate_text_encoder_tp_size_is_rejected(self, etp):
+        with pytest.raises(ValueError, match="must be either 1 or equal to tensor_model_parallel_size"):
+            DiffusionRolloutConfig(name="vllm_omni", tensor_model_parallel_size=4, text_encoder_tp_size=etp)
+
+    def test_non_positive_text_encoder_tp_size_is_rejected(self):
+        with pytest.raises(ValueError, match="text_encoder_tp_size must be >= 1"):
+            DiffusionRolloutConfig(name="vllm_omni", text_encoder_tp_size=0)
+
 
 class TestDiffusionModelConfigPolicyAdapters:
     def test_policy_state_adapters_via_hydra(self, tmp_path):

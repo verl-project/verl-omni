@@ -115,6 +115,10 @@ pipeline:
   # Audio-video frame rate
   frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
 
+  # MiniMax H3 task and FL2VA keyframe positions
+  task: ${oc.select:actor_rollout_ref.rollout.pipeline.task,null}
+  frame_indices: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_indices,null}
+
   # MiniMax H3 video-stream sigma-schedule shift
   video_flow_shift: ${oc.select:actor_rollout_ref.rollout.pipeline.video_flow_shift,12.0}
 
