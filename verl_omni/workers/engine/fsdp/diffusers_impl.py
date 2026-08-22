@@ -116,6 +116,10 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
         self._is_lora = self.model_config.lora_rank > 0
+        # FSDP2 CPUOffloadPolicy owns param placement; a manual model.to(device) would
+        # leave shards on CPU and crash state_dict()/weight-sync (upstream verl#5995).
+        # Set True in _build_fsdp_module to skip that manual load.
+        self._uses_fsdp2_cpu_offload_policy = False
 
     @property
     def is_param_offload_enabled(self) -> bool:
@@ -366,6 +370,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                 self._is_offload_param = False
                 self._is_offload_optimizer = False
                 offload_policy = CPUOffloadPolicy(pin_memory=True)
+                self._uses_fsdp2_cpu_offload_policy = True
 
             fsdp_kwargs = {
                 "mesh": fsdp_mesh,
@@ -682,7 +687,9 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         Save FSDP checkpoint, handling parameter offload as needed.
         """
         origin_module_device = next(self.module.parameters()).device.type
-        if self._is_offload_param or origin_module_device == "cpu":
+        if (self._is_offload_param or origin_module_device == "cpu") and not getattr(
+            self, "_uses_fsdp2_cpu_offload_policy", False
+        ):
             load_fsdp_model_to_gpu(self.module)
 
         self.checkpoint_manager.save_checkpoint(
@@ -721,7 +728,11 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
     ):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
-        load_fsdp_model_to_gpu(self.module)
+        # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
+        # fails the _apply tensor swap on the CPU-resident params. The per-DTensor
+        # .to(device).full_tensor() below still produces GPU tensors for the sync.
+        if not self._uses_fsdp2_cpu_offload_policy:
+            load_fsdp_model_to_gpu(self.module)
 
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 

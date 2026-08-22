@@ -16,8 +16,9 @@ It originated from the multi-modal generation RL effort in `verl`, and now has a
 
 ## News 🔥
 
+- **[2026-08]** **[MiniMax-H3](examples/diffusionnft_trainer/minimax_h3/README.md)** text-to-audio-video is now supported with DiffusionNFT. See the [T2VA LoRA example](examples/diffusionnft_trainer/minimax_h3/README.md).
 - **[2026-08]** We have released [v0.2.0](https://github.com/verl-project/verl-omni/releases/tag/v0.2.0) for faster diffusion rl and more stable Qwen3-Omni multimodal training.
-- **[2026-08]** [LTX2.3](examples/flowgrpo_trainer/ltx2/README.md) text-to-video+audio model is now supported with FlowGRPO. Stay tuned for MiniMax-H3 fine-tuning support!
+- **[2026-08]** [LTX2.3](examples/flowgrpo_trainer/ltx2/README.md) text-to-video+audio model is now supported with FlowGRPO.
 - **[2026-07]** Team-proposed algorithm [FlowGRPO with DiNa-LRM](https://verl-omni.readthedocs.io/en/latest/examples/flowgrpo_trainer_sd35_drm.html) is available. Training skips VAE decoding by scoring clean diffusion latents directly for faster and more resource-efficient model alignment.
 - **[2026-07]** VeRL-Omni is presented in QingKe AI, vLLM community, and verl x Ascend Beijing meetup. [Slides](https://drive.google.com/file/d/1RJBZZ2k6exxciFghU1FNUgds6s1w7Bpf/view?usp=sharing) are shared.
 - **[2026-06]** [Qwen3-Omni GSPO Trainer](examples/gspo_trainer) is available! [Flow-DPPO](https://verl-omni.readthedocs.io/en/latest/algo/flowdppo.html) is integrated. vLLM-Omni rollout backend is upgraded to v0.22 for higher throughput, with default actor attn backend switched to FA3.
@@ -128,9 +129,13 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
-    <td>MiniMax-H3</td>
-    <td>Diffusion generator</td>
-    <td>Any → Video + Audio</td>
+    <td rowspan="2"><b>MiniMax-H3</b></td>
+    <td rowspan="2">Diffusion generator</td>
+    <td rowspan="2">Any → Video + Audio</td>
+    <td>DiffusionNFT</td>
+    <td>✅</td>
+  </tr>
+  <tr>
     <td>FlowGRPO</td>
     <td>WIP</td>
   </tr>

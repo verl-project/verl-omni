@@ -31,6 +31,8 @@ runs:
         uv pip install --system --break-system-packages veomni==0.1.11 --no-deps
         uv pip install --system --break-system-packages torchcodec librosa soundfile av audioread
         uv pip install --system --break-system-packages "transformers[mistral-common]"
+        # GPU-smoke-only override; the project GPU extra remains on kernels==0.16.0.
+        uv pip install --system --break-system-packages "kernels==0.14.1"
         # NCCL checkpoint engine (diffusion v1 separate_async weight sync).
         uv pip install --system --break-system-packages pyzmq
         uv pip install --system --break-system-packages cupy-cuda12x || uv pip install --system --break-system-packages cupy-cuda13x

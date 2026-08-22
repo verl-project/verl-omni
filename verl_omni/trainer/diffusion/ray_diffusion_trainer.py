@@ -329,6 +329,12 @@ class BaseRayDiffusionTrainer(ABC):
 
         n_full = outputs.shape[0]
         n = n_full if max_samples is None else min(max_samples, n_full)
+        if outputs.ndim == 6:
+            # Per-sample batch dim from single-seq rollouts: [N, 1, T, C, H, W].
+            outputs = outputs.squeeze(1)
+        if outputs.ndim == 5 and outputs.shape[1] == 3 and outputs.shape[2] != 3:
+            # Channels-first [N, C, T, H, W] -> [N, T, C, H, W].
+            outputs = outputs.permute(0, 2, 1, 3, 4)
         is_video = outputs.ndim == 5  # [N, T, C, H, W] vs image [N, C, H, W]
 
         output_paths = []
@@ -401,6 +407,20 @@ class BaseRayDiffusionTrainer(ABC):
                     batch.non_tensor_batch["request_id"].tolist(),
                 )
 
+            # Audio rides in tool_extra_fields dicts from the agent loop;
+            # extract it so _dump_generations can mux it into the mp4 files.
+            tool_extra = batch.non_tensor_batch.get("tool_extra_fields", None)
+            if tool_extra is not None:
+                audios_to_dump = [item.get("audio") if isinstance(item, dict) else None for item in tool_extra]
+                audio_rates_to_dump = [
+                    item.get("audio_sample_rate") if isinstance(item, dict) else None for item in tool_extra
+                ]
+            else:
+                audios_to_dump = batch.batch.get("audio", batch.non_tensor_batch.get("audio"))
+                audio_rates_to_dump = batch.non_tensor_batch.get(
+                    "audio_sample_rate", batch.batch.get("audio_sample_rate")
+                )
+
             self._dump_generations(
                 inputs=inputs,
                 outputs=outputs,
@@ -410,10 +430,8 @@ class BaseRayDiffusionTrainer(ABC):
                 dump_path=rollout_data_dir,
                 max_samples=self.config.trainer.get("rollout_data_max_samples", None),
                 fps=int(self.config.trainer.get("video_fps", 24)),
-                audios=batch.batch.get("audio", batch.non_tensor_batch.get("audio")),
-                audio_sample_rates=batch.non_tensor_batch.get(
-                    "audio_sample_rate", batch.batch.get("audio_sample_rate")
-                ),
+                audios=audios_to_dump,
+                audio_sample_rates=audio_rates_to_dump,
             )
 
     def _maybe_log_val_generations(self, inputs, outputs, scores, audios=None, audio_sample_rates=None):

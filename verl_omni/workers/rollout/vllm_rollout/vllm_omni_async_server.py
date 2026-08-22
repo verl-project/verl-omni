@@ -707,6 +707,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 if key in diffusion_output and diffusion_output[key] is not None:
                     diffusion_output = diffusion_output[key]
                     break
+        rollout_audio: Any = None
+        if isinstance(diffusion_output, tuple | list):
+            # Joint audio-video pipelines (e.g. MiniMax H3) return
+            # (video, audio); the visual stream drives the tensor path.
+            rollout_audio = diffusion_output[1] if len(diffusion_output) > 1 else None
+            diffusion_output = diffusion_output[0]
         if output_type == "latent":
             diffusion_output = torch.as_tensor(diffusion_output).float()
         else:
@@ -743,6 +749,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 if key in extra_fields:
                     raise ValueError(f"Duplicate rollout metadata field: {key}")
                 extra_fields[key] = _maybe_unbatch(value)
+        if rollout_audio is not None:
+            extra_fields["audio"] = _maybe_unbatch(rollout_audio)
+            extra_fields.setdefault("audio_sample_rate", 32000)
 
         req_output = getattr(final_res, "request_output", None) or final_res
         if hasattr(req_output, "outputs") and req_output.outputs:

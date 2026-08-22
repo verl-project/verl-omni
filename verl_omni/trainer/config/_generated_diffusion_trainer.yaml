@@ -224,6 +224,8 @@ actor_rollout_ref:
         guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
         num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
         frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
+        video_flow_shift: ${oc.select:actor_rollout_ref.rollout.pipeline.video_flow_shift,12.0}
+        aspect_ratio: ${oc.select:actor_rollout_ref.rollout.pipeline.aspect_ratio,null}
       algo:
         _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
         noise_level: 0.0
@@ -251,6 +253,8 @@ actor_rollout_ref:
       guidance_scale: null
       num_frames: 1
       frame_rate: 24.0
+      video_flow_shift: 12.0
+      aspect_ratio: null
     calculate_log_probs: false
     llm_calculate_log_probs: false
     temperature: 1.0
@@ -319,6 +323,7 @@ actor_rollout_ref:
       guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
       num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
       frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
+      video_flow_shift: ${oc.select:actor_rollout_ref.rollout.pipeline.video_flow_shift,12.0}
     algo:
       _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
       noise_level: ${oc.select:actor_rollout_ref.rollout.algo.noise_level,1.0}
