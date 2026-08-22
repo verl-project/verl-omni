@@ -40,6 +40,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
     VLLM_LORA_NAME,
     VLLM_LORA_PATH,
+    extract_prompt_logprobs,
 )
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
 from vllm import SamplingParams
@@ -646,6 +647,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 raise RuntimeError("AR mode expects outputs with token IDs, but got None or empty.")
 
             extra_fields = {"global_steps": self.global_steps}
+            extract_prompt_logprobs(
+                output=req_output,
+                num_prompt_logprobs=params.prompt_logprobs,
+                result_dict=extra_fields,
+            )
             token_ids = req_output.outputs[0].token_ids
             log_probs = None
             if params.logprobs is not None:
@@ -949,8 +955,12 @@ class vLLMOmniReplica(vLLMReplica):
         model_config: DiffusionModelConfig | OmniModelConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
+        is_teacher_model: bool = False,
+        name_suffix: str = "",
     ):
-        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
+        super().__init__(
+            replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
+        )
         self.server_class = ray.remote(vLLMOmniHttpServer)
 
     def _validate_launch_requirements(self) -> None:
