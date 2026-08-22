@@ -748,12 +748,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         extra_fields: dict[str, Any] = {"global_steps": self.global_steps}
         if final_res.trajectory_latents is not None:
-            if isinstance(final_res.trajectory_latents, Mapping):
-                for key, value in final_res.trajectory_latents.items():
-                    if key not in {"all_log_probs", "all_timesteps"}:
-                        extra_fields[key] = _maybe_unbatch(value)
-            else:
-                extra_fields["all_latents"] = _maybe_unbatch(final_res.trajectory_latents)
+            extra_fields["all_latents"] = _maybe_unbatch(final_res.trajectory_latents)
         if final_res.trajectory_timesteps is not None:
             extra_fields["all_timesteps"] = _maybe_unbatch(final_res.trajectory_timesteps)
         for metadata_group in _rollout_metadata_groups(final_res.multimodal_output):

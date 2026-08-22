@@ -33,6 +33,7 @@ from vllm_omni.diffusion.models.minimax_h3.packed_tokens import (
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
+from verl_omni.pipelines.diffusion_rollout_output import with_rollout_data
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
@@ -358,8 +359,28 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             key: value.detach().cpu() if isinstance(value, torch.Tensor) else value
             for key, value in self._flow_grpo_trajectory.items()
         }
-        # vLLM-Omni attaches structured trajectory payloads here.
-        output.trajectory_latents = trajectory
-        output.trajectory_timesteps = trajectory["all_timesteps"]
-        output.trajectory_log_probs = trajectory["all_log_probs"]
-        return output
+        replay_fields = (
+            "all_next_latents",
+            "h3_step_indices",
+            "h3_audio_timesteps",
+            "h3_video_rows",
+            "h3_audio_rows",
+            "h3_seq_len",
+            "h3_position_ids",
+            "h3_token_tags",
+            "h3_video_indices",
+            "h3_audio_indices",
+            "h3_text_indices",
+        )
+        return with_rollout_data(
+            output,
+            trajectory_latents=trajectory["all_latents"],
+            trajectory_log_probs=trajectory["all_log_probs"],
+            trajectory_timesteps=trajectory["all_timesteps"],
+            prompt_embeddings={
+                "prompt_embeds": trajectory["prompt_embeds"],
+                "prompt_embeds_mask": trajectory["prompt_embeds_mask"],
+            },
+            rl={key: trajectory[key] for key in replay_fields},
+            to_cpu=True,
+        )
