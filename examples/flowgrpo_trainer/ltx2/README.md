@@ -10,6 +10,13 @@ The checkpoint advertises `_class_name: LTX2Pipeline`; the registered rollout
 adapter uses vLLM-Omni's LTX-2.3-specific `LTX23Pipeline` implementation behind
 that checkpoint architecture key.
 
+Two actor engines are supported:
+
+| Script                        | Engine | Weights   | Notes                                  |
+|-------------------------------|--------|-----------|----------------------------------------|
+| `run_ltx2_3_t2av_lora.sh`     | FSDP2  | LoRA      | Default; lower GPU memory.             |
+| `run_ltx2_3_t2av_veomni.sh`  | VeOmni | Full      | Requires VeOmni; param/optimizer offload enabled by default. |
+
 ## Prepare data
 
 The prompt corpus is derived from
@@ -113,7 +120,7 @@ first-frame dataset this configuration trained stably for 140 steps with the
 CLAP+ImageBind training reward climbing from 0.16 to 0.63; FA3 was verified
 error-free on Hopper (compute capability 9.0) for the whole run.
 
-### Ascend NPU
+### LoRA (Ascend NPU)
 
 ```bash
 bash examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora_npu.sh
@@ -140,7 +147,26 @@ the step range `[0, 10)`. This is configured with `sde_window_size=3`,
 `sde_contiguous=True` retains the consecutive-window behavior used by existing
 diffusion recipes.
 
+### Full-weight (VeOmni)
+
+```bash
+bash examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_veomni.sh
+```
+
+VeOmni does not support LoRA; the VeOmni recipe trains full weights and uses a
+lower learning rate (`3e-5` vs `3e-4` for LoRA). Install VeOmni first per
+[`docs/start/install.md`](../../docs/start/install.md) "Optional engine backends".
+
+Both recipes default to 8 GPUs and vLLM-Omni tensor parallel size 8. Override
+`NUM_GPUS`, `ROLLOUT_TP`, `MODEL_PATH`, `DATA_DIR`, `OUTPUT_DIR`, or
+`TOTAL_TRAINING_STEPS` through environment variables. Extra Hydra overrides can be
+appended to the command. One verl-omni global step consumes the same 48
+unique prompts and 16 responses per prompt as one reference training epoch. The
+default 15 global steps and a 24-prompt PPO mini-batch therefore reproduce the
+reference recipe's 15 epochs and two optimizer updates per epoch.
+
 The reference training recipe maintains a separate EMA evaluation copy.
-The current verl-omni FlowGRPO trainer evaluates and checkpoints the live LoRA
-policy, so the EMA-only evaluation behavior is the one reference option not
-mapped by this launch script.
+The current verl-omni FlowGRPO trainer evaluates and checkpoints the live policy
+(LoRA adapters for the FSDP2 recipe, full weights for the VeOmni recipe), so
+the EMA-only evaluation behavior is the one reference option not mapped by
+these launch scripts.
