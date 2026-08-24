@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import math
 from typing import Any
+import copy
+from typing import Any, Iterable
 
 import torch
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
@@ -41,6 +43,7 @@ from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import normalize_ltx_output_type
+from .common import calculate_shift, normalize_ltx_output_type, remap_veomni_to_diffusers_key
 
 __all__ = ["LTX23PipelineWithLogProb"]
 
@@ -69,6 +72,17 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
         primary=MediaSpec("video"),
         auxiliary=(MediaSpec("audio", sample_rate=24000),),
     )
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Remap VeOmni-style checkpoint keys to diffusers naming before loading.
+
+        The pretrained checkpoint may use VeOmni parameter names (e.g.
+        ``adaln_single``, ``patchify_proj``, ``q_norm``) while the vLLM-Omni
+        rollout model expects diffusers names (``time_embed``, ``proj_in``,
+        ``norm_q``).  Remap here so both initial safetensors loading and
+        training-time weight sync load into the correct parameters.
+        """
+        remapped = ((remap_veomni_to_diffusers_key(name), tensor) for name, tensor in weights)
+        return super().load_weights(remapped)
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:
         super().__init__(od_config=od_config, prefix=prefix)
@@ -248,6 +262,112 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
         else:
             num_steps = request_inputs.num_inference_steps
         self._selected_sde_steps = set(self._select_sde_steps(num_steps, self.device))
+
+        sampler = phase_recipe.sampler
+        self._check_forward_inputs(request_inputs, image=image)
+        guidance_parallel_ready = self._setup_forward_runtime(req, request_inputs, attention_kwargs)
+        device = self.device
+        if prompt_context is None:
+            prompt_context = self._prepare_prompt_context(
+                prompt=request_inputs.prompt,
+                negative_prompt=request_inputs.negative_prompt,
+                prompt_embeds=request_inputs.prompt_embeds,
+                negative_prompt_embeds=request_inputs.negative_prompt_embeds,
+                prompt_attention_mask=request_inputs.prompt_attention_mask,
+                negative_prompt_attention_mask=request_inputs.negative_prompt_attention_mask,
+                num_videos_per_prompt=request_inputs.num_videos_per_prompt,
+                max_sequence_length=request_inputs.max_sequence_length,
+            )
+
+        latent_num_frames, latent_height, latent_width = self._resolve_video_latent_dimensions(request_inputs)
+        latents, conditioning_mask = self._prepare_video_latents_stage(
+            request_inputs,
+            prompt_context,
+            device=device,
+            noise_scale=noise_scale,
+            image=image,
+        )
+        audio_latents, original_audio_num_frames, padded_audio_num_frames, latent_mel_bins = (
+            self._prepare_audio_latents_stage(
+                request_inputs,
+                prompt_context,
+                device=device,
+                noise_scale=noise_scale,
+            )
+        )
+
+        sigmas = (
+            np.linspace(1.0, 1.0 / request_inputs.num_inference_steps, request_inputs.num_inference_steps)
+            if sigmas is None
+            else sigmas
+        )
+        video_seq_len = latent_num_frames * latent_height * latent_width
+        mu = calculate_shift(
+            video_seq_len,
+            self.scheduler.config.get("base_image_seq_len", 1024),
+            self.scheduler.config.get("max_image_seq_len", 4096),
+            self.scheduler.config.get("base_shift", 0.95),
+            self.scheduler.config.get("max_shift", 2.05),
+        )
+        audio_scheduler = copy.deepcopy(self.scheduler)
+        video_audio_step_adapter = LTXVideoAudioStepAdapter(
+            self,
+            audio_scheduler,
+            latent_num_frames,
+            latent_height,
+            latent_width,
+            image_conditioned=conditioning_mask is not None,
+            sampler=sampler,
+            generator=request_inputs.generator,
+            conditioning_mask=conditioning_mask,
+        )
+        _ = retrieve_timesteps(
+            audio_scheduler,
+            request_inputs.num_inference_steps,
+            device,
+            timesteps,
+            sigmas=sigmas,
+            mu=mu,
+        )
+        timesteps_tensor, _ = retrieve_timesteps(
+            self.scheduler,
+            request_inputs.num_inference_steps,
+            device,
+            timesteps,
+            sigmas=sigmas,
+            mu=mu,
+        )
+        forward_ctx = LTXForwardContext(
+            req=req,
+            request_inputs=request_inputs,
+            prompt_context=prompt_context,
+            device=device,
+            guidance_parallel_ready=guidance_parallel_ready,
+            attention_kwargs=attention_kwargs,
+            latent_num_frames=latent_num_frames,
+            latent_height=latent_height,
+            latent_width=latent_width,
+            latent_mel_bins=latent_mel_bins,
+            original_audio_num_frames=original_audio_num_frames,
+            padded_audio_num_frames=padded_audio_num_frames,
+            timesteps=timesteps_tensor,
+            sampler=sampler,
+            audio_scheduler=audio_scheduler,
+            video_audio_step_adapter=video_audio_step_adapter,
+        )
+        video_coords, audio_coords = prepare_rope_coords_stage(self, forward_ctx, latents, audio_latents)
+        denoise_ctx = LTXDenoiseContext(
+            latents=latents,
+            audio_latents=audio_latents,
+            video_coords=video_coords,
+            audio_coords=audio_coords,
+            conditioning_mask=conditioning_mask,
+        )
+        denoise_ctx = self._prepare_denoise_context_for_guidance(forward_ctx, denoise_ctx)
+
+        self.scheduler.set_begin_index(0)
+        selected_steps = set(self._select_sde_steps(len(forward_ctx.timesteps), device))
+        self._selected_sde_steps = selected_steps
         self._current_latents = []
         self._next_latents = []
         self._selected_timesteps = []
