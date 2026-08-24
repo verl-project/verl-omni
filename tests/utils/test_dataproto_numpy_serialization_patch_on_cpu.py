@@ -12,11 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import importlib.util
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import verl.protocol as verl_protocol
-
 
 _PATCH_PATH = Path(__file__).parents[2] / "verl_omni" / "patches" / "dataproto.py"
 _SPEC = importlib.util.spec_from_file_location("verl_omni_dataproto_patch", _PATCH_PATH)
