@@ -814,6 +814,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @_with_routing_replay_flag(enabled=False)
     def infer_ref_batch(self, data: TensorDict) -> TensorDict:
         output = self.ref.infer_batch(data=data)
+        aggressive_empty_cache(force_sync=True)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="teacher"))
@@ -828,13 +829,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @_with_routing_replay_flag(enabled=True)
     def infer_actor_batch(self, data: TensorDict) -> TensorDict:
         output = self.actor.infer_batch(data)
-
+        # The inference (eval_mode) context offloads the FSDP model back to CPU
+        # on exit, but the caching allocator may still hold fragmented NPU
+        # memory. Free it so the subsequent training step has maximum available
+        # memory.
+        aggressive_empty_cache(force_sync=True)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
+        # The rollout (vLLM) and reward/inference phases may leave fragmented
+        # NPU memory that the caching allocator hasn't reclaimed. Free it before
+        # loading the FSDP model to GPU for training, so the backward pass has
+        # maximum available memory.
+        aggressive_empty_cache(force_sync=True)
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
 

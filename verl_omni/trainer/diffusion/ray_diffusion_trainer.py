@@ -1135,6 +1135,14 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
+        # Note: rollout replicas are already asleep here.  They were slept at
+        # the end of _init_online_rollout_stack, and neither _load_checkpoint
+        # nor anything else wakes them in between.  Do NOT sleep them again:
+        # vLLM's CuMemAllocator.sleep() has no already-offloaded guard, so a
+        # second sleep re-copies already-unmapped weights and segfaults the
+        # diffusion workers on GPU.  update_weights below resumes the rollout
+        # (wake_up) before syncing weights, so the actor's model can be loaded
+        # to GPU without competing with the rollout's weight memory.
         self.checkpoint_manager.update_weights(self.global_steps)
 
         current_epoch = self.global_steps // len(self.train_dataloader)

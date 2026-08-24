@@ -38,30 +38,57 @@ class DiffusionModelBase(ABC):
     auto-detected into ``DiffusionModelConfig.architecture``). The *algorithm*
     must match ``DiffusionModelConfig.algorithm``.
 
+    An optional ``backend`` argument selects a training-engine-specific adapter
+    for architectures whose ``forward()`` signature differs across backends
+    (e.g. diffusers ``LTXVideoTransformerModel`` vs VeOmni's
+    ``LTX2VideoTransformer3DModel``). When ``backend`` is omitted (``None``)
+    the adapter becomes the default and is used by any engine that has no
+    backend-specific override. Resolution order in :meth:`get_class`:
+
+    1. Exact ``(architecture, algorithm, backend)`` match.
+    2. Fallback ``(architecture, algorithm, None)`` default.
+
     Example::
 
         @DiffusionModelBase.register("QwenImagePipeline", algorithm="flow_grpo")
         class QwenImage(DiffusionModelBase):
             ...
+
+        @DiffusionModelBase.register("LTX2Pipeline", algorithm="flow_grpo", backend="veomni")
+        class LTX23FlowGRPOVeOmni(DiffusionModelBase):
+            ...
     """
 
-    _registry: dict[tuple[str, str], type["DiffusionModelBase"]] = {}
+    _registry: dict[tuple[str, str, Optional[str]], type["DiffusionModelBase"]] = {}
 
     @classmethod
-    def register(cls, architecture: str, algorithm: str):
-        """Class decorator that registers a subclass for ``(architecture, algorithm)``."""
+    def register(cls, architecture: str, algorithm: str, backend: Optional[str] = None):
+        """Class decorator that registers a subclass for ``(architecture, algorithm, backend)``.
+
+        Args:
+            architecture: pipeline class name from ``model_index.json``.
+            algorithm: RL algorithm key (e.g. ``"flow_grpo"``).
+            backend: optional engine backend (e.g. ``"veomni"``). When
+                ``None`` (default) the adapter is the backend-agnostic
+                fallback used when no backend-specific override matches.
+        """
 
         def decorator(subclass: type["DiffusionModelBase"]) -> type["DiffusionModelBase"]:
-            cls._registry[(architecture, algorithm)] = subclass
+            cls._registry[(architecture, algorithm, backend)] = subclass
             return subclass
 
         return decorator
 
     @classmethod
     def get_class(cls, model_config: DiffusionModelConfig) -> type["DiffusionModelBase"]:
-        """Return the registered subclass for ``(architecture, algorithm)``."""
+        """Return the registered subclass for ``(architecture, algorithm, backend)``.
+
+        Resolution tries the backend-specific key first, then falls back to
+        the backend-agnostic (``backend=None``) default.
+        """
         architecture = model_config.architecture
         algorithm = model_config.algorithm
+        backend = getattr(model_config, "backend", None)
 
         if architecture in {"QwenImagePipeline", "QwenImageEditPlusPipeline"}:
             logger.info(
@@ -72,12 +99,26 @@ class DiffusionModelBase(ABC):
             from verl_omni.models.diffusers.qwen_image import apply_qwen_image_ulysses_mask_fix
 
             apply_qwen_image_ulysses_mask_fix()
-        return cls.get_class_by_name(architecture, algorithm, model_config.external_lib)
+        return cls.get_class_by_name(architecture, algorithm, model_config.external_lib, backend=backend)
 
     @classmethod
     def peek_class(cls, architecture: str, algorithm: str) -> Optional[type["DiffusionModelBase"]]:
-        """Return the registered adapter for ``(architecture, algorithm)`` or ``None`` (non-fatal)."""
-        return cls._registry.get((architecture, algorithm))
+        """Return the registered adapter for ``(architecture, algorithm)`` or ``None`` (non-fatal).
+
+        Keys are ``(architecture, algorithm, backend)`` triples, so a plain
+        2-tuple lookup always misses.  Prefer the backend-agnostic default
+        ``(architecture, algorithm, None)``; fall back to any backend-specific
+        override registered for the same pair.  Callers without a backend
+        (e.g. LoRA config validation) get the default adapter's validation,
+        which backend-specific adapters are expected to keep compatible.
+        """
+        default = cls._registry.get((architecture, algorithm, None))
+        if default is not None:
+            return default
+        for (arch, algo, _backend), adapter in cls._registry.items():
+            if arch == architecture and algo == algorithm:
+                return adapter
+        return None
 
     @classmethod
     def get_class_by_name(
@@ -85,22 +126,31 @@ class DiffusionModelBase(ABC):
         architecture: str,
         algorithm: str,
         external_lib: Optional[str] = None,
+        backend: Optional[str] = None,
     ) -> type["DiffusionModelBase"]:
-        """Resolve an adapter before a full ``DiffusionModelConfig`` exists."""
-        key = (architecture, algorithm)
+        """Resolve an adapter before a full ``DiffusionModelConfig`` exists.
+
+        Tries ``(architecture, algorithm, backend)`` first, then falls back to
+        the backend-agnostic default ``(architecture, algorithm, None)``.
+        """
         if external_lib is not None:
             from verl.utils.import_utils import import_external_libs
 
             import_external_libs(external_lib)
-        try:
+        # 1. Try backend-specific override.
+        key = (architecture, algorithm, backend)
+        if key in cls._registry:
             return cls._registry[key]
-        except KeyError:
-            registered = sorted(cls._registry.keys())
-            raise NotImplementedError(
-                f"No diffusion model registered for (architecture={architecture!r}, "
-                f"algorithm={algorithm!r}). Registered: {registered}. "
-                f"Set ``external_lib`` in DiffusionModelConfig to load your implementation."
-            ) from None
+        # 2. Fall back to the backend-agnostic default.
+        default_key = (architecture, algorithm, None)
+        if default_key in cls._registry:
+            return cls._registry[default_key]
+        registered = sorted(cls._registry.keys(), key=lambda k: tuple("" if x is None else x for x in k))
+        raise NotImplementedError(
+            f"No diffusion model registered for (architecture={architecture!r}, "
+            f"algorithm={algorithm!r}, backend={backend!r}). Registered: {registered}. "
+            f"Set ``external_lib`` in DiffusionModelConfig to load your implementation."
+        ) from None
 
     @classmethod
     def build_module(cls, model_config: DiffusionModelConfig, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
@@ -154,6 +204,18 @@ class DiffusionModelBase(ABC):
             model_config: The ``DiffusionModelConfig``.
         """
         return
+
+    @classmethod
+    def convert_export_key(cls, name: str) -> str:
+        """Convert a state-dict key to the naming expected by the rollout loader.
+
+        Default is identity.  Backends whose model class uses different
+        parameter names than the rollout pipeline (e.g. VeOmni's
+        ``LTX2VideoTransformer3DModel`` vs diffusers' ``LTXVideoTransformerModel``)
+        override this to remap keys at export time so the rollout adapter
+        stays backend-agnostic.
+        """
+        return name
 
     @classmethod
     @abstractmethod

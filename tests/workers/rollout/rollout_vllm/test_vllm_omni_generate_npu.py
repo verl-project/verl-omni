@@ -190,3 +190,10 @@ def test_generate_and_sleep_wakeup(init_server):
     assert isinstance(output_2, DiffusionOutput)
     assert len(output_2.diffusion_output) == 3
     assert output_2.stop_reason in ("completed", "aborted", None)
+
+    # Second sleep/wake_up cycle: CaMemAllocator.sleep() unmaps ALL non-persistent
+    # allocations, but wake_up(tags=["weights"]) only remaps "weights".  Without
+    # the fix in npu_utils.py, the second sleep tries to unmap already-unmapped
+    # allocations, causing aclrtUnmapMem to fail (error 507899).
+    ray.get(server.sleep.remote())
+    ray.get(server.wake_up.remote())
