@@ -181,18 +181,18 @@ Precision tensors:
 
 Precision thresholds:
 
-- `PRECISION_ATOL`, default `1e-4`, maximum allowed absolute error.
-- `PRECISION_RTOL`, default `1e-3`, maximum allowed relative error.
-- `PRECISION_MIN_COS_SIM`, default `0.999`, minimum allowed cosine similarity.
-- `PRECISION_IMAGE_ATOL`, default `2/255` (~`0.00784`), for decoded image
-  tensors (`batch.responses`). One 8-bit LSB is `1/255` ≈ `0.00392` abs.
-- `PRECISION_IMAGE_RTOL`, default `2e-2`, relative tolerance for
-  `batch.responses`.
-- `PRECISION_IMAGE_MIN_COS_SIM`, default `0.999`, cosine similarity floor for
-  `batch.responses`.
+- `PRECISION_ATOL`, default `1e-3`, elementwise absolute-error threshold used
+  for `frac_abs_over_atol`.
+- `PRECISION_MEAN_ATOL`, default `1e-4`, maximum mean absolute error.
+- `PRECISION_RMSE_ATOL`, default `1e-3`, maximum RMSE.
+- `PRECISION_P99_ATOL`, default `2e-3`, maximum 99th percentile absolute error.
+- `PRECISION_MAX_FRAC_ABS_OVER_ATOL`, default `2e-2`, maximum fraction of
+  elements whose absolute error exceeds `PRECISION_ATOL`.
+- `PRECISION_MIN_COS_SIM`, default `0.999`, minimum cosine similarity.
 
-Each tensor fails if `max_abs_err > atol`, `max_rel_err > rtol`, or
-`cos_sim < min_cos_sim` for the threshold profile that applies to that key.
+Each tensor report includes `numel`, `mean_abs_err`, `rmse`, `p99_abs_err`,
+`frac_abs_over_atol`, and `cos_sim`. A tensor fails when any aggregate metric
+exceeds its threshold or cosine similarity falls below its floor.
 
 ## Failure Triage
 

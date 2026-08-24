@@ -13,6 +13,8 @@ disagree, these files record the repo and say so.
 - **[`docs/contributing/`](../docs/contributing/) is authoritative for procedures.**
   Seven `integrating_*` guides, each ending in a final checklist, plus a testing
   guide and a symptom-first pitfalls reference. Nothing here restates them.
+  When you add a new guide there, also list it in
+  [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 - **`skills/`** are **routers and deltas**: they classify the task, name the guide
   that owns it, and add only what the guide does not cover. Invoked as `/<skill>` or
   auto-loaded by description.
