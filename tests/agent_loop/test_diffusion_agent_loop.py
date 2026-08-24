@@ -14,7 +14,6 @@
 import gc
 import os
 import shutil
-import tempfile
 
 import numpy as np
 import pytest
@@ -43,6 +42,16 @@ def _create_tp_compatible_model(parent_dir, src_model_path, num_attention_heads=
     dst = os.path.join(parent_dir, "Qwen-Image")
     shutil.copytree(src_model_path, dst)
 
+    import json
+
+    model_index_file = os.path.join(dst, "model_index.json")
+    if os.path.exists(model_index_file):
+        with open(model_index_file) as f:
+            idx = json.load(f)
+        idx["_class_name"] = "QwenImagePipeline"
+        with open(model_index_file, "w") as f:
+            json.dump(idx, f)
+
     transformer = QwenImageTransformer2DModel(
         num_attention_heads=num_attention_heads,
         attention_head_dim=32,
@@ -60,7 +69,7 @@ def _create_tp_compatible_model(parent_dir, src_model_path, num_attention_heads=
 
 
 @pytest.fixture(params=[False, True], ids=["request_execution", "step_execution"])
-def init_config(request) -> DictConfig:
+def init_config(request, tmp_path_factory) -> DictConfig:
     from hydra import compose, initialize_config_dir
 
     with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config")):
@@ -68,51 +77,53 @@ def init_config(request) -> DictConfig:
 
     requested_gpus, tp_size, attention_heads = resolve_diffusion_agent_loop_gpu_topology()
     base_model_path = os.path.expanduser("~/models/tiny-random/Qwen-Image")
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        model_path = _create_tp_compatible_model(tmp_dir, base_model_path, num_attention_heads=attention_heads)
-        config.actor_rollout_ref.model.path = model_path
-        config.actor_rollout_ref.model.tokenizer_path = os.path.join(model_path, "tokenizer")
-        config.actor_rollout_ref.rollout.name = "vllm_omni"
-        config.actor_rollout_ref.rollout.mode = "async"
-        config.actor_rollout_ref.rollout.enforce_eager = True
-        config.actor_rollout_ref.rollout.step_execution = request.param
-        # Keep the 2-GPU TP smoke light; CI EOFError on worker launch is usually OOM.
-        # Keep enough inference steps for sde_window_range=[0, 5] / sde_window_size=2.
-        config.actor_rollout_ref.rollout.n = 2
-        config.actor_rollout_ref.rollout.pipeline.height = 256
-        config.actor_rollout_ref.rollout.pipeline.width = 256
-        config.actor_rollout_ref.rollout.pipeline.num_inference_steps = 10
-        config.actor_rollout_ref.rollout.calculate_log_probs = True
-        config.actor_rollout_ref.rollout.agent.num_workers = min(2, requested_gpus)
-        config.actor_rollout_ref.rollout.agent.default_agent_loop = "diffusion_single_turn_agent"
-        tokenizer_max_length = 1024
-        prompt_template_encode_start_idx = 34
-        max_length = tokenizer_max_length + prompt_template_encode_start_idx
+    tmp_dir = str(tmp_path_factory.mktemp("qwen_image_model"))
+    model_path = _create_tp_compatible_model(tmp_dir, base_model_path, num_attention_heads=attention_heads)
+    config.actor_rollout_ref.model.path = model_path
+    config.actor_rollout_ref.model.tokenizer_path = os.path.join(model_path, "tokenizer")
+    config.actor_rollout_ref.rollout.name = "vllm_omni"
+    config.actor_rollout_ref.rollout.mode = "async"
+    config.actor_rollout_ref.rollout.enforce_eager = True
+    config.actor_rollout_ref.rollout.step_execution = request.param
+    # Keep the 2-GPU TP smoke light; CI EOFError on worker launch is usually OOM.
+    # Keep enough inference steps for sde_window_range=[0, 5] / sde_window_size=2.
+    config.actor_rollout_ref.rollout.n = 2
+    config.actor_rollout_ref.rollout.pipeline.height = 256
+    config.actor_rollout_ref.rollout.pipeline.width = 256
+    config.actor_rollout_ref.rollout.pipeline.num_inference_steps = 10
+    config.actor_rollout_ref.rollout.calculate_log_probs = True
+    config.actor_rollout_ref.rollout.agent.num_workers = min(2, requested_gpus)
+    config.actor_rollout_ref.rollout.agent.default_agent_loop = "diffusion_single_turn_agent"
+    tokenizer_max_length = 1024
+    prompt_template_encode_start_idx = 34
+    max_length = tokenizer_max_length + prompt_template_encode_start_idx
 
-        config.actor_rollout_ref.rollout.algo.noise_level = 1.0
-        config.actor_rollout_ref.rollout.algo.sde_window_size = 2
-        config.actor_rollout_ref.rollout.algo.sde_window_range = [0, 5]
+    config.actor_rollout_ref.rollout.algo.noise_level = 1.0
+    config.actor_rollout_ref.rollout.algo.sde_window_size = 2
+    config.actor_rollout_ref.rollout.algo.sde_window_range = [0, 5]
 
-        config.actor_rollout_ref.rollout.pipeline.true_cfg_scale = 4.0
-        config.actor_rollout_ref.rollout.pipeline.max_sequence_length = max_length
-        config.actor_rollout_ref.rollout.nnodes = 1
+    config.actor_rollout_ref.rollout.pipeline.true_cfg_scale = 4.0
+    config.actor_rollout_ref.rollout.pipeline.max_sequence_length = max_length
+    config.actor_rollout_ref.rollout.nnodes = 1
 
-        config.reward.reward_manager.name = "image"
-        config.trainer.n_gpus_per_node = requested_gpus
+    config.reward.reward_manager.name = "image"
+    config.trainer.n_gpus_per_node = requested_gpus
 
-        config.data.max_prompt_length = max_length
-        config.actor_rollout_ref.rollout.max_model_len = max_length
+    config.data.max_prompt_length = max_length
+    config.actor_rollout_ref.rollout.max_model_len = max_length
 
-        config.actor_rollout_ref.rollout.tensor_model_parallel_size = tp_size
+    config.actor_rollout_ref.rollout.tensor_model_parallel_size = tp_size
+    config.actor_rollout_ref.rollout.seed = 42
+    config.actor_rollout_ref.rollout.full_determinism = False
 
-        # Smoke: prefer local FLASH_ATTN over product-default Hub FA3 (cf. FSDP engine test).
-        from tests.utils.smoke_attention import resolve_smoke_attention_backends
+    # Smoke: prefer local FLASH_ATTN over product-default Hub FA3 (cf. FSDP engine test).
+    from tests.utils.smoke_attention import resolve_smoke_attention_backends
 
-        attn_backend, rollout_attn_backend = resolve_smoke_attention_backends()
-        config.actor_rollout_ref.model.attn_backend = attn_backend
-        config.actor_rollout_ref.rollout.rollout_attn_backend = rollout_attn_backend
+    attn_backend, rollout_attn_backend = resolve_smoke_attention_backends()
+    config.actor_rollout_ref.model.attn_backend = attn_backend
+    config.actor_rollout_ref.rollout.rollout_attn_backend = rollout_attn_backend
 
-        yield config
+    return config
 
 
 def test_single_turn(init_config):

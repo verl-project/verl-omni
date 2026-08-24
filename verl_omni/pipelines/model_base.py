@@ -75,6 +75,11 @@ class DiffusionModelBase(ABC):
         return cls.get_class_by_name(architecture, algorithm, model_config.external_lib)
 
     @classmethod
+    def peek_class(cls, architecture: str, algorithm: str) -> Optional[type["DiffusionModelBase"]]:
+        """Return the registered adapter for ``(architecture, algorithm)`` or ``None`` (non-fatal)."""
+        return cls._registry.get((architecture, algorithm))
+
+    @classmethod
     def get_class_by_name(
         cls,
         architecture: str,
@@ -109,6 +114,11 @@ class DiffusionModelBase(ABC):
     @classmethod
     def configure_train_mode(cls, module: torch.nn.Module) -> None:
         """Hook called after ``module.train()`` for architecture-specific overrides."""
+        return
+
+    @classmethod
+    def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:
+        """Validate LoRA settings; default no-op. Override for rollout-sync-constrained models."""
         return
 
     @classmethod

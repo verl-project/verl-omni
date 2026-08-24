@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# TODO: Remove this import / conftest after verl is upgraded to 0.9.0
-# (which removes the need for FusedMoE alias on test collection).
-import verl_omni  # noqa: F401
+from .diffusers_training_adapter import MiniMaxH3DiffusionNFT
+from .vllm_omni_rollout_adapter import MiniMaxH3DiffusionNFTPipeline
+
+__all__ = [
+    "MiniMaxH3DiffusionNFT",
+    "MiniMaxH3DiffusionNFTPipeline",
+]

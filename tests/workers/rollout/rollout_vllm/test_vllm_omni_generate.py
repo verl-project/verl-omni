@@ -201,6 +201,8 @@ def _build_rollout_cfg(*, step_execution: bool = False) -> Any:
         "free_cache_engine": True,
         "disable_log_stats": True,
         "n": 1,
+        "seed": 42,
+        "full_determinism": False,
         "rollout_attn_backend": rollout_attn_backend,
         "pipeline": {
             "_target_": "verl_omni.workers.config.diffusion.rollout.DiffusionPipelineConfig",

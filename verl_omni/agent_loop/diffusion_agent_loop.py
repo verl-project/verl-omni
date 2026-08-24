@@ -144,6 +144,9 @@ class DiffusionAgentLoopWorker:
         if self.max_prompt_embed_length <= 0:
             raise ValueError(f"max_prompt_embed_length must be positive, got {self.max_prompt_embed_length}.")
 
+        hf_model_type = getattr(self.model_config.hf_config, "model_type", None)
+        self.hf_model_type: str | None = hf_model_type if isinstance(hf_model_type, str) else None
+
         agent_loop_config_path = self.rollout_config.agent.agent_loop_config_path
         if agent_loop_config_path:
             resolved_path = resolve_config_path(agent_loop_config_path)
@@ -240,6 +243,7 @@ class DiffusionAgentLoopWorker:
             processor=self.processor,
             dataset_cls=self.dataset_cls,
             data_config=DictConfigWrap(self.config.data),
+            hf_model_type=self.hf_model_type,
             extra_tokenizer_map=self.model_config.extra_tokenizer_map,
         )
         output: DiffusionAgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)

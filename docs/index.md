@@ -35,7 +35,7 @@ start/metrics.md
 
 ```{toctree}
 :maxdepth: 1
-:caption: Examples
+:caption: Configuration
 
 examples/config.md
 ```

@@ -715,11 +715,20 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         failure_metrics: Counter = Counter()
 
         while remaining_batch_size > 0:
-            batch, current_metrics = self.replay_buffer.sample(
-                global_steps=self.global_steps,
-                partition_id="train",
-                batch_size=remaining_batch_size,
-            )
+            try:
+                batch, current_metrics = self.replay_buffer.sample(
+                    global_steps=self.global_steps,
+                    partition_id="train",
+                    batch_size=remaining_batch_size,
+                )
+            except RuntimeError as e:
+                if "Sync replay buffer selected terminal groups with no materializable trajectories" in str(
+                    e
+                ) and "sync_refill_failed_groups" in str(e):
+                    batch = KVBatchMeta(partition_id="train", keys=[], tags=[])
+                    current_metrics = {}
+                else:
+                    raise
             sampling_metrics.update(current_metrics)
 
             prompt_global_steps = self.replay_buffer.prompt_global_steps["train"]

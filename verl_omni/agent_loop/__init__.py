@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# The MiniMax H3 agent loop lives in its pipeline package; import it here so the
+# @register decorator fires when the agent_loop package is imported. Do not
+# re-export the class from the pipeline package __init__ (import cycle).
+from verl_omni.pipelines.minimax_h3_diffusion_nft.agent_loop import MiniMaxH3DiffusionSingleTurnAgentLoop
+
 from .composite_agent_loop import CompositeAgentLoopWorker
 from .diffusion_agent_loop import DiffusionAgentLoopOutput, DiffusionAgentLoopWorker
 from .diffusion_agent_loop_tq import (
@@ -27,4 +32,5 @@ __all__ = [
     "DiffusionAgentLoopWorkerTQ",
     "create_diffusion_agent_loop_manager",
     "DiffusionSingleTurnAgentLoop",
+    "MiniMaxH3DiffusionSingleTurnAgentLoop",
 ]

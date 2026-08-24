@@ -29,7 +29,12 @@ def video_tensor_to_pil_frames(video: torch.Tensor) -> list[Image.Image]:
     """
     if video.dtype != torch.uint8:
         raise ValueError(f"Expected a uint8 video tensor, got {video.dtype}")
-    if video.ndim != 4 or video.shape[1] != 3:
+    if video.ndim != 4:
+        raise ValueError(f"Expected an RGB video tensor with shape [T, 3, H, W], got {tuple(video.shape)}")
+    if video.shape[0] == 3 and video.shape[1] != 3:
+        # Channels-first [C, T, H, W] from joint audio-video pipelines; permute.
+        video = video.permute(1, 0, 2, 3)
+    if video.shape[1] != 3:
         raise ValueError(f"Expected an RGB video tensor with shape [T, 3, H, W], got {tuple(video.shape)}")
 
     frames = video.detach().permute(0, 2, 3, 1).to(device="cpu").contiguous().numpy()

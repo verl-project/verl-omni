@@ -72,6 +72,13 @@ class VLLMOmniHijack:
             if isinstance(lora_request, OmniTensorLoRARequest):
                 peft_config = lora_request.peft_config
                 lora_tensors = lora_request.lora_tensors
+                # Pipelines whose engine-side layout differs from the trainer's
+                # diffusers names (e.g. MiniMax H3's fused DiT) translate the pushed
+                # tensors + target_modules here; without this the adapter binds to
+                # zero modules and rollout stays base-identical.
+                mapper = getattr(getattr(self, "pipeline", None), "map_lora_update_to_engine", None)
+                if mapper is not None:
+                    lora_tensors, peft_config = mapper(lora_tensors, peft_config)
                 peft_helper = PEFTHelper.from_dict(peft_config)
             else:
                 lora_path = get_adapter_absolute_path(lora_request.lora_path)

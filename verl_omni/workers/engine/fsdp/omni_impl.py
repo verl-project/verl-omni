@@ -47,7 +47,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
-        # leaves the module half-moved and crashes state_dict() below (#5995). The
+        # leaves the module half-moved and crashes state_dict() below (verl#5995). The
         # per-DTensor .to(device).full_tensor() below still produces GPU tensors.
         if not self._uses_fsdp2_cpu_offload_policy:
             load_fsdp_model_to_gpu(self.module)
