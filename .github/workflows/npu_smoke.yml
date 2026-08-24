@@ -70,8 +70,24 @@ jobs:
           echo "mode=${mode}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         if: steps.resolve-mode.outputs.mode != 'none'
-      
-        
+      - name: Upgrade vLLM stack
+        if: steps.resolve-mode.outputs.mode != 'none'
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          uv pip install --system --upgrade vllm==0.27.0
+
+          uv pip install --system --upgrade \
+            "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@$(cat .github/vllm_ascend_pin.txt)"
+
+          uv pip install --system --upgrade \
+            "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
+
+          echo "===== Installed versions ====="
+          pip show vllm || true
+          pip show vllm-ascend || true
+          pip show vllm-omni || true
       - id: resolve-groups
         if: steps.resolve-mode.outputs.mode != 'none'
         shell: bash
