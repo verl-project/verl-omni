@@ -222,6 +222,39 @@ class TestDiffusionModelConfigPolicyAdapters:
             model_cfg: DiffusionModelConfig = omega_conf_to_dataclass(cfg)
         assert tuple(model_cfg.policy_state_adapters) == ("default", "old")
 
+    def test_h3_rejects_all_linear_lora_before_rollout_sync(self, tmp_path):
+        import json
+        import os
+        from unittest.mock import patch
+
+        from hydra import compose, initialize_config_dir
+        from hydra.errors import InstantiationException
+        from verl.utils.config import omega_conf_to_dataclass
+
+        import verl_omni
+
+        model_dir = tmp_path / "h3-model"
+        model_dir.mkdir()
+        (model_dir / "model_index.json").write_text(json.dumps({"_class_name": "MiniMaxH3Pipeline"}))
+
+        config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/diffusion/model")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            cfg = compose(
+                config_name="diffusion_model",
+                overrides=[
+                    f"path={model_dir}",
+                    f"tokenizer_path={model_dir}",
+                    "+load_tokenizer=false",
+                    "attn_backend=native",
+                    "algorithm=diffusion_nft",
+                    "lora_rank=8",
+                    "target_modules=all-linear",
+                ],
+            )
+        with patch("verl_omni.workers.config.diffusion.model.resolve_model_local_dir", return_value=str(model_dir)):
+            with pytest.raises(InstantiationException, match="all-linear.*not synced to rollout"):
+                omega_conf_to_dataclass(cfg)
+
 
 # ---------------------------------------------------------------------------
 # FSDPDiffusionActorConfig (instantiation via Hydra / omega_conf)

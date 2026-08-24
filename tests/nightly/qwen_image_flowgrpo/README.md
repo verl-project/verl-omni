@@ -135,25 +135,29 @@ Nightly mode uploads all current intermediate outputs as
 
 Performance comparison reads step-level metrics from `metrics.jsonl`, or falls
 back to parsing the console log. It compares only steps after `PERF_SKIP_STEPS`,
-which defaults to `2`, and compares the mean value for each metric.
+which defaults to `2`, and compares the mean value for each comparable metric.
 
 Performance tolerance:
 
-- `PERF_THRESHOLD`, default `0.10`, meaning a 10% relative-change threshold.
+- `PERF_THRESHOLD`, default `0.15`, meaning a 15% relative-change threshold.
+- `timing_s/update_weights` uses a fixed 20% threshold. Weight synchronization is
+  sensitive to vLLM-Omni, LoRA, IPC, free-cache, and layered summon details, and
+  is usually a small part of total step time, so this wider tolerance avoids
+  noisy failures while still catching material regressions.
 
 Performance metrics:
 
 - Lower is better: `perf/time_per_step`, `timing_s/gen`,
-  `timing_s/old_log_prob`, `timing_s/reward`, `timing_s/step`,
-  `timing_s/update_actor`, `timing_s/update_weights`, and
-  `timing_per_image_ms/*`.
+  `timing_s/old_log_prob`, `timing_s/reward`, `timing_s/update_actor`, and
+  `timing_s/update_weights`.
 - Higher is better: `perf/mfu/actor`, `perf/mfu/actor_infer`, and
   `perf/throughput`.
 
-A lower-is-better metric fails when current is more than `PERF_THRESHOLD` above
-baseline. A higher-is-better metric fails when current is more than
-`PERF_THRESHOLD` below baseline. A neutral metric fails when the absolute
-relative change is greater than `PERF_THRESHOLD`.
+A lower-is-better metric fails when current is more than the metric threshold
+above baseline. A higher-is-better metric fails when current is more than the
+metric threshold below baseline. Other collected metrics, including
+`perf/total_num_images`, `timing_s/step`, and derived `timing_per_image_ms/*`
+values, are kept in the report but are not compared against the baseline.
 
 Precision comparison recursively compares all tensors in matching `payload.pt`
 debug dumps under `current/qwen_image_flowgrpo/` and

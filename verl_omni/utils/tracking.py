@@ -153,6 +153,9 @@ def wrap_val_samples_for_wandb(samples, fps=24, output_dir=None):
         inp, out, score = sample[:3]
         audio = sample[3] if len(sample) > 3 else None
         audio_sample_rate = sample[4] if len(sample) > 4 else None
+        if hasattr(out, "ndim") and out.ndim == 5:
+            # Batched video [B, T, C, H, W]; log the first sample.
+            out = out[0]
         if hasattr(out, "ndim") and out.ndim == 4:
             if video_dir is None:
                 video_tmp_dir = tempfile.mkdtemp(prefix="val_video_")
@@ -165,7 +168,9 @@ def wrap_val_samples_for_wandb(samples, fps=24, output_dir=None):
             media_to_log[media_key] = wandb.Video(video_path, format="mp4")
             media = media_key
         else:
-            media = wandb.Image(out.float(), file_type="jpg")
+            if not isinstance(out, torch.Tensor) or out.dtype != torch.uint8:
+                raise ValueError(f"Expected a uint8 image tensor, got {getattr(out, 'dtype', type(out))}.")
+            media = wandb.Image(out, file_type="jpg", normalize=False)
         wrapped.append((inp, media, score))
     return wrapped, video_tmp_dir, media_to_log
 

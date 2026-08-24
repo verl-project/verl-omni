@@ -54,12 +54,11 @@ async def _chat_complete(
 
 
 def _to_pil(image) -> Image.Image:
-    """Normalize a tensor / array / PIL image to a uint8 RGB PIL image."""
+    """Convert a uint8 tensor / array / PIL image to an RGB PIL image."""
     if isinstance(image, torch.Tensor):
-        image = image.float().permute(1, 2, 0).cpu().numpy()
+        image = image.permute(1, 2, 0).cpu().numpy()
     if isinstance(image, np.ndarray):
         assert image.shape[-1] == 3, "must be in HWC format"
-        image = (image * 255).round().clip(0, 255).astype(np.uint8)
         image = Image.fromarray(image)
     assert isinstance(image, Image.Image)
     return image

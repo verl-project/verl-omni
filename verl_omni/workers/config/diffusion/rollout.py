@@ -73,6 +73,13 @@ class DiffusionPipelineConfig(BaseConfig):
     # Audio-video generation frame rate.
     frame_rate: float = 24.0
 
+    # Named canvas aspect ratio for pipelines that accept one (e.g. 16:9);
+    # the set of supported ratios is pipeline-specific.
+    aspect_ratio: Optional[str] = None
+
+    # Flow-matching sigma-schedule shift for the video stream (maps to vllm-omni's flow_shift)
+    video_flow_shift: float = 12.0
+
 
 @dataclass
 class DiffusionSamplingConfig(BaseConfig):
@@ -82,10 +89,24 @@ class DiffusionSamplingConfig(BaseConfig):
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
     algo: DiffusionRolloutAlgoConfig = field(default_factory=DiffusionRolloutAlgoConfig)
 
+    # for llm part when needed
+    temperature: float = 1.0
+    top_k: int = 0
+    top_p: float = 1.0
+
 
 @dataclass
 class DiffusionRolloutConfig(BaseConfig):
-    _mutable_fields = {"max_model_len", "load_format", "engine_kwargs", "prompt_length", "expert_parallel_size"}
+    _mutable_fields = {
+        "max_model_len",
+        "load_format",
+        "engine_kwargs",
+        "prompt_length",
+        "expert_parallel_size",
+        "full_determinism",
+        "seed",
+        "max_num_seqs",
+    }
 
     name: Optional[str] = MISSING
     mode: str = "async"
@@ -93,9 +114,17 @@ class DiffusionRolloutConfig(BaseConfig):
     n_gpus_per_node: int = 8
     n: int = 1
 
+    # for llm part when needed
+    temperature: float = 1.0
+    top_k: int = 0
+    top_p: float = 1.0
+    repetition_penalty: float = 1.0
+    max_new_tokens: int = 256
+
     # Base seed for deterministic training rollout RNG. Per-step base is
     # ``seed + global_step - 1``. null disables rollout seeding.
-    seed: Optional[int] = None
+    seed: Optional[int] = 42
+    full_determinism: bool = False
 
     prompt_length: int = 512
 
@@ -141,6 +170,8 @@ class DiffusionRolloutConfig(BaseConfig):
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
 
     calculate_log_probs: bool = False
+    llm_calculate_log_probs: bool = False
+
     rollout_adapter: str = "default"
 
     agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
@@ -178,6 +209,10 @@ class DiffusionRolloutConfig(BaseConfig):
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
     external_lib: Optional[str] = None
+
+    def to_vllm_omni_attention_config(self) -> dict:
+        """Convert the rollout backend to vLLM-Omni's canonical config form."""
+        return {"default": {"backend": self.rollout_attn_backend}}
 
     def __post_init__(self):
         """Validate the diffusion rollout config"""

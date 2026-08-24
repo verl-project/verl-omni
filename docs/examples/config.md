@@ -1,6 +1,6 @@
 # Config Explanation
 
-Last updated: 07/30/2026
+Last updated: 08/23/2026
 
 VeRL-Omni builds on [verl](https://github.com/verl-project/verl) and reuses the
 same Hydra config surface for shared RL trainer fields (`data`, FSDP actor /
@@ -71,7 +71,7 @@ algorithm:
 - `algorithm.timestep_fraction`: Fraction of rollout timesteps used for forward-process training, in `(0, 1]`.
 - `algorithm.adv_mode`: Advantage mapping before reward-probability scaling. One of `continuous`, `positive_only`, `negative_only`, `one_only`, `binary`.
 - `algorithm.paired_preference`: `true` for pair-based algorithms (e.g. offline DPO); doubles actor batch size and disables shuffle.
-- `algorithm.rollout_correction.*`: Experimental IS / RS correction. Schema mirrors upstream verl; see {doc}`algo/rollout_correction` and [verl Rollout Correction](https://verl.readthedocs.io/en/latest/algo/rollout_corr.html).
+- `algorithm.rollout_correction.*`: Experimental IS / RS correction. Schema mirrors upstream verl; see {doc}`../algo/rollout_correction` and [verl Rollout Correction](https://verl.readthedocs.io/en/latest/algo/rollout_corr.html).
 
 ### `actor_rollout_ref.model` — `DiffusionModelConfig`
 
@@ -169,7 +169,7 @@ actor_rollout_ref:
 
 Shared PPO / FSDP / optim fields (`ppo_mini_batch_size`, `ppo_epochs`, `optim.lr`, `fsdp_config`, …) follow upstream verl — see the [verl Config Explanation](https://verl.readthedocs.io/en/latest/examples/config.html).
 
-VeOmni engine path (`strategy=veomni`) adds `veomni_config` / VeOmni optimizer fields; see {doc}`start/install` and the `run_*_veomni.sh` recipes.
+VeOmni engine path (`strategy=veomni`) adds `veomni_config` / VeOmni optimizer fields; see {doc}`../start/install` and the `run_*_veomni.sh` recipes.
 
 ### `actor_rollout_ref.rollout` — `DiffusionRolloutConfig`
 
@@ -245,7 +245,7 @@ actor_rollout_ref:
 - `actor_rollout_ref.rollout.n`: Samples per prompt (FlowGRPO group size; usually `> 1`).
 - `actor_rollout_ref.rollout.seed`: Base seed for deterministic training rollout RNG. Per-step base is `seed + global_step - 1`; `null` disables seeding.
 - `actor_rollout_ref.rollout.rollout_attn_backend`: vLLM-Omni diffusion attention backend. One of `FLASH_ATTN`, `FLASH_ATTN_HUB`, `FLASH_ATTN_3_HUB`, `TORCH_SDPA`. Must match `model.attn_backend` (default `FLASH_ATTN_3_HUB` ↔ `_flash_3_varlen_hub`).
-- `actor_rollout_ref.rollout.step_execution`: When `true`, run the registered pipeline in step-execution (continuous / stepwise batching) mode. See {doc}`start/rollout_batching`.
+- `actor_rollout_ref.rollout.step_execution`: When `true`, run the registered pipeline in step-execution (continuous / stepwise batching) mode. See {doc}`../start/rollout_batching`.
 - `actor_rollout_ref.rollout.max_num_seqs`: Max concurrent sequences in the engine; also the request-level batching capacity knob.
 - `actor_rollout_ref.rollout.gpu_memory_utilization`: Fraction of GPU memory for the vLLM-Omni cache.
 - `actor_rollout_ref.rollout.calculate_log_probs`: Log rollout log-probs for debugging.
@@ -261,7 +261,7 @@ These sit on the diffusion trainer YAML (in addition to shared verl trainer fiel
 - `trainer.rollout_data_save_freq`: Dump train rollout every N steps (`1` = every step, `<= 0` = never).
 - `trainer.rollout_data_max_samples` / `validation_data_max_samples`: Cap samples dumped per train / val run (`null` = all).
 - `trainer.use_v1`: Use the V1 trainer (TransferQueue + ReplayBuffer). When `false`, legacy v0 diffusion trainer.
-- `trainer.v1.*`: V1 mode / sampler / async placeholders (`trainer_mode`, `max_off_policy_threshold`, …). See {doc}`start/diffusion_v1`.
+- `trainer.v1.*`: V1 mode / sampler / async placeholders (`trainer_mode`, `max_off_policy_threshold`, …). See {doc}`../start/diffusion_v1`.
 
 ### `reward` — visual reward manager
 
@@ -272,7 +272,7 @@ Diffusion recipes compose `reward@reward: reward` (`verl_omni/trainer/config/rew
 - `reward.reward_functions`: Multi-reward dict (`{name: {path, name, weight}}`); mutually exclusive with `custom_reward_function`.
 - `reward.aggregation`: Multi-reward aggregation (`weighted_sum` only).
 - `reward.reward_manager`: Defaults to `VisualRewardManager` from `pkg://verl_omni.reward_loop.reward_manager`.
-- `reward.reward_model.*`: Optional model-based RM (resource pool, rollout engine knobs). See {doc}`algo/async_reward` and {doc}`start/http_scorer`.
+- `reward.reward_model.*`: Optional model-based RM (resource pool, rollout engine knobs). See {doc}`../algo/async_reward` and {doc}`../start/http_scorer`.
 
 ---
 
@@ -336,7 +336,7 @@ actor_rollout_ref:
 - `actor_rollout_ref.model.override_config`: Dict merged into HF config load (e.g. `attn_implementation`).
 - `actor_rollout_ref.model.enable_activation_offload` / `use_remove_padding`: Memory / packing flags for the FSDP actor.
 - `actor_rollout_ref.model.lora_*` / `target_modules` / `policy_state_adapters` / `fsdp_layer_prefixes`: Same LoRA roles as diffusion (defaults differ slightly, e.g. `lora_alpha: 16`).
-- `actor_rollout_ref.model.use_liger` / `use_fused_kernels` / `fused_kernel_options` / `tiled_mlp`: Optional kernel / memory optimizations.
+- `actor_rollout_ref.model.use_liger` / `use_fused_kernels`: Unsupported by omni FSDP/FSDP2 and must remain `false`; enabling either fails before model loading. The adjacent `fused_kernel_options` / `tiled_mlp` fields are backend-specific.
 - `actor_rollout_ref.model.max_image_tokens` / `max_audio_tokens` / `max_video_tokens`: Multimodal token budgets (`null` = unset).
 - `actor_rollout_ref.model.lora` / `mtp`: Megatron-style LoRA block and multi-token prediction (speculative decoding) configs; see the YAML comments in `omni/model/omni_model.yaml`.
 
@@ -385,8 +385,8 @@ Which loss block is active depends on `algorithm.trainer_type`:
 ## Where to look next
 
 - Shared PPO / FSDP / rollout knobs — [verl Config Explanation](https://verl.readthedocs.io/en/latest/examples/config.html)
-- Diffusion algorithm pages — {doc}`algo/flowgrpo`, {doc}`algo/mixgrpo`, {doc}`algo/flowdppo`, {doc}`algo/diffusion_dpo`, {doc}`algo/diffusionnft`, {doc}`algo/grpo_guard`
-- Rollout batching / step execution — {doc}`start/rollout_batching`
-- Rollout correction — {doc}`algo/rollout_correction`
-- Profiler — {doc}`perf/profiler`
-- Model catalogue and example scripts — {doc}`start/models`
+- Diffusion algorithm pages — {doc}`../algo/flowgrpo`, {doc}`../algo/mixgrpo`, {doc}`../algo/flowdppo`, {doc}`../algo/diffusion_dpo`, {doc}`../algo/diffusionnft`, {doc}`../algo/grpo_guard`
+- Rollout batching / step execution — {doc}`../start/rollout_batching`
+- Rollout correction — {doc}`../algo/rollout_correction`
+- Profiler — {doc}`../perf/profiler`
+- Model catalogue and example scripts — {doc}`../start/models`

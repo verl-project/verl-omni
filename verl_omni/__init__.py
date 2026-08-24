@@ -24,6 +24,7 @@ apply_numpy_dataproto_serialization_fix()
 
 # Fallback for CPU-only environments where vLLM-Omni current_omni_platform.device_type is empty.
 # This prevents RuntimeError: Device string must not be empty when importing modules with torch.amp.autocast.
+# TODO: Remove when vllm-omni initializes device_type on CPU platforms by default.
 try:
     import vllm_omni.platforms
 

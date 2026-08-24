@@ -67,8 +67,17 @@ def _read_jsonl(dump_path, global_steps=0):
 
 
 class TestDumpGenerations:
+    def test_rejects_non_uint8_outputs(self, tmp_path):
+        outputs = torch.zeros(1, 3, 16, 16)
+
+        with pytest.raises(
+            ValueError,
+            match=r"Expected generation outputs to be a uint8 tensor, got torch\.float32\.",
+        ):
+            _dump(tmp_path, outputs)
+
     def test_video_batch_writes_one_mp4_per_sample(self, tmp_path):
-        outputs = torch.rand(2, 8, 3, 16, 16)  # [N, T, C, H, W]
+        outputs = torch.randint(256, (2, 8, 3, 16, 16), dtype=torch.uint8)  # [N, T, C, H, W]
         _dump(tmp_path, outputs)
 
         visual = os.path.join(str(tmp_path), "0")
@@ -85,7 +94,7 @@ class TestDumpGenerations:
     def test_video_batch_muxes_generated_audio(self, tmp_path):
         from imageio_ffmpeg import get_ffmpeg_exe
 
-        outputs = torch.rand(1, 8, 3, 16, 16)
+        outputs = torch.randint(256, (1, 8, 3, 16, 16), dtype=torch.uint8)
         audios = torch.sin(torch.linspace(0, 100, 48_000)).reshape(1, 1, -1)
         _dump(tmp_path, outputs, audios=audios, audio_sample_rates=[48_000])
 
@@ -95,7 +104,7 @@ class TestDumpGenerations:
 
     def test_image_batch_writes_one_jpg_per_sample(self, tmp_path):
         # Image regression: the 4-D path must stay byte-for-byte behaviour.
-        outputs = torch.rand(2, 3, 16, 16)  # [N, C, H, W]
+        outputs = torch.randint(256, (2, 3, 16, 16), dtype=torch.uint8)  # [N, C, H, W]
         _dump(tmp_path, outputs)
 
         visual = os.path.join(str(tmp_path), "0")
@@ -108,7 +117,7 @@ class TestDumpGenerations:
         assert all(row["output"].endswith(".jpg") for row in rows)
 
     def test_max_samples_bounds_video_dump(self, tmp_path):
-        outputs = torch.rand(3, 8, 3, 16, 16)
+        outputs = torch.randint(256, (3, 8, 3, 16, 16), dtype=torch.uint8)
         _dump(tmp_path, outputs, max_samples=1)
 
         visual = os.path.join(str(tmp_path), "0")

@@ -79,18 +79,16 @@ class LTX2DiffusionSingleTurnAgentLoop(DiffusionSingleTurnAgentLoop):
         self.system_prompt = []
         self.loop = get_event_loop()
 
-    async def apply_chat_template(
+    async def ct_build_initial_tokens(
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
         images: list[Any] | None = None,
         videos: list[Any] | None = None,
         audios: list[Any] | None = None,
-        mm_processor_kwargs: dict[str, Any] | None = None,
-        remove_system_prompt: bool = False,
     ) -> list[int]:
         """Encode raw text with special tokens and right-side truncation."""
-        del tools, images, videos, audios, mm_processor_kwargs, remove_system_prompt
+        del tools, images, videos, audios
         text = _messages_to_text(messages)
         prompt_length = self.rollout_config.prompt_length
         tokenized = await self.loop.run_in_executor(
@@ -104,3 +102,17 @@ class LTX2DiffusionSingleTurnAgentLoop(DiffusionSingleTurnAgentLoop):
             )["input_ids"],
         )
         return normalize_token_ids(tokenized)
+
+    async def apply_chat_template(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        images: list[Any] | None = None,
+        videos: list[Any] | None = None,
+        audios: list[Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+        remove_system_prompt: bool = False,
+    ) -> list[int]:
+        """Encode raw text with special tokens and right-side truncation."""
+        del mm_processor_kwargs, remove_system_prompt
+        return await self.ct_build_initial_tokens(messages, tools=tools, images=images, videos=videos, audios=audios)

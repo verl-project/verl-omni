@@ -1,6 +1,6 @@
 # Diffusion V1 training
 
-Last updated: 07/27/2026
+Last updated: 08/06/2026
 
 This guide runs the diffusion V1 trainer in synchronous mode using the provided
 Stable Diffusion 3.5 Medium FlowGRPO OCR recipe. The V1 trainer uses
@@ -97,13 +97,21 @@ checkpoints/flow_grpo/sd35_medium_ocr_lora_v1
 - `trainer.v1.trainer_mode=sync` selects synchronous rollout and training.
 - `actor_rollout_ref.rollout.agent.num_workers` controls the rollout worker
   count.
+- `trainer.v1.sampler.drop_incomplete_groups=true` evicts a training prompt
+  group when any of its rollout sessions fails and submits the same number of
+  replacement prompts. This policy is supported only with
+  `trainer.v1.trainer_mode=sync`; validation sampling is unchanged.
+- `trainer.v1.sampler.max_incomplete_group_refill_rounds` bounds consecutive
+  replacement rounds within one training sample call. Exact refill uses a
+  generation batch size of one while the policy is enabled.
 - `transfer_queue.backend.SimpleStorage.total_storage_size` controls the
   maximum number of experience samples held by the default backend.
 - `transfer_queue.backend.SimpleStorage.num_data_storage_units` controls the
   number of in-memory storage units.
 
-Only `sync` mode is currently implemented for the diffusion V1 trainer.
-`colocate_async` and `separate_async` are not yet supported.
+This guide and the incomplete-group refill policy cover `sync` mode.
+`separate_async` keeps the upstream replay-buffer behavior, while
+`colocate_async` is not yet supported.
 
 ## Troubleshooting
 
@@ -114,4 +122,3 @@ Only `sync` mode is currently implemented for the diffusion V1 trainer.
 Ray workers cannot import `transfer_queue`
 : Stop the existing Ray cluster with `ray stop`, activate the environment where
   TransferQueue is installed, and launch the recipe again.
-

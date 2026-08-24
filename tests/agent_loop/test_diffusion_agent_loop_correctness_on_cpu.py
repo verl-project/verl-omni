@@ -118,14 +118,14 @@ async def test_async_reward_data_proto_preserves_validate_meta_info(validate: bo
     worker = _DummyDiffusionAgentLoopWorker(reward_loop_worker_handle)
     output = DiffusionAgentLoopOutput(
         prompt_ids=[1, 2],
-        response_diffusion_output=torch.zeros(3, 2, 2),
+        response_diffusion_output=torch.zeros(3, 2, 2, dtype=torch.uint8),
         metrics=AgentLoopMetrics(),
     )
 
     await worker._compute_score(
         output,
         prompts=torch.tensor([[1, 2]]),
-        responses=torch.zeros(1, 3, 2, 2),
+        responses=torch.zeros(1, 3, 2, 2, dtype=torch.uint8),
         kwargs={},
         validate=validate,
     )

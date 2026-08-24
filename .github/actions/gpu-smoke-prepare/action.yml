@@ -7,20 +7,36 @@ runs:
     - name: Install dependencies
       shell: bash
       env:
+        HTTP_PROXY: "http://100.68.174.87:3128"
+        HTTPS_PROXY: "http://100.68.174.87:3128"
+        NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+        UV_EXTRA_INDEX_URL: https://pypi.org/simple
         PIP_EXTRA_INDEX_URL: https://pypi.org/simple
+        UV_SYSTEM_PYTHON: "1"
+        UV_BREAK_SYSTEM_PACKAGES: "1"
+        PIP_BREAK_SYSTEM_PACKAGES: "1"
+        UV_LINK_MODE: copy
       run: |
-        # vllm023.dev1 image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
-        pip3 install ".[gpu,dev]"
-        pip3 install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-        pip3 install --no-deps --force-reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
-        pip3 install TransferQueue==0.1.8
-        pip3 install --no-deps -e .
+        export UV_CACHE_DIR="${UV_CACHE_DIR:-${HOME}/.cache/uv}"
+        git config --global http.postBuffer 524288000 || true
+        # Base image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
+        uv pip install --system --break-system-packages ".[gpu,dev,audio]"
+        uv pip install --system --break-system-packages "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
+        uv pip install --system --break-system-packages --no-deps --reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
+        uv pip install --system --break-system-packages TransferQueue==0.1.8
+        uv pip install --system --break-system-packages --no-deps -e .
         # veomni's [gpu] extra pins torch 2.9 and would conflict with the vLLM stack.
         # See docs/start/install.md "Optional engine backends".
         # TODO: rm --no-deps when VeOmni support torch2.11
-        pip3 install veomni==0.1.11 --no-deps
-        pip3 install torchcodec librosa soundfile av
-        pip3 install "transformers[mistral-common]"
+        uv pip install --system --break-system-packages veomni==0.1.11 --no-deps
+        uv pip install --system --break-system-packages torchcodec librosa soundfile av audioread
+        uv pip install --system --break-system-packages "transformers[mistral-common]"
+        # GPU-smoke-only override; the project GPU extra remains on kernels==0.16.0.
+        uv pip install --system --break-system-packages "kernels==0.14.1"
         # NCCL checkpoint engine (diffusion v1 separate_async weight sync).
-        pip3 install pyzmq
-        pip3 install cupy-cuda12x || pip3 install cupy-cuda13x
+        uv pip install --system --break-system-packages pyzmq
+        uv pip install --system --break-system-packages cupy-cuda12x || uv pip install --system --break-system-packages cupy-cuda13x
+        # uv.cu130 ships python3 only; Ray/scripts may still invoke `python`.
+        if ! command -v python >/dev/null 2>&1; then
+          ln -sfn "$(command -v python3)" /usr/local/bin/python
+        fi

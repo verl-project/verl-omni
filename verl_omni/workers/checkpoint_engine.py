@@ -11,15 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import logging
-import os
-
 import ray
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.utils.ray_utils import auto_await
-
-logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class OmniCheckpointEngineManager(CheckpointEngineManager):
@@ -57,11 +51,9 @@ class OmniCheckpointEngineManager(CheckpointEngineManager):
 
     def _fetch_actor_lora_peft_config(self):
         """Return the actor's LoRA ``peft_config`` dict, or ``None``."""
-        try:
-            results = self.actor_wg.get_lora_peft_config()
-        except Exception as e:  # noqa: BLE001 - tolerate backend/registration differences
-            logger.warning("get_lora_peft_config failed (%s); assuming non-LoRA run", e)
+        if not hasattr(self.actor_wg, "get_lora_peft_config"):
             return None
+        results = self.actor_wg.get_lora_peft_config()
         for result in results or []:
             if result is not None:
                 return result

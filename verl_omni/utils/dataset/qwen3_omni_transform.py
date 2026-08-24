@@ -234,6 +234,9 @@ def _decode_video_path(video_path: str) -> tuple[torch.Tensor, float]:
     if not container.streams.video:
         container.close()
         raise ValueError(f"Video {video_path} contains no video streams.")
+    if not container.streams.video:
+        container.close()
+        raise ValueError(f"Video {video_path} contains no video streams.")
     stream = container.streams.video[0]
     video_fps = float(stream.average_rate) if stream.average_rate else 2.0
     frames = [frame.to_image().convert("RGB") for frame in container.decode(video=0)]

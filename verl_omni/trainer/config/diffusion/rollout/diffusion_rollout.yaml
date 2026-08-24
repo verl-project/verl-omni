@@ -111,7 +111,10 @@ n: 1
 
 # Base seed for deterministic training rollout RNG.
 # Per-step base is ``seed + global_step - 1``. null disables rollout seeding.
-seed: null
+seed: 42
+
+# Whether to enable full determinism for reproducibility.
+full_determinism: False
 
 # Multi-turn interaction config for tools or chat.
 multi_turn:
@@ -166,6 +169,12 @@ val_kwargs:
 
     # Audio-video frame rate (validation)
     frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
+
+    # Flow-matching sigma-schedule shift for the video stream (validation)
+    video_flow_shift: ${oc.select:actor_rollout_ref.rollout.pipeline.video_flow_shift,12.0}
+
+    # Named canvas aspect ratio for compatible pipelines (validation)
+    aspect_ratio: ${oc.select:actor_rollout_ref.rollout.pipeline.aspect_ratio,null}
 
 # Rollout Algorithm configuration for validation
   algo:
@@ -251,8 +260,32 @@ pipeline:
   # Audio-video frame rate
   frame_rate: 24.0
 
+  # Flow-matching sigma-schedule shift for the video stream
+  video_flow_shift: 12.0
+
+  # Named canvas aspect ratio for compatible pipelines
+  aspect_ratio: null
+
 # support logging rollout prob for debugging purpose
 calculate_log_probs: False
+
+# Optional. LLM generation use
+llm_calculate_log_probs: False
+
+# Optional. LLM generation use
+temperature: 1.0
+
+# Optional. LLM generation use
+top_k: 0
+
+# Optional. LLM generation use
+top_p: 1.0
+
+# Optional. LLM generation use
+repetition_penalty: 1.0
+
+# Optional. Max number of LLM generated tokens
+max_new_tokens: 256
 
 # Named adapter used by rollout generation
 rollout_adapter: default

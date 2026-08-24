@@ -48,6 +48,7 @@ class DiffusionModelConfig(BaseConfig):
         "architecture",
         "transformer_config",
         "extra_tokenizer_map",
+        "hf_config",
     }
 
     path: str = MISSING
@@ -58,6 +59,7 @@ class DiffusionModelConfig(BaseConfig):
     local_path: Optional[str] = None
     tokenizer_path: Optional[str] = None
     local_tokenizer_path: Optional[str] = None
+    hf_config: Any = None
 
     # model type, e.g., "diffusion_model"
     model_type: str = "diffusion_model"
@@ -199,6 +201,16 @@ class DiffusionModelConfig(BaseConfig):
                         raise TypeError(
                             f"All elements in target_modules list must be strings, but found {type(x).__name__}"
                         )
+
+        if self.lora_rank > 0:
+            # Validate LoRA targets via the model adapter's hook so this generic config
+            # stays architecture-agnostic (non-fatal lookup; unregistered architectures
+            # fall back to the default no-op).
+            from verl_omni.pipelines.model_base import DiffusionModelBase
+
+            adapter = DiffusionModelBase.peek_class(self.architecture, self.algorithm)
+            if adapter is not None:
+                adapter.validate_lora_config(self)
 
     def get_processor(self):
         return self.processor if self.processor is not None else self.tokenizer

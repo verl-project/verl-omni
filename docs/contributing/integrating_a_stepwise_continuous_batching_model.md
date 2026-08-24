@@ -107,7 +107,7 @@ Before adding step execution, confirm that:
    algorithm name, such as `flow_grpo`.
 2. Its full-forward `forward()` or `diffuse()` path already returns the complete
    rollout outputs required by training.
-3. The expected `custom_output` contract is defined. The current Qwen-Image
+3. The expected rollout output contract is defined. The current Qwen-Image
    integrations use these contracts:
 
    | Algorithm | Required algorithm-specific fields |
@@ -121,7 +121,7 @@ Before adding step execution, confirm that:
 
 4. The corresponding vLLM-Omni model pipeline supports step execution.
 5. Step execution is appropriate for the algorithm. Algorithms with different
-   `custom_output` contracts must implement separate adapter hooks rather than
+   rollout output contracts must implement separate adapter hooks rather than
    being forced to emit the FlowGRPO trajectory format.
 
 ---
@@ -408,28 +408,27 @@ It should:
 
 1. Decode the final latent, either through `super().post_decode()` or the
    model's `_decode_latents()` helper.
-2. Build the exact `custom_output` required by the algorithm's full-forward
+2. Build the exact rollout output payload and metadata required by the algorithm's full-forward
    path.
 3. Preserve optional negative-prompt keys even when their values are `None`.
 4. Move the complete output to CPU before inter-process transfer.
 
-Use `dataclasses.replace` to preserve the decoded output's existing fields while
-replacing its algorithm-specific payload:
+Use `with_rollout_data` from [`verl_omni.pipelines.diffusion_rollout_output`](../../verl_omni/pipelines/diffusion_rollout_output.py)
+to preserve the decoded output's existing fields while attaching trajectory and prompt embeddings:
 
 ```python
-from dataclasses import replace
+from verl_omni.pipelines.diffusion_rollout_output import with_rollout_data
 
-return replace(
+return with_rollout_data(
     output,
-    custom_output={
-        "all_latents": stacked_latents,
-        "all_log_probs": stacked_log_probs,
-        "all_timesteps": stacked_timesteps,
+    trajectory_latents=stacked_latents,
+    trajectory_log_probs=stacked_log_probs,
+    trajectory_timesteps=stacked_timesteps,
+    prompt_embeddings={
         "prompt_embeds": state.prompt_embeds,
         "prompt_embeds_mask": state.prompt_embeds_mask,
         "negative_prompt_embeds": state.negative_prompt_embeds,
-        "negative_prompt_embeds_mask":
-            state.negative_prompt_embeds_mask,
+        "negative_prompt_embeds_mask": state.negative_prompt_embeds_mask,
     },
     to_cpu=True,
 )
@@ -449,17 +448,23 @@ schedule. It reuses the upstream Qwen-Image `denoise_step()` and
 `step_scheduler()` implementations, then returns:
 
 ```python
-custom_output = {
-    "latents_clean": state.latents.float(),
-    "train_timesteps": state.timesteps.unsqueeze(0).expand(
-        state.latents.shape[0], -1
-    ),
-    "prompt_embeds": state.prompt_embeds,
-    "prompt_embeds_mask": state.prompt_embeds_mask,
-    "negative_prompt_embeds": state.negative_prompt_embeds,
-    "negative_prompt_embeds_mask":
-        state.negative_prompt_embeds_mask,
-}
+latents_clean = state.latents.float()
+return with_rollout_data(
+    output,
+    prompt_embeddings={
+        "prompt_embeds": state.prompt_embeds,
+        "prompt_embeds_mask": state.prompt_embeds_mask,
+        "negative_prompt_embeds": state.negative_prompt_embeds,
+        "negative_prompt_embeds_mask": state.negative_prompt_embeds_mask,
+    },
+    rl={
+        "latents_clean": latents_clean,
+        "train_timesteps": state.timesteps.unsqueeze(0).expand(
+            latents_clean.shape[0], -1
+        ),
+    },
+    to_cpu=True,
+)
 ```
 
 It must not emit synthetic `all_latents`, `all_log_probs`, or `all_timesteps`
@@ -472,14 +477,17 @@ Online DPO trains from paired final clean latents. Its step path keeps live
 latents and scheduler inputs in float32, but returns no reverse-SDE trajectory:
 
 ```python
-custom_output = {
-    "latents_clean": state.latents.float(),
-    "prompt_embeds": state.prompt_embeds,
-    "prompt_embeds_mask": state.prompt_embeds_mask,
-    "negative_prompt_embeds": state.negative_prompt_embeds,
-    "negative_prompt_embeds_mask":
-        state.negative_prompt_embeds_mask,
-}
+return with_rollout_data(
+    output,
+    prompt_embeddings={
+        "prompt_embeds": state.prompt_embeds,
+        "prompt_embeds_mask": state.prompt_embeds_mask,
+        "negative_prompt_embeds": state.negative_prompt_embeds,
+        "negative_prompt_embeds_mask": state.negative_prompt_embeds_mask,
+    },
+    rl={"latents_clean": state.latents.float()},
+    to_cpu=True,
+)
 ```
 
 Keep prompt extraction and warm-up fallback logic local to an
@@ -626,7 +634,7 @@ Current Qwen-Image scope:
 | Online DPO | Supported with final-latent output |
 
 The four algorithms share the vLLM-Omni engine lifecycle, but their rollout
-adapters preserve their own scheduler precision and `custom_output` contracts.
+adapters preserve their own scheduler precision and rollout output contracts.
 
 ---
 
@@ -724,7 +732,7 @@ Run parity checks between `step_execution=False` and `step_execution=True` for:
 - [ ] Use padded embedding width for text RoPE lengths.
 - [ ] Keep live request dtypes homogeneous across admission and scheduler steps.
 - [ ] Keep FlowGRPO/MixGRPO and DPO live latents in fp32.
-- [ ] Preserve the full `custom_output` contract.
+- [ ] Preserve the full rollout output contract.
 - [ ] Move returned tensors to CPU.
 - [ ] Mirror algorithm-specific setup in both execution paths.
 - [ ] Keep algorithm-private helpers out of shared mixins unless all consumers

@@ -91,6 +91,14 @@ class TestOmniActorConfig:
 
 
 class TestOmniModelConfigLoraFields:
+    def test_mtp_can_be_disabled_for_megatron_reference_model(self, tmp_path):
+        (tmp_path / "config.json").write_text(json.dumps({"architectures": ["BertForMaskedLM"], "model_type": "bert"}))
+        cfg = OmniModelConfig(path=str(tmp_path), load_tokenizer=False)
+
+        cfg.mtp = MtpConfig(enable=False)
+
+        assert cfg.mtp.enable is False
+
     def test_lora_fields_via_hydra(self, tmp_path):
         from hydra import compose, initialize_config_dir
         from verl.utils.config import omega_conf_to_dataclass

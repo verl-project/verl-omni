@@ -1,0 +1,155 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_megatron_trainer
+  - omni/model@actor_rollout_ref.model: omni_model
+  - _self_
+
+# Fully asynchronous defaults. Sync recipes may override these fields.
+async_training:
+
+  # Maximum accepted sample staleness.
+  staleness_threshold: 0.1
+
+  # Trainer steps between actor-to-rollout parameter synchronizations.
+  trigger_parameter_sync_step: 4
+
+  # PPO mini-batches collected for each trainer step.
+  require_batches: 1
+
+  # Resume interrupted requests after parameter synchronization.
+  partial_rollout: true
+
+  # Run validation on standalone rollout replicas instead of trainer GPUs.
+  use_trainer_do_validate: false
+
+  # Keep hybrid rollout replicas disabled for standalone resource placement.
+  use_dynamic_resource_scheduling: false
+
+  # Dynamic scheduling policy name.
+  dynamic_schedule_policy: default
+
+  # Sample ratio used before dynamic replicas are deactivated.
+  dynamic_schedule_deactivate_ratio: 0.3
+
+  # Rebalance in-flight requests when dynamic replicas change.
+  dynamic_schedule_enable_rebalance: true
+
+  # Maximum concurrent requests handled by each rollout replica.
+  concurrent_samples_per_replica: 16
+
+# Standalone rollout resource configuration.
+rollout:
+
+  # Number of rollout nodes.
+  nnodes: 1
+
+  # GPUs allocated to rollout on each node.
+  n_gpus_per_node: 8
+
+  # Responses sampled for each prompt.
+  n: 4
+
+  # Total number of rollout samples.
+  total_rollout_steps: 100
+
+# Data configuration.
+data:
+
+  # Prompts generated per rollout request.
+  gen_batch_size: 1
+
+  # Continuous-token rollout configuration.
+  continuous_token:
+
+    # Keep the text-only single-turn path on discrete tokenization.
+    enable: false
+
+    # Infer model-specific token boundaries if continuous tokens are enabled.
+    model_family: auto
+
+# Config for actor, rollout and reference model.
+actor_rollout_ref:
+
+  # Keep Megatron training resources separate from standalone rollout replicas.
+  hybrid_engine: false
+
+  # Model config.
+  model:
+
+    # Dispatch to verl's Megatron language-model engine while retaining OmniModelConfig.
+    model_type: language_model
+
+  # Actor config.
+  actor:
+
+    # Use Megatron as the actor backend.
+    strategy: megatron
+
+    # Train against log probabilities returned by rollout.
+    use_rollout_log_probs: true
+
+  # Rollout config.
+  rollout:
+
+    # Use vLLM-Omni as the rollout backend for omni models.
+    name: vllm_omni
+
+    # Use the asynchronous server rollout path.
+    mode: async
+
+    # A standalone vLLM-Omni server owns one data-parallel replica.
+    data_parallel_size: 1
+
+    # Calculate token log probabilities during rollout.
+    calculate_log_probs: true
+
+    # Backend-specific engine arguments.
+    engine_kwargs:
+
+      # vLLM-Omni engine arguments.
+      vllm_omni:
+
+        # Use autoregressive output for text-token rollout.
+        output_mode: ar
+
+    # Checkpoint engine configuration.
+    checkpoint_engine:
+
+      # Use NCCL to synchronize Megatron weights to rollout replicas.
+      backend: nccl
+
+  # Reference model config.
+  ref:
+
+    # Use Megatron as the reference backend.
+    strategy: megatron
+
+# Reward configuration for text-token rollout.
+reward:
+
+  # Reward manager configuration.
+  reward_manager:
+
+    # Resolve the built-in verl reward manager registry.
+    source: register
+
+    # Use the standard text reward manager by default.
+    name: naive
+
+# Algorithm configuration.
+algorithm:
+
+  # Rollout correction configuration.
+  rollout_correction:
+
+    # Use rollout log probabilities directly for the fully asynchronous path.
+    bypass_mode: true

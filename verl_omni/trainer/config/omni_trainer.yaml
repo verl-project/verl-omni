@@ -75,16 +75,16 @@ algorithm:
   _target_: verl_omni.trainer.config.OmniAlgoConfig
 
   # Trainer loop.
-  trainer_type: direct_preference
+  trainer_type: policy_gradient
 
   # Sample provenance.
-  sample_source: offline
+  sample_source: online
 
   # True for pair-based algorithms such as offline DPO.
-  paired_preference: true
+  paired_preference: false
 
   # Advantage estimator placeholder inherited by shared trainer utilities.
-  adv_estimator: dpo
+  adv_estimator: grpo
 
   # Whether to normalize advantages by std.
   norm_adv_by_std_in_grpo: true
