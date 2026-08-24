@@ -17,8 +17,8 @@ Smoke-test ``CompositeAgentLoopWorker`` end-to-end on Qwen-Image.
 
 ``generate_sequences`` returns two ``DataProto`` objects:
 
-- AR part: ``ar_n`` rows with ``ar_response_ids``, ``rollout_ar_log_probs``, etc.
-- Diffusion part: ``ar_n * n`` rows with image ``responses`` and DiT trajectory fields.
+- AR part: ``n`` rows with ``ar_response_ids``, ``rollout_ar_log_probs``, etc.
+- Diffusion part: ``n * m`` rows with image ``responses`` and DiT trajectory fields.
 """
 
 import gc
@@ -31,11 +31,10 @@ import pytest
 import ray
 import torch
 from omegaconf import DictConfig
-from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
 from verl.workers.rollout.llm_server import LLMServerManager
 
-from verl_omni.agent_loop.composite_agent_loop import CompositeAgentLoopWorker
+from verl_omni.agent_loop.composite_agent_loop import CompositeAgentLoopManager
 
 from ..utils.gpu_test_topology import resolve_diffusion_agent_loop_gpu_topology
 
@@ -150,8 +149,8 @@ def init_config() -> DictConfig:
         config.actor_rollout_ref.rollout.step_execution = False
         # Keep the 2-GPU TP smoke light; CI EOFError on worker launch is usually OOM.
         # Keep enough inference steps for sde_window_range=[0, 5] / sde_window_size=2.
-        config.actor_rollout_ref.rollout.n = 2
-        config.actor_rollout_ref.rollout.ar_n = 2  # ar part
+        config.actor_rollout_ref.rollout.n = 2  # ar part
+        config.actor_rollout_ref.rollout.m = 2  # diffusion part
         config.actor_rollout_ref.rollout.pipeline.height = 256
         config.actor_rollout_ref.rollout.pipeline.width = 256
         config.actor_rollout_ref.rollout.pipeline.num_inference_steps = 10
@@ -208,9 +207,8 @@ def test_single_turn(init_config, agent_reward_loop: bool):
     try:
         dit_reward_handle = _FakeRewardLoopWorkerHandle()
         ar_reward_handle = _FakeARRewardLoopWorkerHandle()
-        AgentLoopManager.agent_loop_workers_class = ray.remote(CompositeAgentLoopWorker)
         llm_server_manager = LLMServerManager.create(config=init_config)
-        agent_loop_manager = AgentLoopManager.create(
+        agent_loop_manager = CompositeAgentLoopManager.create(
             config=init_config,
             llm_client=llm_server_manager.get_client(),
             reward_loop_worker_handles=[dit_reward_handle, ar_reward_handle] if agent_reward_loop else None,
@@ -252,13 +250,13 @@ def test_single_turn(init_config, agent_reward_loop: bool):
             },
         )
         batch.meta_info["global_steps"] = 0
-
-        ar_n = init_config.actor_rollout_ref.rollout.ar_n
-        diffusion_n = init_config.actor_rollout_ref.rollout.n
+        ar_n = init_config.actor_rollout_ref.rollout.n
+        diffusion_n = init_config.actor_rollout_ref.rollout.m
+        batch.repeat(ar_n)
 
         ar_result, diffusion_result = agent_loop_manager.generate_sequences(prompts=batch)
         ar_batch_size = len(raw_prompts) * ar_n
-        diffusion_batch_size = ar_n * diffusion_n
+        diffusion_batch_size = len(raw_prompts) * ar_n * diffusion_n
         assert len(ar_result) == ar_batch_size
         assert len(diffusion_result) == diffusion_batch_size
 

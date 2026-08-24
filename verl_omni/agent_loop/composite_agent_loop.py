@@ -137,7 +137,7 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
 
         Returns:
             tuple[DataProto, DataProto]: AR and diffusion outputs separately, since they
-            may have different batch sizes (``ar_n`` vs ``ar_n * n``).
+            may have different batch sizes (``n`` vs ``n * m``).
 
             AR ``DataProto`` batch fields (optional keys omitted when disabled):
 
@@ -189,11 +189,10 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
             default_agent_loop = config.agent.default_agent_loop
             batch.non_tensor_batch["agent_name"] = np.array([default_agent_loop] * len(batch), dtype=object)
 
-        # two-stage generation
-        # one raw prompt -> ar_n refined prompts -> diffusion_n x ar_n generated images
-        diffusion_n = config.n
+        # two-stage generation: one batch row -> one AR output -> diffusion_n images
+        diffusion_n = config.m
         tasks = []
-        for i in range(config.ar_n):
+        for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
             kwargs["diffusion_n"] = diffusion_n
             if per_rollout_seeds is not None:
@@ -359,7 +358,9 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
                 batch = TensorDict(
                     {
                         "prompts": prompts,  # [1, prompt_length], padded input raw prompt ids
-                        "responses": diffusion_output.response_diffusion_output,  # [1, C, H, W] or [1, T, C, H, W]
+                        "responses": diffusion_output.response_diffusion_output.unsqueeze(
+                            0
+                        ),  # [1, C, H, W] or [1, T, C, H, W]
                     },
                     batch_size=1,
                 )

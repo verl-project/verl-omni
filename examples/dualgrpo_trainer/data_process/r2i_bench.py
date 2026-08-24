@@ -84,7 +84,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--input_dir",
         default="~/data/r2i_bench/prompts/",
-        help="Path to the raw dataset directory (contains */*/*.csv).",
+        help="Path to the raw dataset directory (contains */*.csv).",
     )
     parser.add_argument(
         "--output_dir",
@@ -93,7 +93,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--shuffle",
-        default=True,
+        default=False,
+        action="store_true",
         help="Whether to shuffle data when spliting data.",
     )
 

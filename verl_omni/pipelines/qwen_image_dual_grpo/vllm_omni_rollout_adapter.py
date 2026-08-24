@@ -91,7 +91,7 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
     It involves two paths:
     (1) text encoder generate text tokens for each given prompt.
     For Simplicity, LLM only generates one response per prompt for each request.
-    (2) image diffusion generates an image for each given prompt.
+    (2) image diffusion generates an image for each refined prompt.
 
     Extends :class:`QwenImagePipelineWithDualLogProb` by autoregressively sampling
     tokens from the Qwen2.5-VL text encoder before image diffusion.
@@ -311,7 +311,7 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
             # )
             # list[int]
 
-            image = torch.tensor([1.0])  # dummy image
+            image = torch.empty((1,3,1,1))  # dummy image
             result = rollout_output(
                 media=image,
                 rl={

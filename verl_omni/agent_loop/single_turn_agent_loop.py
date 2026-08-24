@@ -136,12 +136,11 @@ class CompositeSingleTurnAgentLoop(DiffusionSingleTurnAgentLoop):
         raw_prompt = kwargs["raw_prompt"]
         prompt_ids = await self.apply_chat_template(raw_prompt)
         metrics = {}
-        with simple_timer("generate_ar_sequences", metrics):
+        with simple_timer("generate_sequences", metrics):
             output = await self.server_manager.generate(
                 request_id=uuid4().hex,
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
-                stage="ar",
             )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
@@ -180,21 +179,21 @@ class CompositeSingleTurnAgentLoop(DiffusionSingleTurnAgentLoop):
             tuple[ARAgentLoopOutput, list[DiffusionAgentLoopOutput]]: AR output and
             one diffusion output per ``diffusion_n`` sample.
         """
-        # Staged generation
-        with simple_timer("generate_staged_sequences", {}):
-            # Stage 1: AR part LLM token generation
-            ar_output = await self._run_ar(sampling_params, **kwargs)
+        # Stage 1: AR part LLM token generation
+        sampling_params["stage"] = "ar"
+        ar_output = await self._run_ar(sampling_params, **kwargs)
 
-            # Stage 2: images generation using the refined prompt from stage 1.
-            diffusion_kwargs = {**kwargs, "raw_prompt": ar_output.refined_prompt}
-            tasks = []
-            diffusion_n = diffusion_kwargs.pop("diffusion_n")
-            per_rollout_seeds = diffusion_kwargs.pop("per_rollout_seeds", None)
-            for i in range(diffusion_n):
-                task_sampling_params = sampling_params.copy()
-                if per_rollout_seeds is not None:
-                    task_sampling_params["seed"] = per_rollout_seeds[i]
-                tasks.append(asyncio.create_task(super().run(task_sampling_params, **diffusion_kwargs)))
-            diffusion_outputs = await asyncio.gather(*tasks)
+        # Stage 2: images generation using the refined prompt from stage 1.
+        sampling_params["stage"] = "diffusion"
+        diffusion_kwargs = {**kwargs, "raw_prompt": [ar_output.refined_prompt]}
+        tasks = []
+        diffusion_n = diffusion_kwargs.pop("diffusion_n")
+        per_rollout_seeds = diffusion_kwargs.pop("per_rollout_seeds", None)
+        for i in range(diffusion_n):
+            task_sampling_params = sampling_params.copy()
+            if per_rollout_seeds is not None:
+                task_sampling_params["seed"] = per_rollout_seeds[i]
+            tasks.append(asyncio.create_task(super().run(task_sampling_params, **diffusion_kwargs)))
+        diffusion_outputs = await asyncio.gather(*tasks)
 
         return ar_output, list(diffusion_outputs)

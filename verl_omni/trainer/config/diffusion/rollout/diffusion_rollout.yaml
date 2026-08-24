@@ -106,11 +106,11 @@ log_prob_micro_batch_size_per_gpu: null
 # disable logging statistics
 disable_log_stats: True
 
-# number of diffusion responses (i.e. num sample times). > 1 for grpo
+# number of responses (i.e. num sample times). > 1 for grpo
 n: 1
 
-# number of AR responses (i.e. num sample times). > 1 for grpo
-ar_n: 1
+# Optional stage 2: number of diffusion responses (i.e. num sample times). > 1 for grpo
+m: 1
 
 # Base seed for deterministic training rollout RNG.
 # Per-step base is ``seed + global_step - 1``. null disables rollout seeding.
