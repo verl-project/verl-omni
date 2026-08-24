@@ -27,6 +27,14 @@ apply_numpy_dataproto_serialization_fix = _PATCH_MODULE.apply_numpy_dataproto_se
 
 
 def test_numpy_dataproto_patch_serializes_original_batch(monkeypatch):
+    def fail_if_original_getstate_called(_self):
+        raise AssertionError("original DataProto.__getstate__ must not be called")
+
+    monkeypatch.setattr(
+        verl_protocol.DataProto,
+        "__getstate__",
+        fail_if_original_getstate_called,
+    )
     apply_numpy_dataproto_serialization_fix()
     sentinel = object()
     batch = object()
