@@ -14,13 +14,12 @@
 import os
 import logging
 
+from verl_omni.patches import apply_numpy_dataproto_serialization_fix
+
 logger = logging.getLogger(__name__)
 
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/version")) as f:
     __version__ = f.read().strip()
-
-
-from verl_omni.patches import apply_numpy_dataproto_serialization_fix
 
 apply_numpy_dataproto_serialization_fix()
 
