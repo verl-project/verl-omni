@@ -1,5 +1,7 @@
 # LTX-2.3 text-to-audio-video FlowGRPO
 
+Last updated: 08/21/2026
+
 This recipe trains `dg845/LTX-2.3-Diffusers` LoRA adapters with a diffusers +
 FSDP actor, vLLM-Omni rollout, joint audio-video CPS transitions, and the CLAP
 plus ImageBind rewards.

@@ -52,7 +52,7 @@ dependencies = [
 [project.optional-dependencies]
 # Rollout engine (install in step 2, after gpu step 1).
 vllm-omni = [
-    "vllm-omni==0.24.0",
+    "vllm-omni==0.27.0rc1",
     "qwen-vl-utils>=0.0.14",
 ]
 audio = [
@@ -60,14 +60,14 @@ audio = [
 ]
 # CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
 gpu = [
-    "vllm==0.24.0",
-    "kernels==0.14.1",
+    "vllm==0.27.0",
+    "kernels==0.16.0",
     "liger-kernel",
 ]
 # Training stack (install in step 2).
-# Git commit must match .github/verl_pin.txt (reports as 0.9.0.dev0 at 8a69493).
+# Git commit must match .github/verl_pin.txt (reports as 0.10.0.dev at c4b389a).
 train = [
-    "verl @ git+https://github.com/verl-project/verl.git@8a694930275061f52ebd538c906ef8819af56dbd",
+    "verl @ git+https://github.com/verl-project/verl.git@c4b389adadc58ce51cb2b63e70df497ca166d77f",
 ]
 dev = [
     "pytest",

@@ -52,9 +52,18 @@ def _install_imagebind_modules(monkeypatch, imagebind_model=None):
 
 
 def test_to_tchw_accepts_channels_last_video():  # trufflehog:ignore
-    video = torch.zeros(3, 8, 10, 3)
+    video = torch.full((3, 8, 10, 3), 255, dtype=torch.uint8)
 
-    assert imagebind._to_tchw(video).shape == (3, 3, 8, 10)
+    converted = imagebind._to_tchw(video)
+
+    assert converted.shape == (3, 3, 8, 10)
+    assert converted.max() == 1.0
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.int32])
+def test_to_tchw_rejects_non_uint8_video(dtype):
+    with pytest.raises(ValueError, match=rf"Expected uint8 video input, got {dtype}\."):
+        imagebind._to_tchw(torch.zeros(3, 8, 10, 3, dtype=dtype))
 
 
 @pytest.mark.parametrize(
@@ -96,7 +105,7 @@ def test_compute_score_supports_flowfactory_modes(
 
     result = imagebind.compute_score(
         data_source="test",
-        solution_image=torch.zeros(2, 3, 8, 8),
+        solution_image=torch.zeros(2, 3, 8, 8, dtype=torch.uint8),
         ground_truth="forest ambience",
         extra_info={} if mode == "text_video" else {"audio": torch.ones(16)},
         device="cpu",

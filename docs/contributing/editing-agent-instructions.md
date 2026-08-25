@@ -62,6 +62,8 @@ touch, what order to change them in, and which tests to run.
 - Merge related bullets into one principle instead of listing variants.
 - Use `search for X` instead of hardcoded file paths.
 - PR references are fine in domain guides for traceability, but avoid them in `AGENTS.md`.
+- A new or renamed guide under `docs/contributing/` must also be linked from
+  `CONTRIBUTING.md` (and the Developer Guide toctree).
 
 ## Anti-Patterns
 
@@ -79,6 +81,7 @@ Before submitting changes to any agent instruction file:
 - [ ] **Non-obvious?** Would an agent do the wrong thing without this rule?
 - [ ] **No conflicts?** Searched all linked guides for contradictions?
 - [ ] **Right file?** Project-wide goes in `AGENTS.md`, area-specific in a domain guide?
+- [ ] **Contributor index?** New or renamed `docs/contributing/` guide also listed in `CONTRIBUTING.md` (and the Developer Guide toctree)?
 - [ ] **Offset the addition?** Removed or consolidated something to compensate?
 - [ ] **Under budget?** `AGENTS.md` < 200 lines, domain guides < 300 lines?
 - [ ] **No hardcoded paths?** Uses "search for X" where paths may change?

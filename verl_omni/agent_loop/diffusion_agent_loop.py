@@ -55,7 +55,7 @@ def _pad_prompt_extra_field(key: str, value: torch.Tensor, target_length: int) -
                 "Configure max_prompt_embed_length for the final embedding sequence, not only one text encoder."
             )
         return F.pad(value, (0, 0, 0, target_length - current_length), value=0)
-    if key in {"prompt_embeds_mask", "negative_prompt_embeds_mask"}:
+    if key in {"prompt_embeds_mask", "negative_prompt_embeds_mask", "prompt_token_tags"}:
         current_length = int(value.shape[0])
         if current_length > target_length:
             raise ValueError(
@@ -74,7 +74,7 @@ class DiffusionAgentLoopOutput(BaseModel):
     prompt_ids: list[int]
     """Prompt token ids."""
     response_diffusion_output: Any
-    """Response diffusion output (torch.Tensor): image tensor (CHW) / video tensor (TCHW)."""
+    """Response pixels (CHW/TCHW) as uint8 values in [0, 255], or floating-point latents."""
     response_logprobs: Optional[Any] = None
     """Log probabilities for the response tokens. (torch.Tensor)"""
     reward_score: Optional[float] = None
@@ -95,7 +95,7 @@ class _InternalDiffusionAgentLoopOutput(DiffusionAgentLoopOutput):
     prompt_ids: torch.Tensor
     """Padded prompt token ids."""
     response_diffusion_output: torch.Tensor
-    """Response diffusion output: image (NCHW format) / video (NTCHW format)."""
+    """Response pixels (NCHW/NTCHW) as uint8 values in [0, 255], or floating-point latents."""
     response_logprobs: Optional[torch.Tensor] = None
     """Log probabilities over denoising timesteps."""
     extra_fields: dict[str, Any] = {}
@@ -144,6 +144,9 @@ class DiffusionAgentLoopWorker:
         if self.max_prompt_embed_length <= 0:
             raise ValueError(f"max_prompt_embed_length must be positive, got {self.max_prompt_embed_length}.")
 
+        hf_model_type = getattr(self.model_config.hf_config, "model_type", None)
+        self.hf_model_type: str | None = hf_model_type if isinstance(hf_model_type, str) else None
+
         agent_loop_config_path = self.rollout_config.agent.agent_loop_config_path
         if agent_loop_config_path:
             resolved_path = resolve_config_path(agent_loop_config_path)
@@ -165,8 +168,9 @@ class DiffusionAgentLoopWorker:
             DataProto: Output batch with the following fields.
 
             - ``prompts``: ``[bsz, prompt_length]`` prompt token ids from dataset.
-            - ``responses``: diffusion output, typically ``[bsz, C, H, W]`` (image)
-              or ``[bsz, T, C, H, W]`` (video).
+            - ``responses``: uint8 pixel output in ``[0, 255]``, typically
+              ``[bsz, C, H, W]`` (image) or ``[bsz, T, C, H, W]`` (video).
+              Latent output remains floating point.
             - ``rm_scores`` (optional): ``[bsz, 1]`` reward model scores.
             - ``meta_info``:
 
@@ -239,6 +243,7 @@ class DiffusionAgentLoopWorker:
             processor=self.processor,
             dataset_cls=self.dataset_cls,
             data_config=DictConfigWrap(self.config.data),
+            hf_model_type=self.hf_model_type,
             extra_tokenizer_map=self.model_config.extra_tokenizer_map,
         )
         output: DiffusionAgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)

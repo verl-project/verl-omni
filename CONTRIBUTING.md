@@ -17,7 +17,7 @@ Looking for ways to dive in? Check out these issues:
 - [Good first issues](https://github.com/verl-project/verl-omni/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
 - [Call for contribution](https://github.com/verl-project/verl-omni/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22call%20for%20contribution%22)
 
-Furthermore, you can learn the development plan and roadmap via the [RFC: Multi-modal Generation RL 2026Q2 Roadmap](https://github.com/verl-project/verl/issues/5755).
+Furthermore, you can learn the development plan and roadmap via the [RFC: Multi-modal Generation RL 2026Q2 Roadmap](https://github.com/verl-project/verl/issues/5755) and the [RFC: Q3 Road Map](https://github.com/verl-project/verl-omni/issues/97).
 
 ## Developing
 
@@ -85,6 +85,17 @@ To integrate a new direct-preference diffusion algorithm (offline DPO-style
 pairs or online DiffusionNFT-style forward-process training), follow:
 
 - [How to Integrate a New Direct-Preference Algorithm for Diffusion Model](docs/contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md)
+
+Additional guides:
+
+- [How to Integrate an Image-to-Image Diffusion Model](docs/contributing/integrating_an_i2i_diffusion_model.md)
+- [How to Integrate a Non-Diffusers Model for FlowGRPO Training](docs/contributing/integrating_a_non_diffusers_model.md)
+- [How to Add a New Omni Model](docs/contributing/integrating_an_omni_model.md)
+- [How to Add Continuous Batching (Step-Execution) Support for a Diffusion Model](docs/contributing/integrating_a_stepwise_continuous_batching_model.md)
+- [Testing Guide](docs/contributing/testing_guide.md)
+- [GPU Smoke Tests](docs/contributing/gpu_smoke_tests.md)
+- [CI/CD Layers](docs/contributing/ci_cd.md)
+- [Common Pitfalls](docs/contributing/common_pitfalls.md)
 
 ## Pull Requests & Code Reviews
 

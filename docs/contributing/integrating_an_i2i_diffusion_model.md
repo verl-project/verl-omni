@@ -54,7 +54,7 @@ parquet images
     -> vLLM-Omni request preprocessing
     -> rollout adapter VAE-encodes condition image
     -> transformer([target noise | condition latent])
-    -> rollout custom_output["condition_image_latents"]
+    -> rollout rl["condition_image_latents"]
     -> training micro-batch
     -> prepare_condition()
     -> inject_condition()
@@ -199,7 +199,7 @@ class MyEditModel(DiffusionI2IModelBase):
 ### Implement `prepare_condition`
 
 This hook extracts condition fields from the training micro-batch. Most fields
-originate in rollout `custom_output`, while actor-only metadata such as
+originate in rollout metadata (`rl`), while actor-only metadata such as
 `sp_size` is injected by the training engine. Return a non-empty dictionary.
 The dispatcher treats `None` as a missing rollout/data condition and fails
 closed.
@@ -389,40 +389,46 @@ Match the upstream pipeline's timestep scaling, dtype casts, CFG formula, and
 prediction sign exactly. The scheduler should receive fp32 predictions and
 latents when the matching T2I FlowGRPO adapter does so.
 
-### 4.5 Return condition fields in `custom_output`
+### 4.5 Return condition fields in rollout output
 
 Return every rollout-owned condition tensor and metadata field needed by
-`prepare_condition`, in addition to the standard FlowGRPO trajectory fields.
-Actor-owned metadata such as `sp_size` does not belong in `custom_output`. Use
+`prepare_condition` in `rl={...}` of `rollout_output(...)`, in addition to the standard FlowGRPO trajectory fields.
+Actor-owned metadata such as `sp_size` does not belong in rollout output. Use
 a null-safe CPU conversion because log-probabilities and negative prompt
 embeddings can be absent during validation or when CFG is disabled:
 
 ```python
+from verl_omni.pipelines.diffusion_rollout_output import rollout_output
+
+
 def _maybe_to_cpu(value):
     if isinstance(value, torch.Tensor):
         return value.detach().cpu()
     return value
 
 
-return DiffusionOutput(
-    output=_maybe_to_cpu(image),
-    custom_output={
-        "all_latents": _maybe_to_cpu(all_latents),
-        "all_log_probs": _maybe_to_cpu(all_log_probs),
-        "all_timesteps": _maybe_to_cpu(all_timesteps),
+return rollout_output(
+    media=_maybe_to_cpu(image),
+    trajectory_latents=_maybe_to_cpu(all_latents),
+    trajectory_log_probs=_maybe_to_cpu(all_log_probs),
+    trajectory_timesteps=_maybe_to_cpu(all_timesteps),
+    prompt_embeddings={
         "prompt_embeds": _maybe_to_cpu(prompt_embeds),
         "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
         "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds),
         "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
+    },
+    rl={
         "condition_image_latents": _maybe_to_cpu(condition_image_latents),
         "img_shapes": img_shapes,
     },
+    to_cpu=False,
 )
 ```
 
 The diffusion server and agent loop move tensor fields into the training
 `TensorDict` and preserve Python values as non-tensor batch data. Keep names
-identical between rollout `custom_output` and training `prepare_condition`.
+identical between rollout `rl` metadata and training `prepare_condition`.
 
 ## Step 5: Add Data Preparation and a Launch Recipe
 
@@ -452,7 +458,7 @@ Add CPU tests for the model-specific contracts:
 
 - Both registry lookups resolve the new architecture.
 - Missing condition images fail with a clear error.
-- `prepare_condition` reads the exact `custom_output` key names.
+- `prepare_condition` reads the exact rollout condition metadata key names.
 - Condition injection changes the transformer sequence as expected.
 - Transformer predictions are cropped back to the target sequence length.
 - Positive and negative CFG paths receive identical condition tensors.

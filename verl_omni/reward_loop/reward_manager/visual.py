@@ -22,6 +22,20 @@ from verl.utils.reward_score import default_compute_score as _upstream_default_c
 from verl_omni.utils.reward_score import default_compute_score_image
 
 
+def _validate_visual_response(response_visual, config, *, is_validate: bool) -> None:
+    rollout_config = config.actor_rollout_ref.rollout
+    pipeline_config = rollout_config.val_kwargs.pipeline if is_validate else rollout_config.pipeline
+    output_type = pipeline_config.get("output_type", "image")
+
+    if output_type == "latent":
+        if not isinstance(response_visual, torch.Tensor) or not response_visual.dtype.is_floating_point:
+            dtype = getattr(response_visual, "dtype", type(response_visual))
+            raise ValueError(f"Expected floating-point latent responses, got {dtype}.")
+    elif not isinstance(response_visual, torch.Tensor) or response_visual.dtype != torch.uint8:
+        dtype = getattr(response_visual, "dtype", type(response_visual))
+        raise ValueError(f"Expected uint8 pixel responses for output_type={output_type!r}, got {dtype}.")
+
+
 class VisualRewardManager(RewardManagerBase):
     """The reward manager for visual response."""
 
@@ -46,6 +60,7 @@ class VisualRewardManager(RewardManagerBase):
         assert len(data) == 1, "Only support single data item"
         data_item = data[0]
         response_visual = data_item.batch["responses"]
+        _validate_visual_response(response_visual, self.config, is_validate=data_item.meta_info.get("validate", False))
         data_source = data_item.non_tensor_batch["data_source"]
         ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
         extra_info = data_item.non_tensor_batch.get("extra_info", {})

@@ -5,9 +5,10 @@ ARG ASCEND_PIP_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
 ARG PYTORCH_CPU_INDEX_URL="https://download.pytorch.org/whl/cpu/"
 
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
-ARG VLLM_REF="v0.24.0"
+ARG VLLM_REF="v0.27.0"
 
 ARG VLLM_ASCEND_REPO="https://github.com/vllm-project/vllm-ascend.git"
+# Defaults to vllm-ascend main via vllm_ascend_pin.txt (no v0.27 release yet).
 ARG VLLM_ASCEND_REF=""
 
 ARG VLLM_OMNI_REPO="https://github.com/vllm-project/vllm-omni.git"
@@ -84,7 +85,7 @@ RUN python3 -m pip install --force-reinstall \
         torchaudio==2.10.0+cpu \
         --index-url ${PYTORCH_CPU_INDEX_URL} && \
     python3 -m pip install --force-reinstall \
-        torch-npu==2.10.0 \
+        torch-npu==2.10.0.post2 \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} \
         --extra-index-url ${PYTORCH_CPU_INDEX_URL}
 
@@ -153,7 +154,7 @@ RUN python3 -m pip install --force-reinstall \
         torchaudio==2.10.0+cpu \
         --index-url ${PYTORCH_CPU_INDEX_URL} && \
     python3 -m pip install --force-reinstall \
-        torch-npu==2.10.0 \
+        torch-npu==2.10.0.post2 \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} \
         --extra-index-url ${PYTORCH_CPU_INDEX_URL} && \
     python3 -m pip install --force-reinstall numpy==1.26.4

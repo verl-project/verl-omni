@@ -27,17 +27,15 @@ import io
 import pickle
 
 import aiohttp
-import numpy as np
 import torch
 from PIL import Image
 
 
 def _tensor_to_pil(image: torch.Tensor) -> Image.Image:
-    """Convert a CHW float tensor in [0, 1] to a uint8 RGB PIL image."""
+    """Convert a CHW uint8 tensor to an RGB PIL image."""
     if image.ndim == 4:
         image = image[0]
-    image = image.float().permute(1, 2, 0).cpu().numpy()
-    image = (image * 255).round().clip(0, 255).astype(np.uint8)
+    image = image.permute(1, 2, 0).cpu().numpy()
     return Image.fromarray(image)
 
 

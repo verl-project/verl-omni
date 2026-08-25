@@ -101,7 +101,8 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             # Consume the stash so a subsequent full-weight sync isn't misrouted.
             self._pending_lora_peft_config = None
 
-        assert self.device is not None
+        if self.device is None:
+            raise RuntimeError("Worker device is not set.")
         zmq_handle = self._get_zmq_handle()
         if zmq_update_id is not None:
             zmq_handle = make_update_zmq_handle(zmq_handle, zmq_update_id)
@@ -123,7 +124,9 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             # cases and more efficient than per-bucket loading).
             t_recv_start = time.perf_counter()
             accumulated_weights: dict[str, torch.Tensor] = {}
-            receiver.receive_weights(on_bucket_received=lambda weights: accumulated_weights.update(weights))
+            receiver.receive_weights(
+                on_bucket_received=lambda weights, *args, **kwargs: accumulated_weights.update(weights)
+            )
             t_recv_end = time.perf_counter()
             lora_total_bytes = sum(t.element_size() * t.numel() for t in accumulated_weights.values())
             logger.debug(
@@ -182,13 +185,24 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 
                 patch_vllm_moe_model_weight_loader(model)
-                receiver.receive_weights(on_bucket_received=lambda weights: model.load_weights(weights))
+                receiver.receive_weights(
+                    on_bucket_received=lambda weights, *args, **kwargs: model.load_weights(weights)
+                )
                 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
                 process_weights_after_loading(model, model_config, self.device)
             else:
-                # Diffusion pipeline worker: use its own loader.
-                receiver.receive_weights(on_bucket_received=lambda weights: self.load_weights(weights))
+                # Diffusion pipeline worker: load via the pipeline. vllm-omni
+                # 0.26 removed DiffusionWorker/DiffusionModelRunner.load_weights;
+                # each pipeline exposes load_weights via AutoWeightsLoader.
+                pipeline = getattr(getattr(self, "model_runner", None), "pipeline", None)
+                if pipeline is not None and hasattr(pipeline, "load_weights"):
+                    load_fn = pipeline.load_weights
+                elif hasattr(self, "load_weights"):
+                    load_fn = self.load_weights
+                else:
+                    raise RuntimeError("Diffusion pipeline worker has no load_weights-capable pipeline")
+                receiver.receive_weights(on_bucket_received=lambda weights, *args, **kwargs: load_fn(weights))
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.

@@ -31,10 +31,15 @@ import torch
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.forward_context import set_forward_context_denoise_step_idx
+from vllm_omni.diffusion.models.wan2_2 import pipeline_wan2_2
 from vllm_omni.diffusion.models.wan2_2.pipeline_wan2_2 import Wan22Pipeline, retrieve_latents
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.platforms import current_omni_platform
 
+from verl_omni.pipelines.diffusion_rollout_output import (
+    rollout_output,
+    wrap_rollout_postprocessor,
+)
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
@@ -42,6 +47,17 @@ from .common import sd3_time_shift, seed_from_prompt_ids
 
 logger = logging.getLogger(__name__)
 __all__ = ["Wan22DanceGRPOPipelineWithLogProb"]
+
+_WAN_POST_PROCESS_FACTORY = pipeline_wan2_2.get_wan22_post_process_func
+
+
+def get_rollout_post_process_func(od_config):
+    """Postprocess Wan media while preserving rollout metadata."""
+    return wrap_rollout_postprocessor(_WAN_POST_PROCESS_FACTORY(od_config))
+
+
+# vllm-omni resolves the built-in architecture's factory in the engine process.
+pipeline_wan2_2.get_wan22_post_process_func = get_rollout_post_process_func
 
 
 def _coalesce_not_none(value, default):
@@ -328,7 +344,7 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
 
         Sampling parameters in *req* take precedence over keyword arguments.
         Returns raw latents (``output_type="latent"``) with full rollout data in
-        ``custom_output``.
+        native ``trajectory_*`` / metadata fields.
 
         Args:
             req: Rollout request containing prompts and sampling params.
@@ -351,10 +367,8 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
             **kwargs: Additional arguments.
 
         Returns:
-            DiffusionOutput: Contains the output video and a *custom_output* dict
-                with ``"all_latents"``, ``"all_log_probs"``, ``"all_timesteps"``,
-                ``"prompt_embeds"``, ``"prompt_embeds_mask"``,
-                ``"negative_prompt_embeds"``, and ``"negative_prompt_embeds_mask"``.
+            DiffusionOutput: Contains the output video plus trajectory/metadata
+                fields used for DanceGRPO training.
         """
         # --- Extract parameters from request ---
         if len(req.prompts) > 1:
@@ -382,7 +396,7 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
 
                 # --- Handle warmup / dummy run (both prompt_ids and prompt_embeds are None) ---
                 if custom_prompt.get("prompt", None) == "dummy run":
-                    return DiffusionOutput(output=None, custom_output={})
+                    return DiffusionOutput(output=None)
 
         # Default dimensions
         sampling_params = req.sampling_params
@@ -651,12 +665,13 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
             latents = latents / latents_std + latents_mean
             output = self.vae.decode(latents, return_dict=False)[0]
 
-        return DiffusionOutput(
-            output=output,
-            custom_output={
-                "all_latents": all_latents,
-                "all_log_probs": all_log_probs,
-                "all_timesteps": all_timesteps_tensor,
+        return rollout_output(
+            media=output,
+            media_key="video",
+            trajectory_latents=all_latents,
+            trajectory_log_probs=all_log_probs,
+            trajectory_timesteps=all_timesteps_tensor,
+            prompt_embeddings={
                 "prompt_embeds": prompt_embeds,
                 "prompt_embeds_mask": prompt_embeds_mask,
                 "negative_prompt_embeds": negative_prompt_embeds,

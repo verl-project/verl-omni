@@ -82,10 +82,10 @@ policy_state_adapters: ["default"]
 # FSDP layer name prefixes for LoRA parameter layered summon.
 fsdp_layer_prefixes: []
 
-# whether to use liger
+# Unsupported by omni FSDP/FSDP2; enabling fails before model loading.
 use_liger: False
 
-# whether to use fused kernels
+# Unsupported by omni FSDP/FSDP2; enabling fails before model loading.
 use_fused_kernels: False
 
 # fused kernel options

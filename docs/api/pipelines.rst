@@ -36,7 +36,8 @@ Model Base
 .. autoclass:: verl_omni.pipelines.model_base.DiffusionModelBase
    :members: register, get_class,
              build_scheduler, set_timesteps,
-             prepare_model_inputs, forward_and_sample_previous_step
+             prepare_model_inputs, forward_and_sample_previous_step,
+             validate_lora_config
 
 .. autoclass:: verl_omni.pipelines.model_base.VllmOmniPipelineBase
    :members: register, get_class, get_pipeline_path
