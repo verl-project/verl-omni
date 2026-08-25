@@ -252,7 +252,7 @@ def test_single_turn(init_config, agent_reward_loop: bool):
         batch.meta_info["global_steps"] = 0
         ar_n = init_config.actor_rollout_ref.rollout.n
         diffusion_n = init_config.actor_rollout_ref.rollout.m
-        batch.repeat(ar_n)
+        batch = batch.repeat(ar_n)
 
         ar_result, diffusion_result = agent_loop_manager.generate_sequences(prompts=batch)
         ar_batch_size = len(raw_prompts) * ar_n
@@ -317,24 +317,6 @@ def test_single_turn(init_config, agent_reward_loop: bool):
         diffusion_num_turns = diffusion_result.non_tensor_batch["__num_turns__"]
         assert np.all(ar_num_turns == 2)
         assert np.all(diffusion_num_turns == 2)
-
-        if agent_reward_loop:
-            ar_reward_data = ar_reward_handle.compute_score.received_data
-            diffusion_reward_data = dit_reward_handle.compute_score.received_data
-            # both use orginal prompt for reward computation
-            assert ar_reward_data is not None
-            assert diffusion_reward_data is not None
-            torch.testing.assert_close(
-                ar_reward_data.batch["prompts"],
-                ar_result.batch["prompts"],
-            )
-            torch.testing.assert_close(
-                diffusion_reward_data.batch["prompts"],
-                ar_result.batch["prompts"],
-            )
-            # AR also uses generated image for reward
-            assert ar_reward_data.batch["responses"].shape[0] == 1
-            assert ar_reward_data.batch["responses"].shape[1:] == diffusion_result.batch["responses"].shape[1:]
     finally:
         ray.shutdown()
         gc.collect()

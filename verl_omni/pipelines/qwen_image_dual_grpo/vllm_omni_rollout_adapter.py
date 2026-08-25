@@ -265,6 +265,7 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
             target_seq_len=None if prompt_token_ids is None else int(prompt_token_ids.shape[1]),
         )
         sampling_params = request_batch.sampling_params_list[0]
+        stage = coalesce_not_none(sampling_params.extra_args.get("stage", None), stage)
 
         # Stage 1: Agent LLM generation
         if stage == "ar":
@@ -301,17 +302,17 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
             #      if ar_all_log_probs.shape[1] < max_new_tokens:
             #          pad_len = max_new_tokens - ar_all_log_probs.shape[1]
             #          ar_all_log_probs = torch.nn.functional.pad(ar_all_log_probs, (0, 0, 0, pad_len), value=0.0)
-            # apply chat template and tokenize
+            # apply chat template
             refined_prompts = extract_prompt(text_encoder_responses)
-            messages = [{"role": "user", "content": SYSTEM_PROMPT + e} for e in refined_prompts]
-            # refined_prompt_ids = self.tokenizer.apply_chat_template(
-            #     messages,
-            #     tokenize=True,
-            #     add_generation_prompt=True
-            # )
-            # list[int]
+            messages = [
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": e},
+                ]
+                for e in refined_prompts
+            ]
 
-            image = torch.empty((1,3,1,1))  # dummy image
+            image = torch.empty((1, 3, 1, 1))  # dummy image
             result = rollout_output(
                 media=image,
                 rl={

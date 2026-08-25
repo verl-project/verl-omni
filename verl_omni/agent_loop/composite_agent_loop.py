@@ -35,12 +35,15 @@ from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from verl.base_config import BaseConfig
 from verl.experimental.agent_loop.agent_loop import (
+    AgentLoopManager,
     AgentLoopMetrics,
     DictConfigWrap,
     _agent_loop_registry,
+    auto_await,
 )
 from verl.protocol import DataProto
 from verl.utils.profiler import simple_timer
+from verl.utils.skip import SkipManager
 from verl.workers.rollout.llm_server import LLMServerClient
 
 from verl_omni.agent_loop.diffusion_agent_loop import (
@@ -434,3 +437,50 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
             non_tensor_batch=non_tensor_batch,
             meta_info=meta_info,
         )
+
+
+class CompositeAgentLoopManager(AgentLoopManager):
+    def __init__(
+        self,
+        config: DictConfig,
+        llm_client: LLMServerClient,
+        teacher_client: dict[str, LLMServerClient] | None = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] | None = None,
+    ):
+        self.agent_loop_workers_class = ray.remote(CompositeAgentLoopWorker)
+        super().__init__(config, llm_client, teacher_client, reward_loop_worker_handles)
+
+    @auto_await
+    @SkipManager.annotate(role="rollout")
+    async def generate_sequences(self, prompts: DataProto) -> tuple[DataProto, DataProto]:
+        """Gather ``(ar_batch, diffusion_batch)`` tuples from composite workers."""
+
+        chunks = prompts.chunk(len(self.agent_loop_workers))
+        outputs = await asyncio.gather(
+            *[
+                worker.generate_sequences.remote(chunk)
+                for worker, chunk in zip(self.agent_loop_workers, chunks, strict=True)
+            ]
+        )
+
+        # concatenate outputs
+        ar_outputs = [output[0] for output in outputs]
+        diffusion_outputs = [output[1] for output in outputs]
+
+        ar_batch = DataProto.concat(ar_outputs)
+        diffusion_batch = DataProto.concat(diffusion_outputs)
+
+        # calculate performance metrics
+        metrics = [output.meta_info.pop("metrics") for output in ar_outputs]
+        ar_timing = self._performance_metrics(metrics, ar_batch)
+        old_keys = list(ar_timing.keys())
+        for key in old_keys:
+            new_key = key.replace("agent_loop/", "agent_loop/ar/")
+            ar_timing[new_key] = ar_timing.pop(key)
+        ar_batch.meta_info = {"timing": ar_timing, **ar_outputs[0].meta_info}
+
+        metrics = [output.meta_info.pop("metrics") for output in diffusion_outputs]
+        diffusion_timing = self._performance_metrics(metrics, ar_batch)
+        diffusion_batch.meta_info = {"timing": diffusion_timing, **diffusion_outputs[0].meta_info}
+
+        return ar_batch, diffusion_batch
