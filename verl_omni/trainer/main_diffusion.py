@@ -28,6 +28,7 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
 )
+from verl_omni.utils.config import validate_config
 from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
 
 
@@ -61,6 +62,7 @@ def main(config):
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
     OmegaConf.resolve(config)
+    validate_config(config)
     fallback_fa3_if_unavailable(config)
     validate_attention_consistency(config)
     run_diffusion(config)

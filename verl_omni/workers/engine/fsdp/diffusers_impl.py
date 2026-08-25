@@ -295,16 +295,11 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             try:
                 module.set_attention_backend(self.model_config.attn_backend)
             except Exception as e:
-                if self.model_config.attn_backend == "_flash_3_varlen_hub":
-                    logger.warning(
-                        "Failed to set attention backend to %s (%s). Falling back to 'native' attention backend.",
-                        self.model_config.attn_backend,
-                        e,
-                    )
-                    object.__setattr__(self.model_config, "attn_backend", "native")
-                    module.set_attention_backend("native")
-                else:
-                    raise e
+                raise RuntimeError(
+                    f"Failed to apply configured attention backend {self.model_config.attn_backend!r}. "
+                    "The validated backend cannot be downgraded after startup; install the required "
+                    "attention dependency or select a supported backend explicitly."
+                ) from e
 
             # Keep architecture-declared fp32 islands; a blanket to(dtype) would flatten them.
             _cast_loaded_diffusers_module(module, torch_dtype)
