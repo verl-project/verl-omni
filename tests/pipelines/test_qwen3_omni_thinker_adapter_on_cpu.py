@@ -20,7 +20,6 @@ Patches dropped from the adapter:
 - ``module._no_split_modules``    → thinker class already correct
 """
 
-import importlib.metadata
 import importlib.util
 import sys
 import types
@@ -30,13 +29,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-from packaging.version import parse as parse_version
-
-
-def _require_version(pkg_name: str, min_version: str):
-    """Raise ``AssertionError`` if *pkg_name* is below *min_version*."""
-    ver = importlib.metadata.version(pkg_name)
-    assert parse_version(ver) >= parse_version(min_version), f"{pkg_name} >= {min_version} is required, got {ver}"
 
 
 def _has_lora(module: nn.Module) -> bool:
@@ -44,10 +36,10 @@ def _has_lora(module: nn.Module) -> bool:
     return hasattr(module, "lora_A") and hasattr(module, "lora_B")
 
 
-def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):
+def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch, require_version):
     """The V1 processor path must collapse image, video, and audio pad runs."""
     pytest.importorskip("transformers")
-    _require_version("transformers", "5.0.0")
+    require_version("transformers", "5.0.0")
 
     from transformers import AutoConfig, AutoProcessor
 
@@ -135,10 +127,10 @@ def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):
     ]
 
 
-def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch):
+def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch, require_version):
     """The V1 adapter must install the audio-aware agent-loop RoPE path."""
     pytest.importorskip("transformers")
-    _require_version("transformers", "5.0.0")
+    require_version("transformers", "5.0.0")
 
     from transformers import AutoConfig, AutoProcessor
     from transformers.models.qwen3_omni_moe import Qwen3OmniMoeThinkerForConditionalGeneration
@@ -341,10 +333,10 @@ class _MoEModel(nn.Module):
         return attn_out + expert_out
 
 
-def test_peft_lora_attaches_to_fused_moe_natively():
+def test_peft_lora_attaches_to_fused_moe_natively(require_version):
     """PEFT converts gate_proj+up_proj → gate_up_proj with doubled rank."""
     pytest.importorskip("peft")
-    _require_version("peft", "0.19.0")
+    require_version("peft", "0.19.0")
     from peft import LoraConfig, get_peft_model
 
     model = _MoEModel()
@@ -390,10 +382,10 @@ def test_peft_lora_attaches_to_fused_moe_natively():
     assert hasattr(obj, "gate_up_proj"), "gate_up_proj parameter should still be reachable through PEFT wrapping"
 
 
-def test_tie_word_embeddings_is_false_by_default():
+def test_tie_word_embeddings_is_false_by_default(require_version):
     """v5 config: ``tie_word_embeddings=False`` on the thinker sub-config."""
     pytest.importorskip("transformers")
-    _require_version("transformers", "5.0.0")
+    require_version("transformers", "5.0.0")
     from transformers.models.qwen3_omni_moe import Qwen3OmniMoeConfig
 
     cfg = Qwen3OmniMoeConfig()
@@ -404,10 +396,10 @@ def test_tie_word_embeddings_is_false_by_default():
     )
 
 
-def test_thinker_class_no_split_modules_is_correct():
+def test_thinker_class_no_split_modules_is_correct(require_version):
     """Thinker subclass already uses the right FSDP layer class name."""
     pytest.importorskip("transformers")
-    _require_version("transformers", "5.0.0")
+    require_version("transformers", "5.0.0")
     from transformers.models.qwen3_omni_moe import (
         Qwen3OmniMoeThinkerForConditionalGeneration,
     )
@@ -428,10 +420,10 @@ def test_thinker_class_no_split_modules_is_correct():
     )
 
 
-def test_peft_wrapped_model_forwards():
+def test_peft_wrapped_model_forwards(require_version):
     """PEFT-wrapped _MoEModel runs a forward pass and produces valid output."""
     pytest.importorskip("peft")
-    _require_version("peft", "0.19.0")
+    require_version("peft", "0.19.0")
     from peft import LoraConfig, get_peft_model
 
     model = _MoEModel()

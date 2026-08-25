@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
-Last updated: 08/19/2026
+Last updated: 08/24/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
@@ -275,6 +275,12 @@ recipe are:
    dataset handles images only).
 2. `+data.mm_processor_kwargs.sampling_rate=16000` — the Qwen3-Omni feature
    extractor rate, used when filtering overlong multimodal prompts.
+3. Rollout memory-margin knobs for colocated audio workloads —
+   `gpu_memory_utilization=0.7` (the base GPU recipe uses `0.8`),
+   `rollout.prompt_length=4160`, `engine_kwargs.vllm_omni.max_num_seqs=256`,
+   and `cudagraph_capture_sizes=[1,2,4,8,16,32,64,128,256]` — see *Sizing
+   rollout memory in colocated sleep mode* in the [integrating
+   guide](../../docs/contributing/integrating_an_omni_model.md).
 
 ```bash
 bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh
