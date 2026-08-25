@@ -8,7 +8,7 @@ gpu_smoke_init "ci-e2e-omni" 2 "$@"
 
 omni_trainer_args=()
 if [[ -n "${RAY_MASTER_PORT_RANGE:-}" ]]; then
-    omni_trainer_args+=("trainer.ray_master_port_range=[${RAY_MASTER_PORT_RANGE}]")
+    omni_trainer_args+=("+trainer.ray_master_port_range=[${RAY_MASTER_PORT_RANGE}]")
 fi
 
 # Fixed at 2 GPUs: FSDP/FSPD2 needs >1 GPU to shard (NO_SHARD can't run the
