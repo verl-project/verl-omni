@@ -14,6 +14,7 @@
 
 import logging
 
+import pytest
 from omegaconf import OmegaConf
 
 from tests.utils.smoke_attention import resolve_smoke_attention_backends
@@ -88,6 +89,20 @@ def test_native_actor_rejects_flash_attn_3_hub():
         assert "rollout_attn_backend='TORCH_SDPA'" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_attention_validation_rejects_unknown_backend():
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "model": {"attn_backend": "typo"},
+                "actor": {"strategy": "fsdp2"},
+                "rollout": {"rollout_attn_backend": "TORCH_SDPA"},
+            }
+        }
+    )
+    with pytest.raises(ValueError, match="Unknown attn_backend"):
+        validate_attention_consistency(config)
 
 
 def test_fallback_hub_fa3_without_kernels_sets_sdpa(monkeypatch):
