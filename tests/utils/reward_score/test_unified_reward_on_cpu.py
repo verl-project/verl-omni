@@ -18,6 +18,8 @@ from verl_omni.utils.reward_score.unified_reward import _parse_unified_reward_sc
 
 def test_unified_reward_requires_all_labeled_axes():
     assert _parse_unified_reward_scores("Alignment Score: 4\nCoherence Score: 5") == {}
-    assert _parse_unified_reward_scores(
-        "Alignment Score: 4\nCoherence Score: 5\nStyle Score: 3"
-    ) == {"alignment": 4.0, "coherence": 5.0, "style": 3.0}
+    assert _parse_unified_reward_scores("Alignment Score: 4\nCoherence Score: 5\nStyle Score: 3") == {
+        "alignment": 4.0,
+        "coherence": 5.0,
+        "style": 3.0,
+    }

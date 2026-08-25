@@ -118,9 +118,7 @@ def validate_attention_consistency(config: Any) -> None:
     rollout_backend = config.actor_rollout_ref.rollout.get("rollout_attn_backend")
 
     if attn_backend not in ACTOR_BACKENDS:
-        raise ValueError(
-            f"Unknown attn_backend={attn_backend!r}. Available options: {list(ACTOR_BACKENDS)}."
-        )
+        raise ValueError(f"Unknown attn_backend={attn_backend!r}. Available options: {list(ACTOR_BACKENDS)}.")
     if rollout_backend not in ROLLOUT_BACKENDS:
         raise ValueError(
             f"Unknown rollout_attn_backend={rollout_backend!r}. Available options: {list(ROLLOUT_BACKENDS)}."

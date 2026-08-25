@@ -41,8 +41,8 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
 )
-from verl_omni.utils.fs import resolve_model_local_dir
 from verl_omni.utils.config import validate_config as validate_omni_config
+from verl_omni.utils.fs import resolve_model_local_dir
 
 __all__ = [
     "RayTrainerTaskRunner",

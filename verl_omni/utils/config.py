@@ -26,10 +26,7 @@ def validate_config(config: Any) -> None:
     resume_mode = _select(config, "trainer.resume_mode")
     valid_resume_modes = ("disable", "auto", "resume_path")
     if resume_mode not in valid_resume_modes:
-        raise ValueError(
-            f"Unknown trainer.resume_mode={resume_mode!r}. "
-            f"Available options: {list(valid_resume_modes)}."
-        )
+        raise ValueError(f"Unknown trainer.resume_mode={resume_mode!r}. Available options: {list(valid_resume_modes)}.")
     if resume_mode == "resume_path" and not _select(config, "trainer.resume_from_path"):
         raise ValueError("trainer.resume_from_path must be set when trainer.resume_mode='resume_path'.")
 
@@ -41,4 +38,3 @@ def validate_config(config: Any) -> None:
             raise ValueError("trainer.total_training_steps must be a positive integer or null.") from exc
         if total_steps <= 0:
             raise ValueError("trainer.total_training_steps must be a positive integer or null.")
-

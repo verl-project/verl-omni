@@ -28,8 +28,8 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
 )
-from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
 from verl_omni.utils.config import validate_config
+from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
 
 
 def _count_controller_capture_ranges(profile_steps: list[int], profile_continuous_steps: bool) -> int:
