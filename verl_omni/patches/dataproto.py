@@ -20,6 +20,11 @@ from functools import wraps
 def apply_numpy_dataproto_serialization_fix() -> None:
     """Avoid an unused TensorDict consolidation in NumPy DataProto serialization.
 
+    This compatibility workaround is used by NPU workloads that enable NumPy
+    serialization and was validated on Ascend 910C. Remove it after
+    https://github.com/verl-project/verl/pull/7539 is merged and the pinned
+    ``verl`` revision includes that upstream fix.
+
     The pinned ``verl`` version consolidates ``self.batch`` before checking the
     serialization method. The NumPy serializer works from the original batch,
     so that consolidation creates an unused full-batch copy for every RPC.
