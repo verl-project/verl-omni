@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .composite_agent_loop import CompositeAgentLoopWorker
-from .composite_agent_loop_manager import CompositeAgentLoopManager
+from .composite_agent_loop import CompositeAgentLoopManager, CompositeAgentLoopWorker
 from .diffusion_agent_loop import DiffusionAgentLoopOutput, DiffusionAgentLoopWorker
 from .diffusion_agent_loop_tq import (
     DiffusionAgentLoopWorkerTQ,
