@@ -523,8 +523,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                     self.config.actor_rollout_ref.actor.optim.total_training_steps = (
                         total_training_steps * self.parameter_sync_step
                     )
-        except Exception as e:
-            logger.warning(f"Could not set total_training_steps in config: {e}")
+        except (KeyError, TypeError, AttributeError, OmegaConf.errors.OmegaConfBaseException) as e:
+            raise RuntimeError("Failed to propagate trainer.total_training_steps to actor optimizer config.") from e
 
     def _init_dump_executor(self):
         self._dump_executor = ThreadPoolExecutor(max_workers=1)
@@ -1271,8 +1271,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             if not os.path.isabs(global_step_folder):
                 global_step_folder = os.path.join(os.getcwd(), global_step_folder)
         else:
-            logger.exception(f"Unknown resume mode {self.config.trainer.resume_mode}")
-            return
+            raise ValueError(
+                f"Unknown trainer.resume_mode={self.config.trainer.resume_mode!r}. "
+                "Available options: ['disable', 'auto', 'resume_path']."
+            )
 
         self.global_steps = int(global_step_folder.split("global_step_")[-1])
         logger.info(f"Resuming diffusion from {global_step_folder}, global_steps={self.global_steps}")

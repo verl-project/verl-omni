@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/version")) as f:
     __version__ = f.read().strip()
@@ -22,11 +25,12 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/vers
 # TODO: Remove when vllm-omni initializes device_type on CPU platforms by default.
 try:
     import vllm_omni.platforms
-
+except ImportError:
+    vllm_omni = None
+else:
     if not vllm_omni.platforms.current_omni_platform.device_type:
+        logger.warning("vllm-omni did not initialize a device type; defaulting to CPU.")
         vllm_omni.platforms.current_omni_platform.device_type = "cpu"
-except Exception:
-    pass
 
 
 # Import pipelines / rollout / reward loop / engines to auto-register them

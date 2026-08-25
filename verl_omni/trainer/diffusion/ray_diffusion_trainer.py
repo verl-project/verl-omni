@@ -304,8 +304,8 @@ class BaseRayDiffusionTrainer(ABC):
             with open_dict(self.config):
                 if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
                     self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
-        except Exception as e:
-            print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+        except (KeyError, TypeError, AttributeError, OmegaConf.errors.OmegaConfBaseException) as e:
+            raise RuntimeError("Failed to propagate trainer.total_training_steps to actor optimizer config.") from e
 
     def _dump_generations(
         self,
@@ -948,6 +948,11 @@ class BaseRayDiffusionTrainer(ABC):
                 if not os.path.isabs(global_step_folder):
                     working_dir = os.getcwd()
                     global_step_folder = os.path.join(working_dir, global_step_folder)
+            else:
+                raise ValueError(
+                    f"Unknown trainer.resume_mode={self.config.trainer.resume_mode!r}. "
+                    "Available options: ['disable', 'auto', 'resume_path']."
+                )
         print(f"Load from checkpoint folder: {global_step_folder}")
         # set global step
         self.global_steps = int(global_step_folder.split("global_step_")[-1])
