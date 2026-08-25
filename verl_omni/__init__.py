@@ -17,6 +17,11 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/vers
     __version__ = f.read().strip()
 
 
+from verl_omni.patches import apply_numpy_dataproto_serialization_fix
+
+apply_numpy_dataproto_serialization_fix()
+
+
 # Fallback for CPU-only environments where vLLM-Omni current_omni_platform.device_type is empty.
 # This prevents RuntimeError: Device string must not be empty when importing modules with torch.amp.autocast.
 # TODO: Remove when vllm-omni initializes device_type on CPU platforms by default.
