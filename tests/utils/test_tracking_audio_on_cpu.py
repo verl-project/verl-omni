@@ -21,22 +21,9 @@ import wave
 from pathlib import Path
 
 import torch
-from PIL import Image
 
 
 def _load_tracking_module(monkeypatch):
-    reward_utils = types.ModuleType("verl_omni.utils.reward_score.reward_utils")
-
-    def video_tensor_to_pil_frames(output):
-        frames = output.detach().permute(0, 2, 3, 1).mul(255).round().to(torch.uint8).numpy()
-        return [Image.fromarray(frame) for frame in frames]
-
-    reward_utils.video_tensor_to_pil_frames = video_tensor_to_pil_frames
-    monkeypatch.setitem(sys.modules, "verl_omni", types.ModuleType("verl_omni"))
-    monkeypatch.setitem(sys.modules, "verl_omni.utils", types.ModuleType("verl_omni.utils"))
-    monkeypatch.setitem(sys.modules, "verl_omni.utils.reward_score", types.ModuleType("verl_omni.utils.reward_score"))
-    monkeypatch.setitem(sys.modules, "verl_omni.utils.reward_score.reward_utils", reward_utils)
-
     module_path = Path(__file__).parents[2] / "verl_omni/utils/tracking.py"
     spec = importlib.util.spec_from_file_location("tracking_under_test", module_path)
     module = importlib.util.module_from_spec(spec)
@@ -45,19 +32,16 @@ def _load_tracking_module(monkeypatch):
     return module
 
 
-def test_export_video_muxes_audio(monkeypatch, tmp_path):
+def test_export_video_encodes_rgb_and_audio_in_one_ffmpeg_invocation(monkeypatch, tmp_path):
     tracking = _load_tracking_module(monkeypatch)
     commands = []
+    output = torch.arange(5 * 3 * 8 * 10, dtype=torch.uint8).reshape(5, 3, 8, 10)
 
-    def fake_video_exporter(frames, output_path, fps):
-        assert len(frames) == 5
-        assert fps == 24
-        Path(output_path).write_bytes(b"silent-video")
-        return output_path
-
-    def fake_ffmpeg(command, check):
+    def fake_ffmpeg(command, *, input, check):
         assert check is True
         commands.append(command)
+        expected_rgb = output.permute(0, 2, 3, 1).contiguous().numpy().tobytes()
+        assert input == expected_rgb
         second_input = command.index("-i", command.index("-i") + 1)
         with wave.open(command[second_input + 1], "rb") as wav_file:
             assert wav_file.getframerate() == 48_000
@@ -67,19 +51,30 @@ def test_export_video_muxes_audio(monkeypatch, tmp_path):
     monkeypatch.setattr(tracking.subprocess, "run", fake_ffmpeg)
     output_path = tmp_path / "sample.mp4"
     tracking._export_video(
-        torch.zeros(5, 3, 8, 10),
+        output,
         str(output_path),
         fps=24,
         audio=torch.zeros(1, 800),
         audio_sample_rate=48_000,
-        video_exporter=fake_video_exporter,
         ffmpeg_exe="/fake/ffmpeg",
     )
 
     assert output_path.read_bytes() == b"video-with-audio"
-    codec_index = commands[0].index("-c:v")
-    assert commands[0][codec_index : codec_index + 4] == ["-c:v", "copy", "-c:a", "aac"]
-    assert "+faststart" in commands[0]
+    command = commands[0]
+    assert command[command.index("-f") : command.index("-f") + 8] == [
+        "-f",
+        "rawvideo",
+        "-vcodec",
+        "rawvideo",
+        "-s",
+        "10x8",
+        "-pix_fmt",
+        "rgb24",
+    ]
+    codec_index = command.index("-c:v")
+    assert command[codec_index : codec_index + 4] == ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
+    assert command[command.index("-c:a") : command.index("-c:a") + 2] == ["-c:a", "aac"]
+    assert "+faststart" in command
 
 
 def test_wandb_wrapper_forwards_audio_to_video_export(monkeypatch):

@@ -18,14 +18,12 @@ import os
 import subprocess
 import tempfile
 import wave
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
-
-from verl_omni.utils.reward_score.reward_utils import video_tensor_to_pil_frames
 
 
 def batch_items(values: Any, batch_size: int, name: str) -> list[Any]:
@@ -71,6 +69,19 @@ def _write_wav(audio: Any, sample_rate: Any, path: Path) -> None:
         wav_file.writeframes(pcm.tobytes())
 
 
+def _video_tensor_to_rgb24(video: torch.Tensor) -> tuple[np.ndarray, int, int]:
+    """Return a contiguous RGB24 video array and its width and height."""
+    if video.dtype != torch.uint8:
+        raise ValueError(f"Expected a uint8 video tensor, got {video.dtype}")
+    if video.ndim != 4 or video.shape[1] != 3:
+        raise ValueError(f"Expected an RGB video tensor with shape [T, 3, H, W], got {tuple(video.shape)}")
+    if video.shape[0] == 0:
+        raise ValueError("Expected a video with at least one frame.")
+
+    frames = video.detach().permute(0, 2, 3, 1).to(device="cpu").contiguous().numpy()
+    return frames, int(frames.shape[2]), int(frames.shape[1])
+
+
 def _export_video(
     output: torch.Tensor,
     output_path: str,
@@ -78,59 +89,71 @@ def _export_video(
     fps: int,
     audio: Any = None,
     audio_sample_rate: Any = None,
-    video_exporter: Callable[..., str] | None = None,
     ffmpeg_exe: str | None = None,
 ) -> None:
-    if video_exporter is None:
-        from diffusers.utils import export_to_video
+    """Encode RGB frames and optional audio in one ffmpeg invocation.
 
-        video_exporter = export_to_video
-
-    frames = video_tensor_to_pil_frames(output)
-    if audio is None:
-        video_exporter(frames, output_path, fps=fps)
-        return
-    if audio_sample_rate is None:
-        raise ValueError("audio_sample_rate is required when logging a video with audio.")
+    Passing the complete RGB payload through ``subprocess.run(input=...)`` uses
+    ``communicate`` to finish partial pipe writes. This avoids imageio-ffmpeg's
+    direct ``stdin.write`` path, which can silently truncate a raw-video frame.
+    """
     if ffmpeg_exe is None:
         from imageio_ffmpeg import get_ffmpeg_exe
 
         ffmpeg_exe = get_ffmpeg_exe()
 
+    frames, width, height = _video_tensor_to_rgb24(output)
     output_path = Path(output_path)
-    silent_path = output_path.with_suffix(".silent.mp4")
-    audio_path = output_path.with_suffix(".wav")
+    audio_path = None
+    command = [
+        ffmpeg_exe,
+        "-y",
+        "-loglevel",
+        "error",
+        "-f",
+        "rawvideo",
+        "-vcodec",
+        "rawvideo",
+        "-s",
+        f"{width}x{height}",
+        "-pix_fmt",
+        "rgb24",
+        "-r",
+        str(fps),
+        "-i",
+        "-",
+    ]
     try:
-        video_exporter(frames, str(silent_path), fps=fps)
-        _write_wav(audio, audio_sample_rate, audio_path)
-        subprocess.run(
+        if audio is None:
+            command.append("-an")
+        else:
+            if audio_sample_rate is None:
+                raise ValueError("audio_sample_rate is required when logging a video with audio.")
+            audio_path = output_path.with_suffix(".wav")
+            _write_wav(audio, audio_sample_rate, audio_path)
+            command.extend(["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0"])
+
+        command.extend(
             [
-                ffmpeg_exe,
-                "-y",
-                "-loglevel",
-                "error",
-                "-i",
-                str(silent_path),
-                "-i",
-                str(audio_path),
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0",
                 "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
                 "-movflags",
                 "+faststart",
-                "-shortest",
-                str(output_path),
-            ],
-            check=True,
+            ]
         )
+        if audio is not None:
+            command.extend(["-c:a", "aac", "-shortest"])
+        command.append(str(output_path))
+        try:
+            subprocess.run(command, input=frames.tobytes(), check=True)
+        except Exception:
+            output_path.unlink(missing_ok=True)
+            raise
     finally:
-        silent_path.unlink(missing_ok=True)
-        audio_path.unlink(missing_ok=True)
+        if audio_path is not None:
+            audio_path.unlink(missing_ok=True)
 
 
 def wrap_val_samples_for_wandb(samples, fps=24, output_dir=None):
