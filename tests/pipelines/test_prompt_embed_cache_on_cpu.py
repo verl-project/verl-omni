@@ -587,6 +587,7 @@ def test_flow_forward_preserves_input_path_through_encode_prompt(use_tensors):
 
     pipeline = SimpleNamespace(
         device=torch.device("cpu"),
+        _prompt_embed_cache=SimpleNamespace(enabled=True),
         default_sample_size=2,
         vae_scale_factor=8,
         transformer=SimpleNamespace(in_channels=4),
