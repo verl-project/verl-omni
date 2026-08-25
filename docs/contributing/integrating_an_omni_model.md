@@ -171,8 +171,8 @@ concurrency keeps the transient off the memory ceiling at negligible
 throughput cost:
 
 ```bash
-    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs=256 \
-    actor_rollout_ref.rollout.cudagraph_capture_sizes=[1,2,4,8,16,32,64,128,256] \
++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs=256 \
+    actor_rollout_ref.rollout.cudagraph_capture_sizes=[1,2,4,8,16,32,64,128,256]
 ```
 
 For long-response workloads that fill the KV pool, prefer keeping
