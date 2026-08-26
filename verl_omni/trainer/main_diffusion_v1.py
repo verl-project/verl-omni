@@ -25,7 +25,7 @@ from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_class_from_fqn
 
 from verl_omni.utils.config import validate_config
-from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
+from verl_omni.utils.diffusion_attention import fallback_fa_if_unavailable, validate_attention_consistency
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -140,7 +140,7 @@ def main(config):
     auto_set_device(config)
     OmegaConf.resolve(config)
     validate_config(config)
-    fallback_fa3_if_unavailable(config)
+    fallback_fa_if_unavailable(config)
     validate_attention_consistency(config)
 
     if config.trainer.get("use_v1", False):

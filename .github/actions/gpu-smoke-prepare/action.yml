@@ -21,6 +21,7 @@ runs:
         git config --global http.postBuffer 524288000 || true
         # Base image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
         # vllm-omni first: the pin still requires diffusers==0.38.0 and would downgrade our >=0.40.0 floor.
+        # Note: this also lifts accelerate past the pin's ==1.12.0 to our >=1.14.0 floor.
         # TODO: restore the original install order once the pin is upgraded past vllm-omni#6459.
         uv pip install --system --break-system-packages "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
         uv pip install --system --break-system-packages ".[gpu,dev,audio]"

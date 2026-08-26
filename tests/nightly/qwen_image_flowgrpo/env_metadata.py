@@ -91,7 +91,7 @@ def collect_env_metadata(*, attn_backend: str | None = None, rollout_attn_backen
 
         fa3_flags = {
             "fa3_available": da.fa3_available(),
-            "actor_fa3_available": da.actor_fa3_available(),
+            "actor_fa_available": da.actor_fa_available(),
             "rollout_fa3_available": da.rollout_fa3_available(),
         }
     except Exception as exc:

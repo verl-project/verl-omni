@@ -80,7 +80,6 @@ GROUP_PATTERNS = {
         "tests/special_e2e/*qwen_image*",
         "tests/special_e2e/*bagel*",
         "tests/special_e2e/*pickscore*",
-        "verl_omni/models/diffusers/**",
         "verl_omni/pipelines/**",
         "verl_omni/trainer/config/diffusion/**",
         "verl_omni/trainer/diffusion/**",

@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
@@ -21,8 +20,6 @@ from diffusers import ModelMixin, SchedulerMixin
 from tensordict import TensorDict
 
 from verl_omni.workers.config import DiffusionModelConfig
-
-logger = logging.getLogger(__name__)
 
 
 class DiffusionModelBase(ABC):

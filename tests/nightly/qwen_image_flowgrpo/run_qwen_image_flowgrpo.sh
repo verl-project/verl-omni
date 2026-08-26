@@ -53,8 +53,8 @@ export NIGHTLY_REQUIRE_FA3=1
 export NIGHTLY_ATTN_BACKEND=${ATTN_BACKEND}
 export NIGHTLY_ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND}
 
-if ! python3 -c 'from verl_omni.utils.diffusion_attention import fa3_available, actor_fa3_available, rollout_fa3_available; import sys; sys.exit(0 if fa3_available() else 1)'; then
-    python3 -c 'from verl_omni.utils.diffusion_attention import actor_fa3_available, rollout_fa3_available; print(f"[NIGHTLY] FA3 check failed: actor_kernels={actor_fa3_available()} rollout_fa={rollout_fa3_available()}")'
+if ! python3 -c 'from verl_omni.utils.diffusion_attention import fa3_available, actor_fa_available, rollout_fa3_available; import sys; sys.exit(0 if fa3_available() else 1)'; then
+    python3 -c 'from verl_omni.utils.diffusion_attention import actor_fa_available, rollout_fa3_available; print(f"[NIGHTLY] FA3 check failed: actor_kernels={actor_fa_available()} rollout_fa={rollout_fa3_available()}")'
     echo "[NIGHTLY] FA3 is required for this regression (kernels + fa3-fwd/flash-attn rollout). Aborting."
     exit 1
 fi
