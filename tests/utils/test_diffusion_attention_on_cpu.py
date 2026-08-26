@@ -135,10 +135,10 @@ def test_fallback_fa2_without_kernels_sets_sdpa(monkeypatch):
 
 
 def test_resolve_smoke_attention_backends_prefers_local_fa(monkeypatch):
-    monkeypatch.setattr("tests.utils.smoke_attention.fa3_available", lambda: True)
+    monkeypatch.setattr("tests.utils.smoke_attention.fa_available", lambda: True)
     assert resolve_smoke_attention_backends() == ("_flash_3_varlen_hub", "FLASH_ATTN")
 
 
 def test_resolve_smoke_attention_backends_falls_back_without_fa3(monkeypatch):
-    monkeypatch.setattr("tests.utils.smoke_attention.fa3_available", lambda: False)
+    monkeypatch.setattr("tests.utils.smoke_attention.fa_available", lambda: False)
     assert resolve_smoke_attention_backends() == ("native", "TORCH_SDPA")

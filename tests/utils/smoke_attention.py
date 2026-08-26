@@ -19,7 +19,7 @@ from verl_omni.utils.diffusion_attention import (
     ACTOR_FA3_BACKEND,
     ACTOR_NATIVE_BACKEND,
     ROLLOUT_SDPA_BACKEND,
-    fa3_available,
+    fa_available,
 )
 
 ROLLOUT_LOCAL_FA_BACKEND = "FLASH_ATTN"
@@ -33,6 +33,6 @@ def resolve_smoke_attention_backends() -> tuple[str, str]:
     download Hub kernels at engine init. Falls back to native/SDPA when FA3 deps
     are missing (same idea as ``tests/workers/test_diffusers_fsdp_engine.py``).
     """
-    if not fa3_available():
+    if not fa_available():
         return ACTOR_NATIVE_BACKEND, ROLLOUT_SDPA_BACKEND
     return ACTOR_FA3_BACKEND, ROLLOUT_LOCAL_FA_BACKEND
