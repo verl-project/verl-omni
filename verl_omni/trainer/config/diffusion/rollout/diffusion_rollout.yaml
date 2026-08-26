@@ -134,6 +134,15 @@ engine_kwargs:
   # vllm-omni engine config
   vllm_omni: {}
 
+# Reuse text-encoder outputs for repeated diffusion prompts.
+enable_prompt_embed_cache: false
+
+# Maximum number of prompt embeddings cached per diffusion worker.
+prompt_embed_cache_size: 32
+
+# Route repeated rollouts for one sample to the same worker when prompt cache is enabled.
+enable_prompt_embed_cache_routing_affinity: false
+
 # Sampling parameters used during validation (diffusion-specific).
 val_kwargs:
 

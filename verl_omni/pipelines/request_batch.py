@@ -100,19 +100,66 @@ def _rows_from_default(
 def collate_prompt_rows(
     prompts: list[Any],
     aliases: tuple[str, ...],
-    default_value: torch.Tensor | list[int] | None,
+    default_value: torch.Tensor | list[int] | list[list[int]] | None,
     *,
     device: torch.device,
     field_name: str,
     pad_value: int = 0,
-) -> tuple[torch.Tensor | None, list[int] | None]:
-    """Pad and stack per-request 1D prompt fields into a batched ``(N, L)`` tensor.
+    preserve_lists: bool = False,
+) -> tuple[torch.Tensor | list[list[int]] | None, list[int] | None]:
+    """Pad and stack per-request 1D prompt fields into batched rows.
 
     Looks up each field via ``aliases`` on the prompt (or its
     ``additional_information``). When ``default_value`` is set it is used for
-    the whole batch instead. Returns ``(None, None)`` if no request provides
-    the field.
+    the whole batch instead. By default rows are returned as a tensor on
+    ``device``; set ``preserve_lists=True`` to preserve list inputs for a
+    caller that must process them before tensorization. Explicit tensor inputs
+    retain the original tensor collation path. Returns ``(None, None)`` if no
+    request provides the field.
     """
+    if preserve_lists:
+        if default_value is None:
+            rows = [_get_prompt_field(prompt, aliases) for prompt in prompts]
+        elif isinstance(default_value, list):
+            rows = default_value if default_value and isinstance(default_value[0], list) else [default_value]
+        elif isinstance(default_value, torch.Tensor):
+            return collate_prompt_rows(
+                prompts,
+                aliases,
+                default_value,
+                device=device,
+                field_name=field_name,
+                pad_value=pad_value,
+            )
+        else:
+            raise TypeError(f"Request-batch {field_name} must be a tensor or list.")
+
+        if not any(row is not None for row in rows):
+            return None, None
+        if not all(row is not None for row in rows):
+            raise ValueError(f"Cannot batch requests with a mix of provided and missing {field_name}.")
+        if any(isinstance(row, torch.Tensor) for row in rows):
+            return collate_prompt_rows(
+                prompts,
+                aliases,
+                default_value,
+                device=device,
+                field_name=field_name,
+                pad_value=pad_value,
+            )
+        if any(not isinstance(row, list) or (row and isinstance(row[0], list)) for row in rows):
+            raise TypeError(f"Request-batch {field_name} rows must be flat lists.")
+        if len(prompts) > 1 and len(rows) != len(prompts):
+            raise ValueError(
+                f"Batched {field_name} default must have one row per request; "
+                f"got {len(rows)} rows for {len(prompts)} requests."
+            )
+
+        typed_rows = [list(row) for row in rows if row is not None]
+        target_len = max(len(row) for row in typed_rows)
+        lengths = [len(row) for row in typed_rows]
+        return [row + [pad_value] * (target_len - len(row)) for row in typed_rows], lengths
+
     default_rows, default_lengths = _rows_from_default(default_value, device=device, field_name=field_name)
     if default_rows is not None:
         if len(prompts) > 1 and default_rows.shape[0] != len(prompts):
@@ -154,13 +201,14 @@ def collate_prompt_rows(
 def collate_prompt_mask(
     prompts: list[Any],
     aliases: tuple[str, ...],
-    default_value: torch.Tensor | list[int] | None,
+    default_value: torch.Tensor | list[int] | list[bool] | list[list[int]] | list[list[bool]] | None,
     *,
     device: torch.device,
     field_name: str,
     token_lengths: list[int] | None,
     target_seq_len: int | None,
-) -> torch.Tensor | None:
+    preserve_lists: bool = False,
+) -> torch.Tensor | list[list[bool]] | None:
     """Build a boolean attention mask for a packed request batch.
 
     Prefers an explicit mask field from ``prompts`` / ``default_value``. If
@@ -174,8 +222,15 @@ def collate_prompt_mask(
         device=device,
         field_name=field_name,
         pad_value=0,
+        preserve_lists=preserve_lists,
     )
     if mask is not None:
+        if isinstance(mask, list):
+            mask = [[value != 0 for value in row] for row in mask]
+            if target_seq_len is not None:
+                mask = [row[:target_seq_len] + [False] * max(target_seq_len - len(row), 0) for row in mask]
+            return mask
+
         mask = mask != 0
         if target_seq_len is not None:
             if mask.shape[1] < target_seq_len:
@@ -188,6 +243,9 @@ def collate_prompt_mask(
 
     if token_lengths is None or target_seq_len is None:
         return None
+
+    if preserve_lists:
+        return [[column < row_len for column in range(target_seq_len)] for row_len in token_lengths]
 
     mask = torch.zeros((len(token_lengths), target_seq_len), dtype=torch.bool, device=device)
     for idx, row_len in enumerate(token_lengths):

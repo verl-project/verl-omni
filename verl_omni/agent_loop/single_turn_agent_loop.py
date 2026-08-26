@@ -34,6 +34,14 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
         super().__init__(*args, **kwargs)
         self.extra_tokenizer_map = extra_tokenizer_map or {}
 
+    def _get_routing_request_id(self, sample_uid: Any | None) -> str:
+        use_prompt_cache_affinity = bool(
+            self.rollout_config.enable_prompt_embed_cache
+            and self.rollout_config.enable_prompt_embed_cache_routing_affinity
+            and sample_uid is not None
+        )
+        return str(sample_uid) if use_prompt_cache_affinity else uuid4().hex
+
     async def _tokenize_per_encoder(self, messages: list[dict]) -> dict[str, list[int]]:
         """Tokenize the rendered prompt once per configured text-encoder tokenizer.
 
@@ -114,7 +122,7 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
         metrics = {}
         with simple_timer("generate_sequences", metrics):
             output = await self.server_manager.generate(
-                request_id=uuid4().hex,
+                request_id=self._get_routing_request_id(kwargs.get("uid")),
                 prompt_ids=prompt_ids,
                 sampling_params=sampling_params,
                 image_data=images,

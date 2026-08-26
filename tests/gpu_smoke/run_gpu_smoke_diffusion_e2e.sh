@@ -11,6 +11,14 @@ diffusion_trainer_args=()
 if [[ -n "${RAY_MASTER_PORT_RANGE:-}" ]]; then
     diffusion_trainer_args+=("trainer.ray_master_port_range=[${RAY_MASTER_PORT_RANGE}]")
 fi
+# The GPU smoke image may contain the ``kernels`` Python package while its
+# installed Torch/CUDA combination has no compatible Hub FA3 build variant.
+# Select the portable native/SDPA pair explicitly for these E2E tests so the
+# production engine can keep its fail-fast attention-backend behavior.
+diffusion_trainer_args+=(
+    "actor_rollout_ref.model.attn_backend=native"
+    "actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA"
+)
 
 run_test 0 "FlowGRPO trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
@@ -26,15 +34,15 @@ run_test 2 "DiffusionNFT trainer e2e" \
 
 run_test 3 "FlowGRPO v1 separate_async trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
-    bash tests/special_e2e/run_flowgrpo_qwen_image_v1_separate_async.sh
+    bash tests/special_e2e/run_flowgrpo_qwen_image_v1_separate_async.sh "${diffusion_trainer_args[@]}"
 
 run_test 4 "Diffusion OPD teacher distill e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" SMOKE=distill \
-    bash tests/special_e2e/run_diffusion_teacher_smoke.sh
+    bash tests/special_e2e/run_diffusion_teacher_smoke.sh "${diffusion_trainer_args[@]}"
 
 run_test 5 "Diffusion OPD actor+ref+teacher e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" SMOKE=coexistence \
-    bash tests/special_e2e/run_diffusion_teacher_smoke.sh
+    bash tests/special_e2e/run_diffusion_teacher_smoke.sh "${diffusion_trainer_args[@]}"
 
 run_test 6 "Bagel PickScore LoRA FlowGRPO e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
