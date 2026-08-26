@@ -88,6 +88,13 @@ actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN_3_HUB
 
 If FA3 deps are missing at runtime, training falls back to native/SDPA automatically. NPU recipes override with `actor_rollout_ref.model.attn_backend=_native_npu`.
 
+On older GPUs, prefer FA2 over the FA3 default — both use the same `kernels` Hub path, so nothing extra to install:
+
+```bash
+actor_rollout_ref.model.attn_backend=flash_varlen_hub
+actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN_HUB
+```
+
 ## Optional engine backends
 
 VeRL-Omni defaults to **FSDP2** as the training engine for the policy and reference models. The diffusion trainer can alternatively be switched to [**VeOmni**](https://github.com/ByteDance-Seed/VeOmni). The engine is selected at the Hydra command line — see [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete recipe.
