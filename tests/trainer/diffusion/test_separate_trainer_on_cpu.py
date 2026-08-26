@@ -19,6 +19,7 @@ import sys
 import types
 
 import pytest
+import verl.trainer.ppo.ray_trainer as upstream_ray_trainer
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 from verl.trainer.ppo.utils import Role
@@ -81,6 +82,50 @@ def test_run_diffusion_validates_before_ray_initialization(monkeypatch, separate
 
     with pytest.raises(ValueError, match="actor_rollout_ref.hybrid_engine=false"):
         main_diffusion.run_diffusion(separate_config)
+
+
+def test_task_runner_rejects_missing_actor_role_support(monkeypatch, separate_config):
+    class FakeWorker:
+        pass
+
+    class RoleWithoutActor:
+        pass
+
+    engine_workers = types.ModuleType("verl_omni.workers.engine_workers")
+    engine_workers.ActorRolloutRefWorker = FakeWorker
+    monkeypatch.setitem(sys.modules, "verl_omni.workers.engine_workers", engine_workers)
+    monkeypatch.setattr(upstream_ray_trainer, "Role", RoleWithoutActor)
+
+    with pytest.raises(ValueError, match="Separate training without colocated rollout requires verl Role.Actor"):
+        main_diffusion.TaskRunner().add_actor_rollout_worker(separate_config)
+
+
+def test_separate_trainer_rejects_missing_actor_mapping(separate_config):
+    trainer = object.__new__(ray_diffusion_trainer.PolicyGradientRayTrainer)
+
+    with pytest.raises(ValueError, match="role_worker_mapping to contain Role.Actor"):
+        ray_diffusion_trainer.BaseRayDiffusionTrainer.__init__(
+            trainer,
+            config=separate_config,
+            tokenizer=None,
+            role_worker_mapping={},
+            resource_pool_manager=None,
+        )
+
+
+def test_separate_trainer_rejects_missing_reference_mapping(separate_config):
+    config = copy.deepcopy(separate_config)
+    config.actor_rollout_ref.actor.use_kl_loss = True
+    trainer = object.__new__(ray_diffusion_trainer.PolicyGradientRayTrainer)
+
+    with pytest.raises(ValueError, match="role_worker_mapping to contain Role.RefPolicy"):
+        ray_diffusion_trainer.BaseRayDiffusionTrainer.__init__(
+            trainer,
+            config=config,
+            tokenizer=None,
+            role_worker_mapping={Role.Actor: object()},
+            resource_pool_manager=None,
+        )
 
 
 @pytest.mark.parametrize(

@@ -214,14 +214,18 @@ class BaseRayDiffusionTrainer(ABC):
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         if config.algorithm.sample_source == "online":
             if self.separate:
-                assert Role.Actor in role_worker_mapping, f"{role_worker_mapping.keys()=}"
+                if Role.Actor not in role_worker_mapping:
+                    raise ValueError("Separate mode requires role_worker_mapping to contain Role.Actor.")
             else:
-                assert self.hybrid_engine, "Currently, only support hybrid engine"
-                assert Role.ActorRollout in role_worker_mapping or Role.ActorRolloutRef in role_worker_mapping, (
-                    f"{role_worker_mapping.keys()=}"
-                )
-        else:
-            assert Role.Actor in role_worker_mapping, f"{role_worker_mapping.keys()=}"
+                if not self.hybrid_engine:
+                    raise ValueError("Online colocated training requires actor_rollout_ref.hybrid_engine=true.")
+                if Role.ActorRollout not in role_worker_mapping and Role.ActorRolloutRef not in role_worker_mapping:
+                    raise ValueError(
+                        "Online colocated training requires role_worker_mapping to contain "
+                        "Role.ActorRollout or Role.ActorRolloutRef."
+                    )
+        elif Role.Actor not in role_worker_mapping:
+            raise ValueError("Offline training requires role_worker_mapping to contain Role.Actor.")
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
@@ -241,7 +245,11 @@ class BaseRayDiffusionTrainer(ABC):
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
         if self.separate and self.use_reference_policy and not self.ref_in_actor:
-            assert Role.RefPolicy in role_worker_mapping, f"{role_worker_mapping.keys()=}"
+            if Role.RefPolicy not in role_worker_mapping:
+                raise ValueError(
+                    "Separate mode with a standalone reference policy requires "
+                    "role_worker_mapping to contain Role.RefPolicy."
+                )
 
         self.use_teacher_policy = is_distillation_enabled(config.get("distillation"))
         validate_distillation_config(config)

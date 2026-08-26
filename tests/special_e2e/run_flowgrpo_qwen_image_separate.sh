@@ -76,6 +76,7 @@ python3 tests/special_e2e/create_dummy_diffusion_data.py \
     --train_size "${synthetic_train_size}" \
     --val_size 4
 
+# Let VisualRewardManager dispatch the data source to the JPEG scorer.
 python3 -m verl_omni.trainer.main_diffusion \
     data.train_files=${dummy_train_path} \
     data.val_files=${dummy_test_path} \
@@ -122,8 +123,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     reward.num_workers=1 \
     reward.reward_model.enable=False \
-    reward.custom_reward_function.path=pkg://verl_omni.utils.reward_score.jpeg_compressibility \
-    reward.custom_reward_function.name=compute_score \
     trainer.logger=console \
     trainer.project_name=verl-test \
     trainer.experiment_name=flowgrpo-diffusion-separate-e2e \

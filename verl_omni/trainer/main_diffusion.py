@@ -165,6 +165,8 @@ class TaskRunner:
 
         separate = config.actor_rollout_ref.get("separate", False)
         if separate:
+            if not hasattr(Role, "Actor"):
+                raise ValueError("Separate training without colocated rollout requires verl Role.Actor support.")
             role = Role.Actor
         elif config.algorithm.sample_source == "offline":
             if not hasattr(Role, "Actor"):

@@ -81,10 +81,9 @@ resources and launches rollout/checkpoint workers on a separate Ray resource poo
 The mode is limited to online policy-gradient training and publishes actor weights once
 before training and once after every logical-batch update.
 
-The current baseline supports full finetuning only. LoRA must be disabled through all
-compatible configuration surfaces: `actor_rollout_ref.model.lora.rank=0`,
-`actor_rollout_ref.model.lora_rank=0`, and
-`actor_rollout_ref.model.lora_adapter_path=null`.
+The current baseline supports full finetuning only. For the diffusion/FSDP
+configuration, LoRA must be disabled with `actor_rollout_ref.model.lora_rank=0`
+and `actor_rollout_ref.model.lora_adapter_path=null`.
 
 Required topology settings are:
 
