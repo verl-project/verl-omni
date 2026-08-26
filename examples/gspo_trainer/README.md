@@ -284,6 +284,182 @@ preserves its `RLHFDataset` base class, sets rollout NPU memory utilization to
 extracts the first `<answer>...</answer>` payload and returns a binary exact-match
 reward against the tagged dataset label.
 
+## Training with `OmniVideo-R1`
+
+The QI recipe trains Qwen3-Omni on
+[`merged_train_all_qi.jsonl`](https://huggingface.co/datasets/jankin123/OmniVideo-R1/blob/main/merged_train_all_qi.jsonl)
+with video, its audio stream, and question text as input. It implements only the
+paper's first-stage reward:
+
+This recipe uses the repository-wide verl pin
+[`8a694930275061f52ebd538c906ef8819af56dbd`](https://github.com/verl-project/verl/commit/8a694930275061f52ebd538c906ef8819af56dbd)
+without a per-recipe override. Because that revision predates verl's generic
+`get_rope_index_kwargs` hook, the Qwen3-Omni adapter supplies the equivalent
+audio/video RoPE bridge locally. The recipe is implemented and tested against
+that commit's V1 TransferQueue and colocated reward-model lifecycle.
+
+```text
+R_QI = r_format + r_answer + 0.5 * (r_consistency + r_completeness)
+```
+
+`r_format` validates the strict ordered, non-overlapping
+`<time>/<caption>...<thinking>/<answer>` structure. Multiple-choice answers use
+letter exact match; open-ended answers and both grounding rewards use an
+OpenAI-compatible Qwen3-VL judge. The consistency and completeness prompts
+follow Figures 11 and 12 of the paper. MA contrastive rollout and `r_attention`
+are intentionally out of scope.
+
+### Prepare the QI parquet
+
+Download the annotations plus the corresponding LLaVA-Video-178K and
+VideoVista media. Map annotation path prefixes explicitly to the shared local
+media mount:
+
+```bash
+python examples/gspo_trainer/data_process/omnivideo_r1_qi.py \
+    --input /path/to/merged_train_all_qi.jsonl \
+    --output_dir ~/data/omnivideo_r1_qi \
+    --path_map ./data/LLaVA-Video-178K=/shared/data/LLaVA-Video-178K \
+    --path_map ./data/VideoVista_Train=/shared/data/VideoVista_Train
+```
+
+The converter validates the real 88,173-row JSONL schema, drops missing media,
+caps each policy input at 64 frames, and splits by video path so validation
+cannot share a video with training. By default, Qwen's media loader extracts
+the audio stream directly from each video; use `--no-audio_from_video` and add
+an audio path map only when separately extracted audio files are preferred.
+Install `ffmpeg` on every training worker when extracting audio from video.
+`--max_samples 40 --val_size 8` is useful for a local smoke subset.
+
+#### Recommended small video subset
+
+Downloading all of
+[LLaVA-Video-178K](https://huggingface.co/datasets/lmms-lab/LLaVA-Video-178K)
+(about 1.28 TB) or
+[VideoVista-Train](https://huggingface.co/datasets/Uni-MoE/VideoVista_Train)
+(about 145 GB) is unnecessary for a small experiment. For the 2k/512 recipe,
+we recommend starting with the first three archives from the short-video
+`0_30_s_youtube_v0_1` split. Each archive is about 5.3 GB, so the initial
+download is about 15.9 GB compressed. The merged QI annotations contain 24,016
+rows from this split; downloading three archives provides practical headroom
+for the requested subset while keeping video decoding inexpensive.
+
+Download only those three archives with the Hugging Face `hf` CLI:
+
+```bash
+LLAVA_VIDEO_DIR=$HOME/data/LLaVA-Video-178K
+
+hf download lmms-lab/LLaVA-Video-178K \
+    0_30_s_youtube_v0_1/0_30_s_youtube_v0_1_videos_1.tar.gz \
+    0_30_s_youtube_v0_1/0_30_s_youtube_v0_1_videos_2.tar.gz \
+    0_30_s_youtube_v0_1/0_30_s_youtube_v0_1_videos_3.tar.gz \
+    --repo-type dataset \
+    --local-dir "$LLAVA_VIDEO_DIR"
+```
+
+Extract them while preserving the split-relative directory layout expected by
+the QI annotations:
+
+```bash
+for shard in "$LLAVA_VIDEO_DIR"/0_30_s_youtube_v0_1/*_videos_{1,2,3}.tar.gz; do
+    tar -xzf "$shard" -C "$LLAVA_VIDEO_DIR/0_30_s_youtube_v0_1"
+done
+```
+
+The archives are only a practical starting point: their exact overlap with the
+QI annotations determines the final number of usable rows. If preprocessing
+reports fewer than 2,512 kept rows, download and extract
+`0_30_s_youtube_v0_1_videos_4.tar.gz` in the same way. VideoVista is not needed
+for this recommended subset, so its `--path_map` can be omitted.
+
+To run a smaller but meaningful experiment with approximately 2,000 training
+rows and 512 validation rows, cap preprocessing at 2,512 valid rows and use 512
+as the validation target:
+
+```bash
+python examples/gspo_trainer/data_process/omnivideo_r1_qi.py \
+    --input /path/to/merged_train_all_qi.jsonl \
+    --output_dir ~/data/omnivideo_r1_qi_2k \
+    --path_map "./data/LLaVA-Video-178K=$LLAVA_VIDEO_DIR" \
+    --max_samples 2512 \
+    --val_size 512 \
+    --seed 42
+```
+
+`--max_samples` counts valid rows after missing media and malformed records are
+dropped. The split is performed by video path to prevent train/validation media
+leakage, so a video with multiple annotations can make the validation split
+slightly larger than 512 and the training split correspondingly smaller than
+2,000. The converter prints the final `train_rows` and `validation_rows`; they
+can also be checked before training with:
+
+```bash
+python -c 'import pandas as pd; from pathlib import Path; p=Path.home()/"data/omnivideo_r1_qi_2k"; print({s: len(pd.read_parquet(p/f"{s}.parquet")) for s in ("train", "validation")})'
+```
+
+### Start the QI judge and train on NPU
+
+The launcher deploys the resource-efficient default judge,
+`Qwen/Qwen3-VL-8B-Instruct`, through verl's reward-model router on the
+same NPU resource pool as training. Actor rollout and reward inference are
+time-multiplexed: the actor rollout sleeps while the reward model is awake,
+and the reward model releases its cache before actor work resumes. The default
+16-card topology uses reward TP 8 and two replicas.
+
+```bash
+export OMNIVIDEO_QI_JUDGE_MODEL=Qwen/Qwen3-VL-8B-Instruct
+
+TRAIN_FILE=$HOME/data/omnivideo_r1_qi/train.parquet \
+VAL_FILE=$HOME/data/omnivideo_r1_qi/validation.parquet \
+MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_omnivideo_qi_v1.sh
+```
+
+For the 2k/512 subset above, point the launcher at the subset and override its
+default validation cap (256) so all 512 validation rows are evaluated:
+
+```bash
+TRAIN_FILE=$HOME/data/omnivideo_r1_qi_2k/train.parquet \
+VAL_FILE=$HOME/data/omnivideo_r1_qi_2k/validation.parquet \
+MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_omnivideo_qi_v1.sh \
+    data.val_max_samples=512
+```
+
+Set `REWARD_TP` and `REWARD_GPU_MEMORY_UTILIZATION` to tune the colocated
+deployment. To reproduce the paper's judge choice, set
+`OMNIVIDEO_QI_JUDGE_MODEL=Qwen/Qwen3-VL-235B-A22B-Instruct` and increase
+`REWARD_TP` as capacity requires. An existing external service remains
+supported: setting `OMNIVIDEO_QI_JUDGE_URL` disables the colocated server and
+routes QI judge requests to that OpenAI-compatible endpoint.
+
+QI segment decoding is limited to two concurrent jobs per reward worker to
+avoid exhausting FFmpeg/scaler threads. Each segment is decoded in a killable
+FFmpeg subprocess with a 30-second timeout, so malformed videos cannot stall a
+reward batch. Set `OMNIVIDEO_QI_DECODE_TIMEOUT` to adjust that limit, or set
+`OMNIVIDEO_QI_MAX_DECODE_CONCURRENCY=1` for containers with especially tight
+process or thread limits. Sub-second groundings sample their midpoint directly
+so they still provide one judge frame. QI judge requests time out after 60
+seconds by default; set `OMNIVIDEO_QI_JUDGE_TIMEOUT` to override that bound.
+
+Policy input videos with `use_audio_in_video=true` are also decoded through
+killable FFmpeg subprocesses instead of the uninterruptible torchvision video
+reader. FFmpeg writes a bounded, normalized MP4 before Qwen preprocessing so
+the client processor and vLLM-Omni keep the same file-video token semantics.
+`OMNIVIDEO_INPUT_DECODE_TIMEOUT` controls the per-stage timeout for duration
+probing, video normalization, and audio extraction (60 seconds by default).
+Each agent-loop worker caches the eight most recent processed media inputs so
+the eight GSPO rollouts do not repeatedly decode the same video. Set
+`OMNIVIDEO_INPUT_CACHE_SIZE=0` to disable this cache or lower it if host memory
+is constrained.
+
+The recipe follows the paper's GSPO settings: eight rollouts, learning rate
+`1e-6`, clip bounds `3e-4`/`4e-4`, KL coefficient `0.03`, 5% warmup, maximum
+combined sequence length 32,768, and 64 input frames. Its default batch size is
+reduced to 32 for the 16 x 910C topology inherited from the AVQA V1 recipe;
+set `TRAIN_BATCH_SIZE=256` only with capacity comparable to the paper's
+128 x H20 setup.
+
 ## Performance
 
 All GPU results measured on a single node of **4 × H800 80GB**, actor and

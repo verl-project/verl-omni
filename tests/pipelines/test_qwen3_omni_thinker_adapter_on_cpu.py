@@ -44,6 +44,18 @@ def _has_lora(module: nn.Module) -> bool:
     return hasattr(module, "lora_A") and hasattr(module, "lora_B")
 
 
+def _install_pinned_agent_loop_stub(monkeypatch, worker_cls):
+    """Expose the verl@8a694930 V1 worker shape used by the adapter."""
+    for package_name in ("verl", "verl.trainer", "verl.trainer.ppo", "verl.trainer.ppo.v1"):
+        package = types.ModuleType(package_name)
+        package.__path__ = []
+        monkeypatch.setitem(sys.modules, package_name, package)
+
+    agent_loop_tq = types.ModuleType("verl.trainer.ppo.v1.agent_loop_tq")
+    agent_loop_tq.AgentLoopWorkerTQ = SimpleNamespace(__ray_metadata__=SimpleNamespace(modified_class=worker_cls))
+    monkeypatch.setitem(sys.modules, "verl.trainer.ppo.v1.agent_loop_tq", agent_loop_tq)
+
+
 def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):
     """The V1 processor path must collapse image, video, and audio pad runs."""
     pytest.importorskip("transformers")
@@ -98,22 +110,9 @@ def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):
 
     class AgentLoopWorker:
         def _compute_position_ids(self, input_ids, attention_mask, multi_modal_inputs, mm_processor_kwargs=None):
-            del input_ids, attention_mask, multi_modal_inputs, mm_processor_kwargs
+            del self, input_ids, attention_mask, multi_modal_inputs, mm_processor_kwargs
 
-    agent_loop_tq_module = types.ModuleType("verl.trainer.ppo.v1.agent_loop_tq")
-    agent_loop_tq_module.AgentLoopWorkerTQ = SimpleNamespace(
-        __ray_metadata__=SimpleNamespace(modified_class=AgentLoopWorker)
-    )
-    for package_name in (
-        "verl",
-        "verl.trainer",
-        "verl.trainer.ppo",
-        "verl.trainer.ppo.v1",
-    ):
-        package = types.ModuleType(package_name)
-        package.__path__ = []
-        monkeypatch.setitem(sys.modules, package_name, package)
-    monkeypatch.setitem(sys.modules, "verl.trainer.ppo.v1.agent_loop_tq", agent_loop_tq_module)
+    _install_pinned_agent_loop_stub(monkeypatch, AgentLoopWorker)
 
     configured = Qwen3OmniThinkerAdapter.configure_processor(
         "/fake/qwen3-omni",
@@ -135,8 +134,8 @@ def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):
     ]
 
 
-def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch):
-    """The V1 adapter must install the audio-aware agent-loop RoPE path."""
+def test_v1_processor_hook_supplies_qwen3_omni_audio_and_video_rope_inputs(monkeypatch):
+    """The processor hook supplies both Qwen3-Omni RoPE auxiliaries."""
     pytest.importorskip("transformers")
     _require_version("transformers", "5.0.0")
 
@@ -167,6 +166,7 @@ def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch):
     class Qwen3OmniMoeProcessor:
         def __init__(self):
             self.audio_seqlens = None
+            self.second_per_grids = None
             self.tokenizer = None
 
     class AgentLoopWorker:
@@ -180,24 +180,7 @@ def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch):
             )
             return position_ids
 
-    class AgentLoopWorkerTQ(AgentLoopWorker):
-        # Ray copies inherited methods when @ray.remote builds the actor class.
-        _compute_position_ids = AgentLoopWorker._compute_position_ids
-
-    agent_loop_tq_module = types.ModuleType("verl.trainer.ppo.v1.agent_loop_tq")
-    agent_loop_tq_module.AgentLoopWorkerTQ = SimpleNamespace(
-        __ray_metadata__=SimpleNamespace(modified_class=AgentLoopWorkerTQ)
-    )
-    for package_name in (
-        "verl",
-        "verl.trainer",
-        "verl.trainer.ppo",
-        "verl.trainer.ppo.v1",
-    ):
-        package = types.ModuleType(package_name)
-        package.__path__ = []
-        monkeypatch.setitem(sys.modules, package_name, package)
-    monkeypatch.setitem(sys.modules, "verl.trainer.ppo.v1.agent_loop_tq", agent_loop_tq_module)
+    _install_pinned_agent_loop_stub(monkeypatch, AgentLoopWorker)
 
     def _get_rope_index(
         processor,
@@ -207,11 +190,12 @@ def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch):
         image_grid_thw=None,
         video_grid_thw=None,
         audio_seqlens=None,
+        second_per_grids=None,
     ):
         del attention_mask, image_grid_thw, video_grid_thw
         processor.audio_seqlens = audio_seqlens
-        _ = audio_seqlens[0]
-        return torch.zeros((3, *input_ids.shape), dtype=torch.float32), torch.zeros((input_ids.shape[0], 1))
+        processor.second_per_grids = second_per_grids
+        return torch.zeros((3, *input_ids.shape), dtype=torch.long), torch.zeros((input_ids.shape[0], 1))
 
     processor = Qwen3OmniMoeProcessor()
     config = SimpleNamespace(
@@ -220,20 +204,34 @@ def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch):
     )
     monkeypatch.setattr(AutoProcessor, "from_pretrained", lambda *args, **kwargs: processor)
     monkeypatch.setattr(AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
-    monkeypatch.setattr(Qwen3OmniMoeThinkerForConditionalGeneration, "get_rope_index", _get_rope_index)
+    monkeypatch.setattr(
+        Qwen3OmniMoeThinkerForConditionalGeneration,
+        "get_rope_index",
+        _get_rope_index,
+    )
 
     configured = adapter_module.Qwen3OmniThinkerAdapter.configure_processor(
         "/fake/qwen3-omni",
         SimpleNamespace(trust_remote_code=False),
     )
-    worker = type("Worker", (), {"processor": configured})()
+    assert hasattr(configured, "get_rope_index_kwargs")
+    assert getattr(AgentLoopWorker._compute_position_ids, "_verl_qwen3_omni_rope_kwargs_bridge", False)
+    worker = SimpleNamespace(processor=configured)
     input_ids = torch.tensor([[1, 2, 3]])
     attention_mask = torch.ones_like(input_ids)
-    multi_modal_inputs = {"feature_attention_mask": torch.tensor([[1, 1, 1, 0]])}
-
-    AgentLoopWorkerTQ._compute_position_ids(worker, input_ids, attention_mask, multi_modal_inputs)
+    AgentLoopWorker._compute_position_ids(
+        worker,
+        input_ids,
+        attention_mask,
+        {
+            "feature_attention_mask": torch.tensor([[1, 1, 1, 0]]),
+            "video_second_per_grid": [0.5],
+        },
+    )
 
     torch.testing.assert_close(configured.audio_seqlens, torch.tensor([3]))
+    torch.testing.assert_close(configured.second_per_grids, torch.tensor([0.5]))
+    assert configured.second_per_grids.dtype == torch.float32
 
 
 class _FusedMoEExperts(nn.Module):
