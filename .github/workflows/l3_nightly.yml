@@ -170,10 +170,12 @@ jobs:
           export UV_CACHE_DIR="${UV_CACHE_DIR:-${HOME}/.cache/uv}"
           git config --global http.postBuffer 524288000 || true
           # Base image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
+          # vllm-omni first: the pin still requires diffusers==0.38.0 and would downgrade our >=0.40.0 floor.
+          # TODO: restore the original install order once the pin is upgraded past vllm-omni#6459.
+          uv pip install --system --break-system-packages "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
           uv pip install --system --break-system-packages ".[gpu,dev,audio]"
           uv pip install --system --break-system-packages "kernels==${NIGHTLY_PIN_KERNELS}"
           uv pip install --system --break-system-packages "fa3-fwd==${NIGHTLY_PIN_FA3_FWD}"
-          uv pip install --system --break-system-packages "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
           uv pip install --system --break-system-packages --no-deps --reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
           uv pip install --system --break-system-packages --no-deps -e .
           # veomni's [gpu] extra pins torch 2.9 and would conflict with the vLLM stack.

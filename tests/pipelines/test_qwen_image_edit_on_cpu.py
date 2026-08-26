@@ -14,7 +14,6 @@
 
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -25,7 +24,6 @@ from vllm_omni.diffusion.models.qwen_image.pipeline_qwen_image_edit_plus import 
     calculate_dimensions,
 )
 
-from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.qwen_image_edit_flow_grpo.diffusers_training_adapter import QwenImageEditPlusFlowGRPO
 from verl_omni.pipelines.qwen_image_edit_flow_grpo.vllm_omni_rollout_adapter import (
     QwenImageEditPlusPipelineWithLogProb,
@@ -67,13 +65,6 @@ def test_processor_hook_preserves_existing_config(tmp_path):
 
     assert prepared_dir == str(processor_dir)
     assert json.loads(config_path.read_text(encoding="utf-8")) == {"model_type": "custom"}
-
-
-def test_get_class_applies_qwen_ulysses_patch():
-    with patch("verl_omni.models.diffusers.qwen_image.apply_qwen_image_ulysses_mask_fix") as apply_patch:
-        assert DiffusionModelBase.get_class(_model_config()) is QwenImageEditPlusFlowGRPO
-
-    apply_patch.assert_called_once_with()
 
 
 def test_prepare_condition_unwraps_metadata():
