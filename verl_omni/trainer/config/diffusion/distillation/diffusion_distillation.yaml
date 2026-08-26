@@ -4,14 +4,43 @@ _target_: verl_omni.workers.config.diffusion.DiffusionDistillationConfig
 # Whether on-policy distillation is enabled.
 enabled: false
 
-# Teacher entries. Single-teacher setups configure the `teacher_model` entry.
+# Number of GPUs per node in the distillation teacher resource pool
+n_gpus_per_node: 0
+
+# Number of nodes in the distillation teacher resource pool. 0 colocates the teachers with the actor.
+nnodes: 0
+
+# multi-teacher configs
 teacher_models:
 
-  # The single supported teacher.
+  # Single-teacher config. This entry is popped when other teacher entries are added, so
+  # using `teacher_model` as one of several keys silently drops it. For
+  # example, the following CLI overrides result in ONLY `teacher_model2` being used:
+  #
+  # distillation.teacher_models.teacher_model.key=ocr
+  # distillation.teacher_models.teacher_model.model_path=/ckpt/ocr_teacher
+  # +distillation.teacher_models.teacher_model2.key=aesthetic
+  # +distillation.teacher_models.teacher_model2.model_path=/ckpt/aesthetic_teacher
+  #
+  # Instead, give the first teacher a different name:
+  #
+  # +distillation.teacher_models.teacher_model1.key=ocr
+  # +distillation.teacher_models.teacher_model1.model_path=/ckpt/ocr_teacher
+  # +distillation.teacher_models.teacher_model2.key=aesthetic
+  # +distillation.teacher_models.teacher_model2.model_path=/ckpt/aesthetic_teacher
   teacher_model:
 
     # Target class for this configuration
     _target_: verl_omni.workers.config.diffusion.DiffusionDistillationTeacherModelConfig
 
+    # Identifier to route examples to this teacher in multi-teacher setups. Auto-set to `default` for a single teacher.
+    key: null
+
     # Local path to the frozen teacher checkpoint (same pipeline family as the student).
     model_path: null
+
+    # Number of GPUs this teacher occupies in the distillation teacher resource pool. A single teacher fills the pool.
+    world_size: 0
+
+# Key to route examples to the appropriate teacher model in multi-teacher setups. Should correspond to a field in the data proto, e.g., data_source.
+teacher_key: data_source

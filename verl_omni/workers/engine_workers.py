@@ -56,6 +56,7 @@ from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
 from verl.workers.utils.losses import ppo_loss
 
+from verl_omni.pipelines.utils import build_scheduler
 from verl_omni.utils.mfu import (
     DiffusionFlopsCounter,
     allgather_diffusion_flops_meta,
@@ -512,6 +513,16 @@ class TrainingWorker(Worker, DistProfilerExtension):
         return self.engine.load_checkpoint(local_path, hdfs_path, del_local_after_load)
 
 
+def resolve_teacher_infer_micro_batch_size(config: DictConfig) -> Optional[int]:
+    """Micro batch size the teacher engine splits its forward-only scoring into."""
+    infer_micro_bsz = config.ref.get("log_prob_micro_batch_size_per_gpu", None)
+    if infer_micro_bsz is None:
+        infer_micro_bsz = config.ref.get("ppo_micro_batch_size_per_gpu", None)
+    if infer_micro_bsz is None:
+        infer_micro_bsz = config.actor.ppo_micro_batch_size_per_gpu
+    return infer_micro_bsz
+
+
 def build_teacher_training_config(
     config: DictConfig,
     model_config: DiffusionModelConfig,
@@ -536,12 +547,9 @@ def build_teacher_training_config(
         optimizer_config=teacher_config.optim,
         checkpoint_config=teacher_config.checkpoint,
     )
-    infer_micro_bsz = config.ref.get("log_prob_micro_batch_size_per_gpu", None)
-    if infer_micro_bsz is None:
-        infer_micro_bsz = config.ref.get("ppo_micro_batch_size_per_gpu", None)
-    if infer_micro_bsz is None:
-        infer_micro_bsz = config.actor.ppo_micro_batch_size_per_gpu
-    teacher_training_config.engine_config.infer_micro_batch_size_per_gpu = infer_micro_bsz
+    teacher_training_config.engine_config.infer_micro_batch_size_per_gpu = resolve_teacher_infer_micro_batch_size(
+        config
+    )
     return teacher_training_config
 
 
@@ -553,18 +561,24 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     """
 
     def __init__(
-        self, config: DictConfig, role: str, distillation_config: Optional[DistillationConfig] = None, **kwargs
+        self,
+        config: DictConfig,
+        role: str,
+        distillation_config: Optional[DistillationConfig] = None,
+        teacher_key: Optional[str] = None,
+        **kwargs,
     ):
         Worker.__init__(self)
         self.config = config
         self.distillation_config = distillation_config
         self.distillation_enabled = is_distillation_enabled(distillation_config)
+        self.teacher_key = teacher_key
         self.role = role
         self.actor: TrainingWorker = None
         self.ref: TrainingWorker = None
-        self.teacher: TrainingWorker = None
+        self.teachers: dict[str, TrainingWorker] = {}
         self.rollout: BaseRollout = None
-        assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
+        assert self.role in ["actor", "rollout", "ref", "teacher", "actor_rollout", "actor_rollout_ref"]
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
         self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
@@ -743,26 +757,37 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor.set_loss_fn(self.loss_fn)
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
 
-        # 2.5 build frozen teacher for diffusion on-policy distillation
-        if self.distillation_enabled and is_diffusion and "actor" in self.role:
-            if self.config.actor.strategy not in ("fsdp", "fsdp2"):
-                raise NotImplementedError(
-                    f"The diffusion distillation teacher supports fsdp/fsdp2, got {self.config.actor.strategy!r}."
-                )
+        # 2.5 build frozen teachers for diffusion on-policy distillation
+        if self.distillation_enabled and is_diffusion:
             distillation_config = omega_conf_to_dataclass(self.distillation_config)
-            teacher_training_config = build_teacher_training_config(
-                config=self.config,
-                model_config=model_config,
-                teacher_model_config=distillation_config.teacher_models["teacher_model"],
-            )
-            self.teacher = TrainingWorker(config=teacher_training_config)
-            self.teacher.reset()
-            if self.teacher.engine.scheduler.config != self.actor.engine.scheduler.config:
-                raise ValueError(
-                    "Teacher and student resolved different scheduler configs; the teacher must replay "
-                    "the student's trajectories on the same noise schedule."
+            teacher_in_actor = distillation_config.nnodes == 0
+            if "teacher" in self.role or ("actor" in self.role and teacher_in_actor):
+                if self.config.actor.strategy not in ("fsdp", "fsdp2"):
+                    raise NotImplementedError(
+                        f"The diffusion distillation teacher supports fsdp/fsdp2, got {self.config.actor.strategy!r}."
+                    )
+                student_scheduler_config = build_scheduler(model_config).config
+                teacher_models = distillation_config.teacher_models
+                if self.teacher_key is not None:
+                    teacher_models = {self.teacher_key: teacher_models[self.teacher_key]}
+                for key, teacher_model_config in teacher_models.items():
+                    teacher_training_config = build_teacher_training_config(
+                        config=self.config,
+                        model_config=model_config,
+                        teacher_model_config=teacher_model_config,
+                    )
+                    teacher = TrainingWorker(config=teacher_training_config)
+                    teacher.reset()
+                    if teacher.engine.scheduler.config != student_scheduler_config:
+                        raise ValueError(
+                            "Teacher and student resolved different scheduler configs; the teacher must replay "
+                            "the student's trajectories on the same noise schedule."
+                        )
+                    self.teachers[key] = teacher
+                # all teachers share the worker's DP layout, so one mesh serves every teacher
+                self.set_dispatch_collect(
+                    mesh_name="teacher", **next(iter(self.teachers.values())).get_dispatch_collect()
                 )
-            self.set_dispatch_collect(mesh_name="teacher", **self.teacher.get_dispatch_collect())
 
         # 3. build rollout engine
         if "rollout" in self.role:
@@ -816,11 +841,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         output = self.ref.infer_batch(data=data)
         return output.cpu() if output is not None else None
 
-    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="teacher"))
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="teacher"), blocking=False)
     @DistProfiler.annotate(color="olive", role="infer_teacher_batch")
     @_with_routing_replay_flag(enabled=False)
     def infer_teacher_batch(self, data: TensorDict) -> TensorDict:
-        output = self.teacher.infer_batch(data=data)
+        teacher_key = tu.pop(data, key="teacher_key")
+        output = self.teachers[teacher_key].infer_batch(data=data)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
