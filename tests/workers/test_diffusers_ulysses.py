@@ -19,6 +19,7 @@ Run the distributed tests with ≥ 4 GPUs:
     torchrun --nproc_per_node=4 --local-ranks-filter=0 tests/workers/test_diffusers_ulysses.py
 """
 
+import importlib.util
 import os
 from datetime import timedelta
 
@@ -28,6 +29,16 @@ import torch.distributed
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
+
+_KERNELS_INSTALLED = importlib.util.find_spec("kernels") is not None
+
+_requires_kernels = pytest.mark.skipif(not _KERNELS_INSTALLED, reason="kernels package not installed")
+
+_ulysses_backends = [
+    "native",
+    pytest.param("flash_varlen_hub", marks=[_requires_kernels]),
+    pytest.param("_flash_3_varlen_hub", marks=[_requires_kernels]),
+]
 
 
 def get_device_name() -> str:
@@ -88,7 +99,7 @@ def _load_config_for_sp(sp_size: int) -> dict:
 
 
 @pytest.mark.parametrize("sp_size", [2, 4])
-@pytest.mark.parametrize("backend", ["native", "flash_varlen_hub", "_flash_3_varlen_hub"])
+@pytest.mark.parametrize("backend", _ulysses_backends)
 def test_diffusers_ulysses_fwd(sp_size, backend):
     """
     Ulysses SP forward must produce numerically equivalent output to a plain
@@ -202,7 +213,7 @@ def _diffusers_ulysses_fwd(sp_size: int, dp_size: int, backend: str):
 
 
 @pytest.mark.parametrize("sp_size", [2, 4])
-@pytest.mark.parametrize("backend", ["native", "flash_varlen_hub", "_flash_3_varlen_hub"])
+@pytest.mark.parametrize("backend", _ulysses_backends)
 def test_diffusers_ulysses_fwd_bwd(sp_size, backend):
     """
     Ulysses SP backward pass must produce equivalent gradients to a plain
@@ -336,7 +347,7 @@ def _diffusers_ulysses_fwd_bwd(sp_size: int, dp_size: int, backend: str):
 
 
 @pytest.mark.parametrize("sp_size", [2, 4])
-@pytest.mark.parametrize("backend", ["native", "flash_varlen_hub", "_flash_3_varlen_hub"])
+@pytest.mark.parametrize("backend", _ulysses_backends)
 def test_diffusers_ulysses_fwd_bwd_fsdp(sp_size, backend):
     """
     FSDP-wrapped Ulysses SP backward must produce equivalent gradients to a
