@@ -181,7 +181,12 @@ class MultiVisualRewardManager(VisualRewardManager):
             except Exception as e:
                 if required:
                     raise RuntimeError(f"Required sub-reward '{key}' failed: {e}") from e
-                logger.error(f"Sub-reward '{key}' raised an exception: {e}. Contributing 0 to weighted sum.")
+                logger.exception(
+                    "Sub-reward '%s' raised an exception: %s. Contributing 0 to weighted sum.",
+                    key,
+                    e,
+                )
+                reward_extra_info[f"reward/{key}/errors"] = 1
                 score = 0.0
 
             reward_extra_info[f"reward/{key}"] = score

@@ -28,6 +28,8 @@ ROLLOUT_SDPA_BACKEND = "TORCH_SDPA"
 # Keep in sync with vllm-omni diffusion attention backends for FA train/rollout pairs.
 FA3_ROLLOUT_BACKENDS = ("FLASH_ATTN", "FLASH_ATTN_HUB", "FLASH_ATTN_3_HUB")
 KERNELS_HUB_ROLLOUT_BACKENDS = ("FLASH_ATTN_HUB", "FLASH_ATTN_3_HUB")
+ACTOR_BACKENDS = (ACTOR_FA3_BACKEND, ACTOR_NATIVE_BACKEND, "_native_npu")
+ROLLOUT_BACKENDS = FA3_ROLLOUT_BACKENDS + (ROLLOUT_SDPA_BACKEND,)
 
 
 def actor_fa3_available() -> bool:
@@ -115,16 +117,19 @@ def validate_attention_consistency(config: Any) -> None:
     attn_backend = model_cfg.get("attn_backend", ACTOR_FA3_BACKEND)
     rollout_backend = config.actor_rollout_ref.rollout.get("rollout_attn_backend")
 
+    if attn_backend not in ACTOR_BACKENDS:
+        raise ValueError(f"Unknown attn_backend={attn_backend!r}. Available options: {list(ACTOR_BACKENDS)}.")
+    if rollout_backend not in ROLLOUT_BACKENDS:
+        raise ValueError(
+            f"Unknown rollout_attn_backend={rollout_backend!r}. Available options: {list(ROLLOUT_BACKENDS)}."
+        )
+
     if attn_backend == ACTOR_FA3_BACKEND:
         if rollout_backend in FA3_ROLLOUT_BACKENDS:
             return
         expected = ", ".join(FA3_ROLLOUT_BACKENDS)
     elif attn_backend in (ACTOR_NATIVE_BACKEND, "_native_npu"):
         expected = ROLLOUT_SDPA_BACKEND
-    else:
-        logger.warning("Unknown attn_backend=%r; skipping attention consistency check.", attn_backend)
-        return
-
     if rollout_backend != expected:
         raise ValueError(
             f"Attention backend mismatch: attn_backend={attn_backend!r} requires "

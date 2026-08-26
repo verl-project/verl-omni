@@ -17,5 +17,5 @@ if not hasattr(diffusers, "MiniMaxH3Transformer3DModel"):
     raise RuntimeError("diffusers must export MiniMaxH3Transformer3DModel for this regression.")
 PY
 
-python3 -m torch.distributed.run --standalone --nproc_per_node=2 \
+python3 -m torch.distributed.run --standalone --nproc_per_node="${NUM_GPUS}" \
     tests/special_e2e/minimax_h3_lora_sync_tp2.py

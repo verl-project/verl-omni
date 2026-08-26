@@ -134,6 +134,10 @@ run_test() {
 
     if [[ "${GPU_SMOKE_SKIP_RAY_STOP:-0}" != "1" ]]; then
         ray stop --force 2>/dev/null || true
+        # Ray/vLLM child processes may release their distributed rendezvous
+        # sockets asynchronously; let them exit before the next smoke test
+        # selects a new port.
+        sleep 3
     fi
 
     sep

@@ -19,6 +19,7 @@ This trainer supports model-agnostic model initialization with Hugging Face.
 import json
 import logging
 import os
+import subprocess
 import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -114,6 +115,13 @@ def validate_separate_config(config) -> None:
         raise ValueError("Separate mode requires positive rollout nnodes and n_gpus_per_node.")
     if rollout.checkpoint_engine.backend == "naive":
         raise ValueError("Separate mode requires a non-naive checkpoint engine backend.")
+
+
+def _to_diffusion_worker_tensordict(batch: DataProto):
+    """Project a driver batch for actor/ref workers without copying tensor storage."""
+    worker_batch = batch.to_tensordict()
+    worker_batch.pop("responses", None)
+    return worker_batch
 
 
 def compute_advantage(
@@ -343,8 +351,8 @@ class BaseRayDiffusionTrainer(ABC):
             with open_dict(self.config):
                 if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
                     self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
-        except Exception as e:
-            print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+        except (KeyError, TypeError, AttributeError, OmegaConf.errors.OmegaConfBaseException) as e:
+            raise RuntimeError("Failed to propagate trainer.total_training_steps to actor optimizer config.") from e
 
     def _dump_generations(
         self,
@@ -364,6 +372,8 @@ class BaseRayDiffusionTrainer(ABC):
         ``outputs`` is a batch of images ``[N, C, H, W]`` (-> ``{i}.jpg``) or videos
         ``[N, T, C, H, W]`` (-> ``{i}.mp4`` at ``fps``). ``max_samples`` caps how many
         are written (``None`` = all). Optional generated audio is muxed into video files.
+        Failed video exports are preserved as ``{i}.pt`` fallback payloads and recorded
+        in the JSONL instead of terminating training.
         """
         if not isinstance(outputs, torch.Tensor) or outputs.dtype != torch.uint8:
             dtype = getattr(outputs, "dtype", type(outputs))
@@ -385,19 +395,51 @@ class BaseRayDiffusionTrainer(ABC):
         is_video = outputs.ndim == 5  # [N, T, C, H, W] vs image [N, C, H, W]
 
         output_paths = []
+        output_fallback_paths = [None] * n
+        video_export_errors = [None] * n
         if is_video:
             audios = batch_items(audios, n_full, "audio")
             audio_sample_rates = batch_items(audio_sample_rates, n_full, "audio_sample_rate")
             for i in range(n):
                 video_path = os.path.join(visual_folder, f"{i}.mp4")
-                _export_video(
-                    outputs[i],
-                    video_path,
-                    fps=fps,
-                    audio=audios[i],
-                    audio_sample_rate=audio_sample_rates[i],
-                )
-                output_paths.append(video_path)
+                try:
+                    _export_video(
+                        outputs[i],
+                        video_path,
+                        fps=fps,
+                        audio=audios[i],
+                        audio_sample_rate=audio_sample_rates[i],
+                    )
+                except (OSError, subprocess.SubprocessError, ValueError) as error:
+                    error_message = f"{type(error).__name__}: {error}"
+                    fallback_path = os.path.join(visual_folder, f"{i}.pt")
+                    fallback_audio = audios[i]
+                    if isinstance(fallback_audio, torch.Tensor):
+                        fallback_audio = fallback_audio.detach().cpu()
+                    fallback = {
+                        "video": outputs[i].detach().cpu(),
+                        "audio": fallback_audio,
+                        "audio_sample_rate": audio_sample_rates[i],
+                    }
+                    try:
+                        torch.save(fallback, fallback_path)
+                    except Exception as fallback_error:
+                        fallback_path = None
+                        error_message = (
+                            f"{error_message}; fallback save failed: {type(fallback_error).__name__}: {fallback_error}"
+                        )
+                    else:
+                        output_fallback_paths[i] = fallback_path
+                    video_export_errors[i] = error_message
+                    sys_logger.warning(
+                        "Failed to export rollout video at step %s sample %s: %s",
+                        self.global_steps,
+                        i,
+                        error_message,
+                    )
+                    output_paths.append(None)
+                else:
+                    output_paths.append(video_path)
         else:
             images_pil = outputs[:n].cpu().permute(0, 2, 3, 1).numpy()
             for i, image in enumerate(images_pil):
@@ -418,6 +460,9 @@ class BaseRayDiffusionTrainer(ABC):
         for k, v in reward_extra_infos_dict.items():
             if len(v) == n_full:
                 base_data[k] = list(v)[:n]
+        if any(video_export_errors):
+            base_data["output_fallback"] = output_fallback_paths
+            base_data["video_export_error"] = video_export_errors
 
         lines = []
         for i in range(n):
@@ -953,6 +998,11 @@ class BaseRayDiffusionTrainer(ABC):
                 if not os.path.isabs(global_step_folder):
                     working_dir = os.getcwd()
                     global_step_folder = os.path.join(working_dir, global_step_folder)
+            else:
+                raise ValueError(
+                    f"Unknown trainer.resume_mode={self.config.trainer.resume_mode!r}. "
+                    "Available options: ['disable', 'auto', 'resume_path']."
+                )
         print(f"Load from checkpoint folder: {global_step_folder}")
         # set global step
         self.global_steps = int(global_step_folder.split("global_step_")[-1])
@@ -978,7 +1028,7 @@ class BaseRayDiffusionTrainer(ABC):
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
         # update actor
-        batch_td = batch.to_tensordict()
+        batch_td = _to_diffusion_worker_tensordict(batch)
         # step 2: convert from padding to no-padding
         batch_td = embeds_padding_2_no_padding(batch_td)
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
@@ -1056,7 +1106,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
     """Policy-gradient diffusion trainer for FlowGRPO, MixGRPO, DanceGRPO, GRPO-Guard, etc."""
 
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
-        batch_td = batch.to_tensordict()
+        batch_td = _to_diffusion_worker_tensordict(batch)
         batch_td = embeds_padding_2_no_padding(batch_td)
         metadata = {
             "compute_loss": False,
@@ -1080,7 +1130,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         return DataProto.from_tensordict(ref_log_prob)
 
     def _compute_teacher_prev_sample_mean(self, batch: DataProto) -> DataProto:
-        batch_td = batch.to_tensordict()
+        batch_td = _to_diffusion_worker_tensordict(batch)
         batch_td = embeds_padding_2_no_padding(batch_td)
         tu.assign_non_tensor(
             batch_td,
@@ -1095,7 +1145,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         return DataProto.from_tensordict(teacher_output)
 
     def _compute_old_log_prob(self, batch: DataProto) -> tuple[DataProto, Optional[float]]:
-        batch_td = batch.to_tensordict()
+        batch_td = _to_diffusion_worker_tensordict(batch)
         batch_td = embeds_padding_2_no_padding(batch_td)
         tu.assign_non_tensor(
             batch_td,
@@ -1463,7 +1513,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
-        batch_td = batch.to_tensordict()
+        batch_td = _to_diffusion_worker_tensordict(batch)
         batch_td = embeds_padding_2_no_padding(batch_td)
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         paired = self.config.algorithm.get("paired_preference", False)
@@ -1502,7 +1552,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
 
     def _compute_ref_noise_pred(self, batch: DataProto) -> Optional[DataProto]:
         """Reference transformer output and shared flow tensors."""
-        batch_td = batch.to_tensordict()
+        batch_td = _to_diffusion_worker_tensordict(batch)
         batch_td = embeds_padding_2_no_padding(batch_td)
         metadata = {
             "compute_loss": False,

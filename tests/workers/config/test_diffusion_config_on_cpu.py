@@ -186,9 +186,41 @@ class TestDiffusionRolloutConfig:
         with pytest.raises(ValueError, match="max_prompt_embed_length must be positive"):
             DiffusionRolloutConfig(name="vllm_omni", max_prompt_embed_length=value)
 
+    def test_prompt_embed_cache_config(self):
+        cfg = DiffusionRolloutConfig(
+            name="vllm_omni",
+            enable_prompt_embed_cache=True,
+            prompt_embed_cache_size=64,
+            enable_prompt_embed_cache_routing_affinity=True,
+        )
+        assert cfg.enable_prompt_embed_cache is True
+        assert cfg.prompt_embed_cache_size == 64
+        assert cfg.enable_prompt_embed_cache_routing_affinity is True
+
+    def test_invalid_prompt_embed_cache_size_raises(self):
+        with pytest.raises(ValueError, match="prompt_embed_cache_size must be positive"):
+            DiffusionRolloutConfig(name="vllm_omni", prompt_embed_cache_size=0)
+
     def test_invalid_rollout_adapter_raises(self):
         with pytest.raises(ValueError, match="Invalid diffusion rollout rollout_adapter"):
             DiffusionRolloutConfig(name="vllm_omni", rollout_adapter="bogus")
+
+    def test_text_encoder_tp_size_defaults_to_one(self):
+        cfg = DiffusionRolloutConfig(name="vllm_omni")
+        assert cfg.text_encoder_tp_size == 1
+
+    def test_text_encoder_tp_size_equal_to_tp_is_allowed(self):
+        cfg = DiffusionRolloutConfig(name="vllm_omni", tensor_model_parallel_size=4, text_encoder_tp_size=4)
+        assert cfg.text_encoder_tp_size == 4
+
+    @pytest.mark.parametrize("etp", [2, 3])
+    def test_intermediate_text_encoder_tp_size_is_rejected(self, etp):
+        with pytest.raises(ValueError, match="must be either 1 or equal to tensor_model_parallel_size"):
+            DiffusionRolloutConfig(name="vllm_omni", tensor_model_parallel_size=4, text_encoder_tp_size=etp)
+
+    def test_non_positive_text_encoder_tp_size_is_rejected(self):
+        with pytest.raises(ValueError, match="text_encoder_tp_size must be >= 1"):
+            DiffusionRolloutConfig(name="vllm_omni", text_encoder_tp_size=0)
 
 
 class TestDiffusionModelConfigPolicyAdapters:

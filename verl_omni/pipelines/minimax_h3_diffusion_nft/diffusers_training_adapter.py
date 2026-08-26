@@ -23,9 +23,12 @@ from verl_omni.workers.config import DiffusionModelConfig
 
 from .common import (
     build_layout_from_meta,
+    build_row_timesteps,
     h3_dit_timestep,
     h3_velocity_to_flow_match,
+    keyframe_indices_to_anchors,
     pack_video_audio_rows,
+    prepare_h3_processor_files,
     split_dual_velocity,
     unpack_video_audio_rows,
     validate_lora_target_modules,
@@ -43,6 +46,11 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
         """Reject LoRA targets the rollout weight sync cannot transport (shares common.py whitelist)."""
         if model_config.lora_rank > 0:
             validate_lora_target_modules(model_config.target_modules)
+
+    @classmethod
+    def prepare_processor_files(cls, model_path: str) -> str:
+        """Make the official Qwen3-VL processor discoverable by AutoProcessor."""
+        return prepare_h3_processor_files(model_path)
 
     @classmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig):
@@ -78,10 +86,19 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
         meta = micro_batch["latent_meta"][0].reshape(-1).tolist()
         num_video_rows, num_audio_rows = int(meta[0]), int(meta[1])
         video_rows, audio_rows = unpack_video_audio_rows(latents, num_video_rows, num_audio_rows)
+        condition_video_rows = micro_batch.get("condition_video_rows", None)
+        if condition_video_rows is None:
+            condition_video_rows = video_rows.new_zeros((video_rows.shape[0], 0, video_rows.shape[-1]))
+        frame_indices = micro_batch.get("keyframe_frame_indices", None)
+        frame_indices = [] if frame_indices is None else frame_indices[0].reshape(-1).tolist()
+        prompt_token_tags = micro_batch.get("prompt_token_tags", None)
 
         model_inputs = {
             "video_rows": video_rows,
             "audio_rows": audio_rows,
+            "condition_video_rows": condition_video_rows,
+            "keyframe_anchors": keyframe_indices_to_anchors(frame_indices),
+            "prompt_token_tags": prompt_token_tags,
             "encoder_hidden_states": prompt_embeds,
             "encoder_mask": prompt_embeds_mask,
             "timestep": h3_dit_timestep(timesteps.float()),
@@ -101,6 +118,9 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
         del negative_model_inputs
         video_rows = model_inputs["video_rows"]
         audio_rows = model_inputs["audio_rows"]
+        condition_video_rows = model_inputs["condition_video_rows"]
+        keyframe_anchors = model_inputs["keyframe_anchors"]
+        prompt_token_tags = model_inputs["prompt_token_tags"]
         encoder_hidden_states = model_inputs["encoder_hidden_states"]
         encoder_mask = model_inputs["encoder_mask"]
         timestep = model_inputs["timestep"]
@@ -118,15 +138,40 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
         packed_velocities = []
         for index in range(batch):
             num_text_tokens = int(text_lengths[index])
-            position_ids, token_tags, video_indices, audio_indices, text_indices, _, _ = build_layout_from_meta(
-                meta, num_text_tokens, patch_size
+            sample_text_tags = None if prompt_token_tags is None else prompt_token_tags[index, :num_text_tokens]
+            position_ids, token_tags, video_indices, audio_indices, text_indices, num_cond_video, num_cond_audio = (
+                build_layout_from_meta(
+                    meta,
+                    num_text_tokens,
+                    patch_size,
+                    keyframe_anchors=keyframe_anchors,
+                    text_token_tags=sample_text_tags,
+                )
+            )
+            sample_condition = condition_video_rows[index]
+            if sample_condition.shape[0] != num_cond_video:
+                raise ValueError(
+                    f"MiniMax H3 condition rows {sample_condition.shape[0]} do not match layout rows {num_cond_video}."
+                )
+            full_video_rows = torch.cat([sample_condition, video_rows[index]], dim=0).unsqueeze(0)
+            video_t = float(timestep[index])
+            unique_timesteps, timestep_indices = build_row_timesteps(
+                video_indices,
+                audio_indices,
+                num_cond_video,
+                num_cond_audio,
+                num_text_tokens,
+                video_timestep=video_t,
+                audio_timestep=video_t,
+                condition_video_timestep=max(video_t, 0.999),
+                condition_audio_timestep=video_t,
             )
             result = module(
-                hidden_states=video_rows[index : index + 1],
+                hidden_states=full_video_rows,
                 audio_hidden_states=audio_rows[index : index + 1],
                 encoder_hidden_states=encoder_hidden_states[index : index + 1, :num_text_tokens],
-                timestep=timestep[index : index + 1],
-                timestep_indices=torch.zeros(position_ids.shape[0], dtype=torch.long, device=device),
+                timestep=unique_timesteps.to(device),
+                timestep_indices=timestep_indices.to(device),
                 token_tags=token_tags.to(device),
                 position_ids=position_ids.to(device),
                 video_indices=video_indices.to(device),
@@ -135,6 +180,7 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
                 return_dict=False,
             )
             v_video, v_audio = split_dual_velocity(result)
+            v_video = v_video[:, num_cond_video:]
             packed_velocities.append(
                 pack_video_audio_rows(h3_velocity_to_flow_match(v_video), h3_velocity_to_flow_match(v_audio))
             )

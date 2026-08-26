@@ -22,10 +22,10 @@ fi
 echo "Detected device: $DEVICE"
 
 if [ "$DEVICE" = "npu" ]; then
-    ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.0.0}
+    export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
+    ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann}
     source $ASCEND_HOME_PATH/set_env.sh
     source $ASCEND_HOME_PATH/../nnal/atb/set_env.sh
-    export MULTI_STREAM_MEMORY_REUSE=${MULTI_STREAM_MEMORY_REUSE:=2}
 
     ATTENTION_BACKEND='native'
     ROLLOUT_ATTN_BACKEND='TORCH_SDPA'
@@ -90,9 +90,11 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.pipeline.height=704 \
     actor_rollout_ref.rollout.pipeline.width=1280 \
     actor_rollout_ref.rollout.pipeline.num_frames=8 \
+    +actor_rollout_ref.rollout.pipeline.output_type=np \
     actor_rollout_ref.rollout.pipeline.num_inference_steps=10 \
     actor_rollout_ref.rollout.pipeline.guidance_scale=5.0 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=1024 \
+    +actor_rollout_ref.rollout.val_kwargs.pipeline.output_type=np \
     actor_rollout_ref.rollout.algo.noise_level=1.2 \
     actor_rollout_ref.rollout.algo.sde_type="dance_sde" \
     actor_rollout_ref.rollout.algo.sde_window_size=2 \

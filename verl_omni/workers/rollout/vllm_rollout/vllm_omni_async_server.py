@@ -256,6 +256,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                     "stage_id": sid,
                     "devices": devices,
                     "tensor_parallel_size": tp_size,
+                    "text_encoder_tp_size": getattr(self.config, "text_encoder_tp_size", 1),
                     "engine_extras": adapter_cls.get_stage_engine_extras(sid, pipeline_mode=pipeline_mode),
                 }
                 for sid in stage_ids
@@ -338,6 +339,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                         pipeline_cls.__name__,
                     )
                     engine_args["max_num_seqs"] = 1
+
+            engine_args["enable_prompt_embed_cache"] = self.config.enable_prompt_embed_cache
+            engine_args["prompt_embed_cache_size"] = self.config.prompt_embed_cache_size
 
         if getattr(self.config, "step_execution", False):
             engine_args["step_execution"] = True

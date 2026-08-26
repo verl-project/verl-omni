@@ -55,7 +55,7 @@ def _pad_prompt_extra_field(key: str, value: torch.Tensor, target_length: int) -
                 "Configure max_prompt_embed_length for the final embedding sequence, not only one text encoder."
             )
         return F.pad(value, (0, 0, 0, target_length - current_length), value=0)
-    if key in {"prompt_embeds_mask", "negative_prompt_embeds_mask"}:
+    if key in {"prompt_embeds_mask", "negative_prompt_embeds_mask", "prompt_token_tags"}:
         current_length = int(value.shape[0])
         if current_length > target_length:
             raise ValueError(

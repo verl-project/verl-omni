@@ -143,6 +143,16 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
     def _build_module(self):
+        unsupported_options = [
+            option for option in ("use_liger", "use_fused_kernels") if getattr(self.model_config, option, False)
+        ]
+        if unsupported_options:
+            enabled_options = ", ".join(f"{option}=True" for option in unsupported_options)
+            raise ValueError(
+                f"Omni models do not support these enabled optimizations: {enabled_options}. "
+                "Set them to false before starting the worker."
+            )
+
         from verl.utils.torch_dtypes import PrecisionType
 
         from verl_omni.pipelines.model_base import OmniModelBase
@@ -169,11 +179,6 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-
-            if getattr(self.model_config, "use_liger", False):
-                logger.warning("use_liger is set but not applied for omni models; this is a no-op.")
-            if getattr(self.model_config, "use_fused_kernels", False):
-                logger.warning("use_fused_kernels is set but not applied for omni models; this is a no-op.")
 
             module = AutoModelForMultimodalLM.from_pretrained(
                 pretrained_model_name_or_path=self.model_config.local_path,

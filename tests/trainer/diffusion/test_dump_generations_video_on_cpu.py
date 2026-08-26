@@ -23,6 +23,7 @@ for the trainer.
 import json
 import os
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +33,7 @@ import torch
 # branch; skip the whole module rather than hard-fail where it is absent.
 pytest.importorskip("diffusers")
 
+import verl_omni.trainer.diffusion.ray_diffusion_trainer as ray_diffusion_trainer
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import BaseRayDiffusionTrainer
 
 
@@ -101,6 +103,28 @@ class TestDumpGenerations:
         path = os.path.join(str(tmp_path), "0", "0.mp4")
         probe = subprocess.run([get_ffmpeg_exe(), "-i", path], capture_output=True, text=True)
         assert "Video:" in probe.stderr and "Audio: aac" in probe.stderr
+
+    def test_video_export_failure_preserves_raw_fallback_and_writes_jsonl(self, monkeypatch, tmp_path):
+        outputs = torch.randint(256, (2, 8, 3, 16, 16), dtype=torch.uint8)
+
+        def fake_export(output, output_path, **kwargs):
+            if output_path.endswith("1.mp4"):
+                raise subprocess.CalledProcessError(1, ["ffmpeg"])
+            Path(output_path).write_bytes(b"video")
+
+        monkeypatch.setattr(ray_diffusion_trainer, "_export_video", fake_export)
+        _dump(tmp_path, outputs)
+
+        rows = _read_jsonl(tmp_path)
+        assert rows[0]["output"].endswith("0.mp4")
+        assert rows[1]["output"] is None
+        assert rows[1]["video_export_error"].startswith("CalledProcessError:")
+        fallback_path = rows[1]["output_fallback"]
+        assert fallback_path.endswith("1.pt")
+        fallback = torch.load(fallback_path, weights_only=True)
+        torch.testing.assert_close(fallback["video"], outputs[1])
+        assert fallback["audio"] is None
+        assert fallback["audio_sample_rate"] is None
 
     def test_image_batch_writes_one_jpg_per_sample(self, tmp_path):
         # Image regression: the 4-D path must stay byte-for-byte behaviour.

@@ -16,6 +16,8 @@
 from typing import Any
 
 import torch
+from vllm_omni.diffusion.models.minimax_h3.condition_noise import minimax_h3_imgvid_cond_noise_aug_rows
+from vllm_omni.diffusion.models.minimax_h3.denoise_loop import MINIMAX_H3_IMGVID_COND_TIMESTEP
 from vllm_omni.diffusion.models.minimax_h3.packed_tokens import (
     minimax_h3_pack_audio_latent,
     minimax_h3_patchify_video_latent,
@@ -45,29 +47,52 @@ class MiniMaxH3DiffusionNFTPipeline(MiniMaxH3RolloutWeightSyncMixin, MiniMaxH3Pi
         self._nft_capture: dict[str, Any] | None = None
 
     def diffuse(self, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run a t2va denoiser and capture the clean latents + shape metadata."""
+        """Run the official T2VA/FL2VA denoiser and retain Actor condition state."""
         task = str(kwargs.get("task", "t2va"))
-        if task != "t2va":
-            raise NotImplementedError(
-                f"MiniMax H3 DiffusionNFT supports task='t2va' only, got {task!r}. "
-                "Conditional H3 rows are not yet transported to the actor batch."
-            )
+        if task not in {"t2va", "fl2va"}:
+            raise NotImplementedError(f"MiniMax H3 DiffusionNFT supports t2va and fl2va, got {task!r}.")
         video_latent, audio_latent = super().diffuse(**kwargs)
+
+        condition_rows = video_latent.new_zeros((0, 96), dtype=torch.float32)
+        keyframe_indices: list[int] = []
+        if task == "fl2va":
+            visual_condition = kwargs.get("visual_condition")
+            condition_shapes = kwargs.get("visual_condition_shapes")
+            if condition_shapes is None and kwargs.get("visual_condition_shape") is not None:
+                condition_shapes = [kwargs["visual_condition_shape"]]
+            keyframe_indices = list(kwargs.get("keyframe_frame_indices") or [])
+            if visual_condition is None or not condition_shapes or not keyframe_indices:
+                raise ValueError("MiniMax H3 FL2VA rollout did not provide complete visual condition metadata.")
+            condition_rows = minimax_h3_imgvid_cond_noise_aug_rows(
+                visual_condition,
+                condition_shapes=condition_shapes,
+                target_latent_t=int(kwargs["latent_t"]),
+                imgvid_cond_num_frames=len(condition_shapes),
+                seed=int(kwargs.get("seed", 42)),
+                noise_aug=MINIMAX_H3_IMGVID_COND_TIMESTEP,
+            )
+
         self._nft_capture = {
             "video_latent": video_latent,
             "audio_latent": audio_latent,
+            "condition_video_rows": condition_rows,
+            "keyframe_frame_indices": keyframe_indices,
             "text_embeddings": kwargs.get("text_embeddings"),
+            "text_tags": kwargs.get("text_tags"),
             "latent_t": int(kwargs.get("latent_t", 0)),
             "latent_h": int(kwargs.get("latent_h", 0)),
             "latent_w": int(kwargs.get("latent_w", 0)),
             "audio_t": int(kwargs.get("audio_t", 0)),
             "num_steps": int(kwargs.get("num_steps", 50)),
             "video_shift": float(kwargs.get("video_shift", self.default_video_shift)),
+            "base_schedule": kwargs.get("base_schedule"),
         }
         return video_latent, audio_latent
 
     def forward(self, request: Any):
         """Generate video+audio and attach DiffusionNFT training tensors."""
+        if int(request.sampling_params.num_outputs_per_prompt or 1) != 1:
+            raise NotImplementedError("MiniMax H3 DiffusionNFT requires one output per rollout request.")
         self._ensure_prompt_text(request)
         try:
             output = super().forward(request)
@@ -99,6 +124,7 @@ class MiniMaxH3DiffusionNFTPipeline(MiniMaxH3RolloutWeightSyncMixin, MiniMaxH3Pi
         )
 
         text_embeddings = capture["text_embeddings"]
+        text_tags = capture["text_tags"]
         prompt_embeds = text_embeddings.unsqueeze(0)
         prompt_embeds_mask = torch.ones(prompt_embeds.shape[:2], dtype=torch.long, device=prompt_embeds.device)
 
@@ -114,6 +140,11 @@ class MiniMaxH3DiffusionNFTPipeline(MiniMaxH3RolloutWeightSyncMixin, MiniMaxH3Pi
                 "latents_clean": latents_clean,
                 "train_timesteps": train_timesteps,
                 "latent_meta": latent_meta,
+                "prompt_token_tags": text_tags.unsqueeze(0),
+                "condition_video_rows": capture["condition_video_rows"].unsqueeze(0),
+                "keyframe_frame_indices": torch.tensor(
+                    [capture["keyframe_frame_indices"]], dtype=torch.long, device=prompt_embeds.device
+                ),
             },
             to_cpu=True,
         )
@@ -124,6 +155,7 @@ class MiniMaxH3DiffusionNFTPipeline(MiniMaxH3RolloutWeightSyncMixin, MiniMaxH3Pi
         sigmas = minimax_h3_time_shift_sigmas(
             num_steps=capture["num_steps"],
             shift_scale=capture["video_shift"],
+            base_schedule=capture.get("base_schedule"),
         )
         if len(sigmas) < 2:
             raise ValueError(

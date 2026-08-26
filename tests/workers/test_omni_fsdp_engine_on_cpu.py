@@ -382,6 +382,19 @@ def test_build_module_calls_adapter_configure_model(architecture):
         assert result is fake_configured_module
 
 
+@pytest.mark.parametrize("option", ["use_liger", "use_fused_kernels"])
+def test_build_module_rejects_unsupported_optimizations_before_model_load(option):
+    omni_impl = _get_omni_impl_module()
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.model_config = _make_mock_model_config(**{option: True})
+
+    with patch.object(omni_impl.AutoModelForMultimodalLM, "from_pretrained") as mock_from_pretrained:
+        with pytest.raises(ValueError, match=rf"{option}=True"):
+            engine._build_module()
+
+    mock_from_pretrained.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # ``_build_lora_module`` dtype handling
 # ---------------------------------------------------------------------------

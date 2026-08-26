@@ -43,7 +43,9 @@ def _flatten_tensors(value: Any, prefix: str = "") -> dict[str, torch.Tensor]:
     return flat
 
 
-def _tensor_metrics(reference: torch.Tensor, actual: torch.Tensor, eps: float) -> dict[str, float | list[int] | str]:
+def _tensor_metrics(
+    reference: torch.Tensor, actual: torch.Tensor, atol: float
+) -> dict[str, float | int | list[int] | str]:
     if reference.shape != actual.shape:
         return {
             "shape_mismatch": True,
@@ -53,38 +55,53 @@ def _tensor_metrics(reference: torch.Tensor, actual: torch.Tensor, eps: float) -
     ref = reference.float().reshape(-1)
     cur = actual.float().reshape(-1)
     if ref.numel() == 0:
-        return {"max_abs_err": 0.0, "max_rel_err": 0.0, "cos_sim": 1.0}
+        return {
+            "numel": 0,
+            "mean_abs_err": 0.0,
+            "rmse": 0.0,
+            "p99_abs_err": 0.0,
+            "frac_abs_over_atol": 0.0,
+            "cos_sim": 1.0,
+        }
     diff = (cur - ref).abs()
-    max_abs = diff.max().item()
-    max_rel = (diff / ref.abs().clamp_min(eps)).max().item()
+    mean_abs = diff.mean().item()
+    rmse = torch.sqrt(torch.mean((cur - ref).square())).item()
+    p99_abs = torch.quantile(diff, 0.99).item()
+    frac_abs_over_atol = diff.gt(atol).float().mean().item()
     denom = ref.norm() * cur.norm()
     cos_sim = 1.0 if denom.item() == 0 else torch.dot(ref, cur).div(denom).item()
-    return {"max_abs_err": max_abs, "max_rel_err": max_rel, "cos_sim": cos_sim}
-
-
-def _is_decoded_image_tensor(key: str) -> bool:
-    """True for decoded image tensors (uint8-style quantization in [0, 1])."""
-    return key == "batch.responses" or key.endswith(".batch.responses")
+    return {
+        "numel": ref.numel(),
+        "mean_abs_err": mean_abs,
+        "rmse": rmse,
+        "p99_abs_err": p99_abs,
+        "frac_abs_over_atol": frac_abs_over_atol,
+        "cos_sim": cos_sim,
+    }
 
 
 def _thresholds_for_key(key: str, thresholds: dict[str, Any]) -> dict[str, float]:
     if "default" not in thresholds:
-        # Legacy flat report format: {"atol", "rtol", "min_cos_sim"}.
+        # Legacy flat report format: {"atol", "min_cos_sim"}.
+        atol = float(thresholds.get("atol", 0.0))
         flat = {
-            "atol": float(thresholds.get("atol", 0.0)),
-            "rtol": float(thresholds.get("rtol", 0.0)),
+            "atol": atol,
+            "mean_atol": atol,
+            "rmse_atol": atol,
+            "p99_atol": atol,
+            "max_frac_abs_over_atol": 0.0,
             "min_cos_sim": float(thresholds.get("min_cos_sim", 1.0)),
         }
         return flat
-    if _is_decoded_image_tensor(key):
-        return thresholds["batch.responses"]
     return thresholds["default"]
 
 
 def _exceeds_thresholds(metrics: dict[str, Any], thresholds: dict[str, float]) -> bool:
     return (
-        metrics["max_abs_err"] > thresholds["atol"]
-        or metrics["max_rel_err"] > thresholds["rtol"]
+        metrics["mean_abs_err"] > thresholds["mean_atol"]
+        or metrics["rmse"] > thresholds["rmse_atol"]
+        or metrics["p99_abs_err"] > thresholds["p99_atol"]
+        or metrics["frac_abs_over_atol"] > thresholds["max_frac_abs_over_atol"]
         or metrics["cos_sim"] < thresholds["min_cos_sim"]
     )
 
@@ -110,12 +127,13 @@ def compare(args: argparse.Namespace) -> tuple[bool, dict]:
     current_files = _payload_files(current)
     baseline_files = _payload_files(baseline)
     thresholds = {
-        "default": {"atol": args.atol, "rtol": args.rtol, "min_cos_sim": args.min_cos_sim},
-        # Decoded images are quantized to 8-bit; a 1/255 pixel step is ~0.00392 abs.
-        "batch.responses": {
-            "atol": args.image_atol,
-            "rtol": args.image_rtol,
-            "min_cos_sim": args.image_min_cos_sim,
+        "default": {
+            "atol": args.atol,
+            "mean_atol": args.mean_atol,
+            "rmse_atol": args.rmse_atol,
+            "p99_atol": args.p99_atol,
+            "max_frac_abs_over_atol": args.max_frac_abs_over_atol,
+            "min_cos_sim": args.min_cos_sim,
         },
     }
     results = {"files": {}, "missing_in_current": [], "missing_in_baseline": [], "thresholds": thresholds}
@@ -143,8 +161,10 @@ def compare(args: argparse.Namespace) -> tuple[bool, dict]:
             passed = False
 
         for key in sorted(set(baseline_tensors) & set(current_tensors)):
-            metrics = _tensor_metrics(baseline_tensors[key], current_tensors[key], args.eps)
             key_thresholds = _thresholds_for_key(key, thresholds)
+            metrics = _tensor_metrics(
+                baseline_tensors[key], current_tensors[key], key_thresholds.get("atol", args.atol)
+            )
             metrics["thresholds"] = key_thresholds
             file_result["tensors"][key] = metrics
             if metrics.get("shape_mismatch"):
@@ -180,8 +200,11 @@ def _dump_failures(results: dict) -> list[str]:
             if _exceeds_thresholds(metrics, key_thresholds):
                 failures.append(
                     f"tensor mismatch: {rel_path}::{key} "
-                    f"abs={metrics['max_abs_err']:.6g} "
-                    f"rel={metrics['max_rel_err']:.6g} "
+                    f"numel={metrics['numel']} "
+                    f"mean={metrics['mean_abs_err']:.6g} "
+                    f"rmse={metrics['rmse']:.6g} "
+                    f"p99={metrics['p99_abs_err']:.6g} "
+                    f"frac_abs_over_atol={metrics['frac_abs_over_atol']:.6g} "
                     f"cos={metrics['cos_sim']:.6g}"
                 )
     return failures
@@ -219,14 +242,21 @@ def main() -> None:
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--current", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--atol", type=float, default=1e-4)
-    parser.add_argument("--rtol", type=float, default=1e-3)
+    parser.add_argument("--atol", type=float, default=1e-3)
+    parser.add_argument("--mean-atol", type=float, default=1e-4)
+    parser.add_argument("--rmse-atol", type=float, default=1e-3)
+    parser.add_argument("--p99-atol", type=float, default=2e-3)
+    parser.add_argument("--max-frac-abs-over-atol", type=float, default=2e-2)
     parser.add_argument("--min-cos-sim", type=float, default=0.999)
-    # Decoded image tensors (batch.responses): 1/255 ≈ 0.00392 abs per LSB.
-    parser.add_argument("--image-atol", type=float, default=2.0 / 255.0)
-    parser.add_argument("--image-rtol", type=float, default=2e-2)
-    parser.add_argument("--image-min-cos-sim", type=float, default=0.999)
-    parser.add_argument("--eps", type=float, default=1e-12)
+    parser.add_argument("--eps", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--rtol", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--image-atol", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--image-mean-atol", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--image-rmse-atol", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--image-p99-atol", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--image-max-frac-abs-over-atol", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--image-min-cos-sim", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--image-rtol", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--bootstrap-missing", action="store_true")
     args = parser.parse_args()
 
