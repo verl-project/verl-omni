@@ -56,6 +56,7 @@ class DiffusionLossConfig(BaseConfig):
             "diffusion_nft",
             "dpo",
             "dance_grpo",
+            "dual_grpo",
             "distill_kl",
             "distill_fm_mse",
         ]

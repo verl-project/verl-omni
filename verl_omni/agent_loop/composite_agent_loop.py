@@ -356,7 +356,7 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
 
         timing = {}
         ar_reward_scores: list[float] = []
-        with simple_timer("compute_score", timing):
+        with simple_timer("compute_ar_score", timing):
             for diffusion_output in diffusion_outputs:
                 batch = TensorDict(
                     {
@@ -386,7 +386,7 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
                 else:
                     output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
 
-        output.ar_reward_score = float(np.mean(ar_reward_scores))
+        output.ar_reward_score = float(np.mean(ar_reward_scores))  # average score per prompt
         if "reward_extra_info" in output.extra_fields:
             output.extra_fields["reward_extra_info"] = output.extra_fields["reward_extra_info"]
         output.metrics.compute_score = timing["compute_score"]
@@ -409,7 +409,7 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
 
         ar_scores = [input.ar_reward_score for input in inputs]
         if all(score is not None for score in ar_scores):
-            batch_dict["ar_rm_scores"] = torch.tensor(ar_scores, dtype=torch.float32).unsqueeze(-1)
+            batch_dict["rm_scores"] = torch.tensor(ar_scores, dtype=torch.float32).unsqueeze(-1)
 
         non_tensor_batch = {
             "__num_turns__": np.array([input.num_turns for input in inputs], dtype=np.int32),
@@ -427,7 +427,7 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
         non_tensor_batch["text_encoder_responses"] = text_encoder_responses
 
         metrics = [input.metrics.model_dump() for input in inputs]
-        if "ar_rm_scores" in batch_dict:
+        if "rm_scores" in batch_dict:
             meta_info = {"metrics": metrics, "reward_extra_keys": reward_extra_keys}
         else:
             meta_info = {"metrics": metrics}
