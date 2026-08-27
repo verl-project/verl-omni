@@ -58,7 +58,6 @@ from verl_omni.workers.rollout.replica import DiffusionOutput
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
-
 # Sentinel: ``None`` is a valid cached value (LoRA not loaded).
 _LORA_REQUEST_CACHE_MISS = object()
 
