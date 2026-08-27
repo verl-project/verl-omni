@@ -26,40 +26,23 @@ reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager
 '+reward.reward_functions.dit.weight=0.0'
 """
 
-import pytest
 import numpy as np
+import pytest
 import torch
 from verl import DataProto
-from verl_omni.trainer.diffusion.dual_grpo_utils import (
-    AR_REWARD_KEY,
-    # average_grouped_rewards,
-    extract_ar_rewards_from_colocate_batch,
-)
+
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import PolicyGradientRayTrainer
 
 AR_REWARD_KEY = "reward/ar"
-# def average_grouped_rewards(scores: np.ndarray, *, group_size: int) -> np.ndarray:
-#     """Average ``group_size`` consecutive rows into one scalar per group."""
-#     scores = np.asarray(scores)
-#     if scores.ndim == 1:
-#         scores = scores.reshape(-1, 1)
-#     if scores.ndim == 2 and scores.shape[1] == 1:
-#         scores = scores
-#     # raise ValueError(f"Expected reward scores with shape (N,) or (N, 1), got {scores.shape}")
-#     num_groups, remainder = divmod(scores.shape[0], group_size)
-#     if remainder != 0:
-#         raise ValueError(
-#             f"Cannot average {scores.shape[0]} reward rows with group_size={group_size}."
-#         )
-#     return scores.reshape(num_groups, group_size, scores.shape[1]).mean(axis=1)
+
+
+class DummyTrainer:
+    def _extract_ar_reward_tensor(self, batch_reward, ar_batch, avg_size):
+        return PolicyGradientRayTrainer._extract_ar_reward_tensor(self, batch_reward, ar_batch, avg_size)
+
 
 class TestExtractARRewardsFromColocateBatch:
-    # def test_average_grouped_rewards_uses_non_overlapping_blocks(self):
-    #     scores = np.array([0.0, 0.1, 0.2, 0.3, 1.0, 1.1, 1.2, 1.3], dtype=np.float32)
-    #     averaged = average_grouped_rewards(scores, group_size=4)
-    #     assert averaged.shape == (2, 1)
-    #     assert averaged[0, 0] == pytest.approx(0.15)
-    #     assert averaged[1, 0] == pytest.approx(1.15)
+    dummy_trainer = DummyTrainer()
 
     def test_extract_ar_rewards_populates_rm_scores_and_extra_keys(self):
         num_ar = 3
@@ -76,15 +59,19 @@ class TestExtractARRewardsFromColocateBatch:
                 AR_REWARD_KEY: np.array(ar_per_image_scores, dtype=np.float32).reshape(-1, 1),
                 f"{AR_REWARD_KEY}/semantic": np.array(ar_per_image_scores, dtype=np.float32),
                 f"{AR_REWARD_KEY}/semantic/detail": (
-                    np.array(["ar detail 1"]*rollout_m+["ar detail 2"]*rollout_m+["ar detail 3"]*rollout_m, dtype=np.float32)
+                    np.array(["ar detail 0"] * rollout_m + ["ar detail 1"] * rollout_m + ["ar detail 2"] * rollout_m)
                 ),
             },
         )
-        batch_reward.meta_info["reward_extra_keys"] = [AR_REWARD_KEY, f"{AR_REWARD_KEY}/semantic", f"{AR_REWARD_KEY}/semantic/detail"]
+        batch_reward.meta_info["reward_extra_keys"] = [
+            AR_REWARD_KEY,
+            f"{AR_REWARD_KEY}/semantic",
+            f"{AR_REWARD_KEY}/semantic/detail",
+        ]
         ar_batch = DataProto.from_dict(
             tensors={"ar_response_ids": torch.zeros(num_ar, 5, dtype=torch.long)},
         )
-        PolicyGradientRayTrainer._extract_ar_reward_tensor(batch_reward, ar_batch, avg_size=rollout_m)
+        self.dummy_trainer._extract_ar_reward_tensor(batch_reward, ar_batch, avg_size=rollout_m)
 
         assert ar_batch.batch["rm_scores"].shape == (num_ar, 1)
         assert ar_batch.batch["rm_scores"][0].item() == pytest.approx(0.15)
@@ -106,5 +93,5 @@ class TestExtractARRewardsFromColocateBatch:
             tensors={"ar_response_ids": torch.zeros(3, 5, dtype=torch.long)},
         )
 
-        with pytest.raises(AssertionError, "reward_scores shape"):
-            PolicyGradientRayTrainer._extract_ar_reward_tensor(batch_reward, ar_batch, avg_size=4)
+        with pytest.raises(AssertionError, match="reward_scores shape"):
+            self.dummy_trainer._extract_ar_reward_tensor(batch_reward, ar_batch, avg_size=4)
