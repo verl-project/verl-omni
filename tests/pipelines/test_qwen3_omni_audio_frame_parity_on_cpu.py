@@ -20,28 +20,80 @@ in omni_rl_datasets restores parity; these tests pin both facts.
 
 from __future__ import annotations
 
+import importlib.metadata
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
+from packaging.version import parse as parse_version
+
+from verl_omni.pipelines.qwen3_omni.thinker_training_adapter import Qwen3OmniThinkerAdapter
+from verl_omni.utils.dataset.omni_rl_datasets import DEFAULT_AUDIO_HOP_LENGTH, pad_audio_to_hop_multiple
 
 HOP = 160
 SR = 16000
+
+# Qwen3-Omni ``<|audio_pad|>`` token id — used by the stubbed tokenizer below
+# and asserted on in the dedup round-trip test.
+AUDIO_PAD_ID = 103
+
+
+def _require_version(pkg_name: str, min_version: str):
+    ver = importlib.metadata.version(pkg_name)
+    assert parse_version(ver) >= parse_version(min_version), f"{pkg_name} >= {min_version} required, got {ver}"
+
+
+@pytest.fixture(scope="module")
+def feature_extractor():
+    """Installed WhisperFeatureExtractor (padding=True, 16kHz, hop=160)."""
+    pytest.importorskip("transformers")
+    _require_version("transformers", "5.0.0")
+    from transformers.models.whisper.feature_extraction_whisper import WhisperFeatureExtractor
+
+    return WhisperFeatureExtractor(sampling_rate=SR, hop_length=HOP)
+
+
+@pytest.fixture
+def processor_with_dedup(monkeypatch):
+    """Run the real adapter's configure_processor on stubs; returns a processor with dedup_pad_tokens bound."""
+    pytest.importorskip("transformers")
+    _require_version("transformers", "5.0.0")
+    from transformers import AutoConfig, AutoProcessor
+    from transformers.models.qwen3_omni_moe import Qwen3OmniMoeThinkerForConditionalGeneration
+
+    tokenizer = SimpleNamespace(
+        unk_token_id=0,
+        convert_tokens_to_ids=lambda token: {"<|audio_pad|>": AUDIO_PAD_ID}.get(token, 0),
+    )
+    processor = SimpleNamespace(
+        tokenizer=tokenizer,
+        image_token="<|image_pad|>",
+        video_token="<|video_pad|>",
+        audio_token="<|audio_pad|>",
+    )
+    config = SimpleNamespace(
+        thinker_config=SimpleNamespace(vision_config=SimpleNamespace(spatial_merge_size=2)),
+        talker_config=SimpleNamespace(vision_start_token_id=104),
+    )
+    monkeypatch.setattr(AutoProcessor, "from_pretrained", lambda *args, **kwargs: processor)
+    monkeypatch.setattr(AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
+    # configure_processor binds get_rope_index/get_llm_pos_ids_for_vision via
+    # MethodType on real model class methods; ensure they exist.
+    assert hasattr(Qwen3OmniMoeThinkerForConditionalGeneration, "get_rope_index")
+
+    configured = Qwen3OmniThinkerAdapter.configure_processor(
+        "/fake/qwen3-omni",
+        SimpleNamespace(trust_remote_code=False),
+    )
+    assert hasattr(configured, "dedup_pad_tokens")
+    return configured
 
 
 def _audio_lengths() -> list[int]:
     """Synthetic 16kHz lengths covering L % hop in {0, 1, 79, 159}."""
     base = int(0.5 * SR)  # 0.5 s @ 16 kHz == 8000 samples (L % 160 == 0)
     return [base, base + 1, base + 79, base + 159]
-
-
-@pytest.fixture(scope="module")
-def feature_extractor(require_version):
-    """Installed WhisperFeatureExtractor (padding=True, 16kHz, hop=160)."""
-    pytest.importorskip("transformers")
-    require_version("transformers", "5.0.0")
-    from transformers.models.whisper.feature_extraction_whisper import WhisperFeatureExtractor
-
-    return WhisperFeatureExtractor(sampling_rate=SR, hop_length=HOP)
 
 
 # ---------------------------------------------------------------------------
@@ -93,18 +145,16 @@ def test_unpadded_audio_frame_counts_diverge_from_rollout(feature_extractor, L):
 
 
 @pytest.mark.parametrize("L", _audio_lengths())
-def test_hop_pad_restores_actor_rollout_frame_parity(feature_extractor, omni_rl_datasets, L):
+def test_hop_pad_restores_actor_rollout_frame_parity(feature_extractor, L):
     """(b) WITH hop-padding, actor and rollout frame counts match everywhere.
 
-    ``omni.DEFAULT_AUDIO_HOP_LENGTH`` is pinned to the local ``HOP`` here so the
+    ``DEFAULT_AUDIO_HOP_LENGTH`` is pinned to the local ``HOP`` here so the
     keep-in-sync note in omni_rl_datasets.py stays enforced by this test.
     """
-    omni = omni_rl_datasets
-    assert omni.DEFAULT_AUDIO_HOP_LENGTH == HOP
-    pad_audio = omni.pad_audio_to_hop_multiple
+    assert DEFAULT_AUDIO_HOP_LENGTH == HOP
 
     waveform = np.zeros(L, dtype=np.float32)
-    padded = pad_audio(waveform, HOP)
+    padded = pad_audio_to_hop_multiple(waveform, HOP)
 
     actor_frames = _actor_frames(feature_extractor, padded)
     rollout_frames = _rollout_frames_after_pad(padded)
@@ -115,11 +165,11 @@ def test_hop_pad_restores_actor_rollout_frame_parity(feature_extractor, omni_rl_
 
 
 @pytest.mark.parametrize("frames", [7, 25, 50, 51, 100, 200])
-def test_dedup_roundtrip_is_count_preserving(processor_with_dedup, audio_pad_id, frames):
+def test_dedup_roundtrip_is_count_preserving(processor_with_dedup, frames):
     """(c) dedup -> vllm-omni re-expand is count-preserving on hop-padded expanded ids."""
     processor = processor_with_dedup
     audio_pad = int(processor.tokenizer.convert_tokens_to_ids(processor.audio_token))
-    assert audio_pad == audio_pad_id
+    assert audio_pad == AUDIO_PAD_ID
 
     T = _audio_token_count(frames)
     assert T > 0

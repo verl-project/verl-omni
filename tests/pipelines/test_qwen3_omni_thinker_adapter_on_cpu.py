@@ -20,15 +20,20 @@ Patches dropped from the adapter:
 - ``module._no_split_modules``    → thinker class already correct
 """
 
-import importlib.util
-import sys
-import types
-from pathlib import Path
+import importlib.metadata
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn as nn
+from packaging.version import parse as parse_version
+
+from verl_omni.pipelines.qwen3_omni.thinker_training_adapter import Qwen3OmniThinkerAdapter
+
+
+def _require_version(pkg_name: str, min_version: str):
+    ver = importlib.metadata.version(pkg_name)
+    assert parse_version(ver) >= parse_version(min_version), f"{pkg_name} >= {min_version} required, got {ver}"
 
 
 def _has_lora(module: nn.Module) -> bool:
@@ -36,34 +41,12 @@ def _has_lora(module: nn.Module) -> bool:
     return hasattr(module, "lora_A") and hasattr(module, "lora_B")
 
 
-def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch, require_version):
+def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):
     """The V1 processor path must collapse image, video, and audio pad runs."""
     pytest.importorskip("transformers")
-    require_version("transformers", "5.0.0")
+    _require_version("transformers", "5.0.0")
 
     from transformers import AutoConfig, AutoProcessor
-
-    class _FakeOmniModelBase:
-        @classmethod
-        def register(cls, *args, **kwargs):
-            return lambda subclass: subclass
-
-    model_base = types.ModuleType("verl_omni.pipelines.model_base")
-    model_base.OmniModelBase = _FakeOmniModelBase
-    for package_name in ("verl_omni", "verl_omni.pipelines", "verl_omni.pipelines.qwen3_omni"):
-        package = types.ModuleType(package_name)
-        package.__path__ = []
-        monkeypatch.setitem(sys.modules, package_name, package)
-    monkeypatch.setitem(sys.modules, "verl_omni.pipelines.model_base", model_base)
-
-    module_name = "verl_omni.pipelines.qwen3_omni.thinker_training_adapter"
-    adapter_path = Path(__file__).parents[2] / "verl_omni" / "pipelines" / "qwen3_omni" / "thinker_training_adapter.py"
-    spec = importlib.util.spec_from_file_location(module_name, adapter_path)
-    assert spec is not None and spec.loader is not None
-    adapter_module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, module_name, adapter_module)
-    spec.loader.exec_module(adapter_module)
-    Qwen3OmniThinkerAdapter = adapter_module.Qwen3OmniThinkerAdapter
 
     token_ids = {
         "<|image_pad|>": 101,
@@ -108,34 +91,13 @@ def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch, require_ver
     ]
 
 
-def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch, require_version):
+def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch):
     """The V1 adapter must install the audio-aware agent-loop RoPE path."""
     pytest.importorskip("transformers")
-    require_version("transformers", "5.0.0")
+    _require_version("transformers", "5.0.0")
 
     from transformers import AutoConfig, AutoProcessor
     from transformers.models.qwen3_omni_moe import Qwen3OmniMoeThinkerForConditionalGeneration
-
-    class _FakeOmniModelBase:
-        @classmethod
-        def register(cls, *args, **kwargs):
-            return lambda subclass: subclass
-
-    model_base = types.ModuleType("verl_omni.pipelines.model_base")
-    model_base.OmniModelBase = _FakeOmniModelBase
-    for package_name in ("verl_omni", "verl_omni.pipelines", "verl_omni.pipelines.qwen3_omni"):
-        package = types.ModuleType(package_name)
-        package.__path__ = []
-        monkeypatch.setitem(sys.modules, package_name, package)
-    monkeypatch.setitem(sys.modules, "verl_omni.pipelines.model_base", model_base)
-
-    module_name = "verl_omni.pipelines.qwen3_omni.thinker_training_adapter"
-    adapter_path = Path(__file__).parents[2] / "verl_omni" / "pipelines" / "qwen3_omni" / "thinker_training_adapter.py"
-    spec = importlib.util.spec_from_file_location(module_name, adapter_path)
-    assert spec is not None and spec.loader is not None
-    adapter_module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, module_name, adapter_module)
-    spec.loader.exec_module(adapter_module)
 
     class Qwen3OmniMoeProcessor:
         def __init__(self):
@@ -182,7 +144,7 @@ def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch, requi
     monkeypatch.setattr(AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
     monkeypatch.setattr(Qwen3OmniMoeThinkerForConditionalGeneration, "get_rope_index", _get_rope_index)
 
-    configured = adapter_module.Qwen3OmniThinkerAdapter.configure_processor(
+    configured = Qwen3OmniThinkerAdapter.configure_processor(
         "/fake/qwen3-omni",
         SimpleNamespace(trust_remote_code=False),
     )
@@ -307,10 +269,10 @@ class _MoEModel(nn.Module):
         return attn_out + expert_out
 
 
-def test_peft_lora_attaches_to_fused_moe_natively(require_version):
+def test_peft_lora_attaches_to_fused_moe_natively():
     """PEFT converts gate_proj+up_proj → gate_up_proj with doubled rank."""
     pytest.importorskip("peft")
-    require_version("peft", "0.19.0")
+    _require_version("peft", "0.19.0")
     from peft import LoraConfig, get_peft_model
 
     model = _MoEModel()
@@ -356,10 +318,10 @@ def test_peft_lora_attaches_to_fused_moe_natively(require_version):
     assert hasattr(obj, "gate_up_proj"), "gate_up_proj parameter should still be reachable through PEFT wrapping"
 
 
-def test_tie_word_embeddings_is_false_by_default(require_version):
+def test_tie_word_embeddings_is_false_by_default():
     """v5 config: ``tie_word_embeddings=False`` on the thinker sub-config."""
     pytest.importorskip("transformers")
-    require_version("transformers", "5.0.0")
+    _require_version("transformers", "5.0.0")
     from transformers.models.qwen3_omni_moe import Qwen3OmniMoeConfig
 
     cfg = Qwen3OmniMoeConfig()
@@ -370,10 +332,10 @@ def test_tie_word_embeddings_is_false_by_default(require_version):
     )
 
 
-def test_thinker_class_no_split_modules_is_correct(require_version):
+def test_thinker_class_no_split_modules_is_correct():
     """Thinker subclass already uses the right FSDP layer class name."""
     pytest.importorskip("transformers")
-    require_version("transformers", "5.0.0")
+    _require_version("transformers", "5.0.0")
     from transformers.models.qwen3_omni_moe import (
         Qwen3OmniMoeThinkerForConditionalGeneration,
     )
@@ -394,10 +356,10 @@ def test_thinker_class_no_split_modules_is_correct(require_version):
     )
 
 
-def test_peft_wrapped_model_forwards(require_version):
+def test_peft_wrapped_model_forwards():
     """PEFT-wrapped _MoEModel runs a forward pass and produces valid output."""
     pytest.importorskip("peft")
-    require_version("peft", "0.19.0")
+    _require_version("peft", "0.19.0")
     from peft import LoraConfig, get_peft_model
 
     model = _MoEModel()
