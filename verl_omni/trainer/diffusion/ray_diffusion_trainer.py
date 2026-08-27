@@ -1104,7 +1104,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         return DataProto.from_tensordict(old_log_prob), old_log_prob_mfu
 
     def _extract_ar_reward_tensor(self, batch_reward: Any, ar_batch: DataProto, avg_size: int) -> Any:
-        if "ar_rm_scores" not in ar_batch.batch.keys():
+        if "rm_scores" not in ar_batch.batch.keys():
             assert "reward/ar" in batch_reward.non_tensor_batch.keys(), (
                 "`ar` must be used as reward function name for "
                 "ar reward computation when using MultiVisualRewardManager"
@@ -1119,21 +1119,24 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                 (reward_scores.ndim == 2)
                 and (num_rewards * avg_size == reward_scores.shape[0])
                 and (reward_scores.shape[1] == 1)
-            )
+            ), f"reward_scores shape: {reward_scores.shape}, num_rewards: {num_rewards}, avg_size: {avg_size}"
             reward_mean = []
-            for i in range(num_rewards):
-                reward_mean.append(reward_scores[i : i + avg_size].mean().item())
-            reward_tensor = torch.tensor(reward_mean).float().unsqueeze(-1)
+            reward_mean = reward_scores.reshape(num_rewards, avg_size, reward_scores.shape[1]).mean(axis=1)
+            reward_tensor = torch.from_numpy(reward_mean).float()
             ar_batch.batch["rm_scores"] = reward_tensor
 
             all_reward_keys = list(batch_reward.meta_info["reward_extra_keys"])
             for key in all_reward_keys:
                 if "reward/ar" in key:
                     sub_scores = batch_reward.non_tensor_batch.pop(key)
-                    sub_reward = []
-                    for i in range(num_rewards):
-                        sub_reward.append(sub_scores[i : i + avg_size].mean().item())
-                    ar_batch.non_tensor_batch[key] = np.array(sub_reward)
+                    if sub_scores.ndim == 1:
+                        sub_scores = sub_scores.reshape(-1, 1)
+                    is_number = isinstance(sub_scores[0], np.number)
+                    if is_number:
+                        sub_reward = sub_scores.reshape(num_rewards, avg_size, sub_scores.shape[1]).mean(axis=1)
+                    else:
+                        sub_reward = sub_scores[::avg_size]
+                    ar_batch.non_tensor_batch[key] = sub_reward
 
     def _prepare_ar_advantages(self, ar_batch: DataProto, ar_reward_tensor: torch.Tensor) -> DataProto:
         return DualGRPOLoss.prepare_actor_batch(ar_batch, ar_reward_tensor, self.config.algorithm)
@@ -1256,8 +1259,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
                     batch = batch.repeat(repeat_times=rollout_n, interleave=True)
                     if self.train_ar_n_diffusion:
-                        ar_batch = batch.repeat(repeat_times=rollout_n, interleave=True)
-                        ar_batch = ar_batch.union(ar_gen_batch_output)
+                        ar_batch = batch.union(ar_gen_batch_output)
                         if rollout_m > 1:
                             batch = batch.repeat(repeat_times=rollout_m, interleave=True)
                     batch = batch.union(gen_batch_output)
