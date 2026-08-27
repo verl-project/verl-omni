@@ -28,6 +28,7 @@ from verl.utils.device import auto_set_device, is_cuda_available
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
+    validate_separate_config,
 )
 from verl_omni.utils.config import validate_config
 from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
@@ -78,6 +79,9 @@ def run_diffusion(config, task_runner_class=None) -> None:
                 settings, model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    OmegaConf.resolve(config)
+    validate_separate_config(config)
+
     # Check if Ray is not initialized
     if not ray.is_initialized():
         # Initialize Ray with a local cluster configuration
@@ -162,7 +166,12 @@ class TaskRunner:
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
-        if config.algorithm.sample_source == "offline":
+        separate = config.actor_rollout_ref.get("separate", False)
+        if separate:
+            if not hasattr(Role, "Actor"):
+                raise ValueError("Separate training without colocated rollout requires verl Role.Actor support.")
+            role = Role.Actor
+        elif config.algorithm.sample_source == "offline":
             if not hasattr(Role, "Actor"):
                 raise ValueError("Offline training without rollout requires verl Role.Actor support.")
             role = Role.Actor
@@ -234,9 +243,20 @@ class TaskRunner:
 
     def add_ref_policy_worker(self, config, ref_policy_cls):
         """Add reference policy worker if KL loss or KL reward is used."""
-        # Ref policy has been fused into ActorRolloutRefWorker in new model engine.
-        # we don't need to add a separate ref policy worker group.
-        return
+        if not config.actor_rollout_ref.get("separate", False) or not need_reference_policy(config):
+            return
+
+        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+        if lora_rank <= 0:
+            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        if ref_in_actor:
+            return
+
+        from verl.trainer.ppo.ray_trainer import Role
+
+        self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)
+        self.mapping[Role.RefPolicy] = "global_pool"
 
     def run(self, config):
         """Execute the main diffusion training workflow.

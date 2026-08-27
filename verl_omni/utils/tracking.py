@@ -193,7 +193,7 @@ def wrap_val_samples_for_wandb(samples, fps=24, output_dir=None):
         else:
             if not isinstance(out, torch.Tensor) or out.dtype != torch.uint8:
                 raise ValueError(f"Expected a uint8 image tensor, got {getattr(out, 'dtype', type(out))}.")
-            media = wandb.Image(out, file_type="jpg", normalize=False)
+            media = wandb.Image(out, file_type="jpg")
         wrapped.append((inp, media, score))
     return wrapped, video_tmp_dir, media_to_log
 

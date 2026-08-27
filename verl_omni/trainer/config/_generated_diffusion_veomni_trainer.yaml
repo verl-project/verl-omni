@@ -384,6 +384,7 @@ actor_rollout_ref:
       sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
       sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
     model_type: diffusion_model
+  separate: false
   hybrid_engine: true
   nccl_timeout: 600
 data:

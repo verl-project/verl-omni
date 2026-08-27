@@ -73,6 +73,59 @@ algorithm:
 - `algorithm.paired_preference`: `true` for pair-based algorithms (e.g. offline DPO); doubles actor batch size and disables shuffle.
 - `algorithm.rollout_correction.*`: Experimental IS / RS correction. Schema mirrors upstream verl; see {doc}`../algo/rollout_correction` and [verl Rollout Correction](https://verl.readthedocs.io/en/latest/algo/rollout_corr.html).
 
+### `actor_rollout_ref.separate` — synchronous resource separation
+
+`actor_rollout_ref.separate` defaults to `false`. When enabled, the legacy synchronous
+diffusion trainer (`trainer.use_v1=false`) places pure Actor workers on the trainer
+resources and launches rollout/checkpoint workers on a separate Ray resource pool.
+The mode is limited to online policy-gradient training and publishes actor weights once
+before training and once after every logical-batch update.
+
+The current baseline supports full finetuning only. For the diffusion/FSDP
+configuration, LoRA must be disabled with `actor_rollout_ref.model.lora_rank=0`
+and `actor_rollout_ref.model.lora_adapter_path=null`.
+
+Required topology settings are:
+
+```yaml
+actor_rollout_ref:
+  separate: true
+  hybrid_engine: false
+  rollout:
+    nnodes: 1
+    n_gpus_per_node: 8
+    checkpoint_engine:
+      backend: nccl
+trainer:
+  use_v1: false
+  nnodes: 1
+  n_gpus_per_node: 8
+```
+
+`rollout.nnodes` and `rollout.n_gpus_per_node` must both be positive, and the
+checkpoint backend must be non-naive (for example, `nccl` on CUDA). Trainer and
+rollout resources are additive; the example above requests 8 Trainer GPUs and 8
+standalone rollout GPUs from the Ray cluster.
+
+`actor_rollout_ref.rollout.agent.num_workers` controls CPU request concurrency; it
+does not allocate rollout GPUs and does not need to match `rollout.n_gpus_per_node`.
+
+On a CUDA Ray cluster, the Wan2.2 auto-device recipe forwards trailing Hydra
+overrides, so the same topology can be launched with the NCCL checkpoint backend:
+
+```bash
+bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_auto.sh \
+  actor_rollout_ref.separate=true \
+  actor_rollout_ref.hybrid_engine=false \
+  actor_rollout_ref.model.lora_rank=0 \
+  actor_rollout_ref.model.lora_adapter_path=null \
+  actor_rollout_ref.rollout.nnodes=1 \
+  actor_rollout_ref.rollout.n_gpus_per_node=8 \
+  actor_rollout_ref.rollout.checkpoint_engine.backend=nccl \
+  trainer.nnodes=1 \
+  trainer.n_gpus_per_node=8
+```
+
 ### `actor_rollout_ref.model` — `DiffusionModelConfig`
 
 ```yaml

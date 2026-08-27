@@ -1032,7 +1032,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                     raise ValueError(f"Expected a uint8 image tensor, got {getattr(image, 'dtype', type(image))}.")
             import wandb
 
-            outputs = [wandb.Image(image, file_type="jpg", normalize=False) for image in outputs]
+            outputs = [wandb.Image(image, file_type="jpg") for image in outputs]
         samples = list(zip(inputs, outputs, scores, strict=True))
         samples.sort(key=lambda x: x[0])
         rng = np.random.RandomState(42)
