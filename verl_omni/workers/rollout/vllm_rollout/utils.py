@@ -195,6 +195,14 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 # Diffusion pipeline worker: load via the pipeline. vllm-omni
                 # 0.26 removed DiffusionWorker/DiffusionModelRunner.load_weights;
                 # each pipeline exposes load_weights via AutoWeightsLoader.
+                # Wrap in inference_mode because vLLM-Omni's DiffusionModelRunner
+                # runs forward passes under torch.inference_mode(), which marks
+                # model parameters as inference tensors. In-place updates
+                # (param_data.copy_(...)) to inference tensors are only allowed
+                # inside an inference_mode context; without this wrapper the
+                # weight sync fails with:
+                #   RuntimeError: Inplace update to inference tensor outside
+                #   InferenceMode is not allowed.
                 pipeline = getattr(getattr(self, "model_runner", None), "pipeline", None)
                 if pipeline is not None and hasattr(pipeline, "load_weights"):
                     load_fn = pipeline.load_weights
@@ -202,7 +210,17 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                     load_fn = self.load_weights
                 else:
                     raise RuntimeError("Diffusion pipeline worker has no load_weights-capable pipeline")
-                receiver.receive_weights(on_bucket_received=lambda weights, *args, **kwargs: load_fn(weights))
+
+                # Accept extra positional/keyword args so the callback works with
+                # both verl callback signatures: older ``on_bucket_received(weights)``
+                # and newer ``on_bucket_received(weights, is_last)`` (verl #7327,
+                # included in the verl pin c4b389a). Diffusion full-weight loading
+                # is bucket-atomic, so ``is_last`` needs no special handling here.
+                def _load_weights_safe(weights, *args, **kwargs):
+                    with torch.inference_mode():
+                        load_fn(weights)
+
+                receiver.receive_weights(on_bucket_received=_load_weights_safe)
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication.

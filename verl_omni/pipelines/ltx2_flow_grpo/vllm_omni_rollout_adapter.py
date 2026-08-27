@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import copy
 import os
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 import torch
@@ -52,7 +52,7 @@ from verl_omni.pipelines.diffusion_rollout_output import (
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
-from .common import calculate_shift, normalize_ltx_output_type
+from .common import calculate_shift, normalize_ltx_output_type, remap_veomni_to_diffusers_key
 
 __all__ = ["LTX23PipelineWithLogProb"]
 
@@ -73,6 +73,18 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
     """Sample LTX-2.3 with CPS/SDE transitions and return joint log-probs."""
 
     supports_request_batch = False
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Remap VeOmni-style checkpoint keys to diffusers naming before loading.
+
+        The pretrained checkpoint may use VeOmni parameter names (e.g.
+        ``adaln_single``, ``patchify_proj``, ``q_norm``) while the vLLM-Omni
+        rollout model expects diffusers names (``time_embed``, ``proj_in``,
+        ``norm_q``).  Remap here so both initial safetensors loading and
+        training-time weight sync load into the correct parameters.
+        """
+        remapped = ((remap_veomni_to_diffusers_key(name), tensor) for name, tensor in weights)
+        return super().load_weights(remapped)
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:
         super().__init__(od_config=od_config, prefix=prefix)
@@ -219,7 +231,7 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
         prompt_context: LTXPromptContext | None = None,
     ) -> LTXPhaseResult:
         """Prepare and execute one phase with FlowGRPO SDE transitions."""
-        del phase_recipe
+        sampler = phase_recipe.sampler
         self._check_forward_inputs(request_inputs, image=image)
         guidance_parallel_ready = self._setup_forward_runtime(req, request_inputs, attention_kwargs)
         device = self.device
@@ -273,6 +285,9 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
             latent_height,
             latent_width,
             image_conditioned=conditioning_mask is not None,
+            sampler=sampler,
+            generator=request_inputs.generator,
+            conditioning_mask=conditioning_mask,
         )
         _ = retrieve_timesteps(
             audio_scheduler,
@@ -304,6 +319,7 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
             original_audio_num_frames=original_audio_num_frames,
             padded_audio_num_frames=padded_audio_num_frames,
             timesteps=timesteps_tensor,
+            sampler=sampler,
             audio_scheduler=audio_scheduler,
             video_audio_step_adapter=video_audio_step_adapter,
         )

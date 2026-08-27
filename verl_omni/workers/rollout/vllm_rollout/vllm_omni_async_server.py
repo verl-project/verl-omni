@@ -148,6 +148,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             self._to_tensor = T.PILToTensor()
         self._lora_request_cache: LoRARequest | None | object = _LORA_REQUEST_CACHE_MISS
         self._lora_resolve_lock = asyncio.Lock()
+        # Tracks the engine sleep state so redundant sleep()/wake_up() calls
+        # become no-ops instead of RPCs.  vLLM's CuMemAllocator.sleep() has no
+        # already-offloaded guard: sleeping an asleep engine re-copies
+        # already-unmapped weights via ctypes cudaMemcpy, which segfaults the
+        # diffusion workers on GPU.
+        self._engine_sleeping = False
         super()._post_init(cuda_visible_devices)
 
     # -----------------------------------------------------------------------
@@ -403,9 +409,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """
         if self.node_rank != 0:
             return
-        await self.engine.collective_rpc(
-            "wake_up", kwargs={"tags": tags if tags is not None else self._get_wake_up_tags()}
-        )
+        if self._engine_sleeping:
+            await self.engine.collective_rpc(
+                "wake_up", kwargs={"tags": tags if tags is not None else self._get_wake_up_tags()}
+            )
+            self._engine_sleeping = False
         self._invalidate_lora_request_cache()
 
     async def set_global_steps(self, global_steps: int):
@@ -425,7 +433,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # TODO (andy): use `sleep_level=2` in the future when the
         #  trainer side incorporates the whole components of the model.
         self._invalidate_lora_request_cache()
+        if self._engine_sleeping:
+            # Already asleep: re-issuing the sleep RPC would make vLLM's
+            # CuMemAllocator copy already-unmapped weights (no already-offloaded
+            # guard), segfaulting the diffusion workers on GPU.
+            return
         await self.engine.collective_rpc("sleep", kwargs={"level": 1})
+        self._engine_sleeping = True
         await self.engine.reset_encoder_cache()
 
     async def resume_generation(self):

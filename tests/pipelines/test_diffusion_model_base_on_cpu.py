@@ -80,6 +80,60 @@ class TestDiffusionModelBaseRegistry:
         assert _Impl.__name__ == "_Impl"
         assert issubclass(_Impl, DiffusionModelBase)
 
+    def test_peek_class_resolves_default_before_backend_specific(self):
+        @DiffusionModelBase.register("_TestPeekArch_CPU", algorithm="flow_grpo")
+        class _Default(DiffusionModelBase):
+            @classmethod
+            def build_scheduler(cls, model_config):
+                pass
+
+            @classmethod
+            def set_timesteps(cls, scheduler, model_config, device):
+                pass
+
+            @classmethod
+            def prepare_model_inputs(cls, module, model_config, *args, **kwargs):
+                pass
+
+        @DiffusionModelBase.register("_TestPeekArch_CPU", algorithm="flow_grpo", backend="veomni")
+        class _BackendSpecific(DiffusionModelBase):
+            @classmethod
+            def build_scheduler(cls, model_config):
+                pass
+
+            @classmethod
+            def set_timesteps(cls, scheduler, model_config, device):
+                pass
+
+            @classmethod
+            def prepare_model_inputs(cls, module, model_config, *args, **kwargs):
+                pass
+
+        # Registry keys are (architecture, algorithm, backend) triples; a plain
+        # 2-tuple lookup silently missed every entry and disabled LoRA config
+        # validation for all architectures.
+        assert DiffusionModelBase.peek_class("_TestPeekArch_CPU", "flow_grpo") is _Default
+
+    def test_peek_class_falls_back_to_backend_specific_without_default(self):
+        @DiffusionModelBase.register("_TestPeekOnlyBackend_CPU", algorithm="flow_grpo", backend="veomni")
+        class _OnlyBackend(DiffusionModelBase):
+            @classmethod
+            def build_scheduler(cls, model_config):
+                pass
+
+            @classmethod
+            def set_timesteps(cls, scheduler, model_config, device):
+                pass
+
+            @classmethod
+            def prepare_model_inputs(cls, module, model_config, *args, **kwargs):
+                pass
+
+        assert DiffusionModelBase.peek_class("_TestPeekOnlyBackend_CPU", "flow_grpo") is _OnlyBackend
+
+    def test_peek_class_unknown_returns_none(self):
+        assert DiffusionModelBase.peek_class("__DoesNotExist__", "flow_grpo") is None
+
 
 class TestVllmOmniPipelineBaseRegistry:
     def test_builtin_qwen_rollout_algorithms_registered(self):

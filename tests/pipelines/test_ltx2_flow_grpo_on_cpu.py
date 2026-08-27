@@ -20,9 +20,13 @@ import torch
 from tensordict import TensorDict
 from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.models.ltx2.ltx2_conditioning import LTXPromptContext
+from vllm_omni.diffusion.models.ltx2.ltx2_denoise import LTXForwardContext
+from vllm_omni.diffusion.models.ltx2.ltx2_guidance import LTXGuidanceSpec
 from vllm_omni.diffusion.models.ltx2.ltx2_latents import LTXAVState
+from vllm_omni.diffusion.models.ltx2.ltx2_recipes import LTXPhaseRecipe
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
+import verl_omni.pipelines.ltx2_flow_grpo.vllm_omni_rollout_adapter as rollout_adapter_module
 from verl_omni.pipelines.ltx2_flow_grpo.agent_loop import _messages_to_text
 from verl_omni.pipelines.ltx2_flow_grpo.common import (
     LTX2_LORA_TARGET_MODULES,
@@ -288,3 +292,108 @@ def unittest_mock_super_forward(target, return_value):
     from unittest.mock import patch
 
     return patch.object(LTX23PipelineWithLogProb.__bases__[0], "forward", return_value=return_value)
+
+
+class _StubScheduler:
+    """Minimal scheduler satisfying diffusers' retrieve_timesteps and the SDE step."""
+
+    def __init__(self):
+        self.config = {
+            "base_image_seq_len": 1024,
+            "max_image_seq_len": 4096,
+            "base_shift": 0.95,
+            "max_shift": 2.05,
+        }
+        self.timesteps = torch.tensor([900.0, 500.0])
+
+    def set_timesteps(self, num_inference_steps=None, sigmas=None, mu=None, device=None):
+        self.timesteps = torch.tensor([900.0, 500.0])
+
+    def set_begin_index(self, index):
+        pass
+
+    def step(self, model_output, timestep, sample, **kwargs):
+        return (sample, torch.zeros(sample.shape[0]), None, None)
+
+
+@pytest.mark.parametrize("sampler", ["euler", "euler_ancestral"])
+def test_ltx2_run_phase_passes_recipe_sampler_to_forward_context(monkeypatch, sampler) -> None:
+    pipeline = object.__new__(LTX23PipelineWithLogProb)
+    pipeline.device = torch.device("cpu")
+    pipeline.interrupt = False
+    pipeline._progress_bar_config = {"disable": True}
+    pipeline.scheduler = _StubScheduler()
+    pipeline._flow_grpo_noise_level = 0.8
+    pipeline._flow_grpo_sde_type = "cps"
+    pipeline._flow_grpo_window_size = None
+    pipeline._flow_grpo_window_range = None
+    pipeline._flow_grpo_sde_contiguous = True
+    pipeline._flow_grpo_logprobs = True
+    pipeline._flow_grpo_seed = 42
+
+    pipeline._check_forward_inputs = MagicMock()
+    pipeline._setup_forward_runtime = MagicMock(return_value=False)
+    pipeline._prepare_prompt_context = MagicMock(return_value=MagicMock())
+    pipeline._resolve_video_latent_dimensions = MagicMock(return_value=(3, 8, 12))
+    pipeline._prepare_video_latents_stage = MagicMock(
+        return_value=(torch.randn(1, 5, 32), None)
+    )
+    pipeline._prepare_audio_latents_stage = MagicMock(
+        return_value=(torch.randn(1, 7, 32), 4, 4, 8)
+    )
+    pipeline._predict_noise_for_step = MagicMock(
+        return_value=(torch.zeros(1, 5, 32), torch.zeros(1, 7, 32))
+    )
+    pipeline._synchronize_guidance_parallel_step_output = MagicMock(
+        side_effect=lambda latents, **kwargs: latents
+    )
+    pipeline._prepare_denoise_context_for_guidance = MagicMock(
+        side_effect=lambda forward_ctx, denoise_ctx: denoise_ctx
+    )
+    pipeline._unpack_and_denormalize_stage = MagicMock(
+        return_value=(torch.randn(1, 3, 16, 64, 64), torch.randn(1, 2, 100))
+    )
+
+    monkeypatch.setattr(
+        rollout_adapter_module,
+        "prepare_rope_coords_stage",
+        lambda pipeline, forward_ctx, latents, audio_latents: (torch.zeros(1), torch.zeros(1)),
+    )
+    monkeypatch.setattr(
+        rollout_adapter_module, "unpad_audio_latents", lambda latents, num_frames: latents
+    )
+    monkeypatch.setattr(
+        rollout_adapter_module, "unpack_audio_latents", lambda latents, num_mel_bins: latents
+    )
+
+    request_inputs = SimpleNamespace(
+        prompt=None,
+        negative_prompt=None,
+        prompt_embeds=None,
+        negative_prompt_embeds=None,
+        prompt_attention_mask=None,
+        negative_prompt_attention_mask=None,
+        num_videos_per_prompt=1,
+        max_sequence_length=64,
+        num_inference_steps=2,
+        generator=torch.Generator().manual_seed(0),
+    )
+    phase_recipe = LTXPhaseRecipe(
+        name="generate",
+        guidance=LTXGuidanceSpec.positive_only(),
+        sampler=sampler,
+    )
+
+    result = pipeline.run_phase(
+        MagicMock(spec=DiffusionRequestBatch),
+        request_inputs,
+        noise_scale=1.0,
+        sigmas=None,
+        timesteps=None,
+        attention_kwargs=None,
+        phase_recipe=phase_recipe,
+    )
+
+    assert isinstance(result.forward_context, LTXForwardContext)
+    assert result.forward_context.sampler == sampler
+    assert result.forward_context.video_audio_step_adapter._sampler == sampler

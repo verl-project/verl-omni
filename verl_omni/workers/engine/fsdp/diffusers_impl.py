@@ -511,6 +511,16 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             print_model_size(module)
         log_gpu_memory_usage("After init model from Diffusers AutoModel", logger=logger)
 
+        # Defensive: materialise any meta tensors left over by ``from_pretrained``
+        # before entering FSDP. ``sync_module_states=True`` below broadcasts rank
+        # 0's tensors to all ranks via ``dist._broadcast_coalesced``, which has no
+        # Meta kernel on NPU and raises ``NotImplementedError`` if a meta tensor
+        # reaches it. ``from_pretrained`` (``low_cpu_mem_usage=True``) usually
+        # materialises everything, but newly-initialised keys can stay on meta;
+        # this guard makes the contract explicit. Rank 0 keeps its real values;
+        # non-rank-0 gets empty tensors that ``sync_module_states`` overwrites.
+        self._materialize_meta_tensors(module)
+
         # Wrap model with FSDP for distributed training (sharding, mixed precision, etc.)
         log_gpu_memory_usage("Before FSDP", logger=None)
         module = self._build_fsdp_module(module)
@@ -529,6 +539,46 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         self.scheduler = scheduler
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
+
+    @staticmethod
+    def _materialize_meta_tensors(module: torch.nn.Module) -> None:
+        """Replace any meta params/buffers with real CPU tensors in-place.
+
+        ``diffusers.AutoModel.from_pretrained`` with ``low_cpu_mem_usage=True``
+        initialises the model on the meta device and materialises the keys
+        present in the checkpoint; parameters missing from the checkpoint
+        (newly initialised) can remain on meta. FSDP's ``sync_module_states``
+        then broadcasts those tensors via ``dist._broadcast_coalesced``, which
+        has no Meta kernel on NPU and crashes with ``NotImplementedError``.
+
+        This is a no-op when nothing is on meta (the common case). Otherwise it
+        materialises meta tensors to empty CPU tensors: rank 0's real values are
+        preserved (rank 0 has no meta once ``from_pretrained`` materialised it),
+        and non-rank-0 empty tensors are overwritten from rank 0 by
+        ``sync_module_states``.
+        """
+        count = 0
+        for sub in module.modules():
+            for name, param in list(sub._parameters.items()):
+                if param is not None and param.is_meta:
+                    sub._parameters[name] = torch.nn.Parameter(
+                        torch.empty_like(param, device="cpu"),
+                        requires_grad=param.requires_grad,
+                    )
+                    count += 1
+            for name, buf in list(sub._buffers.items()):
+                if buf is not None and buf.is_meta:
+                    sub._buffers[name] = torch.empty_like(buf, device="cpu")
+                    count += 1
+        if count:
+            logger.warning(
+                "Materialised %d meta tensor(s) to CPU before FSDP. This usually means "
+                "`from_pretrained` left some (newly-initialised) parameters on the meta "
+                "device. Rank 0 should hold real values; non-rank-0 tensors are filled by "
+                "FSDP sync_module_states. If rank 0 had meta tensors, those params are now "
+                "empty and may need explicit initialisation.",
+                count,
+            )
 
     def train_mode(self, **kwargs):
         """
@@ -841,6 +891,13 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         gradient_accumulation_steps = len(micro_batches) * num_timesteps
         output_lst = []
         ctx = torch.no_grad() if forward_only else nullcontext()
+        # The per-timestep memory reclamation below is an Ascend NPU
+        # workaround: PyTorch's NPU caching allocator holds fragmented blocks
+        # across timesteps and drives OOM without it. On CUDA the caching
+        # allocator reuses those blocks efficiently, so the per-timestep
+        # model_output offload + empty_cache would only add PCIe traffic and
+        # sync overhead to the training hot loop. Gate it to NPU only.
+        is_npu_device = device_name == "npu"
 
         for micro_batch in micro_batches:
             micro_batch = micro_batch.to(get_device_id())
@@ -854,6 +911,23 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                     )
                     if not forward_only:
                         loss.backward()
+                        if is_npu_device:
+                            # After backward, the computation graph (including
+                            # gradient-checkpointing activations) is freed.
+                            # Move model_output predictions to CPU to reclaim NPU
+                            # memory for subsequent timesteps.  Each forward_step
+                            # produces 5 latent-sized tensors (~165 MiB at batch 8);
+                            # without this they accumulate across timesteps and
+                            # contribute to OOM.  model_output is discarded in
+                            # training (engine_workers.py), and
+                            # postprocess_batch_func works on CPU tensors.
+                            model_output = meta_info.get("model_output")
+                            if isinstance(model_output, dict):
+                                for k, v in model_output.items():
+                                    if isinstance(v, torch.Tensor):
+                                        model_output[k] = v.cpu()
+                            del loss
+                            aggressive_empty_cache(force_sync=False)
                     for key, val in meta_info.items():
                         meta_info_lst[key].append(val)
             output_lst.append(meta_info_lst)
@@ -1333,4 +1407,14 @@ class EngineTrainModeCtx(BaseEngineCtx):
     def __exit__(self, exc_type, exc_value, traceback):
         assert isinstance(self.engine, DiffusersFSDPEngine)
         self.engine.optimizer_zero_grad()
-        super().__exit__(exc_type, exc_value, traceback)
+        try:
+            super().__exit__(exc_type, exc_value, traceback)
+        except (AssertionError, RuntimeError) as cleanup_err:
+            if exc_type is not None:
+                logger.error(
+                    "Error during FSDP model offload after %s; original error suppressed cleanup: %s",
+                    exc_type.__name__,
+                    cleanup_err,
+                )
+            else:
+                raise
