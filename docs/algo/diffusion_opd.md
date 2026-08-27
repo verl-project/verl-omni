@@ -1,6 +1,6 @@
 # Diffusion On-Policy Distillation
 
-Last updated: 08/09/2026.
+Last updated: 08/26/2026.
 
 ## Background
 
@@ -33,17 +33,96 @@ is: a third frozen, forward-only engine that replays the student's
 trajectories with a different checkpoint. Teacher and reference can coexist,
 so distillation can be combined with a KL penalty toward the initial policy.
 
+## Teacher Runtime
+
+`DiffusionTeacherManager` runs teacher scoring as one stage of the training
+step, after rewards and before the actor update. Each teacher is a worker
+group of frozen, forward-only engines; a batch passes through four moves:
+
+1. **Route.** The batch column named by `teacher_key` maps every sample to a
+   teacher. A single-teacher setup skips the column; a missing column or an
+   unmatched key raises instead of mis-routing.
+2. **Split and pad.** The batch is split into one sub-batch per teacher, and
+   each sub-batch is padded by repeating its own rows up to a multiple of the
+   teacher's `world_size ×` scoring micro-batch size — so every data-parallel
+   rank gets a non-empty shard that divides evenly into forward micro-batches,
+   whatever the step's task mix is.
+3. **Score.** All sub-batches are dispatched before any result is awaited, so
+   teachers score concurrently. Each teacher replays the stored student states
+   through its own transformer and returns its per-step transition means.
+4. **Reassemble.** Outputs are unpadded, concatenated, and restored to the
+   input row order, then merged into the batch as `teacher_prev_sample_mean`.
+
+Routing and padding happen on the driver, before dispatch, so teacher
+placement is purely a resource decision: colocated teachers and a standalone
+pool see identical inputs and produce identical outputs.
+
 ## Configuration Parameters
 
 ### `distillation.enabled` (bool)
 
 Whether on-policy distillation is enabled. Default: `false`. When `true`, the
-actor worker builds the frozen teacher and the trainer scores every rollout
-batch with it before the actor update.
+frozen teachers are built (in the actor worker, or on their own resource pool)
+and the trainer scores every rollout batch with them before the actor update.
 
-### `distillation.teacher_models.teacher_model.model_path` (str)
+### `distillation.n_gpus_per_node` (int)
 
-Local path to the frozen teacher checkpoint. **Required** when enabled.
+Number of GPUs per node in the teacher resource pool. Default: `0`. Only read
+when `nnodes > 0`.
+
+### `distillation.nnodes` (int)
+
+Number of nodes in the teacher resource pool. Default: `0`, which colocates
+the teachers with the actor on the actor's GPUs. Set to `≥ 1` to give the
+teachers their own `teacher_pool` of `n_gpus_per_node × nnodes` GPUs.
+
+**Constraint:** with `nnodes > 0`, the pool size must exactly equal the sum of
+`world_size` across all configured teachers, or
+`DiffusionDistillationConfig.__post_init__` raises.
+
+### `distillation.teacher_key` (str)
+
+Column of the batch's non-tensor data used to route each sample to the right
+teacher in multi-teacher setups. Default: `"data_source"`.
+
+- **Single-teacher**: ignored (everything goes to the sole teacher).
+- **Multi-teacher**: the value of `sample[teacher_key]` must match the `key`
+  of one of the configured teachers, or `DiffusionTeacherManager` raises.
+
+### `distillation.teacher_models` (dict)
+
+Map of teacher entries. Each value is a
+`DiffusionDistillationTeacherModelConfig`.
+
+The single-teacher entry is named `teacher_model` by convention. **Pitfall:**
+when adding more named teachers, the `teacher_model` entry is silently popped
+— so do **not** keep `teacher_model` as one entry alongside other named
+teachers. Either rely on it alone, or rename it (e.g. `teacher_model1`) and
+add the others.
+
+```bash
+# WRONG: teacher_model is popped, only teacher_model2 is used
+distillation.teacher_models.teacher_model.key=ocr
+distillation.teacher_models.teacher_model.model_path=/ckpt/ocr_teacher
++distillation.teacher_models.teacher_model2.key=aesthetic
++distillation.teacher_models.teacher_model2.model_path=/ckpt/aesthetic_teacher
+
+# RIGHT: rename the first teacher
++distillation.teacher_models.teacher_model1.key=ocr
++distillation.teacher_models.teacher_model1.model_path=/ckpt/ocr_teacher
++distillation.teacher_models.teacher_model2.key=aesthetic
++distillation.teacher_models.teacher_model2.model_path=/ckpt/aesthetic_teacher
+```
+
+### `distillation.teacher_models.<name>.key` (str)
+
+Identifier used to route samples to this teacher in multi-teacher mode. Must
+match the value of `sample[distillation.teacher_key]`. Default: `null`
+(required for multi-teacher; auto-set to `"default"` for single-teacher).
+
+### `distillation.teacher_models.<name>.model_path` (str)
+
+Local path to the frozen teacher checkpoint. **Required.**
 
 The teacher must be a full pipeline checkpoint from the same pipeline family
 as the student (e.g. a fine-tuned Stable Diffusion 3.5 teacher for a Stable
@@ -52,7 +131,13 @@ the teacher replays the student's trajectories on the student's noise grid,
 and worker init raises if the resolved scheduler configs differ. LoRA
 checkpoints must be merged before use; the teacher never loads adapters.
 
-Only the single `teacher_model` entry is supported.
+### `distillation.teacher_models.<name>.world_size` (int)
+
+Number of GPUs this teacher occupies in the teacher resource pool. Default:
+`0`. Only read when `nnodes > 0`; a single teacher auto-fills the whole pool,
+multiple teachers must set it explicitly so the sum matches the pool size.
+Each teacher's sub-pool is its own worker group, so teachers are scored
+concurrently.
 
 ### Loss-side switches
 
@@ -78,8 +163,8 @@ The teacher reuses the reference model's scoring configuration:
 
 ## Usage
 
-Supported scope: the policy-gradient trainer with online sampling, FSDP/FSDP2
-engines, and a single teacher. Unsupported combinations raise at startup.
+Supported scope: the policy-gradient trainer with online sampling and
+FSDP/FSDP2 engines. Unsupported combinations raise at startup.
 
 A complete working recipe is
 [`examples/diffusionopd_trainer/sd35/run_sd35_medium_ocr_distill.sh`](../examples/diffusionopd_trainer.md):
@@ -122,6 +207,61 @@ actor_rollout_ref:
     distill_loss_coef: 1.0
     use_kl_loss: true
     kl_loss_coef: 0.04
+```
+
+### Multi-teacher
+
+Several task-specialised teachers can distil into one student: every sample is
+routed by its `data_source` (or whichever column `teacher_key` names) to the
+teacher whose `key` matches, scored there, and the per-sample
+`teacher_prev_sample_mean` is scattered back into the batch. Each teacher holds
+a full copy of its weights, so the memory cost grows with the number of
+teachers; with colocated teachers that memory comes out of the actor's GPUs.
+
+```yaml
+distillation:
+  enabled: true
+  teacher_key: data_source
+  teacher_models:
+    ocr:
+      key: ocr
+      model_path: /ckpt/sd35m-ocr-teacher
+    aesthetic:
+      key: aesthetic
+      model_path: /ckpt/sd35m-aesthetic-teacher
+actor_rollout_ref:
+  actor:
+    diffusion_loss:
+      loss_mode: distill_kl
+    use_kl_loss: false
+```
+
+### Standalone teacher pool
+
+Teachers can run on their own GPUs instead of the actor's: `nnodes > 0`
+allocates a `teacher_pool`, split into one sub-pool per teacher according to
+`world_size`. The actor's GPUs are set by `trainer.n_gpus_per_node`, the
+teachers' by `distillation.n_gpus_per_node`. Teacher scoring stays a serial
+stage of the training step, so a standalone pool does not make it faster than
+the same GPUs colocated; it isolates teacher memory from the actor and the
+rollout engine's sleep/wake cycle.
+
+```yaml
+trainer:
+  n_gpus_per_node: 4
+distillation:
+  enabled: true
+  n_gpus_per_node: 2
+  nnodes: 1
+  teacher_models:
+    ocr:
+      key: ocr
+      model_path: /ckpt/sd35m-ocr-teacher
+      world_size: 1
+    aesthetic:
+      key: aesthetic
+      model_path: /ckpt/sd35m-aesthetic-teacher
+      world_size: 1
 ```
 
 ## Metrics

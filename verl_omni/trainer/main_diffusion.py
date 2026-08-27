@@ -21,6 +21,7 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
 
@@ -194,6 +195,14 @@ class TaskRunner:
             config.reward.reward_model.nnodes = config.trainer.nnodes
             config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
+        distillation_config = config.get("distillation")
+        if is_distillation_enabled(distillation_config) and distillation_config.nnodes > 0:
+            if distillation_config.n_gpus_per_node <= 0:
+                raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
+
+            teacher_pool = [distillation_config.n_gpus_per_node] * distillation_config.nnodes
+            resource_pool_spec["teacher_pool"] = teacher_pool
+
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
@@ -213,6 +222,15 @@ class TaskRunner:
                     self.mapping[Role.RewardModel] = "global_pool"
         elif config.algorithm.sample_source == "offline":
             return
+
+    def add_teacher_model_worker(self, config, teacher_model_cls):
+        """Add standalone teacher model workers when distillation runs on its own resource pool."""
+        from verl.trainer.ppo.ray_trainer import Role
+
+        distillation_config = config.get("distillation")
+        if is_distillation_enabled(distillation_config) and distillation_config.nnodes > 0:
+            self.role_worker_mapping[Role.TeacherModel] = ray.remote(teacher_model_cls)
+            self.mapping[Role.TeacherModel] = "teacher_pool"
 
     def add_ref_policy_worker(self, config, ref_policy_cls):
         """Add reference policy worker if KL loss or KL reward is used."""
@@ -241,6 +259,8 @@ class TaskRunner:
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
 
         self.add_reward_model_resource_pool(config)
+
+        self.add_teacher_model_worker(config, actor_rollout_cls)
 
         # Add a reference policy worker if KL loss is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)

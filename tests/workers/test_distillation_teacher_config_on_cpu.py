@@ -62,3 +62,35 @@ def test_teacher_training_config_derivation(actor_rollout_ref_config, tmp_path):
     assert teacher_training_config.engine_config.forward_only is True
     # ref gives no scoring micro-batch by default, so the actor training micro-batch applies
     assert teacher_training_config.engine_config.infer_micro_batch_size_per_gpu == 8
+
+
+def test_infer_teacher_batch_routes_by_teacher_key():
+    from types import SimpleNamespace
+
+    import torch
+    from tensordict import TensorDict
+    from verl.utils import tensordict_utils as tu
+
+    from verl_omni.workers.engine_workers import ActorRolloutRefWorker
+
+    class FakeTeacher:
+        def __init__(self, value):
+            self.value = value
+            self.seen = None
+
+        def infer_batch(self, data):
+            self.seen = data
+            return TensorDict(
+                {"prev_sample_mean": torch.full((data.batch_size[0], 1), self.value)}, batch_size=data.batch_size
+            )
+
+    teachers = {"ocr": FakeTeacher(1.0), "aes": FakeTeacher(2.0)}
+    worker = SimpleNamespace(teachers=teachers, enable_routing_replay=False, profiler=None)
+    data = TensorDict({"x": torch.zeros(3, 1)}, batch_size=[3])
+    data = tu.assign_non_tensor(data, teacher_key="aes")
+
+    output = ActorRolloutRefWorker.infer_teacher_batch.__wrapped__(worker, data)
+
+    assert torch.equal(output["prev_sample_mean"], torch.full((3, 1), 2.0))
+    assert teachers["ocr"].seen is None
+    assert "teacher_key" not in teachers["aes"].seen.keys()

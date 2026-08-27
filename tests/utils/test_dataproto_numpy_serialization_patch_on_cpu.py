@@ -11,30 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import importlib.util
-from pathlib import Path
 from types import SimpleNamespace
 
 import verl.protocol as verl_protocol
 
-_PATCH_PATH = Path(__file__).parents[2] / "verl_omni" / "patches" / "dataproto.py"
-_SPEC = importlib.util.spec_from_file_location("verl_omni_dataproto_patch", _PATCH_PATH)
-assert _SPEC is not None and _SPEC.loader is not None
-_PATCH_MODULE = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(_PATCH_MODULE)
-apply_numpy_dataproto_serialization_fix = _PATCH_MODULE.apply_numpy_dataproto_serialization_fix
 
-
-def test_numpy_dataproto_patch_serializes_original_batch(monkeypatch):
-    def fail_if_original_getstate_called(_self):
-        raise AssertionError("original DataProto.__getstate__ must not be called")
-
-    monkeypatch.setattr(
-        verl_protocol.DataProto,
-        "__getstate__",
-        fail_if_original_getstate_called,
-    )
-    apply_numpy_dataproto_serialization_fix()
+def test_numpy_dataproto_serializes_original_batch(monkeypatch):
     sentinel = object()
     batch = object()
     calls = []

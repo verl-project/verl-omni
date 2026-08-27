@@ -48,4 +48,12 @@ run_test 6 "Bagel PickScore LoRA FlowGRPO e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_flowgrpo_bagel_pickscore.sh "${diffusion_trainer_args[@]}"
 
+run_test 7 "Diffusion OPD two colocated teachers e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" SMOKE=mopd \
+    bash tests/special_e2e/run_diffusion_teacher_smoke.sh
+
+run_test 8 "Diffusion OPD standalone teacher pool e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" SMOKE=standalone \
+    bash tests/special_e2e/run_diffusion_teacher_smoke.sh
+
 gpu_smoke_summary

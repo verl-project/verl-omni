@@ -164,7 +164,7 @@ actor_rollout_ref:
 - `actor_rollout_ref.actor.use_distill_loss`: Enable teacher-anchored online policy distillation.
 - `actor_rollout_ref.actor.distill_loss_mode`: `distill_kl` or `distill_fm_mse`.
 - `actor_rollout_ref.actor.distill_loss_coef`: Distillation loss coefficient.
-- `distillation.enabled` / `distillation.teacher_models.teacher_model.model_path`: Frozen teacher that produces the `teacher_*` batch keys the distillation losses consume — see [Diffusion On-Policy Distillation](../algo/diffusion_opd.md).
+- `distillation.enabled` / `distillation.teacher_models.<name>.{key,model_path,world_size}` / `distillation.teacher_key` / `distillation.{n_gpus_per_node,nnodes}`: Frozen teachers (routed per sample, colocated or on their own pool) that produce the `teacher_*` batch keys the distillation losses consume — see [Diffusion On-Policy Distillation](../algo/diffusion_opd.md).
 - `actor_rollout_ref.actor.rollout_correction.*`: Per-actor mirror of `algorithm.rollout_correction` (used when `bypass_mode=True` for per-step RS inside `diffusion_loss`).
 
 Shared PPO / FSDP / optim fields (`ppo_mini_batch_size`, `ppo_epochs`, `optim.lr`, `fsdp_config`, …) follow upstream verl — see the [verl Config Explanation](https://verl.readthedocs.io/en/latest/examples/config.html).

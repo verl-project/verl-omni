@@ -39,7 +39,7 @@ from verl.checkpoint_engine import CheckpointEngineManager
 from verl.plugin.platform import get_platform
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
-from verl.single_controller.ray.base import create_colocated_worker_cls
+from verl.single_controller.ray.base import create_colocated_worker_cls, split_resource_pool
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.metric_utils import compute_variance_proxy_metrics, process_validation_metrics
 from verl.trainer.ppo.reward import extract_reward
@@ -69,6 +69,7 @@ from verl_omni.trainer.diffusion.diffusion_metric_utils import (
 )
 from verl_omni.trainer.diffusion.diffusion_trainer_utils import (
     NoOpCheckpointManager,
+    _to_diffusion_worker_tensordict,
     old_policy_decay,
     validate_distillation_config,
 )
@@ -78,17 +79,11 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     compute_rollout_corr_metrics_from_batch,
     rollout_correction_enabled,
 )
+from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
 from verl_omni.utils.tracking import _export_video, batch_items, log_wandb_media, wrap_val_samples_for_wandb
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 sys_logger = logging.getLogger(__name__)
-
-
-def _to_diffusion_worker_tensordict(batch: DataProto):
-    """Project a driver batch for actor/ref workers without copying tensor storage."""
-    worker_batch = batch.to_tensordict()
-    worker_batch.pop("responses", None)
-    return worker_batch
 
 
 def compute_advantage(
@@ -213,6 +208,7 @@ class BaseRayDiffusionTrainer(ABC):
         self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
         self.use_teacher_policy = is_distillation_enabled(config.get("distillation"))
+        self.distillation_config = omega_conf_to_dataclass(config.distillation) if self.use_teacher_policy else None
         validate_distillation_config(config)
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
@@ -718,6 +714,10 @@ class BaseRayDiffusionTrainer(ABC):
             return
         self._init_online_rollout_stack(actor_rollout_resource_pool)
 
+    @staticmethod
+    def _teacher_wg_name(key: str) -> str:
+        return f"teacher_{key.replace('/', '_')}"
+
     def _init_colocated_workers(self):
         """Create Ray pools and colocated actor/ref worker groups (online and offline)."""
         self.resource_pool_manager.create_resource_pool()
@@ -752,6 +752,22 @@ class BaseRayDiffusionTrainer(ABC):
                 role=str(Role.RefPolicy),
             )
             self.resource_pool_to_cls[resource_pool][str(Role.RefPolicy)] = ref_policy_cls
+
+        # create standalone teachers if needed, one sub-pool per teacher
+        if self.use_teacher_policy and Role.TeacherModel in self.role_worker_mapping:
+            teacher_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            teacher_models = self.distillation_config.teacher_models
+            split_pools = split_resource_pool(teacher_pool, split_size=[t.world_size for t in teacher_models.values()])
+            for key, pool in zip(teacher_models, split_pools, strict=True):
+                self.resource_pool_to_cls[pool] = {
+                    self._teacher_wg_name(key): RayClassWithInitArgs(
+                        self.role_worker_mapping[Role.TeacherModel],
+                        config=self.config.actor_rollout_ref,
+                        distillation_config=self.config.get("distillation"),
+                        role=str(Role.TeacherModel),
+                        teacher_key=key,
+                    )
+                }
 
         # initialize WorkerGroup
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
@@ -806,6 +822,24 @@ class BaseRayDiffusionTrainer(ABC):
 
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
+
+        if self.use_teacher_policy:
+            if Role.TeacherModel in self.role_worker_mapping:
+                teacher_wg = {
+                    key: all_wg[self._teacher_wg_name(key)] for key in self.distillation_config.teacher_models
+                }
+                for wg in teacher_wg.values():
+                    wg.init_model()
+            else:
+                teacher_wg = {key: self.actor_rollout_wg for key in self.distillation_config.teacher_models}
+            from verl_omni.workers.engine_workers import resolve_teacher_infer_micro_batch_size
+
+            self.teacher_model_manager = DiffusionTeacherManager(
+                self.distillation_config,
+                self.config.actor_rollout_ref.model,
+                teacher_wg,
+                infer_micro_batch_size_per_gpu=resolve_teacher_infer_micro_batch_size(self.config.actor_rollout_ref),
+            )
 
         return actor_rollout_resource_pool
 
@@ -1022,6 +1056,9 @@ class BaseRayDiffusionTrainer(ABC):
             self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
             if self.use_reference_policy and not self.ref_in_actor:
                 self.ref_policy_wg.start_profile(profile_step=self.global_steps)
+            if self.use_teacher_policy and Role.TeacherModel in self.role_worker_mapping:
+                for wg in self.teacher_model_manager.teacher_wg.values():
+                    wg.start_profile(profile_step=self.global_steps)
         except Exception:
             if controller_profile_started:
                 try:
@@ -1039,6 +1076,9 @@ class BaseRayDiffusionTrainer(ABC):
             self.actor_rollout_wg.stop_profile()
             if self.use_reference_policy and not self.ref_in_actor:
                 self.ref_policy_wg.stop_profile()
+            if self.use_teacher_policy and Role.TeacherModel in self.role_worker_mapping:
+                for wg in self.teacher_model_manager.teacher_wg.values():
+                    wg.stop_profile()
         finally:
             if self._controller_nsys_profile_active:
                 try:
@@ -1078,21 +1118,6 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
             {"ref_log_prob": log_probs.float(), "ref_prev_sample_mean": prev_sample_mean.float()}
         )
         return DataProto.from_tensordict(ref_log_prob)
-
-    def _compute_teacher_prev_sample_mean(self, batch: DataProto) -> DataProto:
-        batch_td = _to_diffusion_worker_tensordict(batch)
-        batch_td = embeds_padding_2_no_padding(batch_td)
-        tu.assign_non_tensor(
-            batch_td,
-            compute_loss=False,
-            height=self.config.actor_rollout_ref.model.pipeline.height,
-            width=self.config.actor_rollout_ref.model.pipeline.width,
-            vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
-        )
-        output = self.actor_rollout_wg.infer_teacher_batch(batch_td)
-        prev_sample_mean = tu.get(output, "prev_sample_mean")
-        teacher_output = tu.get_tensordict({"teacher_prev_sample_mean": prev_sample_mean.float()})
-        return DataProto.from_tensordict(teacher_output)
 
     def _compute_old_log_prob(self, batch: DataProto) -> tuple[DataProto, Optional[float]]:
         batch_td = _to_diffusion_worker_tensordict(batch)
@@ -1280,7 +1305,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                     if self.use_teacher_policy:
                         # score the rollout trajectories with the frozen teacher
                         with marked_timer("teacher", timing_raw, color="olive"):
-                            batch = batch.union(self._compute_teacher_prev_sample_mean(batch))
+                            batch = batch.union(self.teacher_model_manager.compute_prev_sample_mean(batch))
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # we combine with rule-based rm

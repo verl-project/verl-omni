@@ -978,10 +978,5 @@ class vLLMOmniReplica(vLLMReplica):
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
         self.server_class = ray.remote(vLLMOmniHttpServer)
 
-    def _validate_launch_requirements(self) -> None:
-        """No-op: the parent check validates vllm.__version__ which is
-        irrelevant for vllm-omni (a separate package)."""
-        pass
-
     def _get_server_name_prefix(self) -> str:
         return "vllm_omni_"
