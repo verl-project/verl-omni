@@ -17,8 +17,21 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 from omegaconf import DictConfig
 from verl.utils.dataset.rl_dataset import RLHFDataset
+
+# Whisper mel-frame stride at 16kHz; keep in sync with the feature extractor's
+# hop_length so actor recompute and vllm-omni rollout frame audio identically.
+DEFAULT_AUDIO_HOP_LENGTH = 160
+
+
+def pad_audio_to_hop_multiple(audio: np.ndarray, hop_length: int = DEFAULT_AUDIO_HOP_LENGTH) -> np.ndarray:
+    """Zero-pad audio to a multiple of hop_length (no-op when already aligned)."""
+    pad_length = -audio.shape[-1] % hop_length
+    if pad_length:
+        return np.pad(audio, (0, pad_length))
+    return audio
 
 
 class QwenOmniRLHFDataset(RLHFDataset):
@@ -42,4 +55,9 @@ class QwenOmniRLHFDataset(RLHFDataset):
         # (images, videos, audios). AVQA uses a standalone audio track rather
         # than extracting audio from a video.
         audios, images, videos = process_mm_info(messages, use_audio_in_video=False)
+        # vllm-omni pads audio to a hop multiple before feature extraction while
+        # the HF side drops the tail frame; pad first so both sides expand the
+        # prompt to the same audio token count.
+        if audios is not None:
+            audios = [pad_audio_to_hop_multiple(a) for a in audios]
         return images, videos, audios

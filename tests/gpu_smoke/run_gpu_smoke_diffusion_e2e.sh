@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ci-e2e-diffusion GPU smoke tests (4-GPU): end-to-end diffusion training paths.
-# Includes FlowGRPO / online DPO / DiffusionNFT (v0) and FlowGRPO v1 separate_async.
+# Includes FlowGRPO / online DPO / DiffusionNFT (v0), synchronous separate,
+# and FlowGRPO v1 separate_async.
 
 set -euo pipefail
 
@@ -47,5 +48,17 @@ run_test 5 "Diffusion OPD actor+ref+teacher e2e" \
 run_test 6 "Bagel PickScore LoRA FlowGRPO e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_flowgrpo_bagel_pickscore.sh "${diffusion_trainer_args[@]}"
+
+run_test 7 "Diffusion OPD two colocated teachers e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" SMOKE=mopd \
+    bash tests/special_e2e/run_diffusion_teacher_smoke.sh
+
+run_test 8 "Diffusion OPD standalone teacher pool e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" SMOKE=standalone \
+    bash tests/special_e2e/run_diffusion_teacher_smoke.sh
+
+run_test 9 "FlowGRPO synchronous separate trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
+    bash tests/special_e2e/run_flowgrpo_qwen_image_separate.sh "${diffusion_trainer_args[@]}"
 
 gpu_smoke_summary

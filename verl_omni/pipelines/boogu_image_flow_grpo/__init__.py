@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .dataproto import apply_numpy_dataproto_serialization_fix
+from .diffusers_training_adapter import BooguImage
+from .vllm_omni_rollout_adapter import BooguImagePipelineWithLogProb
 
-__all__ = ["apply_numpy_dataproto_serialization_fix"]
+__all__ = ["BooguImage", "BooguImagePipelineWithLogProb"]

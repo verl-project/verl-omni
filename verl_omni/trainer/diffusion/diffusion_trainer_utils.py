@@ -15,7 +15,16 @@
 
 from typing import Any
 
+from verl import DataProto
 from verl.trainer.distillation import is_distillation_enabled
+
+
+def _to_diffusion_worker_tensordict(batch: DataProto):
+    """Project a driver batch for actor/ref workers without copying tensor storage."""
+    worker_batch = batch.to_tensordict()
+    worker_batch.pop("responses", None)
+    return worker_batch
+
 
 OLD_POLICY_DECAY_SCHEDULES = {
     "copy": (0, 0.0, 0.0),

@@ -82,12 +82,12 @@ def _make_config(reward_functions: dict):
     return config
 
 
-def _make_single_data() -> DataProto:
+def _make_single_data(data_source: str = "test_source") -> DataProto:
     """Create a single-item DataProto for run_single."""
     return DataProto.from_dict(
         tensors={"responses": torch.randint(256, (1, 3, 64, 64), dtype=torch.uint8)},
         non_tensors={
-            "data_source": ["test_source"],
+            "data_source": [data_source],
             "reward_model": [{"ground_truth": "hello"}],
             "extra_info": [{}],
         },
@@ -166,6 +166,18 @@ class TestFilterKwargs:
 # ---------------------------------------------------------------------------
 # MultiVisualRewardManager.run_single
 # ---------------------------------------------------------------------------
+
+
+class TestVisualRewardManagerDefaults:
+    def test_default_jpeg_reward_accepts_manager_call_contract(self):
+        manager = VisualRewardManager(_make_config({}), MagicMock(), compute_score=None)
+        data = _make_single_data(data_source="jpeg_compressibility")
+        data.batch["responses"] = torch.zeros_like(data.batch["responses"])
+
+        result = manager.loop.run_until_complete(manager.run_single(data))
+
+        assert result["reward_score"] < 0
+        assert result["reward_extra_info"]["acc"] == pytest.approx(result["reward_score"])
 
 
 class TestMultiVisualRewardManagerRunSingle:

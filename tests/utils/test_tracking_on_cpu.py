@@ -121,7 +121,7 @@ def test_image_samples_become_wandb_image_and_no_temp_dir(monkeypatch):
     assert media_to_log == {}
     assert len(wrapped) == 1 and wrapped[0][0] == "prompt"
     assert captured[0][0].dtype == torch.uint8
-    assert captured[0][1]["normalize"] is False
+    assert captured[0][1] == {"file_type": "jpg"}
 
 
 def test_image_samples_reject_non_uint8_input(monkeypatch):

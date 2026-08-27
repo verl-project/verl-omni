@@ -34,7 +34,7 @@ from verl.utils.import_utils import import_external_libs
 from verl.utils.net_utils import get_free_port
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.config import RolloutConfig
-from verl.workers.rollout.replica import TokenOutput
+from verl.workers.rollout.replica import RolloutMode, TokenOutput
 from verl.workers.rollout.utils import run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
@@ -390,6 +390,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _get_wake_up_tags(self) -> list[str]:
         return ["weights"]
 
+    def _resolve_sleep_level(self) -> int:
+        """
+        # TODO (andy): use sleep_level=2 when vllm-omni implements wake_up
+        after level-2 sleep AND the trainer syncs the full pipeline.
+        """
+        return 1
+
     async def wake_up(self, tags: list[str] | None = None):
         """Override parent to use collective_rpc instead of engine.wake_up().
 
@@ -422,11 +429,27 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         weight syncs. Use level-1 sleep so those weights are offloaded and can
         be restored on wake-up instead of discarded by level-2 sleep.
         """
-        # TODO (andy): use `sleep_level=2` in the future when the
-        #  trainer side incorporates the whole components of the model.
         self._invalidate_lora_request_cache()
-        await self.engine.collective_rpc("sleep", kwargs={"level": 1})
+        await self.engine.collective_rpc("sleep", kwargs={"level": self._resolve_sleep_level()})
         await self.engine.reset_encoder_cache()
+
+    async def release_kv_cache(self):
+        """Free cache around a weight sync without discarding Omni weights."""
+        if self.node_rank != 0 or not self.config.free_cache_engine:
+            return
+        if self.rollout_mode == RolloutMode.COLOCATED:
+            return
+        self._invalidate_lora_request_cache()
+        await self.engine.collective_rpc("sleep", kwargs={"level": self._resolve_sleep_level()})
+        await self.engine.collective_rpc("wake_up", kwargs={"tags": ["weights"]})
+
+    async def resume_kv_cache(self):
+        """Restore after a weight sync. Route through collective_rpc like wake_up."""
+        if self.node_rank != 0 or not self.config.free_cache_engine:
+            return
+        if self.rollout_mode == RolloutMode.COLOCATED:
+            return
+        await self.engine.collective_rpc("wake_up", kwargs={"tags": ["kv_cache"]})
 
     async def resume_generation(self):
         if self.node_rank == 0:
@@ -970,11 +993,6 @@ class vLLMOmniReplica(vLLMReplica):
     ):
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
         self.server_class = ray.remote(vLLMOmniHttpServer)
-
-    def _validate_launch_requirements(self) -> None:
-        """No-op: the parent check validates vllm.__version__ which is
-        irrelevant for vllm-omni (a separate package)."""
-        pass
 
     def _get_server_name_prefix(self) -> str:
         return "vllm_omni_"

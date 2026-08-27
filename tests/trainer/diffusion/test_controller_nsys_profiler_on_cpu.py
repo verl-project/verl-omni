@@ -59,6 +59,7 @@ def _make_trainer(events, *, controller_enabled=True, use_reference_policy=True)
     trainer.ref_policy_wg = _RecordingWorkerGroup(events, "ref")
     trainer.use_reference_policy = use_reference_policy
     trainer.ref_in_actor = False
+    trainer.use_teacher_policy = False
     trainer._controller_nsys_profile_enabled = controller_enabled
     trainer._controller_nsys_profile_active = False
     return trainer

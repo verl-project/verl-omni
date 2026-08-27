@@ -140,6 +140,13 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>WIP</td>
   </tr>
   <tr>
+    <td><b>Boogu-Image</b></td>
+    <td>Diffusion generator</td>
+    <td>Text/Image → Image</td>
+    <td>FlowGRPO (+ CPS/SDE)</td>
+    <td>✅</td>
+  </tr>
+  <tr>
     <td>BAGEL</td>
     <td>Unified understand + gen</td>
     <td>Text + Image</td>

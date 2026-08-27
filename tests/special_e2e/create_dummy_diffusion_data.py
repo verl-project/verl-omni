@@ -41,13 +41,13 @@ USER_PROMPTS = [
 ]
 
 
-def build_rows(split: str, n: int):
+def build_rows(split: str, n: int, data_sources: list[str]):
     rows = []
     for i in range(n):
         prompt_text = USER_PROMPTS[i % len(USER_PROMPTS)]
         rows.append(
             {
-                "data_source": "jpeg_compressibility",
+                "data_source": data_sources[i % len(data_sources)],
                 "prompt": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": prompt_text},
@@ -72,12 +72,18 @@ def main():
     )
     parser.add_argument("--train_size", type=int, default=32, help="Number of training samples")
     parser.add_argument("--val_size", type=int, default=8, help="Number of validation samples")
+    parser.add_argument(
+        "--data_sources",
+        default="jpeg_compressibility",
+        help="Comma-separated data_source values assigned to rows in round-robin order",
+    )
     args = parser.parse_args()
+    data_sources = args.data_sources.split(",")
 
     os.makedirs(args.local_save_dir, exist_ok=True)
 
-    train_df = pd.DataFrame(build_rows("train", args.train_size))
-    val_df = pd.DataFrame(build_rows("test", args.val_size))
+    train_df = pd.DataFrame(build_rows("train", args.train_size, data_sources))
+    val_df = pd.DataFrame(build_rows("test", args.val_size, data_sources))
 
     train_path = os.path.join(args.local_save_dir, "train.parquet")
     val_path = os.path.join(args.local_save_dir, "test.parquet")
