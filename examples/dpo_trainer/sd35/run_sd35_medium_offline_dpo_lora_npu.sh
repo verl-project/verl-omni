@@ -45,3 +45,4 @@ python3 -m verl_omni.trainer.main_diffusion --config-name=offline_dpo_trainer \
     trainer.save_freq=30 \
     trainer.total_epochs=300 \
     trainer.total_training_steps=1000 "$@"
+
