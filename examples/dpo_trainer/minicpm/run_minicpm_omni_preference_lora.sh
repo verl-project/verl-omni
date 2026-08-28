@@ -24,7 +24,6 @@ export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 DATASET_ROOT=${DATASET_ROOT:-${HOME}/Omni-Preference}
 MODEL_PATH=${MODEL_PATH:-openbmb/MiniCPM-o-4_5}
-MODEL_ARCHITECTURE=${MODEL_ARCHITECTURE:-MiniCPMOForConditionalGeneration}
 DATA_DIR=${DATA_DIR:-${DATASET_ROOT}/parquet_dpo}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-200}
 NUM_GPUS=${NUM_GPUS:-4}
@@ -68,8 +67,6 @@ done
 
 # Train MiniCPM understanding modules; exclude only generation-only audio/TTS paths.
 EXCLUDE_MODULES=${EXCLUDE_MODULES:-".*talker.*|.*code2wav.*|.*code_predictor.*|.*codec.*|.*audio_decoder.*|.*audio_generator.*|.*audio_head.*|.*tts.*|.*vocoder.*"}
-MINICPM_FROM_PRETRAINED_KWARGS=${MINICPM_FROM_PRETRAINED_KWARGS:-"{init_tts:false}"}
-MINICPM_NO_SPLIT_MODULES=${MINICPM_NO_SPLIT_MODULES:-'[]'}
 
 python3 -m verl_omni.trainer.main_omni \
     algorithm.trainer_type=direct_preference \
@@ -98,13 +95,11 @@ python3 -m verl_omni.trainer.main_omni \
     +data.mm_configs="{image_min_pixels:3136,image_max_pixels:602112,video_min_pixels:100352,video_max_pixels:602112,max_ratio:200,min_frames:4,max_frames:8,frame_factor:2,sample_rate:16000,fps:2.0,use_audio_in_video:false,max_slice_nums:${MAX_SLICE_NUMS}}" \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.hf_config_path="${MODEL_PATH}" \
-    actor_rollout_ref.model.architecture="${MODEL_ARCHITECTURE}" \
     actor_rollout_ref.model.model_type=omni_model \
     actor_rollout_ref.model.tokenizer_path="${MODEL_PATH}" \
     actor_rollout_ref.model.trust_remote_code=true \
     +actor_rollout_ref.model.override_config.attn_implementation="${ATTN_IMPLEMENTATION}" \
-    +actor_rollout_ref.model.override_config.minicpm_from_pretrained_kwargs="${MINICPM_FROM_PRETRAINED_KWARGS}" \
-    +actor_rollout_ref.model.override_config.minicpm_no_split_modules="${MINICPM_NO_SPLIT_MODULES}" \
+    +actor_rollout_ref.model.override_config.init_tts=false \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.model.lora_rank="${LORA_RANK}" \
     actor_rollout_ref.model.lora_alpha="${LORA_ALPHA}" \
