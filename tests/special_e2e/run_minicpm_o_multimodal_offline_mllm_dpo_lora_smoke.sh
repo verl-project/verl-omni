@@ -39,7 +39,8 @@ ADAPTER_PATH="${CHECKPOINT_DIR}/global_step_${TOTAL_TRAINING_STEPS}/actor"
 EXCLUDE_MODULES=${EXCLUDE_MODULES:-".*talker.*|.*code2wav.*|.*code_predictor.*|.*codec.*|.*audio_decoder.*|.*audio_generator.*|.*audio_head.*|.*tts.*|.*vocoder.*"}
 
 python3 "${REPO_ROOT}/tests/special_e2e/build_minicpm_o_tiny_random.py" \
-    --output-dir "${MODEL_PATH}"
+    --output-dir "${MODEL_PATH}" \
+    --force
 
 if [ ! -f "${DATA_DIR}/image/train.parquet" ]; then
     python3 "${REPO_ROOT}/tests/special_e2e/create_dummy_omni_preference_dpo_data.py" \
@@ -80,12 +81,13 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.model_type=omni_model \
     actor_rollout_ref.model.tokenizer_path="${MODEL_PATH}" \
     actor_rollout_ref.model.trust_remote_code=true \
-    +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
+    +actor_rollout_ref.model.override_config.attn_implementation=eager \
     +actor_rollout_ref.model.override_config.init_tts=false \
     actor_rollout_ref.model.lora_rank="${LORA_RANK}" \
     actor_rollout_ref.model.lora_alpha="${LORA_ALPHA}" \
     actor_rollout_ref.model.target_modules='["q_proj","k_proj","v_proj","o_proj"]' \
     actor_rollout_ref.model.exclude_modules="${EXCLUDE_MODULES}" \
+    actor_rollout_ref.model.enable_gradient_checkpointing=false \
     actor_rollout_ref.model.use_remove_padding=true \
     actor_rollout_ref.actor.trainer_type=direct_preference \
     actor_rollout_ref.actor.omni_loss.loss_mode=dpo \

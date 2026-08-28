@@ -91,6 +91,8 @@ class MiniCPMThinkerAdapter(OmniModelBase):
                 module.get_input_embeddings = trainable_component.get_input_embeddings
             if hasattr(trainable_component, "set_input_embeddings"):
                 module.set_input_embeddings = trainable_component.set_input_embeddings
+            if hasattr(trainable_component, "prepare_inputs_for_generation"):
+                module.prepare_inputs_for_generation = trainable_component.prepare_inputs_for_generation
 
         module._no_split_modules = _MINICPM_NO_SPLIT_MODULES
         return module

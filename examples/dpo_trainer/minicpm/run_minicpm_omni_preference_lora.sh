@@ -37,7 +37,7 @@ LORA_RANK=${LORA_RANK:-32}
 LORA_ALPHA=${LORA_ALPHA:-64}
 LORA_DROPOUT=${LORA_DROPOUT:-0.05}
 LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-'["q_proj","k_proj","v_proj","o_proj"]'}
-ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-sdpa}
+ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-eager}
 LR=${LR:-1.0e-6}
 SAVE_FREQ=${SAVE_FREQ:-50}
 TEST_FREQ=${TEST_FREQ:-50}
@@ -100,7 +100,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.trust_remote_code=true \
     +actor_rollout_ref.model.override_config.attn_implementation="${ATTN_IMPLEMENTATION}" \
     +actor_rollout_ref.model.override_config.init_tts=false \
-    actor_rollout_ref.model.enable_gradient_checkpointing=true \
+    actor_rollout_ref.model.enable_gradient_checkpointing=false \
     actor_rollout_ref.model.lora_rank="${LORA_RANK}" \
     actor_rollout_ref.model.lora_alpha="${LORA_ALPHA}" \
     actor_rollout_ref.model.lora.dropout="${LORA_DROPOUT}" \
