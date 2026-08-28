@@ -620,6 +620,17 @@ class OmniModelBase(ABC):
         pass
 
     @classmethod
+    def build_module(cls, model_config, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
+        """Optionally load the trainable module for this omni architecture.
+
+        Return ``None`` to use the default ``AutoModelForMultimodalLM`` path.
+        Override this for models that must be loaded through a different
+        Transformers auto class, such as MiniCPM's ``AutoModel`` remote-code
+        entrypoint.
+        """
+        return None
+
+    @classmethod
     def configure_model(cls, module, model_config):
         """Configure the model after loading and before FSDP wrapping.
 
