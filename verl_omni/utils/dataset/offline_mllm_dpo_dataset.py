@@ -34,6 +34,7 @@ from torch.utils.data import Dataset, Sampler
 from verl.utils.dataset.dataset_utils import DatasetPadMode, SFTTensorCollator
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
 
+from verl_omni.utils.dataset.minicpm_transform import process_minicpm_sample
 from verl_omni.utils.dataset.qwen3_omni_transform import IGNORE_INDEX, process_qwen3_omni_sample
 
 __all__ = [
@@ -43,7 +44,7 @@ __all__ = [
     "offline_mllm_dpo_collate_fn",
 ]
 
-_MEDIA_TOKEN_PATTERN = re.compile(r"<(image|video|audio)>")
+_MEDIA_TOKEN_PATTERN = re.compile(r"<(image|video|audio)(?:_\d+)?>")
 _SUPPORTED_MODALITIES = {"audio", "image", "video"}
 _TEXT_MODEL_KEYS = {
     "input_ids",
@@ -546,7 +547,7 @@ def _balanced_modality_sample_indices(
 
 
 class OfflineMLLMDPODataset(MultiTurnSFTDataset):
-    """Build Qwen3-Omni offline DPO samples from Omni-Preference style rows.
+    """Build offline MLLM DPO samples from Omni-Preference style rows.
 
     The dataset reads parquet/json/jsonl files containing a multimodal prompt,
     a preferred response, and a rejected response. Each row is converted into
@@ -557,7 +558,7 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
         data_files: Path or sequence of paths to parquet, json, or jsonl files.
         tokenizer: Unused tokenizer argument kept for compatibility with the
             common dataset factory signature.
-        processor: Multimodal processor used by the Qwen3-Omni transform.
+        processor: Multimodal processor used by the selected base transform.
         config: Dataset config containing column names, multimodal transform
             kwargs, and source metadata.
         max_samples: Optional positive limit on the number of rows to load.
@@ -577,7 +578,20 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
             raise ValueError("OfflineMLLMDPODataset requires a multimodal processor.")
 
         self.config = config
-        self.processor = _prepare_qwen3_omni_processor(processor)
+        base_transform = config.get("base_transform", "qwen3_omni_moe")
+        if base_transform in {"qwen3_omni_moe", "qwen2_5_omni"}:
+            self.processor = _prepare_qwen3_omni_processor(processor)
+            self.base_transform = process_qwen3_omni_sample
+            self.requires_position_id_func = True
+        elif base_transform in {"minicpm", "minicpm_o", "minicpm_v"}:
+            self.processor = processor
+            self.base_transform = process_minicpm_sample
+            self.requires_position_id_func = False
+        else:
+            raise ValueError(
+                f"Unsupported base_transform {base_transform!r}. Expected one of: "
+                "'qwen3_omni_moe', 'qwen2_5_omni', 'minicpm', 'minicpm_o', 'minicpm_v'."
+            )
         self.tokenizer = tokenizer if tokenizer is not None else getattr(processor, "tokenizer", processor)
         self.pad_mode = DatasetPadMode(config.get("pad_mode", DatasetPadMode.RIGHT))
 
@@ -602,7 +616,7 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
         self.transform_kwargs = dict(mm_configs or {})
         if "position_id_func" not in self.transform_kwargs and hasattr(self.processor, "get_rope_index"):
             self.transform_kwargs["position_id_func"] = self.processor.get_rope_index
-        if "position_id_func" not in self.transform_kwargs:
+        if self.requires_position_id_func and "position_id_func" not in self.transform_kwargs:
             raise ValueError(
                 "OfflineMLLMDPODataset requires `mm_configs.position_id_func` or a processor with "
                 "`get_rope_index`. For Qwen3-Omni, bind "
@@ -610,18 +624,11 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
                 "constructing the dataset."
             )
 
-        if self.transform_kwargs.get("use_audio_in_video"):
+        if self.requires_position_id_func and self.transform_kwargs.get("use_audio_in_video"):
             raise ValueError(
                 "use_audio_in_video=True is not supported yet for Qwen3-Omni offline DPO preprocessing. "
                 "Leave use_audio_in_video unset or set it to false."
             )
-
-        base_transform = config.get("base_transform", "qwen3_omni_moe")
-        if base_transform not in {"qwen3_omni_moe", "qwen2_5_omni"}:
-            raise ValueError(
-                f"Unsupported base_transform {base_transform!r}. Expected one of: 'qwen3_omni_moe', 'qwen2_5_omni'."
-            )
-        self.base_transform = process_qwen3_omni_sample
 
         self.parquet_files = _normalise_data_files(data_files)
         self._read_files_and_process()
