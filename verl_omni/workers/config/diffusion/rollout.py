@@ -104,7 +104,7 @@ class DiffusionRolloutConfig(BaseConfig):
     nnodes: int = 0
     n_gpus_per_node: int = 8
     n: int = 1
-    m: int = 1  # Optional. stage 2 number of samples per prompt
+    m: int = 1  # Optional. AR stage 1 number of samples per prompt
 
     # Base seed for deterministic training rollout RNG. Per-step base is
     # ``seed + global_step - 1``. null disables rollout seeding.

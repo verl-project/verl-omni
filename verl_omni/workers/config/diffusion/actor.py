@@ -73,6 +73,14 @@ class DiffusionLossConfig(BaseConfig):
 
 
 @dataclass
+class DiffusionARConfig(BaseConfig):
+    # AR part actor config
+    # use when training AR part
+    entropy_coeff: float = 0
+    calculate_entropy: bool = False
+
+
+@dataclass
 class VeOmniDiffusionEngineConfig(EngineConfig):
     _mutable_fields = EngineConfig._mutable_fields | {"ulysses_parallel_size"}
 
@@ -169,6 +177,9 @@ class DiffusionActorConfig(BaseConfig):
     # Rollout Correction config.
     # When bypass_mode=True, ``diffusion_loss`` computes per-step RS from here.
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
+
+    # Trainale AR config
+    ar: DiffusionARConfig = field(default_factory=DiffusionARConfig)
 
     def __post_init__(self):
         """Validate diffusion actor configuration parameters."""

@@ -152,7 +152,7 @@ class CompositeSingleTurnAgentLoop(DiffusionSingleTurnAgentLoop):
 
         return ARAgentLoopOutput(
             prompt_ids=prompt_ids,
-            response_ar_output=ar_response_ids,
+            response_ids=ar_response_ids,
             ar_response_logprobs=ar_log_probs,
             refined_prompt=refined_prompt,
             num_turns=2,

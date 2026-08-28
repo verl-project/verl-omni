@@ -52,11 +52,11 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
+from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 from verl_omni.trainer.config import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import (
     DiffusionAdvantageEstimator,
-    DualGRPOLoss,
     get_diffusion_adv_estimator_fn,
     get_diffusion_loss_fn,
 )
@@ -126,7 +126,6 @@ def compute_advantage(
     adv_estimator_fn = get_diffusion_adv_estimator_fn(adv_estimator)
     if adv_estimator in {
         DiffusionAdvantageEstimator.FLOW_GRPO,
-        DiffusionAdvantageEstimator.DUAL_GRPO,
     }:
         adv_kwargs["norm_adv_by_std_in_grpo"] = norm_adv_by_std_in_grpo
         adv_kwargs["global_std"] = global_std
@@ -941,13 +940,6 @@ class BaseRayDiffusionTrainer(ABC):
             width=self.config.actor_rollout_ref.model.pipeline.width,
             vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
         )
-        if self.train_ar_n_diffusion:
-            tu.assign_non_tensor(
-                batch_td,
-                rollout_n=rollout_config.n,
-                rollout_m=rollout_config.get("m", 1),
-            )
-
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
         actor_output = tu.get(actor_output, "metrics")
         actor_output = rename_dict(actor_output, "actor/")
@@ -1045,8 +1037,6 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         return DataProto.from_tensordict(teacher_output)
 
     def _compute_ar_old_log_prob(self, batch: DataProto) -> tuple[DataProto, Optional[float]]:
-        from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
-
         # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
         # step 1: convert dataproto to tensordict.
         batch_td = batch.to_tensordict()
@@ -1138,8 +1128,56 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                         sub_reward = sub_scores[::avg_size]
                     ar_batch.non_tensor_batch[key] = sub_reward
 
-    def _prepare_ar_advantages(self, ar_batch: DataProto, ar_reward_tensor: torch.Tensor) -> DataProto:
-        return DualGRPOLoss.prepare_actor_batch(ar_batch, ar_reward_tensor, self.config.algorithm)
+    def _update_ar_actor(self, batch: DataProto) -> DataProto:
+        rollout_config = self.config.actor_rollout_ref.rollout
+        batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
+        batch.meta_info["temperature"] = rollout_config.ar.temperature
+        # update actor
+        batch_td = batch.to_tensordict()
+        # step 2: convert from padding to no-padding
+        batch_td = left_right_2_no_padding(batch_td)
+        calculate_entropy = self.config.actor_rollout_ref.actor.ar.calculate_entropy or (
+            self.config.actor_rollout_ref.actor.ar.entropy_coeff != 0.0
+        )
+        distillation_use_topk = False
+        # distillation_use_topk = (
+        #     self.distillation_config.distillation_loss.loss_settings.use_topk
+        #     if is_distillation_enabled(self.config.get("distillation"))
+        #     else False
+        # )
+        distillation_only = False  # distillation_only flag means we can skip policy loss and reduce mem footprint
+        # if is_distillation_enabled(self.config.get("distillation")):
+        #     distillation_loss_cfg = self.distillation_config.distillation_loss
+        #     distillation_only = (
+        #         distillation_use_topk
+        #         and not distillation_loss_cfg.use_task_rewards
+        #         and not distillation_loss_cfg.use_policy_gradient
+        #     )
+        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.m
+        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
+        seed = self.config.actor_rollout_ref.actor.data_loader_seed
+        shuffle = self.config.actor_rollout_ref.actor.shuffle
+        tu.assign_non_tensor(
+            batch_td,
+            calculate_entropy=calculate_entropy,
+            distillation_use_topk=distillation_use_topk,
+            distillation_only=distillation_only,
+            global_batch_size=ppo_mini_batch_size,
+            mini_batch_size=ppo_mini_batch_size,
+            epochs=ppo_epochs,
+            seed=seed,
+            dataloader_kwargs={"shuffle": shuffle},
+            compute_loss=True,
+        )
+        actor_output = self.actor_rollout_wg.update_actor(batch_td)
+        actor_output = tu.get(actor_output, "metrics")
+        actor_output = rename_dict(actor_output, "actor/")
+        # modify key name
+        actor_output["perf/ar/mfu/actor"] = actor_output.pop("actor/mfu")
+        actor_output = DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
+
+        return actor_output
 
     def fit(self):
         """
@@ -1226,7 +1264,10 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
                 rollout_n = self.config.actor_rollout_ref.rollout.n
                 rollout_m = self.config.actor_rollout_ref.rollout.m
-                gen_batch_for_rollout = gen_batch.repeat(repeat_times=rollout_n, interleave=True)
+                if self.train_ar_n_diffusion:
+                    gen_batch_for_rollout = gen_batch.repeat(repeat_times=rollout_m, interleave=True)
+                else:
+                    gen_batch_for_rollout = gen_batch.repeat(repeat_times=rollout_n, interleave=True)
                 gen_batch_for_rollout.non_tensor_batch["_rollout_seed_global_idx"] = np.arange(
                     len(gen_batch_for_rollout), dtype=np.int64
                 )
@@ -1257,11 +1298,13 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
 
-                    batch = batch.repeat(repeat_times=rollout_n, interleave=True)
                     if self.train_ar_n_diffusion:
+                        batch = batch.repeat(repeat_times=rollout_m, interleave=True)
                         ar_batch = batch.union(ar_gen_batch_output)
-                        if rollout_m > 1:
-                            batch = batch.repeat(repeat_times=rollout_m, interleave=True)
+                        if rollout_n > 1:
+                            batch = batch.repeat(repeat_times=rollout_n, interleave=True)
+                    else:
+                        batch = batch.repeat(repeat_times=rollout_n, interleave=True)
                     batch = batch.union(gen_batch_output)
 
                     with marked_timer("reward", timing_raw, color="yellow"):
@@ -1273,7 +1316,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                             if curr_step_profile:
                                 self.reward_loop_manager.stop_profile()
                             if self.train_ar_n_diffusion:
-                                self._extract_ar_reward_tensor(batch_reward, ar_batch, avg_size=rollout_m)
+                                self._extract_ar_reward_tensor(batch_reward, ar_batch, avg_size=rollout_n)
                             batch = batch.union(batch_reward)
 
                         # extract reward_tensor and reward_extra_infos_dict for training
@@ -1373,8 +1416,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                     # update actor
                     with marked_timer("update_actor", timing_raw, color="red"):
                         if self.train_ar_n_diffusion:
-                            actor_output = self._update_actor(ar_batch)
-
+                            ar_actor_output = self._update_ar_actor(ar_batch)
                         actor_output = self._update_actor(batch)
 
                     # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.

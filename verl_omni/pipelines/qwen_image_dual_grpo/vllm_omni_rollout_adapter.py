@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import torch
+from verl.utils.torch_functional import get_response_mask
 from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
@@ -44,23 +45,10 @@ from verl_omni.pipelines.request_batch import (
 
 __all__ = ["QwenImagePipelineWithDualLogProb"]
 
-# system prompt used in DualGRPO
+# system prompt used for DiT
 SYSTEM_PROMPT = (
-    "You are a Prompt Optimizer specializing in image generation models (e.g., MidJourney, Stable Diffusion)."
-    " Your core task is to rewrite user-provided prompts into highly clear, easy-to-render versions.\n"
-    "When rewriting, prioritize the following principles:\n"
-    "1. Start from the user's prompt, do reasoning step by step to analyze the object or scene they want to generate.\n"
-    "2. Focus on describing the final visual appearance of the scene. "
-    "Clarify elements like the main subject’s shape, color, and state.\n"
-    "3. If you are confident about what the user wants to generate, "
-    "directly point it out in your explanation and the final revised prompt.\n"
-    "4. If technical concepts are necessary but difficult for ordinary users to understand, "
-    "translate them into intuitive visual descriptions.\n"
-    "5. Ensure the final revised prompt is consistent with the user's intent.\n\n"
-    "After receiving the user’s prompt that needs rewriting, first explain your reasoning for optimization. "
-    'Then, output the final revised prompt in the fixed format of "Revised Prompt:\n". '
-    "Where the specific revised content is filled in the next line.\n\n"
-    "Prompt:\n"
+    "Describe the image by detailing the color, shape, size, texture, quantity, "
+    "text, spatial relationships of the objects and background:"
 )
 
 
@@ -107,24 +95,40 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
         prompt_ids: torch.Tensor,
         attention_mask: torch.Tensor | None,
         return_logprobs: bool = True,
-        ar_kwargs: dict[str, Any] = None,
+        **ar_kwargs,
     ):
+        # ref： https://github.com/verl-project/verl/blob/main/verl/workers/rollout/hf_rollout.py#L54
+
         outputs = self.text_encoder.generate(
             input_ids=prompt_ids.to(self.device),
             attention_mask=attention_mask.to(self.device),
             return_dict_in_generate=True,
             output_scores=return_logprobs,
-            **(ar_kwargs or {}),
+            **ar_kwargs,
         )
         if return_logprobs:
             scores = torch.stack(outputs.scores, dim=1)  # B x gen_seq_len x vocab_size
             logprobs = torch.nn.functional.log_softmax(scores, dim=-1)
         else:
             logprobs = None
-        output_ids = outputs.sequences
-        output_ids = output_ids[:, prompt_ids.shape[1] :]  # remove prompt prefix
-        output_texts = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+
+        # huggingface generate will stop generating when all the batch reaches [EOS].
+        # We have to pad to response_length
+        seq = outputs.sequences
+        sequence_length = prompt_ids[1] + ar_kwargs["max_new_tokens"]
+        delta_length = sequence_length - seq.shape[1]
+        if delta_length > 0:
+            delta_tokens = torch.ones(size=(seq.shape[0], delta_length), device=seq.device, dtype=seq.dtype)
+            delta_tokens = self.tokenizer.pad_token_id * delta_tokens
+            seq = torch.cat((seq, delta_tokens), dim=1)
+        assert seq.shape[1] == sequence_length
+
+        output_ids = seq[:, prompt_ids.shape[1] :]  # remove prompt prefix
+        # response_attention_mask = get_response_mask(
+        #     response_id=output_ids, eos_token=self.tokenizer.eos_token_id, dtype=attention_mask.dtype
+        # )
         # Extract the actual image generation prompt
+        output_texts = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)
         refined_prompts = extract_prompt(output_texts)
 
         return TextEncoderGenerationResult(

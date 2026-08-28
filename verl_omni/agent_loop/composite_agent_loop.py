@@ -67,7 +67,7 @@ class ARAgentLoopOutput(BaseModel):
 
     prompt_ids: list[int]
     """Input ids of raw input prompt"""
-    response_ar_output: Any
+    response_ids: Any
     """Full response AR tokens output (torch.Tensor)."""
     refined_prompt: Any
     """Refined rewritten prompt in chat-message form for diffusion."""
@@ -93,7 +93,7 @@ class _InternalARAgentLoopOutput(ARAgentLoopOutput):
 
     prompt_ids: torch.Tensor
     """Padded prompt token ids."""
-    response_ar_output: torch.Tensor
+    response_ids: torch.Tensor
     """Padded AR response token ids."""
     ar_response_logprobs: Optional[torch.Tensor] = None
     """Log probabilities for the response tokens."""
@@ -145,7 +145,7 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
             AR ``DataProto`` batch fields (optional keys omitted when disabled):
 
             - ``prompts``: ``[ar_bsz, prompt_length]`` original prompt token ids.
-            - ``ar_response_ids``: ``[ar_bsz, ar_max_new_tokens]`` generated AR tokens.
+            - ``response_ids``: ``[ar_bsz, ar_max_new_tokens]`` generated AR tokens.
             - ``rollout_ar_log_probs`` (optional): AR token log-probs.
             - ``ar_rm_scores`` (optional): ``[ar_bsz, 1]`` AR reward scores.
 
@@ -193,7 +193,7 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
             batch.non_tensor_batch["agent_name"] = np.array([default_agent_loop] * len(batch), dtype=object)
 
         # two-stage generation: one batch row -> one AR output -> diffusion_n images
-        diffusion_n = config.m
+        diffusion_n = config.n
         tasks = []
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
@@ -295,11 +295,11 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
             prompt_output["input_ids"] = prompt_output["input_ids"].unsqueeze(0)
             prompt_output["attention_mask"] = prompt_output["attention_mask"].unsqueeze(0)
 
-        response_ar_output = output.response_ar_output
-        if not isinstance(response_ar_output, torch.Tensor):
-            response_ar_output = torch.as_tensor(response_ar_output)
-        if response_ar_output.dim() == 1:
-            response_ar_output = response_ar_output.unsqueeze(0)
+        response_ids = output.response_ids
+        if not isinstance(response_ids, torch.Tensor):
+            response_ids = torch.as_tensor(response_ids)
+        if response_ids.dim() == 1:
+            response_ids = response_ids.unsqueeze(0)
 
         ar_response_logprobs = None
         if output.ar_response_logprobs is not None:
@@ -327,7 +327,7 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
 
         return _InternalARAgentLoopOutput(
             prompt_ids=prompt_ids,
-            response_ar_output=response_ar_output,
+            response_ids=response_ids,
             refined_prompt=output.refined_prompt,
             ar_response_logprobs=ar_response_logprobs,
             ar_reward_score=output.ar_reward_score,
@@ -398,7 +398,7 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
     ) -> DataProto:
         """Process padded AR outputs and combine them into a batch."""
         prompt_ids = torch.cat([input.prompt_ids for input in inputs], dim=0)
-        ar_response_ids = torch.cat([input.response_ar_output for input in inputs], dim=0)
+        ar_response_ids = torch.cat([input.response_ids for input in inputs], dim=0)
 
         batch_dict: dict[str, torch.Tensor] = {
             "prompts": prompt_ids,

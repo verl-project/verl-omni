@@ -46,20 +46,20 @@ class TestExtractARRewardsFromColocateBatch:
 
     def test_extract_ar_rewards_populates_rm_scores_and_extra_keys(self):
         num_ar = 3
-        rollout_m = 4
+        rollout_n = 4
         ar_per_image_scores = []
         for ar_idx in range(num_ar):
-            for image_idx in range(rollout_m):
+            for image_idx in range(rollout_n):
                 ar_per_image_scores.append(ar_idx + image_idx * 0.1)
         # [0.0, 0.1, 0.2, 0.3, 1.0, 1.1, 1.2, 1.3, 2.0, 2.1, 2.2, 2.3]
 
         batch_reward = DataProto.from_dict(
-            tensors={"rm_scores": torch.zeros(num_ar * rollout_m, 1)},
+            tensors={"rm_scores": torch.zeros(num_ar * rollout_n, 1)},
             non_tensors={
                 AR_REWARD_KEY: np.array(ar_per_image_scores, dtype=np.float32).reshape(-1, 1),
                 f"{AR_REWARD_KEY}/semantic": np.array(ar_per_image_scores, dtype=np.float32),
                 f"{AR_REWARD_KEY}/semantic/detail": (
-                    np.array(["ar detail 0"] * rollout_m + ["ar detail 1"] * rollout_m + ["ar detail 2"] * rollout_m)
+                    np.array(["ar detail 0"] * rollout_n + ["ar detail 1"] * rollout_n + ["ar detail 2"] * rollout_n)
                 ),
             },
         )
@@ -71,7 +71,7 @@ class TestExtractARRewardsFromColocateBatch:
         ar_batch = DataProto.from_dict(
             tensors={"ar_response_ids": torch.zeros(num_ar, 5, dtype=torch.long)},
         )
-        self.dummy_trainer._extract_ar_reward_tensor(batch_reward, ar_batch, avg_size=rollout_m)
+        self.dummy_trainer._extract_ar_reward_tensor(batch_reward, ar_batch, avg_size=rollout_n)
 
         assert ar_batch.batch["rm_scores"].shape == (num_ar, 1)
         assert ar_batch.batch["rm_scores"][0].item() == pytest.approx(0.15)
