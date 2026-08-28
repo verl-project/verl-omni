@@ -54,6 +54,15 @@ uv pip install -e ".[train]"
 
 This installs `vllm-omni`, then `verl` and `verl-omni`.
 
+> **Ascend PyTorch version alignment:** VeRL-Omni does not require every NPU
+> environment to use one fixed `torch` version such as 2.10.0. Choose a
+> mutually compatible `torch` / `torch-npu` pair for the installed CANN and
+> vLLM-Ascend versions, and pin that pair before installing the engine and
+> training stack. Packages such as `vllm`, `vllm-ascend`, `vllm-omni`, and
+> `verl` may resolve different PyTorch versions while they are installed.
+> Re-apply the selected pair after all four packages are installed if the
+> resolver changed it, then run the version checks below.
+
 ### Extras
 
 | Extra       | Adds                                                          | When                     |
@@ -127,8 +136,10 @@ python -c "import verl_omni; print('VeRL-Omni ready')"
 For Ascend NPU:
 
 ```bash
-python -c "import torch; import torch_npu; print('torch', torch.__version__, '| NPU', torch.npu.is_available())"
+python -c "from importlib.metadata import version; import torch, torch_npu; print('torch', torch.__version__, '| torch-npu', version('torch-npu'), '| NPU', torch.npu.is_available())"
 python -c "import vllm; print('vllm', vllm.__version__)"
+python -c "from importlib.metadata import version; import vllm_ascend; print('vllm-ascend', version('vllm-ascend'))"
+python -c "from importlib.metadata import version; import vllm_omni; print('vllm-omni', version('vllm-omni'))"
 python -c "import verl; print('verl', verl.__version__)"
 python -c "import verl_omni; print('VeRL-Omni ready')"
 ```
@@ -144,6 +155,14 @@ The repository provides Dockerfiles for both NVIDIA GPU and Ascend NPU environme
 The CUDA image is intended for NVIDIA GPU training and rollout. The default CUDA base image uses **CUDA 13.0.2** on Ubuntu 22.04. You can override the CUDA version with `--build-arg CUDA_VERSION=...` if needed.
 
 The NPU images are split by Ascend hardware generation: `Dockerfile.a2.npu` is intended for Ascend 910B / Atlas A2, and `Dockerfile.a3.npu` is intended for Ascend Atlas A3. Both NPU images include CANN, `torch-npu`, `vllm-ascend`, and `vllm-omni`.
+
+The `torch` and `torch-npu` versions in these Dockerfiles are the currently
+validated image defaults, not a universal VeRL-Omni requirement. Each
+Dockerfile installs the selected pair before the engine stack, then re-applies
+the same pair after installing `vllm`, `vllm-ascend`, `vllm-omni`, and `verl`.
+This prevents their dependency resolvers from leaving the final image with a
+mixed PyTorch stack. When changing PyTorch versions, update both alignment
+steps together and keep the pair compatible with the image's CANN version.
 
 Build context is controlled by the repo-root [`.dockerignore`](https://github.com/verl-project/verl-omni/blob/main/.dockerignore); keep large local folders such as `.venv`, `data/`, and `checkpoints/` out of the context.
 
@@ -328,8 +347,10 @@ Inside the container, confirm the NPU environment:
 
 ```bash
 npu-smi info
-python -c "import torch; import torch_npu; print('torch', torch.__version__, '| NPU', torch.npu.is_available())"
+python -c "from importlib.metadata import version; import torch, torch_npu; print('torch', torch.__version__, '| torch-npu', version('torch-npu'), '| NPU', torch.npu.is_available())"
 python -c "import vllm; print('vllm', vllm.__version__)"
+python -c "from importlib.metadata import version; import vllm_ascend; print('vllm-ascend', version('vllm-ascend'))"
+python -c "from importlib.metadata import version; import vllm_omni; print('vllm-omni', version('vllm-omni'))"
 python -c "import verl; print('verl', verl.__version__)"
 python -c "import verl_omni; print('VeRL-Omni ready')"
 ```
