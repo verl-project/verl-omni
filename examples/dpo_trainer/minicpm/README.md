@@ -27,13 +27,10 @@ separate Omni-Preference converter.
 DATASET_ROOT="$HOME/Omni-Preference" \
 DATA_DIR="$DATASET_ROOT/parquet_dpo" \
 MODEL_PATH=openbmb/MiniCPM-o-4_5 \
-MODEL_ARCHITECTURE=MiniCPMOForConditionalGeneration \
 bash examples/dpo_trainer/minicpm/run_minicpm_omni_preference_lora.sh
 ```
 
 The script uses `AutoModel.from_pretrained(..., trust_remote_code=True)` through
-the MiniCPM omni adapter.  Override `MINICPM_FROM_PRETRAINED_KWARGS` for
-checkpoint-specific load flags, for example `{init_tts:false}` for MiniCPM-o.
-
-Set `MINICPM_NO_SPLIT_MODULES` to the decoder layer names from the target
-checkpoint if FSDP wrapping needs explicit layer boundaries.
+the MiniCPM omni adapter. It auto-detects the architecture from the checkpoint
+config and sets `init_tts=false` through the Hugging Face config override so the
+inference-only TTS module is not initialized for training.

@@ -77,13 +77,11 @@ python3 -m verl_omni.trainer.main_omni \
     +data.mm_configs="{image_min_pixels:3136,image_max_pixels:3136,video_min_pixels:3136,video_max_pixels:3136,max_ratio:200,min_frames:2,max_frames:2,frame_factor:1,sample_rate:16000,fps:2.0,use_audio_in_video:false,max_slice_nums:1}" \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.hf_config_path="${MODEL_PATH}" \
-    actor_rollout_ref.model.architecture=MiniCPMOForConditionalGeneration \
     actor_rollout_ref.model.model_type=omni_model \
     actor_rollout_ref.model.tokenizer_path="${MODEL_PATH}" \
     actor_rollout_ref.model.trust_remote_code=true \
     +actor_rollout_ref.model.override_config.attn_implementation=sdpa \
-    +actor_rollout_ref.model.override_config.minicpm_from_pretrained_kwargs="{init_tts:false}" \
-    +actor_rollout_ref.model.override_config.minicpm_no_split_modules='["MiniCPMODecoderLayer"]' \
+    +actor_rollout_ref.model.override_config.init_tts=false \
     actor_rollout_ref.model.lora_rank="${LORA_RANK}" \
     actor_rollout_ref.model.lora_alpha="${LORA_ALPHA}" \
     actor_rollout_ref.model.target_modules='["q_proj","k_proj","v_proj","o_proj"]' \

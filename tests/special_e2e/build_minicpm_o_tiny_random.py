@@ -70,10 +70,10 @@ class MiniCPMOConfig(PretrainedConfig):
         self.intermediate_size = intermediate_size
         self.num_attention_heads = num_attention_heads
         self.tie_word_embeddings = False
-        self.architectures = ["MiniCPMOForConditionalGeneration"]
+        self.architectures = ["MiniCPMO"]
         self.auto_map = {
             "AutoConfig": "configuration_minicpm_o_tiny.MiniCPMOConfig",
-            "AutoModel": "modeling_minicpm_o_tiny.MiniCPMOForConditionalGeneration",
+            "AutoModel": "modeling_minicpm_o_tiny.MiniCPMO",
         }
 """
 
@@ -135,7 +135,7 @@ class MiniCPMOTinyLLM(nn.Module):
         return CausalLMOutputWithPast(logits=logits)
 
 
-class MiniCPMOForConditionalGeneration(PreTrainedModel):
+class MiniCPMO(PreTrainedModel):
     config_class = MiniCPMOConfig
     base_model_prefix = "llm"
     _no_split_modules = ["MiniCPMODecoderLayer"]
@@ -183,7 +183,7 @@ def _load_remote_class(output_dir: str):
         model_module = importlib.util.module_from_spec(model_spec)
         sys.modules[model_spec.name] = model_module
         model_spec.loader.exec_module(model_module)
-        return config_module.MiniCPMOConfig, model_module.MiniCPMOForConditionalGeneration
+        return config_module.MiniCPMOConfig, model_module.MiniCPMO
     finally:
         sys.path.remove(output_dir)
 
