@@ -28,36 +28,14 @@ from verl_omni.pipelines.model_base import OmniModelBase
 
 logger = logging.getLogger(__name__)
 
-_MINICPM_ARCHITECTURES = (
-    "MiniCPMV4_6ForConditionalGeneration",
-    "MiniCPMV4ForConditionalGeneration",
-    "MiniCPMVForConditionalGeneration",
-    "MiniCPMOForConditionalGeneration",
-    "MiniCPMOmniForConditionalGeneration",
-)
+_MINICPM_ARCHITECTURES = ("MiniCPMO",)
+_MINICPM_NO_SPLIT_MODULES = ["Qwen3DecoderLayer", "MiniCPMODecoderLayer"]
 
 
 def _register_minicpm_architectures(cls):
     for architecture in _MINICPM_ARCHITECTURES:
         OmniModelBase.register(architecture, stage="thinker")(cls)
     return cls
-
-
-def _override_config(model_config) -> dict[str, Any]:
-    override = getattr(model_config, "override_config", None) or {}
-    try:
-        return dict(override)
-    except TypeError:
-        return {}
-
-
-def _configured_list(model_config, key: str, default: list[str]) -> list[str]:
-    value = _override_config(model_config).get(key)
-    if value is None:
-        return default
-    if isinstance(value, str):
-        return [item.strip() for item in value.split(",") if item.strip()]
-    return list(value)
 
 
 def _first_existing_attr(module, names: list[str]):
@@ -73,35 +51,29 @@ class MiniCPMThinkerAdapter(OmniModelBase):
 
     @classmethod
     def get_strip_modules(cls, model_config) -> list[str]:
-        return _configured_list(
-            model_config,
-            "minicpm_strip_modules",
-            [
-                "talker",
-                "tts",
-                "audio_decoder",
-                "audio_generator",
-                "audio_head",
-                "audio_detokenizer",
-                "codec",
-                "code2wav",
-                "code_predictor",
-                "snac",
-                "vocoder",
-            ],
-        )
+        return [
+            "talker",
+            "tts",
+            "audio_decoder",
+            "audio_generator",
+            "audio_head",
+            "audio_detokenizer",
+            "codec",
+            "code2wav",
+            "code_predictor",
+            "snac",
+            "vocoder",
+        ]
 
     @classmethod
     def build_module(cls, model_config, torch_dtype):
         from transformers import AutoModel
 
-        from_pretrained_kwargs = dict(_override_config(model_config).get("minicpm_from_pretrained_kwargs", {}))
         return AutoModel.from_pretrained(
             model_config.local_path,
             torch_dtype=torch_dtype,
             config=model_config.hf_config,
             trust_remote_code=model_config.trust_remote_code,
-            **from_pretrained_kwargs,
         )
 
     @classmethod
@@ -110,11 +82,7 @@ class MiniCPMThinkerAdapter(OmniModelBase):
 
         trainable_component = _first_existing_attr(
             module,
-            _configured_list(
-                model_config,
-                "minicpm_understanding_module_names",
-                ["llm", "language_model", "model", "base_model", "text_model"],
-            ),
+            ["llm", "language_model", "model", "base_model", "text_model"],
         )
         if trainable_component is not None:
             if hasattr(trainable_component, "forward"):
@@ -124,15 +92,7 @@ class MiniCPMThinkerAdapter(OmniModelBase):
             if hasattr(trainable_component, "set_input_embeddings"):
                 module.set_input_embeddings = trainable_component.set_input_embeddings
 
-        no_split_modules = _configured_list(model_config, "minicpm_no_split_modules", [])
-        if no_split_modules:
-            module._no_split_modules = no_split_modules
-        elif not getattr(module, "_no_split_modules", None):
-            logger.warning(
-                "MiniCPM adapter did not set _no_split_modules. Set "
-                "`+actor_rollout_ref.model.override_config.minicpm_no_split_modules=[...]` "
-                "if FSDP wraps too coarsely."
-            )
+        module._no_split_modules = _MINICPM_NO_SPLIT_MODULES
         return module
 
     @classmethod

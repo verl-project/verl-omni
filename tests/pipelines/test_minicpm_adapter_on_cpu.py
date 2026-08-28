@@ -56,9 +56,8 @@ def _model_config(**override_config):
     )
 
 
-def test_minicpm_adapter_registered_for_common_architectures():
-    assert OmniModelBase.get_class_by_name("MiniCPMV4ForConditionalGeneration", "thinker") is MiniCPMThinkerAdapter
-    assert OmniModelBase.get_class_by_name("MiniCPMOForConditionalGeneration", "thinker") is MiniCPMThinkerAdapter
+def test_minicpm_adapter_registered_for_minicpmo_architecture():
+    assert OmniModelBase.get_class_by_name("MiniCPMO", "thinker") is MiniCPMThinkerAdapter
 
 
 def test_configure_model_strips_generation_modules_and_redirects_to_llm():
@@ -72,6 +71,7 @@ def test_configure_model_strips_generation_modules_and_redirects_to_llm():
     assert configured.forward.__func__ is configured.llm.forward.__func__
     assert configured.get_input_embeddings.__self__ is configured.llm
     assert configured.set_input_embeddings.__self__ is configured.llm
+    assert configured._no_split_modules == ["Qwen3DecoderLayer", "MiniCPMODecoderLayer"]
 
 
 def test_build_module_uses_transformers_auto_model(monkeypatch):
@@ -85,7 +85,7 @@ def test_build_module_uses_transformers_auto_model(monkeypatch):
         return loaded
 
     monkeypatch.setattr(AutoModel, "from_pretrained", fake_from_pretrained)
-    config = _model_config(minicpm_from_pretrained_kwargs={"init_tts": False})
+    config = _model_config()
 
     module = MiniCPMThinkerAdapter.build_module(config, torch.bfloat16)
 
@@ -94,4 +94,4 @@ def test_build_module_uses_transformers_auto_model(monkeypatch):
     assert calls[0][1]["torch_dtype"] is torch.bfloat16
     assert calls[0][1]["trust_remote_code"] is True
     assert calls[0][1]["config"] is config.hf_config
-    assert calls[0][1]["init_tts"] is False
+    assert "init_tts" not in calls[0][1]
