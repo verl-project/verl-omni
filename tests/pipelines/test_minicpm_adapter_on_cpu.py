@@ -13,7 +13,7 @@
 # limitations under the License.
 """CPU tests for the MiniCPM thinker training adapter."""
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import torch
@@ -21,6 +21,10 @@ import torch.nn as nn
 
 from verl_omni.pipelines.minicpm.thinker_training_adapter import MiniCPMThinkerAdapter
 from verl_omni.pipelines.model_base import OmniModelBase
+
+
+def _prepare_inputs_for_generation(self, input_ids, **kwargs):
+    return {"input_ids": input_ids, **kwargs}
 
 
 class _LLM(nn.Module):
@@ -43,6 +47,7 @@ class _MiniCPMModule(nn.Module):
     def __init__(self):
         super().__init__()
         self.llm = _LLM()
+        self.llm.prepare_inputs_for_generation = MethodType(_prepare_inputs_for_generation, self.llm)
         self.audio_decoder = nn.Linear(4, 4)
         self.code2wav = nn.Linear(4, 4)
 
@@ -71,6 +76,7 @@ def test_configure_model_strips_generation_modules_and_redirects_to_llm():
     assert configured.forward.__func__ is configured.llm.forward.__func__
     assert configured.get_input_embeddings.__self__ is configured.llm
     assert configured.set_input_embeddings.__self__ is configured.llm
+    assert configured.prepare_inputs_for_generation.__self__ is configured.llm
     assert configured._no_split_modules == ["Qwen3DecoderLayer", "MiniCPMODecoderLayer"]
 
 
