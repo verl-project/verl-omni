@@ -3,6 +3,7 @@
 set -x
 
 export WANDB_MODE=${WANDB_MODE:-offline}
+export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
 ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit}
 
 source $ASCEND_HOME_PATH/set_env.sh
