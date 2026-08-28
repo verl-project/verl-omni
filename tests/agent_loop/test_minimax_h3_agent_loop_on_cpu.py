@@ -54,20 +54,15 @@ def test_h3_agent_loop_marks_token_ids_as_native(monkeypatch):
     assert result == {"temperature": 1.0, MINIMAX_H3_TOKEN_ID_NATIVE_KEY: True}
 
 
-def test_h3_agent_loop_init_does_not_touch_the_tokenizer():
-    """Guard the fix for "RuntimeError: Already borrowed".
-
-    The upstream base ``__init__`` derives a chat-template system prompt, which
-    mutates the shared Rust tokenizer. Agent loops are built concurrently, so
-    that mutation races. H3 must not perform it.
-    """
+def test_h3_agent_loop_inherits_base_initialization_without_tokenization():
+    """The inherited base initializer supplies CT state without tokenization."""
 
     class ExplodingTokenizer:
         def __call__(self, *args, **kwargs):
-            raise AssertionError("H3 __init__ must not tokenize")
+            raise AssertionError("H3 initialization must not tokenize")
 
         def apply_chat_template(self, *args, **kwargs):
-            raise AssertionError("H3 __init__ must not apply a chat template")
+            raise AssertionError("H3 initialization must not apply a chat template")
 
     rollout = SimpleNamespace(prompt_length=64)
     trainer_config = SimpleNamespace(config=SimpleNamespace(actor_rollout_ref=SimpleNamespace(rollout=rollout)))
@@ -82,12 +77,14 @@ def test_h3_agent_loop_init_does_not_touch_the_tokenizer():
         data_config=SimpleNamespace(config={}),
     )
 
-    assert agent.system_prompt == []
     assert agent.tokenizer is tokenizer
     assert agent.rollout_config is rollout
+    assert agent.extra_tokenizer_map == {}
+    assert agent.continuous_token_builder is not None
 
 
-def test_h3_agent_loop_tokenizes_raw_text_without_special_tokens():
+@pytest.mark.parametrize("method_name", ["ct_build_initial_tokens", "apply_chat_template"])
+def test_h3_agent_loop_tokenizes_raw_text_without_special_tokens(method_name):
     calls = []
 
     class Tokenizer:
@@ -100,7 +97,7 @@ def test_h3_agent_loop_tokenizes_raw_text_without_special_tokens():
         agent.tokenizer = Tokenizer()
         agent.rollout_config = SimpleNamespace(prompt_length=128)
         agent.loop = asyncio.get_running_loop()
-        return await agent.apply_chat_template(
+        return await getattr(agent, method_name)(
             [
                 {
                     "role": "user",
@@ -127,11 +124,12 @@ def test_h3_agent_loop_tokenizes_raw_text_without_special_tokens():
     ]
 
 
-def test_h3_agent_loop_rejects_empty_text():
+@pytest.mark.parametrize("method_name", ["ct_build_initial_tokens", "apply_chat_template"])
+def test_h3_agent_loop_rejects_empty_text(method_name):
     async def run():
         agent = object.__new__(MiniMaxH3DiffusionSingleTurnAgentLoop)
         agent.rollout_config = SimpleNamespace(prompt_length=128)
-        return await agent.apply_chat_template([{"role": "user", "content": [{"type": "image"}]}])
+        return await getattr(agent, method_name)([{"role": "user", "content": [{"type": "image"}]}])
 
     with pytest.raises(ValueError, match="non-empty text prompt"):
         asyncio.run(run())

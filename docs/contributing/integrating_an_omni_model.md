@@ -1,6 +1,6 @@
 # How to Add a New Omni Model
 
-Last updated: 07/28/2026.
+Last updated: 08/24/2026.
 
 This guide walks through adding a new omni (multimodal autoregressive) model to
 the verl-omni training framework. It uses the Qwen3-Omni Thinker adapter as a
@@ -145,6 +145,39 @@ Key points:
   on `verl_omni`'s `omni_trainer.yaml` defaults.
 - The `"$@"` at the end lets callers override any field without editing
   the script (e.g. `bash run.sh trainer.total_epochs=10`).
+
+### Sizing rollout memory in colocated sleep mode
+
+In colocated training the rollout engine sleeps (level 1) while the actor
+trains and re-maps its memory (`weights`, then `kv_cache`) every step, on
+the same GPUs. Two footprint components matter, and they are controlled by
+different knobs:
+
+- **Steady-state KV cache** — pre-allocated at
+  `gpu_memory_utilization × total` and self-limiting (a full pool preempts,
+  it does not OOM). Raise it for long-response workloads that genuinely
+  fill KV; lower it to widen the wake-up remap margin (audio and other
+  encoder-heavy workloads see larger unbudgeted transients, so they need
+  more margin than image/text-only ones at the same utilization).
+- **Unbudgeted generation transients** — CUDA-graph capture pools (largest
+  capture defaults to `min(2 × max_num_seqs, 512)`) and the in-flight
+  multimodal envelope (encoder outputs retained for all concurrently
+  admitted requests) sit on top of every budget. These are bounded by
+  `max_num_seqs` and `cudagraph_capture_sizes`, **not** by
+  `gpu_memory_utilization` or `max_num_batched_tokens`.
+
+For encoder-heavy workloads (e.g. audio) with short responses, capping
+concurrency keeps the transient off the memory ceiling at negligible
+throughput cost:
+
+```bash
++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs=256 \
+    actor_rollout_ref.rollout.cudagraph_capture_sizes=[1,2,4,8,16,32,64,128,256]
+```
+
+For long-response workloads that fill the KV pool, prefer keeping
+concurrency high and tuning `gpu_memory_utilization` instead — preempting
+KV is cheap relative to starving decode.
 
 Reference:
 [`examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh`](../../examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh)

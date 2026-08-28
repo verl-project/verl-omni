@@ -20,7 +20,6 @@ without needing a GPU or the real vLLM-Omni engine.
 
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 
@@ -61,7 +60,6 @@ def _make_h3_final_res(batch_size: int = 1):
 
 def _server():
     server = object.__new__(server_module.vLLMOmniHttpServer)
-    server._ar_mode = False
     server.global_steps = 3
     server._to_tensor = __import__("torchvision").transforms.PILToTensor()
     return server
@@ -109,10 +107,10 @@ class TestH3RolloutOutputContract:
         assert len(frames) == _VIDEO_T
 
     def test_5d_wandb_video(self):
-        """wrap_val_samples_for_wandb handles [B,T,C,H,W] batched video."""
+        """wrap_val_samples_for_wandb handles H3's [B,C,T,H,W] video."""
         from verl_omni.utils.tracking import wrap_val_samples_for_wandb
 
-        video = torch.randint(0, 256, (1, _VIDEO_T, _VIDEO_C, 64, 64), dtype=torch.uint8)
+        video = torch.randint(0, 256, (1, _VIDEO_C, _VIDEO_T, 64, 64), dtype=torch.uint8)
         samples = [("a test prompt", video, 0.5, None, None)]
         wrapped, tmpdir, media = wrap_val_samples_for_wandb(samples, fps=24, output_dir=None)
         assert len(wrapped) == 1
@@ -178,49 +176,6 @@ class TestH3RolloutOutputContract:
 
 
 def _run_generate(server, final_res, sampling_params):
-    """Run the server's generate path with the fake final_res."""
-
-    async def _fake():
-        return final_res
-
-    # Patch the server's internal generate to return our fake result
-    server._engine = SimpleNamespace(generate=_fake)
-    # We can't easily call the full generate(), so test the output processing directly
-    return _process_output(server, final_res, sampling_params)
-
-
-def _process_output(server, final_res, sampling_params):
-    """Directly test the _process_output path that handles the tuple."""
-    output_type = sampling_params.get("output_type", "pt")
-
-    diffusion_output = final_res.images[0]
-
-    rollout_audio = None
-    if isinstance(diffusion_output, tuple | list):
-        rollout_audio = diffusion_output[1] if len(diffusion_output) > 1 else None
-        diffusion_output = diffusion_output[0]
-
-    if output_type == "latent":
-        diffusion_output = torch.as_tensor(diffusion_output).float()
-    else:
-        if isinstance(diffusion_output, np.ndarray):
-            diffusion_output = torch.from_numpy(diffusion_output)
-        elif not isinstance(diffusion_output, torch.Tensor):
-            diffusion_output = server._to_tensor(diffusion_output)
-        diffusion_output = server_module._pixel_output_to_uint8(diffusion_output)
-
-    extra_fields = {"global_steps": server.global_steps}
-    if rollout_audio is not None:
-        extra_fields["audio"] = rollout_audio
-        extra_fields.setdefault("audio_sample_rate", _AUDIO_SR)
-
-    for metadata_group in server_module._rollout_metadata_groups(final_res.multimodal_output):
-        for key, value in metadata_group.items():
-            if key not in extra_fields:
-                extra_fields[key] = value
-
-    return SimpleNamespace(
-        diffusion_output=diffusion_output,
-        extra_fields=extra_fields,
-        stop_reason="stop",
-    )
+    """Run the production diffusion output strategy with a fake engine result."""
+    strategy = server_module.DiffusionStrategy(server)
+    return strategy.process_output(final_res, params=None, sampling_params=sampling_params)

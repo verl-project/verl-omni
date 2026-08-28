@@ -384,6 +384,7 @@ actor_rollout_ref:
       sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
       sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
     model_type: diffusion_model
+  separate: false
   hybrid_engine: true
   nccl_timeout: 600
 data:
@@ -522,10 +523,15 @@ reward:
 distillation:
   _target_: verl_omni.workers.config.diffusion.DiffusionDistillationConfig
   enabled: false
+  n_gpus_per_node: 0
+  nnodes: 0
   teacher_models:
     teacher_model:
       _target_: verl_omni.workers.config.diffusion.DiffusionDistillationTeacherModelConfig
+      key: null
       model_path: null
+      world_size: 0
+  teacher_key: data_source
 algorithm:
   _target_: verl_omni.trainer.config.DiffusionAlgoConfig
   trainer_type: policy_gradient

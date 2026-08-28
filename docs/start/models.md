@@ -1,6 +1,6 @@
 # Supported Models
 
-Last updated: 08/14/2026.
+Last updated: 08/19/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
@@ -96,6 +96,48 @@ alignment and does not directly enforce source-image preservation.
 
 ---
 
+### Boogu-Image
+
+| Property | Detail |
+|----------|--------|
+| **Hugging Face ID** | `Boogu/Boogu-Image-0.1-Base` (T2I), `Boogu/Boogu-Image-0.1-Edit` (TI2I) |
+| **Architecture** | Double-stream + single-stream DiT with context/noise/reference refiners |
+| **Modality** | Text → Image; Text + Image → Image (Edit) |
+| **Pipeline** | Flow-matching with sequential text CFG; registered as `BooguImagePipeline` |
+| **Text encoder** | Qwen3-VL (`mllm` submodule; also encodes the Edit reference image) |
+| **Default resolution** | 1024×1024 in the example recipe |
+| **Condition images** | Exactly one per sample (Edit); output resolution follows the reference (`align_res`) |
+
+Both checkpoints share the architecture string, so one adapter pair serves
+both: the training adapter is `BooguImage`, rollout uses vLLM-Omni
+`BooguImagePipelineWithLogProb`. A run is T2I or Edit depending on whether the
+dataset carries condition images.
+
+Two Boogu-specific requirements are not tuning knobs. The `boogu-image` package
+must be installed (the checkpoint's `transformer_boogu.py` is a shim that
+re-exports the canonical transformer from it), and `fsdp_layer_prefixes` must
+be set — Boogu's DiT blocks are not named `transformer_blocks.*`, so LoRA
+weight-sync collection gathers zero parameters without it. The rollout pipeline
+supports neither TP nor SP nor CFG-parallel, so rollout TP is pinned to 1.
+
+For dataset layout, launch overrides, and Edit specifics, see
+[Examples - Boogu-Image FlowGRPO training](../../examples/flowgrpo_trainer/boogu_image/README.md).
+
+**Supported trainers:**
+
+| Trainer | Example script | GPU config |
+|---------|---------------|------------|
+| Flow-GRPO (LoRA) | `examples/flowgrpo_trainer/boogu_image/run_boogu_image_ocr_lora.sh` | 4×GPU |
+
+Recipe defaults: LoRA rank 64 / alpha 128, lr 3e-4, train batch 32, `rollout.n=16`,
+guidance scale 4.0, SDE window 2 over `[0,5]` at noise level 1.2, validation at
+50 inference steps with noise level 0.
+
+**Reward model:** `Qwen/Qwen3-VL-8B-Instruct` GenRM
+(`compute_score_ocr`, TP=4, colocated).
+
+---
+
 ## Diffusion Video Models
 
 ### Wan2.2-TI2V-5B
@@ -188,6 +230,7 @@ rather than a separate per-stage YAML file.
 | Qwen-Image | MM-DiT | Qwen2 + T5 |
 | Qwen-Image-Edit | MM-DiT (I2I concat) | Qwen2.5-VL |
 | SD3.5 Medium | MM-DiT | CLIP-L + CLIP-G + T5 |
+| Boogu-Image | Double/single-stream DiT | Qwen3-VL |
 | Wan2.2-TI2V-5B | Wan DiT | T5 |
 | BAGEL | Unified MM | — |
 | Qwen3-Omni-30B | Omni MoE | Qwen3 |
@@ -198,7 +241,7 @@ rather than a separate per-stage YAML file.
 
 | Reward model | HF ID / Source | Modality | Used by | Deployment |
 |-------------|---------------|----------|---------|------------|
-| Qwen3-VL-8B-Instruct | `Qwen/Qwen3-VL-8B-Instruct` | Vision-Language | Qwen-Image (all trainers) | vLLM, TP=4, colocated |
+| Qwen3-VL-8B-Instruct | `Qwen/Qwen3-VL-8B-Instruct` | Vision-Language | Qwen-Image (all trainers), Boogu-Image (Flow-GRPO) | vLLM, TP=4, colocated |
 | Qwen2.5-VL-3B-Instruct | `Qwen/Qwen2.5-VL-3B-Instruct` | Vision-Language | SD3.5 (Flow-GRPO) | vLLM, TP=1, dedicated pool |
 | PickScore | `yuvalkirstain/PickScore_v1` | Vision (preference) | Qwen-Image-Edit (Flow-GRPO), BAGEL (PickScore recipe) | Local CLIP load, async workers |
 | HPSv3 | Local `.safetensors` | Vision (aesthetic) | Wan2.2 (DanceGRPO) | Local safetensors load |
@@ -212,13 +255,13 @@ trainer's README in `examples/`.
 
 ## Which Trainer for Which Model?
 
-| Algorithm | Qwen-Image | Qwen-Image-Edit | SD3.5 | Wan2.2 | BAGEL | Qwen3-Omni |
-|-----------|:---:|:---:|:---:|:---:|:---:|:---:|
-| Flow-GRPO | ✅ | ✅ | ✅ | — | ✅ | — |
-| Flow-DPPO | ✅ | — | — | — | — | — |
-| GRPO-Guard | ✅ | — | — | — | — | — |
-| Mix-GRPO | ✅ | — | — | — | — | — |
-| DanceGRPO | — | — | — | ✅ | — | — |
-| Diffusion-DPO | ✅ | — | ✅ | — | — | — |
-| DiffusionNFT | ✅ | — | — | — | — | — |
-| GSPO | — | — | — | — | — | ✅ |
+| Algorithm | Qwen-Image | Qwen-Image-Edit | SD3.5 | Boogu-Image | Wan2.2 | BAGEL | Qwen3-Omni |
+|-----------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Flow-GRPO | ✅ | ✅ | ✅ | ✅ | — | ✅ | — |
+| Flow-DPPO | ✅ | — | — | — | — | — | — |
+| GRPO-Guard | ✅ | — | — | — | — | — | — |
+| Mix-GRPO | ✅ | — | — | — | — | — | — |
+| DanceGRPO | — | — | — | — | ✅ | — | — |
+| Diffusion-DPO | ✅ | — | ✅ | — | — | — | — |
+| DiffusionNFT | ✅ | — | — | — | — | — | — |
+| GSPO | — | — | — | — | — | — | ✅ |

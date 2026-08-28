@@ -65,9 +65,9 @@ gpu = [
     "liger-kernel",
 ]
 # Training stack (install in step 2).
-# Git commit must match .github/verl_pin.txt (reports as 0.10.0.dev at c4b389a).
+# Git commit must match .github/verl_pin.txt (reports as 0.10.0.dev at fefb080).
 train = [
-    "verl @ git+https://github.com/verl-project/verl.git@c4b389adadc58ce51cb2b63e70df497ca166d77f",
+    "verl @ git+https://github.com/verl-project/verl.git@fefb080262e1c015a0ea05f958822a6a512dc795",
 ]
 dev = [
     "pytest",

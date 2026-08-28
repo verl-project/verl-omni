@@ -21,13 +21,16 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
 
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
+    validate_separate_config,
 )
+from verl_omni.utils.config import validate_config
 from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
 
 
@@ -61,6 +64,7 @@ def main(config):
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
     OmegaConf.resolve(config)
+    validate_config(config)
     fallback_fa3_if_unavailable(config)
     validate_attention_consistency(config)
     run_diffusion(config)
@@ -75,6 +79,9 @@ def run_diffusion(config, task_runner_class=None) -> None:
                 settings, model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    OmegaConf.resolve(config)
+    validate_separate_config(config)
+
     # Check if Ray is not initialized
     if not ray.is_initialized():
         # Initialize Ray with a local cluster configuration
@@ -159,7 +166,12 @@ class TaskRunner:
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
-        if config.algorithm.sample_source == "offline":
+        separate = config.actor_rollout_ref.get("separate", False)
+        if separate:
+            if not hasattr(Role, "Actor"):
+                raise ValueError("Separate training without colocated rollout requires verl Role.Actor support.")
+            role = Role.Actor
+        elif config.algorithm.sample_source == "offline":
             if not hasattr(Role, "Actor"):
                 raise ValueError("Offline training without rollout requires verl Role.Actor support.")
             role = Role.Actor
@@ -192,6 +204,14 @@ class TaskRunner:
             config.reward.reward_model.nnodes = config.trainer.nnodes
             config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
+        distillation_config = config.get("distillation")
+        if is_distillation_enabled(distillation_config) and distillation_config.nnodes > 0:
+            if distillation_config.n_gpus_per_node <= 0:
+                raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
+
+            teacher_pool = [distillation_config.n_gpus_per_node] * distillation_config.nnodes
+            resource_pool_spec["teacher_pool"] = teacher_pool
+
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
@@ -212,11 +232,31 @@ class TaskRunner:
         elif config.algorithm.sample_source == "offline":
             return
 
+    def add_teacher_model_worker(self, config, teacher_model_cls):
+        """Add standalone teacher model workers when distillation runs on its own resource pool."""
+        from verl.trainer.ppo.ray_trainer import Role
+
+        distillation_config = config.get("distillation")
+        if is_distillation_enabled(distillation_config) and distillation_config.nnodes > 0:
+            self.role_worker_mapping[Role.TeacherModel] = ray.remote(teacher_model_cls)
+            self.mapping[Role.TeacherModel] = "teacher_pool"
+
     def add_ref_policy_worker(self, config, ref_policy_cls):
         """Add reference policy worker if KL loss or KL reward is used."""
-        # Ref policy has been fused into ActorRolloutRefWorker in new model engine.
-        # we don't need to add a separate ref policy worker group.
-        return
+        if not config.actor_rollout_ref.get("separate", False) or not need_reference_policy(config):
+            return
+
+        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+        if lora_rank <= 0:
+            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        if ref_in_actor:
+            return
+
+        from verl.trainer.ppo.ray_trainer import Role
+
+        self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)
+        self.mapping[Role.RefPolicy] = "global_pool"
 
     def run(self, config):
         """Execute the main diffusion training workflow.
@@ -239,6 +279,8 @@ class TaskRunner:
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
 
         self.add_reward_model_resource_pool(config)
+
+        self.add_teacher_model_worker(config, actor_rollout_cls)
 
         # Add a reference policy worker if KL loss is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)

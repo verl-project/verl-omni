@@ -11,27 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/version")) as f:
     __version__ = f.read().strip()
-
-
-from verl_omni.patches import apply_numpy_dataproto_serialization_fix
-
-apply_numpy_dataproto_serialization_fix()
-
-
-# Fallback for CPU-only environments where vLLM-Omni current_omni_platform.device_type is empty.
-# This prevents RuntimeError: Device string must not be empty when importing modules with torch.amp.autocast.
-# TODO: Remove when vllm-omni initializes device_type on CPU platforms by default.
-try:
-    import vllm_omni.platforms
-
-    if not vllm_omni.platforms.current_omni_platform.device_type:
-        vllm_omni.platforms.current_omni_platform.device_type = "cpu"
-except Exception:
-    pass
 
 
 # Import pipelines / rollout / reward loop / engines to auto-register them

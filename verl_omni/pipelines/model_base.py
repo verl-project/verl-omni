@@ -117,6 +117,15 @@ class DiffusionModelBase(ABC):
         return
 
     @classmethod
+    def preserve_fp32_modules(cls) -> bool:
+        """Whether to preserve diffusers ``_keep_in_fp32_modules`` during model loading.
+
+        Models whose FSDP wrapping units contain both fp32 and reduced-precision
+        parameters should override this and return ``False``.
+        """
+        return True
+
+    @classmethod
     def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:
         """Validate LoRA settings; default no-op. Override for rollout-sync-constrained models."""
         return
