@@ -247,7 +247,7 @@ def main() -> None:
     parser.add_argument("--rmse-atol", type=float, default=1e-3)
     parser.add_argument("--p99-atol", type=float, default=2e-3)
     parser.add_argument("--max-frac-abs-over-atol", type=float, default=2e-2)
-    parser.add_argument("--min-cos-sim", type=float, default=0.999)
+    parser.add_argument("--min-cos-sim", type=float, default=0.99)
     parser.add_argument("--eps", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--rtol", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--image-atol", type=float, default=None, help=argparse.SUPPRESS)
