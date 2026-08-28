@@ -1,5 +1,6 @@
 # Qwen-Image Diffusion DPO LoRA RL, vllm_omni rollout
 set -x
+export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
 
 # Set WORKSPACE to any writable directory; defaults to $HOME
 WORKSPACE=${WORKSPACE:-$HOME}
@@ -74,4 +75,3 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.test_freq=30 \
     trainer.total_epochs=15 \
     trainer.total_training_steps=300 "$@"
-

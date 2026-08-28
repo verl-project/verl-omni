@@ -4,6 +4,7 @@
 #            https://github.com/Tencent-Hunyuan/MixGRPO
 #
 set -x
+export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
 ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.0.0}
 source $ASCEND_HOME_PATH/set_env.sh
 source $ASCEND_HOME_PATH/../nnal/atb/set_env.sh
