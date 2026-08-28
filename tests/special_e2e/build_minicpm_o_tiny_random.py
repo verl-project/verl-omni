@@ -52,7 +52,7 @@ from transformers import PretrainedConfig
 
 
 class MiniCPMOConfig(PretrainedConfig):
-    model_type = "minicpm_o_tiny"
+    model_type = "minicpmo"
 
     def __init__(
         self,
@@ -61,23 +61,116 @@ class MiniCPMOConfig(PretrainedConfig):
         num_hidden_layers=2,
         intermediate_size=128,
         num_attention_heads=4,
+        num_key_value_heads=4,
+        max_position_embeddings=2048,
+        init_vision=True,
+        init_audio=True,
+        init_tts=True,
+        audio_config=None,
+        slice_config=None,
+        tts_config=None,
+        vision_config=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self.version = "4.5"
+        self.attention_bias = False
+        self.attention_dropout = 0.0
+        self.audio_chunk_length = 1.0
+        self.audio_pool_step = 5
+        self.batch_vision_input = True
+        self.drop_vision_last_layer = False
+        self.head_dim = hidden_size // num_attention_heads
+        self.hidden_act = "silu"
+        self.image_size = 448
+        self.init_audio = init_audio
+        self.init_tts = init_tts
+        self.init_vision = init_vision
+        self.initializer_range = 0.02
+        self.listen_speak_type = "asr"
+        self.max_position_embeddings = max_position_embeddings
+        self.max_window_layers = num_hidden_layers
+        self.num_key_value_heads = num_key_value_heads
+        self.patch_size = 14
+        self.query_num = 64
+        self.rms_norm_eps = 1e-6
+        self.rope_scaling = None
+        self.rope_theta = 1000000
+        self.slice_config = slice_config or {
+            "max_slice_nums": 1,
+            "model_type": "minicpmv",
+            "patch_size": 14,
+            "scale_resolution": 448,
+        }
+        self.slice_mode = True
+        self.sliding_window = None
+        self.stream_input = True
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.intermediate_size = intermediate_size
         self.num_attention_heads = num_attention_heads
         self.tie_word_embeddings = False
+        self.use_cache = True
+        self.use_image_id = True
+        self.use_sliding_window = False
+        self.vision_batch_size = 16
+        self.audio_config = audio_config or {
+            "_attn_implementation_autoset": True,
+            "architectures": ["MiniCPMWhisperEncoder"],
+            "d_model": hidden_size,
+            "decoder_attention_heads": num_attention_heads,
+            "decoder_ffn_dim": intermediate_size,
+            "decoder_layers": num_hidden_layers,
+            "encoder_attention_heads": num_attention_heads,
+            "encoder_ffn_dim": intermediate_size,
+            "encoder_layers": num_hidden_layers,
+            "model_type": "whisper",
+            "num_hidden_layers": num_hidden_layers,
+            "num_mel_bins": 80,
+            "torch_dtype": "float32",
+            "vocab_size": vocab_size,
+        }
+        self.tts_config = tts_config or {
+            "_attn_implementation_autoset": True,
+            "attention_type": "full_attention",
+            "attn_implementation": "eager",
+            "hidden_size": hidden_size,
+            "intermediate_size": intermediate_size,
+            "llm_dim": hidden_size,
+            "llm_hidden_size": hidden_size,
+            "llm_intermediate_size": intermediate_size,
+            "model_type": "minicpmtts",
+            "num_attention_heads": num_attention_heads,
+            "num_hidden_layers": num_hidden_layers,
+            "num_key_value_heads": num_key_value_heads,
+            "use_text": True,
+        }
+        self.vision_config = vision_config or {
+            "_attn_implementation_autoset": True,
+            "attention_dropout": 0.0,
+            "hidden_act": "gelu_pytorch_tanh",
+            "hidden_size": hidden_size,
+            "image_size": 448,
+            "intermediate_size": intermediate_size,
+            "layer_norm_eps": 1e-6,
+            "model_type": "siglip_vision_model",
+            "num_attention_heads": num_attention_heads,
+            "num_channels": 3,
+            "num_hidden_layers": num_hidden_layers,
+            "patch_size": 14,
+        }
         self.architectures = ["MiniCPMO"]
         self.auto_map = {
             "AutoConfig": "configuration_minicpm_o_tiny.MiniCPMOConfig",
             "AutoModel": "modeling_minicpm_o_tiny.MiniCPMO",
+            "AutoModelForCausalLM": "modeling_minicpm_o_tiny.MiniCPMO",
         }
 """
 
 _MODEL_CODE = r"""
+import types
+
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
@@ -87,6 +180,10 @@ try:
     from .configuration_minicpm_o_tiny import MiniCPMOConfig
 except ImportError:
     from configuration_minicpm_o_tiny import MiniCPMOConfig
+
+
+def prepare_inputs_for_generation(self, input_ids, **kwargs):
+    return {"input_ids": input_ids, **kwargs}
 
 
 class MiniCPMODecoderLayer(nn.Module):
@@ -143,6 +240,7 @@ class MiniCPMO(PreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.llm = MiniCPMOTinyLLM(config)
+        self.llm.prepare_inputs_for_generation = types.MethodType(prepare_inputs_for_generation, self.llm)
         self.audio_decoder = nn.Linear(config.hidden_size, config.hidden_size)
         self.code2wav = nn.Linear(config.hidden_size, config.hidden_size)
         self.post_init()
