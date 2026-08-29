@@ -96,6 +96,12 @@ class OmniPPOTrainerSync(PPOTrainerSync):
         self.use_teacher_policy = use_teacher
 
         if use_teacher:
+            # Monkey-patch the minimal padding template so teacher-side fields
+            # (teacher_ids / teacher_logprobs) are padded alongside student tokens.
+            import verl.trainer.ppo.padding_utils as _padding_utils
+
+            _padding_utils.construct_minimal_padding_template = patched_padding_template
+
             teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
             self.teacher_model_manager = OmniMultiTeacherModelManager(
                 config=self.config,
