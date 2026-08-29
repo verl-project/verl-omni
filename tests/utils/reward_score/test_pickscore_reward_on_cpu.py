@@ -164,3 +164,65 @@ async def test_consumer_isolates_invalid_image_from_batch(monkeypatch):
     assert results[2] == 3.0
     assert len(inferencer.batches) == 1
     assert inferencer.batches[0][0] == ["prompt", "prompt"]
+
+
+def test_extract_frames_handles_image_and_video_shapes():
+    single = pickscore_reward._extract_frames(torch.rand(3, 2, 2))
+    video = pickscore_reward._extract_frames(torch.rand(3, 4, 2, 2))  # (C, T, H, W)
+    subsampled = pickscore_reward._extract_frames(torch.rand(3, 4, 2, 2), frame_interval=2)
+    batched = pickscore_reward._extract_frames(torch.rand(2, 3, 4, 2, 2))  # (B, C, T, H, W)
+
+    assert [len(single), len(video), len(subsampled), len(batched)] == [1, 4, 2, 8]
+    assert all(isinstance(frame, Image.Image) for frame in single + video + subsampled + batched)
+
+
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        (torch.rand(2, 2), ValueError),
+        (torch.rand(2, 4, 2, 2), ValueError),
+        (torch.rand(3, 2, 2).numpy(), TypeError),
+    ],
+)
+def test_extract_frames_rejects_invalid_inputs(value, error):
+    with pytest.raises(error):
+        pickscore_reward._extract_frames(value)
+
+
+def test_extract_frames_rejects_nonpositive_interval():
+    with pytest.raises(ValueError, match="frame_interval must be positive"):
+        pickscore_reward._extract_frames(torch.rand(3, 2, 2), frame_interval=0)
+
+
+class _CountingInferencer:
+    def __init__(self):
+        self.batches = []
+
+    def score(self, prompts, images):
+        self.batches.append((list(prompts), list(images)))
+        return torch.arange(len(images), dtype=torch.float32)
+
+
+@pytest.mark.asyncio
+async def test_video_frames_are_scored_and_averaged(monkeypatch):
+    inferencer = _CountingInferencer()
+    queue = asyncio.Queue()
+    monkeypatch.setattr(pickscore_reward, "_score_queue", queue)
+    monkeypatch.setattr(pickscore_reward, "_consumer_started", False)
+    monkeypatch.setattr(pickscore_reward, "_consumer_task", None)
+    monkeypatch.setattr(pickscore_reward, "_consumer_lock", asyncio.Lock())
+    monkeypatch.setattr(pickscore_reward, "_PickScoreInferencer", lambda device: inferencer)
+
+    result = await pickscore_reward.compute_score_pickscore(
+        data_source="test",
+        solution_image=torch.rand(3, 4, 2, 2),  # 4 frames, all against one prompt
+        ground_truth="a cat",
+        extra_info={},
+        device="cpu",
+    )
+    queue.put_nowait((None, None, None))
+    await pickscore_reward._consumer_task
+
+    assert result == {"score": 1.5, "pickscore_raw": 1.5}  # mean(arange(4))
+    assert len(inferencer.batches) == 1
+    assert inferencer.batches[0][0] == ["a cat"] * 4

@@ -96,13 +96,51 @@ class _PickScoreInferencer:
 
 def _to_pil_hwc(image) -> Image.Image:
     if isinstance(image, torch.Tensor):
-        image = image.cpu().numpy()
+        image = image.float().cpu().numpy()
     if isinstance(image, np.ndarray):
         if image.ndim == 3 and image.shape[0] in (1, 3):
             image = image.transpose(1, 2, 0)
+        image = (image * 255).round().clip(0, 255).astype(np.uint8)
         image = Image.fromarray(image)
     assert isinstance(image, Image.Image)
     return image
+
+
+def _extract_frames(solution_image, frame_interval: int = 1) -> list[Image.Image]:
+    """Convert an image or video tensor into sampled PIL frames."""
+    if not isinstance(solution_image, torch.Tensor):
+        raise TypeError(f"solution_image must be a torch.Tensor, got {type(solution_image).__name__}.")
+    if frame_interval <= 0:
+        raise ValueError(f"frame_interval must be positive, got {frame_interval}.")
+    if solution_image.ndim not in (3, 4, 5):
+        raise ValueError(f"solution_image must be 3-D, 4-D, or 5-D, got shape {tuple(solution_image.shape)}.")
+
+    is_channels_last = solution_image.shape[-1] in (1, 3)
+    channel_dim = (
+        solution_image.shape[-1] if is_channels_last else solution_image.shape[1 if solution_image.ndim == 5 else 0]
+    )
+    if channel_dim not in (1, 3):
+        raise ValueError(f"solution_image must have 1 or 3 channels, got shape {tuple(solution_image.shape)}.")
+
+    if solution_image.ndim == 3:
+        if is_channels_last:
+            solution_image = solution_image.permute(2, 0, 1)
+        solution_image = solution_image.unsqueeze(0)
+
+    elif solution_image.ndim == 4:
+        if is_channels_last:
+            solution_image = solution_image.permute(3, 0, 1, 2)
+        solution_image = solution_image[:, ::frame_interval]
+        solution_image = solution_image.permute(1, 0, 2, 3)
+
+    elif solution_image.ndim == 5:
+        if is_channels_last:
+            solution_image = solution_image.permute(0, 4, 1, 2, 3)
+        solution_image = solution_image[:, :, ::frame_interval]
+        solution_image = solution_image.permute(0, 2, 1, 3, 4)
+        solution_image = solution_image.reshape(-1, *solution_image.shape[2:])
+
+    return [_to_pil_hwc(frame) for frame in solution_image]
 
 
 def _score_batch(requests) -> list[float | Exception]:
@@ -187,12 +225,31 @@ async def compute_score_pickscore(
     device: str = "cuda",
     **kwargs,
 ) -> dict:
+    """Score a still image or a video against ``ground_truth`` with PickScore.
+
+    A single PIL image or ``(C, H, W)`` tensor is scored directly; a video tensor is
+    split into frames, every frame is scored against the same prompt through the shared
+    batching consumer, and the frame PickScores are averaged. ``extra_info["frame_interval"]``
+    subsamples the frames (default 1, i.e. every frame).
+    """
     await _ensure_consumer(device)
 
     prompt = ground_truth if ground_truth else ""
+    # TODO (gpu-bringup): video stream only; H3 audio needs its own scorer.
+    if isinstance(solution_image, Image.Image):
+        frames = [solution_image]
+    else:
+        frame_interval = int(extra_info.get("frame_interval", 1)) if extra_info else 1
+        frames = _extract_frames(solution_image, frame_interval=frame_interval)
+
     loop = asyncio.get_running_loop()
-    future = loop.create_future()
-    await _score_queue.put((prompt, solution_image, future))
-    raw_score = await future
+    futures = []
+    for frame in frames:
+        future = loop.create_future()
+        await _score_queue.put((prompt, frame, future))
+        futures.append(future)
+
+    frame_scores = await asyncio.gather(*futures)
+    raw_score = sum(frame_scores) / len(frame_scores)
 
     return {"score": raw_score, "pickscore_raw": raw_score}
