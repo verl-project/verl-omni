@@ -159,6 +159,46 @@ class ARStrategy(OmniStrategyBase):
         if isinstance(engine_args.get("compilation_config"), dict):
             engine_args["compilation_config"] = _drop_none_mapping_values(engine_args["compilation_config"])
 
+    def validate_multimodal_args(
+        self,
+        *,
+        image_data: Optional[list[Any]],
+        video_data: Optional[list[Any]],
+        audio_data: Optional[list[Any]],
+        mm_processor_kwargs: Optional[dict[str, Any]],
+    ) -> None:
+        """Fail closed for AR inputs outside the validated Thinker contract."""
+        hf_config = getattr(self.server.model_config, "hf_config", None)
+        is_qwen3_omni = getattr(hf_config, "model_type", None) == "qwen3_omni_moe"
+
+        unsupported = []
+        if image_data is not None and not is_qwen3_omni:
+            unsupported.append("image_data")
+        if video_data is not None:
+            unsupported.append("video_data")
+        if audio_data is not None and not is_qwen3_omni:
+            unsupported.append("audio_data")
+
+        if mm_processor_kwargs:
+            if audio_data is None or not is_qwen3_omni:
+                unsupported.append("mm_processor_kwargs")
+            else:
+                unknown_kwargs = set(mm_processor_kwargs) - {"sampling_rate"}
+                if unknown_kwargs:
+                    raise ValueError(
+                        "Qwen3-Omni audio rollout only permits per-request sampling_rate; "
+                        f"got unsupported processor kwargs: {sorted(unknown_kwargs)}"
+                    )
+                sampling_rate = mm_processor_kwargs.get("sampling_rate")
+                if sampling_rate is not None and int(sampling_rate) != 16000:
+                    raise ValueError(f"Qwen3-Omni audio rollout requires sampling_rate=16000, got {sampling_rate}")
+
+        if unsupported:
+            raise NotImplementedError(
+                "vLLM-Omni AR rollout supports images and audio only for the Qwen3-Omni Thinker; "
+                f"got unsupported multimodal args: {', '.join(unsupported)}"
+            )
+
     def preprocess_input(
         self,
         prompt_ids: list[int],

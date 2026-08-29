@@ -132,6 +132,27 @@ class DiffusionStrategy(OmniStrategyBase):
         engine_args["enable_prompt_embed_cache"] = self.server.config.enable_prompt_embed_cache
         engine_args["prompt_embed_cache_size"] = self.server.config.prompt_embed_cache_size
 
+    def validate_multimodal_args(
+        self,
+        *,
+        image_data: Optional[list[Any]],
+        video_data: Optional[list[Any]],
+        audio_data: Optional[list[Any]],
+        mm_processor_kwargs: Optional[dict[str, Any]],
+    ) -> None:
+        """Reject public arguments that the diffusion prompt path does not wire."""
+        del image_data, video_data
+        unsupported = []
+        if audio_data is not None:
+            unsupported.append("audio_data")
+        if mm_processor_kwargs:
+            unsupported.append("mm_processor_kwargs")
+        if unsupported:
+            raise NotImplementedError(
+                "vLLM-Omni diffusion rollout does not currently wire these multimodal args: "
+                f"{', '.join(unsupported)}"
+            )
+
     def preprocess_input(
         self,
         prompt_ids: list[int],

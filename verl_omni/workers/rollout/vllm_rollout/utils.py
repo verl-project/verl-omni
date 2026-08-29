@@ -26,7 +26,6 @@ from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_han
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
-
 def _split_visible_devices(value: str) -> list[str]:
     """Split a visible-devices env value into stripped, non-empty entries."""
     return [entry.strip() for entry in value.split(",") if entry.strip()]
@@ -129,6 +128,11 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         )
 
         if peft_config and base_sync_done:
+            if getattr(getattr(self, "vllm_config", None), "lora_config", None) is None:
+                logger.info("LoRA config is disabled; draining adapter weights without loading")
+                receiver.receive_weights(on_bucket_received=lambda _weights: None)
+                return
+
             # In async mode, make sure the old lora is removed before adding the new one
             t0 = time.perf_counter()
             self.remove_lora(VLLM_LORA_INT_ID)
@@ -178,6 +182,8 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             self.add_lora(lora_request)
             if self._get_standard_weight_model_and_config() is None:
                 self._move_diffusion_lora_stacks_to_device()
+            if hasattr(lora_request, "lora_tensors"):
+                lora_request.lora_tensors = None
             t3 = time.perf_counter()
             logger.debug("add_lora took %.3f ms", (t3 - t2) * 1000)
             logger.debug(
@@ -244,6 +250,17 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         device within the replica list. Falls back to the stage-local rank
         when the lists are absent or the device is not in the replica list.
         """
+        fixed_handles = os.environ.get("VERL_VLLM_WEIGHT_SYNC_ZMQ_HANDLES")
+        if fixed_handles:
+            handles = [handle.strip() for handle in fixed_handles.split(",") if handle.strip()]
+            rank = int(getattr(self, "rank", self.local_rank))
+            if rank >= len(handles):
+                raise IndexError(
+                    f"VERL_VLLM_WEIGHT_SYNC_ZMQ_HANDLES has {len(handles)} handles, "
+                    f"but worker rank is {rank}"
+                )
+            return handles[rank]
+
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
         job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
         local_rank = int(self.local_rank)

@@ -12,51 +12,65 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import (
-    bagel_flow_grpo,
-    boogu_image_flow_grpo,
-    ltx2_flow_grpo,
-    minimax_h3_diffusion_nft,
-    minimax_h3_flow_grpo,
-    qwen3_omni,
-    qwen_image_diffusion_nft,
-    qwen_image_dpo,
-    qwen_image_dual_grpo,
-    qwen_image_edit_flow_grpo,
-    qwen_image_flow_grpo,
-    qwen_image_mix_grpo,
-    sd3_dpo,
-    sd3_flow_grpo,
-    wan22_dance_grpo,
-)
-from .bagel_flow_grpo import *  # noqa: F401, F403
-from .boogu_image_flow_grpo import *  # noqa: F401, F403
-from .ltx2_flow_grpo import *  # noqa: F401, F403
-from .minimax_h3_diffusion_nft import *  # noqa: F401, F403
-from .minimax_h3_flow_grpo import *  # noqa: F401, F403
-from .qwen3_omni import *  # noqa: F401, F403
-from .qwen_image_diffusion_nft import *  # noqa: F401, F403
-from .qwen_image_dpo import *  # noqa: F401, F403
-from .qwen_image_dual_grpo import *  # noqa: F401, F403
-from .qwen_image_edit_flow_grpo import *  # noqa: F401, F403
-from .qwen_image_flow_grpo import *  # noqa: F401, F403
-from .qwen_image_mix_grpo import *  # noqa: F401, F403
-from .sd3_dpo import *  # noqa: F401, F403
-from .sd3_flow_grpo import *  # noqa: F401, F403
-from .wan22_dance_grpo import *  # noqa: F401, F403
+import os
 
-__all__ = list(qwen3_omni.__all__)
-__all__ += list(qwen_image_flow_grpo.__all__)
-__all__ += list(qwen_image_diffusion_nft.__all__)
-__all__ += list(qwen_image_mix_grpo.__all__)
-__all__ += list(bagel_flow_grpo.__all__)
-__all__ += list(ltx2_flow_grpo.__all__)
-__all__ += list(minimax_h3_diffusion_nft.__all__)
-__all__ += list(minimax_h3_flow_grpo.__all__)
-__all__ += list(sd3_dpo.__all__)
-__all__ += list(sd3_flow_grpo.__all__)
-__all__ += list(wan22_dance_grpo.__all__)
-__all__ += list(qwen_image_dpo.__all__)
-__all__ += list(qwen_image_dual_grpo.__all__)
-__all__ += list(qwen_image_edit_flow_grpo.__all__)
-__all__ += list(boogu_image_flow_grpo.__all__)
+_skip_pipeline_registration = os.environ.get("VERL_OMNI_SKIP_PIPELINES", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
+if _skip_pipeline_registration:
+    # Importing a concrete submodule (for example ``pipelines.model_base``)
+    # always executes this package initializer first.  Keep that path light
+    # when the launcher explicitly opts out of pipeline auto-registration.
+    __all__ = []
+else:
+    from . import (
+        bagel_flow_grpo,
+        boogu_image_flow_grpo,
+        ltx2_flow_grpo,
+        minimax_h3_diffusion_nft,
+        minimax_h3_flow_grpo,
+        qwen3_omni,
+        qwen_image_diffusion_nft,
+        qwen_image_dpo,
+        qwen_image_dual_grpo,
+        qwen_image_edit_flow_grpo,
+        qwen_image_flow_grpo,
+        qwen_image_mix_grpo,
+        sd3_dpo,
+        sd3_flow_grpo,
+        wan22_dance_grpo,
+    )
+    from .bagel_flow_grpo import *  # noqa: F401, F403
+    from .boogu_image_flow_grpo import *  # noqa: F401, F403
+    from .ltx2_flow_grpo import *  # noqa: F401, F403
+    from .minimax_h3_diffusion_nft import *  # noqa: F401, F403
+    from .minimax_h3_flow_grpo import *  # noqa: F401, F403
+    from .qwen3_omni import *  # noqa: F401, F403
+    from .qwen_image_diffusion_nft import *  # noqa: F401, F403
+    from .qwen_image_dpo import *  # noqa: F401, F403
+    from .qwen_image_dual_grpo import *  # noqa: F401, F403
+    from .qwen_image_edit_flow_grpo import *  # noqa: F401, F403
+    from .qwen_image_flow_grpo import *  # noqa: F401, F403
+    from .qwen_image_mix_grpo import *  # noqa: F401, F403
+    from .sd3_dpo import *  # noqa: F401, F403
+    from .sd3_flow_grpo import *  # noqa: F401, F403
+    from .wan22_dance_grpo import *  # noqa: F401, F403
+
+    __all__ = list(qwen3_omni.__all__)
+    __all__ += list(qwen_image_flow_grpo.__all__)
+    __all__ += list(qwen_image_diffusion_nft.__all__)
+    __all__ += list(qwen_image_mix_grpo.__all__)
+    __all__ += list(bagel_flow_grpo.__all__)
+    __all__ += list(ltx2_flow_grpo.__all__)
+    __all__ += list(minimax_h3_diffusion_nft.__all__)
+    __all__ += list(minimax_h3_flow_grpo.__all__)
+    __all__ += list(sd3_dpo.__all__)
+    __all__ += list(sd3_flow_grpo.__all__)
+    __all__ += list(wan22_dance_grpo.__all__)
+    __all__ += list(qwen_image_dpo.__all__)
+    __all__ += list(qwen_image_dual_grpo.__all__)
+    __all__ += list(qwen_image_edit_flow_grpo.__all__)
+    __all__ += list(boogu_image_flow_grpo.__all__)
