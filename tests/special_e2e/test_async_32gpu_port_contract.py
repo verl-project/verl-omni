@@ -8,6 +8,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -208,6 +209,61 @@ def test_launcher_forwards_wrapper_hydra_overrides_to_fully_async_main():
     ld_library_line = next(line for line in launch.splitlines() if "env_vars.LD_LIBRARY_PATH" in line)
     assert ld_library_line.endswith("\\")
     assert not ld_library_line.endswith("\\\\")
+
+
+def test_launcher_registers_model_adapters_in_ray_actors_by_default():
+    script = SCRIPT.read_text(encoding="utf-8")
+
+    assert "export VERL_OMNI_SKIP_AGENT_LOOP=${VERL_OMNI_SKIP_AGENT_LOOP:-1}" in script
+    assert "export VERL_OMNI_SKIP_MODELS=${VERL_OMNI_SKIP_MODELS:-0}" in script
+    assert (
+        "VERL_USE_EXTERNAL_MODULES=${VERL_USE_EXTERNAL_MODULES:-verl_omni,"
+        "verl_omni.models.transformers.qwen3_omni_thinker,verl_omni.pipelines.qwen3_omni}"
+        in script
+    )
+    assert (
+        '++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_SKIP_AGENT_LOOP=\\"${VERL_OMNI_SKIP_AGENT_LOOP}\\"'
+        in script
+    )
+    assert (
+        '++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_SKIP_MODELS=\\"${VERL_OMNI_SKIP_MODELS}\\"'
+        in script
+    )
+
+
+def test_lightweight_ray_actor_import_registers_qwen3_omni_thinker():
+    env = os.environ.copy()
+    env.update(
+        {
+            "VERL_OMNI_SKIP_AGENT_LOOP": "1",
+            "VERL_OMNI_SKIP_MODELS": "0",
+            "VERL_OMNI_SKIP_PIPELINES": "1",
+            "VERL_OMNI_SKIP_REWARD_LOOP": "1",
+            "VERL_OMNI_SKIP_TRAINER": "1",
+            "VERL_OMNI_SKIP_ENGINES": "1",
+            "VERL_USE_EXTERNAL_MODULES": (
+                "verl_omni,verl_omni.models.transformers.qwen3_omni_thinker,"
+                "verl_omni.pipelines.qwen3_omni"
+            ),
+        }
+    )
+    code = """
+import verl
+from verl_omni.pipelines.model_base import OmniModelBase
+
+adapter = OmniModelBase.get_class_by_name(
+    "Qwen3OmniMoeForConditionalGeneration", "thinker"
+)
+assert adapter.__name__ == "Qwen3OmniThinkerAdapter"
+"""
+
+    subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=SCRIPT.parents[2],
+        env=env,
+        check=True,
+        timeout=120,
+    )
 
 
 def test_config_only_rejects_vllm_omni_internal_dp(tmp_path: Path):

@@ -101,9 +101,9 @@ def _install_lightweight_imports():
 
 _install_lightweight_imports()
 
-from verl_omni.utils.vllm_omni import OmniTensorLoRARequest
-from verl_omni.workers.rollout.vllm_rollout import utils as rollout_utils
-from vllm_omni.lora.request import LoRARequest as OmniLoRARequest
+from verl_omni.utils.vllm_omni import OmniTensorLoRARequest  # noqa: E402, I001
+from verl_omni.workers.rollout.vllm_rollout import utils as rollout_utils  # noqa: E402
+from vllm_omni.lora.request import LoRARequest as OmniLoRARequest  # noqa: E402
 
 pytestmark = pytest.mark.cpu
 

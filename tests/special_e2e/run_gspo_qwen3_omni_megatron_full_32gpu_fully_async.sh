@@ -24,8 +24,12 @@ source "${CONDA_ENV}/bin/activate"
 export PYTHONNOUSERSITE=${PYTHONNOUSERSITE:-1}
 export VLLM_USE_V1=${VLLM_USE_V1:-0}
 export VLLM_DISABLE_COMPILE_CACHE=${VLLM_DISABLE_COMPILE_CACHE:-1}
-export VERL_USE_EXTERNAL_MODULES=${VERL_USE_EXTERNAL_MODULES:-verl_omni,verl_omni.models.transformers.qwen3_omni_thinker}
-export VERL_OMNI_SKIP_MODELS=${VERL_OMNI_SKIP_MODELS:-1}
+export VERL_USE_EXTERNAL_MODULES=${VERL_USE_EXTERNAL_MODULES:-verl_omni,verl_omni.models.transformers.qwen3_omni_thinker,verl_omni.pipelines.qwen3_omni}
+# Rollout server actors need the model adapter registration side effects.  Keep
+# this enabled for the full E2E launcher; lightweight import probes may still
+# opt out explicitly before importing verl_omni.
+export VERL_OMNI_SKIP_AGENT_LOOP=${VERL_OMNI_SKIP_AGENT_LOOP:-1}
+export VERL_OMNI_SKIP_MODELS=${VERL_OMNI_SKIP_MODELS:-0}
 export VERL_OMNI_SKIP_PIPELINES=${VERL_OMNI_SKIP_PIPELINES:-1}
 export VERL_OMNI_SKIP_REWARD_LOOP=${VERL_OMNI_SKIP_REWARD_LOOP:-1}
 export VERL_OMNI_SKIP_TRAINER=${VERL_OMNI_SKIP_TRAINER:-0}
@@ -1584,6 +1588,7 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_LOGGING_LEVEL=\"${VERL_LOGGING_LEVEL}\" \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_PPO_LOGGING_LEVEL=\"${VERL_PPO_LOGGING_LEVEL}\" \
     ++ray_kwargs.ray_init.runtime_env.env_vars.TENSORBOARD_DIR=\"${TENSORBOARD_DIR}\" \
+    ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_SKIP_AGENT_LOOP=\"${VERL_OMNI_SKIP_AGENT_LOOP}\" \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_SKIP_MODELS=\"${VERL_OMNI_SKIP_MODELS}\" \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_SKIP_PIPELINES=\"${VERL_OMNI_SKIP_PIPELINES}\" \
     ++ray_kwargs.ray_init.runtime_env.env_vars.VERL_OMNI_SKIP_REWARD_LOOP=\"${VERL_OMNI_SKIP_REWARD_LOOP}\" \
