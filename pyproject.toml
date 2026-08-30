@@ -55,6 +55,11 @@ vllm-omni = [
     "vllm-omni==0.27.0rc1",
     "qwen-vl-utils>=0.0.14",
 ]
+# Official LingBot custom architecture used by the optional Dense T2V FlowGRPO adapter.
+# Pin code because the checkpoint's model_index references this package directly.
+lingbot-video = [
+    "lingbot-video @ git+https://github.com/Robbyant/lingbot-video.git@a638721cf2271804d02738b69f2ad788c4a559fc",
+]
 audio = [
     "qwen-omni-utils>=0.0.9",
 ]

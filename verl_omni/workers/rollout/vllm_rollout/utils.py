@@ -26,6 +26,35 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+class _PipelineLoRAProxy:
+    """Expose custom pipeline LoRA hooks through the worker LoRA API."""
+
+    def __init__(self, pipeline):
+        self.pipeline = pipeline
+
+    def add_adapter(self, lora_request) -> bool:
+        return self.pipeline.add_lora(lora_request)
+
+    def remove_adapter(self, adapter_id: int) -> bool:
+        return self.pipeline.remove_lora(adapter_id)
+
+    def list_adapters(self) -> list[int]:
+        return self.pipeline.list_loras()
+
+    def pin_adapter(self, adapter_id: int) -> bool:
+        if hasattr(self.pipeline, "pin_lora"):
+            return self.pipeline.pin_lora(adapter_id)
+        return adapter_id in set(self.pipeline.list_loras())
+
+    def set_active_adapter(self, lora_request, lora_scale: float = 1.0) -> None:
+        self.pipeline.set_active_lora(lora_request, lora_scale)
+
+
+def _supports_pipeline_lora(pipeline) -> bool:
+    required = ("add_lora", "remove_lora", "list_loras", "set_active_lora")
+    return pipeline is not None and all(callable(getattr(pipeline, name, None)) for name in required)
+
+
 class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
     """
     The class for vLLM-Omni's worker to inherit from, in the colocate setting.
@@ -50,16 +79,22 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
 
         return super().__new__(cls)
 
-    def set_pending_lora_peft_config(self, peft_config: dict | None = None):
-        """Stash the actor's LoRA ``peft_config`` for the next
-        ``update_weights_from_ipc`` call (separate-async NCCL path only).
+    def _get_custom_lora_pipeline(self):
+        model_runner = getattr(self, "model_runner", None)
+        return getattr(model_runner, "pipeline", None) if model_runner is not None else None
 
-        Called out-of-band via ``collective_rpc`` by
-        ``OmniCheckpointEngineManager`` before the NCCL weight broadcast.
-        ``update_weights_from_ipc`` consumes the stash when its ``peft_config``
-        kwarg is absent (the standalone rollout path), then clears it so a
-        later full-weight sync is not misrouted.
-        """
+    def init_lora_manager(self) -> None:
+        pipeline = self._get_custom_lora_pipeline()
+        if _supports_pipeline_lora(pipeline):
+            self.lora_manager = _PipelineLoRAProxy(pipeline)
+            return
+        parent = super()
+        if hasattr(parent, "init_lora_manager"):
+            return parent.init_lora_manager()
+        return None
+
+    def set_pending_lora_peft_config(self, peft_config: dict | None = None):
+        """Stash actor LoRA config for the next separate-async weight update."""
         self._pending_lora_peft_config = peft_config
 
     def _get_standard_weight_model_and_config(self):
