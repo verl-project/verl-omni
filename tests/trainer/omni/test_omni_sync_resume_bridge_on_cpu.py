@@ -146,16 +146,26 @@ async def test_server_wake_up_does_not_self_resume():
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.node_rank = 0
 
+    from verl.workers.rollout.replica import RolloutMode
+
+    server.rollout_mode = RolloutMode.COLOCATED
+    server.config = SimpleNamespace(free_cache_engine=True)
+    server._lora_request_cache = None
+
     calls: list[str] = []
 
-    async def collective_rpc(method, kwargs=None):
-        calls.append(method)
+    async def wake_up(stage_ids=None, tags=None):
+        calls.append(f"wake_up(tags={tags})")
 
-    def resume_generation():
+    async def reset_prefix_cache(reset_connector=False):
+        calls.append("reset_prefix_cache")
+
+    def resume_generation(stage_ids=None):
         calls.append("resume_generation")
 
-    server.engine = SimpleNamespace(collective_rpc=collective_rpc, resume_generation=resume_generation)
+    server.engine = SimpleNamespace(wake_up=wake_up, reset_prefix_cache=reset_prefix_cache)
+    server.engine.resume_generation = resume_generation
 
     await server.wake_up()
 
-    assert calls == ["wake_up"]
+    assert calls == ["wake_up(tags=['weights'])", "reset_prefix_cache"]
