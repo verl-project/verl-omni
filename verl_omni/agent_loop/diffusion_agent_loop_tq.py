@@ -35,6 +35,9 @@ from verl_omni.agent_loop.utils import _derive_rollout_seed
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
+# Structured model metadata is carried inside the existing non-tensor envelope.
+_NON_TENSOR_TRAJECTORY_FIELDS = frozenset({"img_shapes"})
+
 
 @ray.remote
 class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
@@ -234,6 +237,9 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
 
         reward_extra_info = extra.get("reward_extra_info")
         extra_fields_out: dict[str, Any] = {}
+        for metadata_key in _NON_TENSOR_TRAJECTORY_FIELDS:
+            if metadata_key in extra:
+                extra_fields_out[metadata_key] = extra[metadata_key]
         if reward_extra_info is not None:
             extra_fields_out["reward_extra_info"] = reward_extra_info
         # Track the rollout model version this trajectory was generated against.

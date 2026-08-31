@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+import math
 from pathlib import Path
 from unittest.mock import patch
 
@@ -150,6 +151,7 @@ def test_inject_condition_updates_qwen_image_shapes():
     assert output["img_shapes"] == image_shapes
     assert negative_output["img_shapes"] == image_shapes
     assert output["hidden_states"].shape == (1, 5, 4)
+    assert output["hidden_states"].shape[1] == sum(math.prod(shape) for shape in output["img_shapes"][0])
 
 
 def test_inject_condition_validates_qwen_sequence_parallel_alignment():
