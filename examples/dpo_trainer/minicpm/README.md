@@ -6,6 +6,19 @@ training path simplex: vision/audio understanding modules and the AR language
 model can be trained, while audio generation modules such as talker, codec,
 TTS, audio decoder, and code2wav are excluded by default.
 
+## Supported batch kinds
+
+MiniCPM's remote-code processor is reliable for two training batch types only:
+
+1. **Image-only** batches from `image/*.parquet` rows.
+2. **Video+audio** batches from `video/*.parquet` rows with
+   `mm_configs.use_audio_in_video=true`, so audio is decoded from the video file
+   instead of using standalone `audio/*.parquet` rows.
+
+Do **not** include `audio/train.parquet` in `data.train_files` for MiniCPM DPO.
+The dataset loader rejects standalone audio-only rows when
+`data.base_transform=minicpm`.
+
 ## Data
 
 Convert Omni-Preference into the offline MLLM DPO parquet schema:
@@ -14,7 +27,7 @@ Convert Omni-Preference into the offline MLLM DPO parquet schema:
 python examples/dpo_trainer/data_process/omni_preference_dpo_multisource.py \
   --dataset_root "$HOME/Omni-Preference" \
   --output_dir "$HOME/Omni-Preference/parquet_dpo" \
-  --modalities image video audio
+  --modalities image video
 ```
 
 The generated parquet schema is model-agnostic. MiniCPM-specific behavior is
@@ -34,3 +47,9 @@ The script uses `AutoModel.from_pretrained(..., trust_remote_code=True)` through
 the MiniCPM omni adapter. It auto-detects the architecture from the checkpoint
 config and sets `init_tts=false` through the Hugging Face config override so the
 inference-only TTS module is not initialized for training.
+
+Key defaults in the launch script:
+
+- `data.train_files`: image + video parquet only
+- `mm_configs.use_audio_in_video=true`
+- `ModalityGroupedBatchSampler` weights: `{image, video}` only

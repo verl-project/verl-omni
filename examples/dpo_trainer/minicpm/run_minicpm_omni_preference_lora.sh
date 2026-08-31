@@ -47,18 +47,16 @@ MAX_SLICE_NUMS=${MAX_SLICE_NUMS:-1}
 
 IMAGE_RATIO=${IMAGE_RATIO:-1.0}
 VIDEO_RATIO=${VIDEO_RATIO:-1.0}
-AUDIO_RATIO=${AUDIO_RATIO:-1.0}
 
-TRAIN_FILES=${TRAIN_FILES:-"['${DATA_DIR}/image/train.parquet','${DATA_DIR}/video/train.parquet','${DATA_DIR}/audio/train.parquet']"}
-VAL_FILES=${VAL_FILES:-"['${DATA_DIR}/image/test.parquet','${DATA_DIR}/video/test.parquet','${DATA_DIR}/audio/test.parquet']"}
+# MiniCPM training uses image-only and video+audio batches only
+TRAIN_FILES=${TRAIN_FILES:-"['${DATA_DIR}/image/train.parquet','${DATA_DIR}/video/train.parquet']"}
+VAL_FILES=${VAL_FILES:-"['${DATA_DIR}/image/test.parquet','${DATA_DIR}/video/test.parquet']"}
 
 for parquet in \
     "${DATA_DIR}/image/train.parquet" \
     "${DATA_DIR}/video/train.parquet" \
-    "${DATA_DIR}/audio/train.parquet" \
     "${DATA_DIR}/image/test.parquet" \
-    "${DATA_DIR}/video/test.parquet" \
-    "${DATA_DIR}/audio/test.parquet"; do
+    "${DATA_DIR}/video/test.parquet"; do
     if [ ! -f "${parquet}" ]; then
         echo "Missing MiniCPM offline DPO parquet: ${parquet}" >&2
         exit 1
@@ -88,11 +86,11 @@ python3 -m verl_omni.trainer.main_omni \
     data.custom_cls.collate_fn=offline_mllm_dpo_collate_fn \
     +data.train_sampler.class_path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset \
     +data.train_sampler.class_name=ModalityGroupedBatchSampler \
-    +data.train_sampler.sampler_kwargs="{batch_size:${TRAIN_BATCH_SIZE},drop_last:true,num_batches:${TOTAL_TRAINING_STEPS},modality_sample_weights:{image:${IMAGE_RATIO},video:${VIDEO_RATIO},audio:${AUDIO_RATIO}}}" \
+    +data.train_sampler.sampler_kwargs="{batch_size:${TRAIN_BATCH_SIZE},drop_last:true,num_batches:${TOTAL_TRAINING_STEPS},modality_sample_weights:{image:${IMAGE_RATIO},video:${VIDEO_RATIO}}}" \
     +data.val_sampler.class_path=pkg://verl_omni.utils.dataset.offline_mllm_dpo_dataset \
     +data.val_sampler.class_name=ModalityGroupedBatchSampler \
     +data.val_sampler.sampler_kwargs="{batch_size:${VAL_BATCH_SIZE},shuffle:false,drop_last:true,replacement:false}" \
-    +data.mm_configs="{image_min_pixels:3136,image_max_pixels:602112,video_min_pixels:100352,video_max_pixels:602112,max_ratio:200,min_frames:4,max_frames:8,frame_factor:2,sample_rate:16000,fps:2.0,use_audio_in_video:false,max_slice_nums:${MAX_SLICE_NUMS}}" \
+    +data.mm_configs="{image_min_pixels:3136,image_max_pixels:602112,video_min_pixels:100352,video_max_pixels:602112,max_ratio:200,min_frames:4,max_frames:8,frame_factor:2,sample_rate:16000,fps:2.0,use_audio_in_video:true,max_slice_nums:${MAX_SLICE_NUMS}}" \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.hf_config_path="${MODEL_PATH}" \
     actor_rollout_ref.model.model_type=omni_model \
