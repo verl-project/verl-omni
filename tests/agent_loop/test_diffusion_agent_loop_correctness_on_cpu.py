@@ -19,6 +19,7 @@ import pytest
 import torch
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics
 from verl.protocol import DataProto
+from verl.utils import tensordict_utils as tu
 
 from verl_omni.agent_loop import diffusion_agent_loop_tq
 from verl_omni.agent_loop.diffusion_agent_loop import (
@@ -28,6 +29,7 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
 )
 from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopWorkerTQ
 from verl_omni.agent_loop.single_turn_agent_loop import DiffusionSingleTurnAgentLoop
+from verl_omni.trainer.diffusion.v1 import tq_utils
 
 
 class _FakeRemoteComputeScore:
@@ -114,6 +116,69 @@ def test_pad_prompt_extra_field_pads_without_truncation(key, value, expected_sha
 def test_pad_prompt_extra_field_rejects_truncation(key, value):
     with pytest.raises(ValueError, match="exceeds max_prompt_embed_length=3"):
         _pad_prompt_extra_field(key, value, target_length=3)
+
+
+@pytest.mark.asyncio
+async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(monkeypatch):
+    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = object.__new__(worker_cls)
+    captured = {}
+    img_shapes = [(1, 32, 32), (1, 64, 64)]
+    internal = SimpleNamespace(
+        prompt_ids=torch.tensor([[1, 2]]),
+        response_diffusion_output=torch.zeros(1, 3, 2, 2),
+        response_logprobs=None,
+        reward_score=None,
+        num_turns=2,
+        extra_fields={
+            "condition_image_latents": torch.zeros(1, 4096, 64),
+            "img_shapes": img_shapes,
+            "unrelated_metadata": "do-not-forward",
+        },
+    )
+
+    monkeypatch.setattr(diffusion_agent_loop_tq, "list_of_dict_to_tensordict", lambda rows: rows)
+
+    async def fake_kv_batch_put(*, keys, fields, tags, partition_id):
+        captured.update(keys=keys, fields=fields, tags=tags, partition_id=partition_id)
+
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", fake_kv_batch_put)
+
+    await worker._write_trajectory_to_tq(
+        internal,
+        uid="sample",
+        session_id=0,
+        trajectory={"step": 3},
+        validate=False,
+    )
+
+    field = captured["fields"][0]
+    assert field["extra_fields"]["img_shapes"] == img_shapes
+    assert "unrelated_metadata" not in field["extra_fields"]
+    assert field["condition_image_latents"].shape == (4096, 64)
+
+
+def test_tq_batch_restores_non_tensor_trajectory_metadata(monkeypatch):
+    img_shapes = [
+        [(1, 32, 32), (1, 64, 64)],
+        [(1, 32, 32), (1, 64, 64)],
+    ]
+
+    monkeypatch.setattr(
+        tq_utils.tq,
+        "kv_batch_get",
+        lambda **kwargs: {
+            "all_latents": torch.zeros(2, 4, 1024, 64),
+            "extra_fields": [{"img_shapes": value} for value in img_shapes],
+        },
+    )
+
+    data = tq_utils.diffusion_tq_batch_to_dataproto(
+        SimpleNamespace(keys=["sample_0", "sample_1"], partition_id="train")
+    )
+
+    assert data.non_tensor_batch["img_shapes"].tolist() == img_shapes
+    assert tu.get(data.to_tensordict(), "img_shapes") == img_shapes
 
 
 @pytest.mark.asyncio

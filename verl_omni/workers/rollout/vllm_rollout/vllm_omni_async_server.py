@@ -88,6 +88,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._generate_strategy.validate_configs()
 
     def _post_init(self, cuda_visible_devices: str) -> None:
+        """Run strategy post-init and preserve the replica device list."""
+        # Set before vllm-omni narrows per-stage visible devices; stage workers
+        # remap their ZMQ ranks through this replica-level list.
+        os.environ["VERL_ZMQ_BASE_VISIBLE_DEVICES"] = cuda_visible_devices
         self._generate_strategy.post_init(cuda_visible_devices)
         self._lora_request_cache: LoRARequest | None | object = _LORA_REQUEST_CACHE_MISS
         self._lora_resolve_lock = asyncio.Lock()
