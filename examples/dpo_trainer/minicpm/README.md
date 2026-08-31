@@ -8,16 +8,12 @@ TTS, audio decoder, and code2wav are excluded by default.
 
 ## Supported batch kinds
 
-MiniCPM's remote-code processor is reliable for two training batch types only:
+MiniCPM's remote-code processor supports two training batch types only:
 
 1. **Image-only** batches from `image/*.parquet` rows.
-2. **Video+audio** batches from `video/*.parquet` rows with
-   `mm_configs.use_audio_in_video=true`, so audio is decoded from the video file
-   instead of using standalone `audio/*.parquet` rows.
+2. **Audio-only** batches from `audio/*.parquet` rows with standalone `audios`
+   paths and `<audio>` prompt placeholders.
 
-Do **not** include `audio/train.parquet` in `data.train_files` for MiniCPM DPO.
-The dataset loader rejects standalone audio-only rows when
-`data.base_transform=minicpm`.
 
 ## Data
 
@@ -27,12 +23,16 @@ Convert Omni-Preference into the offline MLLM DPO parquet schema:
 python examples/dpo_trainer/data_process/omni_preference_dpo_multisource.py \
   --dataset_root "$HOME/Omni-Preference" \
   --output_dir "$HOME/Omni-Preference/parquet_dpo" \
-  --modalities image video
+  --modalities image audio
 ```
 
 The generated parquet schema is model-agnostic. MiniCPM-specific behavior is
 handled later by `data.base_transform=minicpm` in the dataset transform, not by a
 separate Omni-Preference converter.
+
+Parquet prompts should keep compact semantic markers (`<image>`, `<audio>`).
+The MiniCPM transform rewrites them to processor slots (`<image>./</image>`,
+`<audio>./</audio>`) before calling `MiniCPMOProcessor`.
 
 ## Training
 
@@ -50,6 +50,17 @@ inference-only TTS module is not initialized for training.
 
 Key defaults in the launch script:
 
-- `data.train_files`: image + video parquet only
-- `mm_configs.use_audio_in_video=true`
-- `ModalityGroupedBatchSampler` weights: `{image, video}` only
+- `data.train_files`: image + audio parquet only
+- `ModalityGroupedBatchSampler` weights: `{image, audio}` only
+
+## Verify preprocessing
+
+```bash
+export PYTHONPATH="$REPO_ROOT"
+export MINICPM_CACHE_DIR=/path/to/MiniCPM-o-4_5
+
+python examples/dpo_trainer/minicpm/verify_minicpm_dataset.py \
+  --train-files "$DATA_DIR/image/train.parquet" "$DATA_DIR/audio/train.parquet" \
+  --num-batches 4 \
+  --batch-size 2
+```
