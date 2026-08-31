@@ -387,3 +387,89 @@ async def test_checkpoint_manager_gather_propagates_server_abort_raise():
 
     with pytest.raises(RuntimeError, match="abort rpc failed"):
         await asyncio.gather(_Replica(server).abort_all_requests())
+
+
+# ---------------------------------------------------------------------------
+# (i) diffusion-only sleep/wake contract — why diffusion v1 sync needs no
+#     resume bridge (drives the REAL AsyncOmni state machine, not a mock)
+# ---------------------------------------------------------------------------
+
+
+def _build_async_omni(stage_type: str):
+    """Minimal AsyncOmni driving the real sleep/wake/resume state machine.
+
+    Only the RPC plumbing (EngineCore/worker RPCs, tag bookkeeping, output
+    handler) is stubbed; the admission-hold logic under test is the real
+    class's. ``stage_type`` selects a pure-diffusion ("diffusion") or
+    pure-AR ("llm") single-stage engine.
+    """
+    from vllm_omni.entrypoints.async_omni import AsyncOmni
+
+    ack = SimpleNamespace(status="SUCCESS")
+    engine_rpc: list[str] = []
+
+    async def _engine_core_rpc(method, stage_ids=None, args=(), kwargs=None):
+        engine_rpc.append(method)
+        return []
+
+    async def _acks(*args, **kwargs):
+        return [ack]
+
+    omni = object.__new__(AsyncOmni)
+    omni.engine = SimpleNamespace(stage_clients=[SimpleNamespace(stage_type=stage_type)])
+    omni._pause_cond = asyncio.Condition()
+    omni._admitting = 0
+    omni._paused = False
+    omni._hold_admission_until_resume = False
+    omni._level2_sleeping = False
+    omni._sleeping_tags = {"weights"}
+    omni._stage_sleeping_tags = {}
+    # RPC plumbing stubs — not the contract under test.
+    omni.reset_mm_cache = _acks
+    omni._final_output_handler = lambda: None
+    omni._sleep_diffusion = _acks
+    omni._wake_diffusion = _acks
+    omni._record_stage_sleep = lambda stage_ids, tags: None
+    omni._sleeping_tags_for_stages = lambda stage_ids: {"weights"}
+    omni._clear_stage_sleep = lambda stage_ids, tags: None
+    omni._engine_core_rpc = _engine_core_rpc
+    omni._engine_rpc_log = engine_rpc
+    return omni
+
+
+async def test_diffusion_only_sleep_wake_needs_no_resume_generation():
+    """Pure-diffusion sleep must not set the admission hold (engine contract).
+
+    Diffusion v1 sync has no omni-style resume bridge; it relies on
+    ``AsyncOmni.sleep()`` setting ``_hold_admission_until_resume`` only for AR
+    stages and ``wake_up()`` restoring admission otherwise. If upstream ever
+    sets the hold on diffusion sleep (or stops clearing ``_paused`` on a
+    diffusion wake), that trainer hangs silently — this tripwire fails first.
+    """
+    omni = _build_async_omni("diffusion")
+
+    await omni.sleep(level=1)
+
+    assert omni._paused is True, "race guard set during sleep"
+    assert omni._hold_admission_until_resume is False, "no AR stages — the hold must NOT be set"
+    assert omni._engine_rpc_log == [], "diffusion sleep must not touch EngineCore RPCs"
+
+    await omni.wake_up()
+
+    assert omni._paused is False, "diffusion-only wake must restore admission by itself"
+
+
+async def test_ar_sleep_wake_requires_resume_generation_contrast():
+    """The AR-side contrast that makes the omni_sync bridge load-bearing."""
+    omni = _build_async_omni("llm")
+
+    await omni.sleep(level=1)
+    assert omni._hold_admission_until_resume is True
+
+    await omni.wake_up()
+    assert omni._paused is True, "wake must keep the hold for AR stages"
+    assert "sleep" in omni._engine_rpc_log and "wake_up" in omni._engine_rpc_log
+
+    await omni.resume_generation()
+    assert omni._paused is False
+    assert omni._hold_admission_until_resume is False

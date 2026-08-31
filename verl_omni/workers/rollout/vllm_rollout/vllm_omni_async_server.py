@@ -491,7 +491,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         req_state.queue.put_nowait(msg)
 
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
-        """Abort a single in-flight request — same abort-then-pause contract."""
+        """Abort a single in-flight request — same abort-then-pause contract.
+
+        Hazard: the trailing ``pause_generation(mode="abort")`` is engine-wide
+        — EngineCore ``pause_scheduler(mode="abort")`` finishes ALL in-flight
+        requests, not just this one. Safe only when no other in-flight work
+        must survive (trainers use ``abort_all_requests``; single-request
+        abort exists for draining a lone request such as standalone mode).
+        """
         engine = self.engine
         if getattr(engine, "output_processor", None) is not None:
             return await super().abort_request(request_id, reset_prefix_cache)
