@@ -85,17 +85,31 @@ def test_build_module_uses_transformers_auto_model(monkeypatch):
 
     loaded = MagicMock(spec=nn.Module)
     calls = []
+    patch_calls = []
 
     def fake_from_pretrained(*args, **kwargs):
         calls.append((args, kwargs))
         return loaded
 
+    def fake_patch(*args, **kwargs):
+        patch_calls.append((args, kwargs))
+
     monkeypatch.setattr(AutoModel, "from_pretrained", fake_from_pretrained)
+    monkeypatch.setattr(
+        "verl_omni.models.transformers.remote_code_compat.patch_remote_auto_model_init",
+        fake_patch,
+    )
     config = _model_config()
 
     module = MiniCPMThinkerAdapter.build_module(config, torch.bfloat16)
 
     assert module is loaded
+    assert patch_calls == [
+        (
+            ("/fake/minicpm",),
+            {"trust_remote_code": True, "config": config.hf_config},
+        )
+    ]
     assert calls[0][0] == ("/fake/minicpm",)
     assert calls[0][1]["torch_dtype"] is torch.bfloat16
     assert calls[0][1]["trust_remote_code"] is True

@@ -69,6 +69,14 @@ class MiniCPMThinkerAdapter(OmniModelBase):
     def build_module(cls, model_config, torch_dtype):
         from transformers import AutoModel
 
+        from verl_omni.models.transformers.remote_code_compat import patch_remote_auto_model_init
+
+        patch_remote_auto_model_init(
+            model_config.local_path,
+            trust_remote_code=model_config.trust_remote_code,
+            config=model_config.hf_config,
+        )
+
         return AutoModel.from_pretrained(
             model_config.local_path,
             torch_dtype=torch_dtype,
