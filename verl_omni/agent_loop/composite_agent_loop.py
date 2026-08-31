@@ -147,7 +147,7 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
             - ``prompts``: ``[ar_bsz, prompt_length]`` original prompt token ids.
             - ``response_ids``: ``[ar_bsz, ar_max_new_tokens]`` generated AR tokens.
             - ``rollout_ar_log_probs`` (optional): AR token log-probs.
-            - ``ar_rm_scores`` (optional): ``[ar_bsz, 1]`` AR reward scores.
+            - ``rm_scores`` (optional): ``[ar_bsz, 1]`` AR reward scores.
 
             Diffusion ``DataProto`` batch fields match :class:`DiffusionAgentLoopWorker`.
 
@@ -356,7 +356,7 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
 
         timing = {}
         ar_reward_scores: list[float] = []
-        with simple_timer("compute_ar_score", timing):
+        with simple_timer("compute_score", timing):
             for diffusion_output in diffusion_outputs:
                 batch = TensorDict(
                     {

@@ -115,7 +115,7 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
         # huggingface generate will stop generating when all the batch reaches [EOS].
         # We have to pad to response_length
         seq = outputs.sequences
-        sequence_length = prompt_ids[1] + ar_kwargs["max_new_tokens"]
+        sequence_length = prompt_ids.shape[1] + ar_kwargs["max_new_tokens"]
         delta_length = sequence_length - seq.shape[1]
         if delta_length > 0:
             delta_tokens = torch.ones(size=(seq.shape[0], delta_length), device=seq.device, dtype=seq.dtype)
@@ -144,7 +144,7 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
         num_responses_per_prompt: int = 1,
         return_logprobs: bool = True,
         dtype: torch.dtype | None = None,
-        ar_kwargs: dict[str, Any] = None,
+        **ar_kwargs,
     ):
         """Text encoder response generation.
 
@@ -156,7 +156,7 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
                 tokens and logprobs are repeated accordingly.
             return_logprobs (bool): Whether to calculate log-probabilities for generated tokens.
             dtype (torch.dtype, *optiional*): Data type for text encoder.
-            ar_kwargs (dict): Additional argmuents for text generation.
+            ar_kwargs: Additional argmuents for text generation.
 
         Returns:
             tuple[torch.Tensor, torch.Tensor | None, list[str]]: A tuple of
@@ -182,7 +182,7 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
                 prompt_ids=prompt_ids,
                 attention_mask=attention_mask,
                 return_logprobs=return_logprobs,
-                ar_kwargs=ar_kwargs,
+                **ar_kwargs,
             )
             ar_response_ids.append(response.ar_response_ids)
             if return_logprobs:
@@ -299,7 +299,7 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
                 attention_mask=prompt_mask,
                 num_responses_per_prompt=num_responses_per_prompt,
                 return_logprobs=ar_logprobs,
-                ar_kwargs=ar_kwargs,
+                **ar_kwargs,
             )
             # TBD
             # if ar_all_log_probs is not None:

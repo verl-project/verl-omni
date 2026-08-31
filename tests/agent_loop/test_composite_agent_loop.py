@@ -149,8 +149,8 @@ def init_config() -> DictConfig:
         config.actor_rollout_ref.rollout.step_execution = False
         # Keep the 2-GPU TP smoke light; CI EOFError on worker launch is usually OOM.
         # Keep enough inference steps for sde_window_range=[0, 5] / sde_window_size=2.
-        config.actor_rollout_ref.rollout.n = 2  # ar part
-        config.actor_rollout_ref.rollout.m = 2  # diffusion part
+        config.actor_rollout_ref.rollout.n = 2  # dit part
+        config.actor_rollout_ref.rollout.m = 2  # ar part
         config.actor_rollout_ref.rollout.pipeline.height = 256
         config.actor_rollout_ref.rollout.pipeline.width = 256
         config.actor_rollout_ref.rollout.pipeline.num_inference_steps = 10
@@ -250,8 +250,8 @@ def test_single_turn(init_config, agent_reward_loop: bool):
             },
         )
         batch.meta_info["global_steps"] = 0
-        ar_n = init_config.actor_rollout_ref.rollout.n
-        diffusion_n = init_config.actor_rollout_ref.rollout.m
+        ar_n = init_config.actor_rollout_ref.rollout.m
+        diffusion_n = init_config.actor_rollout_ref.rollout.n
         batch = batch.repeat(ar_n)
 
         ar_result, diffusion_result = agent_loop_manager.generate_sequences(prompts=batch)
@@ -274,7 +274,7 @@ def test_single_turn(init_config, agent_reward_loop: bool):
         ]
         diffusion_expected_non_tensor_batch_keys = []
         if agent_reward_loop:
-            ar_expected_batch_keys += ["ar_rm_scores"]
+            ar_expected_batch_keys += ["rm_scores"]
             ar_expected_non_tensor_batch_keys += ["ar_msg"]
             diffusion_expected_batch_keys += ["rm_scores"]
             diffusion_expected_non_tensor_batch_keys += ["dit_msg"]
