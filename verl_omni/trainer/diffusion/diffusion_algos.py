@@ -1130,3 +1130,41 @@ class DistillFlowMatchingMSELoss(DiffusionLossFn):
             teacher_noise_pred=data["teacher_noise_pred"],
         )
         return DiffusionLossResult(loss=distill_loss, metrics=metrics)
+
+
+@register_diffusion_loss("dual_grpo")
+class DualGRPOLoss(DiffusionLossFn):
+    """Dual-GRPO: Flow-GRPO DiT loss + GRPO LLM loss."""
+
+    required_model_output_keys = ("log_probs",)
+    # required_data_keys = ("old_log_probs", "advantages")
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        """
+        Compute either AR or DiT loss
+        """
+        if "ar_log_probs" not in model_output:
+            return FlowGRPOLoss()(config=config, model_output=model_output, data=data)
+
+        ar_loss, ar_metrics = FlowGRPOLoss.compute_loss(
+            old_log_prob=data["ar_old_log_probs"],
+            log_prob=model_output["ar_log_probs"],
+            advantages=data["ar_advantages"],
+            config=config,
+            rollout_is_weights=data.get("ar_rollout_is_weights", None),
+        )
+        ar_metrics = {
+            "actor/ar/ppo_kl": ar_metrics.pop("actor/ppo_kl"),
+            "actor/ar/pg_clipfrac": ar_metrics.pop("actor/pg_clipfrac"),
+            "actor/ar/pg_clipfrac_higher": ar_metrics.pop("actor/pg_clipfrac_higher"),
+            "actor/ar/pg_clipfrac_lower": ar_metrics.pop("actor/pg_clipfrac_lower"),
+            "actor/ar/ratio_mean": ar_metrics.pop("actor/ratio_mean"),
+            "actor/ar/ratio_std": ar_metrics.pop("actor/ratio_std"),
+        }
+        return DiffusionLossResult(loss=ar_loss, metrics=ar_metrics)
