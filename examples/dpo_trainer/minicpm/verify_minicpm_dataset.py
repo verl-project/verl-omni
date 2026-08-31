@@ -18,11 +18,11 @@ Loads ``processing_minicpmo.MiniCPMOProcessor`` via ``AutoProcessor``,
 constructs :class:`OfflineMLLMDPODataset` batches from real parquet files,
 and prints a readable summary for each collated batch.
 
-Each batch summary separates **training** tensors (``input_ids``, ``labels``, …)
-from **processor** multimodal fields (``pixel_values``, ``audio_bounds``, …).
+Each batch summary separates **training** tensors (``input_ids``, ``labels``, ...)
+from **processor** multimodal fields (``pixel_values``, ``audio_bounds``, ...).
 It always prints ``label_alignment`` comparing parquet ``chosen``/``rejected``
 text against label tokens, decoding the sequence with ``image_bound`` /
-``audio_bounds`` spans replaced by ``[IMAGE#…]`` / ``[AUDIO#…]`` tags.
+``audio_bounds`` spans replaced by ``[IMAGE#N]`` / ``[AUDIO#N]`` tags.
 
 Example::
 
@@ -293,9 +293,7 @@ def _dataframe_row_from_extra_info(
         return None, debug
 
     debug["extra_info_keys"] = sorted(extra_info.keys())
-    debug["index_candidates"] = {
-        key: extra_info.get(key) for key in ("dataset_index", "index") if key in extra_info
-    }
+    debug["index_candidates"] = {key: extra_info.get(key) for key in ("dataset_index", "index") if key in extra_info}
 
     dataframe = dataset.dataframe
     for key in ("dataset_index", "index"):
@@ -312,7 +310,11 @@ def _dataframe_row_from_extra_info(
             debug["resolved_index"] = index
             return dataframe.loc[index], debug
         debug.setdefault("out_of_bounds", []).append(
-            {key: index, "dataframe_index_min": int(dataframe.index.min()), "dataframe_index_max": int(dataframe.index.max())}
+            {
+                key: index,
+                "dataframe_index_min": int(dataframe.index.min()),
+                "dataframe_index_max": int(dataframe.index.max()),
+            }
         )
 
     debug["lookup_failure"] = (
@@ -537,7 +539,6 @@ def _print_batch_summary(
 
     if "input_ids" in batch and "labels" in batch:
         input_ids = batch["input_ids"]
-        labels = batch["labels"]
         num_rows = input_ids.size(0) if input_ids.is_nested else input_ids.shape[0]
         alignment_reports = []
         decoded_previews = []
