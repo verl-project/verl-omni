@@ -142,7 +142,6 @@ def _mark_final_assistant_content(
 
 def _render_chat(messages: list[dict[str, Any]], processor, **kwargs) -> str:
     tokenizer = _tokenizer_from_processor(processor)
-    renderer = processor if hasattr(processor, "apply_chat_template") else tokenizer
     template_kwargs = {
         key: kwargs[key]
         for key in (
@@ -154,9 +153,9 @@ def _render_chat(messages: list[dict[str, Any]], processor, **kwargs) -> str:
         if key in kwargs
     }
     try:
-        return renderer.apply_chat_template(messages, tokenize=False, **template_kwargs)
+        return tokenizer.apply_chat_template(messages, tokenize=False, **template_kwargs)
     except TypeError:
-        return renderer.apply_chat_template(messages, tokenize=False)
+        return tokenizer.apply_chat_template(messages, tokenize=False)
 
 
 def _processor_data(output: Any) -> dict[str, Any]:
