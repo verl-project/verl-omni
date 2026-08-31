@@ -11,10 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Model packages.
 
-from .diffusers import apply_flash_attention_3_varlen_hub_fix, apply_qwen_image_ulysses_mask_fix
-
-# register diffusers patches
-apply_flash_attention_3_varlen_hub_fix()  # apply FA3 varlen hub fix universally
-
-__all__ = ["apply_flash_attention_3_varlen_hub_fix", "apply_qwen_image_ulysses_mask_fix"]
+The temporary diffusers monkey-patches (QwenImage Ulysses SP mask rebuild and
+the FA3 varlen-hub gather fix) were dropped at the diffusers>=0.40 floor —
+both fixes are upstream (diffusers#13756 / diffusers#14115, see #445 P4/P5).
+"""

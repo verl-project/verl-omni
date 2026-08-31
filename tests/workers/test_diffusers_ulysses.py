@@ -29,10 +29,6 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
 
-from verl_omni.models.diffusers.qwen_image import apply_qwen_image_ulysses_mask_fix
-
-apply_qwen_image_ulysses_mask_fix()
-
 
 def get_device_name() -> str:
     if torch.cuda.is_available():
@@ -190,7 +186,7 @@ def _diffusers_ulysses_fwd(sp_size: int, dp_size: int, backend: str):
 
     assert output_sp.shape == output_no_sp.shape, f"Shape mismatch: SP {output_sp.shape} vs non-SP {output_no_sp.shape}"
 
-    # we need a strict tolerance here to show _patch is working
+    # we need a strict tolerance here to prove the native CP path is correct
     torch.testing.assert_close(output_sp.float(), output_no_sp.float(), rtol=1e-2, atol=1e-2)
 
     if rank == 0:

@@ -28,7 +28,7 @@ uv pip install -e ".[train,dev]"
 For Ascend NPU:
 
 ```bash
-uv pip install vllm==0.27.0
+uv pip install vllm==0.28.0
 uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@$(cat .github/vllm_ascend_pin.txt)"
 uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
 uv pip install -e ".[train,dev]"

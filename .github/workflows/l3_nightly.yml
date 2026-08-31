@@ -178,13 +178,15 @@ jobs:
           uv pip install --system --break-system-packages --no-deps -e .
           # veomni's [gpu] extra pins torch 2.9 and would conflict with the vLLM stack.
           # See docs/start/install.md "Optional engine backends".
-          # TODO: rm --no-deps when VeOmni supports torch2.11.
+          # TODO: rm --no-deps when VeOmni supports the vLLM torch pin (torch 2.13 as of vLLM 0.28).
           uv pip install --system --break-system-packages veomni==0.1.11 --no-deps
           uv pip install --system --break-system-packages torchcodec librosa soundfile av audioread
           uv pip install --system --break-system-packages "transformers[mistral-common]==${NIGHTLY_PIN_TRANSFORMERS}"
           python3 -c "import importlib.metadata as m; print('[NIGHTLY] pinned deps:', 'transformers='+m.version('transformers'), 'kernels='+m.version('kernels'), 'fa3-fwd='+m.version('fa3-fwd'))"
-          # TODO: Remove this FusedMoE compatibility patch after verl is upgraded to 0.9.0 (which natively supports vLLM 0.27 MoE modular refactor).
-          # vLLM 0.27 compatibility: install lazy .pth hook so all Ray workers/subprocesses alias FusedMoE
+          # TODO: Remove this FusedMoE compatibility patch once verl natively resolves the modular MoE
+          # layout. Re-checked at the vLLM 0.28 pin (#445 P9): still required — vLLM 0.28 removed the
+          # MoE legacy code and verl still imports FusedMoE from fused_moe.layer (guarded import).
+          # vLLM 0.28 compatibility: install lazy .pth hook so all Ray workers/subprocesses alias FusedMoE
           python3 -c "import site, os; code = '''import importlib.util, sys\nfrom importlib.abc import Loader, MetaPathFinder\n\nclass _MoEHookFinder(MetaPathFinder):\n    def find_spec(self, fullname, path, target=None):\n        if fullname == \'vllm.model_executor.layers.fused_moe.layer\':\n            sys.meta_path.remove(self)\n            try:\n                spec = importlib.util.find_spec(fullname)\n                if spec and spec.loader:\n                    orig_loader = spec.loader\n                    class _HookedLoader(Loader):\n                        def create_module(self, spec):\n                            return orig_loader.create_module(spec)\n                        def exec_module(self, module):\n                            orig_loader.exec_module(module)\n                            if not hasattr(module, \'FusedMoE\'):\n                                import vllm.model_executor.layers.fused_moe as _m\n                                module.FusedMoE = getattr(_m, \'FusedMoEExpertsModular\', getattr(_m, \'FusedMoEMethodBase\', object))\n                    spec.loader = _HookedLoader()\n                return spec\n            finally:\n                sys.meta_path.insert(0, self)\n        return None\n\nsys.meta_path.insert(0, _MoEHookFinder())\n'''; [open(os.path.join(p, '_vllm_moe_compat.py'), 'w').write(code) for p in set(site.getsitepackages()) if os.path.exists(p)]; [open(os.path.join(p, 'verl_omni_vllm_compat.pth'), 'w').write('import _vllm_moe_compat\n') for p in set(site.getsitepackages()) if os.path.exists(p)]"
           if ! command -v python >/dev/null 2>&1; then
             ln -sfn "$(command -v python3)" /usr/local/bin/python

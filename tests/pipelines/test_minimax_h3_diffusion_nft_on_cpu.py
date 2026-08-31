@@ -485,6 +485,12 @@ class TestMiniMaxH3TokenIdNativePrompt:
         pipeline_module = ModuleType(module_name)
         pipeline_module._dit_rank_world = lambda: (None, 0, 1)
         pipeline_module._broadcast_tensor = lambda value, **kwargs: value
+        # Merged presentation helper (vllm-omni#5885); re-exported by the real
+        # pipeline module. Unused on the t2va path — a placeholder suffices here.
+        pipeline_module.minimax_h3_multi_image_presentation = lambda tokenizer, *, prompt, image_token_counts: (
+            torch.tensor([], dtype=torch.long),
+            torch.tensor([], dtype=torch.long),
+        )
         monkeypatch.setitem(sys.modules, module_name, pipeline_module)
 
         pipeline = _StubSyncPipeline()

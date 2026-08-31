@@ -27,11 +27,11 @@ runs:
         uv pip install --system --break-system-packages --no-deps -e .
         # veomni's [gpu] extra pins torch 2.9 and would conflict with the vLLM stack.
         # See docs/start/install.md "Optional engine backends".
-        # TODO: rm --no-deps when VeOmni support torch2.11
+        # TODO: rm --no-deps when VeOmni supports the vLLM torch pin (torch 2.13 as of vLLM 0.28)
         uv pip install --system --break-system-packages veomni==0.1.11 --no-deps
         uv pip install --system --break-system-packages torchcodec librosa soundfile av audioread
         uv pip install --system --break-system-packages "transformers[mistral-common]"
-        # GPU-smoke-only override; the project GPU extra remains on kernels==0.16.0.
+        # Mirror-lag defense: reassert the kernels pin (pyproject's [gpu] extra pins the same 0.14.1).
         uv pip install --system --break-system-packages "kernels==0.14.1"
         # NCCL checkpoint engine (diffusion v1 separate_async weight sync).
         uv pip install --system --break-system-packages pyzmq

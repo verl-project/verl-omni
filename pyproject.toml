@@ -17,13 +17,15 @@ dynamic = ["version"]
 description = "verl-omni: Easy, fast, and stable RL training for diffusion and omni-modality models"
 license = {text = "Apache-2.0"}
 readme = {file = "README.md", content-type = "text/markdown"}
-requires-python = ">=3.10"
+# vLLM-Omni 0.28.x imports enum.StrEnum (py3.11+) at import time.
+requires-python = ">=3.11"
 dependencies = [
     "accelerate>=1.14.0",
     "cachetools",
     "codetiming",
     "datasets",
-    "diffusers>=0.37.1",
+    # Window matches vllm-omni 0.28.x (diffusers==0.40.0, vllm-omni#6459).
+    "diffusers>=0.40.0,<0.41",
     "dill",
     "hydra-core",
     "imageio[ffmpeg]>=2.37.2",
@@ -52,7 +54,9 @@ dependencies = [
 [project.optional-dependencies]
 # Rollout engine (install in step 2, after gpu step 1).
 vllm-omni = [
-    "vllm-omni==0.27.0rc1",
+    # Optional PyPI baseline only; the git pin (.github/vllm_omni_pin.txt) is canonical.
+    # PyPI has no stable 0.28.0 yet -- move to ==0.28.0 when the wheel ships.
+    "vllm-omni==0.28.0rc1",
     "qwen-vl-utils>=0.0.14",
 ]
 audio = [
@@ -60,8 +64,8 @@ audio = [
 ]
 # CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
 gpu = [
-    "vllm==0.27.0",
-    "kernels==0.16.0",
+    "vllm==0.28.0",
+    "kernels==0.14.1",
     "liger-kernel",
 ]
 # Training stack (install in step 2).
