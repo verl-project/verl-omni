@@ -14,19 +14,28 @@
 """MiniCPM sample transform for offline MLLM DPO.
 
 The transform consumes the same intermediate conversation format as
-``OfflineMLLMDPODataset`` and renders MiniCPM-style turn-based messages with
-``<image>``, ``<video>``, and ``<audio>`` placeholders.  It intentionally keeps
-the dependency surface small: MiniCPM's official ``AutoProcessor`` /
-``AutoTokenizer`` path is used when available, while ``minicpmo.utils`` remains
-optional for training-only preprocessing.
+``OfflineMLLMDPODataset``.  Parquet rows should keep compact semantic markers
+(``<image>``, ``<video>``, ``<audio>``) in prompt text; this module rewrites
+them to MiniCPM processor slots (``<image>./</image>``, ``<audio>./</audio>``)
+after chat-template rendering and before calling ``MiniCPMOProcessor``.
+
+Training should use two batch kinds only:
+
+* **image-only** batches from ``image/*.parquet`` rows.
+* **audio-only** batches from ``audio/*.parquet`` rows with standalone ``audios`` paths.
+
+Do not use ``video/*.parquet`` for MiniCPM DPO: the remote processor has no video
+input path, and the previous video+audio workaround only fed decoded audio anyway.
 """
 
 from __future__ import annotations
 
 import copy
+import re
 from collections.abc import Sequence
 from typing import Any
 
+import numpy as np
 import torch
 
 from verl_omni.utils.dataset.qwen3_omni_transform import (
@@ -36,10 +45,13 @@ from verl_omni.utils.dataset.qwen3_omni_transform import (
     VIDEO_INPUT_INDEX,
     _fetch_audios,
     _fetch_images,
-    _fetch_videos,
 )
 
 __all__ = ["process_minicpm_sample"]
+
+# Remote ``processing_minicpmo.MiniCPMOProcessor`` scans for these inline slots in text.
+_MINICPM_IMAGE_SLOT = "<image>./</image>"
+_MINICPM_AUDIO_SLOT = "<audio>./</audio>"
 
 _MODALITY_PLACEHOLDERS = {
     "image": "<image>",
@@ -141,21 +153,65 @@ def _mark_final_assistant_content(
 
 
 def _render_chat(messages: list[dict[str, Any]], processor, **kwargs) -> str:
+    del kwargs
     tokenizer = _tokenizer_from_processor(processor)
-    template_kwargs = {
-        key: kwargs[key]
-        for key in (
-            "use_image_id",
-            "max_slice_nums",
-            "slice_mode",
-            "downsample_mode",
+    return tokenizer.apply_chat_template(messages, tokenize=False)
+
+
+def _replace_bare_media_tokens(text: str, modality: str, slot: str) -> str:
+    token = f"<{modality}>"
+    if slot in text:
+        return text
+    pattern = re.compile(rf"{re.escape(token)}(?!\./</{modality}>)")
+    return pattern.sub(slot, text)
+
+
+def _inject_processor_media_slots(
+    text: str,
+    *,
+    image_count: int,
+    audio_count: int,
+    video_count: int = 0,
+    use_audio_in_video: bool = False,
+) -> str:
+    """Rewrite bare ``<image>`` / ``<video>`` / ``<audio>`` markers into MiniCPM processor slots."""
+
+    if use_audio_in_video and video_count > 0:
+        text = _replace_bare_media_tokens(text, "video", _MINICPM_AUDIO_SLOT)
+    text = _replace_bare_media_tokens(text, "image", _MINICPM_IMAGE_SLOT)
+    text = _replace_bare_media_tokens(text, "audio", _MINICPM_AUDIO_SLOT)
+
+    if image_count and text.count(_MINICPM_IMAGE_SLOT) != image_count:
+        raise ValueError(
+            f"MiniCPM processor expects {image_count} {_MINICPM_IMAGE_SLOT!r} slot(s) in text, "
+            f"found {text.count(_MINICPM_IMAGE_SLOT)} after chat-template rendering."
         )
-        if key in kwargs
-    }
-    try:
-        return tokenizer.apply_chat_template(messages, tokenize=False, **template_kwargs)
-    except TypeError:
-        return tokenizer.apply_chat_template(messages, tokenize=False)
+    if audio_count and text.count(_MINICPM_AUDIO_SLOT) != audio_count:
+        raise ValueError(
+            f"MiniCPM processor expects {audio_count} {_MINICPM_AUDIO_SLOT!r} slot(s) in text, "
+            f"found {text.count(_MINICPM_AUDIO_SLOT)} after chat-template rendering."
+        )
+    return text
+
+
+def _render_processor_text(
+    messages: list[dict[str, Any]],
+    processor,
+    *,
+    image_count: int,
+    audio_count: int,
+    video_count: int,
+    use_audio_in_video: bool,
+    **kwargs,
+) -> str:
+    rendered = _render_chat(messages, processor, **kwargs)
+    return _inject_processor_media_slots(
+        rendered,
+        image_count=image_count,
+        audio_count=audio_count,
+        video_count=video_count,
+        use_audio_in_video=use_audio_in_video,
+    )
 
 
 def _processor_data(output: Any) -> dict[str, Any]:
@@ -172,11 +228,50 @@ def _without_empty_media(kwargs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _call_processor(processor, *, text: str, images: list[Any], videos: list[Any], audios: list[Any]) -> dict[str, Any]:
+def _call_processor(
+    processor,
+    *,
+    text: str,
+    images: list[Any],
+    videos: list[Any],
+    audios: list[Any],
+    **kwargs,
+) -> dict[str, Any]:
+    processor_kwargs = {
+        key: kwargs[key]
+        for key in ("max_slice_nums", "use_image_id", "max_length", "sampling_rate")
+        if key in kwargs and kwargs[key] is not None
+    }
+    if "sampling_rate" not in processor_kwargs and kwargs.get("sample_rate") is not None:
+        processor_kwargs["sampling_rate"] = kwargs["sample_rate"]
     attempts = [
-        {"text": text, "images": images, "videos": videos, "audios": audios, "return_tensors": "pt", "padding": True},
-        {"text": [text], "images": images, "videos": videos, "audios": audios, "return_tensors": "pt", "padding": True},
-        {"text": text, "image": images, "video": videos, "audio": audios, "return_tensors": "pt", "padding": True},
+        {
+            "text": text,
+            "images": images,
+            "videos": videos,
+            "audios": audios,
+            "return_tensors": "pt",
+            "padding": True,
+            **processor_kwargs,
+        },
+        {
+            "text": [text],
+            "images": images,
+            "videos": videos,
+            "audios": audios,
+            "return_tensors": "pt",
+            "padding": True,
+            **processor_kwargs,
+        },
+        {
+            "text": text,
+            "image": images,
+            "video": videos,
+            "audio": audios,
+            "return_tensors": "pt",
+            "padding": True,
+            **processor_kwargs,
+        },
     ]
     last_error: Exception | None = None
     for kwargs in attempts:
@@ -198,27 +293,118 @@ def _squeeze_batch_dim(value: Any) -> Any:
     return value
 
 
-def _align_template_tokens_to_processor_tokens(
-    token_ids: Sequence[int],
-    processor_input_ids: torch.Tensor,
-    media_token_ids: set[int],
-) -> list[int]:
-    token_to_processor_pos: list[int] = []
-    processor_ids = processor_input_ids.tolist()
-    processor_i = 0
-    for token_id in token_ids:
-        if processor_i >= len(processor_ids):
-            break
-        if processor_ids[processor_i] != token_id:
-            token_to_processor_pos.append(processor_i)
-            processor_i += 1
+def _encode_like_processor(tokenizer, text: str, *, max_length: int | None = None) -> list[int]:
+    """Mirror ``MiniCPMOProcessor._convert`` tokenization (drop ``<|listen|>``)."""
+
+    listen_token_id = _convert_token_to_id(tokenizer, "<|listen|>")
+    encode = getattr(tokenizer, "encode", None)
+    if encode is not None:
+        raw_ids = [int(token) for token in encode(text)]
+    else:
+        result = tokenizer(text, add_special_tokens=False)
+        raw_ids = [int(token) for token in result["input_ids"]]
+
+    token_ids: list[int] = []
+    for token in raw_ids:
+        if listen_token_id is not None and token == listen_token_id:
             continue
-        token_to_processor_pos.append(processor_i)
-        processor_i += 1
-        if token_id in media_token_ids:
-            while processor_i < len(processor_ids) and processor_ids[processor_i] == token_id:
-                processor_i += 1
-    return token_to_processor_pos
+        token_ids.append(token)
+    if max_length is not None:
+        token_ids = token_ids[:max_length]
+    return token_ids
+
+
+def _normalise_image_sizes(image_sizes: Any) -> list[Any]:
+    if isinstance(image_sizes, torch.Tensor):
+        if image_sizes.numel() == 0:
+            return []
+        return image_sizes.reshape(-1, 2).tolist()
+    if not image_sizes:
+        return []
+    if isinstance(image_sizes, list):
+        if len(image_sizes) == 1 and isinstance(image_sizes[0], list):
+            inner = image_sizes[0]
+            if inner and isinstance(inner[0], (list, tuple)):
+                return [tuple(item) for item in inner]
+            return list(inner)
+        return list(image_sizes)
+    return [image_sizes]
+
+
+def _expand_processor_slots(
+    processor,
+    text: str,
+    *,
+    image_sizes: Sequence[Any],
+    audios: Sequence[np.ndarray],
+    max_slice_nums: int | None = None,
+    use_image_id: bool | None = None,
+    stream_input: bool = False,
+    chunk_length: int = 1,
+) -> str:
+    """Expand MiniCPM processor slots the same way as ``_convert_omni_to_inputs``."""
+
+    if use_image_id is None:
+        use_image_id = True
+
+    split_pattern = f"({re.escape(_MINICPM_IMAGE_SLOT)}|{re.escape(_MINICPM_AUDIO_SLOT)})"
+    text_chunks = re.split(split_pattern, text)
+    image_sizes_list = _normalise_image_sizes(image_sizes)
+    audios_list = list(audios)
+    image_id = 0
+    audio_id = 0
+    for index, chunk in enumerate(text_chunks):
+        if chunk == _MINICPM_IMAGE_SLOT:
+            if image_id >= len(image_sizes_list):
+                raise ValueError(
+                    f"MiniCPM label alignment expects {len(image_sizes_list)} image slot(s), "
+                    f"found at least {image_id + 1} in text."
+                )
+            image_processor = processor.image_processor
+            text_chunks[index] = image_processor.get_slice_image_placeholder(
+                image_sizes_list[image_id],
+                image_id,
+                max_slice_nums,
+                use_image_id,
+            )
+            image_id += 1
+        elif chunk == _MINICPM_AUDIO_SLOT:
+            if audio_id >= len(audios_list):
+                raise ValueError(
+                    f"MiniCPM label alignment expects {len(audios_list)} audio slot(s), "
+                    f"found at least {audio_id + 1} in text."
+                )
+            text_chunks[index] = processor.get_audio_placeholder(
+                len(audios_list[audio_id]),
+                chunk_input=stream_input,
+                chunk_length=chunk_length,
+            )
+            audio_id += 1
+    return "".join(text_chunks)
+
+
+def _strip_leading_padding(
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+) -> tuple[torch.Tensor, int]:
+    if attention_mask is None or attention_mask.ndim != 1:
+        return input_ids, 0
+    valid = attention_mask.to(dtype=torch.bool)
+    if valid.all():
+        return input_ids, 0
+    first_valid = int(valid.int().argmax().item()) if valid.any() else 0
+    if first_valid == 0:
+        return input_ids, 0
+    return input_ids[first_valid:], first_valid
+
+
+def _find_token_subsequence(haystack: Sequence[int], needle: Sequence[int]) -> slice | None:
+    if not needle or len(needle) > len(haystack):
+        return None
+    for start in range(len(haystack) - len(needle), -1, -1):
+        if list(haystack[start : start + len(needle)]) == list(needle):
+            return slice(start, start + len(needle))
+    return None
 
 
 def _final_assistant_token_mask(
@@ -226,7 +412,10 @@ def _final_assistant_token_mask(
     processor,
     rendered_text: str,
     input_ids: torch.Tensor,
-    media_token_ids: set[int],
+    *,
+    image_sizes: Sequence[Any],
+    audios: Sequence[np.ndarray],
+    attention_mask: torch.Tensor | None = None,
     **kwargs,
 ) -> torch.Tensor:
     tokenizer = _tokenizer_from_processor(processor)
@@ -235,31 +424,76 @@ def _final_assistant_token_mask(
     if markers is None:
         return loss_mask
 
-    marked_text = _render_chat(marked_messages, processor, **kwargs)
+    image_count = int(kwargs.get("_minicpm_image_count", 0))
+    audio_count = int(kwargs.get("_minicpm_audio_count", 0))
+    video_count = int(kwargs.get("_minicpm_video_count", 0))
+    use_audio_in_video = bool(kwargs.get("use_audio_in_video"))
+    max_slice_nums = kwargs.get("max_slice_nums")
+    use_image_id = kwargs.get("use_image_id")
+    max_length = kwargs.get("max_length")
+    stream_input = bool(kwargs.get("stream_input", False))
+    chunk_length = int(kwargs.get("chunk_length", 1))
+
+    marked_text = _render_processor_text(
+        marked_messages,
+        processor,
+        image_count=image_count,
+        audio_count=audio_count,
+        video_count=video_count,
+        use_audio_in_video=use_audio_in_video,
+        **kwargs,
+    )
+    expand_kwargs = {
+        "image_sizes": image_sizes,
+        "audios": audios,
+        "max_slice_nums": max_slice_nums,
+        "use_image_id": use_image_id,
+        "stream_input": stream_input,
+        "chunk_length": chunk_length,
+    }
+    expanded_rendered = _expand_processor_slots(processor, rendered_text, **expand_kwargs)
+    expanded_marked = _expand_processor_slots(processor, marked_text, **expand_kwargs)
+
     start_marker, end_marker = markers
-    start = marked_text.find(start_marker)
+    start = expanded_marked.find(start_marker)
     if start < 0:
         raise ValueError("Cannot locate MiniCPM assistant start marker in rendered chat template.")
-    stripped_text = marked_text[:start] + marked_text[start + len(start_marker) :]
-    end = stripped_text.find(end_marker, start)
+    end = expanded_marked.find(end_marker, start + len(start_marker))
     if end < 0:
         raise ValueError("Cannot locate MiniCPM assistant end marker in rendered chat template.")
-    stripped_text = stripped_text[:end] + stripped_text[end + len(end_marker) :]
-    if stripped_text != rendered_text:
+
+    assistant_char_start = start
+    assistant_char_end = end - len(start_marker)
+    expected_answer = expanded_marked[start + len(start_marker) : end]
+    if expanded_rendered[assistant_char_start:assistant_char_end] != expected_answer:
         raise ValueError("Marked MiniCPM chat template rendering does not match the unmarked rendering.")
 
-    tokenized = tokenizer(rendered_text, add_special_tokens=False, return_offsets_mapping=True)
+    encoded_ids = _encode_like_processor(tokenizer, expanded_rendered, max_length=max_length)
+    processor_ids_tensor, pad_offset = _strip_leading_padding(input_ids, attention_mask)
+    processor_ids = [int(token) for token in processor_ids_tensor.tolist()]
+
+    if encoded_ids != processor_ids:
+        answer_ids = _encode_like_processor(tokenizer, expected_answer)
+        answer_span = _find_token_subsequence(processor_ids, answer_ids)
+        if answer_span is not None:
+            for token_i in range(answer_span.start, answer_span.stop):
+                loss_mask[pad_offset + token_i] = True
+            return loss_mask
+        raise ValueError(
+            "MiniCPM expanded label encoding does not match processor input_ids; "
+            f"lengths {len(encoded_ids)} vs {len(processor_ids)}."
+        )
+
+    tokenized = tokenizer(expanded_rendered, return_offsets_mapping=True)
     offsets = tokenized.get("offset_mapping")
-    token_ids = tokenized.get("input_ids")
-    if offsets is None or token_ids is None:
+    if offsets is None:
         raise ValueError("MiniCPM tokenizer must provide offset_mapping to build final-assistant DPO labels.")
 
-    token_to_processor_pos = _align_template_tokens_to_processor_tokens(token_ids, input_ids, media_token_ids)
-    for token_i, (token_start, token_end) in enumerate(offsets[: len(token_to_processor_pos)]):
+    for token_i, (token_start, token_end) in enumerate(offsets[: len(processor_ids)]):
         if token_start == token_end:
             continue
-        if token_start < end and token_end > start:
-            loss_mask[token_to_processor_pos[token_i]] = True
+        if token_start < assistant_char_end and token_end > assistant_char_start:
+            loss_mask[pad_offset + token_i] = True
     return loss_mask
 
 
@@ -267,16 +501,33 @@ def _default_position_ids(input_ids: torch.Tensor) -> torch.Tensor:
     return torch.arange(input_ids.shape[-1], dtype=torch.long, device=input_ids.device)
 
 
+def _fetch_minicpm_audios(sample: dict[str, Any], **kwargs) -> list[np.ndarray]:
+    return _fetch_audios(sample.get("audios", []), **kwargs) if sample.get("audios") else []
+
+
 def process_minicpm_sample(sample: dict[str, Any], processor, position_id_func=None, **kwargs) -> list[dict[str, Any]]:
     """Transform one offline preference sample into MiniCPM model inputs."""
 
     messages = _build_minicpm_messages(sample)
-    rendered_text = _render_chat(messages, processor, **kwargs)
     images = _fetch_images(sample.get("images", []), **kwargs) if sample.get("images") else []
-    videos, _video_audios = _fetch_videos(sample.get("videos", []), **kwargs) if sample.get("videos") else ([], [])
-    audios = _fetch_audios(sample.get("audios", []), **kwargs) if sample.get("audios") else []
+    audios = _fetch_minicpm_audios(sample, **kwargs)
+    rendered_text = _render_processor_text(
+        messages,
+        processor,
+        image_count=len(images),
+        audio_count=len(audios),
+        video_count=0,
+        use_audio_in_video=False,
+        **kwargs,
+    )
 
-    model_inputs = _call_processor(processor, text=rendered_text, images=images, videos=videos, audios=audios)
+    label_kwargs = {
+        **kwargs,
+        "_minicpm_image_count": len(images),
+        "_minicpm_audio_count": len(audios),
+        "_minicpm_video_count": 0,
+    }
+    model_inputs = _call_processor(processor, text=rendered_text, images=images, videos=[], audios=audios, **kwargs)
     model_inputs = {key: _squeeze_batch_dim(value) for key, value in model_inputs.items()}
 
     if "input_ids" not in model_inputs:
@@ -329,8 +580,10 @@ def process_minicpm_sample(sample: dict[str, Any], processor, position_id_func=N
         processor,
         rendered_text,
         raw_input_ids,
-        media_token_ids,
-        **kwargs,
+        image_sizes=model_inputs.get("image_sizes", []),
+        audios=audios,
+        attention_mask=model_inputs.get("attention_mask"),
+        **label_kwargs,
     )
     labels[assistant_mask] = raw_input_ids[assistant_mask]
     model_inputs["input_ids"] = raw_input_ids
