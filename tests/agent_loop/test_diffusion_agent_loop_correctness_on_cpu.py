@@ -28,8 +28,8 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
     _pad_prompt_extra_field,
 )
 from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopWorkerTQ
-from verl_omni.trainer.diffusion.v1 import tq_utils
 from verl_omni.agent_loop.single_turn_agent_loop import DiffusionSingleTurnAgentLoop
+from verl_omni.trainer.diffusion.v1 import tq_utils
 
 
 class _FakeRemoteComputeScore:
