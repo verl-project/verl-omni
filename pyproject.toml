@@ -65,7 +65,9 @@ audio = [
 # CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
 gpu = [
     "vllm==0.28.0",
-    "kernels==0.14.1",
+    # 0.14.1 cannot select the stable-ABI FA3 Hub build on torch 2.13/CUDA 13
+    # (silently degrades actor attention to native, #417); 0.16.0 can.
+    "kernels==0.16.0",
     "liger-kernel",
 ]
 # Training stack (install in step 2).

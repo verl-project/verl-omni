@@ -31,8 +31,9 @@ runs:
         uv pip install --system --break-system-packages veomni==0.1.11 --no-deps
         uv pip install --system --break-system-packages torchcodec librosa soundfile av audioread
         uv pip install --system --break-system-packages "transformers[mistral-common]==5.14.1"
-        # Mirror-lag defense: reassert the kernels pin (pyproject's [gpu] extra pins the same 0.14.1).
-        uv pip install --system --break-system-packages "kernels==0.14.1"
+        # kernels comes from pyproject's [gpu] extra (0.16.0): required for stable-ABI
+        # FA3 variant selection on the torch 2.13/CUDA 13 stack (#417). The old
+        # 0.14.1 smoke override targeted the pre-0.28 torch and is gone.
         # NCCL checkpoint engine (diffusion v1 separate_async weight sync).
         uv pip install --system --break-system-packages pyzmq
         uv pip install --system --break-system-packages cupy-cuda12x || uv pip install --system --break-system-packages cupy-cuda13x
