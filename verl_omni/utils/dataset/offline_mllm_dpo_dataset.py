@@ -763,9 +763,12 @@ class OfflineMLLMDPODataset(MultiTurnSFTDataset):
         transformed["reward_model"] = [reward_model, reward_model]
         modality = self.get_modality(item)
         transformed["modality"] = [modality, modality]
-        extra_info = _as_python(row.get("extra_info", {"index": int(item)}))
-        if isinstance(extra_info, dict):
-            extra_info = {**extra_info, "modality": modality}
+        extra_info = _as_python(row.get("extra_info", {}))
+        if not isinstance(extra_info, dict):
+            extra_info = {}
+        if "index" not in extra_info:
+            extra_info = {**extra_info, "index": int(item)}
+        extra_info = {**extra_info, "modality": modality, "dataset_index": int(item)}
         transformed["extra_info"] = [extra_info, extra_info]
         transformed["is_chosen"] = [True, False]
         return transformed
