@@ -26,6 +26,10 @@ class _CharTokenizer:
     def convert_tokens_to_ids(self, token):
         return {"<image>": 1001, "<video>": 1002, "<audio>": 1003}.get(token, self.unk_token_id)
 
+    def apply_chat_template(self, messages, tokenize=False, **kwargs):
+        del tokenize, kwargs
+        return "".join(f"{message['role']}:{message['content']}\n" for message in messages)
+
     def __call__(
         self, text, add_special_tokens=False, return_offsets_mapping=False, return_tensors=None, padding=False
     ):
@@ -43,13 +47,23 @@ class _MiniCPMProcessor:
     def __init__(self):
         self.tokenizer = _CharTokenizer()
 
-    def apply_chat_template(self, messages, tokenize=False, **kwargs):
-        del tokenize, kwargs
-        return "".join(f"{message['role']}:{message['content']}\n" for message in messages)
-
     def __call__(self, text, **kwargs):
         del kwargs
         return self.tokenizer(text, return_tensors="pt")
+
+
+def test_minicpm_transform_uses_tokenizer_apply_chat_template():
+    sample = {
+        "conversations": [
+            ["user", ("text", "question")],
+            ["assistant", ("text", "answer")],
+        ]
+    }
+
+    output = process_minicpm_sample(sample, processor=_MiniCPMProcessor())[0]
+    input_text = "".join(chr(token_id) for token_id in output["input_ids"].tolist())
+    assert "user:question" in input_text
+    assert "assistant:answer" in input_text
 
 
 def test_minicpm_transform_labels_only_final_assistant_answer():
