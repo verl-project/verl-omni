@@ -159,7 +159,6 @@ async def test_abort_outputs_come_from_engine_queues_with_non_empty_tokens():
     assert OmniStrategyBase._map_stop_reason(output.finish_reason) == "aborted"
     # No server-side synthetic enqueue on the success path.
     assert states["ext-1-abc"].queue.qsize() == 0
-    assert not hasattr(vLLMOmniHttpServer, "_enqueue_abort_output")
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +293,7 @@ async def test_pause_failure_after_successful_abort_does_not_double_enqueue():
 
 
 async def test_abort_ack_timeout_raises(monkeypatch):
-    monkeypatch.setattr(server_module, "ABORT_ACK_TIMEOUT_S", 0.05)
+    monkeypatch.setenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "0.05")
 
     class _HangingEngine(_FakeAsyncOmni):
         async def abort(self, request_ids):
@@ -305,6 +304,9 @@ async def test_abort_ack_timeout_raises(monkeypatch):
 
     with pytest.raises(asyncio.TimeoutError):
         await server.abort_all_requests()
+
+    for state in states.values():
+        assert state.queue.get_nowait().finished is True  # terminal still enqueued
 
 
 # ---------------------------------------------------------------------------
@@ -320,8 +322,7 @@ async def test_drain_returns_immediately_when_no_requests_in_flight():
 
 
 async def test_drain_raises_on_lingering_requests(monkeypatch):
-    monkeypatch.setattr(server_module, "ABORT_ACK_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(server_module, "_DRAIN_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "0.05")
     states = {"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")}
     server = _make_server(_FakeAsyncOmni(states=states))
 

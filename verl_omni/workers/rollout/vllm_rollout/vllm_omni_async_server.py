@@ -49,10 +49,6 @@ logger.setLevel(logging.INFO)
 # Sentinel: ``None`` is a valid cached value (LoRA not loaded).
 _LORA_REQUEST_CACHE_MISS = object()
 
-# AsyncOmni.abort() has no default timeout; also bounds the pre-sleep drain.
-ABORT_ACK_TIMEOUT_S = float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
-_DRAIN_POLL_INTERVAL_S = 0.1
-
 
 class vLLMOmniHttpServer(vLLMHttpServer):
     """vLLM-Omni http server in single node, this is equivalent to launch server with command line:
@@ -190,7 +186,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         raise NotImplementedError("vLLM-Omni headless mode is not implemented yet.")
 
     # -----------------------------------------------------------------------
-    # Sleep / wake lifecycle: delegated to AsyncOmni and ACK-validated
+    # wake_up hook: Omni does not restore KV cache on wake-up
     # -----------------------------------------------------------------------
 
     def _get_wake_up_tags(self) -> list[str]:
@@ -354,14 +350,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     async def wait_for_requests_to_drain(self):
         """Raise while requests are in flight: EngineCore auto-resumes leftover
         AR requests on a full wake, so sleep must not pass them silently."""
-        deadline = time.monotonic() + ABORT_ACK_TIMEOUT_S
+        timeout_s = float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
+        deadline = time.monotonic() + timeout_s
         while self.engine.request_states:
             if time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"rollout engine still has {len(self.engine.request_states)} in-flight "
-                    f"request(s) after {ABORT_ACK_TIMEOUT_S:.0f}s; refusing to proceed"
+                    f"request(s) after {timeout_s:.0f}s; refusing to proceed"
                 )
-            await asyncio.sleep(_DRAIN_POLL_INTERVAL_S)
+            await asyncio.sleep(0.1)
 
     # -----------------------------------------------------------------------
     # Abort: AsyncOmni has no `output_processor` (it routes through an
@@ -396,7 +393,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         try:
             if request_ids:
                 # Never abort with an empty list — a silent no-op engine-side.
-                await asyncio.wait_for(engine.abort(request_ids), timeout=ABORT_ACK_TIMEOUT_S)
+                await asyncio.wait_for(
+                    engine.abort(request_ids), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
+                )
             aborted = True
             # Pause even with nothing to abort: holds admission until resume_generation.
             await engine.pause_generation(
@@ -407,14 +406,21 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             # generate() cannot hang on queue.get.
             if not aborted:
                 for internal_id, _, state in in_flight:
-                    self._enqueue_emergency_abort_output(internal_id, state)
+                    self._enqueue_abort_output(internal_id, state)
             raise
 
         logger.info("Aborted %d request(s): %s", len(request_ids), request_ids)
         return {"aborted_count": len(request_ids), "request_ids": request_ids}
 
-    def _enqueue_emergency_abort_output(self, internal_id: str, req_state: Any) -> None:
-        """Failure-path only: unblock generate() when the abort itself raised."""
+    def _enqueue_abort_output(self, internal_id: str, req_state: Any) -> None:
+        """Synthesize a terminal abort OutputMessage and put it into a per-request queue.
+
+        ``_process_orchestrator_results`` reads from ``req_state.queue`` and
+        expects ``OutputMessage`` (or ``ErrorMessage``) objects. We build a
+        minimal ``OmniRequestOutput`` with ``finish_reason="abort"`` so that
+        ``_process_single_result`` yields it and the active generation strategy maps it
+        to ``stop_reason="aborted"``.
+        """
         from vllm.outputs import CompletionOutput
         from vllm_omni.engine.messages import OutputMessage
         from vllm_omni.outputs import OmniRequestOutput
@@ -462,14 +468,16 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         aborted = False
         try:
             if in_flight_state is not None:
-                await asyncio.wait_for(engine.abort(request_id), timeout=ABORT_ACK_TIMEOUT_S)
+                await asyncio.wait_for(
+                    engine.abort(request_id), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
+                )
             aborted = True
             await engine.pause_generation(
                 mode="abort", wait_for_inflight_requests=False, clear_cache=reset_prefix_cache
             )
         except Exception:
             if not aborted and in_flight_state is not None:
-                self._enqueue_emergency_abort_output(in_flight_state.request_id, in_flight_state)
+                self._enqueue_abort_output(in_flight_state.request_id, in_flight_state)
             raise
 
         logger.info("Aborted request: %s", request_id)
