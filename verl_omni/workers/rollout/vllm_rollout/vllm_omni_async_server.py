@@ -244,8 +244,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """Fail closed on any non-success sleep/wake handshake."""
         for ack in acks or []:
             if isinstance(ack, dict):
-                if "error" in ack:
-                    raise RuntimeError(f"{method} failed on a stage: {ack['error']}")
+                raise RuntimeError(f"{method} failed on a stage: {ack.get('error', ack)}")
             elif ack.status != "SUCCESS":
                 raise RuntimeError(f"{method} failed on a stage: {getattr(ack, 'error_msg', None) or ack!r}")
 
@@ -372,6 +371,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                     engine.abort(request_ids), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
                 )
             aborted = True
+            # The engine's abort fallback terminal is stage-0, which multi-stage
+            # pipelines drop as non-final — enqueue ours so generate() can always
+            # complete; when the engine delivered a real terminal ours trails unused.
+            for internal_id, _, state in in_flight:
+                self._enqueue_abort_output(internal_id, state)
             # Pause even with nothing to abort: holds admission until resume_generation.
             await engine.pause_generation(
                 mode="abort", wait_for_inflight_requests=False, clear_cache=reset_prefix_cache
@@ -437,18 +441,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 in_flight_state = state
                 break
 
-        aborted = False
         try:
             if in_flight_state is not None:
                 await asyncio.wait_for(
                     engine.abort(request_id), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
                 )
-            aborted = True
-            await engine.pause_generation(
-                mode="abort", wait_for_inflight_requests=False, clear_cache=reset_prefix_cache
-            )
+                self._enqueue_abort_output(in_flight_state.request_id, in_flight_state)
         except Exception:
-            if not aborted and in_flight_state is not None:
+            if in_flight_state is not None:
                 self._enqueue_abort_output(in_flight_state.request_id, in_flight_state)
             raise
 
