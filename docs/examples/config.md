@@ -1,6 +1,6 @@
 # Config Explanation
 
-Last updated: 08/23/2026
+Last updated: 09/01/2026
 
 VeRL-Omni builds on [verl](https://github.com/verl-project/verl) and reuses the
 same Hydra config surface for shared RL trainer fields (`data`, FSDP actor /
@@ -110,8 +110,13 @@ standalone rollout GPUs from the Ray cluster.
 `actor_rollout_ref.rollout.agent.num_workers` controls CPU request concurrency; it
 does not allocate rollout GPUs and does not need to match `rollout.n_gpus_per_node`.
 
-On a CUDA Ray cluster, the Wan2.2 auto-device recipe forwards trailing Hydra
-overrides, so the same topology can be launched with the NCCL checkpoint backend:
+This topology is v0-only (`trainer.use_v1=false`). The default CUDA DanceGRPO
+recipe is now the V1 sync launcher (`run_wan22_5b_t2v_hpsv3_v1.sh`); use the
+**deprecated** v0 auto-detect script below when you need
+`actor_rollout_ref.separate`.
+
+On a CUDA Ray cluster, that v0 recipe forwards trailing Hydra overrides, so the
+same topology can be launched with the NCCL checkpoint backend:
 
 ```bash
 bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_auto.sh \
@@ -315,7 +320,10 @@ These sit on the diffusion trainer YAML (in addition to shared verl trainer fiel
 - `trainer.video_fps`: FPS for videos written to `rollout_data_dir` / `validation_data_dir` and logged to W&B (image runs ignore this).
 - `trainer.rollout_data_save_freq`: Dump train rollout every N steps (`1` = every step, `<= 0` = never).
 - `trainer.rollout_data_max_samples` / `validation_data_max_samples`: Cap samples dumped per train / val run (`null` = all).
-- `trainer.use_v1`: Use the V1 trainer (TransferQueue + ReplayBuffer). When `false`, legacy v0 diffusion trainer.
+- `trainer.use_v1`: Use the V1 trainer (TransferQueue + ReplayBuffer). When `false`,
+  the legacy v0 diffusion trainer. Wan2.2 DanceGRPO on CUDA now defaults to V1
+  via `run_wan22_5b_t2v_hpsv3_v1.sh`; the v0 auto-detect launcher is deprecated
+  for CUDA.
 - `trainer.v1.*`: V1 mode / sampler / async placeholders (`trainer_mode`, `max_off_policy_threshold`, …). See {doc}`../start/diffusion_v1`.
 
 ### `reward` — visual reward manager

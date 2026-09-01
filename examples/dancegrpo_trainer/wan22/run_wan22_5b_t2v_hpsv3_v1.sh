@@ -5,13 +5,13 @@
 # Algorithm: DanceGRPO (reuses FlowGRPO's advantage estimator and loss)
 # Reward: HPSv3 (Human Preference Score v3) - custom reward model
 #
-# This is the CUDA v1 counterpart of run_wan22_5b_t2v_hpsv3_auto.sh. It uses
+# This is the default CUDA recipe for Wan2.2 DanceGRPO. It uses
 # `verl_omni.trainer.main_diffusion_v1`, which selects
 # `PolicyGradientDiffusionTrainerV1Sync` via `trainer.v1.trainer_mode=sync`.
 # TransferQueue is force-enabled inside the runner, so it does not need to be
-# set on the CLI. NPU auto-detect remains on the v0 script.
+# set on the CLI. NPU auto-detect remains on the deprecated v0 script.
 #
-# Reference (legacy v0 script):
+# Reference (deprecated v0 script):
 # verl-omni/examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_auto.sh
 # Reference: https://github.com/XueZeyue/DanceGRPO and https://github.com/verl-project/verl-recipe/blob/main/dance_grpo/dance_grpo_mindspeed_mm/
 set -x

@@ -1,4 +1,9 @@
 #!/bin/bash
+# DEPRECATED (CUDA): This v0 launcher uses verl_omni.trainer.main_diffusion.
+# New CUDA runs should use the V1 sync recipe:
+#   bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_v1.sh
+# This script remains for NPU auto-detect and backward compatibility.
+#
 # Wan2.2 LoRA RL with DanceGRPO
 #
 # Model: Wan-AI/Wan2.2-TI2V-5B-Diffusers (text+image-to-video, used in T2V mode)
@@ -9,7 +14,6 @@
 #
 # Reference: https://github.com/XueZeyue/DanceGRPO and https://github.com/verl-project/verl-recipe/blob/main/dance_grpo/dance_grpo_mindspeed_mm/
 #
-set -x
 
 if npu-smi info &>/dev/null; then
     DEVICE="npu"
@@ -20,6 +24,12 @@ else
     exit 1
 fi
 echo "Detected device: $DEVICE"
+if [ "$DEVICE" = "gpu" ]; then
+    echo "WARNING: run_wan22_5b_t2v_hpsv3_auto.sh is the deprecated v0 trainer." >&2
+    echo "For CUDA, use examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_v1.sh instead." >&2
+fi
+
+set -x
 
 if [ "$DEVICE" = "npu" ]; then
     export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy

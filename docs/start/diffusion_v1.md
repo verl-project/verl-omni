@@ -1,11 +1,12 @@
 # Diffusion V1 training
 
-Last updated: 08/25/2026
+Last updated: 09/01/2026
 
 This guide runs the diffusion V1 trainer in synchronous or separate-asynchronous
 mode using the provided Stable Diffusion 3.5 Medium FlowGRPO OCR recipes. The V1
 trainer uses TransferQueue and ReplayBuffer to move rollout trajectories into
-the training loop.
+the training loop. Wan2.2 DanceGRPO on CUDA also defaults to the V1 sync
+recipe; see {doc}`../examples/dancegrpo_trainer`.
 
 The examples support a single-node NVIDIA GPU setup. Sync mode uses two GPUs for
 the colocated actor and rollout plus one reward GPU. Separate-async mode also
@@ -88,6 +89,18 @@ Checkpoints are written by default to:
 ```text
 checkpoints/flow_grpo/sd35_medium_ocr_lora_v1
 ```
+
+### Wan2.2 DanceGRPO (default CUDA recipe)
+
+Wan2.2 DanceGRPO on CUDA now defaults to the same V1 sync trainer:
+
+```bash
+bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_v1.sh
+```
+
+See {doc}`../examples/dancegrpo_trainer` for dataset and HPSv3 setup. The
+legacy v0 auto-detect script (`run_wan22_5b_t2v_hpsv3_auto.sh`) is
+**deprecated** for CUDA and remains for NPU.
 
 ## Run V1 separate-async mode
 

@@ -1,6 +1,6 @@
 # Supported Models
 
-Last updated: 08/19/2026.
+Last updated: 09/01/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
@@ -157,7 +157,12 @@ guidance scale 4.0, SDE window 2 over `[0,5]` at noise level 1.2, validation at
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
-| DanceGRPO (HPSv3) | `examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_npu.sh` | 8×NPU (Ascend 800T A2) |
+| DanceGRPO (HPSv3, V1 sync) | `examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_v1.sh` | 8×GPU |
+| DanceGRPO (HPSv3, v0, NPU) | `examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_auto.sh` | 16×NPU (Ascend 800T A2) |
+
+The CUDA default is the V1 sync recipe (`main_diffusion_v1`, TransferQueue).
+The v0 auto-detect launcher is **deprecated** for CUDA and remains for NPU
+until a V1 NPU recipe lands.
 
 **Reward model:** HPSv3 (Human Preference Score v3) — local safetensors checkpoint
 placed at `$WORKSPACE/CKPT/HPSv3/HPSv3.safetensors`.

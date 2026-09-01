@@ -1,16 +1,24 @@
 # DanceGRPO Trainer
 
-Last updated: 08/07/2026
+Last updated: 09/01/2026
 
 This example shows how to post-train `Wan2.2-TI2V-5B` with DanceGRPO on text-to-video generation tasks. DanceGRPO extends FlowGRPO with a score-based SDE step formulation for improved numerical stability during rollout sampling.
 
-For the base Flow-GRPO setup, see [Examples - FlowGRPO Trainer](https://verl-omni.readthedocs.io/en/latest/examples/flowgrpo_trainer.html). For algorithm details, see [Algorithms - Flow-GRPO](../../docs/algo/flowgrpo.md).
+For the base Flow-GRPO setup, see [Examples - FlowGRPO Trainer](https://verl-omni.readthedocs.io/en/latest/examples/flowgrpo_trainer.html). For algorithm details, see [Algorithms - Flow-GRPO](../../docs/algo/flowgrpo.md). For the V1 trainer (TransferQueue + ReplayBuffer), see [Diffusion V1 training](../../docs/start/diffusion_v1.md).
+
+The **default CUDA recipe** is the V1 sync launcher:
+
+- [`run_wan22_5b_t2v_hpsv3_v1.sh`](wan22/run_wan22_5b_t2v_hpsv3_v1.sh) — **GPU**, **V1 sync** (`verl_omni.trainer.main_diffusion_v1`)
+
+> **Deprecated:** `run_wan22_5b_t2v_hpsv3_auto.sh` is the legacy v0 launcher
+> (`verl_omni.trainer.main_diffusion`). It remains for NPU auto-detect and
+> backward compatibility. New CUDA runs should use the V1 script.
 
 ## Installation
 
 Follow the [installation guide](../../docs/start/install.md) to set up the base environment.
 
-The provided script auto-detects whether NPUs or GPUs are available and configures the run accordingly (16 NPUs or 8 GPUs on a single node).
+The V1 CUDA script targets 8 GPUs on a single node. The deprecated v0 auto-detect script still configures 16 NPUs or 8 GPUs.
 
 ## Prepare the dataset
 
@@ -45,17 +53,26 @@ This produces:
 
 ## Run training
 
-### HPSv3 reward
+### HPSv3 reward (default: V1 sync)
 
 Launch the HPSv3 example from the repository root:
+
+```bash
+bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_v1.sh
+```
+
+The V1 script is CUDA-only and selects `PolicyGradientDiffusionTrainerV1Sync` via `trainer.v1.trainer_mode=sync`. TransferQueue is force-enabled inside the runner.
+
+For Ascend NPU, or to keep the legacy v0 trainer, use the auto-detect script:
 
 ```bash
 bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_auto.sh
 ```
 
-For CUDA V1 sync (TransferQueue + ReplayBuffer), use `examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_v1.sh`.
-
-The script auto-detects the device (`npu` via `npu-smi info`, or `gpu` via `nvidia-smi`) and exits with an error if neither is found.
+> **Deprecated:** the auto-detect script uses the v0 `main_diffusion` trainer.
+> Prefer the V1 launcher on CUDA. The v0 script auto-detects the device
+> (`npu` via `npu-smi info`, or `gpu` via `nvidia-smi`) and exits with an
+> error if neither is found.
 
 #### Configurable environment variables
 
@@ -78,10 +95,10 @@ TRAIN_FILES_PATH=/data/my_train.parquet \
 VAL_FILES_PATH=/data/my_val.parquet \
 MODEL_NAME=/path/to/local/model \
 CUSTOM_REWARD_MODEL_PATH=/path/to/HPSv3.safetensors \
-bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_auto.sh
+bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_v1.sh
 ```
 
-The script runs `python3 -m verl_omni.trainer.main_diffusion` with:
+The V1 script runs `python3 -m verl_omni.trainer.main_diffusion_v1` with:
 
 - `algorithm.adv_estimator=dance_grpo`
 - `actor_rollout_ref.model.path=Wan-AI/Wan2.2-TI2V-5B-Diffusers`
@@ -91,8 +108,12 @@ The script runs `python3 -m verl_omni.trainer.main_diffusion` with:
 - `actor_rollout_ref.rollout.algo.noise_level=1.2`
 - `actor_rollout_ref.rollout.algo.sde_window_size=2`
 - `reward.custom_reward_function.name=compute_score_hpsv3`
-- `trainer.n_gpus_per_node=16` (NPU) or `8` (GPU)
+- `trainer.use_v1=true`
+- `trainer.v1.trainer_mode=sync`
+- `trainer.n_gpus_per_node=8`
 - `trainer.total_training_steps=120`
+
+The deprecated v0 auto-detect script still uses `python3 -m verl_omni.trainer.main_diffusion` and sets `trainer.n_gpus_per_node=16` (NPU) or `8` (GPU).
 
 ## SDE variants
 
@@ -121,10 +142,10 @@ The script sets:
 
 ```bash
 trainer.project_name=dance_grpo
-trainer.experiment_name=wan22_5b_t2v_hpsv3_npu  # or wan22_5b_t2v_hpsv3_gpu
+trainer.experiment_name=wan22_5b_t2v_hpsv3_gpu_v1
 ```
 
-These values are set automatically based on the detected device. Override them by editing the `PROJECT_NAME` and `EXPERIMENT_NAME` variables in the script.
+The V1 script hard-codes that experiment name. The deprecated v0 auto-detect script still sets `wan22_5b_t2v_hpsv3_npu` or `wan22_5b_t2v_hpsv3_gpu` from the detected device. Override them by editing the `PROJECT_NAME` and `EXPERIMENT_NAME` variables in the script.
 
 ### Diffusion-specific metrics
 
