@@ -1139,6 +1139,52 @@ class DualGRPOLoss(DiffusionLossFn):
     required_model_output_keys = ("log_probs",)
     # required_data_keys = ("old_log_probs", "advantages")
 
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        old_log_prob: torch.Tensor,
+        log_prob: torch.Tensor,
+        advantages: torch.Tensor,
+        config: DiffusionActorConfig,
+        rollout_is_weights: Optional[torch.Tensor] = None,
+        stage: str = "ar",
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute the clipped policy objective and related metrics for GRPO/FlowGRPO.
+
+        Args:
+            old_log_prob (torch.Tensor):
+                Log-probabilities of actions under the old policy, shape (batch_size,).
+            log_prob (torch.Tensor):
+                Log-probabilities of actions under the current policy, shape (batch_size,).
+            advantages (torch.Tensor):
+                Advantage estimates for each action, shape (batch_size,).
+            config (verl_omni.workers.config.DiffusionActorConfig):
+                Config for the actor.
+            rollout_is_weights (Optional[torch.Tensor]):
+                Optional Rollout Correction multiplier (same shape as ``log_prob``) combining
+                IS weights and RS rejection (rejected samples have weight 0). When provided,
+                the per-element policy loss is multiplied by these (detached) weights before
+                the mean reduction.
+        """
+        loss, metrics = FlowGRPOLoss.compute_loss(
+            old_log_prob=old_log_prob,
+            log_prob=log_prob,
+            advantages=advantages,
+            config=config,
+            rollout_is_weights=rollout_is_weights,
+        )
+        if stage == "ar":
+            metrics = {
+                "actor/ar/ppo_kl": metrics.pop("actor/ppo_kl"),
+                "actor/ar/pg_clipfrac": metrics.pop("actor/pg_clipfrac"),
+                "actor/ar/pg_clipfrac_higher": metrics.pop("actor/pg_clipfrac_higher"),
+                "actor/ar/pg_clipfrac_lower": metrics.pop("actor/pg_clipfrac_lower"),
+                "actor/ar/ratio_mean": metrics.pop("actor/ratio_mean"),
+                "actor/ar/ratio_std": metrics.pop("actor/ratio_std"),
+            }
+        return loss, metrics
+
     def __call__(
         self,
         *,
@@ -1149,22 +1195,22 @@ class DualGRPOLoss(DiffusionLossFn):
         """
         Compute either AR or DiT loss
         """
-        if "ar_log_probs" not in model_output:
-            return FlowGRPOLoss()(config=config, model_output=model_output, data=data)
-
-        ar_loss, ar_metrics = FlowGRPOLoss.compute_loss(
-            old_log_prob=data["ar_old_log_probs"],
-            log_prob=model_output["ar_log_probs"],
-            advantages=data["ar_advantages"],
-            config=config,
-            rollout_is_weights=data.get("ar_rollout_is_weights", None),
-        )
-        ar_metrics = {
-            "actor/ar/ppo_kl": ar_metrics.pop("actor/ppo_kl"),
-            "actor/ar/pg_clipfrac": ar_metrics.pop("actor/pg_clipfrac"),
-            "actor/ar/pg_clipfrac_higher": ar_metrics.pop("actor/pg_clipfrac_higher"),
-            "actor/ar/pg_clipfrac_lower": ar_metrics.pop("actor/pg_clipfrac_lower"),
-            "actor/ar/ratio_mean": ar_metrics.pop("actor/ratio_mean"),
-            "actor/ar/ratio_std": ar_metrics.pop("actor/ratio_std"),
-        }
-        return DiffusionLossResult(loss=ar_loss, metrics=ar_metrics)
+        if "ar_log_probs" in model_output:
+            loss, metrics = self.compute_loss(
+                old_log_prob=data["ar_old_log_probs"],
+                log_prob=model_output["ar_log_probs"],
+                advantages=data["ar_advantages"],
+                config=config,
+                rollout_is_weights=data.get("ar_rollout_is_weights", None),
+                stage="ar",
+            )
+        else:
+            loss, metrics = self.compute_loss(
+                old_log_prob=data["old_log_probs"],
+                log_prob=model_output["log_probs"],
+                advantages=data["advantages"],
+                config=config,
+                rollout_is_weights=data.get("rollout_is_weights", None),
+                stage="diffusion",
+            )
+        return DiffusionLossResult(loss=loss, metrics=metrics)

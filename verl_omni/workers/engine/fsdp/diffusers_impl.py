@@ -1285,6 +1285,89 @@ class EngineTrainModeCtx(BaseEngineCtx):
         super().__exit__(exc_type, exc_value, traceback)
 
 
+# verl monkey patch use
+# TODO: (susan) delete after fixing the bug in verl
+from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLForConditionalGeneration
+from verl.utils.transformers_compat import unpack_visual_output
+
+
+def _get_input_embeds(
+    model: "Qwen2VLForConditionalGeneration",
+    input_ids: torch.LongTensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    pixel_values: Optional[torch.FloatTensor] = None,
+    pixel_values_videos: Optional[torch.FloatTensor] = None,
+    image_grid_thw: Optional[torch.LongTensor] = None,
+    video_grid_thw: Optional[torch.LongTensor] = None,
+):
+    inputs_embeds = model.get_input_embeddings()(input_ids)
+    if pixel_values is not None:
+        pixel_values = pixel_values.type(model.visual.dtype)
+        image_embeds, _ = unpack_visual_output(model.visual(pixel_values, grid_thw=image_grid_thw))
+        n_image_tokens = (input_ids == model.config.image_token_id).sum().item()
+        n_image_features = image_embeds.shape[0]
+        if n_image_tokens != n_image_features:
+            raise ValueError(
+                f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
+            )
+
+        mask = input_ids == model.config.image_token_id
+        mask_unsqueezed = mask.unsqueeze(-1)
+        mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
+        image_mask = mask_expanded.to(inputs_embeds.device)
+
+        image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+        inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+
+    if pixel_values_videos is not None:
+        pixel_values_videos = pixel_values_videos.type(model.visual.dtype)
+        video_embeds, _ = unpack_visual_output(model.visual(pixel_values_videos, grid_thw=video_grid_thw))
+        n_video_tokens = (input_ids == model.config.video_token_id).sum().item()
+        n_video_features = video_embeds.shape[0]
+        if n_video_tokens != n_video_features:
+            raise ValueError(
+                f"Video features and video tokens do not match: tokens: {n_video_tokens}, features {n_video_features}"
+            )
+
+        mask = input_ids == model.config.video_token_id
+        mask_unsqueezed = mask.unsqueeze(-1)
+        mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
+        video_mask = mask_expanded.to(inputs_embeds.device)
+
+        video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+        inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+
+    # if pixel_values is None and pixel_values_videos is None:  # handle mixed text-image data
+    #     config = model.config.vision_config
+    #     patch_dim = config.in_channels * config.temporal_patch_size * config.patch_size**2
+    #     pixel_values = torch.zeros((16, patch_dim), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
+    #     image_grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.long, device=inputs_embeds.device)
+    #     image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw)
+    #     inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()
+
+    if attention_mask is not None:
+        attention_mask = attention_mask.to(inputs_embeds.device)
+
+    return inputs_embeds, attention_mask
+
+
+def qwen2_vl_base_forward(
+    self: "Qwen2VLForConditionalGeneration",
+    input_ids: torch.LongTensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    labels: Optional[torch.LongTensor] = None,
+    pixel_values: Optional[torch.FloatTensor] = None,
+    pixel_values_videos: Optional[torch.FloatTensor] = None,
+    image_grid_thw: Optional[torch.LongTensor] = None,
+    video_grid_thw: Optional[torch.LongTensor] = None,
+    **kwargs,
+):
+    kwargs["inputs_embeds"], kwargs["attention_mask"] = _get_input_embeds(
+        self, input_ids, attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw
+    )  # avoid lora module having multiple keyword arguments
+    return self.language_model(input_ids=None, **kwargs)
+
+
 @EngineRegistry.register(model_type="diffusion_composite_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class CompositeFSDPEngine(BaseEngine):
     """Composite engine delegating to separate AR and DiT FSDP backends.
@@ -1301,18 +1384,17 @@ class CompositeFSDPEngine(BaseEngine):
         text_encoder_path = os.path.join(diffusion_model_config.local_path, subfolder)
         return HFModelConfig(
             path=text_encoder_path,
-            trust_remote_code=diffusion_model_config.trust_remote_code,
-            use_shm=diffusion_model_config.use_shm,
-            enable_gradient_checkpointing=diffusion_model_config.enable_gradient_checkpointing,
-            lora_rank=diffusion_model_config.lora_rank,
-            lora_alpha=diffusion_model_config.lora_alpha,
-            lora_init_weights=diffusion_model_config.lora_init_weights,
-            target_modules=diffusion_model_config.target_modules,
-            target_parameters=diffusion_model_config.target_parameters,
-            exclude_modules=diffusion_model_config.exclude_modules,
-            lora_adapter_path=getattr(diffusion_model_config, "lora_adapter_path", None),
-            lora_dtype=getattr(diffusion_model_config, "lora_dtype", None),
+            trust_remote_code=diffusion_model_config.ar.trust_remote_code,
+            use_shm=diffusion_model_config.ar.use_shm,
+            enable_gradient_checkpointing=diffusion_model_config.ar.enable_gradient_checkpointing,
+            lora_rank=diffusion_model_config.ar.lora_rank,
+            lora_alpha=diffusion_model_config.ar.lora_alpha,
+            target_modules=diffusion_model_config.ar.target_modules,
+            target_parameters=diffusion_model_config.ar.target_parameters,
+            exclude_modules=diffusion_model_config.ar.exclude_modules,
+            lora_adapter_path=getattr(diffusion_model_config.ar, "lora_adapter_path", None),
             load_tokenizer=False,
+            override_config=diffusion_model_config.ar.override_config,
         )
 
     def __init__(
@@ -1353,6 +1435,11 @@ class CompositeFSDPEngine(BaseEngine):
     def initialize(self) -> None:
         self.ar_engine.initialize()
         self.dit_engine.initialize()
+
+        # TODO: (susan) delete after fixing bug
+        # if self.ar_engine.module
+        self.ar_engine.module.model.forward = qwen2_vl_base_forward.__get__(self.ar_engine.module.model)
+        print("Monkey patch verl.modles.transformers.qwen2_vl._get_input_embeds")  # line 388-394
 
     def next_stage(self) -> None:
         """Switch stage and engine"""

@@ -30,6 +30,7 @@ __all__ = [
     "VeOmniDiffusionEngineConfig",
     "VeOmniDiffusionOptimizerConfig",
     "DiffusionActorConfig",
+    "DiffusionActorARConfig",
     "FSDPDiffusionActorConfig",
     "VeOmniDiffusionActorConfig",
 ]
@@ -73,7 +74,7 @@ class DiffusionLossConfig(BaseConfig):
 
 
 @dataclass
-class DiffusionARConfig(BaseConfig):
+class DiffusionActorARConfig(BaseConfig):
     # AR part actor config
     # use when training AR part
     entropy_coeff: float = 0
@@ -179,7 +180,7 @@ class DiffusionActorConfig(BaseConfig):
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
 
     # Trainale AR config
-    ar: DiffusionARConfig = field(default_factory=DiffusionARConfig)
+    ar: DiffusionActorARConfig = field(default_factory=DiffusionActorARConfig)
 
     def __post_init__(self):
         """Validate diffusion actor configuration parameters."""

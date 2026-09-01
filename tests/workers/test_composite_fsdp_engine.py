@@ -46,7 +46,7 @@ from verl_omni.workers.utils.losses import diffusion_loss
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 from ..utils.gpu_test_topology import resolve_requested_num_gpus
-from .test_diffusers_fsdp_engine import _diffusers_sp_supported, _create_sp_compatible_model
+from .test_diffusers_fsdp_engine import _create_sp_compatible_model, _diffusers_sp_supported
 
 
 def _require_composite_model(model_path: str) -> None:
@@ -86,6 +86,7 @@ def create_composite_training_config(
         "pipeline.true_cfg_scale=4.0",
         "algo.noise_level=1.2",
         "algo.sde_type=sde",
+        "+override_config.attn_implementation=sdpa",  # default is FA2
     ]
     from verl_omni.utils.diffusion_attention import fa3_available
 
@@ -116,6 +117,8 @@ def create_composite_training_config(
                 "fsdp_config.forward_only=False",
                 "fsdp_config.fsdp_size=" + str(fsdp_size),
                 "fsdp_config.ulysses_sequence_parallel_size=" + str(cp),
+                "+fsdp_config.infer_micro_batch_size_per_gpu=2",
+                "+fsdp_config.micro_batch_size_per_gpu=2",
             ],
         )
     actor_config: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
@@ -141,7 +144,9 @@ def _create_ar_left_right_batch(
     attention_mask = torch.ones(batch_size, max_seq_len)
     response_mask = torch.zeros(batch_size, max_response_len)
     response_mask[:, : max_response_len // 2] = 1
-    position_ids = torch.arange(max_seq_len, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
+    position_ids = (
+        torch.arange(max_seq_len, dtype=torch.long).unsqueeze(0).expand(4, batch_size, -1)
+    )  # text & vision positions
     return TensorDict(
         {
             "response_ids": response_ids,
@@ -162,6 +167,7 @@ def create_ar_infer_batch(batch_size: int) -> TensorDict:
         compute_loss=False,
         calculate_entropy=True,
         temperature=1.0,
+        use_dynamic_bsz=False,  # default is True, to test True
     )
     return batch
 
@@ -256,11 +262,8 @@ def create_dit_train_batch(
 
 @pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
 def test_composite_fsdp_engine_infer_and_train(strategy: str) -> None:
-    # if not torch.cuda.is_available():
-    #     pytest.skip("CUDA is required for CompositeFSDPEngine GPU tests")
-
-    rollout_n = 2 # dit
-    rollout_m = 2 # ar
+    rollout_n = 2  # dit
+    rollout_m = 2  # ar
 
     ray.init()
     tmp_dir = tempfile.mkdtemp(prefix="composite_fsdp_engine_")
