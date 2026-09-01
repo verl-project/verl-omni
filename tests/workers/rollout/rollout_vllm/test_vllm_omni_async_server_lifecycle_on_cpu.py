@@ -122,15 +122,15 @@ async def test_abort_runs_before_pause_with_one_batched_call():
     assert result == {"aborted_count": 2, "request_ids": ["ext-1", "ext-2"]}
 
 
-async def test_abort_with_no_in_flight_requests_still_pauses_without_calling_abort():
+async def test_abort_with_no_in_flight_requests_still_pauses():
     engine = _FakeAsyncOmni(states={})
     server = _make_server(engine)
 
     result = await server.abort_all_requests()
 
-    # An empty-list abort is a silent no-op engine-side — never send one.
-    assert engine.abort_calls == []
-    assert engine.calls == ["pause"]
+    # The engine returns immediately on an empty id list.
+    assert engine.abort_calls == [[]]
+    assert engine.calls == ["abort", "pause"]
     assert result == {"aborted_count": 0, "request_ids": []}
 
 
@@ -331,8 +331,8 @@ async def test_abort_request_unknown_id_is_a_noop():
 
     result = await server.abort_request("missing")
 
-    assert engine.abort_calls == []
-    assert engine.calls == []
+    assert engine.abort_calls == [["missing"]]
+    assert engine.calls == ["abort"]
     assert result == {"aborted": True, "request_id": "missing"}
 
 
