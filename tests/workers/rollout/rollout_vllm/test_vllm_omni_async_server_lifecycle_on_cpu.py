@@ -47,10 +47,9 @@ def _terminal(request_id: str, token_ids: list[int]):
 
 
 class _FakeAsyncOmni:
-    def __init__(self, *, states=None, fail_abort=False, sleep_acks=None, wake_acks=None, deliver_abort_terminals=True):
+    def __init__(self, *, states=None, fail_abort=False, sleep_acks=None, wake_acks=None):
         self.request_states: dict[str, _FakeRequestState] = dict(states or {})
         self.fail_abort = fail_abort
-        self.deliver_abort_terminals = deliver_abort_terminals
         self.sleep_acks = sleep_acks if sleep_acks is not None else [_SUCCESS_ACK]
         self.wake_acks = wake_acks if wake_acks is not None else [_SUCCESS_ACK]
         self.calls: list[str] = []
@@ -66,10 +65,9 @@ class _FakeAsyncOmni:
         if self.fail_abort:
             raise RuntimeError("abort rpc failed")
         ids = request_ids if isinstance(request_ids, list) else [request_ids]
-        if self.deliver_abort_terminals:
-            for state in self.request_states.values():
-                if state.external_request_id in ids:
-                    state.queue.put_nowait(_terminal(state.request_id, token_ids=[7, 8, 9]))
+        for state in self.request_states.values():
+            if state.external_request_id in ids:
+                state.queue.put_nowait(_terminal(state.request_id, token_ids=[7, 8, 9]))
 
     async def pause_generation(self, **kwargs):
         self.calls.append("pause")
@@ -153,9 +151,8 @@ async def test_abort_outputs_come_from_engine_queues_with_non_empty_tokens():
     assert output.token_ids == [7, 8, 9], "cumulative partial tokens must survive the abort"
     assert output.finish_reason == "abort"
     assert OmniStrategyBase._map_stop_reason(output.finish_reason) == "aborted"
-    # The engine's real terminal comes first; the server's safety net trails it.
-    safety_net = states["ext-1-abc"].queue.get_nowait()
-    assert safety_net.finished is True and states["ext-1-abc"].queue.qsize() == 0
+    # The engine owns success-path terminals; the server synthesizes only on failure.
+    assert states["ext-1-abc"].queue.qsize() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -252,32 +249,6 @@ async def test_engine_side_rpc_failure_propagates_from_all_four_methods():
 
 
 # ---------------------------------------------------------------------------
-# multi-stage abort: the engine's fallback terminal is stage-0 and is dropped
-# ---------------------------------------------------------------------------
-
-
-async def test_abort_enqueues_final_stage_terminal_when_engine_delivers_none():
-    """Multi-stage AR abort must not hang when the orchestrator returns nothing.
-
-    The engine's fallback abort terminal is stage_id=0, which multi-stage
-    pipelines drop as non-final in _process_single_result; the server's
-    safety net is final-stage so generate() can always complete.
-    """
-    states = {"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")}
-    engine = _FakeAsyncOmni(states=states)
-    engine.num_stages = 2
-    engine.deliver_abort_terminals = False
-    server = _make_server(engine)
-
-    await server.abort_all_requests()
-
-    assert states["ext-1-abc"].queue.qsize() == 1
-    terminal = states["ext-1-abc"].queue.get_nowait()
-    assert terminal.finished is True
-    assert terminal.stage_id == 1  # final stage of 2
-
-
-# ---------------------------------------------------------------------------
 # fail-closed abort: enqueue terminals first, then raise; timeout raises
 # ---------------------------------------------------------------------------
 
@@ -312,9 +283,8 @@ async def test_pause_failure_after_successful_abort_does_not_double_enqueue():
     with pytest.raises(RuntimeError, match="pause rpc failed"):
         await server.abort_all_requests()
 
-    # The engine's real terminal plus exactly one safety net — a pause failure
-    # must not append a second synthetic.
-    assert states["ext-1-abc"].queue.qsize() == 2
+    # Exactly the engine's real terminal — no synthetic appended after it.
+    assert states["ext-1-abc"].queue.qsize() == 1
     assert states["ext-1-abc"].queue.get_nowait().engine_outputs.outputs[0].token_ids == [7, 8, 9]
 
 
@@ -351,7 +321,7 @@ async def test_abort_request_aborts_single_id_without_pausing():
 
     assert engine.abort_calls == [["ext-1"]]  # external id, not internal
     assert engine.calls == ["abort"], "single-request abort must not pause the engine"
-    assert states["ext-1-abc"].queue.qsize() == 2  # engine terminal + safety net
+    assert states["ext-1-abc"].queue.qsize() == 1  # engine terminal only
     assert result == {"aborted": True, "request_id": "ext-1"}
 
 

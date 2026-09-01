@@ -367,15 +367,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         try:
             if request_ids:
                 # Never abort with an empty list — a silent no-op engine-side.
+                # TODO (mike): multi-stage AR abort is broken upstream — the engine's
+                # abort fallback terminal is stage_id=0 and the consume loop breaks on
+                # finished non-final messages, so generate() exits empty. Single-stage /
+                # thinker-only is correct here; needs a vllm-omni fix + pin bump.
                 await asyncio.wait_for(
                     engine.abort(request_ids), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
                 )
             aborted = True
-            # The engine's abort fallback terminal is stage-0, which multi-stage
-            # pipelines drop as non-final — enqueue ours so generate() can always
-            # complete; when the engine delivered a real terminal ours trails unused.
-            for internal_id, _, state in in_flight:
-                self._enqueue_abort_output(internal_id, state)
             # Pause even with nothing to abort: holds admission until resume_generation.
             await engine.pause_generation(
                 mode="abort", wait_for_inflight_requests=False, clear_cache=reset_prefix_cache
@@ -446,7 +445,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 await asyncio.wait_for(
                     engine.abort(request_id), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
                 )
-                self._enqueue_abort_output(in_flight_state.request_id, in_flight_state)
         except Exception:
             if in_flight_state is not None:
                 self._enqueue_abort_output(in_flight_state.request_id, in_flight_state)
