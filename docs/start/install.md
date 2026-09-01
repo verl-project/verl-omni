@@ -6,14 +6,12 @@ Last updated: 08/31/2026
 
 For NVIDIA GPU:
 
-* **Python**: Version >= 3.11 (3.12 recommended; vLLM-Omni 0.28 imports `enum.StrEnum`)
-* **CUDA**: Version >= 12.8. Note the default PyPI `vllm==0.28.0` wheel is built for
-  CUDA 13.0 (torch 2.13.0) and needs a driver that supports it; CUDA 12.9 wheels are
-  available from the [vLLM release assets](https://github.com/vllm-project/vllm/releases/tag/v0.28.0)
+* **Python**: Version >= 3.11
+* **CUDA**: Version >= 12.8
 
 For Ascend NPU:
 
-* **Python**: Version >= 3.11 (3.12 recommended; vLLM-Omni 0.28 imports `enum.StrEnum`)
+* **Python**: Version >= 3.11
 * **CANN**: Version >= 8.5.0
 
 ## Install
@@ -87,8 +85,6 @@ This installs `vllm-omni`, then `verl` and `verl-omni`.
 ### Flash Attention 3
 
 The `gpu` extra pulls `kernels==0.16.0` for Diffusers actor FA3 (`attn_backend=_flash_3_varlen_hub`).
-Older clients (≤0.14.1) cannot select the stable-ABI FA3 build on torch 2.13/CUDA 13 and
-silently fall back to native attention (#417).
 Defaults pair actor and rollout on the same Hub kernel backend:
 
 ```bash

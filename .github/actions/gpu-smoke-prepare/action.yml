@@ -31,7 +31,6 @@ runs:
         uv pip install --system --break-system-packages veomni==0.1.11 --no-deps
         uv pip install --system --break-system-packages torchcodec librosa soundfile av audioread
         uv pip install --system --break-system-packages "transformers[mistral-common]==5.14.1"
-        # kernels comes from .[gpu] (0.16.0 — stable-ABI FA3 on torch 2.13).
         # NCCL checkpoint engine (diffusion v1 separate_async weight sync).
         uv pip install --system --break-system-packages pyzmq
         uv pip install --system --break-system-packages cupy-cuda12x || uv pip install --system --break-system-packages cupy-cuda13x
