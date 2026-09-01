@@ -16,14 +16,73 @@ import os
 from typing import Any
 from uuid import uuid4
 
-from verl.experimental.agent_loop.agent_loop import AgentLoopBase, register
+from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
+from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
 from verl.utils.profiler import simple_timer
 from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
 
 from verl_omni.agent_loop.diffusion_agent_loop import DiffusionAgentLoopOutput
+from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+@register("omni_single_turn_agent")
+class OmniSingleTurnAgentLoop(SingleTurnAgentLoop):
+    """Single-turn loop for an omni model's autoregressive Talker policy."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.rollout_adapter = self._resolve_rollout_adapter(self.rollout_config)
+
+    @staticmethod
+    def _resolve_rollout_adapter(rollout_config):
+        try:
+            pipeline_name = rollout_config.engine_kwargs["vllm_omni"]["pipeline_name"]
+        except (KeyError, TypeError) as error:
+            raise ValueError("omni_single_turn_agent requires engine_kwargs.vllm_omni.pipeline_name.") from error
+
+        adapter = OmniRolloutPipelineBase.get_class(pipeline_name)
+        if adapter is None:
+            raise ValueError(
+                "omni_single_turn_agent requires a registered "
+                f"engine_kwargs.vllm_omni.pipeline_name, got {pipeline_name!r}."
+            )
+        return adapter
+
+    async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+        """Run the standard flow, then map and validate the model's policy sequence."""
+        output = await super().run(sampling_params, **kwargs)
+        output = self.rollout_adapter.postprocess_agent_loop_output(
+            output,
+            tokenizer=self.tokenizer,
+            response_length=self.response_length,
+        )
+        if not isinstance(output, AgentLoopOutput):
+            raise TypeError(
+                "OmniRolloutPipelineBase.postprocess_agent_loop_output must return an AgentLoopOutput, "
+                f"got {type(output).__name__}."
+            )
+
+        policy_length = len(output.response_ids)
+        if policy_length > self.response_length:
+            raise ValueError(
+                f"Omni policy output has {policy_length} tokens, exceeding response_length={self.response_length}."
+            )
+        if len(output.response_mask) != policy_length:
+            raise ValueError(
+                "Omni policy response_mask must align one-to-one with response_ids, "
+                f"got {len(output.response_mask)} and {policy_length}."
+            )
+        if output.response_logprobs is not None and len(output.response_logprobs) != policy_length:
+            raise ValueError(
+                "Omni policy response_logprobs must align one-to-one with response_ids, "
+                f"got {len(output.response_logprobs)} and {policy_length}."
+            )
+        if not isinstance(output.extra_fields, dict):
+            raise TypeError(f"Omni policy extra_fields must be a dict, got {type(output.extra_fields).__name__}.")
+        return output
 
 
 @register("diffusion_single_turn_agent")

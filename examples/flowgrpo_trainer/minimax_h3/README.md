@@ -1,14 +1,16 @@
-# MiniMax H3 T2VA FlowGRPO
+# MiniMax H3 T2VA and FL2VA FlowGRPO
 
-Last updated: 08/23/2026
+Last updated: 08/28/2026
 
-This recipe trains `MiniMaxAI/MiniMax-H3` LoRA adapters with FlowGRPO for
-text-to-audio-video (T2VA) generation. The provided launchers configure a
-Diffusers H3 Actor and vLLM-Omni rollout for joint video and audio generation,
-with CLAP and ImageBind as the default alignment rewards.
+These recipes train `MiniMaxAI/MiniMax-H3` LoRA adapters with FlowGRPO for
+text-to-audio-video (T2VA) and first-frame image-to-audio-video (FL2VA)
+generation. The launchers configure a Diffusers H3 Actor and vLLM-Omni rollout
+for joint video and audio generation, with CLAP and ImageBind as the default
+alignment rewards.
 
-The launchers support NVIDIA GPUs and Ascend NPUs. FL2VA and Ref2VA training
-are not yet supported by the FlowGRPO adapters.
+The T2VA launchers support NVIDIA GPUs and Ascend NPUs; the FL2VA launcher
+targets NVIDIA GPUs. Ref2VA training is not yet supported by the FlowGRPO
+adapters.
 
 ## Install
 
@@ -96,6 +98,24 @@ This writes `$DATA_DIR/train.parquet` and `$DATA_DIR/test.parquet`, the paths
 consumed by both launchers. Use `--train_size` or `--val_size` to create a
 smaller debugging dataset.
 
+FL2VA conditions each clip on a first frame. Reuse the DiffusionNFT FL2VA
+converter (symlinked here as `prepare_fl2va_data.py`), which emits one
+`<image>` token and `frame_indices=[0]`:
+
+```bash
+export RAW_FL2VA_DIR=/path/to/raw_fl2va
+export FL2VA_DATA_DIR="$HOME/data/fl2va/verl_omni"
+
+python3 examples/flowgrpo_trainer/minimax_h3/prepare_fl2va_data.py \
+  --input_dir "$RAW_FL2VA_DIR" \
+  --output_dir "$FL2VA_DATA_DIR" \
+  --frame_mode first
+```
+
+Each `train.jsonl` / `test.jsonl` row carries a prompt and a first-frame image
+path relative to the input directory; see the DiffusionNFT FL2VA recipe for the
+exact schema.
+
 ## Install reward dependencies
 
 The provided launchers enable both CLAP and ImageBind rewards. Install their
@@ -143,6 +163,19 @@ bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh \
   actor_rollout_ref.model.attn_backend=native \
   actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA
 ```
+
+### NVIDIA GPU (FL2VA)
+
+```bash
+MODEL_PATH="$MODEL_ROOT/FL2VA" \
+DATA_DIR="$HOME/data/fl2va/verl_omni" \
+IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_fl2va_lora.sh
+```
+
+FL2VA reuses the same CPS FlowGRPO configuration as T2VA. The first-frame
+condition rows are held fixed across the reverse-SDE window and re-injected
+after every transition, so only the target video/audio rows are scored.
 
 ### Ascend NPU
 
@@ -220,6 +253,6 @@ Extra Hydra overrides may be appended to either launcher command.
 
 ## Current limitations
 
-- Only T2VA rollout and training are supported. FL2VA and Ref2VA are TODOs.
+- T2VA and FL2VA rollout and training are supported. Ref2VA is a TODO.
 - CLAP and ImageBind are required by the provided launchers; change the reward
   configuration explicitly if either reward is unavailable.
