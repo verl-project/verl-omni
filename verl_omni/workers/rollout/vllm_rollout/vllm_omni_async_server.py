@@ -109,9 +109,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return "vllm_omni"
 
     def _get_worker_extension_cls(self) -> str:
-        from vllm.platforms import current_platform
+        device_type = ""
+        try:
+            from vllm.platforms import current_platform
 
-        return self._generate_strategy.worker_extension_cls(current_platform.device_type)
+            device_type = current_platform.device_type
+        except Exception:
+            pass
+
+        return self._generate_strategy.worker_extension_cls(device_type)
 
     def _get_cli_modules(self) -> list:
         return [vllm_omni.entrypoints.cli.serve]
