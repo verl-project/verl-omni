@@ -36,8 +36,7 @@ def _is_npu_platform() -> bool:
         from vllm.platforms import current_platform
 
         return current_platform.device_type == "npu"
-    except ImportError as exc:
-        logger.error("Cannot import vllm.platforms.current_platform for NPU detection: %s", exc)
+    except Exception:
         return False
 
 
