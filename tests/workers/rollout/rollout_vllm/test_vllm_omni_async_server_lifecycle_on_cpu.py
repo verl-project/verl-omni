@@ -86,12 +86,6 @@ class _FakeAsyncOmni:
     async def resume_generation(self, stage_ids=None):
         self.resumed += 1
 
-    async def reset_encoder_cache(self):
-        self.calls.append("reset_encoder_cache")
-
-    async def reset_prefix_cache(self, reset_connector=False):
-        self.calls.append("reset_prefix_cache")
-
 
 def _make_server(engine, rollout_mode=RolloutMode.HYBRID, node_rank=0, free_cache_engine=True):
     # HYBRID default: release/resume_kv_cache are skipped in COLOCATED mode
@@ -307,27 +301,6 @@ async def test_abort_ack_timeout_raises(monkeypatch):
 
     for state in states.values():
         assert state.queue.get_nowait().finished is True  # terminal still enqueued
-
-
-# ---------------------------------------------------------------------------
-# bounded drain that raises
-# ---------------------------------------------------------------------------
-
-
-async def test_drain_returns_immediately_when_no_requests_in_flight():
-    engine = _FakeAsyncOmni(states={})
-    server = _make_server(engine)
-    await server.wait_for_requests_to_drain()
-    assert engine.calls == []
-
-
-async def test_drain_raises_on_lingering_requests(monkeypatch):
-    monkeypatch.setenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "0.05")
-    states = {"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")}
-    server = _make_server(_FakeAsyncOmni(states=states))
-
-    with pytest.raises(TimeoutError, match="in-flight"):
-        await server.wait_for_requests_to_drain()
 
 
 # ---------------------------------------------------------------------------

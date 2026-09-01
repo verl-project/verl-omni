@@ -15,7 +15,6 @@ import argparse
 import asyncio
 import logging
 import os
-import time
 from dataclasses import asdict
 from typing import Any, Optional
 
@@ -210,7 +209,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             if isinstance(ack, dict):
                 if "error" in ack:
                     raise RuntimeError(f"{method} failed on a stage: {ack['error']}")
-            elif getattr(ack, "status", None) != "SUCCESS":
+            elif ack.status != "SUCCESS":
                 raise RuntimeError(f"{method} failed on a stage: {getattr(ack, 'error_msg', None) or ack!r}")
 
     async def _delegated_sleep(self) -> None:
@@ -218,8 +217,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         acks = await self.engine.sleep(level=self._resolve_sleep_level())
         self._validate_acks("sleep", acks)
         self._invalidate_lora_request_cache()
-        # Logged no-op on the omni frontend; kept for parity with verl's shape.
-        await self.engine.reset_encoder_cache()
 
     async def _delegated_wake(self, tags: list[str] | None = None) -> None:
         """``tags`` must be keyword-only — the first positional parameter is ``stage_ids``.
@@ -230,8 +227,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         acks = await self.engine.wake_up(tags=resolved_tags)
         self._validate_acks("wake_up", acks)
         self._invalidate_lora_request_cache()
-        # Logged no-op on the omni frontend; kept for parity with verl's shape.
-        await self.engine.reset_prefix_cache(reset_connector=True)
 
     async def wake_up(self, tags: list[str] | None = None):
         if self.node_rank != 0:
@@ -348,44 +343,20 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return self._lora_request_cache  # type: ignore[return-value]
 
     async def wait_for_requests_to_drain(self):
-        """Raise while requests are in flight: EngineCore auto-resumes leftover
-        AR requests on a full wake, so sleep must not pass them silently."""
-        timeout_s = float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
-        deadline = time.monotonic() + timeout_s
-        while self.engine.request_states:
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"rollout engine still has {len(self.engine.request_states)} in-flight "
-                    f"request(s) after {timeout_s:.0f}s; refusing to proceed"
-                )
-            await asyncio.sleep(0.1)
-
-    # -----------------------------------------------------------------------
-    # Abort: AsyncOmni has no `output_processor` (it routes through an
-    # Orchestrator process and tracks state in `AsyncOmni.request_states`),
-    # so the parent's AsyncLLM-specific implementation must be overridden.
-    # -----------------------------------------------------------------------
+        # TODO (mike): implement this once DP is supported.
+        pass
 
     async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
-        """Abort-then-pause: abort while generate is live, then pause.
-
-        Pausing first would finish the requests EngineCore-side and the
-        follow-up abort would synthesize *empty* ``token_ids``, wiping the
-        real cumulative partial tokens the abort delivers.
-        """
+        """Abort all in-flight requests on the AsyncOmni engine."""
         engine = self.engine
-        if getattr(engine, "output_processor", None) is not None:
-            return await super().abort_all_requests(reset_prefix_cache)
-
         # ``engine.abort`` takes EXTERNAL ids; ``request_states`` is keyed by internal.
         in_flight: list[tuple[str, str, Any]] = []
         seen: set[str] = set()
         for state in engine.request_states.values():
-            external_id = getattr(state, "external_request_id", None)
-            if external_id is None or external_id in seen:
+            if state.external_request_id in seen:
                 continue
-            seen.add(external_id)
-            in_flight.append((state.request_id, external_id, state))
+            seen.add(state.external_request_id)
+            in_flight.append((state.request_id, state.external_request_id, state))
 
         request_ids = [external_id for _, external_id, _ in in_flight]
 
@@ -450,7 +421,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         req_state.queue.put_nowait(msg)
 
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
-        """Abort a single in-flight request — same abort-then-pause contract.
+        """Abort a single in-flight request on the AsyncOmni engine.
 
         The pause is engine-wide: it finishes ALL in-flight requests, so this
         is only safe when no other in-flight work must survive.
@@ -461,7 +432,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         in_flight_state = None
         for state in engine.request_states.values():
-            if getattr(state, "external_request_id", None) == request_id:
+            if state.external_request_id == request_id:
                 in_flight_state = state
                 break
 

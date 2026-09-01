@@ -155,15 +155,12 @@ async def test_server_wake_up_does_not_self_resume():
     async def wake_up(stage_ids=None, tags=None):
         calls.append(f"wake_up(tags={tags})")
 
-    async def reset_prefix_cache(reset_connector=False):
-        calls.append("reset_prefix_cache")
-
     def resume_generation(stage_ids=None):
         calls.append("resume_generation")
 
-    server.engine = SimpleNamespace(wake_up=wake_up, reset_prefix_cache=reset_prefix_cache)
+    server.engine = SimpleNamespace(wake_up=wake_up)
     server.engine.resume_generation = resume_generation
 
     await server.wake_up()
 
-    assert calls == ["wake_up(tags=['weights'])", "reset_prefix_cache"]
+    assert calls == ["wake_up(tags=['weights'])"]
