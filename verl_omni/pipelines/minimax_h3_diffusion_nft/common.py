@@ -382,8 +382,6 @@ class MiniMaxH3RolloutWeightSyncMixin:
         if prompt_ids is None or task not in {"t2va", "fl2va"}:
             return super().encode_prompt(task=task, prompt=prompt, image=image, images=images, **kwargs)
 
-        # ``presentation.py`` was merged into ``preprocessing.py`` upstream (vllm-omni#5885);
-        # ``pipeline_minimax_h3`` re-exports the merged helper.
         from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import (
             _broadcast_tensor,
             _dit_rank_world,

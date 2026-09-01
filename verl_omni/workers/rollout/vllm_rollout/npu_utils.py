@@ -31,12 +31,7 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 def _is_npu_platform() -> bool:
-    """Return True when vLLM is running on an Ascend NPU device.
-
-    Runtime probe: only an import failure downgrades to ``False`` (with a log);
-    anything else must surface rather than silently disabling NPU handling
-    (#388 B4).
-    """
+    """Return True when vLLM is running on an Ascend NPU device."""
     try:
         from vllm.platforms import current_platform
 

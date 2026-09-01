@@ -11,9 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Model packages.
-
-The temporary diffusers monkey-patches (QwenImage Ulysses SP mask rebuild and
-the FA3 varlen-hub gather fix) were dropped at the diffusers>=0.40 floor —
-both fixes are upstream (diffusers#13756 / diffusers#14115, see #445 P4/P5).
-"""

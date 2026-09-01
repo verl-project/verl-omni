@@ -49,9 +49,7 @@ logger.setLevel(logging.INFO)
 # Sentinel: ``None`` is a valid cached value (LoRA not loaded).
 _LORA_REQUEST_CACHE_MISS = object()
 
-# Bound for the acked abort (``AsyncOmni.abort()``'s correlated RPC has no default
-# timeout) and for the pre-sleep request drain. Replaces the old drain-phase
-# timeout ``VERL_OMNI_ABORT_DRAIN_TIMEOUT_S``.
+# AsyncOmni.abort() has no default timeout; also bounds the pre-sleep drain.
 ABORT_ACK_TIMEOUT_S = float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
 _DRAIN_POLL_INTERVAL_S = 0.1
 
@@ -111,8 +109,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return "vllm_omni"
 
     def _get_worker_extension_cls(self) -> str:
-        # Startup probe: a platform that cannot even be imported must fail the
-        # server launch, not silently fall back to the "" device type (#388 B4).
         from vllm.platforms import current_platform
 
         return self._generate_strategy.worker_extension_cls(current_platform.device_type)
@@ -202,13 +198,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return 1
 
     def _validate_acks(self, method: str, acks: Any) -> None:
-        """Fail closed on any non-success sleep/wake handshake (#433).
+        """Fail closed on any non-success sleep/wake handshake.
 
-        ``AsyncOmni.sleep()/wake_up()`` re-raise AR EngineCore RPC failures, but
-        diffusion handlers return ``OmniACK(status="ERROR")`` / ``{"supported":
-        False, "error": ...}`` entries that the engine iterates without checking
-        — for diffusion/mixed engines this validation is the only barrier.
-        An empty ACK list is success ("already warm").
+        The engine re-raises AR EngineCore failures but returns diffusion
+        ``OmniACK(status="ERROR")`` / error-dict entries unchecked — this is
+        the only barrier on diffusion/mixed engines.
         """
         for ack in acks or []:
             if isinstance(ack, dict):
@@ -218,34 +212,23 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 raise RuntimeError(f"{method} failed on a stage: {getattr(ack, 'error_msg', None) or ack!r}")
 
     async def _delegated_sleep(self) -> None:
-        """Level-1 sleep through ``AsyncOmni.sleep()`` in every replica mode.
-
-        Level 1 keeps non-actor pipeline weights (text encoder, VAE) offloaded
-        and restorable — level 2 discards them and its wake is not implemented
-        upstream. The engine sets an admission hold that only
-        ``resume_generation()`` clears; the trainer-side bridge owns that, so
-        this method must not resume by itself.
-        """
+        """Level-1 sleep: keeps non-actor pipeline weights (text encoder, VAE) restorable."""
         acks = await self.engine.sleep(level=self._resolve_sleep_level())
         self._validate_acks("sleep", acks)
         self._invalidate_lora_request_cache()
-        # Frontend no-op on the omni engine (parity with verl's shape); the real
-        # encoder-cache safety is EngineCore-side sleep clearing.
+        # Logged no-op on the omni frontend; kept for parity with verl's shape.
         await self.engine.reset_encoder_cache()
 
     async def _delegated_wake(self, tags: list[str] | None = None) -> None:
-        """Wake through ``AsyncOmni.wake_up()`` (keyword ``tags=`` only).
+        """``tags`` must be keyword-only — the first positional parameter is ``stage_ids``.
 
-        The first positional parameter of ``AsyncOmni.wake_up`` is ``stage_ids``
-        — passing tags positionally would silently bind to the wrong argument.
-        Does NOT call ``resume_generation``: that would re-open admission
-        mid-weight-sync on the non-naive path (#492 §5.2).
+        Never resume generation here: it would re-open admission mid-weight-sync.
         """
         resolved_tags = tags if tags is not None else self._get_wake_up_tags()
         acks = await self.engine.wake_up(tags=resolved_tags)
         self._validate_acks("wake_up", acks)
         self._invalidate_lora_request_cache()
-        # Frontend no-op on the omni engine, kept for upstream-shape parity.
+        # Logged no-op on the omni frontend; kept for parity with verl's shape.
         await self.engine.reset_prefix_cache(reset_connector=True)
 
     async def wake_up(self, tags: list[str] | None = None):
@@ -262,13 +245,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         await super().set_global_steps(global_steps)
 
     async def sleep(self):
-        """Level-1 delegated sleep in HYBRID and COLOCATED modes alike.
-
-        The parent dispatches COLOCATED to ``engine.sleep(level=1)`` whose
-        wake never clears the frontend admission hold, while HYBRID used raw
-        ``collective_rpc`` — routing both modes through ``_delegated_sleep``
-        makes the lifecycle uniform and ACK-validated.
-        """
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
         if self.rollout_mode == RolloutMode.STANDALONE:
@@ -286,7 +262,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         await self._delegated_wake(tags=["weights"])
 
     async def resume_kv_cache(self):
-        """Restore after a weight sync. Both halves of the split are validated."""
+        """Restore after a weight sync."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
@@ -370,19 +346,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return self._lora_request_cache  # type: ignore[return-value]
 
     async def wait_for_requests_to_drain(self):
-        """Bounded drain: no in-flight request states may remain.
-
-        ``AsyncOmni`` has no drain API. The acked abort in ``abort_all_requests``
-        is the real quiesce; this poll is the fail-closed backstop — EngineCore
-        auto-resumes leftover AR requests on a full wake, so callers (e.g.
-        ``sleep_replicas``) must not proceed past a lingering request.
-        """
+        """Raise while requests are in flight: EngineCore auto-resumes leftover
+        AR requests on a full wake, so sleep must not pass them silently."""
         deadline = time.monotonic() + ABORT_ACK_TIMEOUT_S
         while self.engine.request_states:
             if time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"rollout engine still has {len(self.engine.request_states)} in-flight "
-                    f"request(s) after {ABORT_ACK_TIMEOUT_S:.0f}s; refusing to proceed (#433)"
+                    f"request(s) after {ABORT_ACK_TIMEOUT_S:.0f}s; refusing to proceed"
                 )
             await asyncio.sleep(_DRAIN_POLL_INTERVAL_S)
 
@@ -393,28 +364,17 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # -----------------------------------------------------------------------
 
     async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
-        """Abort every in-flight request, then pause — abort-then-pause.
+        """Abort-then-pause: abort while generate is live, then pause.
 
-        ``AsyncOmni.pause_generation`` never delivers tokens, so the batched
-        ``abort()`` must run while generate is still live: it enqueues the real
-        cumulative partial-token terminals (``finish_reason="abort"``) into each
-        per-request queue. Pausing first would let EngineCore finish the requests
-        ``FINISHED_ABORTED`` and the follow-up abort would synthesize *empty*
-        ``token_ids`` instead. The pause afterwards is the idle boundary plus the
-        admission hold that stays until ``resume_generation``.
-
-        Known straggler window: a ``generate()`` that already passed the pause
-        check between the abort and the pause is finished EngineCore-side with
-        empty partials — the client falls back to whole-sample retry (the same
-        degradation diffusion always gets), never a hang.
+        Pausing first would finish the requests EngineCore-side and the
+        follow-up abort would synthesize *empty* ``token_ids``, wiping the
+        real cumulative partial tokens the abort delivers.
         """
         engine = self.engine
         if getattr(engine, "output_processor", None) is not None:
             return await super().abort_all_requests(reset_prefix_cache)
 
-        # Snapshot in-flight states (dedup by external id) BEFORE the abort:
-        # the failure path needs the queue references, and ``engine.abort``
-        # takes EXTERNAL ids while ``request_states`` is keyed by internal ones.
+        # ``engine.abort`` takes EXTERNAL ids; ``request_states`` is keyed by internal.
         in_flight: list[tuple[str, str, Any]] = []
         seen: set[str] = set()
         for state in engine.request_states.values():
@@ -429,20 +389,16 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         aborted = False
         try:
             if request_ids:
-                # One batched acked abort — never per-request loops (each call
-                # is a correlated RPC) and never an empty list (a silent no-op).
+                # Never abort with an empty list — a silent no-op engine-side.
                 await asyncio.wait_for(engine.abort(request_ids), timeout=ABORT_ACK_TIMEOUT_S)
             aborted = True
-            # Always pause, even with nothing to abort: the admission hold is
-            # what keeps the engine quiesced until resume_generation. EngineCore
-            # ``pause_scheduler(clear_cache=...)`` performs the real cache reset.
+            # Pause even with nothing to abort: holds admission until resume_generation.
             await engine.pause_generation(
                 mode="abort", wait_for_inflight_requests=False, clear_cache=reset_prefix_cache
             )
         except Exception:
-            # Fail closed (#433/#388) — but never strand an in-flight generate()
-            # on ``queue.get``: if the abort itself failed, nothing engine-side
-            # enqueued terminals, so synthesize them before re-raising.
+            # Nothing engine-side enqueued terminals — synthesize them so
+            # generate() cannot hang on queue.get.
             if not aborted:
                 for internal_id, _, state in in_flight:
                     self._enqueue_emergency_abort_output(internal_id, state)
@@ -452,15 +408,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return {"aborted_count": len(request_ids), "request_ids": request_ids}
 
     def _enqueue_emergency_abort_output(self, internal_id: str, req_state: Any) -> None:
-        """FAILURE PATH ONLY: synthesize a terminal so generate() cannot hang.
-
-        On the success path the engine's acked abort already enqueues real
-        cumulative partial-token terminals (plus its own synthetic fallback for
-        requests without output). This helper exists solely for the case where
-        ``engine.abort()`` itself raised — nothing was enqueued, and in-flight
-        ``generate()`` coroutines would otherwise block forever on
-        ``req_state.queue.get``.
-        """
+        """Failure-path only: unblock generate() when the abort itself raised."""
         from vllm.outputs import CompletionOutput
         from vllm_omni.engine.messages import OutputMessage
         from vllm_omni.outputs import OmniRequestOutput
@@ -479,8 +427,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             outputs=[completion],
             finished=True,
         )
-        # Use the final stage so _process_single_result's stage_meta.final_output
-        # check passes and the output is yielded (not silently dropped).
+        # Final stage so _process_single_result's final_output check yields it.
         final_stage_id = max(0, getattr(self.engine, "num_stages", 1) - 1)
         msg = OutputMessage(
             request_id=internal_id,
@@ -493,11 +440,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a single in-flight request — same abort-then-pause contract.
 
-        Hazard: the trailing ``pause_generation(mode="abort")`` is engine-wide
-        — EngineCore ``pause_scheduler(mode="abort")`` finishes ALL in-flight
-        requests, not just this one. Safe only when no other in-flight work
-        must survive (trainers use ``abort_all_requests``; single-request
-        abort exists for draining a lone request such as standalone mode).
+        The pause is engine-wide: it finishes ALL in-flight requests, so this
+        is only safe when no other in-flight work must survive.
         """
         engine = self.engine
         if getattr(engine, "output_processor", None) is not None:

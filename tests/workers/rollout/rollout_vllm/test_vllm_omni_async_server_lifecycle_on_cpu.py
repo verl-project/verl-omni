@@ -11,14 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Async rollout server lifecycle contract (issue #492 §5).
+"""Async rollout server lifecycle contract (issue #492).
 
-Covers the abort-then-pause ordering, the ACK-validated delegated sleep/wake
-across all four lifecycle methods, the bounded drain, and the fail-closed
-abort path — all against a mocked ``AsyncOmni`` matching the frozen-pin API
-(``abort`` takes EXTERNAL ids in one batched acked call; ``pause_generation``
-never delivers tokens; ``sleep``/``wake_up`` return ``OmniACK`` lists whose
-diffusion entries are not engine-checked).
+Driven by a mocked ``AsyncOmni`` matching the pinned engine API: ``abort``
+takes EXTERNAL ids in one batched acked call; ``pause_generation`` never
+delivers tokens; diffusion sleep/wake ACKs are not engine-checked.
 """
 
 import asyncio
@@ -50,8 +47,6 @@ def _terminal(request_id: str, token_ids: list[int]):
 
 
 class _FakeAsyncOmni:
-    """AsyncOmni surface at the frozen pin, limited to the lifecycle methods."""
-
     def __init__(self, *, states=None, fail_abort=False, sleep_acks=None, wake_acks=None):
         self.request_states: dict[str, _FakeRequestState] = dict(states or {})
         self.fail_abort = fail_abort
@@ -72,7 +67,6 @@ class _FakeAsyncOmni:
         ids = request_ids if isinstance(request_ids, list) else [request_ids]
         for state in self.request_states.values():
             if state.external_request_id in ids:
-                # Real cumulative partial tokens, as the acked abort enqueues.
                 state.queue.put_nowait(_terminal(state.request_id, token_ids=[7, 8, 9]))
 
     async def pause_generation(self, **kwargs):
@@ -112,7 +106,7 @@ def _make_server(engine, rollout_mode=RolloutMode.HYBRID, node_rank=0, free_cach
 
 
 # ---------------------------------------------------------------------------
-# (a) abort-then-pause ordering; single batched abort; no empty-list abort
+# abort-then-pause ordering; single batched abort; no empty-list abort
 # ---------------------------------------------------------------------------
 
 
@@ -127,8 +121,7 @@ async def test_abort_runs_before_pause_with_one_batched_call():
 
     result = await server.abort_all_requests()
 
-    # One batched call with the deduped EXTERNAL ids (request_states keys are
-    # internal; engine.abort maps external -> internal).
+    # Deduped EXTERNAL ids (request_states keys are internal ids).
     assert engine.abort_calls == [["ext-1", "ext-2"]]
     assert engine.calls == ["abort", "pause"], "abort must run while generate is live, pause after"
     assert engine.pause_calls == [{"mode": "abort", "wait_for_inflight_requests": False, "clear_cache": True}]
@@ -148,7 +141,7 @@ async def test_abort_with_no_in_flight_requests_still_pauses_without_calling_abo
 
 
 # ---------------------------------------------------------------------------
-# (b) abort outputs arrive via the request queues; mapper untouched
+# abort outputs arrive via the request queues; mapper untouched
 # ---------------------------------------------------------------------------
 
 
@@ -163,16 +156,14 @@ async def test_abort_outputs_come_from_engine_queues_with_non_empty_tokens():
     output = terminal.engine_outputs.outputs[0]
     assert output.token_ids == [7, 8, 9], "cumulative partial tokens must survive the abort"
     assert output.finish_reason == "abort"
-    # The frozen #403 seam maps finish_reason="abort" to the client vocabulary.
     assert OmniStrategyBase._map_stop_reason(output.finish_reason) == "aborted"
-    # The success-path synthetic enqueue is gone entirely (the engine owns
-    # terminals — appending empty ones after real ones wipes the partials).
+    # No server-side synthetic enqueue on the success path.
     assert states["ext-1-abc"].queue.qsize() == 0
     assert not hasattr(vLLMOmniHttpServer, "_enqueue_abort_output")
 
 
 # ---------------------------------------------------------------------------
-# (c) all four lifecycle methods delegate, validate ACKs, level=1, keyword tags
+# all four lifecycle methods delegate, validate ACKs, level=1, keyword tags
 # ---------------------------------------------------------------------------
 
 
@@ -263,7 +254,7 @@ async def test_engine_side_rpc_failure_propagates_from_all_four_methods():
 
 
 # ---------------------------------------------------------------------------
-# (e) fail-closed abort: enqueue terminals first, then raise; timeout raises
+# fail-closed abort: enqueue terminals first, then raise; timeout raises
 # ---------------------------------------------------------------------------
 
 
@@ -317,7 +308,7 @@ async def test_abort_ack_timeout_raises(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# (f) bounded drain that raises
+# bounded drain that raises
 # ---------------------------------------------------------------------------
 
 
@@ -339,7 +330,7 @@ async def test_drain_raises_on_lingering_requests(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# (g) single-request abort shares the contract
+# single-request abort shares the contract
 # ---------------------------------------------------------------------------
 
 
@@ -368,7 +359,7 @@ async def test_abort_request_unknown_id_skips_abort_but_pauses():
 
 
 # ---------------------------------------------------------------------------
-# (h) the manager-level gather observes the server's raise
+# the manager-level gather observes the server's raise
 # ---------------------------------------------------------------------------
 
 
@@ -390,18 +381,16 @@ async def test_checkpoint_manager_gather_propagates_server_abort_raise():
 
 
 # ---------------------------------------------------------------------------
-# (i) diffusion-only sleep/wake contract — why diffusion v1 sync needs no
-#     resume bridge (drives the REAL AsyncOmni state machine, not a mock)
+# diffusion-only sleep/wake contract — why diffusion v1 sync needs no
+# resume bridge (drives the REAL AsyncOmni state machine, not a mock)
 # ---------------------------------------------------------------------------
 
 
 def _build_async_omni(stage_type: str):
-    """Minimal AsyncOmni driving the real sleep/wake/resume state machine.
+    """Drive the real AsyncOmni state machine; only RPC plumbing is stubbed.
 
-    Only the RPC plumbing (EngineCore/worker RPCs, tag bookkeeping, output
-    handler) is stubbed; the admission-hold logic under test is the real
-    class's. ``stage_type`` selects a pure-diffusion ("diffusion") or
-    pure-AR ("llm") single-stage engine.
+    ``stage_type`` selects a pure-diffusion ("diffusion") or pure-AR ("llm")
+    single-stage engine.
     """
     from vllm_omni.entrypoints.async_omni import AsyncOmni
 
@@ -438,13 +427,11 @@ def _build_async_omni(stage_type: str):
 
 
 async def test_diffusion_only_sleep_wake_needs_no_resume_generation():
-    """Pure-diffusion sleep must not set the admission hold (engine contract).
+    """Pure-diffusion sleep must not set the admission hold.
 
-    Diffusion v1 sync has no omni-style resume bridge; it relies on
-    ``AsyncOmni.sleep()`` setting ``_hold_admission_until_resume`` only for AR
-    stages and ``wake_up()`` restoring admission otherwise. If upstream ever
-    sets the hold on diffusion sleep (or stops clearing ``_paused`` on a
-    diffusion wake), that trainer hangs silently — this tripwire fails first.
+    Diffusion v1 sync has no resume bridge; if the engine ever holds
+    admission on diffusion sleep, that trainer hangs silently — this
+    fails first.
     """
     omni = _build_async_omni("diffusion")
 

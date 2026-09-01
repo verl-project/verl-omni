@@ -11,13 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""omni_sync resume-bridge ordering (issue #492 §5.3).
+"""omni_sync resume-bridge ordering (issue #492).
 
-``AsyncOmni.sleep()`` sets an admission hold that ``wake_up()`` does not clear, and
-the naive-backend ``update_weights`` restores weights without resuming generation.
-Without the ``OmniPPOTrainerSync`` bridge the first ``generate()`` of init and of
-every step would block on the pause condition. These tests pin the hook ordering:
-update_weights first, then ``resume_generation_replicas`` — on both hooks.
+``AsyncOmni.sleep()`` sets an admission hold that ``wake_up()`` does not clear,
+and the naive-backend ``update_weights`` restores weights without resuming
+generation. Without the ``OmniPPOTrainerSync`` bridge the first ``generate()``
+of init and of every step would block on the pause condition.
 """
 
 from types import SimpleNamespace
@@ -34,9 +33,8 @@ from verl_omni.trainer.omni.ray_omni_trainer import OmniPPOTrainerSync  # noqa: 
 class _HoldModel:
     """Emulates the engine-side admission hold + a recording checkpoint manager.
 
-    ``sleep_replicas`` sets the hold; ``update_weights`` (naive backend) wakes the
-    engine for the weight sync but does not clear it; only ``resume_generation_replicas``
-    lifts it. ``generate`` fails loudly while the hold is set.
+    ``sleep_replicas`` sets the hold; ``update_weights`` does not clear it;
+    only ``resume_generation_replicas`` lifts it.
     """
 
     def __init__(self):
@@ -141,7 +139,7 @@ def test_unbridged_parent_hooks_leave_hold_set():
 
 
 async def test_server_wake_up_does_not_self_resume():
-    """The server's wake_up must not re-open admission mid-weight-sync (#492 §5.2)."""
+    """The server's wake_up must not re-open admission mid-weight-sync."""
     server_module = pytest.importorskip("verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server")
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.node_rank = 0

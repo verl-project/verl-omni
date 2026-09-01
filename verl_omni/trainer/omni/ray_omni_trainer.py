@@ -72,15 +72,14 @@ class OmniPPOTrainerSync(PPOTrainerSync):
         self.tokenizer = model_config.tokenizer
         self.processor = model_config.processor
 
-    # AsyncOmni.sleep() sets an admission hold that wake_up() does not clear, and the
-    # naive-backend update_weights restores memory without resuming generation — without
-    # this bridge the first generate() of init and of every step blocks on the pause cond.
+    # AsyncOmni.sleep() sets an admission hold that wake_up() does not clear;
+    # without this bridge the first generate() of init and of every step blocks.
     def on_init_end(self):
-        super().on_init_end()  # update_weights after loading the checkpoint
+        super().on_init_end()
         self.checkpoint_manager.resume_generation_replicas()
 
     def on_step_end(self):
-        super().on_step_end()  # update_weights
+        super().on_step_end()
         self.checkpoint_manager.resume_generation_replicas()
 
 

@@ -24,7 +24,7 @@ dependencies = [
     "cachetools",
     "codetiming",
     "datasets",
-    # Window matches vllm-omni 0.28.x (diffusers==0.40.0, vllm-omni#6459).
+    # Window matches vllm-omni 0.28.x (diffusers==0.40.0).
     "diffusers>=0.40.0,<0.41",
     "dill",
     "hydra-core",
@@ -54,8 +54,7 @@ dependencies = [
 [project.optional-dependencies]
 # Rollout engine (install in step 2, after gpu step 1).
 vllm-omni = [
-    # Optional PyPI baseline only; the git pin (.github/vllm_omni_pin.txt) is canonical.
-    # PyPI has no stable 0.28.0 yet -- move to ==0.28.0 when the wheel ships.
+    # PyPI baseline only (the git pin is canonical); no stable 0.28.0 wheel yet.
     "vllm-omni==0.28.0rc1",
     "qwen-vl-utils>=0.0.14",
 ]
@@ -65,8 +64,8 @@ audio = [
 # CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
 gpu = [
     "vllm==0.28.0",
-    # 0.14.1 cannot select the stable-ABI FA3 Hub build on torch 2.13/CUDA 13
-    # (silently degrades actor attention to native, #417); 0.16.0 can.
+    # 0.16.0 selects the stable-ABI FA3 build on torch 2.13/CUDA 13; 0.14.1
+    # silently falls back to native attention.
     "kernels==0.16.0",
     "liger-kernel",
 ]
