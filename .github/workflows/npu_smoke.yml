@@ -41,6 +41,19 @@ jobs:
       image: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni:ascend910b-cann9.0.0-torchnpu2.10.0-py3.12-ubuntu22.04-aarch64
       options: >-
         --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+      UV_HTTP_TIMEOUT: 120
+      UV_NO_CACHE: "1"
+      UV_SYSTEM_PYTHON: "1"
+      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Resolve NPU CI mode
         id: resolve-mode
@@ -72,6 +85,8 @@ jobs:
           set -euxo pipefail
 
           pip install uv
+          
+          uv pip install --no-deps -e .
           
           uv pip install --system --upgrade vllm==0.27.0
 
