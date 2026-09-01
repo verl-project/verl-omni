@@ -74,6 +74,7 @@ class OmniPPOTrainerSync(PPOTrainerSync):
 
     # AsyncOmni.sleep() sets an admission hold that wake_up() does not clear;
     # without this bridge the first generate() of init and of every step blocks.
+    # TODO (long): check and fix the resume bridge on the rollout side.
     def on_init_end(self):
         super().on_init_end()
         self.checkpoint_manager.resume_generation_replicas()

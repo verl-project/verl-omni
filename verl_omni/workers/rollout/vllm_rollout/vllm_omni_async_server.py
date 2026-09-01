@@ -204,7 +204,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
             return
-        await self._delegated_wake(tags)
+        resolved_tags = tags if tags is not None else self._get_wake_up_tags()
+        acks = await self.engine.wake_up(tags=resolved_tags)
+        self._validate_acks("wake_up", acks)
+        self._invalidate_lora_request_cache()
 
     async def set_global_steps(self, global_steps: int):
         if global_steps != self.global_steps:
@@ -217,7 +220,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
             return
-        await self._delegated_sleep()
+        acks = await self.engine.sleep(level=self._resolve_sleep_level())
+        self._validate_acks("sleep", acks)
+        self._invalidate_lora_request_cache()
 
     async def release_kv_cache(self):
         """Free cache around a weight sync without discarding Omni weights."""
@@ -225,8 +230,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
-        await self._delegated_sleep()
-        await self._delegated_wake(tags=["weights"])
+        acks = await self.engine.sleep(level=self._resolve_sleep_level())
+        self._validate_acks("sleep", acks)
+        self._invalidate_lora_request_cache()
+        acks = await self.engine.wake_up(tags=["weights"])
+        self._validate_acks("wake_up", acks)
+        self._invalidate_lora_request_cache()
 
     async def resume_kv_cache(self):
         """Restore after a weight sync."""
@@ -234,7 +243,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
-        await self._delegated_wake(tags=["kv_cache"])
+        acks = await self.engine.wake_up(tags=["kv_cache"])
+        self._validate_acks("wake_up", acks)
+        self._invalidate_lora_request_cache()
 
     async def resume_generation(self):
         if self.node_rank == 0:
@@ -247,22 +258,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 raise RuntimeError(f"{method} failed on a stage: {ack.get('error', ack)}")
             elif ack.status != "SUCCESS":
                 raise RuntimeError(f"{method} failed on a stage: {getattr(ack, 'error_msg', None) or ack!r}")
-
-    async def _delegated_sleep(self) -> None:
-        """Level-1 sleep: keeps non-actor pipeline weights (text encoder, VAE) restorable."""
-        acks = await self.engine.sleep(level=self._resolve_sleep_level())
-        self._validate_acks("sleep", acks)
-        self._invalidate_lora_request_cache()
-
-    async def _delegated_wake(self, tags: list[str] | None = None) -> None:
-        """``tags`` must be keyword-only — the first positional parameter is ``stage_ids``.
-
-        Never resume generation here: it would re-open admission mid-weight-sync.
-        """
-        resolved_tags = tags if tags is not None else self._get_wake_up_tags()
-        acks = await self.engine.wake_up(tags=resolved_tags)
-        self._validate_acks("wake_up", acks)
-        self._invalidate_lora_request_cache()
 
     # -----------------------------------------------------------------------
     # Generation delegates mode-specific behavior to the selected strategy.
