@@ -198,31 +198,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         """
         return 1
 
-    def _validate_acks(self, method: str, acks: Any) -> None:
-        """Fail closed on any non-success sleep/wake handshake."""
-        for ack in acks or []:
-            if isinstance(ack, dict):
-                if "error" in ack:
-                    raise RuntimeError(f"{method} failed on a stage: {ack['error']}")
-            elif ack.status != "SUCCESS":
-                raise RuntimeError(f"{method} failed on a stage: {getattr(ack, 'error_msg', None) or ack!r}")
-
-    async def _delegated_sleep(self) -> None:
-        """Level-1 sleep: keeps non-actor pipeline weights (text encoder, VAE) restorable."""
-        acks = await self.engine.sleep(level=self._resolve_sleep_level())
-        self._validate_acks("sleep", acks)
-        self._invalidate_lora_request_cache()
-
-    async def _delegated_wake(self, tags: list[str] | None = None) -> None:
-        """``tags`` must be keyword-only — the first positional parameter is ``stage_ids``.
-
-        Never resume generation here: it would re-open admission mid-weight-sync.
-        """
-        resolved_tags = tags if tags is not None else self._get_wake_up_tags()
-        acks = await self.engine.wake_up(tags=resolved_tags)
-        self._validate_acks("wake_up", acks)
-        self._invalidate_lora_request_cache()
-
     async def wake_up(self, tags: list[str] | None = None):
         if self.node_rank != 0:
             return
@@ -264,6 +239,31 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     async def resume_generation(self):
         if self.node_rank == 0:
             await self.engine.resume_generation()
+
+    def _validate_acks(self, method: str, acks: Any) -> None:
+        """Fail closed on any non-success sleep/wake handshake."""
+        for ack in acks or []:
+            if isinstance(ack, dict):
+                if "error" in ack:
+                    raise RuntimeError(f"{method} failed on a stage: {ack['error']}")
+            elif ack.status != "SUCCESS":
+                raise RuntimeError(f"{method} failed on a stage: {getattr(ack, 'error_msg', None) or ack!r}")
+
+    async def _delegated_sleep(self) -> None:
+        """Level-1 sleep: keeps non-actor pipeline weights (text encoder, VAE) restorable."""
+        acks = await self.engine.sleep(level=self._resolve_sleep_level())
+        self._validate_acks("sleep", acks)
+        self._invalidate_lora_request_cache()
+
+    async def _delegated_wake(self, tags: list[str] | None = None) -> None:
+        """``tags`` must be keyword-only — the first positional parameter is ``stage_ids``.
+
+        Never resume generation here: it would re-open admission mid-weight-sync.
+        """
+        resolved_tags = tags if tags is not None else self._get_wake_up_tags()
+        acks = await self.engine.wake_up(tags=resolved_tags)
+        self._validate_acks("wake_up", acks)
+        self._invalidate_lora_request_cache()
 
     # -----------------------------------------------------------------------
     # Generation delegates mode-specific behavior to the selected strategy.
@@ -341,9 +341,18 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # TODO (mike): implement this once DP is supported.
         pass
 
+    # -----------------------------------------------------------------------
+    # Abort: AsyncOmni has no `output_processor` (it routes through an
+    # Orchestrator process and tracks state in `AsyncOmni.request_states`),
+    # so the parent's AsyncLLM-specific implementation must be overridden.
+    # -----------------------------------------------------------------------
+
     async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort all in-flight requests on the AsyncOmni engine."""
         engine = self.engine
+        if getattr(engine, "output_processor", None) is not None:
+            return await super().abort_all_requests(reset_prefix_cache)
+
         # ``engine.abort`` takes EXTERNAL ids; ``request_states`` is keyed by internal.
         in_flight: list[tuple[str, str, Any]] = []
         seen: set[str] = set()
