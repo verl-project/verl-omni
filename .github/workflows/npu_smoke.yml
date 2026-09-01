@@ -71,6 +71,8 @@ jobs:
         run: |
           set -euxo pipefail
 
+          pip install uv
+          
           uv pip install --system --upgrade vllm==0.27.0
 
           uv pip install --system --upgrade \
