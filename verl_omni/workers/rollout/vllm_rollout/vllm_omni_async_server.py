@@ -199,12 +199,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return 1
 
     def _validate_acks(self, method: str, acks: Any) -> None:
-        """Fail closed on any non-success sleep/wake handshake.
-
-        The engine re-raises AR EngineCore failures but returns diffusion
-        ``OmniACK(status="ERROR")`` / error-dict entries unchecked — this is
-        the only barrier on diffusion/mixed engines.
-        """
+        """Fail closed on any non-success sleep/wake handshake."""
         for ack in acks or []:
             if isinstance(ack, dict):
                 if "error" in ack:
@@ -410,7 +405,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             outputs=[completion],
             finished=True,
         )
-        # Final stage so _process_single_result's final_output check yields it.
+        # Use the final stage so _process_single_result's stage_meta.final_output
+        # check passes and the output is yielded (not silently dropped).
         final_stage_id = max(0, getattr(self.engine, "num_stages", 1) - 1)
         msg = OutputMessage(
             request_id=internal_id,
@@ -421,11 +417,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         req_state.queue.put_nowait(msg)
 
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
-        """Abort a single in-flight request on the AsyncOmni engine.
-
-        The pause is engine-wide: it finishes ALL in-flight requests, so this
-        is only safe when no other in-flight work must survive.
-        """
+        """Abort a single in-flight request on the AsyncOmni engine."""
         engine = self.engine
         if getattr(engine, "output_processor", None) is not None:
             return await super().abort_request(request_id, reset_prefix_cache)
