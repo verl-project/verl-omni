@@ -12,7 +12,7 @@ For NVIDIA GPU:
 For Ascend NPU:
 
 * **Python**: Version >= 3.10
-* **CANN**: Version >= 8.5.0
+* **CANN**: Version == 9.1.0
 
 ## Install
 
