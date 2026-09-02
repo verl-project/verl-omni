@@ -131,6 +131,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
 
+        # TODO (mike): drop this patch once vllm-omni strips the serialized default
+        # fault_tolerance_config at its kwargs boundary, or vLLM defaults it to None —
+        # any dict is read as an explicit --fault-tolerance-config and auto-enabled,
+        # failing without an external load balancer.
+        if not engine_args.get("enable_fault_tolerance"):
+            engine_args.pop("fault_tolerance_config", None)
+
         # ``from_cli_args`` only retains OmniEngineArgs fields. Restore the
         # OrchestratorArgs fields forwarded by verl before creating AsyncOmni.
         for key in orchestrator_field_names() - engine_args.keys():
