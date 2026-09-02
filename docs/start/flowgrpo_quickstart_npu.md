@@ -1,6 +1,8 @@
 # Quickstart: FlowGRPO training on Qwen-Image OCR dataset with Ascend NPU
 
-Last updated: 05/09/2026
+<!-- 2026-09-02, tianqi, point NPU quickstart install link at install_npu.md -->
+Last updated: 09/02/2026
+<!-- end -->
 
 Post-train a diffusion image generation model with FlowGRPO on Atlas 800T A2.
 
@@ -14,7 +16,9 @@ Prepare an Atlas 800T A2 server with 8 NPUs, and install the necessary software 
 
 1. Install CANN by following the [Ascend CANN installation guide](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/900/softwareinst/instg/instg_0003.html?OS=openEuler&InstallType=local).
 
-2. Install VeRL-Omni and its dependencies as described in the [installation guide](install.md#install).
+<!-- 2026-09-02, tianqi, point NPU quickstart at the NPU install page -->
+2. Install VeRL-Omni and its dependencies as described in the [NPU installation guide](install_npu.md).
+<!-- end -->
 
 3. Install the FlowGRPO-specific reward dependency:
 
