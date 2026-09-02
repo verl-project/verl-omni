@@ -1,6 +1,6 @@
 # Installation
 
-Last updated: 08/31/2026
+Last updated: 09/02/2026
 
 ## Requirements
 
@@ -96,6 +96,10 @@ actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN_3_HUB
 `FLASH_ATTN` rollout path still uses local FA packages (`fa3-fwd` / `flash-attn`).
 
 If FA3 deps are missing at runtime, training falls back to native/SDPA automatically. NPU recipes override with `actor_rollout_ref.model.attn_backend=_native_npu`.
+
+### Flash Attention 2 (omni trainer)
+
+The omni trainer's actor is a transformers LLM; following verl's practice for LLM training, it defaults to `flash_attention_2`, which requires the local `flash-attn` package — see verl's [installation docs](https://verl.readthedocs.io/en/latest/start/install.html).
 
 ## Optional engine backends
 
