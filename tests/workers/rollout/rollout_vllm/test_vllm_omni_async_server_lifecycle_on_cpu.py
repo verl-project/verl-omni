@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Async rollout server lifecycle contract (issue #492).
+"""Async rollout server lifecycle contract.
 
 Driven by a mocked ``AsyncOmni`` matching the pinned engine API: ``abort``
 takes EXTERNAL ids in one batched acked call; ``pause_generation`` never

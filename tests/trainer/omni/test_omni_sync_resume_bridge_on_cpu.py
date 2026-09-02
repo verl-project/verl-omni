@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""omni_sync resume-bridge ordering (issue #492).
+"""omni_sync resume-bridge ordering.
 
 ``AsyncOmni.sleep()`` sets an admission hold that ``wake_up()`` does not clear,
 and the naive-backend ``update_weights`` restores weights without resuming
