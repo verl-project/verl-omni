@@ -246,6 +246,50 @@ def test_direct_preference_reuses_base_train_and_infer_batch_methods():
     assert omni_impl.OmniFSDPEngine.infer_batch is omni_impl.FSDPEngineWithLMHead.infer_batch
 
 
+def test_fsdp2_npu_gradient_sync_context_keeps_sync_enabled():
+    """NPU FSDP2 synchronizes each micro-batch to avoid retaining full gradients."""
+    omni_impl = _get_omni_impl_module()
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.module = MagicMock()
+
+    with (
+        patch.object(omni_impl, "fsdp_version", return_value=2),
+        patch.object(omni_impl, "get_device_name", return_value="npu"),
+        patch.object(omni_impl.FSDPEngineWithLMHead, "_gradient_sync_context") as mock_base_context,
+    ):
+        with engine._gradient_sync_context(is_last_micro_batch=False):
+            pass
+
+    mock_base_context.assert_not_called()
+    engine.module.set_requires_gradient_sync.assert_not_called()
+
+
+@pytest.mark.parametrize(("version", "device_name"), [(1, "npu"), (1, "cuda"), (2, "cuda")])
+def test_gradient_sync_context_delegates_other_backends(version, device_name):
+    """All combinations except NPU FSDP2 retain verl's synchronization policy."""
+    omni_impl = _get_omni_impl_module()
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.module = MagicMock()
+
+    @contextmanager
+    def base_context(*, is_last_micro_batch):
+        yield
+
+    with (
+        patch.object(omni_impl, "fsdp_version", return_value=version),
+        patch.object(omni_impl, "get_device_name", return_value=device_name),
+        patch.object(
+            omni_impl.FSDPEngineWithLMHead,
+            "_gradient_sync_context",
+            side_effect=base_context,
+        ) as mock_base_context,
+    ):
+        with engine._gradient_sync_context(is_last_micro_batch=False):
+            pass
+
+    mock_base_context.assert_called_once_with(is_last_micro_batch=False)
+
+
 def test_policy_gradient_prepare_model_inputs_delegates_to_base_engine():
     """Policy-gradient omni input preparation stays on verl's language-model path."""
     omni_impl = _get_omni_impl_module()

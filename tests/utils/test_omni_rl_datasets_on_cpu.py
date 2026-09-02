@@ -68,3 +68,34 @@ def test_process_multi_modal_info_uses_qwen_omni_utils_and_reorders_outputs(monk
     np.testing.assert_array_equal(result[2][0][:L], audios[0])
     np.testing.assert_array_equal(result[2][0][L:], 0.0)
     assert calls == [(messages, False)]
+
+    result = QwenOmniRLHFDataset._process_multi_modal_info(
+        messages,
+        image_patch_size=14,
+        config={"mm_processor_kwargs": {"use_audio_in_video": True}},
+    )
+
+    assert result[0] is images
+    assert result[1] is videos
+    assert len(result[2]) == 1
+    assert result[2][0].shape == (padded_len,)
+    np.testing.assert_array_equal(result[2][0][:L], audios[0])
+    np.testing.assert_array_equal(result[2][0][L:], 0.0)
+    assert calls == [(messages, False), (messages, True)]
+
+
+def test_process_multi_modal_info_chains_decode_error_without_dumping_messages(monkeypatch):
+    original_error = ValueError("decode failed")
+
+    def fake_process_mm_info(messages, use_audio_in_video):
+        raise original_error
+
+    monkeypatch.setitem(sys.modules, "qwen_omni_utils", SimpleNamespace(process_mm_info=fake_process_mm_info))
+    sensitive_path = "/private/datasets/nextqa/secret-video.mp4"
+    messages = [{"role": "user", "content": [{"type": "video", "video": sensitive_path}]}]
+
+    with pytest.raises(RuntimeError, match="^Failed to process multimodal sample$") as exc_info:
+        QwenOmniRLHFDataset._process_multi_modal_info(messages, image_patch_size=14, config={})
+
+    assert exc_info.value.__cause__ is original_error
+    assert sensitive_path not in str(exc_info.value)

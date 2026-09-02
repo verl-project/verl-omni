@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import numpy as np
@@ -39,7 +40,9 @@ class QwenOmniRLHFDataset(RLHFDataset):
 
     verl turns parquet media columns into structured messages. Qwen's
     ``process_mm_info`` then resolves image/audio/video paths into the media
-    objects expected by the Qwen3-Omni processor and vLLM-Omni rollout.
+    objects expected by the Qwen3-Omni processor and vLLM-Omni rollout. Video
+    audio extraction is controlled by ``data.mm_processor_kwargs.use_audio_in_video``
+    and remains disabled by default.
     """
 
     @classmethod
@@ -51,13 +54,23 @@ class QwenOmniRLHFDataset(RLHFDataset):
     ) -> tuple[list[Any] | None, list[Any] | None, list[Any] | None]:
         from qwen_omni_utils import process_mm_info
 
+        mm_processor_kwargs = config.get("mm_processor_kwargs", {}) if config is not None else {}
+        use_audio_in_video = bool(mm_processor_kwargs.get("use_audio_in_video", False))
+
         # Qwen returns (audios, images, videos); verl expects
-        # (images, videos, audios). AVQA uses a standalone audio track rather
-        # than extracting audio from a video.
-        audios, images, videos = process_mm_info(messages, use_audio_in_video=False)
-        # vllm-omni pads audio to a hop multiple before feature extraction while
-        # the HF side drops the tail frame; pad first so both sides expand the
-        # prompt to the same audio token count.
+        # (images, videos, audios). AVQA keeps the default because it supplies
+        # a standalone audio track; video tasks can opt into the video audio.
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    category=FutureWarning,
+                    message=r".*__audioread_load.*",
+                )
+                audios, images, videos = process_mm_info(messages, use_audio_in_video=use_audio_in_video)
+        except Exception as error:
+            raise RuntimeError("Failed to process multimodal sample") from error
+
         if audios is not None:
             audios = [pad_audio_to_hop_multiple(a) for a in audios]
         return images, videos, audios

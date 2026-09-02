@@ -1,12 +1,13 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
-Last updated: 08/24/2026
+Last updated: 08/27/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
-the async rollout backend. Three input recipes are supported: **text → text**
-(`gsm8k`), **image → text** (`MMK12`), and
-**text + image + audio → text** (`AVQA-R1-6K`).
+the async rollout backend. Four input recipes are supported: **text → text**
+(`gsm8k`), **image → text** (`MMK12`), **text + image + audio → text**
+(`AVQA-R1-6K`), and **video frames + video audio + text → text**
+(`NExT-QA`).
 
 Both **GPU** and **NPU** training platforms are supported:
 
@@ -19,6 +20,8 @@ Both **GPU** and **NPU** training platforms are supported:
   — **GPU**, **LoRA (r=32) V1** for text + image + audio AVQA training.
 - [`run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh)
   — **NPU**, **full-parameter V1** for text + image + audio AVQA training.
+- [`run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh)
+  — **NPU**, **full-parameter V1** for video question answering on NextQA.
 
 For the base environment setup, see the [installation guide](../../docs/start/install.md).
 
@@ -311,6 +314,155 @@ preserves its `RLHFDataset` base class, sets rollout NPU memory utilization to
 `0.6`, uses deterministic validation, and wires
 [`choice_reward.py`](../../verl_omni/utils/reward_score/choice_reward.py).
 
+## Training with `NExT-QA`
+
+This recipe uses the official NExT-QA train and validation annotations with
+verl-omni's GSPO loss, Qwen3-Omni V1 trainer, `vllm-omni` rollout, and Ascend
+NPU FSDP2 actor. Each sample contains one video and a five-way question. Both
+sampled frames and the video's audio track are passed to Qwen3-Omni; the
+expected completion ends in a single tag such as `<answer>C</answer>`.
+
+### Prepare the dataset
+
+Clone the official annotation repository. The upstream files live under
+`dataset/nextqa/`, so copy the four files used by this recipe to the documented
+`repo/` annotation root:
+
+```bash
+mkdir -p /path/to/NextQA
+cd /path/to/NextQA
+git clone https://github.com/doc-doc/NExT-QA.git repo
+cp repo/dataset/nextqa/{train.csv,val.csv,test.csv,map_vid_vidorID.json} repo/
+```
+
+Download [`NExTVideo.zip`](https://drive.google.com/file/d/1jTcRCrVHS66ckOUfWRb-rXdzJ52XAWQH/view?usp=share_link)
+from the official NExT-QA repository link and place it directly in
+`/path/to/NextQA`. Extract it from that directory:
+
+```bash
+cd /path/to/NextQA
+unzip NExTVideo.zip
+```
+
+`NExTVideo.zip` already contains a top-level `NExTVideo/` directory. Do not use
+`unzip NExTVideo.zip -d NExTVideo`; that produces the invalid directory
+`NExTVideo/NExTVideo/`, which the converter deliberately rejects.
+
+The resulting input must have this layout:
+
+```text
+NextQA/
+├── repo/
+│   ├── train.csv
+│   ├── val.csv
+│   ├── test.csv
+│   └── map_vid_vidorID.json
+├── NExTVideo.zip
+└── NExTVideo/
+    ├── 0001/
+    ├── ...
+    └── 0083/
+        └── 5572343997.mp4
+```
+
+Run the converter from the verl-omni repository root:
+
+```bash
+python examples/gspo_trainer/data_process/nextqa.py \
+    --input_dir /path/to/NextQA \
+    --output_dir /path/to/nextqa_parquet
+```
+
+This writes `/path/to/nextqa_parquet/train.parquet` from official `train.csv`
+and `/path/to/nextqa_parquet/validation.parquet` from official `val.csv`; it
+does not randomly re-split records. The converter uses `map_vid_vidorID.json`
+to resolve each CSV video ID, validates fields and media paths, and uses the
+real `ffprobe` and `ffmpeg` binaries to retain only videos whose first audio
+stream can decode at least one frame. Each probe has a 30-second timeout.
+Install FFmpeg and ensure both binaries are available in `PATH` before
+conversion. The printed JSON reports
+input, kept, dropped-by-reason, answer, output, and unique-video audio statistics
+for each split. `dropped` counts QA records; `audio` counts unique videos, so
+multiple questions for one rejected video increase the former but not the
+latter. Absolute media paths are stored in parquet and must be mounted
+identically on every Ray worker.
+
+The output files can also be referenced directly in a trainer data config:
+
+```yaml
+data:
+  train_files: /path/to/nextqa_parquet/train.parquet
+  val_files: /path/to/nextqa_parquet/validation.parquet
+```
+
+Video sampling uses 1 FPS, 32--128 visual tokens per frame (`25088--100352` pixels), and at most 32 frames. These values are embedded in each parquet video item for `qwen_omni_utils.process_mm_info`; override them at conversion time with `--fps`, `--min_pixels`, `--max_pixels`, or `--max_frames`.
+
+Install the Qwen Omni media loader with:
+
+```bash
+pip install -e ".[audio]"
+```
+
+FFmpeg must also be available on every worker for video/audio decoding and for the dataset conversion step described above.
+
+> [!NOTE]
+> The NExT-QA launcher selects TorchCodec by default with
+> `FORCE_QWENVL_VIDEO_READER=torchcodec`. On a 320-core host, we observed stable
+> decoding with TorchCodec, while the torchvision/PyAV fallback path showed
+> severe transient native-thread growth and could fail with
+> `Resource temporarily unavailable` during video decoding. The launcher also
+> defaults `OMP_NUM_THREADS`, `TQ_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, and
+> `MKL_NUM_THREADS` to 8 and uses 8 prompt-filter workers; explicitly override
+> these values only after validating the host's process and thread limits.
+>
+> For PyTorch 2.10 on Ascend/NPU, TorchCodec 0.10 can be built without CUDA support:
+>
+> ```bash
+> python -m pip install pybind11
+> git clone --branch v0.10.0 --depth 1 https://github.com/pytorch/torchcodec.git /tmp/torchcodec
+> cd /tmp/torchcodec
+> export pybind11_DIR="$(python -m pybind11 --cmakedir)"
+> ENABLE_CUDA=0 I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1 \
+>     python -m pip install . --no-build-isolation --no-deps
+> ```
+>
+> Make sure the required FFmpeg development libraries are installed and that TorchCodec imports successfully on every Ray worker.
+
+The launcher enables `use_audio_in_video=true` and decodes audio at 16 kHz.
+Clips must therefore contain an audio stream that `ffmpeg` can decode. To run a
+visual-only ablation without rebuilding the parquet, launch with
+`USE_AUDIO_IN_VIDEO=false`.
+
+### Reward
+
+The recipe reuses the shared
+[`choice_reward.py`](../../verl_omni/utils/reward_score/choice_reward.py)
+multiple-choice scorer. It extracts the first `<answer>...</answer>` payload
+and gives `1.0` only for an exact match with the tagged dataset label,
+otherwise `0.0`. The dataset converter guarantees that every label is one of
+the five option letters A--E.
+
+### Run NPU training
+
+The default is one 16-NPU node. The script runs 32 prompts × 8 samples per
+rollout for 200 optimizer steps and accepts Hydra overrides after the script
+name.
+
+```bash
+TRAIN_FILE=$HOME/data/nextqa/train.parquet \
+VAL_FILE=$HOME/data/nextqa/validation.parquet \
+MODEL_PATH=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh
+```
+
+For the task4 two-node topology, first create the Ray cluster across both
+machines, then launch on the head node with:
+
+```bash
+N_GPUS_PER_NODE=8 NNODES=2 \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh
+```
+
 ## Performance
 
 All GPU results measured on a single node of **4 × H800 80GB**, actor and
@@ -351,12 +503,14 @@ examples/gspo_trainer/
 │   ├── run_qwen3_omni_thinker_gspo_lora.sh           ← deprecated (old main_ppo entrypoint)
 │   ├── run_qwen3_omni_thinker_gspo_npu.sh            ← launch script (NPU, full-parameter)
 │   ├── run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh    ← V1 launch script (NPU, AVQA)
+│   ├── run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh  ← V1 launch script (NPU, NextQA video)
 │   ├── config/
 │   │   └── qwen3_omni_thinker_gspo.yaml              ← old recipe config (deprecated path only)
 │   ├── qwen3_omni_thinker_only.yaml                  ← old vllm-omni stage config (deprecated path only)
 │   └── qwen3_omni_thinker_only_npu.yaml              ← old vllm-omni stage config (deprecated path only)
 ├── data_process/
 │   ├── mmk12.py                                      ← MMK12 → verl RL parquet converter
-│   └── avqa.py                                       ← AVQA → verl RL parquet converter
+│   ├── avqa.py                                       ← AVQA → verl RL parquet converter
+│   └── nextqa.py                                     ← NextQA → verl RL parquet converter
 └── README.md                                         ← (this file)
 ```
