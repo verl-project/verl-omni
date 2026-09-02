@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
-Last updated: 08/24/2026
+Last updated: 09/03/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
@@ -235,6 +235,26 @@ The scorer combines `math_verify` accuracy with a progressive format reward on
 the `<answer>…\boxed{}…</answer>` template; see
 [`verl_omni/utils/reward_score/mmk12_reward.py`](https://github.com/verl-project/verl-omni/blob/main/verl_omni/utils/reward_score/mmk12_reward.py)
 for the full formula.
+
+### MMK12 On-Policy Distillation (OPD)
+
+OPD distills a teacher's distribution into the student during GSPO training.
+The student is the noised Qwen3-Omni-30B-A3B-Instruct (25% weight noise) and
+the teacher is the original (un-noised) model, served by `vllm_omni` in AR mode.
+
+Validated on 2 × Ascend 910C machines — student rollout/actor on 16 GPUs of
+node 1, teacher model on 16 GPUs of node 2:
+
+```bash
+# 1. On the master node (node 1): ray start --head
+# 2. On the slave node (node 2): ray start --address='<head_ip>:<port>'
+# 3. Run on the master node:
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh
+```
+
+The script sets `distillation.enabled=true` with a `vllm_omni` teacher
+(`loss_mode=kl`, `use_policy_gradient=true`). Teacher and student must share
+the same tokenizer (same model family).
 
 ## Training with `AVQA-R1-6K`
 

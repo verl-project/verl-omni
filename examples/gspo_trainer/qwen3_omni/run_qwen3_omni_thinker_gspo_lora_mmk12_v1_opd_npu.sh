@@ -14,7 +14,7 @@
 # Validated on 2x Ascend 910C machines: student rollout/actor on 16 GPUs of node 1,
 # teacher model on 16 GPUs of node 2.
 #
-# Start the task as followed (replace <head_ip> and <port> with the actual values from the head node):
+# Start the task as follows (replace <head_ip> and <port> with the actual values from the head node):
 #   1. On the master node (node 1): ray start --head
 #   2. On the slave node (node 2): ray start --address='<head_ip>:<port>'
 #   3. Run this script on the master node to start the training task.
@@ -25,8 +25,8 @@ export VLLM_ASCEND_ENABLE_NZ=0
 # Make verl_omni available to Ray workers
 export VERL_USE_EXTERNAL_MODULES=verl_omni
 
-STUDENT_MODEL=${STUDENT_MODEL:-""}
-TEACHER_MODEL=${TEACHER_MODEL:-""}
+STUDENT_MODEL=${STUDENT_MODEL:-"$HOME/models/Qwen/Qwen3-Omni-30B-A3B-Instruct-Noised"}
+TEACHER_MODEL=${TEACHER_MODEL:-"$HOME/models/Qwen/Qwen3-Omni-30B-A3B-Instruct"}
 
 TRAIN_FILE=${TRAIN_FILE:-"$HOME/data/mmk12/train.parquet"}
 VAL_FILE=${VAL_FILE:-"$HOME/data/mmk12/test.parquet"}
@@ -98,7 +98,7 @@ python3 -m verl_omni.trainer.main_omni \
     trainer.critic_warmup=0 \
     trainer.logger='["console","tensorboard"]' \
     trainer.project_name=gspo \
-    trainer.experiment_name=qwen3_omni_thinker_lora_mmk12_opd \
+    trainer.experiment_name=qwen3_omni_thinker_lora_mmk12_opd_npu \
     trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
     trainer.nnodes=1 \
     trainer.save_freq=50 \
