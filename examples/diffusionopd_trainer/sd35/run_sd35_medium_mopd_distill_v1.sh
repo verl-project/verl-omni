@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
-# SD3.5-Medium on-policy distillation on the OCR task.
+# SD3.5-Medium multi-teacher on-policy distillation (V1 trainer: sync mode).
 #
-# A frozen teacher (e.g. an OCR-tuned SD3.5-Medium with its LoRA merged) replays
-# the student's rollout trajectories, and the student minimizes distill_kl toward
-# the teacher's transition means. The OCR GenRM reward is monitored only -- it
-# never enters the loss -- so the reward curve shows the student reaching the
-# teacher's reward level through distillation alone.
-#
-# Set TEACHER_PATH to the merged teacher checkpoint. Data layout and the reward
-# model follow examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh.
+# V1 counterpart of run_sd35_medium_mopd_distill.sh: same data, teachers,
+# routing, and objective, run through `verl_omni.trainer.main_diffusion_v1`,
+# which selects `PolicyGradientDiffusionTrainerV1Sync` via
+# `trainer.v1.trainer_mode=sync`. See the v0 script for teacher-merge and
+# data-preparation notes.
 set -x
 
 WORKSPACE=${OCR_WORKSPACE:-${WORKSPACE:-$HOME}}
 
 ocr_train_path=$WORKSPACE/data/ocr/sd3/train.parquet
 ocr_test_path=$WORKSPACE/data/ocr/sd3/test.parquet
+pickscore_train_path=$WORKSPACE/data/pickscore_sfw/sd3/train.parquet
+pickscore_test_path=$WORKSPACE/data/pickscore_sfw/sd3/test.parquet
 
 model_name=stabilityai/stable-diffusion-3.5-medium
-teacher_path=${TEACHER_PATH:?set TEACHER_PATH to the frozen teacher checkpoint}
+ocr_teacher_path=${OCR_TEACHER_PATH:?set OCR_TEACHER_PATH to the merged OCR teacher checkpoint}
+aes_teacher_path=${AES_TEACHER_PATH:?set AES_TEACHER_PATH to the merged Aes teacher checkpoint}
 reward_model_name=Qwen/Qwen2.5-VL-3B-Instruct
-reward_function_path=verl_omni/utils/reward_score/genrm_ocr.py
+reward_function_path=examples/diffusionopd_trainer/sd35/mixed_task_reward.py
 custom_chat_template='{% for message in messages %}{% if message['\''role'\''] == '\''user'\'' %}{{ message['\''content'\''] }}{% endif %}{% endfor %}'
 
 NUM_GPUS_ACTOR_ROLLOUT=2
@@ -42,11 +42,11 @@ fi
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
-python3 -m verl_omni.trainer.main_diffusion \
-    data.train_files=$ocr_train_path \
-    data.val_files=$ocr_test_path \
+python3 -m verl_omni.trainer.main_diffusion_v1 \
+    data.train_files="[\"$ocr_train_path\",\"$pickscore_train_path\"]" \
+    data.val_files="[\"$ocr_test_path\",\"$pickscore_test_path\"]" \
     data.train_batch_size=8 \
-    data.val_max_samples=32 \
+    data.val_max_samples=64 \
     data.max_prompt_length=512 \
     data.truncation=error \
     data.seed=42 \
@@ -59,7 +59,10 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.lora_alpha=64 \
     actor_rollout_ref.model.target_modules="['to_q','to_k','to_v','to_out.0','add_q_proj','add_k_proj','add_v_proj','to_add_out']" \
     distillation.enabled=True \
-    distillation.teacher_models.teacher_model.model_path=$teacher_path \
+    +distillation.teacher_models.ocr_teacher.key=flow_grpo/ocr \
+    +distillation.teacher_models.ocr_teacher.model_path=$ocr_teacher_path \
+    +distillation.teacher_models.pickscore_teacher.key=flow_grpo/pickscore_sfw \
+    +distillation.teacher_models.pickscore_teacher.model_path=$aes_teacher_path \
     actor_rollout_ref.actor.diffusion_loss.loss_mode=distill_kl \
     actor_rollout_ref.actor.diffusion_loss.clip_ratio=1e-5 \
     actor_rollout_ref.actor.use_kl_loss=False \
@@ -109,10 +112,10 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.reward_model.rollout.tensor_model_parallel_size=$REWARD_TP \
     reward.reward_model.rollout.enforce_eager=False \
     reward.custom_reward_function.path=$reward_function_path \
-    reward.custom_reward_function.name=compute_score_ocr \
+    reward.custom_reward_function.name=compute_score_mixed \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=diffusion_opd \
-    trainer.experiment_name=sd35_medium_ocr_distill \
+    trainer.experiment_name=sd35_medium_mopd_distill_v1 \
     trainer.log_val_generations=8 \
     trainer.val_before_train=True \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT \
@@ -121,4 +124,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.test_freq=20 \
     trainer.total_epochs=15 \
     trainer.total_training_steps=$TOTAL_TRAINING_STEPS \
+    trainer.use_v1=true \
+    trainer.v1.trainer_mode=sync \
     "$@"

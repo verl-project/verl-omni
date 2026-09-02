@@ -27,12 +27,33 @@ __all__ = ["MiniMaxH3DiffusionSingleTurnAgentLoop"]
 
 @register("minimax_h3_diffusion_single_turn_agent")
 class MiniMaxH3DiffusionSingleTurnAgentLoop(DiffusionSingleTurnAgentLoop):
-    """Tokenize H3 prompt text verbatim without applying a chat template."""
+    """Tokenize H3 prompts verbatim and preserve raw reference media."""
 
     async def run(self, sampling_params: dict[str, Any], **kwargs):
         """Mark IDs so the H3 rollout can reject generic chat-template tokens."""
         sampling_params = {**sampling_params, MINIMAX_H3_TOKEN_ID_NATIVE_KEY: True}
         return await super().run(sampling_params, **kwargs)
+
+    async def process_multi_modal_info(self, messages: list[dict]) -> dict[str, list[Any]]:
+        """Keep H3 reference paths and waveforms in their upstream input format."""
+        media: dict[str, list[Any]] = {"images": [], "videos": [], "audios": []}
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                media_type = item.get("type")
+                if media_type == "image":
+                    media["images"].append(item["image"])
+                elif media_type == "video":
+                    video = item["video"]
+                    start = item.get("start_time_seconds")
+                    media["videos"].append(video if start is None else {"path": video, "start_time_seconds": start})
+                elif media_type == "audio":
+                    media["audios"].append(item["audio"])
+        return {key: values for key, values in media.items() if values}
 
     async def _tokenize_raw_text(self, messages: list[dict]) -> list[int]:
         """Return raw H3 text IDs without applying a chat template."""

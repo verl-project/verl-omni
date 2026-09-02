@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock
 import pytest
 import torch
 
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_ar_strategy as ar_strategy_module
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_async_server as server_module
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_diffusion_strategy as diffusion_strategy_module
@@ -281,6 +282,67 @@ def test_diffusion_strategy_preserves_multistage_prompt_shape():
     assert prompt["extra_args"] == {"multi_modal_data": {"image": ["image"]}}
     assert params[0] == "ar-stage"
     assert params[-1].extra_args == {"pipeline_private_arg": 7}
+
+
+def _joint_video_audio_final_res():
+    video = torch.zeros(1, 3, 2, 8, 8, dtype=torch.uint8)
+    audio = torch.zeros(1, 16)
+    final_res = SimpleNamespace(
+        images=[(video, audio)],
+        trajectory_latents=None,
+        trajectory_timesteps=None,
+        trajectory_log_probs=None,
+        multimodal_output=None,
+        request_output=None,
+    )
+    return final_res, audio
+
+
+def test_diffusion_strategy_uses_declared_audio_sample_rate(monkeypatch):
+    pipeline_cls = SimpleNamespace(
+        diffusion_io_spec=DiffusionIOSpec(
+            primary=MediaSpec("video"),
+            auxiliary=(MediaSpec("audio", sample_rate=48000),),
+        )
+    )
+    monkeypatch.setattr(
+        diffusion_strategy_module.VllmOmniPipelineBase,
+        "get_class",
+        staticmethod(lambda **kwargs: pipeline_cls),
+    )
+    server = SimpleNamespace(
+        global_steps=1,
+        model_config=SimpleNamespace(architecture="Architecture", algorithm="Algorithm"),
+    )
+    final_res, audio = _joint_video_audio_final_res()
+
+    processed = DiffusionStrategy(server).process_output(final_res, None, {"output_type": "pt", "logprobs": False})
+
+    # The audio sample rate comes from the adapter-declared DiffusionIOSpec,
+    # not the strategy's legacy 32 kHz fallback.
+    assert processed.extra_fields["audio_sample_rate"] == 48000
+    # process_output unbatches the leading dimension of auxiliary media.
+    torch.testing.assert_close(processed.extra_fields["audio"], audio[0])
+
+
+def test_diffusion_strategy_omits_audio_sample_rate_without_declared_spec(monkeypatch):
+    # Without an adapter-declared DiffusionIOSpec the strategy still surfaces the
+    # auxiliary audio stream but attaches no model-specific sample-rate default.
+    monkeypatch.setattr(
+        diffusion_strategy_module.VllmOmniPipelineBase,
+        "get_class",
+        staticmethod(lambda **kwargs: SimpleNamespace()),
+    )
+    server = SimpleNamespace(
+        global_steps=1,
+        model_config=SimpleNamespace(architecture="Architecture", algorithm="Algorithm"),
+    )
+    final_res, audio = _joint_video_audio_final_res()
+
+    processed = DiffusionStrategy(server).process_output(final_res, None, {"output_type": "pt", "logprobs": False})
+
+    torch.testing.assert_close(processed.extra_fields["audio"], audio[0])
+    assert "audio_sample_rate" not in processed.extra_fields
 
 
 @pytest.mark.parametrize(

@@ -30,6 +30,7 @@ from verl_omni.pipelines.qwen_image_flow_grpo.common import (
     build_img_shapes,
     coalesce_not_none,
 )
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 
 __all__ = ["QwenImageDiffusionNFTPipeline"]
 
@@ -42,6 +43,10 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
     objective, so the rollout side does not collect reverse-SDE trajectories or
     log-probabilities.
     """
+
+    #: Declares the primary rollout media stream so downstream consumers read
+    #: the modality from the adapter instead of inferring it from tensor rank.
+    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

@@ -240,6 +240,7 @@ actor_rollout_ref:
       true_cfg_scale: 1.0
       max_sequence_length: 512
       guidance_scale: null
+      reference_image_short_edge: null
       num_frames: 1
       task: null
 ```
@@ -249,6 +250,7 @@ actor_rollout_ref:
 - `actor_rollout_ref.rollout.pipeline.true_cfg_scale`: True classifier-free guidance scale; values `> 1.0` enable CFG with a negative prompt (e.g. Qwen-Image).
 - `actor_rollout_ref.rollout.pipeline.max_sequence_length`: Max text-encoder token length for prompt encoding.
 - `actor_rollout_ref.rollout.pipeline.guidance_scale`: Distilled guidance scale for models with guidance embeddings; `null` disables.
+- `actor_rollout_ref.rollout.pipeline.reference_image_short_edge`: Reference-image resize short edge for compatible pipelines. MiniMax-H3 Ref2VA accepts multiples of 32 from 256 through 2048; use `val_kwargs.pipeline.reference_image_short_edge` for a different validation value.
 - `actor_rollout_ref.rollout.pipeline.num_frames`: Wan2.2 (and similar) video frame count (`81` ≈ 3s at 24 fps; image models keep `1`).
 - `actor_rollout_ref.rollout.pipeline.task`: Optional task label forwarded to the pipeline's request contract (vLLM-Omni reads it as the request `task`); values are pipeline-specific (e.g. MiniMax-H3: `t2va` / `fl2va` / `ref2va`), `null` lets the engine infer it.
 - `actor_rollout_ref.rollout.pipeline.output_type`: Pipeline output modality (dataclass default `image`).

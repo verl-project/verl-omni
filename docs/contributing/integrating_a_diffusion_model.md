@@ -436,8 +436,54 @@ needs normalized model input must convert locally with
 restore precision discarded at the rollout boundary. Do not multiply uint8 pixels
 by 255 again before PIL, JPEG, or HTTP serialization.
 
+(diffusion-io-spec)=
+### 4.2 Declare the media output contract (`diffusion_io_spec`)
+
+Set a `diffusion_io_spec` class attribute on the registered pipeline so the
+shared `DiffusionStrategy` knows what media your `forward` emits. The strategy
+reads it (via `VllmOmniPipelineBase.get_class(architecture, algorithm)`) when it
+converts the raw pipeline output into the rollout response, so model-specific
+conventions — which tuple position carries audio, what audio sample rate to
+attach — live in the adapter instead of being hardcoded in the shared strategy.
+
+```python
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
+
+@VllmOmniPipelineBase.register("MyModelPipeline", algorithm="flow_grpo")
+class MyModelPipelineWithLogProb(MyModelPipeline):
+    # Image-only pipeline:
+    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
+```
+
+- **`primary`** — the main media stream (`MediaSpec("image")` or
+  `MediaSpec("video")`), carried in `responses`.
+- **`auxiliary`** — additional streams in tuple order: `auxiliary[i]` maps to
+  output tuple position `i + 1` (position `0` is the primary). A `forward` that
+  returns `(video, audio)` declares one auxiliary audio stream:
+
+```python
+    diffusion_io_spec = DiffusionIOSpec(
+        primary=MediaSpec("video"),
+        auxiliary=(MediaSpec("audio", sample_rate=32000),),
+    )
+```
+
+- **`MediaSpec.sample_rate`** is the *default* audio sample rate in Hz. If your
+  `forward` attaches a runtime rate through the `rl` rollout metadata, that value
+  takes precedence and the strategy only falls back to this default. Declare the
+  rate your model actually decodes (MiniMax H3 → `32000`, LTX-2 → `24000`).
+- `MediaSpec.fps` is an optional video default; `Modality` is
+  `image | video | audio`.
+- Subclasses inherit the attribute, so a pipeline that subclasses another adapter
+  (e.g. `qwen_image_dual_grpo` extends `qwen_image_flow_grpo`) reuses its
+  `diffusion_io_spec` unless it overrides it.
+
+Every registered diffusion adapter declares one; see
+[`rollout_media.py`](../../verl_omni/pipelines/rollout_media.py) and the
+`test_diffusion_io_spec_on_cpu.py` completeness test.
+
 (request-level-batching)=
-### 4.2 Request-level batching (optional)
+### 4.3 Request-level batching (optional)
 
 To let vLLM-Omni pack multiple requests into one transformer forward
 (`max_num_seqs > 1`), extend the rollout adapter as follows. Reference
@@ -620,6 +666,10 @@ Before opening the PR, confirm every box:
       `model_index.json::_class_name`; the `algorithm=` keyword matches
       the algorithm you are integrating against (e.g. `"flow_grpo"` for
       FlowGRPO).
+- [ ] The registered pipeline declares a `diffusion_io_spec`
+      ([`DiffusionIOSpec`](../../verl_omni/pipelines/rollout_media.py)) whose
+      `primary` modality matches what `forward` emits, plus an `auxiliary`
+      audio stream (with its `sample_rate`) for joint audio/video models.
 - [ ] Scheduler returns latents in fp32 (no `model_output.dtype` cast in `step()`),
       `diffuse()` casts to model dtype before transformer forward and casts
       noise_pred to float32 before `scheduler.step()`

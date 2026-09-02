@@ -53,7 +53,7 @@ def _convert_split(input_dir: Path, split: str, frame_mode: str, max_samples: in
                 {
                     "data_source": "minimax_h3_fl2va",
                     "prompt": [{"role": "user", "content": "<image>" * expected_images + prompt}],
-                    "ability": "video_generation",
+                    "ability": "frame_to_audio_video",
                     "images": [{"bytes": path.read_bytes()} for path in image_paths],
                     "reward_model": {"style": "model", "ground_truth": prompt},
                     "extra_info": {

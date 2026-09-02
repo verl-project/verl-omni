@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ci-e2e-diffusion GPU smoke tests (4-GPU): end-to-end diffusion training paths.
 # Includes FlowGRPO / online DPO / DiffusionNFT (v0), synchronous separate,
-# and FlowGRPO v1 separate_async.
+# FlowGRPO v1 separate_async, and OPD teachers on v0 and the v1 sync trainer.
 
 set -euo pipefail
 
@@ -60,5 +60,9 @@ run_test 8 "Diffusion OPD standalone teacher pool e2e" \
 run_test 9 "FlowGRPO synchronous separate trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_flowgrpo_qwen_image_separate.sh "${diffusion_trainer_args[@]}"
+
+run_test 10 "Diffusion OPD v1 sync standalone teachers e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" V1=1 SMOKE=standalone \
+    bash tests/special_e2e/run_diffusion_teacher_smoke.sh
 
 gpu_smoke_summary

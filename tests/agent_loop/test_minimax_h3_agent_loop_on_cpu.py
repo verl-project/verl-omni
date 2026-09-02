@@ -41,6 +41,30 @@ def test_messages_to_text_ignores_structured_media_items():
     assert messages_to_text(messages) == "A campfire under the stars."
 
 
+def test_h3_agent_loop_preserves_reference_media_paths():
+    agent = object.__new__(MiniMaxH3DiffusionSingleTurnAgentLoop)
+    image = object()
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "video", "video": "/tmp/reference.mp4", "start_time_seconds": 1.5},
+                {"type": "audio", "audio": "/tmp/reference.wav"},
+                {"type": "text", "text": "Animate the references."},
+            ],
+        }
+    ]
+
+    media = asyncio.run(agent.process_multi_modal_info(messages))
+
+    assert media == {
+        "images": [image],
+        "videos": [{"path": "/tmp/reference.mp4", "start_time_seconds": 1.5}],
+        "audios": ["/tmp/reference.wav"],
+    }
+
+
 def test_h3_agent_loop_marks_token_ids_as_native(monkeypatch):
     async def capture_sampling_params(self, sampling_params, **kwargs):
         del self, kwargs

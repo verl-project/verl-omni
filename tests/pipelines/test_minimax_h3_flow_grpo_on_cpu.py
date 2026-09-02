@@ -186,6 +186,9 @@ def test_rollout_output_reaches_actor_and_replays_joint_transition(monkeypatch) 
     )
     server = object.__new__(vLLMOmniHttpServer)
     server.global_steps = 1
+    # The strategy resolves the audio sample rate from the adapter-declared
+    # DiffusionIOSpec, which is keyed by (architecture, algorithm).
+    server.model_config = SimpleNamespace(architecture="MiniMaxH3Pipeline", algorithm="flow_grpo")
     processed = DiffusionStrategy(server).process_output(final_res, None, {"output_type": "pt", "logprobs": True})
 
     for key in ("all_latents", "all_next_latents", "h3_step_indices", "h3_audio_timesteps"):

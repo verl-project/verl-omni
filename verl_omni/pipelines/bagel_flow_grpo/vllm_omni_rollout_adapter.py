@@ -39,6 +39,7 @@ from verl_omni.pipelines.bagel_flow_grpo.common import (
 )
 from verl_omni.pipelines.diffusion_rollout_output import rollout_output
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 logger = logging.getLogger(__name__)
@@ -241,6 +242,10 @@ def _pick_sde_window(
 @VllmOmniPipelineBase.register("OmniBagelForConditionalGeneration", algorithm="flow_grpo")
 class BagelPipelineWithLogProb(BagelPipeline):
     """BAGEL pipeline variant for RL rollouts with verl-omni."""
+
+    #: Declares the primary rollout media stream so downstream consumers read
+    #: the modality from the adapter instead of inferring it from tensor rank.
+    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)

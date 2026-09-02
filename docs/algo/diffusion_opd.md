@@ -1,6 +1,6 @@
 # Diffusion On-Policy Distillation
 
-Last updated: 08/26/2026.
+Last updated: 08/31/2026.
 
 ## Background
 
@@ -155,16 +155,26 @@ rejected at startup. The teacher runtime produces `teacher_prev_sample_mean`,
 which only `distill_kl` consumes; `distill_fm_mse` has no producer on the
 policy-gradient path and is rejected.
 
-### Scoring batch size
+### Scoring configuration
 
 The teacher reuses the reference model's scoring configuration:
 `actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu`, falling back to
 `actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu`.
 
+The same applies to the engine dtype: teachers load with
+`actor_rollout_ref.ref.fsdp_config.model_dtype`, which defaults to fp32.
+Scoring-only teachers compute in bf16 either way (FSDP mixed precision casts
+parameters per forward), so overriding it to `bfloat16` — as the example
+recipes do — only removes the fp32 parameter streaming and roughly halves the
+teacher stage time without changing the scores.
+
 ## Usage
 
 Supported scope: the policy-gradient trainer with online sampling and
-FSDP/FSDP2 engines. Unsupported combinations raise at startup.
+FSDP/FSDP2 engines, on both the legacy trainer (`main_diffusion`) and the v1
+sync trainer (`main_diffusion_v1` with `trainer.v1.trainer_mode=sync`; the
+v1 `separate_async` mode does not support distillation yet). Unsupported
+combinations raise at startup.
 
 A complete working recipe is
 [`examples/diffusionopd_trainer/sd35/run_sd35_medium_ocr_distill.sh`](../examples/diffusionopd_trainer.md):

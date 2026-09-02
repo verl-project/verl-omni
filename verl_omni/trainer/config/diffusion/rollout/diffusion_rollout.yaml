@@ -176,6 +176,9 @@ val_kwargs:
     # Distilled guidance scale for models with guidance_embeds; null to disable
     guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
 
+    # Reference-image short edge for compatible pipelines (validation)
+    reference_image_short_edge: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_image_short_edge,null}
+
     # Wan2.2 number of frames (validation)
     num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
 
@@ -271,6 +274,9 @@ pipeline:
 
   # Distilled guidance scale for models with guidance_embeds; null to disable
   guidance_scale: null
+
+  # Reference-image short edge for compatible pipelines
+  reference_image_short_edge: null
 
   # Wan2.2 number of frames
   num_frames: 1

@@ -40,6 +40,7 @@ from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from verl_omni.pipelines.diffusion_rollout_output import with_rollout_data
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import (
@@ -76,6 +77,13 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
     """
 
     supports_request_batch = False
+
+    #: Declares the joint video/audio rollout streams so the diffusion strategy
+    #: does not hard-code the audio tuple position or its 32 kHz sample rate.
+    diffusion_io_spec = DiffusionIOSpec(
+        primary=MediaSpec("video"),
+        auxiliary=(MediaSpec("audio", sample_rate=32000),),
+    )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
