@@ -238,11 +238,13 @@ class ARStrategy(OmniStrategyBase):
             raise RuntimeError("AR mode expects outputs with token IDs, but got None or empty.")
 
         extra_fields = {"global_steps": self.server.global_steps}
-        extract_prompt_logprobs(
-            output=req_output,
-            num_prompt_logprobs=params.prompt_logprobs,
-            result_dict=extra_fields,
-        )
+        num_prompt_logprobs = getattr(params, "prompt_logprobs", None)
+        if num_prompt_logprobs is not None and hasattr(req_output, "prompt_logprobs"):
+            extract_prompt_logprobs(
+                output=req_output,
+                num_prompt_logprobs=num_prompt_logprobs,
+                result_dict=extra_fields,
+            )
         token_ids = req_output.outputs[0].token_ids
         log_probs = None
         if params.logprobs is not None:

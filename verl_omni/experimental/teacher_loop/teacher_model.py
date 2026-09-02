@@ -19,6 +19,7 @@ inference, ensuring proper processor initialization with dedup_pad_tokens.
 
 from verl.experimental.teacher_loop.teacher_model import MultiTeacherModelManager, TeacherModelManager
 from verl.single_controller.ray.base import split_resource_pool
+from verl.utils.config import omega_conf_to_dataclass
 
 from verl_omni.workers.config import OmniModelConfig
 
@@ -33,6 +34,15 @@ class OmniTeacherModelManager(TeacherModelManager):
         teacher_model_config = self.teacher_model_config
         per_replica_world_size = teacher_model_config.per_replica_world_size
         num_replicas = teacher_model_config.num_replicas
+        expected_pool_size = num_replicas * per_replica_world_size
+        if self.resource_pool.world_size != expected_pool_size:
+            raise ValueError(
+                f"Teacher {teacher_model_config.key!r} expected sub-pool of size "
+                f"{expected_pool_size} (num_replicas={num_replicas} * "
+                f"per_replica_world_size={per_replica_world_size}), but got "
+                f"{self.resource_pool.world_size}."
+            )
+
         gpus_per_node = self.distillation_config.n_gpus_per_node
         rollout_config = teacher_model_config.inference
         rollout_replica_class = get_rollout_replica_class(rollout_config.name)
@@ -63,7 +73,7 @@ class OmniTeacherModelManager(TeacherModelManager):
         _run_all(
             [
                 server.init_colocated(resource_pool)
-                for server, resource_pool in zip(self.rollout_replicas, split_resource_pools, strict=False)
+                for server, resource_pool in zip(self.rollout_replicas, split_resource_pools, strict=True)
             ]
         )
         self.server_handles = [server._server_handle for server in self.rollout_replicas]
@@ -73,12 +83,27 @@ class OmniTeacherModelManager(TeacherModelManager):
 class OmniMultiTeacherModelManager(MultiTeacherModelManager):
     """Multi-teacher manager using OmniTeacherModelManager for vllm_omni rollout."""
 
+    def __init__(self, config, resource_pool):
+        self.config = config
+        # Materializes teachers as OmniDistillationTeacherModelConfig via the
+        # distillation _target_ override in omni_trainer.yaml, so vllm_omni is
+        # accepted by _validate_topk_logprobs.
+        self.distillation_config = omega_conf_to_dataclass(config.distillation)
+
+        self.resource_pool = resource_pool
+        self.teacher_model_managers = {}
+        self.server_addresses = {}
+        self.server_handles = {}
+        self.load_balancer_handle = {}
+
+        self._initialize_teacher_model_managers()
+
     def _initialize_teacher_model_managers(self):
         teacher_models = self.distillation_config.teacher_models
         split_sizes = [teacher.world_size for teacher in teacher_models.values()]
         split_pools = split_resource_pool(self.resource_pool, split_size=split_sizes)
 
-        for (key, teacher_model_config), teacher_pool in zip(teacher_models.items(), split_pools, strict=False):
+        for (key, teacher_model_config), teacher_pool in zip(teacher_models.items(), split_pools, strict=True):
             manager = OmniTeacherModelManager(
                 distillation_config=self.distillation_config,
                 teacher_model_config=teacher_model_config,

@@ -87,17 +87,16 @@ class OmniPPOTrainerSync(PPOTrainerSync):
         self.checkpoint_manager.resume_generation_replicas()
 
     def init(self):
-        # Temporarily disable teacher policy to prevent super().init() from creating
-        # the default MultiTeacherModelManager (which uses HFModelConfig).
-        # We'll create OmniMultiTeacherModelManager manually below.
-        use_teacher = self.use_teacher_policy
+        # Disable teacher policy during super().init() to skip verl's default
+        # MultiTeacherModelManager (uses HFModelConfig, incompatible with vllm_omni).
+        # Build OmniMultiTeacherModelManager below instead.
+        use_teacher_policy = self.use_teacher_policy
         self.use_teacher_policy = False
         super().init()
-        self.use_teacher_policy = use_teacher
+        self.use_teacher_policy = use_teacher_policy
 
-        if use_teacher:
-            # Monkey-patch the minimal padding template so teacher-side fields
-            # (teacher_ids / teacher_logprobs) are padded alongside student tokens.
+        if use_teacher_policy:
+            # Pad teacher-side fields (teacher_ids / teacher_logprobs) alongside student tokens.
             import verl.trainer.ppo.padding_utils as _padding_utils
 
             _padding_utils.construct_minimal_padding_template = patched_padding_template
@@ -107,7 +106,6 @@ class OmniPPOTrainerSync(PPOTrainerSync):
                 config=self.config,
                 resource_pool=teacher_resource_pool,
             )
-            # Initialize distillation_config (skipped by super().init() because we disabled use_teacher_policy)
             self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
 
 
