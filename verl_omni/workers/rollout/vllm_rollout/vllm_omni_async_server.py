@@ -221,6 +221,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             self._invalidate_lora_request_cache()
         await super().set_global_steps(global_steps)
 
+    async def _reset_frontend_mm_cache(self) -> None:
+        """Clear the frontend multimodal cache; EngineCore.sleep wipes only the engine-side copy."""
+        # Diffusion-only engines build no InputProcessor, so renderer is None.
+        # TODO (mike): drop after vllm-omni fixes AsyncOmni.reset_mm_cache.
+        renderer = self.engine.renderer
+        if renderer is not None:
+            await renderer.clear_mm_cache_async()
+
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
@@ -229,6 +237,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return
         acks = await self.engine.sleep(level=self._resolve_sleep_level())
         self._validate_acks("sleep", acks)
+        await self._reset_frontend_mm_cache()
         self._invalidate_lora_request_cache()
 
     async def release_kv_cache(self):
@@ -239,6 +248,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return
         acks = await self.engine.sleep(level=self._resolve_sleep_level())
         self._validate_acks("sleep", acks)
+        await self._reset_frontend_mm_cache()
         self._invalidate_lora_request_cache()
         acks = await self.engine.wake_up(tags=["weights"])
         self._validate_acks("wake_up", acks)

@@ -58,6 +58,14 @@ class _FakeAsyncOmni:
         self.sleep_calls: list[dict] = []
         self.wake_calls: list[dict] = []
         self.resumed = 0
+        # Real-shaped handle: the frontend multimodal cache lives on the
+        # renderer, so the fake must expose clear_mm_cache_async there.
+        self.mm_clears = 0
+
+        async def _clear_mm_cache_async():
+            self.mm_clears += 1
+
+        self.renderer = SimpleNamespace(clear_mm_cache_async=_clear_mm_cache_async)
 
     async def abort(self, request_ids):
         self.calls.append("abort")
@@ -207,6 +215,47 @@ async def test_lifecycle_guards_skip_standalone_and_non_driver_ranks():
     await server.release_kv_cache()
     await server.resume_kv_cache()
     assert engine.calls == []
+
+
+# ---------------------------------------------------------------------------
+# mm cache drift: EngineCore.sleep wipes only the engine-side multimodal
+# cache, so every successful sleep must also clear the frontend copy through
+# the renderer (the engine's reset_mm_cache no-ops on a missing attribute)
+# ---------------------------------------------------------------------------
+
+
+async def test_sleep_and_release_kv_cache_clear_frontend_mm_sender_cache():
+    engine = _FakeAsyncOmni()
+    server = _make_server(engine)
+
+    await server.sleep()
+    assert engine.sleep_calls[0]["level"] == 1
+    assert engine.mm_clears == 1
+
+    await server.release_kv_cache()
+    assert engine.mm_clears == 2
+
+
+async def test_frontend_mm_clear_skipped_when_sleep_acks_fail():
+    engine = _FakeAsyncOmni(sleep_acks=[SimpleNamespace(status="FAILED", error_msg="boom")])
+    server = _make_server(engine)
+
+    with pytest.raises(RuntimeError, match="sleep failed"):
+        await server.sleep()
+
+    assert engine.mm_clears == 0
+
+
+async def test_sleep_skips_frontend_mm_clear_when_renderer_is_none():
+    # Diffusion-only engines build no InputProcessor, so renderer is None.
+    engine = _FakeAsyncOmni()
+    engine.renderer = None
+    server = _make_server(engine)
+
+    await server.sleep()
+    await server.release_kv_cache()
+    assert engine.mm_clears == 0
+    assert engine.sleep_calls[0]["level"] == 1
 
 
 async def test_ack_validation_fails_closed():
