@@ -57,6 +57,7 @@ vllm-omni = [
 ]
 audio = [
     "qwen-omni-utils>=0.0.9",
+    "audioread",
 ]
 # CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
 gpu = [
