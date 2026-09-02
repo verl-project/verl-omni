@@ -15,13 +15,15 @@
 
 import logging
 import warnings
+from contextlib import contextmanager
 
 import torch
 from torch.distributed.tensor import DTensor
 from transformers import AutoModelForMultimodalLM
 from verl.utils.debug import log_gpu_memory_usage
-from verl.utils.device import get_device_id
+from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import (
+    fsdp_version,
     get_init_weight_context_manager,
     load_fsdp_model_to_gpu,
     merged_lora_context,
@@ -233,3 +235,23 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
                     submodule.cast_input_dtype_enabled = False
 
         return module
+
+    @contextmanager
+    def _gradient_sync_context(self, *, is_last_micro_batch: bool):
+        version = fsdp_version(self.module)
+
+        if version == 2 and get_device_name() == "npu":
+            # Keep gradient synchronization enabled for every micro-batch.
+            #
+            # Deferred FSDP2 gradient synchronization retains unsharded
+            # gradients across micro-batches, which can cause excessive
+            # peak memory usage for large Omni MoE models on NPU.
+            yield
+            return
+
+        # Preserve upstream verl behavior for:
+        #   - FSDP1 + NPU
+        #   - FSDP1 + CUDA
+        #   - FSDP2 + CUDA
+        with super()._gradient_sync_context(is_last_micro_batch=is_last_micro_batch):
+            yield

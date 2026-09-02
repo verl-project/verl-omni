@@ -192,23 +192,35 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             logger.info("Loading standard weights (async)")
             standard = self._get_standard_weight_model_and_config()
             if standard is not None:
-                # AR (standard vLLM) model: load each bucket via the low-level
-                # model.load_weights (no per-bucket finalize), then run the single
-                # post-load processing pass once all buckets are received.
-                model, model_config = standard
-                # Re-attach weight_loader on Ascend FusedMoE params via verl's
-                # built-in patch (handles ACLGraph unwrap + SUPPORTED_MOE_MODELS
-                # whitelist, which Qwen3-Omni is registered into via
-                # patch_register_vllm_moe_model_weight_loader).
-                from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
-
-                patch_vllm_moe_model_weight_loader(model)
-                receiver.receive_weights(
-                    on_bucket_received=lambda weights, *args, **kwargs: model.load_weights(weights)
+                from vllm.model_executor.model_loader.reload import (
+                    finalize_layerwise_reload,
+                    initialize_layerwise_reload,
                 )
-                from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
-                process_weights_after_loading(model, model_config, self.device)
+                model, model_config = standard
+
+                # vLLM records checkpoint/model-layout metadata during model initialization.
+                # Restore kernel-layout parameters to a loadable layout and wrap each weight_loader.
+                initialize_layerwise_reload(model)
+
+                try:
+                    receiver.receive_weights(
+                        on_bucket_received=lambda weights, *args, **kwargs: model.load_weights(weights)
+                    )
+                except BaseException:
+                    # Best-effort restore the kernel parameters so the worker is not
+                    # left with meta or partially loaded tensors.
+                    try:
+                        finalize_layerwise_reload(model, model_config)
+                    except Exception:
+                        logger.exception("Failed to restore model after weight reload failure")
+                    raise
+                else:
+                    # Finish Ascend transpose/repack per layer and copy the results
+                    # back into the original kernel tensors.
+                    finalize_layerwise_reload(model, model_config)
+
+                torch.accelerator.synchronize()
             else:
                 # Diffusion pipeline worker: load via the pipeline. vllm-omni
                 # 0.26 removed DiffusionWorker/DiffusionModelRunner.load_weights;
