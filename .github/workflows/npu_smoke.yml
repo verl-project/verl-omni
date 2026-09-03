@@ -38,19 +38,12 @@ jobs:
     runs-on: linux-aarch64-a2b4-8
     timeout-minutes: 120
     container:
-      image: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni:ascend910b-cann9.0.0-torchnpu2.10.0-py3.12-ubuntu22.04-aarch64
+      image: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2
       options: >-
         --shm-size 16g
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
-      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
-      UV_INDEX_STRATEGY: unsafe-best-match
-      UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
-      UV_HTTP_TIMEOUT: 120
-      UV_NO_CACHE: "1"
-      UV_SYSTEM_PYTHON: "1"
-      UV_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
       PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
       TRANSFORMERS_VERBOSITY: 'error'
@@ -83,19 +76,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
-          pip install uv
           
-          uv pip install --no-deps -e .
-          
-          uv pip install --system --upgrade vllm==0.27.0
-
-          uv pip install --system --upgrade \
-            "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@$(cat .github/vllm_ascend_pin.txt)"
-
-          uv pip install --system --upgrade \
-            "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-
           echo "===== Installed versions ====="
           pip show vllm || true
           pip show vllm-ascend || true
