@@ -16,16 +16,20 @@ Use RL-Insight when you want one monitoring view for:
 
 ## Step 1: Install and Start RL-Insight
 
-Install RL-Insight in the environment where the monitoring server runs. Prefer the latest source version:
+Install RL-Insight in the environment where the monitoring server runs. This integration requires
+[RL-Insight commit `dd1d0a8`](https://github.com/verl-project/rl-insight/commit/dd1d0a8f6d3235989fd662264dcc96cd6e442be4)
+or later. The following command pins the earliest compatible revision:
 
 ```bash
-pip install "git+https://github.com/verl-project/rl-insight.git"
+pip install "git+https://github.com/verl-project/rl-insight.git@dd1d0a8f6d3235989fd662264dcc96cd6e442be4"
 ```
 
-Or install a released package:
+Alternatively, clone the repository and install the latest source version:
 
 ```bash
-pip install "rl-insight>=0.2.0"
+git clone https://github.com/verl-project/rl-insight.git
+cd rl-insight
+pip install -e .
 ```
 
 The Python package must also be installed in the VeRL-Omni training environment because trainer and rollout processes import the RL-Insight client when monitoring is enabled.
