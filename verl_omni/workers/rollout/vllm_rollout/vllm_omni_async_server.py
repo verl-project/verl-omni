@@ -167,12 +167,8 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # rollout_attn_backend only exists on the diffusion rollout config, not AR text rollouts.
         attn_backend = getattr(self.config, "rollout_attn_backend", None)
         if attn_backend is not None:
-            engine_args.pop("diffusion_attention_backend", None)
-            engine_args["diffusion_attention_config"] = self.config.to_vllm_omni_attention_config()
-            logger.info(
-                "Setting diffusion_attention_config.default.backend=%s from rollout config",
-                attn_backend,
-            )
+            engine_args["diffusion_attention_backend"] = attn_backend
+            logger.info("Setting diffusion_attention_backend=%s from rollout config", attn_backend)
 
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
