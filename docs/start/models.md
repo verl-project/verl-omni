@@ -222,7 +222,6 @@ For version requirements and detailed setup instructions, see
 | GSPO (text) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh` | 4×H100/H200 80GB |
 | GSPO (image) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh` | 4×H100/H200 80GB |
 | GSPO (AVQA, NPU) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh` | 16×NPU (Atlas 800T A3) |
-| GSPO (full, NPU) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh` | 16×NPU (Atlas 800T A3) |
 | Offline DPO (LoRA) | `examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh` | 4×H800 |
 
 The GSPO actor (FSDP2, 30B + LoRA r=32 with offloading) and vLLM-Omni rollout (TP=2)

@@ -68,7 +68,6 @@ GROUP_PATTERNS = {
     "ci-e2e-omni": (
         "tests/gpu_smoke/run_gpu_smoke_omni_e2e.sh",
         "tests/special_e2e/*omni*",
-        "verl_omni/models/transformers/qwen3_omni_thinker.py",
         "verl_omni/trainer/config/omni/**",
         "verl_omni/trainer/omni/**",
     ),
