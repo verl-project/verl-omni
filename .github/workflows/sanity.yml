@@ -44,7 +44,6 @@ jobs:
             pyproject.toml
             .github/vllm_omni_pin.txt
             .github/verl_pin.txt
-            .github/workflows/sanity.yml
       - name: Verify vLLM-Ascend pin
         run: |
           pin="$(tr -d '[:space:]' < .github/vllm_ascend_pin.txt)"
