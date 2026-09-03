@@ -258,6 +258,44 @@ async def test_sleep_skips_frontend_mm_clear_when_renderer_is_none():
     assert engine.sleep_calls[0]["level"] == 1
 
 
+async def test_abort_pause_clears_frontend_mm_sender_cache():
+    engine = _FakeAsyncOmni(states={"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")})
+    server = _make_server(engine)
+
+    await server.abort_all_requests()
+
+    # pause_generation(clear_cache=True) wipes the engine-side mm cache; the
+    # frontend copy must go with it or hash-only follow-ups finish empty.
+    assert engine.pause_calls[0]["clear_cache"] is True
+    assert engine.mm_clears == 1
+
+
+async def test_abort_skips_frontend_mm_clear_without_cache_reset():
+    engine = _FakeAsyncOmni(states={"ext-1-abc": _FakeRequestState("ext-1-abc", "ext-1")})
+    server = _make_server(engine)
+
+    await server.abort_all_requests(reset_prefix_cache=False)
+
+    assert engine.pause_calls[0]["clear_cache"] is False
+    assert engine.mm_clears == 0
+
+
+async def test_frontend_mm_clear_skipped_when_pause_fails():
+    class _PauseFailsEngine(_FakeAsyncOmni):
+        async def pause_generation(self, **kwargs):
+            self.calls.append("pause")
+            self.pause_calls.append(kwargs)
+            raise RuntimeError("pause rpc failed")
+
+    engine = _PauseFailsEngine()
+    server = _make_server(engine)
+
+    with pytest.raises(RuntimeError, match="pause rpc failed"):
+        await server.abort_all_requests()
+
+    assert engine.mm_clears == 0
+
+
 async def test_ack_validation_fails_closed():
     bad_acks = [
         # diffusion worker error dict (collective_rpc error shape)

@@ -397,6 +397,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                     self._enqueue_abort_output(internal_id, state)
             raise
 
+        if reset_prefix_cache:
+            # pause_generation(clear_cache=True) wiped the engine-side mm cache;
+            # drop the frontend copy too, or hash-only follow-ups finish empty.
+            # TODO (mike): drop after vllm-omni fixes AsyncOmni.reset_mm_cache.
+            await self._reset_frontend_mm_cache()
+
         logger.info("Aborted %d request(s): %s", len(request_ids), request_ids)
         return {"aborted_count": len(request_ids), "request_ids": request_ids}
 
