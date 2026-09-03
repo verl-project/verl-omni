@@ -47,14 +47,12 @@ MICRO_BSZ=$((MICRO_BSZ_PER_GPU * NUM_GPUS))
 MINI_BSZ=${MICRO_BSZ}
 TRAIN_BATCH_SIZE=$((MINI_BSZ * N_RESP_PER_PROMPT))
 
-# Smoke: pin local FLASH_ATTN (product default remains FLASH_ATTN_3_HUB).
-# Use exit-code checks only — importing verl/vllm may print INFO lines on stdout.
-ATTN_BACKEND=_flash_3_varlen_hub
-ROLLOUT_ATTN_BACKEND=FLASH_ATTN
-if ! python3 -c 'from verl_omni.utils.diffusion_attention import fa3_available; raise SystemExit(0 if fa3_available() else 1)' >/dev/null 2>&1; then
-    ATTN_BACKEND=native
-    ROLLOUT_ATTN_BACKEND=TORCH_SDPA
-fi
+# The GPU smoke image may contain the ``kernels`` Python package while its
+# installed Torch/CUDA combination has no compatible Hub FA3 build variant.
+# Select the portable native/SDPA pair explicitly for these E2E tests so the
+# production engine can keep its fail-fast attention-backend behavior..
+ATTN_BACKEND=native
+ROLLOUT_ATTN_BACKEND=TORCH_SDPA
 echo "[NIGHTLY] diffusion attention: ATTN_BACKEND=${ATTN_BACKEND} ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND}"
 
 export NIGHTLY_DETERMINISTIC_SEED
