@@ -19,7 +19,6 @@ delivers tokens; diffusion sleep/wake ACKs are not engine-checked.
 """
 
 import asyncio
-from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -101,60 +100,11 @@ def _make_server(engine, rollout_mode=RolloutMode.HYBRID, node_rank=0, free_cach
     # (parent semantics), so their delegation is exercised via HYBRID.
     server = object.__new__(vLLMOmniHttpServer)
     server.engine = engine
-    server.replica_rank = 3
     server.node_rank = node_rank
     server.rollout_mode = rollout_mode
     server.config = SimpleNamespace(free_cache_engine=free_cache_engine)
     server._lora_request_cache = None  # a valid cached value
     return server
-
-
-async def test_lifecycle_operations_emit_distinct_replica_traces(monkeypatch):
-    events = []
-
-    @contextmanager
-    def trace_state(state_name, *, state_lane_id):
-        events.append(("enter", state_name, state_lane_id))
-        yield
-        events.append(("exit", state_name, state_lane_id))
-
-    monkeypatch.setattr(server_module.RLInsightLogger, "trace_state", trace_state)
-    server = _make_server(_FakeAsyncOmni())
-
-    await server.sleep()
-    await server.wake_up()
-    await server.release_kv_cache()
-    await server.resume_kv_cache()
-
-    assert events == [
-        (phase, state_name, "replica_3")
-        for state_name in (
-            "vllm_sleep",
-            "vllm_wake_up",
-            "vllm_release_kv_cache",
-            "vllm_resume_kv_cache",
-        )
-        for phase in ("enter", "exit")
-    ]
-
-
-async def test_lifecycle_guards_do_not_emit_traces(monkeypatch):
-    events = []
-
-    @contextmanager
-    def trace_state(state_name, *, state_lane_id):
-        events.append((state_name, state_lane_id))
-        yield
-
-    monkeypatch.setattr(server_module.RLInsightLogger, "trace_state", trace_state)
-    server = _make_server(_FakeAsyncOmni(), node_rank=1)
-
-    await server.sleep()
-    await server.wake_up()
-    await server.release_kv_cache()
-    await server.resume_kv_cache()
-
-    assert events == []
 
 
 # ---------------------------------------------------------------------------

@@ -1111,23 +1111,23 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             zmq_update_id = make_update_zmq_id(global_steps, self._zmq_update_seq)
             self._zmq_update_seq += 1
             zmq_handle = make_update_zmq_handle(self.rollout.zmq_handle, zmq_update_id)
+            future = await self.rollout._execute_method(
+                "update_weights_from_ipc",
+                non_block=True,
+                kwargs={
+                    "peft_config": peft_config,
+                    "base_sync_done": True,
+                    "use_shm": self.rollout.use_shm,
+                    "zmq_update_id": zmq_update_id,
+                },
+            )
+            bucket_size_mb = self.config.rollout.checkpoint_engine.update_weights_bucket_megabytes
+            sender = BucketedWeightSender(
+                zmq_handle=zmq_handle,
+                bucket_size_mb=bucket_size_mb,
+                use_shm=self.rollout.use_shm,
+            )
             with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
-                future = await self.rollout._execute_method(
-                    "update_weights_from_ipc",
-                    non_block=True,
-                    kwargs={
-                        "peft_config": peft_config,
-                        "base_sync_done": True,
-                        "use_shm": self.rollout.use_shm,
-                        "zmq_update_id": zmq_update_id,
-                    },
-                )
-                bucket_size_mb = self.config.rollout.checkpoint_engine.update_weights_bucket_megabytes
-                sender = BucketedWeightSender(
-                    zmq_handle=zmq_handle,
-                    bucket_size_mb=bucket_size_mb,
-                    use_shm=self.rollout.use_shm,
-                )
                 await sender.async_send_weights(lora_weights.items())
                 if future is not None:
                     await future
@@ -1152,21 +1152,18 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 self.rollout.sleep_level = 1
                 do_lora_base_sync = not self.base_sync_done
 
-            with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
-                # For SGLang, sync the base first when needed, then the adapter/merged weights.
-                if do_lora_base_sync:
-                    per_tensor_param_base, peft_config = self.actor.engine.get_per_tensor_param(
-                        layered_summon=self.layered_summon,
-                        base_sync_done=False,
-                        adapter_name=self.config.rollout.rollout_adapter,
-                    )
-                    await self.rollout.update_weights(
-                        per_tensor_param_base,
-                        peft_config=peft_config,
-                        base_sync_done=False,
-                        global_steps=global_steps,
-                    )
+            # sync weights: For SGLang, we need base first (when needed), then adapter/merged
+            if do_lora_base_sync:
+                per_tensor_param_base, peft_config = self.actor.engine.get_per_tensor_param(
+                    layered_summon=self.layered_summon,
+                    base_sync_done=False,
+                    adapter_name=self.config.rollout.rollout_adapter,
+                )
+                await self.rollout.update_weights(
+                    per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
+                )
 
+            with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
                 await self.rollout.update_weights(
                     per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
                 )

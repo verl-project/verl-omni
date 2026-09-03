@@ -133,7 +133,7 @@ The `trainer.logger` setting automatically propagates `VERL_RL_INSIGHT_ENABLE=1`
 
 ## Step 4: Monitor Rollout and TransferQueue Metrics
 
-Rollout engine statistics are exposed by each vLLM-Omni server and registered with RL-Insight. Each rollout replica uses a separate lane such as `replica_0` or `replica_1` for `vllm_generate`, `vllm_sleep`, `vllm_wake_up`, `vllm_release_kv_cache`, and `vllm_resume_kv_cache` traces. Actor workers also emit `update_weights` on their rank lanes.
+Rollout engine statistics are exposed by each vLLM-Omni server and registered with RL-Insight. Each rollout replica uses a separate lane such as `replica_0` or `replica_1` for `vllm_generate`, `vllm_sleep`, `vllm_wake_up`, `vllm_release_kv_cache`, and `vllm_resume_kv_cache` traces. Actor workers emit `update_weights` on their own `rank_<rank>` lanes.
 
 The following setting is required for rollout metrics:
 
