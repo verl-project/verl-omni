@@ -18,7 +18,7 @@ Mirrors the trainer flow in ``PolicyGradientRayTrainer.fit``:
 
 1. ``infer_batch`` on the AR batch (``num_prompts * rollout.n`` rows), then ``next_stage``.
 2. ``infer_batch`` on the DiT batch (``num_prompts * rollout.n * rollout.m`` rows), then ``next_stage``.
-3. ``train_batch`` on the AR batch (``ppo_loss``), then ``next_stage``.
+3. ``train_batch`` on the AR batch (``diffusion_loss``), then ``next_stage``.
 4. ``train_batch`` on the DiT batch (``diffusion_loss``), then ``next_stage``.
 """
 
@@ -36,7 +36,6 @@ from tensordict import TensorDict
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils import tensordict_utils as tu
 from verl.workers.config import TrainingWorkerConfig
-from verl.workers.utils.losses import ppo_loss
 from verl.workers.utils.padding import left_right_2_no_padding
 
 from verl_omni.pipelines.utils import build_scheduler
@@ -104,7 +103,7 @@ def create_composite_training_config(
                 "strategy=" + strategy,
                 "diffusion_loss.clip_ratio=0.0001",
                 "diffusion_loss.adv_clip_max=5.0",
-                "diffusion_loss.loss_mode=dual_grpo",
+                "diffusion_loss.loss_mode=flow_grpo",
                 "ppo_mini_batch_size=4",
                 "ppo_micro_batch_size_per_gpu=4",
                 "optim.lr=1e-4",
@@ -117,8 +116,6 @@ def create_composite_training_config(
                 "fsdp_config.forward_only=False",
                 "fsdp_config.fsdp_size=" + str(fsdp_size),
                 "fsdp_config.ulysses_sequence_parallel_size=" + str(cp),
-                "+fsdp_config.infer_micro_batch_size_per_gpu=2",
-                "+fsdp_config.micro_batch_size_per_gpu=2",
             ],
         )
     actor_config: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
@@ -136,30 +133,41 @@ def create_composite_training_config(
 def _create_ar_left_right_batch(
     batch_size: int,
     *,
-    max_seq_len: int = 64,
-    max_response_len: int = 32,
+    max_seq_len: int = 128,
+    max_response_len: int = 73,
 ) -> TensorDict:
+    prompt_len = max_seq_len - max_response_len
+    # Left-right layout: prompt tokens first, response tokens at the end (see verl padding tests).
+    prompt_ids = torch.randint(1, 1000, (batch_size, prompt_len))
     response_ids = torch.randint(1, 1000, (batch_size, max_response_len))
-    input_ids = torch.randint(1, 1000, (batch_size, max_seq_len))
+    input_ids = torch.cat([prompt_ids, response_ids], dim=-1)
+
     attention_mask = torch.ones(batch_size, max_seq_len)
+    attention_mask[:, -max_response_len // 2 :] = 0  # valid len = 91
     response_mask = torch.zeros(batch_size, max_response_len)
-    response_mask[:, : max_response_len // 2] = 1
+    response_mask[:, : max_response_len // 2] = 1  # valid len = 36
+
+    # M-RoPE layout expected by ``left_right_2_no_padding``: (batch_size, 4, seq_len).
     position_ids = (
-        torch.arange(max_seq_len, dtype=torch.long).unsqueeze(0).expand(4, batch_size, -1)
-    )  # text & vision positions
+        torch.arange(max_seq_len, dtype=torch.long).view(1, 1, -1).expand(batch_size, 4, -1)
+    )  # text&vision position ids
+
     return TensorDict(
         {
-            "response_ids": response_ids,
-            "input_ids": input_ids,
+            "prompts": prompt_ids,
+            "response": response_ids,
+            "input_ids": input_ids,  # prompt+response
             "attention_mask": attention_mask,
             "response_mask": response_mask,
             "position_ids": position_ids,
+            "old_log_probs": torch.randn(batch_size, max_response_len),
+            "advantages": torch.randn(batch_size, max_response_len),
         },
         batch_size=batch_size,
     )
 
 
-def create_ar_infer_batch(batch_size: int) -> TensorDict:
+def create_ar_infer_batch(batch_size: int, *, micro_batch_size_per_gpu: int) -> TensorDict:
     batch = _create_ar_left_right_batch(batch_size)
     batch = left_right_2_no_padding(batch)
     tu.assign_non_tensor(
@@ -167,17 +175,16 @@ def create_ar_infer_batch(batch_size: int) -> TensorDict:
         compute_loss=False,
         calculate_entropy=True,
         temperature=1.0,
+        micro_batch_size_per_gpu=micro_batch_size_per_gpu,
         use_dynamic_bsz=False,  # default is True, to test True
     )
     return batch
 
 
 def create_ar_train_batch(batch_size: int, *, micro_batch_size_per_gpu: int) -> TensorDict:
-    max_seq_len = 64
-    max_response_len = 32
+    max_seq_len = 128
+    max_response_len = 73
     batch = _create_ar_left_right_batch(batch_size, max_seq_len=max_seq_len, max_response_len=max_response_len)
-    batch["old_log_probs"] = torch.randn(batch_size, max_seq_len)
-    batch["advantages"] = torch.randn(batch_size, max_response_len)
     batch = left_right_2_no_padding(batch)
     tu.assign_non_tensor(
         batch,
@@ -190,6 +197,7 @@ def create_ar_train_batch(batch_size: int, *, micro_batch_size_per_gpu: int) -> 
         seed=42,
         dataloader_kwargs={"shuffle": False},
         micro_batch_size_per_gpu=micro_batch_size_per_gpu,
+        use_dynamic_bsz=False,  # default is True, to test True
     )
     return batch
 
@@ -263,10 +271,10 @@ def create_dit_train_batch(
 @pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
 def test_composite_fsdp_engine_infer_and_train(strategy: str) -> None:
     rollout_n = 2  # dit
-    rollout_m = 2  # ar
+    rollout_m = 4  # ar
 
     ray.init()
-    tmp_dir = tempfile.mkdtemp(prefix="composite_fsdp_engine_")
+    tmp_dir = tempfile.mkdtemp(prefix="composite_fsdp_engine_sp_")
     try:
         device_count = resolve_requested_num_gpus(default_num_gpus=max(1, torch.cuda.device_count()))
         if device_count > 1 and device_count % 2 != 0:
@@ -303,7 +311,7 @@ def test_composite_fsdp_engine_infer_and_train(strategy: str) -> None:
         # Two-stage forward: AR then DiT
         # --- infer w/o loss: AR first (CompositeFSDPEngine starts on AR), then DiT via next_stage ---
         # stage 1: _compute_ar_old_log_prob
-        ar_infer_td = create_ar_infer_batch(ar_batch_size)
+        ar_infer_td = create_ar_infer_batch(ar_batch_size, micro_batch_size_per_gpu=micro_batch_size)
         ar_infer_out = wg.infer_batch(ar_infer_td).get()
         for key in ["log_probs", "metrics", "entropy"]:
             assert key in ar_infer_out
@@ -316,23 +324,21 @@ def test_composite_fsdp_engine_infer_and_train(strategy: str) -> None:
         )
         dit_infer_out = wg.infer_batch(dit_infer_td).get()
         assert dit_infer_out is not None
-        assert "log_probs" in dit_infer_out
-        assert "metrics" in dit_infer_out
+        for key in ["log_probs", "metrics"]:
+            assert key in dit_infer_out
 
         ar_log_probs = ar_infer_out["log_probs"]
         dit_log_probs = dit_infer_out["log_probs"]
-        if isinstance(ar_log_probs, torch.Tensor):
-            if ar_log_probs.is_nested:
-                assert len(ar_log_probs.unbind()) == ar_batch_size
-            else:
-                assert ar_log_probs.shape[0] == ar_batch_size
-        if isinstance(dit_log_probs, torch.Tensor):
-            assert dit_log_probs.shape[0] == dit_batch_size
+        if ar_log_probs.is_nested:
+            assert len(ar_log_probs.unbind()) == ar_batch_size
+        else:
+            assert ar_log_probs.shape[0] == ar_batch_size
+        assert dit_log_probs.shape[0] == dit_batch_size
         assert ar_batch_size != dit_batch_size
 
         # --- train w/ loss: AR (token-level ppo_loss), then DiT (diffusion_loss / dual_grpo) ---
         # stage 1
-        wg.set_loss_fn(partial(ppo_loss, config=actor_config))
+        wg.set_loss_fn(partial(diffusion_loss, config=actor_config))
         ar_train_td = create_ar_train_batch(ar_batch_size, micro_batch_size_per_gpu=micro_batch_size)
         ar_train_out = wg.train_batch(ar_train_td).get()
         assert ar_train_out is not None

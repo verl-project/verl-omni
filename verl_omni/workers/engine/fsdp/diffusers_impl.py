@@ -28,6 +28,7 @@ from tensordict import TensorDict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 from torch.distributed.tensor import DTensor
+from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLForConditionalGeneration
 from verl.trainer.config import CheckpointConfig
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
@@ -52,6 +53,7 @@ from verl.utils.fsdp_utils import (
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import convert_weight_keys
 from verl.utils.py_functional import append_to_dict
+from verl.utils.transformers_compat import unpack_visual_output
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
 from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
@@ -1287,10 +1289,6 @@ class EngineTrainModeCtx(BaseEngineCtx):
 
 # verl monkey patch use
 # TODO: (susan) delete after fixing the bug in verl
-from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLForConditionalGeneration
-from verl.utils.transformers_compat import unpack_visual_output
-
-
 def _get_input_embeds(
     model: "Qwen2VLForConditionalGeneration",
     input_ids: torch.LongTensor,

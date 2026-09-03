@@ -1046,7 +1046,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         # calculate_sum_pi_squared = self.config.actor_rollout_ref.actor.get("calculate_sum_pi_squared", False)
         tu.assign_non_tensor(
             batch_td,
-            calculate_entropy=True,
+            calculate_entropy=True,  # TODO: TBD (susan) seems useless
             # calculate_sum_pi_squared=calculate_sum_pi_squared,
             compute_loss=False,
         )
@@ -1172,9 +1172,9 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         )
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
         actor_output = tu.get(actor_output, "metrics")
-        actor_output = rename_dict(actor_output, "actor/")
+        actor_output = rename_dict(actor_output, "actor/ar/")
         # modify key name
-        actor_output["perf/ar/mfu/actor"] = actor_output.pop("actor/mfu")
+        actor_output["perf/ar/mfu/actor"] = actor_output.pop("actor/ar/mfu")
         actor_output = DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
         return actor_output
@@ -1447,6 +1447,9 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
                     actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                     metrics.update(actor_output_metrics)
+                    if self.train_ar_n_diffusion:
+                        ar_actor_output_metrics = reduce_metrics(ar_actor_output.meta_info["metrics"])
+                        metrics.update(ar_actor_output_metrics)
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
