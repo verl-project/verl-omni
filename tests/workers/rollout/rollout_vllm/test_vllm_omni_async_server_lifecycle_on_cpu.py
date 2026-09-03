@@ -525,3 +525,40 @@ async def test_ar_sleep_wake_requires_resume_generation_contrast():
     await omni.resume_generation()
     assert omni._paused is False
     assert omni._hold_admission_until_resume is False
+
+
+# ---------------------------------------------------------------------------
+# admission resume rides every successful server-side wake — no per-trainer
+# bridge needed (the engine keeps the sleep hold through its own wake_up)
+# ---------------------------------------------------------------------------
+
+
+async def test_wake_up_resumes_engine_admission():
+    engine = _FakeAsyncOmni()
+    server = _make_server(engine)
+
+    await server.wake_up()
+
+    assert engine.wake_calls == [{"stage_ids": None, "tags": ["weights"]}]
+    assert engine.resumed == 1
+
+
+async def test_release_and_resume_kv_cache_resume_admission():
+    engine = _FakeAsyncOmni()
+    server = _make_server(engine)
+
+    await server.release_kv_cache()
+    assert engine.resumed == 1
+
+    await server.resume_kv_cache()
+    assert engine.resumed == 2
+
+
+async def test_failed_wake_skips_admission_resume():
+    engine = _FakeAsyncOmni(wake_acks=[SimpleNamespace(status="FAILED", error_msg="boom")])
+    server = _make_server(engine)
+
+    with pytest.raises(RuntimeError, match="wake_up failed"):
+        await server.wake_up()
+
+    assert engine.resumed == 0

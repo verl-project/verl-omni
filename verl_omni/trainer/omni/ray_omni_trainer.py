@@ -72,8 +72,8 @@ class OmniPPOTrainerSync(PPOTrainerSync):
         self.tokenizer = model_config.tokenizer
         self.processor = model_config.processor
 
-    # AsyncOmni.sleep() sets an admission hold that wake_up() does not clear;
-    # without this bridge the first generate() of init and of every step blocks.
+    # The rollout server resumes admission after every successful wake; this
+    # bridge remains a safety net for holds not preceded by a wake (init).
     # TODO (long): check and fix the resume bridge on the rollout side.
     def on_init_end(self):
         super().on_init_end()

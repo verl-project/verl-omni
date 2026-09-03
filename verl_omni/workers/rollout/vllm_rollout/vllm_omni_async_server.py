@@ -214,6 +214,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         resolved_tags = tags if tags is not None else self._get_wake_up_tags()
         acks = await self.engine.wake_up(tags=resolved_tags)
         self._validate_acks("wake_up", acks)
+        await self.engine.resume_generation()
         self._invalidate_lora_request_cache()
 
     async def set_global_steps(self, global_steps: int):
@@ -252,6 +253,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         self._invalidate_lora_request_cache()
         acks = await self.engine.wake_up(tags=["weights"])
         self._validate_acks("wake_up", acks)
+        await self.engine.resume_generation()
         self._invalidate_lora_request_cache()
 
     async def resume_kv_cache(self):
@@ -262,6 +264,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return
         acks = await self.engine.wake_up(tags=["kv_cache"])
         self._validate_acks("wake_up", acks)
+        await self.engine.resume_generation()
         self._invalidate_lora_request_cache()
 
     async def resume_generation(self):
