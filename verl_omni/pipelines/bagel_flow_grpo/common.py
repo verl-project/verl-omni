@@ -71,6 +71,6 @@ def setup_bagel_sigmas(
     else:
         scheduler.set_timesteps(sigmas=sigmas, timesteps=sigmas)
     # diffusers >= 0.40 ignores `timesteps=` and stores sigmas * 1000; the replay matches timesteps by exact value.
-    scheduler.timesteps = torch.tensor(sigmas, dtype=torch.float32, device=scheduler.timesteps.device)
+    scheduler.timesteps = scheduler.sigmas[:-1]
     scheduler.set_begin_index(0)
     return sigmas
