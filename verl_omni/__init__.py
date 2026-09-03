@@ -14,30 +14,15 @@
 import logging
 import os
 
-from verl_omni.patches import apply_numpy_dataproto_serialization_fix
-
 logger = logging.getLogger(__name__)
 
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "version/version")) as f:
     __version__ = f.read().strip()
 
-apply_numpy_dataproto_serialization_fix()
 
-
-# Fallback for CPU-only environments where vLLM-Omni current_omni_platform.device_type is empty.
-# This prevents RuntimeError: Device string must not be empty when importing modules with torch.amp.autocast.
-# TODO: Remove when vllm-omni initializes device_type on CPU platforms by default.
-try:
-    import vllm_omni.platforms
-except ImportError:
-    vllm_omni = None
-else:
-    if not vllm_omni.platforms.current_omni_platform.device_type:
-        logger.warning("vllm-omni did not initialize a device type; defaulting to CPU.")
-        vllm_omni.platforms.current_omni_platform.device_type = "cpu"
-
-
-# Import pipelines / rollout / reward loop / engines to auto-register them
+# Apply model patches and auto-register agent loops / pipelines / rollout / reward loop / engines
+import verl_omni.agent_loop  # noqa: E402, F401
+import verl_omni.models  # noqa: E402, F401
 import verl_omni.pipelines  # noqa: E402, F401
 import verl_omni.reward_loop  # noqa: E402, F401
 import verl_omni.trainer  # noqa: E402, F401

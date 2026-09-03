@@ -15,6 +15,7 @@
 import sys
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from dill import dumps, loads
 
@@ -43,7 +44,9 @@ def test_package_loaded_dataset_preserves_base_class_after_serialization():
 
 def test_process_multi_modal_info_uses_qwen_omni_utils_and_reorders_outputs(monkeypatch):
     calls = []
-    audios = [object()]
+    L = 8001
+    padded_len = L + (-L % 160)
+    audios = [np.zeros(L, dtype=np.float32)]
     images = [object()]
     videos = [object()]
 
@@ -56,5 +59,12 @@ def test_process_multi_modal_info_uses_qwen_omni_utils_and_reorders_outputs(monk
 
     result = QwenOmniRLHFDataset._process_multi_modal_info(messages, image_patch_size=14, config={})
 
-    assert result == (images, videos, audios)
+    assert result[0] is images
+    assert result[1] is videos
+    assert len(result[2]) == 1
+    # Audio is padded to a hop multiple (160) so the actor recompute and the
+    # vllm-omni rollout expand it to the same audio token count.
+    assert result[2][0].shape == (padded_len,)
+    np.testing.assert_array_equal(result[2][0][:L], audios[0])
+    np.testing.assert_array_equal(result[2][0][L:], 0.0)
     assert calls == [(messages, False)]

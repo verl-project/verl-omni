@@ -152,7 +152,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.aggregation=weighted_sum \
     trainer.logger='["console","tensorboard","wandb"]' \
     trainer.project_name=diffusion_nft \
-    trainer.experiment_name=minimax_h3_t2av_lora \
+    trainer.experiment_name=minimax_h3_t2va_lora \
     trainer.default_local_dir=$checkpoint_dir \
     trainer.validation_data_dir=$output_dir/validation_data \
     trainer.rollout_data_dir=$output_dir/rollout_data \

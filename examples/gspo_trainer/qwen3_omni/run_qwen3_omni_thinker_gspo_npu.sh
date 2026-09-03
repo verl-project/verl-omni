@@ -15,6 +15,7 @@ set -x
 
 export CPATH=/usr/include${CPATH:+:$CPATH}
 export VLLM_ASCEND_ENABLE_NZ=0
+export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
 export VERL_USE_EXTERNAL_MODULES=verl_omni,verl_omni.models.transformers.qwen3_omni_thinker
 
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-Omni-30B-A3B-Instruct"}

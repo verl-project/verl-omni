@@ -17,7 +17,7 @@ dynamic = ["version"]
 description = "verl-omni: Easy, fast, and stable RL training for diffusion and omni-modality models"
 license = {text = "Apache-2.0"}
 readme = {file = "README.md", content-type = "text/markdown"}
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "accelerate>=1.14.0",
     "cachetools",
@@ -38,7 +38,7 @@ dependencies = [
     "torchdata",
     # TODO: Remove this cap after the Qwen3-Omni adapter and tests support the
     # FSDP `_no_split_modules` metadata change introduced in Transformers 5.15.0.
-    "transformers<=5.14.1",
+    "transformers>=5.13.0,<=5.14.1",
     "wandb",
     "packaging>=20.0",
     "uvicorn",
@@ -52,22 +52,23 @@ dependencies = [
 [project.optional-dependencies]
 # Rollout engine (install in step 2, after gpu step 1).
 vllm-omni = [
-    "vllm-omni==0.27.0rc1",
+    "vllm-omni==0.28.0rc1",
     "qwen-vl-utils>=0.0.14",
 ]
 audio = [
     "qwen-omni-utils>=0.0.9",
+    "audioread",
 ]
 # CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
 gpu = [
-    "vllm==0.27.0",
+    "vllm==0.28.0",
     "kernels==0.16.0",
     "liger-kernel",
 ]
 # Training stack (install in step 2).
-# Git commit must match .github/verl_pin.txt (reports as 0.10.0.dev at c4b389a).
+# Git commit must match .github/verl_pin.txt (reports as 0.10.0.dev at fefb080).
 train = [
-    "verl @ git+https://github.com/verl-project/verl.git@c4b389adadc58ce51cb2b63e70df497ca166d77f",
+    "verl @ git+https://github.com/verl-project/verl.git@fefb080262e1c015a0ea05f958822a6a512dc795",
 ]
 dev = [
     "pytest",
@@ -192,4 +193,5 @@ verl_omni = [
 [tool.uv]
 override-dependencies = [
     "accelerate>=1.14.0",
+    "kernels==0.16.0",
 ]

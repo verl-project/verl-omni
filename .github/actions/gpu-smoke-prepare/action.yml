@@ -20,22 +20,17 @@ runs:
         export UV_CACHE_DIR="${UV_CACHE_DIR:-${HOME}/.cache/uv}"
         git config --global http.postBuffer 524288000 || true
         # Base image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
-        # vllm-omni first: the pin still requires diffusers==0.38.0 and would downgrade our >=0.40.0 floor.
-        # Note: this also lifts accelerate past the pin's ==1.12.0 to our >=1.14.0 floor.
-        # TODO: restore the original install order once the pin is upgraded past vllm-omni#6459.
-        uv pip install --system --break-system-packages "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
         uv pip install --system --break-system-packages ".[gpu,dev,audio]"
+        uv pip install --system --break-system-packages "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
         uv pip install --system --break-system-packages --no-deps --reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
         uv pip install --system --break-system-packages TransferQueue==0.1.8
         uv pip install --system --break-system-packages --no-deps -e .
         # veomni's [gpu] extra pins torch 2.9 and would conflict with the vLLM stack.
         # See docs/start/install.md "Optional engine backends".
-        # TODO: rm --no-deps when VeOmni support torch2.11
+        # TODO: rm --no-deps when VeOmni supports the vLLM torch pin (torch 2.13 as of vLLM 0.28)
         uv pip install --system --break-system-packages veomni==0.1.11 --no-deps
         uv pip install --system --break-system-packages torchcodec librosa soundfile av audioread
-        uv pip install --system --break-system-packages "transformers[mistral-common]"
-        # GPU-smoke-only override; the project GPU extra remains on kernels==0.16.0.
-        uv pip install --system --break-system-packages "kernels==0.14.1"
+        uv pip install --system --break-system-packages "transformers[mistral-common]==5.14.1"
         # NCCL checkpoint engine (diffusion v1 separate_async weight sync).
         uv pip install --system --break-system-packages pyzmq
         uv pip install --system --break-system-packages cupy-cuda12x || uv pip install --system --break-system-packages cupy-cuda13x

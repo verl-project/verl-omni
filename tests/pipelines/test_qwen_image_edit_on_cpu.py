@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from vllm_omni.diffusion.models.qwen_image.pipeline_qwen_image_edit_plus import 
     calculate_dimensions,
 )
 
+from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.qwen_image_edit_flow_grpo.diffusers_training_adapter import QwenImageEditPlusFlowGRPO
 from verl_omni.pipelines.qwen_image_edit_flow_grpo.vllm_omni_rollout_adapter import (
     QwenImageEditPlusPipelineWithLogProb,
@@ -65,6 +67,10 @@ def test_processor_hook_preserves_existing_config(tmp_path):
 
     assert prepared_dir == str(processor_dir)
     assert json.loads(config_path.read_text(encoding="utf-8")) == {"model_type": "custom"}
+
+
+def test_get_class_resolves_qwen_image_adapter():
+    assert DiffusionModelBase.get_class(_model_config()) is QwenImageEditPlusFlowGRPO
 
 
 def test_prepare_condition_unwraps_metadata():
@@ -141,6 +147,7 @@ def test_inject_condition_updates_qwen_image_shapes():
     assert output["img_shapes"] == image_shapes
     assert negative_output["img_shapes"] == image_shapes
     assert output["hidden_states"].shape == (1, 5, 4)
+    assert output["hidden_states"].shape[1] == sum(math.prod(shape) for shape in output["img_shapes"][0])
 
 
 def test_inject_condition_validates_qwen_sequence_parallel_alignment():

@@ -30,8 +30,21 @@ assert _SPEC is not None
 assert _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
+normalize_video_tensor = _MODULE.normalize_video_tensor
 video_tensor_to_pil_frames = _MODULE.video_tensor_to_pil_frames
 pil_image_to_base64 = _MODULE.pil_image_to_base64
+
+
+@pytest.mark.parametrize("layout", ["tchw", "cthw", "thwc"])
+def test_normalize_video_tensor_accepts_supported_rgb_layouts(layout):
+    canonical = torch.arange(2 * 3 * 4 * 5, dtype=torch.uint8).reshape(2, 3, 4, 5)
+    video = {
+        "tchw": canonical,
+        "cthw": canonical.permute(1, 0, 2, 3),
+        "thwc": canonical.permute(0, 2, 3, 1),
+    }[layout]
+
+    torch.testing.assert_close(normalize_video_tensor(video), canonical)
 
 
 def test_video_tensor_to_pil_frames_preserves_uint8_pixels():

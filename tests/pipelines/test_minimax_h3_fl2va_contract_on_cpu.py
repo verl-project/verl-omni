@@ -28,6 +28,13 @@ from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
 vllm_packed = pytest.importorskip("vllm_omni.diffusion.models.minimax_h3.packed_sequence")
 
 
+def test_merged_presentation_helper_reexport():
+    """Guard the exact import path ``encode_prompt`` relies on."""
+    pipeline_module = pytest.importorskip("vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3")
+    preprocessing = pytest.importorskip("vllm_omni.model_executor.models.minimax_h3.preprocessing")
+    assert pipeline_module.minimax_h3_multi_image_presentation is preprocessing.minimax_h3_multi_image_presentation
+
+
 def test_nft_rollout_registry_resolves_custom_pipeline():
     from verl_omni.pipelines.minimax_h3_diffusion_nft.vllm_omni_rollout_adapter import (
         MiniMaxH3DiffusionNFTPipeline,

@@ -14,6 +14,7 @@
 
 """Experiment-tracking helpers layered on verl.utils.tracking."""
 
+import logging
 import os
 import subprocess
 import tempfile
@@ -24,6 +25,10 @@ from typing import Any
 
 import numpy as np
 import torch
+
+from verl_omni.utils.reward_score.reward_utils import normalize_video_tensor
+
+logger = logging.getLogger(__name__)
 
 
 def batch_items(values: Any, batch_size: int, name: str) -> list[Any]:
@@ -70,14 +75,8 @@ def _write_wav(audio: Any, sample_rate: Any, path: Path) -> None:
 
 
 def _video_tensor_to_rgb24(video: torch.Tensor) -> tuple[np.ndarray, int, int]:
-    """Return a contiguous RGB24 video array and its width and height."""
-    if video.dtype != torch.uint8:
-        raise ValueError(f"Expected a uint8 video tensor, got {video.dtype}")
-    if video.ndim != 4 or video.shape[1] != 3:
-        raise ValueError(f"Expected an RGB video tensor with shape [T, 3, H, W], got {tuple(video.shape)}")
-    if video.shape[0] == 0:
-        raise ValueError("Expected a video with at least one frame.")
-
+    """Return a contiguous RGB24 array from a supported RGB video layout."""
+    video = normalize_video_tensor(video)
     frames = video.detach().permute(0, 2, 3, 1).to(device="cpu").contiguous().numpy()
     return frames, int(frames.shape[2]), int(frames.shape[1])
 
@@ -93,14 +92,19 @@ def _export_video(
 ) -> None:
     """Encode RGB frames and optional audio in one ffmpeg invocation.
 
-    Passing the complete RGB payload through ``subprocess.run(input=...)`` uses
+    Passing the contiguous RGB buffer through ``subprocess.run(input=...)`` uses
     ``communicate`` to finish partial pipe writes. This avoids imageio-ffmpeg's
-    direct ``stdin.write`` path, which can silently truncate a raw-video frame.
+    direct ``stdin.write`` path, which can silently truncate a raw-video frame
+    without materializing another full-video ``bytes`` copy.
     """
     if ffmpeg_exe is None:
         from imageio_ffmpeg import get_ffmpeg_exe
 
         ffmpeg_exe = get_ffmpeg_exe()
+
+    fps = int(fps)
+    if fps <= 0:
+        raise ValueError(f"fps must be positive, got {fps}.")
 
     frames, width, height = _video_tensor_to_rgb24(output)
     output_path = Path(output_path)
@@ -135,6 +139,9 @@ def _export_video(
 
         command.extend(
             [
+                # yuv420p/H.264 needs even dimensions. Padding only affects odd-sized inputs.
+                "-vf",
+                "pad=ceil(iw/2)*2:ceil(ih/2)*2",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -144,10 +151,12 @@ def _export_video(
             ]
         )
         if audio is not None:
-            command.extend(["-c:a", "aac", "-shortest"])
+            # Keep the full video even when generated audio is shorter, and do not
+            # extend the artifact when audio is longer.
+            command.extend(["-c:a", "aac", "-t", str(frames.shape[0] / fps)])
         command.append(str(output_path))
         try:
-            subprocess.run(command, input=frames.tobytes(), check=True)
+            subprocess.run(command, input=memoryview(frames).cast("B"), check=True)
         except Exception:
             output_path.unlink(missing_ok=True)
             raise
@@ -159,7 +168,8 @@ def _export_video(
 def wrap_val_samples_for_wandb(samples, fps=24, output_dir=None):
     """Wrap validation samples and prepare top-level ``wandb`` video media.
 
-    Video outputs ``[T, C, H, W]`` are encoded to mp4 and passed to
+    Video outputs in ``[T, C, H, W]``, ``[C, T, H, W]``, or ``[T, H, W, C]``
+    layouts are encoded to mp4 and passed to
     ``wandb.Video`` by path. Provide ``output_dir`` to keep the media available
     for asynchronous upload; otherwise a temp dir is returned for cleanup.
     Optional tuple elements four and five carry audio and its sample rate. The
@@ -177,23 +187,27 @@ def wrap_val_samples_for_wandb(samples, fps=24, output_dir=None):
         audio = sample[3] if len(sample) > 3 else None
         audio_sample_rate = sample[4] if len(sample) > 4 else None
         if hasattr(out, "ndim") and out.ndim == 5:
-            # Batched video [B, T, C, H, W]; log the first sample.
+            # Batched video [B, T, C, H, W], [B, C, T, H, W], or [B, T, H, W, C].
             out = out[0]
         if hasattr(out, "ndim") and out.ndim == 4:
-            if video_dir is None:
-                video_tmp_dir = tempfile.mkdtemp(prefix="val_video_")
-                video_dir = video_tmp_dir
-            else:
-                os.makedirs(video_dir, exist_ok=True)
-            video_path = os.path.join(video_dir, f"{len(wrapped)}.mp4")
-            _export_video(out, video_path, fps=fps, audio=audio, audio_sample_rate=audio_sample_rate)
-            media_key = f"val/videos/sample_{len(wrapped) + 1}"
-            media_to_log[media_key] = wandb.Video(video_path, format="mp4")
-            media = media_key
+            try:
+                if video_dir is None:
+                    video_tmp_dir = tempfile.mkdtemp(prefix="val_video_")
+                    video_dir = video_tmp_dir
+                else:
+                    os.makedirs(video_dir, exist_ok=True)
+                video_path = os.path.join(video_dir, f"{len(wrapped)}.mp4")
+                _export_video(out, video_path, fps=fps, audio=audio, audio_sample_rate=audio_sample_rate)
+                media_key = f"val/videos/sample_{len(wrapped) + 1}"
+                media_to_log[media_key] = wandb.Video(video_path, format="mp4")
+                media = media_key
+            except Exception as error:
+                logger.warning("Could not log validation sample %d video: %s", len(wrapped), error)
+                media = f"[validation media unavailable: {type(error).__name__}: {error}]"
         else:
             if not isinstance(out, torch.Tensor) or out.dtype != torch.uint8:
                 raise ValueError(f"Expected a uint8 image tensor, got {getattr(out, 'dtype', type(out))}.")
-            media = wandb.Image(out, file_type="jpg", normalize=False)
+            media = wandb.Image(out, file_type="jpg")
         wrapped.append((inp, media, score))
     return wrapped, video_tmp_dir, media_to_log
 

@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from omegaconf import OmegaConf
-from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer
+from verl.trainer.ppo.v1.replay_buffer import ReplayBuffer, ReplayBufferAsync
 
 from verl_omni.trainer.diffusion.v1 import trainer_base as trainer_base_module
 from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
@@ -90,15 +90,24 @@ def _make_upstream_buffer(trainer_mode="sync"):
     )
 
 
-def _make_trainer(*, refill_fn, drop_incomplete_groups=True, max_refill_rounds=3, train_batch_size=3):
+def _make_trainer(
+    *,
+    refill_fn,
+    drop_incomplete_groups=True,
+    max_refill_rounds=3,
+    train_batch_size=3,
+    trainer_mode="sync",
+):
     return SimpleNamespace(
         config=_make_config(
             drop_incomplete_groups=drop_incomplete_groups,
+            trainer_mode=trainer_mode,
             max_refill_rounds=max_refill_rounds,
             train_batch_size=train_batch_size,
         ),
+        trainer_mode=trainer_mode,
         global_steps=1,
-        replay_buffer=_make_upstream_buffer(),
+        replay_buffer=_make_upstream_buffer(trainer_mode),
         _add_prompts_to_generate=refill_fn,
         _trajectory_uid=PolicyGradientDiffusionTrainerV1._trajectory_uid,
     )
@@ -278,14 +287,11 @@ def test_validation_preserves_upstream_failure_sampling(monkeypatch):
     assert metrics == {}
 
 
-@pytest.mark.parametrize("trainer_mode", ["sync", "separate_async"])
-def test_disabled_policy_preserves_upstream_training_failure_sampling(monkeypatch, trainer_mode):
+def test_disabled_sync_policy_preserves_upstream_training_failure_sampling(monkeypatch):
     fake_tq = _FakeTransferQueue({})
     fake_tq.add_group("failed", status="failure", trajectories=1)
     _patch_transfer_queue(monkeypatch, fake_tq)
     trainer = _make_trainer(refill_fn=None, drop_incomplete_groups=False)
-    trainer.replay_buffer = _make_upstream_buffer(trainer_mode)
-    trainer.config.trainer.v1.trainer_mode = trainer_mode
 
     batch, metrics = _sample(trainer, batch_size=1)
 
@@ -293,20 +299,61 @@ def test_disabled_policy_preserves_upstream_training_failure_sampling(monkeypatc
     assert metrics == {}
 
 
+def test_separate_async_uses_upstream_exact_eviction_and_refill(monkeypatch):
+    fake_tq = _FakeTransferQueue({})
+    fake_tq.add_group("stale", status="finished", trajectories=1, global_steps=0)
+    fake_tq.add_group("failed", status="failure", trajectories=1, global_steps=5)
+    fake_tq.add_group("fresh", status="finished", trajectories=1, global_steps=5)
+    refill_calls = []
+
+    def refill(num_prompts):
+        refill_calls.append(num_prompts)
+        for index in range(num_prompts):
+            fake_tq.add_group(f"replacement-{index}", status="finished", trajectories=1, global_steps=5)
+        return num_prompts
+
+    _patch_transfer_queue(monkeypatch, fake_tq)
+    config = _make_config(
+        drop_incomplete_groups=False,
+        trainer_mode="separate_async",
+        train_batch_size=3,
+    )
+    config.trainer.v1.sampler.max_off_policy_threshold = 2
+    trainer = SimpleNamespace(
+        config=config,
+        trainer_mode="separate_async",
+        _add_prompts_to_generate=refill,
+    )
+    replay_buffer = PolicyGradientDiffusionTrainerV1._build_replay_buffer(trainer)
+    replay_buffer.poll_interval = 0
+
+    batch, metrics = replay_buffer.sample(global_steps=5, partition_id="train", batch_size=3)
+
+    assert refill_calls == [2]
+    assert {key.rsplit("_", 2)[0] for key in batch.keys} == {"fresh", "replacement-0", "replacement-1"}
+    assert metrics["training/off_policy/evicted_samples"] == 1
+    assert metrics["training/off_policy/evicted_samples_staleness/mean"] == pytest.approx(6.0)
+    assert metrics["training/rollout_failure/evicted_samples"] == 1
+
+
 @pytest.mark.parametrize(
-    ("trainer_mode", "drop_incomplete_groups"),
-    [("sync", False), ("separate_async", False), ("sync", True)],
+    ("trainer_mode", "drop_incomplete_groups", "expected_type"),
+    [
+        ("sync", False, ReplayBuffer),
+        ("separate_async", False, ReplayBufferAsync),
+        ("sync", True, ReplayBuffer),
+    ],
 )
-def test_trainer_factory_always_uses_upstream_replay_buffer(trainer_mode, drop_incomplete_groups):
+def test_trainer_factory_uses_upstream_replay_buffer(trainer_mode, drop_incomplete_groups, expected_type):
     config = _make_config(
         drop_incomplete_groups=drop_incomplete_groups,
         trainer_mode=trainer_mode,
     )
-    trainer = SimpleNamespace(config=config, trainer_mode=trainer_mode)
+    trainer = SimpleNamespace(config=config, trainer_mode=trainer_mode, _add_prompts_to_generate=lambda count: count)
 
     replay_buffer = PolicyGradientDiffusionTrainerV1._build_replay_buffer(trainer)
 
-    assert type(replay_buffer) is ReplayBuffer
+    assert type(replay_buffer) is expected_type
 
 
 def test_sample_rejects_non_exact_refill_result(monkeypatch):

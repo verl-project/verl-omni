@@ -64,6 +64,7 @@ def fa_available() -> bool:
     return actor_fa_available() and rollout_fa_available()
 
 
+# TODO (mike): drop this fallback and raise instead — a silent FA-to-native downgrade hides a broken kernels stack.
 def fallback_fa_if_unavailable(config: Any) -> None:
     """Downgrade explicit FA2/FA3 settings to native/SDPA when deps are missing."""
     attn_backend = config.actor_rollout_ref.model.get("attn_backend", ACTOR_FA3_BACKEND)

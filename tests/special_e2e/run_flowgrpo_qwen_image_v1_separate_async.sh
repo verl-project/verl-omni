@@ -41,7 +41,7 @@ ROLLOUT_TP=${ROLLOUT_TP:-1}
 # Fully on-policy knobs so the short smoke finishes without waiting on
 # off-policy backlog (sync_compatible pauses standalone during actor update).
 NUM_WARMUP_BATCHES=${NUM_WARMUP_BATCHES:-0}
-PARAMETER_SYNC_STEP=${PARAMETER_SYNC_STEP:-1}
+PARAMETER_SYNC_STEP=${PARAMETER_SYNC_STEP:-2}
 MAX_OFF_POLICY_THRESHOLD=${MAX_OFF_POLICY_THRESHOLD:-1}
 MAX_OFF_POLICY_STRATEGY=${MAX_OFF_POLICY_STRATEGY:-drop}
 SYNC_COMPATIBLE=${SYNC_COMPATIBLE:-1}
@@ -81,11 +81,11 @@ except Exception as e:
     sys.exit(1)
 PY
 
-# separate_async requires train_batch_size == ppo_mini_batch_size.
+# Each outer step consumes PARAMETER_SYNC_STEP complete PPO mini-batches.
 n_resp_per_prompt=2
 micro_bsz_per_gpu=1
-train_batch_size=$((micro_bsz_per_gpu * NUM_GPUS_ACTOR))
-mini_bsz=${train_batch_size}
+mini_bsz=$((micro_bsz_per_gpu * NUM_GPUS_ACTOR))
+train_batch_size=$((PARAMETER_SYNC_STEP * mini_bsz))
 # Enough rows for a couple of prompt groups across the short smoke.
 synthetic_train_size=$((train_batch_size * TOTAL_TRAIN_STEPS * 2))
 if [[ "${synthetic_train_size}" -lt 4 ]]; then

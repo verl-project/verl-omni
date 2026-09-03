@@ -12,6 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .dataproto import apply_numpy_dataproto_serialization_fix
+from .agent_loop import MiniMaxH3DiffusionSingleTurnAgentLoop
+from .diffusers_training_adapter import MiniMaxH3FlowGRPO
+from .vllm_omni_rollout_adapter import MiniMaxH3PipelineWithLogProb
 
-__all__ = ["apply_numpy_dataproto_serialization_fix"]
+__all__ = [
+    "MiniMaxH3DiffusionSingleTurnAgentLoop",
+    "MiniMaxH3FlowGRPO",
+    "MiniMaxH3PipelineWithLogProb",
+]

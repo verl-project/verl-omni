@@ -27,7 +27,7 @@ from unittest.mock import MagicMock
 import yaml
 from verl.utils.device import get_visible_devices_keyword
 
-from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 
 
 def _run_write_deploy_config(
@@ -46,7 +46,7 @@ def _run_write_deploy_config(
     monkeypatch.setenv(get_visible_devices_keyword(), "0,1,2,3")
 
     engine_kwargs: dict = {}
-    vLLMOmniHttpServer._write_deploy_config(fake_self, engine_kwargs, "minimax_h3", adapter, "t2av")
+    ARStrategy(fake_self)._write_deploy_config(engine_kwargs, "minimax_h3", adapter, "t2av")
     with open(engine_kwargs["deploy_config"]) as f:
         return yaml.safe_load(f)
 

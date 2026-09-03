@@ -13,9 +13,19 @@
 # limitations under the License.
 """Shared helpers for diffusion Ray trainers."""
 
-from typing import Any
+from collections.abc import Sequence
+from typing import Any, Optional
 
+from verl import DataProto
 from verl.trainer.distillation import is_distillation_enabled
+
+
+def _to_diffusion_worker_tensordict(batch: DataProto):
+    """Project a driver batch for actor/ref workers without copying tensor storage."""
+    worker_batch = batch.to_tensordict()
+    worker_batch.pop("responses", None)
+    return worker_batch
+
 
 OLD_POLICY_DECAY_SCHEDULES = {
     "copy": (0, 0.0, 0.0),
@@ -37,6 +47,23 @@ def old_policy_decay(step: int, schedule: str) -> float:
     else:
         raise ValueError(f"Unsupported old_policy_decay_schedule: {schedule}")
     return 0.0 if step < warmup_steps else min((step - warmup_steps) * ramp_rate, max_decay)
+
+
+def worker_group_port_ranges(master_port_range: Optional[Sequence[int]], num_groups: int) -> list[Optional[list[int]]]:
+    """Slice a rendezvous port range into one disjoint sub-range per worker group.
+
+    Ports are only bound at ``init_model``, after every group has been spawned, so groups
+    sharing a range would all pick its first free port.
+    """
+    if master_port_range is None:
+        return [None] * num_groups
+    lo, hi = (int(port) for port in master_port_range)
+    stride = (hi - lo) // num_groups
+    if stride < 1:
+        raise ValueError(
+            f"trainer.ray_master_port_range={master_port_range} has fewer ports than worker groups ({num_groups})."
+        )
+    return [[lo + i * stride, hi if i == num_groups - 1 else lo + (i + 1) * stride] for i in range(num_groups)]
 
 
 def validate_distillation_config(config) -> None:

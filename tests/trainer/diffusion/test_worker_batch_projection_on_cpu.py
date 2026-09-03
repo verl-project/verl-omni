@@ -28,6 +28,7 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     PolicyGradientRayTrainer,
     _to_diffusion_worker_tensordict,
 )
+from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
 from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
 
 
@@ -114,12 +115,6 @@ def test_worker_projection_preserves_driver_batch_and_shared_tensor_storage(incl
     [
         (PolicyGradientRayTrainer, "_compute_old_log_prob", "actor_rollout_wg", "infer_actor_batch"),
         (PolicyGradientRayTrainer, "_compute_ref_log_prob", "ref_policy_wg", "infer_ref_batch"),
-        (
-            PolicyGradientRayTrainer,
-            "_compute_teacher_prev_sample_mean",
-            "actor_rollout_wg",
-            "infer_teacher_batch",
-        ),
         (PolicyGradientRayTrainer, "_update_actor", "actor_rollout_wg", "update_actor"),
         (DirectPreferenceRayTrainer, "_compute_ref_noise_pred", "ref_policy_wg", "infer_ref_batch"),
         (DirectPreferenceRayTrainer, "_update_actor", "actor_rollout_wg", "update_actor"),
@@ -136,6 +131,19 @@ def test_v0_diffusion_worker_hops_exclude_responses(trainer_cls, method_name, wo
 
     worker = getattr(trainer, worker_attr)
     sent_batch = getattr(worker, remote_method).call_args.args[0]
+    _assert_worker_projection(sent_batch, driver_batch)
+
+
+def test_teacher_manager_hop_excludes_responses():
+    actor, _ = _make_worker_groups()
+    manager = DiffusionTeacherManager.__new__(DiffusionTeacherManager)
+    manager.model_config = _make_config().actor_rollout_ref.model
+    manager.teacher_wg = {"default": actor}
+    driver_batch = _make_batch()
+
+    manager._infer(driver_batch, "default")
+
+    sent_batch = actor.infer_teacher_batch.call_args.args[0]
     _assert_worker_projection(sent_batch, driver_batch)
 
 

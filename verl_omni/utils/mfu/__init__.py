@@ -14,7 +14,7 @@
 
 """Diffusion Model FLOPs Utilization (MFU) utilities."""
 
-from verl_omni.utils.mfu import qwen_image  # noqa: F401 — register built-in architectures
+from verl_omni.utils.mfu import qwen_image, stable_diffusion_3, wan  # noqa: F401 — register built-in architectures
 from verl_omni.utils.mfu.diffusion_flops_counter import (
     DiffusionFlopsCounter,
     DiffusionModelFlops,
@@ -25,11 +25,15 @@ from verl_omni.utils.mfu.diffusion_flops_counter import (
     register_diffusion_architecture,
 )
 from verl_omni.utils.mfu.qwen_image import QwenImageFlops
+from verl_omni.utils.mfu.stable_diffusion_3 import StableDiffusion3Flops
+from verl_omni.utils.mfu.wan import WanFlops
 
 __all__ = [
     "DiffusionModelFlops",
     "DiffusionFlopsCounter",
     "QwenImageFlops",
+    "StableDiffusion3Flops",
+    "WanFlops",
     "register_diffusion_architecture",
     "get_forward_passes_per_step",
     "get_device_peak_tflops",
