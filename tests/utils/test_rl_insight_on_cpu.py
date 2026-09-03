@@ -38,3 +38,18 @@ def test_enable_rl_insight_leaves_environment_unchanged_when_not_selected(monkey
     enable_rl_insight(config)
 
     assert "VERL_RL_INSIGHT_ENABLE" not in os.environ
+
+
+@pytest.mark.parametrize("already_enabled", [False, True])
+def test_enable_rl_insight_warns_when_ray_is_already_initialized(monkeypatch, caplog, already_enabled):
+    if already_enabled:
+        monkeypatch.setenv("VERL_RL_INSIGHT_ENABLE", "1")
+    else:
+        monkeypatch.delenv("VERL_RL_INSIGHT_ENABLE", raising=False)
+    monkeypatch.setattr("verl_omni.utils.rl_insight.ray.is_initialized", lambda: True)
+    config = SimpleNamespace(trainer={"logger": ["rl_insight"]})
+
+    with caplog.at_level("WARNING"):
+        enable_rl_insight(config)
+
+    assert "enabled after Ray initialization" in caplog.text

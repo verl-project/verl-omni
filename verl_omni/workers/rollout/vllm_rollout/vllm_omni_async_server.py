@@ -21,6 +21,7 @@ from typing import Any, Optional
 import ray
 import torch
 import vllm_omni.entrypoints.cli.serve
+from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, TokenOutput
 from verl.workers.rollout.utils import run_uvicorn
@@ -232,11 +233,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
             return
-        resolved_tags = tags if tags is not None else self._get_wake_up_tags()
-        acks = await self.engine.wake_up(tags=resolved_tags)
-        self._validate_acks("wake_up", acks)
-        await self.engine.resume_generation()
-        self._invalidate_lora_request_cache()
+        with RLInsightLogger.trace_state("vllm_wake_up", state_lane_id=f"replica_{self.replica_rank}"):
+            resolved_tags = tags if tags is not None else self._get_wake_up_tags()
+            acks = await self.engine.wake_up(tags=resolved_tags)
+            self._validate_acks("wake_up", acks)
+            await self.engine.resume_generation()
+            self._invalidate_lora_request_cache()
 
     async def set_global_steps(self, global_steps: int):
         if global_steps != self.global_steps:
@@ -257,10 +259,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
             return
-        acks = await self.engine.sleep(level=self._resolve_sleep_level())
-        self._validate_acks("sleep", acks)
-        await self._reset_frontend_mm_cache()
-        self._invalidate_lora_request_cache()
+        with RLInsightLogger.trace_state("vllm_sleep", state_lane_id=f"replica_{self.replica_rank}"):
+            acks = await self.engine.sleep(level=self._resolve_sleep_level())
+            self._validate_acks("sleep", acks)
+            await self._reset_frontend_mm_cache()
+            self._invalidate_lora_request_cache()
 
     async def release_kv_cache(self):
         """Free cache around a weight sync without discarding Omni weights."""
@@ -268,14 +271,15 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
-        acks = await self.engine.sleep(level=self._resolve_sleep_level())
-        self._validate_acks("sleep", acks)
-        await self._reset_frontend_mm_cache()
-        self._invalidate_lora_request_cache()
-        acks = await self.engine.wake_up(tags=["weights"])
-        self._validate_acks("wake_up", acks)
-        await self.engine.resume_generation()
-        self._invalidate_lora_request_cache()
+        with RLInsightLogger.trace_state("vllm_release_kv_cache", state_lane_id=f"replica_{self.replica_rank}"):
+            acks = await self.engine.sleep(level=self._resolve_sleep_level())
+            self._validate_acks("sleep", acks)
+            await self._reset_frontend_mm_cache()
+            self._invalidate_lora_request_cache()
+            acks = await self.engine.wake_up(tags=["weights"])
+            self._validate_acks("wake_up", acks)
+            await self.engine.resume_generation()
+            self._invalidate_lora_request_cache()
 
     async def resume_kv_cache(self):
         """Restore after a weight sync."""
@@ -283,10 +287,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
             return
-        acks = await self.engine.wake_up(tags=["kv_cache"])
-        self._validate_acks("wake_up", acks)
-        await self.engine.resume_generation()
-        self._invalidate_lora_request_cache()
+        with RLInsightLogger.trace_state("vllm_resume_kv_cache", state_lane_id=f"replica_{self.replica_rank}"):
+            acks = await self.engine.wake_up(tags=["kv_cache"])
+            self._validate_acks("wake_up", acks)
+            await self.engine.resume_generation()
+            self._invalidate_lora_request_cache()
 
     async def resume_generation(self):
         if self.node_rank == 0:

@@ -13,7 +13,12 @@
 # limitations under the License.
 """RL-Insight setup shared by verl-omni training entrypoints."""
 
+import logging
 import os
+
+import ray
+
+logger = logging.getLogger(__name__)
 
 
 def enable_rl_insight(config) -> None:
@@ -22,3 +27,8 @@ def enable_rl_insight(config) -> None:
     configured_loggers = [trainer_logger] if isinstance(trainer_logger, str) else trainer_logger or []
     if "rl_insight" in configured_loggers:
         os.environ["VERL_RL_INSIGHT_ENABLE"] = "1"
+        if ray.is_initialized():
+            logger.warning(
+                "RL-Insight was enabled after Ray initialization; existing workers may not receive "
+                "VERL_RL_INSIGHT_ENABLE. Set it before ray.init() or restart Ray."
+            )
