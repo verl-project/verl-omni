@@ -1,0 +1,1 @@
+../../../examples/flowgrpo_trainer/ltx2/README.md

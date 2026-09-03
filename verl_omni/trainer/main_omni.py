@@ -41,6 +41,7 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
 )
+from verl_omni.utils.config import validate_config as validate_omni_config
 from verl_omni.utils.fs import resolve_model_local_dir
 
 __all__ = [
@@ -347,6 +348,8 @@ def run_omni(config, task_runner_class=None) -> None:
 def main(config):
     """Omni model training entrypoint."""
     auto_set_device(config)
+    OmegaConf.resolve(config)
+    validate_omni_config(config)
     if uses_v1_trainer(config):
         from verl.trainer.ppo.utils import need_critic, need_reference_policy
         from verl.utils.config import validate_config

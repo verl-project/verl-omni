@@ -11,6 +11,8 @@ on:
     paths:
       - "**/*.py"
       - "docs/**"
+      # Example READMEs are the Sphinx sources via git symlinks under docs/examples/.
+      - "examples/**"
       - .github/workflows/doc.yml
 
 concurrency:

@@ -6,7 +6,7 @@
 
 <a href="https://deepwiki.com/verl-project/verl-omni"><img src="https://devin.ai/assets/deepwiki-badge.png" alt="Ask DeepWiki.com" style="height:20px;"></a>
 [![Docs](https://img.shields.io/badge/docs-Read%20the%20Docs-8A2BE2)](https://verl-omni.readthedocs.io/en/latest/index.html)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE) <a href="docs/assets/WeChat.jpg"><img src="https://img.shields.io/badge/微信-green?logo=wechat"></a> <a href="https://join.slack.com/t/verl-project/shared_invite/zt-44qlagy6p-WVn7sOdatfcfAm_RWbwHWQ"><img src="https://img.shields.io/badge/Slack-verl-blueviolet?logo=slack"></a>
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE) <a href="docs/assets/WeChat.jpg"><img src="https://img.shields.io/badge/微信-green?logo=wechat"></a> <a href="https://join.slack.com/t/verl-project/shared_invite/zt-47rq3rljo-PMM7921PnFVf67be0tqYJg"><img src="https://img.shields.io/badge/Slack-verl-blueviolet?logo=slack"></a>
 
 </div>
 
@@ -15,9 +15,10 @@
 It originated from the multi-modal generation RL effort in `verl`, and now has a dedicated home so it can evolve in a more focused way.
 
 ## News 🔥
-
-- **[2026-08]** We have released [v0.2.0](https://github.com/verl-project/verl-omni/releases/tag/v0.2.0) for faster diffusion rl and more stable Qwen3-Omni multimodal training.
-- **[2026-08]** [LTX2.3](examples/flowgrpo_trainer/ltx2/README.md) text-to-video+audio model is now supported with FlowGRPO. Stay tuned for MiniMax-H3 fine-tuning support!
+- **[2026-08]** **[DiffusionOPD](docs/algo/diffusion_opd.md)** (on-policy distillation, including multi-teacher MOPD) is now supported.
+- **[2026-08]** 🔥 **[MiniMax-H3](examples/diffusionnft_trainer/minimax_h3/README.md)** T2VA and FL2VA is now supported with DiffusionNFT. Doc: [MiniMax-H3 DiffusionNFT Training](examples/diffusionnft_trainer/minimax_h3/README.md)
+- **[2026-08]** 🎉 We have released [v0.2.0](https://github.com/verl-project/verl-omni/releases/tag/v0.2.0) for faster diffusion rl and more stable Qwen3-Omni multimodal training. Blog: [VeRL-Omni v0.2.0](https://verl-project.github.io/posts/2026-08-17-verl-omni-v0-2-0/)
+- **[2026-08]** [LTX2.3](examples/flowgrpo_trainer/ltx2/README.md) text-to-video+audio model is now supported with FlowGRPO.
 - **[2026-07]** Team-proposed algorithm [FlowGRPO with DiNa-LRM](https://verl-omni.readthedocs.io/en/latest/examples/flowgrpo_trainer_sd35_drm.html) is available. Training skips VAE decoding by scoring clean diffusion latents directly for faster and more resource-efficient model alignment.
 - **[2026-07]** VeRL-Omni is presented in QingKe AI, vLLM community, and verl x Ascend Beijing meetup. [Slides](https://drive.google.com/file/d/1RJBZZ2k6exxciFghU1FNUgds6s1w7Bpf/view?usp=sharing) are shared.
 - **[2026-06]** [Qwen3-Omni GSPO Trainer](examples/gspo_trainer) is available! [Flow-DPPO](https://verl-omni.readthedocs.io/en/latest/algo/flowdppo.html) is integrated. vLLM-Omni rollout backend is upgraded to v0.22 for higher throughput, with default actor attn backend switched to FA3.
@@ -128,11 +129,22 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
-    <td>MiniMax-H3</td>
-    <td>Diffusion generator</td>
-    <td>Any → Video + Audio</td>
+    <td rowspan="2"><b>MiniMax-H3</b></td>
+    <td rowspan="2">Diffusion generator</td>
+    <td rowspan="2">Any → Video + Audio</td>
+    <td>DiffusionNFT</td>
+    <td>✅</td>
+  </tr>
+  <tr>
     <td>FlowGRPO</td>
     <td>WIP</td>
+  </tr>
+  <tr>
+    <td><b>Boogu-Image</b></td>
+    <td>Diffusion generator</td>
+    <td>Text/Image → Image</td>
+    <td>FlowGRPO (+ CPS/SDE)</td>
+    <td>✅</td>
   </tr>
   <tr>
     <td>BAGEL</td>
@@ -142,9 +154,9 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
-    <td rowspan="3">SD3.5</td>
-    <td rowspan="3">Diffusion generator</td>
-    <td rowspan="3">Text → Image</td>
+    <td rowspan="4">SD3.5</td>
+    <td rowspan="4">Diffusion generator</td>
+    <td rowspan="4">Text → Image</td>
     <td>DPO</td>
     <td>✅</td>
   </tr>
@@ -154,6 +166,10 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
   </tr>
   <tr>
     <td>FlowGRPO w/ DiNa-LRM</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td><a href="docs/algo/diffusion_opd.md">DiffusionOPD</a> (incl. MOPD)</td>
     <td>✅</td>
   </tr>
   <tr>

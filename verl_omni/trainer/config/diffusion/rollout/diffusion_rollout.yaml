@@ -59,6 +59,9 @@ free_cache_engine: True
 # TP size for rollout
 tensor_model_parallel_size: 2
 
+# Text-encoder TP shard size: 1 or tensor_model_parallel_size.
+text_encoder_tp_size: 1
+
 # DP size for rollout
 data_parallel_size: 1
 
@@ -114,7 +117,10 @@ m: 1
 
 # Base seed for deterministic training rollout RNG.
 # Per-step base is ``seed + global_step - 1``. null disables rollout seeding.
-seed: null
+seed: 42
+
+# Whether to enable full determinism for reproducibility.
+full_determinism: False
 
 # Multi-turn interaction config for tools or chat.
 multi_turn:
@@ -130,6 +136,15 @@ engine_kwargs:
 
   # vllm-omni engine config
   vllm_omni: {}
+
+# Reuse text-encoder outputs for repeated diffusion prompts.
+enable_prompt_embed_cache: false
+
+# Maximum number of prompt embeddings cached per diffusion worker.
+prompt_embed_cache_size: 32
+
+# Route repeated rollouts for one sample to the same worker when prompt cache is enabled.
+enable_prompt_embed_cache_routing_affinity: false
 
 # Sampling parameters used during validation (diffusion-specific).
 val_kwargs:
@@ -164,11 +179,26 @@ val_kwargs:
     # Distilled guidance scale for models with guidance_embeds; null to disable
     guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
 
+    # Reference-image short edge for compatible pipelines (validation)
+    reference_image_short_edge: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_image_short_edge,null}
+
     # Wan2.2 number of frames (validation)
     num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
 
     # Audio-video frame rate (validation)
     frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
+
+    # Flow-matching sigma-schedule shift for the video stream (validation)
+    video_flow_shift: ${oc.select:actor_rollout_ref.rollout.pipeline.video_flow_shift,12.0}
+
+    # Task label forwarded to the vLLM-Omni request `task`, pipeline-specific (validation)
+    task: ${oc.select:actor_rollout_ref.rollout.pipeline.task,null}
+
+    # Optional frame indices for pipelines that accept them (validation)
+    frame_indices: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_indices,null}
+
+    # Named canvas aspect ratio for compatible pipelines (validation)
+    aspect_ratio: ${oc.select:actor_rollout_ref.rollout.pipeline.aspect_ratio,null}
 
   # Rollout Algorithm configuration for validation
   algo:
@@ -265,11 +295,26 @@ pipeline:
   # Distilled guidance scale for models with guidance_embeds; null to disable
   guidance_scale: null
 
+  # Reference-image short edge for compatible pipelines
+  reference_image_short_edge: null
+
   # Wan2.2 number of frames
   num_frames: 1
 
   # Audio-video frame rate
   frame_rate: 24.0
+
+  # Flow-matching sigma-schedule shift for the video stream
+  video_flow_shift: 12.0
+
+  # Task label forwarded to the vLLM-Omni request `task`, pipeline-specific
+  task: null
+
+  # Optional frame indices for pipelines that accept them
+  frame_indices: null
+
+  # Named canvas aspect ratio for compatible pipelines
+  aspect_ratio: null
 
 # Optional. AR part rollout use.
 ar:

@@ -441,6 +441,11 @@ The step-execution output must match the full-forward output contract exactly.
 Downstream training code should not need to know which execution mode produced
 the trajectory.
 
+> **Media output contract.** If your `forward` emits joint media such as
+> `(video, audio)`, declare a `diffusion_io_spec` on the pipeline class so the
+> rollout strategy resolves the auxiliary audio stream and its sample rate from
+> the adapter instead of a hardcoded default. See {ref}`diffusion-io-spec`.
+
 ### DiffusionNFT output
 
 DiffusionNFT trains from the final clean latent and the inference timestep

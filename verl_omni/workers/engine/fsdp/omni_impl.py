@@ -43,11 +43,23 @@ logger = logging.getLogger(__name__)
 class OmniFSDPEngine(FSDPEngineWithLMHead):
     """FSDP engine for omni models"""
 
+    def prepare_model_inputs(self, micro_batch):
+        """Prepare standard LM inputs, then add model-native replay fields."""
+        model_inputs, output_args = super().prepare_model_inputs(micro_batch)
+        if not hasattr(self, "model_adapter_cls"):
+            raise RuntimeError("Omni model inputs cannot be prepared before the model adapter is initialized.")
+        model_inputs = self.model_adapter_cls.prepare_model_inputs(model_inputs, micro_batch, self.model_config)
+        if not isinstance(model_inputs, dict):
+            raise TypeError(
+                f"OmniModelBase.prepare_model_inputs must return a dict, got {type(model_inputs).__name__}."
+            )
+        return model_inputs, output_args
+
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
-        # leaves the module half-moved and crashes state_dict() below (#5995). The
+        # leaves the module half-moved and crashes state_dict() below (verl#5995). The
         # per-DTensor .to(device).full_tensor() below still produces GPU tensors.
         if not self._uses_fsdp2_cpu_offload_policy:
             load_fsdp_model_to_gpu(self.module)
@@ -143,6 +155,16 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
     def _build_module(self):
+        unsupported_options = [
+            option for option in ("use_liger", "use_fused_kernels") if getattr(self.model_config, option, False)
+        ]
+        if unsupported_options:
+            enabled_options = ", ".join(f"{option}=True" for option in unsupported_options)
+            raise ValueError(
+                f"Omni models do not support these enabled optimizations: {enabled_options}. "
+                "Set them to false before starting the worker."
+            )
+
         from verl.utils.torch_dtypes import PrecisionType
 
         from verl_omni.pipelines.model_base import OmniModelBase
@@ -170,11 +192,6 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            if getattr(self.model_config, "use_liger", False):
-                logger.warning("use_liger is set but not applied for omni models; this is a no-op.")
-            if getattr(self.model_config, "use_fused_kernels", False):
-                logger.warning("use_fused_kernels is set but not applied for omni models; this is a no-op.")
-
             module = AutoModelForMultimodalLM.from_pretrained(
                 pretrained_model_name_or_path=self.model_config.local_path,
                 torch_dtype=torch_dtype,
@@ -187,6 +204,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
                 self.model_config.model_stage,
                 self.model_config.get("external_lib"),
             )
+            self.model_adapter_cls = adapter_cls
             module = adapter_cls.configure_model(module, self.model_config)
 
             module.to(torch_dtype)

@@ -175,59 +175,85 @@ jobs:
             exit 1
           fi
 
-          pids=()
-          names=()
-
-          run_group() {
-            local name="$1"
-            local devices="$2"
-            local num_gpus="$3"
-            local script="$4"
-            local ray_master_port_range="$5"
-            local logfile="logs/gpu_smoke/parallel/${name}.log"
-
-            echo "Starting ${name} on CUDA_VISIBLE_DEVICES=${devices}; RAY_MASTER_PORT_RANGE=${ray_master_port_range}; log=${logfile}"
-            RAY_MASTER_PORT_RANGE="${ray_master_port_range}" GPU_SMOKE_SKIP_RAY_STOP=1 bash "${script}" \
-              --num-gpus "${num_gpus}" \
-              --cuda-visible-devices "${devices}" \
-              > "${logfile}" 2>&1 &
-            pids+=("$!")
-            names+=("${name}")
-          }
-
-          while IFS=$'\t' read -r name devices num_gpus script ray_master_port_range; do
-            run_group "${name}" "${devices}" "${num_gpus}" "${script}" "${ray_master_port_range}"
-          done < /tmp/gpu_smoke_groups.tsv
-
+          group_count="${{ needs.setup_runner.outputs.group-count }}"
           failed=0
           failed_names=()
-          for i in "${!pids[@]}"; do
-            if wait "${pids[$i]}"; then
-              echo "[PASS] ${names[$i]}"
-            else
-              echo "[FAIL] ${names[$i]}"
-              failed=1
-              failed_names+=("${names[$i]}")
-            fi
-          done
+
+          if [[ "${group_count}" -eq 1 ]]; then
+            # Single group (ci-core / ci-e2e-omni / ci-e2e-diffusion): run in
+            # foreground with tee so logs stream live in the Actions UI.
+            while IFS=$'\t' read -r name devices num_gpus script ray_master_port_range; do
+              logfile="logs/gpu_smoke/parallel/${name}.log"
+              echo "Starting ${name} on CUDA_VISIBLE_DEVICES=${devices}; RAY_MASTER_PORT_RANGE=${ray_master_port_range}; log=${logfile}"
+              if RAY_MASTER_PORT_RANGE="${ray_master_port_range}" GPU_SMOKE_SKIP_RAY_STOP=1 bash "${script}" \
+                --num-gpus "${num_gpus}" \
+                --cuda-visible-devices "${devices}" \
+                2>&1 | tee "${logfile}"; then
+                echo "[PASS] ${name}"
+              else
+                echo "[FAIL] ${name}"
+                failed=1
+                failed_names+=("${name}")
+              fi
+            done < /tmp/gpu_smoke_groups.tsv
+          else
+            pids=()
+            names=()
+
+            run_group() {
+              local name="$1"
+              local devices="$2"
+              local num_gpus="$3"
+              local script="$4"
+              local ray_master_port_range="$5"
+              local logfile="logs/gpu_smoke/parallel/${name}.log"
+
+              echo "Starting ${name} on CUDA_VISIBLE_DEVICES=${devices}; RAY_MASTER_PORT_RANGE=${ray_master_port_range}; log=${logfile}"
+              # Keep artifact logs raw while prefixing only the live Actions UI stream.
+              (
+                RAY_MASTER_PORT_RANGE="${ray_master_port_range}" GPU_SMOKE_SKIP_RAY_STOP=1 bash "${script}" \
+                  --num-gpus "${num_gpus}" \
+                  --cuda-visible-devices "${devices}" \
+                  2>&1 | tee "${logfile}" | sed -u "s/^/[${name}] /"
+              ) &
+              pids+=("$!")
+              names+=("${name}")
+            }
+
+            while IFS=$'\t' read -r name devices num_gpus script ray_master_port_range; do
+              run_group "${name}" "${devices}" "${num_gpus}" "${script}" "${ray_master_port_range}"
+            done < /tmp/gpu_smoke_groups.tsv
+
+            for i in "${!pids[@]}"; do
+              if wait "${pids[$i]}"; then
+                echo "[PASS] ${names[$i]}"
+              else
+                echo "[FAIL] ${names[$i]}"
+                failed=1
+                failed_names+=("${names[$i]}")
+              fi
+            done
+          fi
 
           echo ""
           if [[ "${failed}" -eq 0 ]]; then
             echo "===== All GPU smoke groups passed; skipping parallel logs ====="
             echo "Full logs are uploaded as workflow artifacts under logs/gpu_smoke/"
-          else
+          elif [[ "${group_count}" -gt 1 ]]; then
             echo "===== GPU smoke logs (failed groups only) ====="
             for name in "${failed_names[@]}"; do
               logfile="logs/gpu_smoke/parallel/${name}.log"
               if [[ -f "${logfile}" ]]; then
                 echo "::group::${logfile}"
-                cat "${logfile}" || true
+                sed -u "s/^/[${name}] /" "${logfile}" || true
                 echo "::endgroup::"
               else
                 echo "::warning::Missing GPU smoke log: ${logfile}"
               fi
             done
             echo "Full logs for all groups are uploaded as workflow artifacts under logs/gpu_smoke/"
+          else
+            echo "Full logs are uploaded as workflow artifacts under logs/gpu_smoke/"
           fi
 
           ray stop --force || true

@@ -336,7 +336,7 @@ def test_composite_fsdp_engine_infer_and_train(strategy: str) -> None:
         assert dit_log_probs.shape[0] == dit_batch_size
         assert ar_batch_size != dit_batch_size
 
-        # --- train w/ loss: AR (token-level ppo_loss), then DiT (diffusion_loss / dual_grpo) ---
+        # --- train w/ loss: AR (diffusion_loss), then DiT (diffusion_loss) ---
         # stage 1
         wg.set_loss_fn(partial(diffusion_loss, config=actor_config))
         ar_train_td = create_ar_train_batch(ar_batch_size, micro_batch_size_per_gpu=micro_batch_size)

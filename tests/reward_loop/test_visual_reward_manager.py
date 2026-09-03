@@ -63,6 +63,7 @@ def test_reward_model_genrm():
                 "NCCL_DEBUG": "WARN",
                 "VLLM_LOGGING_LEVEL": "INFO",
                 "VLLM_USE_V1": "1",
+                "FLASHINFER_DISABLE_VERSION_CHECK": os.environ.get("FLASHINFER_DISABLE_VERSION_CHECK", "1"),
             }
         },
         ignore_reinit_error=True,
@@ -118,6 +119,7 @@ def test_rule_reward():
                 "NCCL_DEBUG": "WARN",
                 "VLLM_LOGGING_LEVEL": "INFO",
                 "VLLM_USE_V1": "1",
+                "FLASHINFER_DISABLE_VERSION_CHECK": os.environ.get("FLASHINFER_DISABLE_VERSION_CHECK", "1"),
             }
         },
         ignore_reinit_error=True,

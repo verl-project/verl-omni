@@ -134,76 +134,64 @@ def patch_hf_processor_for_qwen3_omni() -> None:
         if result is not None:
             return result
 
-        try:
-            import numpy as np
-            from transformers import AutoConfig, AutoProcessor, PreTrainedTokenizerBase
+        import numpy as np
+        from transformers import AutoConfig, AutoProcessor, PreTrainedTokenizerBase
 
-            processor = AutoProcessor.from_pretrained(name_or_path, **kwargs)
-            if isinstance(processor, PreTrainedTokenizerBase):
-                return None
-            if processor.__class__.__name__ != "Qwen3OmniMoeProcessor":
-                return None
-
-            config = AutoConfig.from_pretrained(name_or_path, **kwargs)
-            # Token IDs / spatial_merge_size live on thinker_config, not the top-level config.
-            processor.config = config.thinker_config
-            processor.spatial_merge_size = config.thinker_config.vision_config.spatial_merge_size
-            processor.config.vision_start_token_id = config.talker_config.vision_start_token_id
-            model_class = Qwen3OmniMoeThinkerForConditionalGeneration
-
-            # cast to int64 to avoid BF16 large-int rounding in fsdp.
-            _ori_get_rope_index = types.MethodType(model_class.get_rope_index, processor)
-
-            def _get_rope_index_long(*args, **kwargs):
-                vision_position_ids, deltas = _ori_get_rope_index(*args, **kwargs)
-                return vision_position_ids.long(), deltas
-
-            processor.get_rope_index = _get_rope_index_long
-            processor.get_llm_pos_ids_for_vision = types.MethodType(model_class.get_llm_pos_ids_for_vision, processor)
-
-            def _dedup_pad_tokens(self, prompt_ids: list[int]) -> list[int]:
-                """Collapse consecutive multimodal pad tokens to one.
-
-                HF processor and vLLM's ``_apply_prompt_updates`` both expand the pad
-                token, causing double expansion. Collapse every run of identical
-                placeholder tokens before sending to vLLM-Omni, mirroring
-                ``verl.workers.rollout.utils.qwen2_5_vl_dedup_image_tokens``.
-                """
-                tokenizer = getattr(self, "tokenizer", None)
-                if tokenizer is None:
-                    return prompt_ids
-
-                pad_ids: set[int] = set()
-                for tok_attr in ("image_token", "video_token", "audio_token"):
-                    tok = getattr(self, tok_attr, None)
-                    if tok is None:
-                        continue
-                    try:
-                        tid = tokenizer.convert_tokens_to_ids(tok)
-                    except Exception:
-                        continue
-                    if tid is None or tid == getattr(tokenizer, "unk_token_id", None):
-                        continue
-                    pad_ids.add(int(tid))
-                if not pad_ids:
-                    return prompt_ids
-
-                arr = np.asarray(prompt_ids, dtype=np.int64)
-                if arr.size == 0:
-                    return prompt_ids
-                is_pad = np.isin(arr, list(pad_ids))
-                # Collapse consecutive identical pad tokens to one: HF processor and
-                # vLLM's _apply_prompt_updates both expand the pad token, so the raw
-                # prompt_ids already carries the full run.
-                keep = np.ones(arr.size, dtype=bool)
-                same_as_prev = is_pad[1:] & is_pad[:-1] & (arr[1:] == arr[:-1])
-                keep[1:] &= ~same_as_prev
-                return arr[keep].tolist()
-
-            processor.dedup_pad_tokens = types.MethodType(_dedup_pad_tokens, processor)
-            return processor
-        except Exception:
+        processor = AutoProcessor.from_pretrained(name_or_path, **kwargs)
+        if isinstance(processor, PreTrainedTokenizerBase):
             return None
+        if processor.__class__.__name__ != "Qwen3OmniMoeProcessor":
+            return None
+
+        config = AutoConfig.from_pretrained(name_or_path, **kwargs)
+        # Token IDs / spatial_merge_size live on thinker_config, not the top-level config.
+        processor.config = config.thinker_config
+        processor.spatial_merge_size = config.thinker_config.vision_config.spatial_merge_size
+        processor.config.vision_start_token_id = config.talker_config.vision_start_token_id
+        model_class = Qwen3OmniMoeThinkerForConditionalGeneration
+
+        # cast to int64 to avoid BF16 large-int rounding in fsdp.
+        _ori_get_rope_index = types.MethodType(model_class.get_rope_index, processor)
+
+        def _get_rope_index_long(*args, **kwargs):
+            vision_position_ids, deltas = _ori_get_rope_index(*args, **kwargs)
+            return vision_position_ids.long(), deltas
+
+        processor.get_rope_index = _get_rope_index_long
+        processor.get_llm_pos_ids_for_vision = types.MethodType(model_class.get_llm_pos_ids_for_vision, processor)
+
+        def _dedup_pad_tokens(self, prompt_ids: list[int]) -> list[int]:
+            """Collapse consecutive multimodal pad tokens to one."""
+            tokenizer = getattr(self, "tokenizer", None)
+            if tokenizer is None:
+                return prompt_ids
+
+            pad_ids: set[int] = set()
+            for tok_attr in ("image_token", "video_token", "audio_token"):
+                tok = getattr(self, tok_attr, None)
+                if tok is None:
+                    continue
+                try:
+                    tid = tokenizer.convert_tokens_to_ids(tok)
+                except (TypeError, ValueError):
+                    continue
+                if tid is None or tid == getattr(tokenizer, "unk_token_id", None):
+                    continue
+                pad_ids.add(int(tid))
+            if not pad_ids:
+                return prompt_ids
+
+            arr = np.asarray(prompt_ids, dtype=np.int64)
+            if arr.size == 0:
+                return prompt_ids
+            is_pad = np.isin(arr, list(pad_ids))
+            keep = np.ones(arr.size, dtype=bool)
+            same_as_prev = is_pad[1:] & is_pad[:-1] & (arr[1:] == arr[:-1])
+            keep[1:] &= ~same_as_prev
+            return arr[keep].tolist()
+
+        processor.dedup_pad_tokens = types.MethodType(_dedup_pad_tokens, processor)
+        return processor
 
     _vt.hf_processor = _patched_hf_processor
     # Also refresh verl.utils's stale re-export (callers use `from verl.utils import hf_processor`).

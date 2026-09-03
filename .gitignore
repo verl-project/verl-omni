@@ -130,3 +130,7 @@ logs
 log
 outputs
 .history
+tensorboard_log
+
+# locally downloaded reward weights (ImageBind / CLAP)
+.checkpoints

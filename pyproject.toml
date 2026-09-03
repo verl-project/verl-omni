@@ -38,7 +38,7 @@ dependencies = [
     "torchdata",
     # TODO: Remove this cap after the Qwen3-Omni adapter and tests support the
     # FSDP `_no_split_modules` metadata change introduced in Transformers 5.15.0.
-    "transformers<=5.14.1",
+    "transformers>=5.10.1,<=5.14.1",
     "wandb",
     "packaging>=20.0",
     "uvicorn",
@@ -61,13 +61,13 @@ audio = [
 # CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
 gpu = [
     "vllm==0.27.0",
-    "kernels==0.14.1",
+    "kernels==0.16.0",
     "liger-kernel",
 ]
 # Training stack (install in step 2).
-# Git commit must match .github/verl_pin.txt (reports as 0.9.0.dev0 at 8a69493).
+# Git commit must match .github/verl_pin.txt (reports as 0.10.0.dev at fefb080).
 train = [
-    "verl @ git+https://github.com/verl-project/verl.git@8a694930275061f52ebd538c906ef8819af56dbd",
+    "verl @ git+https://github.com/verl-project/verl.git@fefb080262e1c015a0ea05f958822a6a512dc795",
 ]
 dev = [
     "pytest",

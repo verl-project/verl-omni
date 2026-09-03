@@ -167,6 +167,17 @@ def _tensor_from_column(value: Any, *, dtype: torch.dtype) -> torch.Tensor:
     return torch.tensor(_to_nested(value), dtype=dtype)
 
 
+def _score_from_column(row: dict[str, Any], key: str, item: int) -> float:
+    value = row[key]
+    try:
+        score = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Offline DPO row {item} column {key!r} must be a finite number; got {value!r}.") from exc
+    if not np.isfinite(score):
+        raise ValueError(f"Offline DPO row {item} column {key!r} must be a finite number; got {value!r}.")
+    return score
+
+
 class OfflineDPODataset(Dataset):
     """Dataset for rows containing offline DPO pairs plus precomputed SD3 tensors."""
 
@@ -193,6 +204,8 @@ class OfflineDPODataset(Dataset):
             self.prompt_key,
             self.win_key,
             self.lose_key,
+            self.win_score_key,
+            self.lose_score_key,
             "img_win_latents",
             "img_lose_latents",
             "prompt_embeds",
@@ -213,8 +226,8 @@ class OfflineDPODataset(Dataset):
         data_file = self.data_files[0] if len(self.data_files) == 1 else None
         pair_uid = str(row.get("uid") or uuid.uuid4())
 
-        win_score = float(row.get(self.win_score_key, 1.0))
-        lose_score = float(row.get(self.lose_score_key, 0.0))
+        win_score = _score_from_column(row, self.win_score_key, item)
+        lose_score = _score_from_column(row, self.lose_score_key, item)
         if win_score < lose_score:
             raise ValueError(f"Offline DPO row {item} has win_score < lose_score: {win_score} < {lose_score}")
 

@@ -1,22 +1,22 @@
-FROM quay.io/ascend/cann:9.0.0-910b-ubuntu22.04-py3.12
+FROM quay.io/ascend/cann:9.1.0-910b-ubuntu22.04-py3.12
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG ASCEND_PIP_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
 ARG PYTORCH_CPU_INDEX_URL="https://download.pytorch.org/whl/cpu/"
+ARG MOONCAKE_INDEX_URL="https://mirrors.aliyun.com/pypi/web/simple"
+
+ARG MOONCAKE_TAG="0.3.11.post1"
 
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
 ARG VLLM_REF="v0.27.0"
 
 ARG VLLM_ASCEND_REPO="https://github.com/vllm-project/vllm-ascend.git"
-# Defaults to vllm-ascend main via vllm_ascend_pin.txt (no v0.27 release yet).
 ARG VLLM_ASCEND_REF=""
 
 ARG VLLM_OMNI_REPO="https://github.com/vllm-project/vllm-omni.git"
 ARG VLLM_OMNI_REF=""
 
 ARG VERL_REPO="https://github.com/verl-project/verl.git"
-# Default: read from .github/verl_pin.txt at build time.
-# Override with: --build-arg VERL_REF=<commit-or-tag>
 ARG VERL_REF=""
 
 ARG VERL_OMNI_REPO="https://github.com/verl-project/verl-omni.git"
@@ -41,7 +41,10 @@ WORKDIR /workspace
 
 RUN mkdir -p /workspace/src /workspace/pins
 
-COPY .github/verl_pin.txt .github/vllm_ascend_pin.txt .github/vllm_omni_pin.txt /workspace/pins/
+COPY .github/verl_pin.txt \
+     .github/vllm_ascend_pin.txt \
+     .github/vllm_omni_pin.txt \
+     /workspace/pins/
 
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
@@ -58,50 +61,69 @@ RUN apt-get update -y && \
         build-essential \
         numactl \
         libnuma-dev \
+        libibverbs-dev \
         libjemalloc2 \
+        libhiredis-dev \
+        libxcb1 \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
         clang-15 \
         ninja-build && \
-    update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
-    update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
+    update-alternatives \
+        --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
+    update-alternatives \
+        --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
+    rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip config set global.index-url ${PIP_INDEX_URL} && \
-    python3 -m pip config set global.trusted-host "mirrors.tuna.tsinghua.edu.cn mirrors.huaweicloud.com download.pytorch.org download-r2.pytorch.org github.com raw.githubusercontent.com files.pythonhosted.org pypi.org" && \
-    python3 -m pip install --upgrade pip setuptools wheel packaging
+    python3 -m pip config set global.trusted-host \
+        "mirrors.tuna.tsinghua.edu.cn mirrors.huaweicloud.com mirrors.aliyun.com download.pytorch.org download-r2.pytorch.org github.com raw.githubusercontent.com files.pythonhosted.org pypi.org" && \
+    python3 -m pip install --upgrade \
+        pip \
+        setuptools \
+        wheel \
+        packaging
 
-# Match useful runtime dependencies from the official vLLM-Ascend A3 Dockerfile.
-# modelscope is useful for model download, and ray is required by distributed workloads.
-# ray>=2.56 no longer clears ASCEND_RT_VISIBLE_DEVICES for actors that request zero
-# NPUs, which is what lets CPU-only reward workers reach the devices they need.
 RUN python3 -m pip install \
         modelscope \
         'ray>=2.56.1' \
         'protobuf>3.20.0'
 
-# Align torch stack for Ascend.
+RUN . /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    python3 -m pip install \
+        mooncake-transfer-engine-npu==${MOONCAKE_TAG} \
+        --extra-index-url ${MOONCAKE_INDEX_URL}
+
 RUN python3 -m pip install --force-reinstall \
         torch==2.10.0+cpu \
         torchvision==0.25.0+cpu \
         torchaudio==2.10.0+cpu \
         --index-url ${PYTORCH_CPU_INDEX_URL} && \
     python3 -m pip install --force-reinstall \
-        torch-npu==2.10.0.post2 \
+        torch-npu==2.10.0.post4 \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} \
         --extra-index-url ${PYTORCH_CPU_INDEX_URL}
 
-# Install vLLM.
-# Use VLLM_TARGET_DEVICE=empty so vLLM itself does not build CUDA backend.
-# Ascend backend is provided by vllm-ascend.
-RUN git clone --depth 1 -b ${VLLM_REF} ${VLLM_REPO} /workspace/src/vllm && \
+RUN git clone \
+        --depth 1 \
+        -b ${VLLM_REF} \
+        ${VLLM_REPO} \
+        /workspace/src/vllm && \
     cd /workspace/src/vllm && \
-    VLLM_TARGET_DEVICE="empty" python3 -m pip install -e ".[audio]" \
+    VLLM_TARGET_DEVICE="empty" \
+        python3 -m pip install -e ".[audio]" \
         --extra-index-url ${PYTORCH_CPU_INDEX_URL} && \
     python3 -m pip uninstall -y triton || true
 
-# Install vLLM-Ascend.
 RUN VLLM_ASCEND_REF="${VLLM_ASCEND_REF:-$(tr -d '[:space:]' < /workspace/pins/vllm_ascend_pin.txt)}" && \
     echo "Installing vLLM-Ascend from ${VLLM_ASCEND_REPO}@${VLLM_ASCEND_REF}" && \
-    git clone ${VLLM_ASCEND_REPO} /workspace/src/vllm-ascend && \
+    git clone \
+        ${VLLM_ASCEND_REPO} \
+        /workspace/src/vllm-ascend && \
     cd /workspace/src/vllm-ascend && \
     git checkout ${VLLM_ASCEND_REF} && \
     git submodule update --init --recursive && \
@@ -113,58 +135,64 @@ RUN VLLM_ASCEND_REF="${VLLM_ASCEND_REF:-$(tr -d '[:space:]' < /workspace/pins/vl
         --extra-index-url ${ASCEND_PIP_INDEX_URL} \
         --extra-index-url ${PYTORCH_CPU_INDEX_URL} && \
     python3 -m pip uninstall -y triton triton-ascend || true && \
-    python3 -m pip install triton-ascend==3.2.1 \
-        --extra-index-url ${ASCEND_PIP_INDEX_URL}
+    python3 -m pip install \
+        triton-ascend==3.2.2 \
+        --extra-index-url ${ASCEND_PIP_INDEX_URL} && \
+    python3 -m pip install concurrent-log-handler
 
-# Install vLLM-Omni.
 RUN VLLM_OMNI_REF="${VLLM_OMNI_REF:-$(tr -d '[:space:]' < /workspace/pins/vllm_omni_pin.txt)}" && \
     echo "Installing vLLM-Omni from ${VLLM_OMNI_REPO}@${VLLM_OMNI_REF}" && \
-    git clone ${VLLM_OMNI_REPO} /workspace/src/vllm-omni && \
+    git clone \
+        ${VLLM_OMNI_REPO} \
+        /workspace/src/vllm-omni && \
     cd /workspace/src/vllm-omni && \
     git checkout ${VLLM_OMNI_REF} && \
-    VLLM_OMNI_TARGET_DEVICE=npu python3 -m pip install -e . \
+    VLLM_OMNI_TARGET_DEVICE=npu \
+        python3 -m pip install -e . \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} \
         --extra-index-url ${PYTORCH_CPU_INDEX_URL}
 
-# Install verl from source.
-# If VERL_REF is empty, read the pinned commit from .github/verl_pin.txt.
 RUN VERL_REF="${VERL_REF:-$(tr -d '[:space:]' < /workspace/pins/verl_pin.txt)}" && \
     echo "Installing verl from ${VERL_REPO}@${VERL_REF}" && \
-    git clone ${VERL_REPO} /workspace/src/verl && \
+    git clone \
+        ${VERL_REPO} \
+        /workspace/src/verl && \
     cd /workspace/src/verl && \
     git checkout ${VERL_REF} && \
     python3 -m pip install -e . \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} \
         --extra-index-url ${PYTORCH_CPU_INDEX_URL}
 
-# Install verl-omni.
-# Do NOT install the train extra here, because train installs verl again.
-# verl has already been installed from /workspace/src/verl using .github/verl_pin.txt.
-RUN git clone --depth 1 -b ${VERL_OMNI_REF} ${VERL_OMNI_REPO} /workspace/src/verl-omni && \
+RUN git clone \
+        --depth 1 \
+        -b ${VERL_OMNI_REF} \
+        ${VERL_OMNI_REPO} \
+        /workspace/src/verl-omni && \
     cd /workspace/src/verl-omni && \
     python3 -m pip install -e ".[ocr]" \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} \
         --extra-index-url ${PYTORCH_CPU_INDEX_URL}
 
-# Re-align torch / torch-npu / numpy after dependency resolution.
-# This prevents downstream extras from upgrading torch/numpy to incompatible versions.
 RUN python3 -m pip install --force-reinstall \
         torch==2.10.0+cpu \
         torchvision==0.25.0+cpu \
         torchaudio==2.10.0+cpu \
         --index-url ${PYTORCH_CPU_INDEX_URL} && \
     python3 -m pip install --force-reinstall \
-        torch-npu==2.10.0.post2 \
+        torch-npu==2.10.0.post4 \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} \
         --extra-index-url ${PYTORCH_CPU_INDEX_URL} && \
-    python3 -m pip install --force-reinstall numpy==1.26.4
+    python3 -m pip install --upgrade onnxruntime
 
-    
-RUN echo "export VLLM_WORKER_MULTIPROC_METHOD=spawn" >> /root/.bashrc && \
-    echo 'export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD' >> /root/.bashrc && \
-    echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' >> /root/.bashrc
+RUN echo "export VLLM_WORKER_MULTIPROC_METHOD=spawn" \
+        >> /root/.bashrc && \
+    echo 'export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD' \
+        >> /root/.bashrc && \
+    echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' \
+        >> /root/.bashrc
 
 WORKDIR /workspace
 
 ENTRYPOINT ["/bin/bash", "-c", "source /usr/local/Ascend/ascend-toolkit/set_env.sh && source /usr/local/Ascend/nnal/atb/set_env.sh && exec \"$@\"", "--"]
+
 CMD ["/bin/bash"]

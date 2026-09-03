@@ -78,6 +78,36 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
+def _cast_loaded_diffusers_module(
+    module: torch.nn.Module,
+    torch_dtype: torch.dtype,
+    *,
+    preserve_fp32_modules: bool = True,
+) -> None:
+    """Cast ordinary models while preserving diffusers-declared fp32 islands."""
+    keep_in_fp32 = getattr(module, "_keep_in_fp32_modules", None)
+    if preserve_fp32_modules and keep_in_fp32:
+        logger.info(
+            "Preserving mixed precision declared by %s._keep_in_fp32_modules=%s",
+            type(module).__name__,
+            keep_in_fp32,
+        )
+        return
+    module.to(torch_dtype)
+
+
+def _fsdp_param_dtype(
+    module: torch.nn.Module,
+    configured_dtype: torch.dtype,
+    *,
+    preserve_fp32_modules: bool = True,
+) -> Optional[torch.dtype]:
+    """Disable FSDP casting only for declared fp32 islands that are preserved."""
+    if preserve_fp32_modules and getattr(module, "_keep_in_fp32_modules", None):
+        return None
+    return configured_dtype
+
+
 class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
     """Base Diffusers engine using PyTorch FullyShardedDataParallel (FSDP).
 
@@ -119,6 +149,10 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
         self._is_lora = self.model_config.lora_rank > 0
+        # FSDP2 CPUOffloadPolicy owns param placement; a manual model.to(device) would
+        # leave shards on CPU and crash state_dict()/weight-sync (upstream verl#5995).
+        # Set True in _build_fsdp_module to skip that manual load.
+        self._uses_fsdp2_cpu_offload_policy = False
 
     @property
     def is_param_offload_enabled(self) -> bool:
@@ -274,19 +308,20 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             try:
                 module.set_attention_backend(self.model_config.attn_backend)
             except Exception as e:
-                if self.model_config.attn_backend == "_flash_3_varlen_hub":
-                    logger.warning(
-                        "Failed to set attention backend to %s (%s). Falling back to 'native' attention backend.",
-                        self.model_config.attn_backend,
-                        e,
-                    )
-                    object.__setattr__(self.model_config, "attn_backend", "native")
-                    module.set_attention_backend("native")
-                else:
-                    raise e
+                raise RuntimeError(
+                    f"Failed to apply configured attention backend {self.model_config.attn_backend!r}. "
+                    "The validated backend cannot be downgraded after startup; install the required "
+                    "attention dependency or select a supported backend explicitly."
+                ) from e
 
-            # some parameters may not in torch_dtype
-            module.to(torch_dtype)
+            # Keep architecture-declared fp32 islands unless the adapter marks
+            # them as incompatible with its FSDP wrapping units.
+            model_cls = DiffusionModelBase.get_class(self.model_config)
+            _cast_loaded_diffusers_module(
+                module,
+                torch_dtype,
+                preserve_fp32_modules=model_cls.preserve_fp32_modules(),
+            )
 
             if self.model_config.enable_gradient_checkpointing:
                 module.enable_gradient_checkpointing()
@@ -317,6 +352,16 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             reduce_dtype = torch.float32
             buffer_dtype = torch.float32
 
+        model_cls = DiffusionModelBase.get_class(self.model_config)
+        preserve_fp32_modules = model_cls.preserve_fp32_modules()
+
+        # None preserves declared fp32 islands; a real dtype lets FSDP cast
+        # forward inputs and flatten parameters using the configured dtype.
+        param_dtype = _fsdp_param_dtype(
+            module,
+            param_dtype,
+            preserve_fp32_modules=preserve_fp32_modules,
+        )
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
 
         auto_wrap_policy = get_fsdp_wrap_policy(
@@ -369,6 +414,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                 self._is_offload_param = False
                 self._is_offload_optimizer = False
                 offload_policy = CPUOffloadPolicy(pin_memory=True)
+                self._uses_fsdp2_cpu_offload_policy = True
 
             fsdp_kwargs = {
                 "mesh": fsdp_mesh,
@@ -685,7 +731,9 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         Save FSDP checkpoint, handling parameter offload as needed.
         """
         origin_module_device = next(self.module.parameters()).device.type
-        if self._is_offload_param or origin_module_device == "cpu":
+        if (self._is_offload_param or origin_module_device == "cpu") and not getattr(
+            self, "_uses_fsdp2_cpu_offload_policy", False
+        ):
             load_fsdp_model_to_gpu(self.module)
 
         self.checkpoint_manager.save_checkpoint(
@@ -722,9 +770,14 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
     def get_per_tensor_param(
         self, layered_summon=False, base_sync_done=False, adapter_name: str | None = None, **kwargs
     ):
+        """Export the transformer weights for a rollout-engine weight sync."""
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
-        load_fsdp_model_to_gpu(self.module)
+        # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
+        # fails the _apply tensor swap on the CPU-resident params. The per-DTensor
+        # .to(device).full_tensor() below still produces GPU tensors for the sync.
+        if not self._uses_fsdp2_cpu_offload_policy:
+            load_fsdp_model_to_gpu(self.module)
 
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 
@@ -1125,6 +1178,31 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
 class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
     """Diffusers FSDP engine for direct-preference / forward-process objectives (e.g. DiffusionNFT)."""
 
+    def _unpad_condition_rows(self, micro_batch: TensorDict) -> None:
+        """Restore globally padded condition rows to the minibatch-local length."""
+        for key in ("condition_video_rows", "condition_audio_rows"):
+            values = micro_batch.get(key, None)
+            if not isinstance(values, torch.Tensor):
+                continue
+            mask_key = f"{key}_mask"
+            mask = micro_batch.get(mask_key, None)
+            if values.is_nested:
+                if not isinstance(mask, torch.Tensor) or not mask.is_nested:
+                    raise ValueError(f"Nested {key} requires a nested {mask_key}.")
+                values, mask = self._unpad_nested_embeds(values, mask)
+                micro_batch[key] = values
+                micro_batch[mask_key] = mask
+
+            count_key = key.replace("_rows", "_row_count")
+            counts = micro_batch.get(count_key, None)
+            if isinstance(mask, torch.Tensor) and isinstance(counts, torch.Tensor):
+                declared = counts.reshape(counts.shape[0], -1)[:, 0].to(mask.device)
+                valid = mask.long().sum(dim=1)
+                if not torch.equal(valid, declared):
+                    raise ValueError(
+                        f"{mask_key} valid rows {valid.tolist()} do not match {count_key} {declared.tolist()}."
+                    )
+
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
     ) -> list[TensorDict]:
@@ -1165,6 +1243,7 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
                 negative_prompt_embeds, negative_prompt_embeds_mask, sp_size
             )
 
+        self._unpad_condition_rows(micro_batch)
         model_inputs, negative_model_inputs = prepare_model_inputs(
             module=self.module,
             model_config=self.model_config,

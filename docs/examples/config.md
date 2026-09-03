@@ -1,6 +1,6 @@
 # Config Explanation
 
-Last updated: 07/30/2026
+Last updated: 08/23/2026
 
 VeRL-Omni builds on [verl](https://github.com/verl-project/verl) and reuses the
 same Hydra config surface for shared RL trainer fields (`data`, FSDP actor /
@@ -71,7 +71,60 @@ algorithm:
 - `algorithm.timestep_fraction`: Fraction of rollout timesteps used for forward-process training, in `(0, 1]`.
 - `algorithm.adv_mode`: Advantage mapping before reward-probability scaling. One of `continuous`, `positive_only`, `negative_only`, `one_only`, `binary`.
 - `algorithm.paired_preference`: `true` for pair-based algorithms (e.g. offline DPO); doubles actor batch size and disables shuffle.
-- `algorithm.rollout_correction.*`: Experimental IS / RS correction. Schema mirrors upstream verl; see {doc}`algo/rollout_correction` and [verl Rollout Correction](https://verl.readthedocs.io/en/latest/algo/rollout_corr.html).
+- `algorithm.rollout_correction.*`: Experimental IS / RS correction. Schema mirrors upstream verl; see {doc}`../algo/rollout_correction` and [verl Rollout Correction](https://verl.readthedocs.io/en/latest/algo/rollout_corr.html).
+
+### `actor_rollout_ref.separate` — synchronous resource separation
+
+`actor_rollout_ref.separate` defaults to `false`. When enabled, the legacy synchronous
+diffusion trainer (`trainer.use_v1=false`) places pure Actor workers on the trainer
+resources and launches rollout/checkpoint workers on a separate Ray resource pool.
+The mode is limited to online policy-gradient training and publishes actor weights once
+before training and once after every logical-batch update.
+
+The current baseline supports full finetuning only. For the diffusion/FSDP
+configuration, LoRA must be disabled with `actor_rollout_ref.model.lora_rank=0`
+and `actor_rollout_ref.model.lora_adapter_path=null`.
+
+Required topology settings are:
+
+```yaml
+actor_rollout_ref:
+  separate: true
+  hybrid_engine: false
+  rollout:
+    nnodes: 1
+    n_gpus_per_node: 8
+    checkpoint_engine:
+      backend: nccl
+trainer:
+  use_v1: false
+  nnodes: 1
+  n_gpus_per_node: 8
+```
+
+`rollout.nnodes` and `rollout.n_gpus_per_node` must both be positive, and the
+checkpoint backend must be non-naive (for example, `nccl` on CUDA). Trainer and
+rollout resources are additive; the example above requests 8 Trainer GPUs and 8
+standalone rollout GPUs from the Ray cluster.
+
+`actor_rollout_ref.rollout.agent.num_workers` controls CPU request concurrency; it
+does not allocate rollout GPUs and does not need to match `rollout.n_gpus_per_node`.
+
+On a CUDA Ray cluster, the Wan2.2 auto-device recipe forwards trailing Hydra
+overrides, so the same topology can be launched with the NCCL checkpoint backend:
+
+```bash
+bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_auto.sh \
+  actor_rollout_ref.separate=true \
+  actor_rollout_ref.hybrid_engine=false \
+  actor_rollout_ref.model.lora_rank=0 \
+  actor_rollout_ref.model.lora_adapter_path=null \
+  actor_rollout_ref.rollout.nnodes=1 \
+  actor_rollout_ref.rollout.n_gpus_per_node=8 \
+  actor_rollout_ref.rollout.checkpoint_engine.backend=nccl \
+  trainer.nnodes=1 \
+  trainer.n_gpus_per_node=8
+```
 
 ### `actor_rollout_ref.model` — `DiffusionModelConfig`
 
@@ -164,12 +217,12 @@ actor_rollout_ref:
 - `actor_rollout_ref.actor.use_distill_loss`: Enable teacher-anchored online policy distillation.
 - `actor_rollout_ref.actor.distill_loss_mode`: `distill_kl` or `distill_fm_mse`.
 - `actor_rollout_ref.actor.distill_loss_coef`: Distillation loss coefficient.
-- `distillation.enabled` / `distillation.teacher_models.teacher_model.model_path`: Frozen teacher that produces the `teacher_*` batch keys the distillation losses consume — see [Diffusion On-Policy Distillation](../algo/diffusion_opd.md).
+- `distillation.enabled` / `distillation.teacher_models.<name>.{key,model_path,world_size}` / `distillation.teacher_key` / `distillation.{n_gpus_per_node,nnodes}`: Frozen teachers (routed per sample, colocated or on their own pool) that produce the `teacher_*` batch keys the distillation losses consume — see [Diffusion On-Policy Distillation](../algo/diffusion_opd.md).
 - `actor_rollout_ref.actor.rollout_correction.*`: Per-actor mirror of `algorithm.rollout_correction` (used when `bypass_mode=True` for per-step RS inside `diffusion_loss`).
 
 Shared PPO / FSDP / optim fields (`ppo_mini_batch_size`, `ppo_epochs`, `optim.lr`, `fsdp_config`, …) follow upstream verl — see the [verl Config Explanation](https://verl.readthedocs.io/en/latest/examples/config.html).
 
-VeOmni engine path (`strategy=veomni`) adds `veomni_config` / VeOmni optimizer fields; see {doc}`start/install` and the `run_*_veomni.sh` recipes.
+VeOmni engine path (`strategy=veomni`) adds `veomni_config` / VeOmni optimizer fields; see {doc}`../start/install` and the `run_*_veomni.sh` recipes.
 
 ### `actor_rollout_ref.rollout` — `DiffusionRolloutConfig`
 
@@ -187,7 +240,9 @@ actor_rollout_ref:
       true_cfg_scale: 1.0
       max_sequence_length: 512
       guidance_scale: null
+      reference_image_short_edge: null
       num_frames: 1
+      task: null
 ```
 
 - `actor_rollout_ref.rollout.pipeline.height` / `width`: Image / video spatial size for training rollout.
@@ -195,7 +250,9 @@ actor_rollout_ref:
 - `actor_rollout_ref.rollout.pipeline.true_cfg_scale`: True classifier-free guidance scale; values `> 1.0` enable CFG with a negative prompt (e.g. Qwen-Image).
 - `actor_rollout_ref.rollout.pipeline.max_sequence_length`: Max text-encoder token length for prompt encoding.
 - `actor_rollout_ref.rollout.pipeline.guidance_scale`: Distilled guidance scale for models with guidance embeddings; `null` disables.
+- `actor_rollout_ref.rollout.pipeline.reference_image_short_edge`: Reference-image resize short edge for compatible pipelines. MiniMax-H3 Ref2VA accepts multiples of 32 from 256 through 2048; use `val_kwargs.pipeline.reference_image_short_edge` for a different validation value.
 - `actor_rollout_ref.rollout.pipeline.num_frames`: Wan2.2 (and similar) video frame count (`81` ≈ 3s at 24 fps; image models keep `1`).
+- `actor_rollout_ref.rollout.pipeline.task`: Optional task label forwarded to the pipeline's request contract (vLLM-Omni reads it as the request `task`); values are pipeline-specific (e.g. MiniMax-H3: `t2va` / `fl2va` / `ref2va`), `null` lets the engine infer it.
 - `actor_rollout_ref.rollout.pipeline.output_type`: Pipeline output modality (dataclass default `image`).
 
 #### Rollout algo — `DiffusionRolloutAlgoConfig`
@@ -245,7 +302,7 @@ actor_rollout_ref:
 - `actor_rollout_ref.rollout.n`: Samples per prompt (FlowGRPO group size; usually `> 1`).
 - `actor_rollout_ref.rollout.seed`: Base seed for deterministic training rollout RNG. Per-step base is `seed + global_step - 1`; `null` disables seeding.
 - `actor_rollout_ref.rollout.rollout_attn_backend`: vLLM-Omni diffusion attention backend. One of `FLASH_ATTN`, `FLASH_ATTN_HUB`, `FLASH_ATTN_3_HUB`, `TORCH_SDPA`. Must match `model.attn_backend` (default `FLASH_ATTN_3_HUB` ↔ `_flash_3_varlen_hub`).
-- `actor_rollout_ref.rollout.step_execution`: When `true`, run the registered pipeline in step-execution (continuous / stepwise batching) mode. See {doc}`start/rollout_batching`.
+- `actor_rollout_ref.rollout.step_execution`: When `true`, run the registered pipeline in step-execution (continuous / stepwise batching) mode. See {doc}`../start/rollout_batching`.
 - `actor_rollout_ref.rollout.max_num_seqs`: Max concurrent sequences in the engine; also the request-level batching capacity knob.
 - `actor_rollout_ref.rollout.gpu_memory_utilization`: Fraction of GPU memory for the vLLM-Omni cache.
 - `actor_rollout_ref.rollout.calculate_log_probs`: Log rollout log-probs for debugging.
@@ -261,7 +318,7 @@ These sit on the diffusion trainer YAML (in addition to shared verl trainer fiel
 - `trainer.rollout_data_save_freq`: Dump train rollout every N steps (`1` = every step, `<= 0` = never).
 - `trainer.rollout_data_max_samples` / `validation_data_max_samples`: Cap samples dumped per train / val run (`null` = all).
 - `trainer.use_v1`: Use the V1 trainer (TransferQueue + ReplayBuffer). When `false`, legacy v0 diffusion trainer.
-- `trainer.v1.*`: V1 mode / sampler / async placeholders (`trainer_mode`, `max_off_policy_threshold`, …). See {doc}`start/diffusion_v1`.
+- `trainer.v1.*`: V1 mode / sampler / async placeholders (`trainer_mode`, `max_off_policy_threshold`, …). See {doc}`../start/diffusion_v1`.
 
 ### `reward` — visual reward manager
 
@@ -272,7 +329,7 @@ Diffusion recipes compose `reward@reward: reward` (`verl_omni/trainer/config/rew
 - `reward.reward_functions`: Multi-reward dict (`{name: {path, name, weight}}`); mutually exclusive with `custom_reward_function`.
 - `reward.aggregation`: Multi-reward aggregation (`weighted_sum` only).
 - `reward.reward_manager`: Defaults to `VisualRewardManager` from `pkg://verl_omni.reward_loop.reward_manager`.
-- `reward.reward_model.*`: Optional model-based RM (resource pool, rollout engine knobs). See {doc}`algo/async_reward` and {doc}`start/http_scorer`.
+- `reward.reward_model.*`: Optional model-based RM (resource pool, rollout engine knobs). See {doc}`../algo/async_reward` and {doc}`../start/http_scorer`.
 
 ---
 
@@ -336,7 +393,7 @@ actor_rollout_ref:
 - `actor_rollout_ref.model.override_config`: Dict merged into HF config load (e.g. `attn_implementation`).
 - `actor_rollout_ref.model.enable_activation_offload` / `use_remove_padding`: Memory / packing flags for the FSDP actor.
 - `actor_rollout_ref.model.lora_*` / `target_modules` / `policy_state_adapters` / `fsdp_layer_prefixes`: Same LoRA roles as diffusion (defaults differ slightly, e.g. `lora_alpha: 16`).
-- `actor_rollout_ref.model.use_liger` / `use_fused_kernels` / `fused_kernel_options` / `tiled_mlp`: Optional kernel / memory optimizations.
+- `actor_rollout_ref.model.use_liger` / `use_fused_kernels`: Unsupported by omni FSDP/FSDP2 and must remain `false`; enabling either fails before model loading. The adjacent `fused_kernel_options` / `tiled_mlp` fields are backend-specific.
 - `actor_rollout_ref.model.max_image_tokens` / `max_audio_tokens` / `max_video_tokens`: Multimodal token budgets (`null` = unset).
 - `actor_rollout_ref.model.lora` / `mtp`: Megatron-style LoRA block and multi-token prediction (speculative decoding) configs; see the YAML comments in `omni/model/omni_model.yaml`.
 
@@ -385,8 +442,8 @@ Which loss block is active depends on `algorithm.trainer_type`:
 ## Where to look next
 
 - Shared PPO / FSDP / rollout knobs — [verl Config Explanation](https://verl.readthedocs.io/en/latest/examples/config.html)
-- Diffusion algorithm pages — {doc}`algo/flowgrpo`, {doc}`algo/mixgrpo`, {doc}`algo/flowdppo`, {doc}`algo/diffusion_dpo`, {doc}`algo/diffusionnft`, {doc}`algo/grpo_guard`
-- Rollout batching / step execution — {doc}`start/rollout_batching`
-- Rollout correction — {doc}`algo/rollout_correction`
-- Profiler — {doc}`perf/profiler`
-- Model catalogue and example scripts — {doc}`start/models`
+- Diffusion algorithm pages — {doc}`../algo/flowgrpo`, {doc}`../algo/mixgrpo`, {doc}`../algo/flowdppo`, {doc}`../algo/diffusion_dpo`, {doc}`../algo/diffusionnft`, {doc}`../algo/grpo_guard`
+- Rollout batching / step execution — {doc}`../start/rollout_batching`
+- Rollout correction — {doc}`../algo/rollout_correction`
+- Profiler — {doc}`../perf/profiler`
+- Model catalogue and example scripts — {doc}`../start/models`

@@ -21,29 +21,7 @@ from verl.utils.ray_utils import get_event_loop
 from verl.utils.tokenizer import normalize_token_ids
 
 from verl_omni.agent_loop.single_turn_agent_loop import DiffusionSingleTurnAgentLoop
-
-
-def _messages_to_text(messages: Any) -> str:
-    """Extract textual message content without applying a chat template."""
-    if isinstance(messages, str):
-        return messages
-    if isinstance(messages, dict):
-        messages = [messages]
-
-    parts = []
-    for message in messages or []:
-        if not isinstance(message, dict):
-            continue
-        content = message.get("content", "")
-        if isinstance(content, str):
-            parts.append(content)
-            continue
-        for item in content or []:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict) and item.get("type") == "text":
-                parts.append(item.get("text", ""))
-    return "\n".join(part for part in parts if part).strip()
+from verl_omni.agent_loop.utils import messages_to_text as _messages_to_text
 
 
 @register("ltx2_diffusion_single_turn_agent")
@@ -79,18 +57,16 @@ class LTX2DiffusionSingleTurnAgentLoop(DiffusionSingleTurnAgentLoop):
         self.system_prompt = []
         self.loop = get_event_loop()
 
-    async def apply_chat_template(
+    async def ct_build_initial_tokens(
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
         images: list[Any] | None = None,
         videos: list[Any] | None = None,
         audios: list[Any] | None = None,
-        mm_processor_kwargs: dict[str, Any] | None = None,
-        remove_system_prompt: bool = False,
     ) -> list[int]:
         """Encode raw text with special tokens and right-side truncation."""
-        del tools, images, videos, audios, mm_processor_kwargs, remove_system_prompt
+        del tools, images, videos, audios
         text = _messages_to_text(messages)
         prompt_length = self.rollout_config.prompt_length
         tokenized = await self.loop.run_in_executor(
@@ -104,3 +80,17 @@ class LTX2DiffusionSingleTurnAgentLoop(DiffusionSingleTurnAgentLoop):
             )["input_ids"],
         )
         return normalize_token_ids(tokenized)
+
+    async def apply_chat_template(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        images: list[Any] | None = None,
+        videos: list[Any] | None = None,
+        audios: list[Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
+        remove_system_prompt: bool = False,
+    ) -> list[int]:
+        """Encode raw text with special tokens and right-side truncation."""
+        del mm_processor_kwargs, remove_system_prompt
+        return await self.ct_build_initial_tokens(messages, tools=tools, images=images, videos=videos, audios=audios)

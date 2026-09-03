@@ -21,7 +21,8 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import torch
-from verl.utils.torch_functional import get_response_mask
+
+# from verl.utils.torch_functional import get_response_mask
 from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch

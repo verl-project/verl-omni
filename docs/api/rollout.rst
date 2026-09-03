@@ -29,6 +29,24 @@ Diffusion Agent Loop
 .. autoclass:: verl_omni.agent_loop.DiffusionAgentLoopOutput
    :members:
 
+Variable-Length Reference Rows
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Diffusion pipelines may return per-sample ``condition_video_rows`` and
+``condition_audio_rows`` with different lengths. The Agent Loop validates each
+``condition_*_row_count``, pads both fields to ``max_prompt_embed_length``, and
+emits ``condition_*_rows_mask`` tensors. This fixed transport shape lets the
+standard :class:`verl.experimental.agent_loop.AgentLoopManager` concatenate
+outputs from multiple rollout workers without model-specific manager logic.
+
+Before Actor training,
+:func:`verl_omni.workers.utils.padding.embeds_padding_2_no_padding` removes the
+global padding and stores the rows as jagged tensors. The DiffusionNFT engine
+restores only the minibatch-local maximum immediately before model input. This
+path raises an error for invalid tensor shapes, count or mask mismatches, or row
+counts above ``max_prompt_embed_length``; it never truncates reference rows
+silently.
+
 Rollout Replica
 ~~~~~~~~~~~~~~~~~
 

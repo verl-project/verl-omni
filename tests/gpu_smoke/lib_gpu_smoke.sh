@@ -103,8 +103,10 @@ EOF
     export PYTHONUNBUFFERED=1
     export RAY_DEDUP_LOGS=0
     if [[ -n "${CONDA_PREFIX:-}" ]]; then
+        export FLASHINFER_DISABLE_VERSION_CHECK="${FLASHINFER_DISABLE_VERSION_CHECK:-1}"
         export LD_LIBRARY_PATH="${CONDA_PREFIX}/cuda-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     fi
+    export FLASHINFER_DISABLE_VERSION_CHECK="${FLASHINFER_DISABLE_VERSION_CHECK:-1}"
 
     TEST_IDS=()
     TEST_NAMES=()
@@ -132,6 +134,10 @@ run_test() {
 
     if [[ "${GPU_SMOKE_SKIP_RAY_STOP:-0}" != "1" ]]; then
         ray stop --force 2>/dev/null || true
+        # Ray/vLLM child processes may release their distributed rendezvous
+        # sockets asynchronously; let them exit before the next smoke test
+        # selects a new port.
+        sleep 3
     fi
 
     sep

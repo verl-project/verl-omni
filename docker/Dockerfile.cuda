@@ -7,7 +7,7 @@
 #   docker build -f docker/Dockerfile.cuda -t verl-omni:gpu \
 #     --build-arg VLLM_VERSION=0.27.0 \
 #     --build-arg KERNELS_VERSION=0.14.1 \
-#     --build-arg VERL_GIT_REF=8a694930275061f52ebd538c906ef8819af56dbd .
+#     --build-arg VERL_GIT_REF=fefb080262e1c015a0ea05f958822a6a512dc795 .
 #
 # Build with dev extras (pytest, pre-commit, …):
 #   docker build -f docker/Dockerfile.cuda --target dev -t verl-omni:gpu-dev .

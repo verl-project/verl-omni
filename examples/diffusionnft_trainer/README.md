@@ -6,6 +6,12 @@ This example shows how to post-train `Qwen-Image` with DiffusionNFT on an OCR-st
 
 DiffusionNFT is a direct-preference / forward-process algorithm. Unlike PPO-style FlowGRPO training, this example trains from final clean latents and uses an `old` LoRA adapter as the rollout policy while updating the `default` adapter.
 
+A MiniMax H3 text-to-audio-video recipe is also available at
+[`minimax_h3/run_minimax_h3_t2va_lora.sh`](minimax_h3/run_minimax_h3_t2va_lora.sh).
+It uses the dedicated token-ID-native H3 AgentLoop; see the
+[MiniMax H3 recipe README](minimax_h3/README.md) for model staging, data preparation,
+and launch instructions.
+
 For the full installation guide, see [Installation](../../docs/start/install.md). For implementation details on adding or extending direct-preference diffusion algorithms, see `docs/contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md`.
 
 ## Installation

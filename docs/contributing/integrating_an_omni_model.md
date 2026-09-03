@@ -1,6 +1,6 @@
 # How to Add a New Omni Model
 
-Last updated: 07/28/2026.
+Last updated: 08/31/2026.
 
 This guide walks through adding a new omni (multimodal autoregressive) model to
 the verl-omni training framework. It uses the Qwen3-Omni Thinker adapter as a
@@ -60,6 +60,17 @@ adapt each implementation to your model's architecture:
   `module._no_split_modules` to the correct decoder layer class for FSDP.
   This method runs before FSDP wrapping and LoRA injection.
 
+- **`prepare_model_inputs(model_inputs, micro_batch, model_config)`**
+  (optional): Validate model-native trajectory or conditioning data retained by
+  rollout and add it to the actor forward inputs. Per-sample rollout data starts
+  under a model-defined, namespaced key in `AgentLoopOutput.extra_fields`;
+  `AgentLoopWorker` batches that key into the top level of `micro_batch`. For
+  example, data stored as `output.extra_fields["your_model_replay"]` is consumed
+  as `micro_batch["your_model_replay"]`. This is required when the policy token
+  sequence alone cannot reconstruct the exact sampled trajectory. Missing
+  required fields or inconsistent shapes should raise an actionable error; the
+  adapter must not silently reconstruct a different trajectory.
+
 Reference:
 [`verl_omni/pipelines/qwen3_omni/thinker_training_adapter.py`](../../verl_omni/pipelines/qwen3_omni/thinker_training_adapter.py)
 
@@ -86,6 +97,15 @@ Optional overrides: `ensure_pipeline_registered` (register non-standard
 pipeline variants with vLLM-Omni), `get_engine_hf_overrides` (HF config
 overrides like `enable_audio_output: false`), `get_stage_engine_extras`
 (per-stage overrides like `model_arch`).
+
+When training an omni model's autoregressive Talker stage, also override
+`postprocess_agent_loop_output`. Put the sampled policy sequence in
+`response_ids`, align `response_mask` and optional `response_logprobs`
+one-to-one, and retain model-native acoustic trajectory and conditioning data
+under a model-defined, namespaced key in `extra_fields`. The corresponding
+training adapter consumes the batched top-level key in `prepare_model_inputs`.
+The common contract intentionally does not prescribe the key name, its nested
+schema, a codebook count, or a conditioning source.
 
 Reference:
 [`verl_omni/pipelines/qwen3_omni/omni_rollout_adapter.py`](../../verl_omni/pipelines/qwen3_omni/omni_rollout_adapter.py)
@@ -129,6 +149,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.lora_rank=32 \
     actor_rollout_ref.actor.policy_loss.loss_mode=gspo \
     actor_rollout_ref.actor.strategy=fsdp2 \
+    actor_rollout_ref.rollout.agent.default_agent_loop=omni_single_turn_agent \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode="ar" \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name="your_pipeline_name" \
     trainer.n_gpus_per_node=4 \
@@ -141,10 +162,47 @@ Key points:
   triggered by `VERL_USE_EXTERNAL_MODULES=verl_omni`.
 - No `stage_configs_path` — the rollout deploy config is auto-generated
   from `pipeline_name` by `vLLMOmniHttpServer`.
+- Use `omni_single_turn_agent` only for an omni model's autoregressive Talker
+  stage when its rollout adapter must map model-native output to the Talker
+  policy sequence. Standard text-token stages such as the Thinker can keep
+  verl's `single_turn_agent`.
 - No `--config-path/--config-name` — all config comes from CLI overrides
   on `verl_omni`'s `omni_trainer.yaml` defaults.
 - The `"$@"` at the end lets callers override any field without editing
   the script (e.g. `bash run.sh trainer.total_epochs=10`).
+
+### Sizing rollout memory in colocated sleep mode
+
+In colocated training the rollout engine sleeps (level 1) while the actor
+trains and re-maps its memory (`weights`, then `kv_cache`) every step, on
+the same GPUs. Two footprint components matter, and they are controlled by
+different knobs:
+
+- **Steady-state KV cache** — pre-allocated at
+  `gpu_memory_utilization × total` and self-limiting (a full pool preempts,
+  it does not OOM). Raise it for long-response workloads that genuinely
+  fill KV; lower it to widen the wake-up remap margin (audio and other
+  encoder-heavy workloads see larger unbudgeted transients, so they need
+  more margin than image/text-only ones at the same utilization).
+- **Unbudgeted generation transients** — CUDA-graph capture pools (largest
+  capture defaults to `min(2 × max_num_seqs, 512)`) and the in-flight
+  multimodal envelope (encoder outputs retained for all concurrently
+  admitted requests) sit on top of every budget. These are bounded by
+  `max_num_seqs` and `cudagraph_capture_sizes`, **not** by
+  `gpu_memory_utilization` or `max_num_batched_tokens`.
+
+For encoder-heavy workloads (e.g. audio) with short responses, capping
+concurrency keeps the transient off the memory ceiling at negligible
+throughput cost:
+
+```bash
++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs=256 \
+    actor_rollout_ref.rollout.cudagraph_capture_sizes=[1,2,4,8,16,32,64,128,256]
+```
+
+For long-response workloads that fill the KV pool, prefer keeping
+concurrency high and tuning `gpu_memory_utilization` instead — preempting
+KV is cheap relative to starving decode.
 
 Reference:
 [`examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh`](../../examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh)

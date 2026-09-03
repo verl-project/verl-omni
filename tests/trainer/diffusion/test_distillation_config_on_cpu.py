@@ -40,22 +40,83 @@ class TestDiffusionDistillationConfig:
                 teacher_models={"teacher_model": DiffusionDistillationTeacherModelConfig()},
             )
 
-    def test_enabled_requires_single_teacher_model_entry(self):
-        with pytest.raises(NotImplementedError, match="teacher_model"):
-            DiffusionDistillationConfig(
-                enabled=True,
-                teacher_models={
-                    "teacher_model": DiffusionDistillationTeacherModelConfig(model_path="/ckpt/a"),
-                    "second": DiffusionDistillationTeacherModelConfig(model_path="/ckpt/b"),
-                },
-            )
-
-    def test_enabled_with_model_path_passes(self):
+    def test_single_teacher_is_keyed_default(self):
         config = DiffusionDistillationConfig(
             enabled=True,
             teacher_models={"teacher_model": DiffusionDistillationTeacherModelConfig(model_path="/ckpt/teacher")},
         )
-        assert config.teacher_models["teacher_model"].model_path == "/ckpt/teacher"
+        assert set(config.teacher_models) == {"default"}
+        assert config.teacher_models["default"].key == "default"
+        assert config.teacher_models["default"].model_path == "/ckpt/teacher"
+        assert config.teacher_models["default"].world_size == 0
+
+    def test_single_teacher_fills_standalone_pool(self):
+        config = DiffusionDistillationConfig(
+            enabled=True,
+            n_gpus_per_node=2,
+            nnodes=2,
+            teacher_models={"teacher_model": DiffusionDistillationTeacherModelConfig(model_path="/ckpt/teacher")},
+        )
+        assert config.teacher_models["default"].world_size == 4
+
+    def test_multi_teacher_pops_default_entry_and_indexes_by_key(self):
+        config = DiffusionDistillationConfig(
+            enabled=True,
+            teacher_models={
+                "teacher_model": DiffusionDistillationTeacherModelConfig(),
+                "a": DiffusionDistillationTeacherModelConfig(key="ocr", model_path="/ckpt/a"),
+                "b": DiffusionDistillationTeacherModelConfig(key="aes", model_path="/ckpt/b"),
+            },
+        )
+        assert set(config.teacher_models) == {"ocr", "aes"}
+        assert config.teacher_models["ocr"].model_path == "/ckpt/a"
+        assert config.teacher_models["aes"].model_path == "/ckpt/b"
+
+    def test_multi_teacher_requires_key(self):
+        with pytest.raises(ValueError, match="key must be specified"):
+            DiffusionDistillationConfig(
+                enabled=True,
+                teacher_models={
+                    "teacher_model": DiffusionDistillationTeacherModelConfig(),
+                    "a": DiffusionDistillationTeacherModelConfig(model_path="/ckpt/a"),
+                    "b": DiffusionDistillationTeacherModelConfig(key="aes", model_path="/ckpt/b"),
+                },
+            )
+
+    def test_multi_teacher_rejects_duplicate_key(self):
+        with pytest.raises(ValueError, match="Duplicate teacher key"):
+            DiffusionDistillationConfig(
+                enabled=True,
+                teacher_models={
+                    "teacher_model": DiffusionDistillationTeacherModelConfig(),
+                    "a": DiffusionDistillationTeacherModelConfig(key="ocr", model_path="/ckpt/a"),
+                    "b": DiffusionDistillationTeacherModelConfig(key="ocr", model_path="/ckpt/b"),
+                },
+            )
+
+    def test_standalone_pool_requires_matching_world_size_sum(self):
+        with pytest.raises(ValueError, match="must match the distillation resource pool size"):
+            DiffusionDistillationConfig(
+                enabled=True,
+                n_gpus_per_node=4,
+                nnodes=1,
+                teacher_models={
+                    "teacher_model": DiffusionDistillationTeacherModelConfig(),
+                    "a": DiffusionDistillationTeacherModelConfig(key="ocr", model_path="/ckpt/a", world_size=1),
+                    "b": DiffusionDistillationTeacherModelConfig(key="aes", model_path="/ckpt/b", world_size=1),
+                },
+            )
+
+    def test_colocated_ignores_world_size(self):
+        config = DiffusionDistillationConfig(
+            enabled=True,
+            teacher_models={
+                "teacher_model": DiffusionDistillationTeacherModelConfig(),
+                "a": DiffusionDistillationTeacherModelConfig(key="ocr", model_path="/ckpt/a"),
+                "b": DiffusionDistillationTeacherModelConfig(key="aes", model_path="/ckpt/b"),
+            },
+        )
+        assert set(config.teacher_models) == {"ocr", "aes"}
 
 
 class TestDistillationConfigComposition:
@@ -81,4 +142,28 @@ class TestDistillationConfigComposition:
             ]
         )
         config = omega_conf_to_dataclass(cfg.distillation)
-        assert config.teacher_models["teacher_model"].model_path == "/ckpt/teacher"
+        assert config.teacher_models["default"].model_path == "/ckpt/teacher"
+        assert config.teacher_key == "data_source"
+        assert config.n_gpus_per_node == 0
+        assert config.nnodes == 0
+
+    def test_cli_multi_teacher_entries(self):
+        from verl.utils.config import omega_conf_to_dataclass
+
+        cfg = self._compose(
+            [
+                "distillation.enabled=true",
+                "+distillation.teacher_models.a.key=ocr",
+                "+distillation.teacher_models.a.model_path=/ckpt/a",
+                "+distillation.teacher_models.a.world_size=1",
+                "+distillation.teacher_models.b.key=aes",
+                "+distillation.teacher_models.b.model_path=/ckpt/b",
+                "+distillation.teacher_models.b.world_size=1",
+                "distillation.n_gpus_per_node=2",
+                "distillation.nnodes=1",
+            ]
+        )
+        config = omega_conf_to_dataclass(cfg.distillation)
+        assert set(config.teacher_models) == {"ocr", "aes"}
+        assert all(isinstance(t, DiffusionDistillationTeacherModelConfig) for t in config.teacher_models.values())
+        assert config.teacher_models["aes"].world_size == 1

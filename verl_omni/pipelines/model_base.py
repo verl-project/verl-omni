@@ -75,6 +75,11 @@ class DiffusionModelBase(ABC):
         return cls.get_class_by_name(architecture, algorithm, model_config.external_lib)
 
     @classmethod
+    def peek_class(cls, architecture: str, algorithm: str) -> Optional[type["DiffusionModelBase"]]:
+        """Return the registered adapter for ``(architecture, algorithm)`` or ``None`` (non-fatal)."""
+        return cls._registry.get((architecture, algorithm))
+
+    @classmethod
     def get_class_by_name(
         cls,
         architecture: str,
@@ -109,6 +114,20 @@ class DiffusionModelBase(ABC):
     @classmethod
     def configure_train_mode(cls, module: torch.nn.Module) -> None:
         """Hook called after ``module.train()`` for architecture-specific overrides."""
+        return
+
+    @classmethod
+    def preserve_fp32_modules(cls) -> bool:
+        """Whether to preserve diffusers ``_keep_in_fp32_modules`` during model loading.
+
+        Models whose FSDP wrapping units contain both fp32 and reduced-precision
+        parameters should override this and return ``False``.
+        """
+        return True
+
+    @classmethod
+    def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:
+        """Validate LoRA settings; default no-op. Override for rollout-sync-constrained models."""
         return
 
     @classmethod
@@ -627,6 +646,24 @@ class OmniModelBase(ABC):
 
         return module
 
+    @classmethod
+    def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
+        """Add model-native rollout data to an actor replay forward call.
+
+        ``model_inputs`` contains the standard language-model inputs prepared
+        by verl. A trainable Talker stage may also need trajectory or conditioning
+        data retained under a model-defined key in the per-sample rollout
+        ``extra_fields``. ``AgentLoopWorker`` batches each such key into the top
+        level of ``micro_batch``. A model adapter can validate its own namespaced
+        payload and return the exact inputs required to replay the sampled policy
+        sequence.
+
+        The default keeps the standard autoregressive path unchanged. An
+        adapter that overrides this hook must fail closed when required fields
+        or shapes are missing instead of reconstructing a different trajectory.
+        """
+        return model_inputs
+
 
 class OmniRolloutPipelineBase:
     """Registry for omni model vLLM-Omni pipeline topologies.
@@ -666,6 +703,22 @@ class OmniRolloutPipelineBase:
         topology or external runner configuration.
         """
         return cls._registry.get(model_type)
+
+    @classmethod
+    def postprocess_agent_loop_output(cls, output, *, tokenizer, response_length: int):
+        """Map model-native rollout data to the policy sequence used by RL.
+
+        Adapters for an omni model's autoregressive Talker stage should put the
+        sampled policy tokens in ``response_ids`` and align ``response_mask``
+        and optional ``response_logprobs`` one-to-one. Architecture-specific
+        trajectory and conditioning data stays under a model-defined, namespaced
+        key in ``extra_fields``. ``AgentLoopWorker`` later exposes that key at the
+        top level of the actor micro-batch for
+        :meth:`OmniModelBase.prepare_model_inputs`.
+
+        The default preserves the standard text-token output unchanged.
+        """
+        return output
 
     @classmethod
     @abstractmethod
