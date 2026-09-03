@@ -19,7 +19,6 @@ Run the distributed tests with ≥ 4 GPUs:
     torchrun --nproc_per_node=4 --local-ranks-filter=0 tests/workers/test_diffusers_ulysses.py
 """
 
-import importlib.util
 import os
 from datetime import timedelta
 
@@ -30,15 +29,8 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
 
-_KERNELS_INSTALLED = importlib.util.find_spec("kernels") is not None
-
-_requires_kernels = pytest.mark.skipif(not _KERNELS_INSTALLED, reason="kernels package not installed")
-
-_ulysses_backends = [
-    "native",
-    pytest.param("flash_varlen_hub", marks=[_requires_kernels]),
-    pytest.param("_flash_3_varlen_hub", marks=[_requires_kernels]),
-]
+# Hub FA kernels don't fetch on the torch-2.13 CI stack (no flash-attn2 build; hf-mirror breaks flash-attn3).
+_ulysses_backends = ["native"]
 
 
 def get_device_name() -> str:
