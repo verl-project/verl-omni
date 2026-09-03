@@ -130,6 +130,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     async def run_server(self, args: argparse.Namespace):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
+        engine_args["log_stats"] = not self.config.disable_log_stats
 
         # TODO (mike): drop this patch once vllm-omni strips the serialized default
         # fault_tolerance_config at its kwargs boundary, or vLLM defaults it to None —
