@@ -72,7 +72,6 @@ GROUP_PATTERNS = {
         "tests/pipelines/test_qwen3_tts*",
         "tests/special_e2e/*omni*",
         "tests/special_e2e/*qwen3_tts*",
-        "verl_omni/models/transformers/qwen3_omni_thinker.py",
         "verl_omni/pipelines/qwen3_tts/**",
         "verl_omni/trainer/config/omni/**",
         "verl_omni/trainer/omni/**",
