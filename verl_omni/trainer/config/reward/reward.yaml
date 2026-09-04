@@ -29,6 +29,16 @@ reward_functions: {}
 # Aggregation method for multi-reward. Only "weighted_sum" is supported.
 aggregation: weighted_sum
 
+# Extra kwargs read directly by the reward manager (e.g. verl's "dapo" manager).
+reward_kwargs:
+  # max_resp_len must exceed overlong_buffer_cfg.len when enable is true.
+  overlong_buffer_cfg:
+    enable: false
+    len: 0
+    penalty_factor: 0.0
+    log: true
+  max_resp_len: null
+
 # reward manager configuration
 reward_manager:
   _target_: verl.workers.config.reward_model.RewardManagerConfig
