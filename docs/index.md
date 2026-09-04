@@ -80,6 +80,7 @@ examples/mixgrpo_trainer.md
 examples/diffusionopd_trainer.md
 examples/flowgrpo_trainer_sd35_drm.md
 examples/bagel/flowgrpo_trainer_bagel.md
+examples/qwen3_tts/grpo_trainer_qwen3_tts.md
 examples/qwen_image_edit/flowgrpo_trainer_qwen_image_edit.md
 examples/ltx2/flowgrpo_trainer_ltx2.md
 examples/minimax_h3/diffusionnft_trainer_minimax_h3.md

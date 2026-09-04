@@ -11,9 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""CPU-only reward used by the Qwen3-TTS execution smoke test."""
 
-from .audio import AudioRewardManager
-from .multi import MultiVisualRewardManager
-from .visual import VisualRewardManager
+import numpy as np
 
-__all__ = ["AudioRewardManager", "VisualRewardManager", "MultiVisualRewardManager"]
+
+def compute_score(solution_audio, **kwargs):
+    del kwargs
+    waveform, sample_rate = solution_audio
+    duration_s = np.asarray(waveform).size / sample_rate
+    return {"score": float(duration_s), "duration_s": float(duration_s)}

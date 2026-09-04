@@ -43,6 +43,12 @@ logger = logging.getLogger(__name__)
 class OmniFSDPEngine(FSDPEngineWithLMHead):
     """FSDP engine for omni models"""
 
+    @staticmethod
+    def _cast_dtensor_weight_for_sync(tensor: torch.Tensor) -> torch.Tensor:
+        if tensor.is_floating_point() and tensor.dtype != torch.bfloat16:
+            return tensor.to(dtype=torch.bfloat16, non_blocking=True)
+        return tensor
+
     def prepare_model_inputs(self, micro_batch):
         """Prepare standard LM inputs, then add model-native replay fields."""
         model_inputs, output_args = super().prepare_model_inputs(micro_batch)
@@ -97,11 +103,10 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             per_tensor_param = params.items()
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-            # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
             per_tensor_param = (
                 (
                     name,
-                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                    self._cast_dtensor_weight_for_sync(param.to(device, non_blocking=True).full_tensor())
                     if isinstance(param, DTensor)
                     else param,
                 )
@@ -144,7 +149,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
                 for name, param in params.items():
                     yield (
                         name,
-                        param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                        self._cast_dtensor_weight_for_sync(param.to(device, non_blocking=True).full_tensor())
                         if isinstance(param, DTensor)
                         else param.detach().clone(),
                     )
@@ -171,6 +176,12 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
         self.model_config: OmniModelConfig
         architecture = self.model_config.architecture
+        adapter_cls = OmniModelBase.get_class_by_name(
+            architecture,
+            self.model_config.model_stage,
+            self.model_config.get("external_lib"),
+        )
+        self.model_adapter_cls = adapter_cls
 
         torch_dtype = self.engine_config.model_dtype
 
@@ -192,20 +203,21 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            module = AutoModelForMultimodalLM.from_pretrained(
+            auto_model_cls = getattr(adapter_cls, "auto_model_class", None) or AutoModelForMultimodalLM
+            module = auto_model_cls.from_pretrained(
                 pretrained_model_name_or_path=self.model_config.local_path,
                 torch_dtype=torch_dtype,
                 config=self.model_config.hf_config,
                 trust_remote_code=self.model_config.trust_remote_code,
             )
-
-            adapter_cls = OmniModelBase.get_class_by_name(
-                architecture,
-                self.model_config.model_stage,
-                self.model_config.get("external_lib"),
-            )
-            self.model_adapter_cls = adapter_cls
             module = adapter_cls.configure_model(module, self.model_config)
+
+            if self.engine_config.strategy == "fsdp" and not self.engine_config.use_orig_params:
+                trainability = {parameter.requires_grad for parameter in module.parameters()}
+                if len(trainability) > 1:
+                    raise ValueError(
+                        "FSDP1 requires use_orig_params=true when a model adapter freezes only part of the model."
+                    )
 
             module.to(torch_dtype)
 

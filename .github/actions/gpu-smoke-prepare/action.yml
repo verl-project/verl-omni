@@ -20,7 +20,7 @@ runs:
         export UV_CACHE_DIR="${UV_CACHE_DIR:-${HOME}/.cache/uv}"
         git config --global http.postBuffer 524288000 || true
         # Base image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
-        uv pip install --system --break-system-packages ".[gpu,dev,audio]"
+        uv pip install --system --break-system-packages ".[gpu,dev,audio,tts]"
         uv pip install --system --break-system-packages "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
         uv pip install --system --break-system-packages --no-deps --reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
         uv pip install --system --break-system-packages TransferQueue==0.1.8
@@ -31,6 +31,11 @@ runs:
         uv pip install --system --break-system-packages veomni==0.1.11 --no-deps
         uv pip install --system --break-system-packages torchcodec librosa soundfile av audioread
         uv pip install --system --break-system-packages "transformers[mistral-common]==5.14.1"
+        # The pinned Qwen3-TTS TF5 source declares Transformers >=5.15.1, while
+        # this repository deliberately caps Transformers at 5.14.1. Install its
+        # exact tested source without letting that metadata replace the CI stack.
+        uv pip install --system --break-system-packages --no-deps \
+          "qwen-tts @ git+https://github.com/QwenLM/Qwen3-TTS.git@$(cat .github/qwen_tts_pin.txt)"
         # NCCL checkpoint engine (diffusion v1 separate_async weight sync).
         uv pip install --system --break-system-packages pyzmq
         uv pip install --system --break-system-packages cupy-cuda12x || uv pip install --system --break-system-packages cupy-cuda13x

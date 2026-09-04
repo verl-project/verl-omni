@@ -1,0 +1,44 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import importlib.util
+import sys
+from pathlib import Path
+
+
+def _load_selector():
+    path = Path(__file__).parents[1] / "gpu_smoke/select_gpu_smoke_groups.py"
+    spec = importlib.util.spec_from_file_location("gpu_smoke_selector_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_qwen3_tts_smoke_files_select_only_omni_e2e_group():
+    selector = _load_selector()
+
+    selected = selector.select_group_names(
+        [
+            ".github/qwen_tts_pin.txt",
+            "examples/grpo_trainer/qwen3_tts/run_qwen3_tts_grpo.sh",
+            "tests/special_e2e/build_qwen3_tts_tiny_random.py",
+            "tests/special_e2e/run_qwen3_tts_grpo_smoke.sh",
+            "tests/special_e2e/create_dummy_qwen3_tts_grpo_data.py",
+            "tests/special_e2e/qwen3_tts_dummy_reward.py",
+        ]
+    )
+
+    assert selected == ["ci-e2e-omni"]

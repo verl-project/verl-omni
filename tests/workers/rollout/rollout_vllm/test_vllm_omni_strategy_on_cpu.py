@@ -13,12 +13,15 @@
 # limitations under the License.
 
 from argparse import Namespace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 import torch
+import yaml
 
+from verl_omni.pipelines.qwen3_omni.omni_rollout_adapter import Qwen3OmniRolloutAdapter
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_ar_strategy as ar_strategy_module
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_async_server as server_module
@@ -195,6 +198,26 @@ def test_ar_strategy_preserves_engine_kwarg_normalization(monkeypatch):
     }
 
 
+@pytest.mark.parametrize(
+    ("timeout_kwargs", "expected"),
+    [
+        ({"stage-init-timeout": 45}, {"stage-init-timeout": 45, "init-timeout": 600}),
+        (
+            {"stage_init_timeout": 45, "init-timeout": 90},
+            {"stage-init-timeout": 45, "init-timeout": 90},
+        ),
+    ],
+)
+def test_ar_strategy_preserves_hyphenated_timeout_kwargs(monkeypatch, timeout_kwargs, expected):
+    monkeypatch.setattr(ar_strategy_module.OmniRolloutPipelineBase, "get_class", lambda pipeline_name: None)
+    strategy = ARStrategy(SimpleNamespace())
+    engine_kwargs = {"pipeline_name": "missing", **timeout_kwargs}
+
+    strategy.preprocess_engine_kwargs(engine_kwargs)
+
+    assert engine_kwargs == expected
+
+
 def test_ar_strategy_preserves_engine_argument_normalization():
     server = SimpleNamespace(config=SimpleNamespace(logprobs_mode="raw_logprobs"))
     strategy = ARStrategy(server)
@@ -216,6 +239,91 @@ def test_ar_strategy_preserves_engine_argument_normalization():
         "logprobs_mode": "raw_logprobs",
         "compilation_config": {"keep": 1, "nested": {"keep": 2}},
     }
+
+
+def test_ar_strategy_preserves_qwen3_omni_thinker_only_contract():
+    server = SimpleNamespace(
+        config=SimpleNamespace(
+            max_model_len=8,
+            prompt_length=4,
+            response_length=4,
+            repetition_penalty=1.0,
+            logprobs_mode="processed_logprobs",
+        ),
+        model_config=SimpleNamespace(processor=None),
+        global_steps=12,
+    )
+    strategy = ARStrategy(server)
+    strategy._rollout_adapter = Qwen3OmniRolloutAdapter
+    strategy._rollout_output_modalities = None
+
+    engine_args = {"model_stage": "thinker"}
+    strategy.prepare_engine_args(engine_args, Namespace(stage_init_timeout=None, init_timeout=None))
+    assert engine_args["model_stage"] == "thinker"
+
+    prompt, params = strategy.preprocess_input(
+        prompt_ids=[1, 2],
+        sampling_params={"max_new_tokens": 2, "logprobs": True},
+        multi_modal_data={},
+        lora_request=None,
+        negative_prompt_ids=None,
+    )
+    assert prompt == {"prompt_token_ids": [1, 2]}
+    assert isinstance(params, ar_strategy_module.SamplingParams)
+
+    completion = SimpleNamespace(
+        token_ids=[7],
+        logprobs=[{7: SimpleNamespace(logprob=-0.25)}],
+        finish_reason="stop",
+        num_preempted=0,
+    )
+    output = strategy.process_output(
+        SimpleNamespace(request_output=SimpleNamespace(outputs=[completion])),
+        params=params,
+        sampling_params={},
+    )
+    assert output.extra_fields == {"global_steps": 12}
+
+
+def test_ar_strategy_writes_qwen3_omni_thinker_only_deploy_config(monkeypatch):
+    monkeypatch.setattr(ar_strategy_module, "get_visible_devices_keyword", lambda: "CUDA_VISIBLE_DEVICES")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    server = SimpleNamespace(
+        config=SimpleNamespace(
+            tensor_model_parallel_size=1,
+            text_encoder_tp_size=1,
+            max_model_len=8,
+            max_num_batched_tokens=8,
+        ),
+        _rollout_flags={},
+    )
+    strategy = ARStrategy(server)
+    engine_kwargs = {
+        "pipeline_name": "qwen3_omni_moe",
+        "pipeline_mode": "thinker_only",
+    }
+
+    strategy.preprocess_engine_kwargs(engine_kwargs)
+
+    deploy_path = engine_kwargs["deploy-config"]
+    deploy = yaml.safe_load(Path(deploy_path).read_text(encoding="utf-8"))
+    assert deploy["pipeline"] == Qwen3OmniRolloutAdapter.get_pipeline_id("thinker_only")
+    assert [stage["stage_id"] for stage in deploy["stages"]] == [0]
+    assert strategy._rollout_output_modalities is None
+    server._temp_deploy_ctx.cleanup()
+
+
+def test_ar_strategy_rejects_qwen3_omni_full_multi_output_without_combiner():
+    server = SimpleNamespace(_rollout_flags={})
+    strategy = ARStrategy(server)
+
+    with pytest.raises(ValueError, match="multiple final pipeline outputs"):
+        strategy.preprocess_engine_kwargs(
+            {
+                "pipeline_name": "qwen3_omni_moe",
+                "pipeline_mode": "full",
+            }
+        )
 
 
 def test_diffusion_strategy_preserves_engine_argument_preparation(monkeypatch):

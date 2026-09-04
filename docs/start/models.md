@@ -234,6 +234,21 @@ parquet pairs and does not start rollout or reward workers.
 
 ---
 
+### Qwen3-TTS-12Hz-0.6B Base
+
+| Property | Detail |
+|----------|--------|
+| **Hugging Face ID** | `Qwen/Qwen3-TTS-12Hz-0.6B-Base` |
+| **Trainable component** | Talker codec-0 policy, full-parameter example |
+| **Rollout** | Two-stage vLLM-Omni Talker + code2wav pipeline |
+| **Algorithm** | Stock GRPO, vanilla PPO loss, optional direct KL |
+| **Reward** | Generic decoded-audio reward; SpeechJudge-BTRM external scorer example |
+
+The example uses two training GPUs and an independently deployed audio scorer.
+See [Qwen3-TTS GRPO with an audio reward](../../examples/grpo_trainer/qwen3_tts/README.md).
+
+---
+
 ## Model Architecture Summary
 
 | Model | Architecture | Text encoder |
@@ -247,6 +262,7 @@ parquet pairs and does not start rollout or reward workers.
 | MiniMax-H3 | MiniMax H3 transformer | H3 text encoder |
 | BAGEL | Unified MM | — |
 | Qwen3-Omni-30B | Omni MoE | Qwen3 |
+| Qwen3-TTS-12Hz-0.6B | Talker + code2wav | Qwen3 |
 
 ---
 
@@ -261,7 +277,8 @@ parquet pairs and does not start rollout or reward workers.
 | CLAP | `laion/larger_clap_general` | Audio | LTX-2.3 (Flow-GRPO), MiniMax-H3 (DiffusionNFT) | Local transformers load |
 | ImageBind | Local `.pth` | Audio + Video | LTX-2.3 (Flow-GRPO), MiniMax-H3 (DiffusionNFT) | Local ImageBind package (CC-BY-NC-SA 4.0) |
 | DiNa-LRM | HTTP latent scorer | Diffusion latents | SD3.5 (Flow-GRPO DRM) | Separate `diffusion-rm` process, safetensors HTTP |
-| HTTP scorer | External HTTP service | Any | Any model | Gunicorn/Flask, pickle protocol |
+| HTTP scorer | External HTTP service | Image/audio | Any model | Pickle image or JSON audio protocol |
+| SpeechJudge-BTRM | `RMSnow/SpeechJudge-BTRM` | Audio quality | Qwen3-TTS example | External service; CC-BY-NC-4.0 |
 | JPEG incompressibility | Rule-based | Image stats | Any diffusion model | No model process needed |
 
 For end-to-end instructions on setting up each reward, see the respective
@@ -271,18 +288,20 @@ trainer's README in `examples/`.
 
 ## Which Trainer for Which Model?
 
-| Algorithm | Qwen-Image | Qwen-Image-Edit | SD3.5 | Wan2.2 | LTX-2.3 | MiniMax-H3 | BAGEL | Qwen3-Omni |
-|-----------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Flow-GRPO | ✅ | ✅ | ✅ | — | ✅ | WIP | ✅ | — |
-| Flow-DPPO | ✅ | — | — | — | — | — | — | — |
-| GRPO-Guard | ✅ | — | — | — | — | — | — | — |
-| Mix-GRPO | ✅ | — | — | — | — | — | — | — |
-| DanceGRPO | — | — | — | ✅ | — | — | — | — |
-| DPO | ✅ | — | ✅ | — | — | — | — | ✅ |
-| DiffusionNFT | ✅ | — | — | — | — | ✅ | — | — |
-| [DiffusionOPD](../algo/diffusion_opd.md) (incl. MOPD) | — | — | ✅ | — | — | — | — | — |
-| GSPO | — | — | — | — | — | — | — | ✅ |
+| Algorithm | Qwen-Image | Qwen-Image-Edit | SD3.5 | Wan2.2 | LTX-2.3 | MiniMax-H3 | BAGEL | Qwen3-Omni | Qwen3-TTS |
+|-----------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| GRPO | — | — | — | — | — | — | — | — | ✅ |
+| Flow-GRPO | ✅ | ✅ | ✅ | — | ✅ | WIP | ✅ | — | — |
+| Flow-DPPO | ✅ | — | — | — | — | — | — | — | — |
+| GRPO-Guard | ✅ | — | — | — | — | — | — | — | — |
+| Mix-GRPO | ✅ | — | — | — | — | — | — | — | — |
+| DanceGRPO | — | — | — | ✅ | — | — | — | — | — |
+| DPO | ✅ | — | ✅ | — | — | — | — | ✅ | WIP |
+| DiffusionNFT | ✅ | — | — | — | — | ✅ | — | — | — |
+| [DiffusionOPD](../algo/diffusion_opd.md) (incl. MOPD) | — | — | ✅ | — | — | — | — | — | — |
+| GSPO | — | — | — | — | — | — | — | ✅ | WIP |
 
-HunyuanImage-3.0 (MixGRPO / SRPO) and Qwen3-TTS (DPO / GSPO) appear on the
-project README as Planned or WIP and do not yet have a ready-to-run recipe, so
-they are omitted from the catalogue above.
+HunyuanImage-3.0 (MixGRPO / SRPO) appears on the project README as Planned or
+WIP and does not yet have a ready-to-run recipe, so it is omitted from the
+catalogue above. Qwen3-TTS DPO and GSPO remain WIP; its ready-to-run GRPO recipe
+is listed above.

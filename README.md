@@ -195,15 +195,19 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
     <tr>
-    <td rowspan="2">Qwen3-TTS</td>
-    <td rowspan="2">Audio-modality</td>
-    <td rowspan="2">Text → Audio</td>
+    <td rowspan="3">Qwen3-TTS</td>
+    <td rowspan="3">Audio-modality</td>
+    <td rowspan="3">Text → Audio</td>
     <td>DPO</td>
     <td>WIP</td>
   </tr>
-    <tr>
+  <tr>
     <td>GSPO</td>
     <td>WIP</td>
+  </tr>
+  <tr>
+    <td>GRPO</td>
+    <td>✅</td>
   </tr>
 </table>
 

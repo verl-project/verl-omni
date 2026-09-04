@@ -479,6 +479,7 @@ class OmniModelBase(ABC):
     """
 
     _registry: dict[tuple[str, str], type["OmniModelBase"]] = {}
+    auto_model_class: Any = None
 
     @classmethod
     def register(cls, architecture: str, stage: str = "thinker"):
@@ -545,6 +546,11 @@ class OmniModelBase(ABC):
                 f"stage={stage!r}). Registered: {registered}. "
                 f"Set ``external_lib`` to load your training adapter."
             ) from None
+
+    @classmethod
+    def register_auto_classes(cls) -> None:
+        """Register optional model-package classes with Transformers auto APIs."""
+        return
 
     @classmethod
     @abstractmethod
@@ -615,7 +621,6 @@ class OmniModelBase(ABC):
         Default implementation strips the submodules returned by
         ``get_strip_modules``.  Override to also:
 
-        - Register the model class with ``AutoModelForCausalLM``.
         - Redirect ``forward()`` and embedding accessors to the
           trainable sub-component.
         - Force ``tie_word_embeddings=False`` for FSDP compatibility.
@@ -670,6 +675,7 @@ class OmniRolloutPipelineBase:
     """
 
     _registry: dict[str, type["OmniRolloutPipelineBase"]] = {}
+    supports_async_chunk = True
 
     @classmethod
     def register(cls, model_type: str):
@@ -747,6 +753,11 @@ class OmniRolloutPipelineBase:
         return {}
 
     @classmethod
+    def weight_sync_stage_ids(cls, pipeline_mode="thinker_only") -> list[int] | None:
+        """Return stages that receive actor weights, or all stages by default."""
+        return None
+
+    @classmethod
     def get_pipeline_id(cls, pipeline_mode: str = "thinker_only") -> str:
         """Return the vLLM-Omni pipeline model_type for *pipeline_mode*.
 
@@ -800,3 +811,25 @@ class OmniRolloutPipelineBase:
             dict: Extra key-value pairs merged into the stage's engine args.
         """
         return {}
+
+    @classmethod
+    def prepare_engine_prompt(
+        cls,
+        prompt_ids: list[int],
+        model_config,
+        multi_modal_data: dict,
+        mm_processor_kwargs: Optional[dict] = None,
+    ) -> dict | None:
+        """Build an architecture-specific rollout prompt when required."""
+        return None
+
+    @classmethod
+    def combine_engine_outputs(cls, outputs: list, prompt: dict) -> tuple[Any, dict[str, Any]]:
+        """Select the policy output and collect architecture-specific fields."""
+        if not outputs:
+            raise RuntimeError("The omni rollout engine returned no outputs.")
+        if len(outputs) != 1:
+            raise NotImplementedError(
+                "An omni rollout adapter with multiple final outputs must implement combine_engine_outputs()."
+            )
+        return outputs[0], {}

@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .audio import AudioRewardManager
-from .multi import MultiVisualRewardManager
-from .visual import VisualRewardManager
+from .omni_rollout_adapter import Qwen3TTSRolloutAdapter
+from .talker_training_adapter import Qwen3TTSTalkerAdapter
 
-__all__ = ["AudioRewardManager", "VisualRewardManager", "MultiVisualRewardManager"]
+__all__ = ["Qwen3TTSTalkerAdapter", "Qwen3TTSRolloutAdapter"]

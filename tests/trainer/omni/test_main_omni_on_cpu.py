@@ -123,6 +123,7 @@ class TestLoadTokenizerAndProcessor:
 
         assert model_config.tokenizer == "tokenizer"
         assert model_config.processor == "processor"
+        mock_adapter.register_auto_classes.assert_called_once_with()
         mock_adapter.configure_tokenizer.assert_called_once_with("local:tokenizer-path", model_config)
         mock_adapter.configure_processor.assert_called_once_with(str(tmp_path), model_config)
 

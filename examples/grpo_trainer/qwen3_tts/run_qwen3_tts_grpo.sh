@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+# Licensed under the Apache License, Version 2.0
+
+set -euo pipefail
+
+MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to a local Qwen3-TTS Base directory}"
+TRAIN_FILE="${TRAIN_FILE:?Set TRAIN_FILE to the training parquet}"
+VAL_FILE="${VAL_FILE:?Set VAL_FILE to the fixed validation parquet}"
+SPK_EMBED_PATH="${SPK_EMBED_PATH:?Set SPK_EMBED_PATH to a speaker embedding JSON file}"
+SCORER_URL="${SCORER_URL:?Set SCORER_URL to an audio scorer /score endpoint}"
+OUTPUT_DIR="${OUTPUT_DIR:-outputs/qwen3_tts_grpo}"
+NUM_GPUS="${NUM_GPUS:-2}"
+SEED="${SEED:-42}"
+TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-500}"
+TEST_FREQ="${TEST_FREQ:-20}"
+SAVE_FREQ="${SAVE_FREQ:-20}"
+RESUME_MODE="${RESUME_MODE:-auto}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+for path in "${MODEL_PATH}" "${TRAIN_FILE}" "${VAL_FILE}" "${SPK_EMBED_PATH}"; do
+    [[ -e "${path}" ]] || { printf 'Missing required path: %s\n' "${path}" >&2; exit 2; }
+done
+
+mkdir -p "${OUTPUT_DIR}"
+export PYTHONHASHSEED="${SEED}"
+export TOKENIZERS_PARALLELISM=false
+export VERL_USE_EXTERNAL_MODULES=verl_omni
+export VLLM_USE_FLASHINFER_SAMPLER=0
+
+"${PYTHON_BIN}" -m verl_omni.trainer.main_omni \
+    "data.train_files=${TRAIN_FILE}" \
+    "data.val_files=${VAL_FILE}" \
+    "data.seed=${SEED}" \
+    data.train_batch_size=4 \
+    data.dataloader_num_workers=0 \
+    data.max_prompt_length=512 \
+    data.max_response_length=360 \
+    data.val_max_samples=100 \
+    data.validation_shuffle=false \
+    data.filter_overlong_prompts=true \
+    data.truncation=error \
+    "actor_rollout_ref.model.path=${MODEL_PATH}" \
+    actor_rollout_ref.model.model_stage=talker \
+    actor_rollout_ref.model.hf_config_name=talker_config \
+    actor_rollout_ref.model.trust_remote_code=false \
+    actor_rollout_ref.model.use_remove_padding=false \
+    actor_rollout_ref.model.enable_gradient_checkpointing=true \
+    +actor_rollout_ref.model.override_config.attn_implementation=eager \
+    +actor_rollout_ref.model.override_config.tts_language=Auto \
+    "+actor_rollout_ref.model.override_config.tts_spk_embed_path=${SPK_EMBED_PATH}" \
+    actor_rollout_ref.actor.strategy=fsdp \
+    actor_rollout_ref.actor.ppo_mini_batch_size=4 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.actor.use_dynamic_bsz=false \
+    actor_rollout_ref.actor.use_kl_loss=true \
+    actor_rollout_ref.actor.kl_loss_coef=0.12 \
+    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+    actor_rollout_ref.actor.ppo_epochs=1 \
+    actor_rollout_ref.actor.shuffle=false \
+    actor_rollout_ref.actor.clip_ratio_low=0.2 \
+    actor_rollout_ref.actor.clip_ratio_high=0.2 \
+    actor_rollout_ref.actor.entropy_coeff=0.0 \
+    actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
+    actor_rollout_ref.actor.use_torch_compile=false \
+    actor_rollout_ref.actor.policy_loss.loss_mode=vanilla \
+    actor_rollout_ref.actor.optim.lr=1.0e-6 \
+    actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
+    actor_rollout_ref.actor.optim.lr_scheduler_type=constant \
+    actor_rollout_ref.actor.optim.weight_decay=0.0 \
+    actor_rollout_ref.actor.optim.clip_grad=1.0 \
+    "actor_rollout_ref.actor.data_loader_seed=${SEED}" \
+    "actor_rollout_ref.actor.fsdp_config.fsdp_size=${NUM_GPUS}" \
+    "actor_rollout_ref.actor.fsdp_config.seed=${SEED}" \
+    actor_rollout_ref.actor.fsdp_config.model_dtype=float32 \
+    actor_rollout_ref.actor.fsdp_config.dtype=bfloat16 \
+    '+actor_rollout_ref.actor.fsdp_config.mixed_precision={param_dtype:bf16,reduce_dtype:fp32,buffer_dtype:fp32}' \
+    actor_rollout_ref.actor.fsdp_config.param_offload=false \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=false \
+    actor_rollout_ref.actor.fsdp_config.use_orig_params=true \
+    actor_rollout_ref.actor.fsdp_config.use_torch_compile=false \
+    actor_rollout_ref.actor.fsdp_config.wrap_policy.min_num_params=0 \
+    actor_rollout_ref.rollout.name=vllm_omni \
+    actor_rollout_ref.rollout.mode=async \
+    actor_rollout_ref.rollout.n=8 \
+    actor_rollout_ref.rollout.temperature=1.0 \
+    actor_rollout_ref.rollout.top_p=1.0 \
+    actor_rollout_ref.rollout.top_k=-1 \
+    actor_rollout_ref.rollout.dtype=bfloat16 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.20 \
+    actor_rollout_ref.rollout.max_num_seqs=8 \
+    actor_rollout_ref.rollout.max_num_batched_tokens=1024 \
+    actor_rollout_ref.rollout.free_cache_engine=false \
+    actor_rollout_ref.rollout.calculate_log_probs=true \
+    actor_rollout_ref.rollout.logprobs_mode=processed_logprobs \
+    actor_rollout_ref.rollout.load_format=safetensors \
+    actor_rollout_ref.rollout.layered_summon=true \
+    actor_rollout_ref.rollout.enable_prefix_caching=false \
+    actor_rollout_ref.rollout.enforce_eager=true \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.rollout.agent.num_workers=8 \
+    actor_rollout_ref.rollout.agent.default_agent_loop=omni_single_turn_agent \
+    "+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.seed=${SEED}" \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode=ar \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name=qwen3_tts_rl \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_mode=full \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.async_chunk=false \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.attention_config.backend=TRITON_ATTN \
+    actor_rollout_ref.rollout.val_kwargs.n=1 \
+    actor_rollout_ref.rollout.val_kwargs.do_sample=true \
+    actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
+    actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \
+    actor_rollout_ref.rollout.val_kwargs.top_k=-1 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+    actor_rollout_ref.ref.strategy=fsdp \
+    "actor_rollout_ref.ref.fsdp_config.fsdp_size=${NUM_GPUS}" \
+    "actor_rollout_ref.ref.fsdp_config.seed=${SEED}" \
+    actor_rollout_ref.ref.fsdp_config.model_dtype=float32 \
+    actor_rollout_ref.ref.fsdp_config.dtype=bfloat16 \
+    '+actor_rollout_ref.ref.fsdp_config.mixed_precision={param_dtype:bf16,reduce_dtype:fp32,buffer_dtype:fp32}' \
+    actor_rollout_ref.ref.fsdp_config.param_offload=false \
+    actor_rollout_ref.ref.fsdp_config.use_orig_params=true \
+    actor_rollout_ref.ref.fsdp_config.wrap_policy.min_num_params=0 \
+    algorithm.adv_estimator=grpo \
+    algorithm.norm_adv_by_std_in_grpo=true \
+    algorithm.use_kl_in_reward=false \
+    reward.num_workers=1 \
+    reward.custom_reward_function.path=pkg://verl_omni.utils.reward_score.audio_http_scorer_client \
+    reward.custom_reward_function.name=compute_score \
+    "+reward.custom_reward_function.reward_kwargs.server_url=${SCORER_URL}" \
+    +reward.custom_reward_function.reward_kwargs.timeout=120.0 \
+    +reward.custom_reward_function.reward_kwargs.max_retries=2 \
+    +reward.custom_reward_function.reward_kwargs.retry_backoff=0.5 \
+    reward.reward_manager.source=importlib \
+    reward.reward_manager.name=AudioRewardManager \
+    reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager \
+    trainer.val_before_train=true \
+    trainer.balance_batch=true \
+    trainer.critic_warmup=0 \
+    trainer.logger='["console"]' \
+    trainer.project_name=qwen3_tts_grpo \
+    trainer.experiment_name=qwen3_tts_0_6b_audio_reward \
+    "trainer.n_gpus_per_node=${NUM_GPUS}" \
+    trainer.nnodes=1 \
+    trainer.total_epochs=100 \
+    trainer.log_val_generations=100 \
+    "trainer.total_training_steps=${TOTAL_TRAINING_STEPS}" \
+    "trainer.test_freq=${TEST_FREQ}" \
+    "trainer.save_freq=${SAVE_FREQ}" \
+    "trainer.resume_mode=${RESUME_MODE}" \
+    trainer.max_actor_ckpt_to_keep=26 \
+    "trainer.default_local_dir=${OUTPUT_DIR}/checkpoints" \
+    "trainer.validation_data_dir=${OUTPUT_DIR}/validation" \
+    "trainer.rollout_data_dir=${OUTPUT_DIR}/rollout" \
+    "$@" 2>&1 | tee "${OUTPUT_DIR}/train.log"
