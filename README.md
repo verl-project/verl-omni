@@ -184,15 +184,19 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>Planned</td>
   </tr>
   <tr>
-    <td rowspan="2">Qwen3-Omni-Thinker</td>
-    <td rowspan="2">Omni-modality</td>
-    <td rowspan="2">Text / Image / Video / Audio</td>
+    <td rowspan="3">Qwen3-Omni-Thinker</td>
+    <td rowspan="3">Omni-modality</td>
+    <td rowspan="3">Text / Image / Video / Audio</td>
     <td>DPO</td>
     <td>✅</td>
   </tr>
     <tr>
     <td>GSPO</td>
     <td>✅</td>
+  </tr>
+    <tr>
+    <td>DAPO</td>
+    <td>WIP</td>
   </tr>
     <tr>
     <td rowspan="2">Qwen3-TTS</td>
