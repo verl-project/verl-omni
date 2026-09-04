@@ -569,3 +569,78 @@ def test_ref2va_layout_masks_cover_every_reference_block():
     standalone_audio = packed["audio_pos"][4:10]
     assert int(video_soundtrack[-1]) < int(video_visual[0])
     assert int(video_visual[-1]) < int(standalone_audio[0])
+
+
+def test_ref2va_engine_unpads_nested_condition_rows():
+    """FlowGRPO engine restores padded condition rows before adapter slicing.
+
+    Ref2VA condition rows are padded to a global length and turned into jagged
+    nested tensors by ``embeds_padding_2_no_padding``. The FlowGRPO engine must
+    restore them to dense padded tensors before the adapter slices them with
+    ``[:, :count]``, which fails on a nested tensor's jagged dim-0.
+    """
+    import torch
+    from tensordict import TensorDict
+
+    from verl_omni.workers.engine.fsdp.diffusers_impl import PPODiffusersFSDPEngine
+
+    engine = PPODiffusersFSDPEngine.__new__(PPODiffusersFSDPEngine)
+
+    width = 6
+    nested_video = torch.nested.as_nested_tensor([torch.randn(3, width), torch.randn(4, width)], layout=torch.jagged)
+    nested_video_mask = torch.nested.as_nested_tensor(
+        [torch.ones(3, dtype=torch.bool), torch.ones(4, dtype=torch.bool)], layout=torch.jagged
+    )
+    nested_audio = torch.nested.as_nested_tensor([torch.randn(2, width), torch.randn(5, width)], layout=torch.jagged)
+    nested_audio_mask = torch.nested.as_nested_tensor(
+        [torch.ones(2, dtype=torch.bool), torch.ones(5, dtype=torch.bool)], layout=torch.jagged
+    )
+
+    micro_batch = TensorDict(
+        {
+            "condition_video_rows": nested_video,
+            "condition_video_rows_mask": nested_video_mask,
+            "condition_video_row_count": torch.tensor([[3], [4]]),
+            "condition_audio_rows": nested_audio,
+            "condition_audio_rows_mask": nested_audio_mask,
+            "condition_audio_row_count": torch.tensor([[2], [5]]),
+        },
+        batch_size=[2],
+    )
+
+    engine._unpad_condition_rows(micro_batch)
+
+    assert not micro_batch["condition_video_rows"].is_nested
+    assert micro_batch["condition_video_rows"].shape == (2, 4, width)
+    assert micro_batch["condition_video_rows_mask"].shape == (2, 4)
+    assert not micro_batch["condition_audio_rows"].is_nested
+    assert micro_batch["condition_audio_rows"].shape == (2, 5, width)
+    assert micro_batch["condition_audio_rows_mask"].shape == (2, 5)
+
+    # The adapter slices the restored rows with ``[:, :count]``, which is what
+    # previously raised ``RuntimeError: slice() not supported for NestedTensor``.
+    video_count = micro_batch["condition_video_row_count"][:, 0]
+    sliced = micro_batch["condition_video_rows"][:, : int(video_count[0])]
+    assert sliced.shape == (2, 3, width)
+
+
+def test_ref2va_engine_rejects_mismatched_nested_mask():
+    """Nested condition rows without a nested mask must be rejected, not sliced."""
+    import torch
+    from tensordict import TensorDict
+
+    from verl_omni.workers.engine.fsdp.diffusers_impl import PPODiffusersFSDPEngine
+
+    engine = PPODiffusersFSDPEngine.__new__(PPODiffusersFSDPEngine)
+    nested_video = torch.nested.as_nested_tensor([torch.randn(3, 6), torch.randn(4, 6)], layout=torch.jagged)
+
+    micro_batch = TensorDict(
+        {
+            "condition_video_rows": nested_video,
+            "condition_video_row_count": torch.tensor([[3], [4]]),
+        },
+        batch_size=[2],
+    )
+
+    with pytest.raises(ValueError, match="requires a nested"):
+        engine._unpad_condition_rows(micro_batch)
