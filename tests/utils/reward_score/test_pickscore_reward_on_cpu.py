@@ -62,6 +62,30 @@ class _FeatureImage:
         self.feature = torch.tensor(feature)
 
 
+def test_inferencer_uses_platform_device_by_default(monkeypatch):
+    class _FakeLoadedModel:
+        def __init__(self):
+            self.to_calls = []
+
+        def eval(self):
+            return self
+
+        def to(self, *args, **kwargs):
+            self.to_calls.append((args, kwargs))
+            return self
+
+    model = _FakeLoadedModel()
+    monkeypatch.setattr(pickscore_reward, "get_device_name", lambda: "cuda")
+    monkeypatch.setattr(pickscore_reward, "get_device_id", lambda: 2)
+    monkeypatch.setattr(pickscore_reward.CLIPProcessor, "from_pretrained", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(pickscore_reward.CLIPModel, "from_pretrained", lambda *_args, **_kwargs: model)
+
+    inferencer = pickscore_reward._PickScoreInferencer()
+
+    assert inferencer.device == torch.device("cuda", 2)
+    assert model.to_calls[0] == ((torch.device("cuda", 2),), {})
+
+
 def test_score_encodes_duplicate_prompts_once_and_preserves_pairing():
     inferencer = object.__new__(pickscore_reward._PickScoreInferencer)
     inferencer.device = "cpu"

@@ -714,10 +714,14 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
     def _init_online_rollout_stack(self, actor_rollout_resource_pool):
         """Initialize reward loop, LLM server, and checkpoint engine managers."""
-        from verl_omni.reward_loop import OmniRewardLoopManager
+        from verl_omni.reward_loop.local_accelerator_reward_loop import create_v1_reward_loop_manager
 
         resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
-        self.reward_loop_manager = OmniRewardLoopManager(config=self.config, rm_resource_pool=resource_pool)
+        self.reward_loop_manager = create_v1_reward_loop_manager(
+            config=self.config,
+            rm_resource_pool=resource_pool,
+            accelerator_resource_pool=actor_rollout_resource_pool,
+        )
 
         # Streaming agent reward loop when there is no rm, or the rm has a separate pool.
         self.enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool

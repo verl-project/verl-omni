@@ -469,6 +469,7 @@ reward:
   custom_reward_function:
     path: null
     name: compute_score
+    use_accelerator: false
   reward_functions: {}
   aggregation: weighted_sum
   reward_manager:
