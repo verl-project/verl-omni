@@ -122,33 +122,35 @@ def _sample(trainer, batch_size):
     return PolicyGradientDiffusionTrainerV1._sample_training_batch(trainer, batch_size)
 
 
-def test_wandb_validation_logging_rejects_non_uint8_images():
+def test_wandb_validation_media_failure_is_best_effort():
+    calls = []
     trainer = SimpleNamespace(
-        config=OmegaConf.create({"trainer": {"log_val_generations": 1, "logger": ["wandb"]}}),
+        config=OmegaConf.create(
+            {
+                "trainer": {
+                    "log_val_generations": 1,
+                    "logger": ["wandb"],
+                    "video_fps": 24,
+                    "validation_data_dir": None,
+                    "default_local_dir": None,
+                }
+            }
+        ),
+        global_steps=1,
+        validation_generations_logger=SimpleNamespace(log=lambda *args: calls.append(args)),
     )
 
-    with pytest.raises(ValueError, match=r"Expected a uint8 image tensor, got torch\.float32\."):
-        PolicyGradientDiffusionTrainerV1._maybe_log_val_generations(
-            trainer,
-            inputs=["prompt"],
-            outputs=torch.zeros(1, 3, 8, 8),
-            scores=[0.0],
-        )
+    PolicyGradientDiffusionTrainerV1._maybe_log_val_generations(
+        trainer,
+        inputs=["prompt"],
+        outputs=torch.zeros(1, 3, 8, 8),
+        scores=[0.0],
+        media_kinds=["image"],
+    )
 
-
-def test_v1_generation_dump_rejects_non_uint8_outputs_before_submission():
-    trainer = SimpleNamespace()
-
-    with pytest.raises(ValueError, match=r"Expected generation outputs to be a uint8 tensor, got torch\.float32\."):
-        PolicyGradientDiffusionTrainerV1._dump_generations(
-            trainer,
-            inputs=["prompt"],
-            outputs=torch.zeros(1, 3, 8, 8),
-            gts=[""],
-            scores=[0.0],
-            reward_extra_infos_dict={},
-            dump_path="unused",
-        )
+    assert calls[0][1] == [
+        ("prompt", "[validation media unavailable: ValueError: Expected a uint8 image tensor, got torch.float32.]", 0.0)
+    ]
 
 
 def test_sample_evicts_partial_failure_and_refills_exact_prompt_count(monkeypatch):

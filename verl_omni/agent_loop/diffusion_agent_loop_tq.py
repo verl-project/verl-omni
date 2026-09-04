@@ -238,6 +238,13 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             extra_fields_out["img_shapes"] = extra["img_shapes"]
         if reward_extra_info is not None:
             extra_fields_out["reward_extra_info"] = reward_extra_info
+        # Tensor media (for example generated audio) is already carried as a
+        # top-level TQ field above. Preserve its non-tensor declaration/metadata
+        # in the envelope that ``diffusion_tq_batch_to_dataproto`` restores.
+        for media_key in ("media_kind", "audio_sample_rate"):
+            media_value = extra.get(media_key)
+            if media_value is not None and not isinstance(media_value, torch.Tensor):
+                extra_fields_out[media_key] = media_value
         # Track the rollout model version this trajectory was generated against.
         step = trajectory["step"] if trajectory else global_steps
         extra_fields_out["min_global_steps"] = step

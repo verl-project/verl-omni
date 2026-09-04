@@ -18,7 +18,6 @@ import tempfile
 from argparse import Namespace
 from typing import Any, Optional
 
-import torch
 import yaml
 from verl.utils.device import get_visible_devices_keyword
 from verl.workers.config import RolloutConfig
@@ -28,6 +27,7 @@ from vllm import SamplingParams
 from vllm_omni.lora.request import LoRARequest
 
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
+from verl_omni.pipelines.rollout_request import OmniRolloutRequest
 from verl_omni.workers.config import OmniModelConfig
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_strategy_base import OmniStrategyBase
 
@@ -161,16 +161,26 @@ class ARStrategy(OmniStrategyBase):
 
     def preprocess_input(
         self,
-        prompt_ids: list[int],
+        request: OmniRolloutRequest,
         sampling_params: dict[str, Any],
-        multi_modal_data: dict[str, Any],
         lora_request: Optional[LoRARequest],
-        negative_prompt_ids: Optional[list[int]],
-        prompt_mask: torch.BoolTensor | None = None,
-        mm_processor_kwargs: Optional[dict[str, Any]] = None,
-        extra_prompt_ids: Optional[dict[str, list[int]]] = None,
-        negative_extra_prompt_ids: Optional[dict[str, list[int]]] = None,
     ) -> tuple[dict[str, Any], SamplingParams]:
+        unsupported_fields = [
+            name
+            for name, value in (
+                ("prompt_mask", request.prompt.mask),
+                ("negative_prompt_ids", request.prompt.negative_token_ids),
+                ("extra_prompt_ids", request.prompt.extra_token_ids),
+                ("negative_extra_prompt_ids", request.prompt.negative_extra_token_ids),
+            )
+            if value is not None
+        ]
+        if unsupported_fields:
+            raise ValueError(f"ARStrategy does not support request fields: {', '.join(unsupported_fields)}")
+
+        prompt_ids = request.prompt.token_ids
+        multi_modal_data = request.multi_modal_data()
+        mm_processor_kwargs = request.prompt.mm_processor_kwargs
         if multi_modal_data:
             processor = getattr(self.server.model_config, "processor", None)
             if processor is not None and hasattr(processor, "dedup_pad_tokens"):

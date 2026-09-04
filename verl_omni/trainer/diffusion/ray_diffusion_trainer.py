@@ -81,10 +81,29 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     rollout_correction_enabled,
 )
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
-from verl_omni.utils.tracking import _export_video, batch_items, log_wandb_media, wrap_val_samples_for_wandb
+from verl_omni.utils.tracking import (
+    _export_video,
+    batch_items,
+    log_wandb_media,
+    resolve_is_video,
+    wrap_val_samples_for_wandb,
+)
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 sys_logger = logging.getLogger(__name__)
+
+
+def _json_encode_default(obj):
+    """Encode NumPy values retained in rollout metadata for JSONL dumps."""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if hasattr(obj, "tolist"):
+        return obj.tolist()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
 def validate_separate_config(config) -> None:
@@ -363,6 +382,7 @@ class BaseRayDiffusionTrainer(ABC):
         fps=24,
         audios=None,
         audio_sample_rates=None,
+        media_kind=None,
     ):
         """Dump samples to disk as media files plus a JSONL index.
 
@@ -387,9 +407,11 @@ class BaseRayDiffusionTrainer(ABC):
             # Per-sample batch dim from single-seq rollouts: [N, 1, T, C, H, W].
             outputs = outputs.squeeze(1)
         if outputs.ndim == 5 and outputs.shape[1] == 3 and outputs.shape[2] != 3:
-            # Channels-first [N, C, T, H, W] -> [N, T, C, H, W].
+            # Channels-first [N, C, T, H, W] -> [N, T, C, H, W]. Layout normalization
+            # is still heuristic; declaring/normalizing it is deferred to the layout PR.
             outputs = outputs.permute(0, 2, 1, 3, 4)
-        is_video = outputs.ndim == 5  # [N, T, C, H, W] vs image [N, C, H, W]
+        # Prefer the adapter-declared media kind over the tensor rank.
+        is_video = resolve_is_video(outputs.ndim, media_kind)
 
         output_paths = []
         output_fallback_paths = [None] * n
@@ -464,7 +486,7 @@ class BaseRayDiffusionTrainer(ABC):
         lines = []
         for i in range(n):
             entry = {k: v[i] for k, v in base_data.items()}
-            lines.append(json.dumps(entry, ensure_ascii=False))
+            lines.append(json.dumps(entry, ensure_ascii=False, default=_json_encode_default))
 
         with open(filename, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
@@ -510,6 +532,28 @@ class BaseRayDiffusionTrainer(ABC):
                     "audio_sample_rate", batch.batch.get("audio_sample_rate")
                 )
 
+            # The primary media kind is declared per adapter and is uniform across a
+            # rollout batch (one pipeline); take the first declared value. Direct
+            # diffusion loops project it as a top-level non-tensor field, while
+            # composite loops may retain the tool-extra envelope.
+            media_kind_values = batch.non_tensor_batch.get("media_kind")
+            if media_kind_values is not None:
+                media_kind = next(
+                    (value for value in batch_items(media_kind_values, len(batch), "media_kind") if value is not None),
+                    None,
+                )
+            elif tool_extra is not None:
+                media_kind = next(
+                    (
+                        item.get("media_kind")
+                        for item in tool_extra
+                        if isinstance(item, dict) and item.get("media_kind")
+                    ),
+                    None,
+                )
+            else:
+                media_kind = None
+
             self._dump_generations(
                 inputs=inputs,
                 outputs=outputs,
@@ -521,10 +565,19 @@ class BaseRayDiffusionTrainer(ABC):
                 fps=int(self.config.trainer.get("video_fps", 24)),
                 audios=audios_to_dump,
                 audio_sample_rates=audio_rates_to_dump,
+                media_kind=media_kind,
             )
 
-    def _maybe_log_val_generations(self, inputs, outputs, scores, audios=None, audio_sample_rates=None):
-        """Log a table of validation samples to the configured logger (wandb or swanlab)"""
+    def _maybe_log_val_generations(
+        self,
+        inputs,
+        outputs,
+        scores,
+        audios=None,
+        audio_sample_rates=None,
+        media_kinds=None,
+    ):
+        """Log a table of validation samples to the configured logger (wandb or swanlab)."""
 
         generations_to_log = self.config.trainer.log_val_generations
 
@@ -537,7 +590,8 @@ class BaseRayDiffusionTrainer(ABC):
 
         audios = batch_items(audios, len(inputs), "audio")
         audio_sample_rates = batch_items(audio_sample_rates, len(inputs), "audio_sample_rate")
-        samples = list(zip(inputs, list(outputs), scores, audios, audio_sample_rates, strict=True))
+        media_kinds = batch_items(media_kinds, len(inputs), "media_kind")
+        samples = list(zip(inputs, list(outputs), scores, audios, audio_sample_rates, media_kinds, strict=True))
         samples.sort(key=lambda x: x[0])  # Sort by input text
 
         # Use fixed random seed for deterministic shuffling
@@ -557,10 +611,13 @@ class BaseRayDiffusionTrainer(ABC):
             if wandb_video_dir:
                 wandb_video_dir = os.path.join(wandb_video_dir, "wandb_val_media", f"global_step_{self.global_steps}")
             samples, video_tmp_dir, wandb_media = wrap_val_samples_for_wandb(
-                samples, fps=int(self.config.trainer.get("video_fps", 24)), output_dir=wandb_video_dir
+                samples,
+                fps=int(self.config.trainer.get("video_fps", 24)),
+                output_dir=wandb_video_dir,
+                media_kinds=[sample[5] for sample in samples],
             )
         else:
-            samples = [(input_, output, score) for input_, output, score, _, _ in samples]
+            samples = [(input_, output, score) for input_, output, score, *_ in samples]
 
         # Log to each configured logger
         try:
@@ -603,6 +660,7 @@ class BaseRayDiffusionTrainer(ABC):
         sample_outputs = []
         sample_audios = []
         sample_audio_sample_rates = []
+        sample_media_kinds = []
         sample_gts = []
         sample_scores = []
         sample_turns = []
@@ -668,6 +726,9 @@ class BaseRayDiffusionTrainer(ABC):
                     "audio_sample_rate",
                 )
             )
+            sample_media_kinds.extend(
+                batch_items(test_output_gen_batch.non_tensor_batch.get("media_kind"), batch_size, "media_kind")
+            )
 
             test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
@@ -706,6 +767,7 @@ class BaseRayDiffusionTrainer(ABC):
             scores=sample_scores,
             audios=sample_audios,
             audio_sample_rates=sample_audio_sample_rates,
+            media_kinds=sample_media_kinds,
         )
 
         # dump generations
@@ -722,6 +784,7 @@ class BaseRayDiffusionTrainer(ABC):
                 fps=int(self.config.trainer.get("video_fps", 24)),
                 audios=sample_audios,
                 audio_sample_rates=sample_audio_sample_rates,
+                media_kind=next((kind for kind in sample_media_kinds if kind is not None), None),
             )
 
         for key_info, lst in reward_extra_infos_dict.items():
