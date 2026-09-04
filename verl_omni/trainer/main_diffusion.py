@@ -32,6 +32,7 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
 )
 from verl_omni.utils.config import validate_config
 from verl_omni.utils.diffusion_attention import fallback_fa_if_unavailable, validate_attention_consistency
+from verl_omni.utils.rl_insight import enable_rl_insight
 
 
 def _count_controller_capture_ranges(profile_steps: list[int], profile_continuous_steps: bool) -> int:
@@ -81,6 +82,7 @@ def run_diffusion(config, task_runner_class=None) -> None:
     """
     OmegaConf.resolve(config)
     validate_separate_config(config)
+    enable_rl_insight(config)
 
     # Check if Ray is not initialized
     if not ray.is_initialized():

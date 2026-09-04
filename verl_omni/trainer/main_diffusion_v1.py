@@ -26,6 +26,7 @@ from verl.utils.import_utils import load_class_from_fqn
 
 from verl_omni.utils.config import validate_config
 from verl_omni.utils.diffusion_attention import fallback_fa_if_unavailable, validate_attention_consistency
+from verl_omni.utils.rl_insight import enable_rl_insight
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -40,6 +41,8 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
                 settings, model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    enable_rl_insight(config)
+
     if not ray.is_initialized():
         default_runtime_env = get_ppo_ray_runtime_env()
         ray_init_kwargs = config.ray_kwargs.get("ray_init", {})

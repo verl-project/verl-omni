@@ -44,6 +44,7 @@ from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerCon
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
+from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import (
     ActorConfig,
     DistillationConfig,
@@ -1040,13 +1041,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     base_sync_done=True,
                     adapter_name=self.config.rollout.rollout_adapter,
                 )
-                await self.checkpoint_engine.send_weights(per_tensor_param)
+                with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
+                    await self.checkpoint_engine.send_weights(per_tensor_param)
                 return
 
             per_tensor_param, _ = self.actor.engine.get_per_tensor_param(
                 adapter_name=self.config.rollout.rollout_adapter
             )
-            await self.checkpoint_engine.send_weights(per_tensor_param)
+            with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
+                await self.checkpoint_engine.send_weights(per_tensor_param)
             return
 
         # Per-component wall-clock timings (seconds) for monitoring.
@@ -1124,9 +1127,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 bucket_size_mb=bucket_size_mb,
                 use_shm=self.rollout.use_shm,
             )
-            await sender.async_send_weights(lora_weights.items())
-            if future is not None:
-                await future
+            with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
+                await sender.async_send_weights(lora_weights.items())
+                if future is not None:
+                    await future
             timings["update_weights_sync"] = time.perf_counter() - sync_start
             offloaded = True
         else:
@@ -1159,9 +1163,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
                 )
 
-            await self.rollout.update_weights(
-                per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
-            )
+            with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
+                await self.rollout.update_weights(
+                    per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+                )
 
         log_gpu_memory_usage("After update_weights", logger=logger)
 
