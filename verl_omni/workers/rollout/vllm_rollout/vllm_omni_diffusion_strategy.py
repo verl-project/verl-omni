@@ -25,6 +25,7 @@ from vllm_omni.lora.request import LoRARequest
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec
+from verl_omni.pipelines.rollout_request import OmniRolloutRequest
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_strategy_base import OmniStrategyBase
@@ -134,16 +135,18 @@ class DiffusionStrategy(OmniStrategyBase):
 
     def preprocess_input(
         self,
-        prompt_ids: list[int],
+        request: OmniRolloutRequest,
         sampling_params: dict[str, Any],
-        multi_modal_data: dict[str, Any],
         lora_request: Optional[LoRARequest],
-        negative_prompt_ids: Optional[list[int]],
-        prompt_mask: torch.BoolTensor | None = None,
-        mm_processor_kwargs: Optional[dict[str, Any]] = None,
-        extra_prompt_ids: Optional[dict[str, list[int]]] = None,
-        negative_extra_prompt_ids: Optional[dict[str, list[int]]] = None,
     ) -> tuple[OmniCustomPrompt, list[Any]]:
+        prompt_ids = request.prompt.token_ids
+        prompt_mask = request.prompt.mask
+        negative_prompt_ids = request.prompt.negative_token_ids
+        extra_prompt_ids = request.prompt.extra_token_ids
+        negative_extra_prompt_ids = request.prompt.negative_extra_token_ids
+        mm_processor_kwargs = request.prompt.mm_processor_kwargs
+        multi_modal_data = request.multi_modal_data()
+
         default_params_list = self.server.engine.default_sampling_params_list
 
         custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_ids}
@@ -186,6 +189,8 @@ class DiffusionStrategy(OmniStrategyBase):
         lora_request: Optional[LoRARequest],
         priority: int,
     ) -> Any:
+        if priority != 0:
+            raise ValueError("DiffusionStrategy does not support nonzero request priority")
         return await self._collect_last_output(
             self.server.engine.generate(
                 prompt=prompt,
