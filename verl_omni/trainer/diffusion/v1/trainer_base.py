@@ -58,13 +58,16 @@ from verl.utils.skip import SkipManager
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
+from verl_omni.trainer.diffusion.diffusion_algos import get_diffusion_loss_fn
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
+    compute_old_policy_metrics,
     compute_reward_extra_metrics_diffusion,
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
 )
 from verl_omni.trainer.diffusion.diffusion_trainer_utils import (
+    old_policy_decay,
     validate_distillation_config,
     worker_group_port_ranges,
 )
@@ -78,6 +81,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
 from verl_omni.trainer.diffusion.v1.tq_utils import (
     diffusion_tq_batch_to_dataproto,
+    put_dataproto_fields_to_tq,
     sort_diffusion_tq_keys,
 )
 from verl_omni.workers.engine_workers import ActorRolloutRefWorker, resolve_teacher_infer_micro_batch_size
@@ -122,7 +126,25 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self.config = config
         self.trainer_mode = config.trainer.v1.trainer_mode
         self.parameter_sync_step = config.trainer.v1.get(self.trainer_mode, {}).get("parameter_sync_step", 1)
-        self.use_reference_policy = need_reference_policy(config)
+        loss_mode = config.actor_rollout_ref.actor.diffusion_loss.loss_mode
+        self._is_direct_preference = config.algorithm.get("trainer_type", "policy_gradient") == "direct_preference"
+        if self._is_direct_preference:
+            if config.algorithm.get("sample_source", "online") == "offline":
+                raise NotImplementedError(
+                    "Diffusion offline DPO stays on the v0 trainer. Use "
+                    "`python -m verl_omni.trainer.main_diffusion` with trainer.use_v1=false."
+                )
+            self._loss_fn = get_diffusion_loss_fn(loss_mode)
+            self._has_old_adapter = "old" in tuple(
+                config.actor_rollout_ref.model.get("policy_state_adapters", ("default",))
+            )
+            if self._has_old_adapter:
+                self._validate_old_adapter_config()
+        else:
+            self._loss_fn = None
+            self._has_old_adapter = False
+        # DPO needs trainer-side ref noise preds even when KL is disabled.
+        self.use_reference_policy = need_reference_policy(config) or (loss_mode == "dpo")
         self.use_rm = need_reward_model(config)
         self.use_teacher_policy = is_distillation_enabled(config.get("distillation"))
         self.distillation_config = omega_conf_to_dataclass(config.distillation) if self.use_teacher_policy else None
@@ -164,6 +186,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
     def init(self):
         """Initialize workers, rollout server, reward loop, checkpoint engine."""
         self._setup()
+        if self._has_old_adapter:
+            self.actor_rollout_wg.copy_adapter(source="default", target="old")
         self.on_init_end()
 
     def fit(self, agent_loop_manager: AgentLoopManager):
@@ -327,6 +351,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 data = data.union(self._compute_reward_colocate(data))
                 self.checkpoint_manager.update_weights(self.global_steps)
 
+        if self._is_direct_preference:
+            return self._train_direct_preference_batch(metrics, timing_raw, batch_meta, data)
+
         data = self._balance_batch(data, metrics=metrics)
 
         # Bypass mode: skip old_log_prob recompute (2 policies).
@@ -374,8 +401,6 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # Persist computed fields back to TransferQueue so the sampled keys carry
         # the full trajectory for metrics/dumping (keys are cleared after step).
         # Slice to the original key count in case ``_balance_batch`` appended pad rows.
-        from verl_omni.trainer.diffusion.v1.tq_utils import put_dataproto_fields_to_tq
-
         n_keys = len(batch_meta.keys)
         if len(data) > n_keys:
             data_for_tq = data.select_idxs(list(range(n_keys)))
@@ -386,6 +411,121 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             data_for_tq,
             fields=["old_log_probs", "advantages", "returns", "sample_level_scores", "sample_level_rewards"],
         )
+        return batch_meta
+
+    def _validate_old_adapter_config(self):
+        """Require the NFT old-adapter rollout/loss contract."""
+        rollout_cfg = self.config.actor_rollout_ref.rollout
+        actor_loss_cfg = self.config.actor_rollout_ref.actor.diffusion_loss
+        if rollout_cfg.rollout_adapter != "old":
+            raise ValueError("Old-adapter algorithms require actor_rollout_ref.rollout.rollout_adapter=old.")
+        if actor_loss_cfg.loss_mode != "diffusion_nft":
+            raise ValueError(
+                "Old-adapter algorithms require actor_rollout_ref.actor.diffusion_loss.loss_mode=diffusion_nft."
+            )
+
+    def _prepare_actor_batch(self, batch: DataProto, reward_tensor: torch.Tensor) -> DataProto:
+        """Delegate algorithm-specific rollout-to-actor batch preparation."""
+        reward_tensor = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
+        return self._loss_fn.prepare_actor_batch(batch, reward_tensor, self.config)
+
+    def _compute_ref_noise_pred(self, data: DataProto) -> DataProto | None:
+        """Reference transformer output and shared flow tensors for DPO."""
+        batch_td = _to_diffusion_worker_tensordict(data)
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        metadata = {
+            "compute_loss": False,
+            "height": self.config.actor_rollout_ref.model.pipeline.height,
+            "width": self.config.actor_rollout_ref.model.pipeline.width,
+            "vae_scale_factor": self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        }
+        if self.ref_in_actor:
+            metadata["no_lora_adapter"] = True
+        tu.assign_non_tensor(batch_td, **metadata)
+        if self.ref_in_actor:
+            output = self.actor_rollout_wg.infer_actor_batch(batch_td)
+        else:
+            output = self.ref_policy_wg.infer_ref_batch(batch_td)
+        if output is None:
+            return None
+
+        noise_pred = tu.get(output, "noise_pred")
+        if noise_pred is None:
+            raise RuntimeError(
+                "Reference infer returned noise_pred=None. Diffusion DPO requires "
+                "model_type=diffusion_dpo_model so infer_actor_batch / infer_ref_batch "
+                "emit noise_pred rather than SDE log_probs."
+            )
+        if noise_pred.ndim >= 2 and noise_pred.shape[1] == 1:
+            noise_pred = noise_pred[:, 0]
+        noise = tu.get(output, "noise")
+        if noise.ndim >= 2 and noise.shape[1] == 1:
+            noise = noise[:, 0]
+        timesteps = tu.get(output, "timesteps")
+        if timesteps.ndim >= 2 and timesteps.shape[1] == 1:
+            timesteps = timesteps[:, 0]
+        ref_output = {
+            "ref_noise_pred": noise_pred.float(),
+            "noise": noise.float(),
+            "timesteps": timesteps.float(),
+        }
+        return DataProto.from_tensordict(tu.get_tensordict(ref_output))
+
+    def _update_old_policy(self) -> tuple[bool, float, str]:
+        """Refresh the NFT old-policy adapter (copy or EMA)."""
+        algo_cfg = self.config.algorithm
+        if self.global_steps % algo_cfg.old_policy_update_interval != 0:
+            return False, 0.0, "none"
+
+        decay = algo_cfg.old_policy_decay
+        if decay is None:
+            decay = old_policy_decay(self.global_steps, algo_cfg.old_policy_decay_schedule)
+
+        if decay == 0:
+            self.actor_rollout_wg.copy_adapter(source="default", target="old")
+            return True, float(decay), "copy"
+        self.actor_rollout_wg.ema_update_adapter(source="default", target="old", decay=decay)
+        return True, float(decay), "ema"
+
+    def _train_direct_preference_batch(
+        self, metrics: dict, timing_raw: dict, batch_meta: KVBatchMeta, data: DataProto
+    ) -> KVBatchMeta:
+        """Online DPO / DiffusionNFT update: pair (or NFT-prep) then ref noise + actor.
+
+        Unlike Flow-GRPO, DPO does not recompute SDE ``old_log_probs``. The DPO
+        engine returns ``noise_pred`` from ``infer_actor_batch``, so the PG
+        old-log-prob hop would crash with ``log_probs is None``.
+        """
+        with marked_timer("prepare_actor_batch", timing_raw, color="brown"):
+            reward_tensor, reward_extra_infos_dict = extract_reward(data)
+            data.batch["sample_level_scores"] = reward_tensor
+            if reward_extra_infos_dict:
+                data.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+            # Persist unpaired scores for metrics before pairing shrinks the batch.
+            data.batch["sample_level_rewards"] = data.batch["sample_level_scores"]
+            n_keys = len(batch_meta.keys)
+            data_for_tq = data.select_idxs(list(range(n_keys))) if len(data) > n_keys else data
+            put_dataproto_fields_to_tq(
+                batch_meta,
+                data_for_tq,
+                fields=["sample_level_scores", "sample_level_rewards"],
+            )
+            data = self._prepare_actor_batch(data, reward_tensor)
+            data.batch["sample_level_rewards"] = data.batch["sample_level_scores"]
+
+        if self.use_reference_policy:
+            with marked_timer("ref", timing_raw, color="olive"):
+                ref_infer_res = self._compute_ref_noise_pred(data)
+                if ref_infer_res is not None:
+                    data = data.union(ref_infer_res)
+
+        with marked_timer("update_actor", timing_raw, color="red"):
+            actor_output = self._update_actor(data)
+            actor_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+            metrics.update(actor_metrics)
+            if self._has_old_adapter:
+                metrics.update(compute_old_policy_metrics(self._update_old_policy()))
+
         return batch_meta
 
     def on_init_end(self):
@@ -954,6 +1094,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         )
         output = self.actor_rollout_wg.infer_actor_batch(batch_td)
         log_probs = tu.get(output, "log_probs")
+        if log_probs is None:
+            raise RuntimeError(
+                "Actor infer_actor_batch returned log_probs=None. Direct-preference "
+                "algorithms (DPO / DiffusionNFT) must set algorithm.trainer_type="
+                "direct_preference so the trainer skips old-log-prob recomputation."
+            )
         old_log_prob_dict = {"old_log_probs": log_probs.float()}
         prev_sample_mean = tu.get(output, "prev_sample_mean")
         if prev_sample_mean is not None:
@@ -1011,14 +1157,30 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         batch_td = _to_diffusion_worker_tensordict(data)
         batch_td = embeds_padding_2_no_padding(batch_td)
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        paired = bool(self.config.algorithm.get("paired_preference", False)) and getattr(
+            self, "_is_direct_preference", False
+        )
+        if paired:
+            ppo_mini_batch_size = ppo_mini_batch_size * 2
+        else:
+            ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
+        seed = self.config.actor_rollout_ref.actor.data_loader_seed
+        shuffle = self.config.actor_rollout_ref.actor.shuffle
+        if paired and shuffle:
+            logger.warning(
+                "Shuffle is not supported for direct preference during actor update."
+                "This is to prevent the chosen/rejected pairs from being split across different micro batches."
+                "Setting shuffle to False."
+            )
+            shuffle = False
         tu.assign_non_tensor(
             batch_td,
             global_batch_size=ppo_mini_batch_size,
             mini_batch_size=ppo_mini_batch_size,
-            epochs=self.config.actor_rollout_ref.actor.ppo_epochs,
-            seed=self.config.actor_rollout_ref.actor.data_loader_seed,
-            dataloader_kwargs={"shuffle": self.config.actor_rollout_ref.actor.shuffle},
+            epochs=ppo_epochs,
+            seed=seed,
+            dataloader_kwargs={"shuffle": shuffle},
             height=self.config.actor_rollout_ref.model.pipeline.height,
             width=self.config.actor_rollout_ref.model.pipeline.width,
             vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
