@@ -103,6 +103,8 @@ def restore_moe_param_layout(model, hidden_size: int) -> None:
     from vllm.model_executor.utils import replace_parameter
 
     for name, param in model.named_parameters():
+        if param.ndim != 3:
+            continue
         if "w2_weight" in name and param.shape[2] == hidden_size:
             parts = name.split(".")
             parent_module = model.get_submodule(".".join(parts[:-1]))

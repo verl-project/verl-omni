@@ -35,23 +35,17 @@ class OmniDistillationTeacherModelConfig(DistillationTeacherModelConfig):
         if topk is None:
             raise ValueError("topk must be specified when use_topk is True.")
 
-        engine_name = self.inference.name
+        if self.inference.name != "vllm_omni":
+            raise ValueError(f"the inference.name should be 'vllm_omni', got {self.inference.name}")
         engine_kwargs = self.inference.engine_kwargs
-        match engine_name:
-            case "vllm_omni":
-                # Mirror the vllm branch: seed max_logprobs=topk when unset and
-                # reject an existing value below topk.
-                omni_engine_kwargs = dict(engine_kwargs.get("vllm_omni", {}))
-                max_logprobs = omni_engine_kwargs.get("max_logprobs")
-                if max_logprobs is None:
-                    omni_engine_kwargs["max_logprobs"] = topk
-                    max_logprobs = topk
-                if max_logprobs < topk:
-                    raise ValueError(
-                        f"vllm_omni max_logprobs ({max_logprobs}) must be >= distillation_loss topk "
-                        f"({topk}) to enable distillation loss computation."
-                    )
-                engine_kwargs["vllm_omni"] = omni_engine_kwargs
-            case _:
-                # Delegate vllm / sglang handling to the base implementation.
-                super()._validate_topk_logprobs(use_topk=use_topk, topk=topk)
+        omni_engine_kwargs = dict(engine_kwargs.get("vllm_omni", {}))
+        max_logprobs = omni_engine_kwargs.get("max_logprobs")
+        if max_logprobs is None:
+            omni_engine_kwargs["max_logprobs"] = topk
+            max_logprobs = topk
+        if max_logprobs < topk:
+            raise ValueError(
+                f"vllm_omni max_logprobs ({max_logprobs}) must be >= distillation_loss topk "
+                f"({topk}) to enable distillation loss computation."
+            )
+        engine_kwargs["vllm_omni"] = omni_engine_kwargs

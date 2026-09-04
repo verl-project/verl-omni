@@ -13,32 +13,14 @@
 # limitations under the License.
 """Padding utilities for model training."""
 
+import logging
+
 import torch
 from tensordict import TensorDict
+from verl.trainer.ppo import padding_utils as _padding_utils
 from verl.trainer.ppo.padding_utils import construct_minimal_padding_template as ori_padding_template
 
-
-# TODO (wsc): temporary monkey-patch. Remove once verl's padding_utils pads teacher-side
-# fields (teacher_ids / teacher_logprobs) natively in construct_minimal_padding_template.
-def patched_padding_template(source_td, source_tag, eos_token_id):
-    """Wrap verl's minimal padding template to also pad teacher-side fields.
-
-    The stock template only knows about student-token fields; teacher_ids /
-    teacher_logprobs ride along on the batch and must be extended to the padded
-    sequence length with eos / zeros respectively.
-    """
-    sample, tag = ori_padding_template(source_td, source_tag, eos_token_id)
-    sequence_length = sample["input_ids"].size(0)
-
-    teacher_ids = sample.get("teacher_ids")
-    if isinstance(teacher_ids, torch.Tensor):
-        sample["teacher_ids"] = teacher_ids.new_full((sequence_length, *teacher_ids.shape[1:]), eos_token_id)
-
-    teacher_logprobs = sample.get("teacher_logprobs")
-    if isinstance(teacher_logprobs, torch.Tensor):
-        sample["teacher_logprobs"] = teacher_logprobs.new_zeros((sequence_length, *teacher_logprobs.shape[1:]))
-
-    return sample, tag
+logger = logging.getLogger(__name__)
 
 
 def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
@@ -94,3 +76,38 @@ def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
         data[key], data[mask_key] = _to_nested(values, mask, key)
 
     return data
+
+
+# TODO (wsc): temporary monkey-patch. Remove once verl's padding_utils pads teacher-side
+# fields (teacher_ids / teacher_logprobs) natively in construct_minimal_padding_template.
+def patched_padding_template(source_td, source_tag, eos_token_id):
+    """Wrap verl's minimal padding template to also pad teacher-side fields.
+
+    The stock template only knows about student-token fields; teacher_ids /
+    teacher_logprobs ride along on the batch and must be extended to the padded
+    sequence length with eos / zeros respectively.
+    """
+    sample, tag = ori_padding_template(source_td, source_tag, eos_token_id)
+    if not getattr(patched_padding_template, "_warned", False):
+        logger.warning(
+            "Using patched_padding_template to pad teacher_ids / teacher_logprobs. "
+            "This is a temporary workaround; remove once verl's padding_utils pads "
+            "teacher-side fields natively."
+        )
+        patched_padding_template._warned = True
+    sequence_length = sample["input_ids"].size(0)
+
+    teacher_ids = sample.get("teacher_ids")
+    if isinstance(teacher_ids, torch.Tensor):
+        sample["teacher_ids"] = teacher_ids.new_full((sequence_length, *teacher_ids.shape[1:]), eos_token_id)
+
+    teacher_logprobs = sample.get("teacher_logprobs")
+    if isinstance(teacher_logprobs, torch.Tensor):
+        sample["teacher_logprobs"] = teacher_logprobs.new_zeros((sequence_length, *teacher_logprobs.shape[1:]))
+
+    return sample, tag
+
+
+# Patch the module attribute so upsample_batch_to_divisible_size resolves the
+# patched template through verl's padding_utils namespace.
+_padding_utils.construct_minimal_padding_template = patched_padding_template
