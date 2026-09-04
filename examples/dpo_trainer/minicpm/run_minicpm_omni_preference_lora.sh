@@ -99,6 +99,7 @@ python3 -m verl_omni.trainer.main_omni \
     +actor_rollout_ref.model.override_config.attn_implementation="${ATTN_IMPLEMENTATION}" \
     +actor_rollout_ref.model.override_config.init_tts=false \
     +actor_rollout_ref.model.override_config.use_cache=false \
+    +actor_rollout_ref.model.override_config.stream_input=false \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.model.lora_rank="${LORA_RANK}" \
     actor_rollout_ref.model.lora_alpha="${LORA_ALPHA}" \

@@ -28,6 +28,7 @@ from verl_omni.pipelines.model_base import OmniModelBase
 
 _MINICPM_ARCHITECTURES = ("MiniCPMO",)
 _MINICPM_NO_SPLIT_MODULES = ["Qwen3DecoderLayer", "MiniCPMODecoderLayer"]
+_WHISPER_ATTN_RETURN3_ATTR = "_verl_omni_whisper_attn_return3"
 # Keys consumed by MiniCPMO.forward(data, **kwargs) / get_vllm_embedding / get_omni_embedding.
 _MINICPM_DATA_KEYS = (
     "input_ids",
@@ -49,12 +50,61 @@ _MINICPM_REQUIRED_DATA_KEYS = (
     "image_bound",
     "audio_bounds",
 )
+# MiniCPMO.forward binds these before ``self.llm(..., **kwargs)``. The adapter wrap
+# must not forward engine copies or the LLM call raises TypeError.
+_MINICPM_LLM_BOUND_KEYS = ("input_ids", "position_ids", "inputs_embeds")
 
 
 def _register_minicpm_architectures(cls):
     for architecture in _MINICPM_ARCHITECTURES:
         OmniModelBase.register(architecture, stage="thinker")(cls)
     return cls
+
+
+def _pad_whisper_self_attn_output(output, past_key_values=None):
+    """Normalize WhisperAttention output to the 3-tuple MiniCPM unpacks."""
+    if not isinstance(output, tuple):
+        return output, None, past_key_values
+    if len(output) == 2:
+        hidden_states, attn_weights = output
+        return hidden_states, attn_weights, past_key_values
+    return output
+
+
+def wrap_whisper_self_attn_forward(attn_module) -> None:
+    """Make ``self_attn`` always return ``(hidden_states, attn_weights, past_key_values)``.
+
+    MiniCPM-o's remote ``MiniCPMWhisperEncoderLayer`` still does::
+
+        hidden_states, attn_weights, past_key_values = self.self_attn(...)
+
+    Transformers WhisperAttention now returns only ``(hidden_states, attn_weights)``
+    and renamed ``past_key_value`` to ``past_key_values``. Training still runs the
+    audio encoder on dummy wavs, so the unpack fails even without real audio.
+    """
+    if attn_module is None or getattr(attn_module, _WHISPER_ATTN_RETURN3_ATTR, False):
+        return
+
+    original_forward = attn_module.forward
+
+    def _forward(*args, _original=original_forward, **kwargs):
+        past_key_values = kwargs.get("past_key_values", kwargs.get("past_key_value"))
+        if "past_key_value" in kwargs and "past_key_values" not in kwargs:
+            kwargs["past_key_values"] = kwargs.pop("past_key_value")
+        return _pad_whisper_self_attn_output(_original(*args, **kwargs), past_key_values)
+
+    attn_module.forward = _forward
+    setattr(attn_module, _WHISPER_ATTN_RETURN3_ATTR, True)
+
+
+def patch_minicpm_whisper_encoder_layers(module) -> None:
+    """Patch MiniCPM audio-encoder layers after remote-code ``from_pretrained``."""
+    apm = getattr(module, "apm", None)
+    layers = getattr(apm, "layers", None) if apm is not None else None
+    if not layers:
+        return
+    for layer in layers:
+        wrap_whisper_self_attn_forward(getattr(layer, "self_attn", None))
 
 
 def _first_existing_attr(module, names: list[str]):
@@ -76,7 +126,9 @@ def split_minicpm_forward_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any]
     Remote ``MiniCPMO.forward(self, data, **kwargs)`` reads ``input_ids``,
     ``position_ids``, and media tensors from ``data``, then calls
     ``self.llm(..., **kwargs)``. verl's FSDP engine instead unpacks
-    ``input_ids=`` / ``pixel_values=`` at the top level.
+    ``input_ids=`` / ``pixel_values=`` at the top level. Keys that MiniCPMO
+    already binds on the LLM call (``inputs_embeds``, ``input_ids``,
+    ``position_ids``) are dropped from ``llm_kwargs``.
     """
     kwargs = dict(kwargs)
     if "data" in kwargs:
@@ -127,7 +179,7 @@ def split_minicpm_forward_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any]
     else:
         data["pixel_values"] = [_sample_pixel_slices(pixel_values)]
     tgt_sizes = data["tgt_sizes"]
-    if isinstance(tgt_sizes, (list, tuple)):
+    if isinstance(tgt_sizes, (list | tuple)):
         data["tgt_sizes"] = [
             _sample_tgt_sizes(sample, n_slices=len(slices), device=data["input_ids"].device)
             for sample, slices in zip(tgt_sizes, data["pixel_values"], strict=False)
@@ -140,6 +192,8 @@ def split_minicpm_forward_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any]
     missing = [key for key in _MINICPM_REQUIRED_DATA_KEYS if key not in data]
     if missing:
         raise TypeError(f"MiniCPMO.forward data dict is missing required keys: {missing}.")
+    for key in _MINICPM_LLM_BOUND_KEYS:
+        llm_kwargs.pop(key, None)
     return data, llm_kwargs
 
 
@@ -185,6 +239,7 @@ class MiniCPMThinkerAdapter(OmniModelBase):
     @classmethod
     def configure_model(cls, module, model_config):
         module = super().configure_model(module, model_config)
+        patch_minicpm_whisper_encoder_layers(module)
 
         # Keep MiniCPMO.forward so vpm/resampler/apm stay in the training graph.
         # Wrap it so verl's `module(**hf_kwargs)` becomes `forward(data, **llm_kwargs)`.
