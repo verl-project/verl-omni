@@ -58,6 +58,7 @@ def _make_mock_model_config(**overrides):
     cfg.model_stage = "thinker"
     cfg.local_path = "/fake/model/path"
     cfg.trust_remote_code = False
+    cfg.external_lib = None
     cfg.use_liger = False
     cfg.use_fused_kernels = False
     cfg.enable_gradient_checkpointing = False
@@ -82,7 +83,6 @@ def _make_mock_model_config(**overrides):
 # ---------------------------------------------------------------------------
 # Isolated module loader
 # ---------------------------------------------------------------------------
-
 
 _omni_impl_cache = None
 
@@ -328,6 +328,26 @@ def test_prepare_model_inputs_applies_registered_adapter_hook():
     assert output_args == {"base": True}
 
 
+def test_weight_sync_casts_floating_dtensor_to_bfloat16():
+    omni_impl = _get_omni_impl_module()
+    tensor = torch.tensor([1.25], dtype=torch.float32)
+
+    synced = omni_impl.OmniFSDPEngine._cast_dtensor_weight_for_sync(tensor)
+
+    assert synced.dtype is torch.bfloat16
+    assert synced.item() == pytest.approx(1.25)
+
+
+def test_weight_sync_keeps_integer_dtensor_buffers():
+    omni_impl = _get_omni_impl_module()
+    tensor = torch.tensor([1, 2], dtype=torch.int64)
+
+    synced = omni_impl.OmniFSDPEngine._cast_dtensor_weight_for_sync(tensor)
+
+    assert synced is tensor
+    assert synced.dtype is torch.int64
+
+
 # ---------------------------------------------------------------------------
 # ``collect_lora_params`` import source
 # ---------------------------------------------------------------------------
@@ -359,8 +379,8 @@ def test_collect_lora_params_import_not_from_verl():
 # ---------------------------------------------------------------------------
 
 
-def test_build_module_uses_auto_model_for_multimodal_lm():
-    """``_build_module`` uses ``AutoModelForMultimodalLM``, not ``AutoModelForCausalLM``."""
+def test_build_module_uses_adapter_selected_auto_model_class():
+    """Adapters select non-default auto model classes without relying on stage names."""
     omni_impl = _get_omni_impl_module()
     assert omni_impl.AutoModelForMultimodalLM is not None
 
@@ -373,19 +393,27 @@ def test_build_module_uses_auto_model_for_multimodal_lm():
     assert "AutoModelForMultimodalLM" in import_names, (
         f"AutoModelForMultimodalLM not imported from transformers; imports: {import_names}"
     )
+    assert "AutoModelForTextToWaveform" not in import_names
     assert "AutoModelForCausalLM" not in import_names, "AutoModelForCausalLM should NOT be imported from transformers"
 
 
-@pytest.mark.parametrize("architecture", ["Qwen3OmniMoeForConditionalGeneration"])
-def test_build_module_calls_adapter_configure_model(architecture):
+@pytest.mark.parametrize(
+    ("architecture", "model_stage"),
+    [
+        ("Qwen3OmniMoeForConditionalGeneration", "thinker"),
+        ("FutureOmniForConditionalGeneration", "talker"),
+    ],
+)
+def test_build_module_calls_adapter_configure_model(architecture, model_stage):
     """Mock ``from_pretrained``; verify ``adapter_cls.configure_model(module, cfg)``."""
     omni_impl = _get_omni_impl_module()
-    model_config = _make_mock_model_config(architecture=architecture)
+    model_config = _make_mock_model_config(architecture=architecture, model_stage=model_stage)
 
     fake_module = MagicMock(spec=torch.nn.Module)
     fake_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
 
     fake_adapter_cls = MagicMock()
+    fake_adapter_cls.auto_model_class = None
     fake_configured_module = MagicMock(spec=torch.nn.Module)
     fake_configured_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
     fake_adapter_cls.configure_model.return_value = fake_configured_module
@@ -399,13 +427,15 @@ def test_build_module_calls_adapter_configure_model(architecture):
         patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=fake_adapter_cls) as mock_get_cls,
         patch.object(omni_impl, "get_init_weight_context_manager", return_value=MagicMock()),
         patch.object(omni_impl.warnings, "catch_warnings", return_value=MagicMock()),
-        patch("verl.utils.torch_dtypes.PrecisionType"),
+        patch("verl.utils.torch_dtypes.PrecisionType") as precision_type,
     ):
+        precision_type.to_dtype.side_effect = lambda value: value
         engine = object.__new__(omni_impl.OmniFSDPEngine)
         engine.model_config = model_config
         engine.engine_config = MagicMock()
         engine.engine_config.model_dtype = None
         engine.engine_config.forward_only = False
+        engine.engine_config.strategy = "fsdp2"
         engine.device_mesh = None
 
         result = engine._build_module()
@@ -423,7 +453,80 @@ def test_build_module_calls_adapter_configure_model(architecture):
         )
 
         fake_adapter_cls.configure_model.assert_called_once_with(fake_module, model_config)
+        assert engine.model_adapter_cls is fake_adapter_cls
         assert result is fake_configured_module
+
+
+def test_build_module_calls_adapter_selected_auto_model_loader():
+    omni_impl = _get_omni_impl_module()
+    model_config = _make_mock_model_config(
+        architecture="FutureOmniForConditionalGeneration",
+        model_stage="talker",
+    )
+    loaded_module = MagicMock(spec=torch.nn.Module)
+    loaded_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
+    configured_module = MagicMock(spec=torch.nn.Module)
+    configured_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
+    auto_model_cls = MagicMock()
+    auto_model_cls.from_pretrained.return_value = loaded_module
+    adapter_cls = MagicMock()
+    adapter_cls.auto_model_class = auto_model_cls
+    adapter_cls.configure_model.return_value = configured_module
+    model_base_mod = sys.modules["verl_omni.pipelines.model_base"]
+
+    with (
+        patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=adapter_cls),
+        patch.object(omni_impl, "get_init_weight_context_manager", return_value=MagicMock()),
+        patch.object(omni_impl.warnings, "catch_warnings", return_value=MagicMock()),
+        patch("verl.utils.torch_dtypes.PrecisionType") as precision_type,
+    ):
+        precision_type.to_dtype.side_effect = lambda value: value
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine.model_config = model_config
+        engine.engine_config = MagicMock(model_dtype=None, forward_only=False)
+        engine.engine_config.strategy = "fsdp2"
+        engine.device_mesh = None
+
+        result = engine._build_module()
+
+    auto_model_cls.from_pretrained.assert_called_once_with(
+        pretrained_model_name_or_path=model_config.local_path,
+        torch_dtype=torch.float32,
+        config=model_config.hf_config,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    adapter_cls.configure_model.assert_called_once_with(loaded_module, model_config)
+    assert result is configured_module
+
+
+def test_build_module_rejects_mixed_frozen_parameters_without_fsdp1_orig_params():
+    omni_impl = _get_omni_impl_module()
+    model_config = _make_mock_model_config()
+    loaded_module = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
+    configured_module = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
+    configured_module[0].requires_grad_(False)
+    adapter_cls = MagicMock()
+    adapter_cls.auto_model_class = None
+    adapter_cls.configure_model.return_value = configured_module
+    model_base_mod = sys.modules["verl_omni.pipelines.model_base"]
+
+    with (
+        patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=adapter_cls),
+        patch.object(omni_impl.AutoModelForMultimodalLM, "from_pretrained", return_value=loaded_module),
+        patch.object(omni_impl, "get_init_weight_context_manager", return_value=MagicMock()),
+        patch.object(omni_impl.warnings, "catch_warnings", return_value=MagicMock()),
+        patch("verl.utils.torch_dtypes.PrecisionType") as precision_type,
+    ):
+        precision_type.to_dtype.side_effect = lambda value: value
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine.model_config = model_config
+        engine.engine_config = MagicMock(model_dtype=None, forward_only=False)
+        engine.engine_config.strategy = "fsdp"
+        engine.engine_config.use_orig_params = False
+        engine.device_mesh = None
+
+        with pytest.raises(ValueError, match="use_orig_params=true"):
+            engine._build_module()
 
 
 @pytest.mark.parametrize("option", ["use_liger", "use_fused_kernels"])

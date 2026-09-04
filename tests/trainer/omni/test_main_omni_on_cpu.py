@@ -123,8 +123,37 @@ class TestLoadTokenizerAndProcessor:
 
         assert model_config.tokenizer == "tokenizer"
         assert model_config.processor == "processor"
+        mock_adapter.register_auto_classes.assert_called_once_with()
         mock_adapter.configure_tokenizer.assert_called_once_with("local:tokenizer-path", model_config)
         mock_adapter.configure_processor.assert_called_once_with(str(tmp_path), model_config)
+
+    def test_config_only_load_registers_known_auto_classes_without_requiring_an_adapter(self, monkeypatch, tmp_path):
+        from types import SimpleNamespace
+
+        from verl_omni.pipelines.model_base import OmniModelBase
+        from verl_omni.workers.config.omni import model as model_config_module
+        from verl_omni.workers.config.omni.model import OmniModelConfig
+
+        mock_adapter = MagicMock()
+        monkeypatch.setattr(OmniModelBase, "peek_class", lambda *_args: mock_adapter)
+        monkeypatch.setattr(model_config_module, "resolve_model_local_dir", lambda path, use_shm=False: str(tmp_path))
+        monkeypatch.setattr(model_config_module, "copy_to_local", lambda path, use_shm=False: str(tmp_path))
+
+        def load_config(*_args, **_kwargs):
+            mock_adapter.register_auto_classes.assert_called_once_with()
+            return SimpleNamespace(tie_word_embeddings=False, architectures=["arch"])
+
+        monkeypatch.setattr(model_config_module.AutoConfig, "from_pretrained", load_config)
+
+        model_config = OmniModelConfig(
+            path=str(tmp_path),
+            architecture="RegisteredArchitecture",
+            model_stage="talker",
+            load_tokenizer=False,
+        )
+
+        assert model_config.tokenizer is None
+        assert model_config.processor is None
 
     def test_ray_task_runner_delegates_omni_model_to_adapter(self, monkeypatch, tmp_path):
         config = OmegaConf.create(
