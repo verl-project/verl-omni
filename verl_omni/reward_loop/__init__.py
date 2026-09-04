@@ -11,7 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from .deployment import MultiRewardModelManager  # noqa: F401
 from .reward_loop import OmniRewardLoopManager  # noqa: F401
-from .reward_manager import VisualRewardManager  # noqa: F401
+from .reward_manager import MultiVisualRewardManager, VisualRewardManager  # noqa: F401
 
-__all__ = ["OmniRewardLoopManager", "VisualRewardManager"]
+__all__ = [
+    "OmniRewardLoopManager",
+    "VisualRewardManager",
+    "MultiVisualRewardManager",
+    "MultiRewardModelManager",
+]

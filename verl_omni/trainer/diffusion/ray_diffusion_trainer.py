@@ -43,7 +43,7 @@ from verl.single_controller.ray.base import create_colocated_worker_cls, split_r
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.metric_utils import compute_variance_proxy_metrics, process_validation_metrics
 from verl.trainer.ppo.reward import extract_reward
-from verl.trainer.ppo.utils import Role, WorkerType, need_reference_policy, need_reward_model
+from verl.trainer.ppo.utils import Role, WorkerType, need_reference_policy
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
@@ -54,6 +54,7 @@ from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
+from verl_omni.reward_loop.deployment import reward_is_enabled, reward_role_required, streaming_reward_enabled
 from verl_omni.trainer.config import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import (
     DiffusionAdvantageEstimator,
@@ -235,7 +236,7 @@ class BaseRayDiffusionTrainer(ABC):
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.config)
 
-        self.use_rm = need_reward_model(self.config)
+        self.use_rm = reward_is_enabled(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
         self.validation_generations_logger = ValidationGenerationsLogger(
@@ -902,10 +903,15 @@ class BaseRayDiffusionTrainer(ABC):
         # initalize reward loop manager
         # reward model (colocate or standalone): get resource_pool
         # no reward model: resource_pool = None
-        resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
+        resource_pool = (
+            self.resource_pool_manager.get_resource_pool(Role.RewardModel)
+            if reward_role_required(self.config)
+            else None
+        )
         self.reward_loop_manager = OmniRewardLoopManager(
             config=self.config,
             rm_resource_pool=resource_pool,
+            accelerator_resource_pool=actor_rollout_resource_pool,
         )
 
         # create async rollout manager and request scheduler
@@ -926,7 +932,7 @@ class BaseRayDiffusionTrainer(ABC):
         # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
         # agent_reward_loop: streaming reward computation with actor rollout
         # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
-        self.enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
+        self.enable_agent_reward_loop = streaming_reward_enabled(self.config)
 
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout

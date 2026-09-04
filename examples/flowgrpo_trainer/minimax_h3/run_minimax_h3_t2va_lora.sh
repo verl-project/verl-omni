@@ -118,13 +118,11 @@ python3 -m verl_omni.trainer.main_diffusion \
     "+reward.reward_functions.clap.path=$repo_root/verl_omni/utils/reward_score/clap.py" \
     '+reward.reward_functions.clap.name=compute_score' \
     '+reward.reward_functions.clap.weight=1.0' \
-    '+reward.reward_functions.clap.required=true' \
     "+reward.reward_functions.clap.device=$REWARD_DEVICE:0" \
     "+reward.reward_functions.clap.model_name_or_path=$CLAP_MODEL_PATH" \
     "+reward.reward_functions.imagebind.path=$repo_root/verl_omni/utils/reward_score/imagebind.py" \
     '+reward.reward_functions.imagebind.name=compute_score' \
     '+reward.reward_functions.imagebind.weight=1.0' \
-    '+reward.reward_functions.imagebind.required=true' \
     "+reward.reward_functions.imagebind.device=$REWARD_DEVICE:1" \
     "+reward.reward_functions.imagebind.model_name_or_path=$IMAGEBIND_MODEL_PATH" \
     '+reward.reward_functions.imagebind.mode=audio_video' \

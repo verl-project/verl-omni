@@ -20,11 +20,61 @@ custom_reward_function:
   path: null
   # The name of the reward function within the specified file. Default is 'compute_score'.
   name: compute_score
+  # Deprecated alias; use reward.accelerator_workers.enabled instead.
+  use_accelerator: false
+
+# Bind legacy custom reward workers to bundles in the trainer-selected
+# accelerator pool. Native deployments select this automatically; this switch
+# only preserves an explicit path for existing custom reward functions.
+accelerator_workers:
+  enabled: false
 
 # Multi-reward configuration (dict-based, mutually exclusive with custom_reward_function).
 # Keys are user-chosen names used for metric logging (e.g., "ocr", "jpeg").
 # Each entry: path (str), name (str), weight (float).
 reward_functions: {}
+
+# Named reward-model deployments. A reward function may reference one entry
+# with ``deployment: <key>``. Backends are ``engine`` (vLLM/vLLM-Omni through
+# the existing verl RewardModelManager) and ``native`` (verl-omni worker-local
+# model). Trainer selects one
+# parent global_pool or reward_pool through reward_model.enable_resource_pool;
+# MultiRewardModelManager splits that parent pool into disjoint engine and
+# native subpools. Native deployments share one parent native subpool, but
+# each deployment must explicitly claim its own native-pool bundle indices.
+# One index creates one full local model instance; this is replication, not TP.
+# The indices are relative to the native subpool (not physical CUDA/NPU IDs),
+# and cannot overlap between native deployments.
+# Native PickScore example:
+#
+# deployments:
+#   pickscore_native:
+#     backend: native
+#     model_path: yuvalkirstain/PickScore_v1
+#     placement:
+#       devices: [0, 1, 2, 3]
+#     executor:
+#       scorer: verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeScorer
+# Engine PickScore example (requires a vLLM pooling endpoint compatible with
+# this checkpoint; verify embedding parity before using it for training):
+#   pickscore_engine:
+#     backend: engine
+#     n_gpus_per_node: 1
+#     nnodes: 1
+#     model_path: yuvalkirstain/PickScore_v1
+#     adapter: pickscore
+#     # Required: vLLM CLIP does not restore checkpoint logit_scale. Use the
+#     # verified value (98.86447 for PickScore_v1) after parity validation.
+#     executor:
+#       logit_scale: 98.86447
+#     rollout:
+#       name: vllm
+#       tensor_model_parallel_size: 1
+# Existing router-based rewards (for example GenRM OCR) may also bind their
+# existing path/name function to a deployment; it receives that deployment's
+# ``reward_router_address`` and ``model_name`` instead of the legacy global
+# reward router.
+deployments: {}
 
 # Aggregation method for multi-reward. Only "weighted_sum" is supported.
 aggregation: weighted_sum
@@ -43,8 +93,9 @@ reward_manager:
 reward_model:
   enable: False
 
-  # Whether to deploy the model to a separate resource pool.
-  # If true, n_gpus_per_node & nnodes will be used to determine the resource node.
+  # Select the parent pool for legacy reward_model and named engine deployments.
+  # If true, use a dedicated reward_pool; otherwise, use global_pool.
+  # MultiRewardModelManager splits the selected parent pool per deployment.
   enable_resource_pool: False
   n_gpus_per_node: 8
   nnodes: 0

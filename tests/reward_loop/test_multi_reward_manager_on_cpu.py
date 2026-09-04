@@ -67,6 +67,31 @@ async def reward_asserts_float_latent_contract(data_source, solution_image, grou
     return float(solution_image[0, 0, 0])
 
 
+async def reward_uses_named_engine_router(reward_router_address, model_name):
+    assert reward_router_address == "engine-router"
+    assert model_name == "ocr-model"
+    return {"score": 0.6, "backend": "engine-function"}
+
+
+class _DeploymentClient:
+    async def score(self, prompt, image):
+        assert prompt == "hello"
+        assert image.dtype == torch.uint8
+        return {"score": 0.25, "backend": "engine"}
+
+
+class _NativeDeploymentExecutor:
+    async def score(self, prompt, image):
+        assert prompt == "hello"
+        assert image.dtype == torch.uint8
+        return {"score": 0.75, "backend": "native"}
+
+
+class _EngineRouterClient:
+    def reward_kwargs(self):
+        return {"reward_router_address": "engine-router", "model_name": "ocr-model"}
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -253,8 +278,8 @@ class TestMultiVisualRewardManagerRunSingle:
         assert "reward/dict_result/score" not in result["reward_extra_info"]
         assert result["reward_extra_info"]["reward/combined"] == pytest.approx(2.0)
 
-    def test_exception_contributes_zero(self):
-        """A failing sub-reward contributes 0 without breaking others."""
+    def test_exception_fails_fast(self):
+        """A failing sub-reward aborts reward computation."""
         reward_fns = {
             "good": {"path": DUMMY_REWARDS_PATH, "name": "reward_fixed_score", "weight": 1.0},
             "bad": {"path": DUMMY_REWARDS_PATH, "name": "reward_raises", "weight": 1.0},
@@ -262,11 +287,8 @@ class TestMultiVisualRewardManagerRunSingle:
         manager = _build_manager(reward_fns)
         data = _make_single_data()
 
-        result = manager.loop.run_until_complete(manager.run_single(data))
-
-        # combined = 1.0 * 0.5 + 1.0 * 0.0 = 0.5
-        assert result["reward_score"] == pytest.approx(0.5)
-        assert result["reward_extra_info"]["reward/bad"] == pytest.approx(0.0)
+        with pytest.raises(ValueError, match="intentional failure"):
+            manager.loop.run_until_complete(manager.run_single(data))
 
     def test_async_reward_function(self):
         """Async reward functions are awaited correctly."""
@@ -279,6 +301,45 @@ class TestMultiVisualRewardManagerRunSingle:
         result = manager.loop.run_until_complete(manager.run_single(data))
 
         assert result["reward_score"] == pytest.approx(0.8)
+
+    def test_mixes_rule_engine_and_native_deployments(self):
+        manager = _build_manager(
+            {
+                "rule": {"path": DUMMY_REWARDS_PATH, "name": "reward_fixed_score", "weight": 1.0},
+                "engine": {"deployment": "ocr_engine", "weight": 2.0},
+                "native": {"deployment": "native_pickscore", "weight": 1.0},
+            }
+        )
+        manager.set_reward_executors(
+            {"ocr_engine": _DeploymentClient()}, {"native_pickscore": _NativeDeploymentExecutor()}
+        )
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == pytest.approx(1.75)
+        assert result["reward_extra_info"]["reward/rule"] == pytest.approx(0.5)
+        assert result["reward_extra_info"]["reward/engine"] == pytest.approx(0.25)
+        assert result["reward_extra_info"]["reward/native"] == pytest.approx(0.75)
+        assert result["reward_extra_info"]["reward/engine/backend"] == "engine"
+        assert result["reward_extra_info"]["reward/native/backend"] == "native"
+
+    def test_engine_reward_function_uses_its_named_router(self):
+        manager = _build_manager(
+            {
+                "ocr": {
+                    "deployment": "ocr_engine",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_uses_named_engine_router",
+                    "weight": 1.0,
+                },
+            }
+        )
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClient()}, None)
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == pytest.approx(0.6)
+        assert result["reward_extra_info"]["reward/ocr/backend"] == "engine-function"
 
     def test_jpeg_reward_via_file_path(self):
         """JPEG reward loaded via file path must not fail on relative imports."""

@@ -47,6 +47,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.workers.rollout.llm_server import LLMServerManager
 
+from verl_omni.reward_loop.deployment import reward_role_required, streaming_reward_enabled
 from verl_omni.trainer.diffusion.v1.trainer_base import (
     PolicyGradientDiffusionTrainerV1,
     register_diffusion_trainer,
@@ -170,9 +171,17 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         """
         from verl_omni.reward_loop import OmniRewardLoopManager
 
-        resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
-        self.reward_loop_manager = OmniRewardLoopManager(config=self.config, rm_resource_pool=resource_pool)
-        self.enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
+        resource_pool = (
+            self.resource_pool_manager.get_resource_pool(Role.RewardModel)
+            if reward_role_required(self.config)
+            else None
+        )
+        self.reward_loop_manager = OmniRewardLoopManager(
+            config=self.config,
+            rm_resource_pool=resource_pool,
+            accelerator_resource_pool=actor_rollout_resource_pool,
+        )
+        self.enable_agent_reward_loop = streaming_reward_enabled(self.config)
 
         # Colocated rollout replicas (share GPUs with the actor).
         self.llm_server_manager = LLMServerManager.create(

@@ -910,7 +910,11 @@ reward:
   custom_reward_function:
     path: null
     name: compute_score
+    use_accelerator: false
+  accelerator_workers:
+    enabled: false
   reward_functions: {}
+  deployments: {}
   aggregation: weighted_sum
   reward_manager:
     _target_: verl.workers.config.reward_model.RewardManagerConfig

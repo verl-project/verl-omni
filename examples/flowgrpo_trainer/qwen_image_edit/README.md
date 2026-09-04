@@ -96,6 +96,26 @@ bash examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora.sh \
     trainer.logger=console
 ```
 
+### Ascend NPU
+
+The NPU recipe uses the synchronous V1 diffusion trainer and a named native
+PickScore deployment. Its `placement.devices` list assigns one full PickScore
+model worker to each native-pool bundle:
+
+```bash
+WORKSPACE=$PWD \
+NUM_GPUS_ACTOR_ROLLOUT_REWARD=16 \
+bash examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora_v1_npu.sh
+```
+
+Its checked-in resource layout uses 16 NPUs, rollout tensor parallelism 4, and
+16 native PickScore workers, creating four rollout replicas. The default
+native placement is `[0, ..., 15]`; these are native-subpool bundle indices,
+not physical NPU IDs or tensor-parallel ranks. Adjust `ROLLOUT_TP` for rollout
+topology and set `NATIVE_REWARD_DEVICES` explicitly when changing the number
+of native PickScore replicas. The model and parquet inputs use the same
+environment overrides listed below.
+
 By default, the launcher reads:
 
 ```text
@@ -118,9 +138,12 @@ Set `TRAIN_FILES` and `VAL_FILES` to use different parquet files.
 | `REWARD_WORKERS` | `4` | Asynchronous reward worker count. |
 | `IMAGE_RESOLUTION` | `512` | Square target output resolution. |
 | `MAX_PROMPT_LENGTH` | `8192` | Token and prompt-embedding length limit. |
-| `REWARD_FUNCTION_PATH` | `pkg://verl_omni.utils.reward_score.pickscore_reward` | Reward module import path. |
+| `PICKSCORE_MODEL_PATH` | `yuvalkirstain/PickScore_v1` | PickScore checkpoint for the native deployment. |
+| `NATIVE_REWARD_DEVICES` | `[0,1,2,3]` (CUDA) / `[0,...,15]` (NPU) | Native-subpool bundle indices; one full PickScore instance per entry. |
 
-The launcher selects `compute_score_pickscore` from the reward module.
+The launcher configures `reward.deployments.pickscore.backend=native` and
+binds `reward.reward_functions.pickscore` to that deployment. Native workers
+preserve the PickScore scorer's local batch queue; they are not TP shards.
 
 Additional Hydra overrides can be appended to the command:
 
@@ -134,7 +157,8 @@ bash examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora.sh \
 
 Keep `actor_rollout_ref.rollout.n` greater than one for group-relative
 advantages. When reducing GPU count, also reduce the training batch size,
-rollout count, micro-batch sizes, and reward worker count to fit memory.
+rollout count, micro-batch sizes, and the explicit native placement list to
+fit memory.
 
 The launcher enables console, TensorBoard, and W&B logging by default. The
 first command overrides this with `trainer.logger=console` so it can run

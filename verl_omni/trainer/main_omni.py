@@ -37,6 +37,7 @@ from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
 
 import verl_omni.trainer.omni  # noqa: F401  — registers @register_trainer("omni_sync")
+from verl_omni.reward_loop.deployment import reward_pool_is_separate, reward_role_required
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
@@ -113,15 +114,17 @@ class RayTrainerTaskRunner:
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         }
 
-        if config.reward.reward_model.enable_resource_pool:
-            if config.reward.reward_model.n_gpus_per_node <= 0:
+        if reward_role_required(config) and reward_pool_is_separate(config):
+            reward_gpus = config.reward.reward_model.n_gpus_per_node
+            reward_nnodes = config.reward.reward_model.nnodes
+            if reward_gpus <= 0:
                 raise ValueError("config.reward.reward_model.n_gpus_per_node must be greater than 0")
-            if config.reward.reward_model.nnodes <= 0:
+            if reward_nnodes <= 0:
                 raise ValueError("config.reward.reward_model.nnodes must be greater than 0")
 
-            reward_pool = [config.reward.reward_model.n_gpus_per_node] * config.reward.reward_model.nnodes
+            reward_pool = [reward_gpus] * reward_nnodes
             resource_pool_spec["reward_pool"] = reward_pool
-        else:
+        elif reward_role_required(config):
             config.reward.reward_model.nnodes = config.trainer.nnodes
             config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
 
@@ -134,8 +137,8 @@ class RayTrainerTaskRunner:
         from verl.trainer.ppo.ray_trainer import Role
 
         if config.algorithm.sample_source == "online":
-            if config.reward.reward_model.enable:
-                if config.reward.reward_model.enable_resource_pool:
+            if reward_role_required(config):
+                if reward_pool_is_separate(config):
                     self.mapping[Role.RewardModel] = "reward_pool"
                 else:
                     self.mapping[Role.RewardModel] = "global_pool"

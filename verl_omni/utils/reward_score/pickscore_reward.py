@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import gc
 import logging
 import os
 
@@ -20,6 +21,7 @@ import numpy as np
 import torch
 from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
+from verl.utils.device import get_device_id, get_device_name
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -48,12 +50,20 @@ def _feature_tensor(features):
 
 
 class _PickScoreInferencer:
-    def __init__(self, device: str = "cuda", dtype=torch.float32):
-        logger.info("Creating PickScore model from %s", _MODEL_PATH)
-        self.device = device
+    def __init__(
+        self,
+        device: str | torch.device | None = None,
+        dtype=torch.float32,
+        model_path: str = _MODEL_PATH,
+        processor_path: str = _PROCESSOR_PATH,
+    ):
+        if device is None:
+            device = torch.device(get_device_name(), get_device_id())
+        logger.info("Creating PickScore model from %s", model_path)
+        self.device = torch.device(device)
         self.dtype = dtype
-        self.processor = CLIPProcessor.from_pretrained(_PROCESSOR_PATH)
-        self.model = CLIPModel.from_pretrained(_MODEL_PATH).eval().to(device)
+        self.processor = CLIPProcessor.from_pretrained(processor_path)
+        self.model = CLIPModel.from_pretrained(model_path).eval().to(self.device)
         self.model = self.model.to(dtype=dtype)
 
     @torch.no_grad()
@@ -92,6 +102,111 @@ class _PickScoreInferencer:
         scores = scores.diag()
         scores = scores / 26
         return scores
+
+
+class PickScoreNativeScorer:
+    """Lifecycle-friendly PickScore scorer for native deployments.
+
+    ``RewardLoopWorker.compute_score_batch`` fans a batch out into concurrent
+    single-item calls.  This scorer preserves the old PickScore batching
+    behavior by collecting those calls locally and running one CLIP forward for
+    up to ``_MAX_BATCH_SIZE`` items.  The queue belongs to this scorer instance
+    (rather than module globals), so ``NativeRewardExecutor.sleep`` can stop it
+    and release the model before actor update.
+    """
+
+    def __init__(self, model_path: str = _MODEL_PATH, device=None, dtype=torch.float32, processor_path=_PROCESSOR_PATH):
+        self._inferencer = _PickScoreInferencer(
+            device=device,
+            dtype=dtype,
+            model_path=model_path,
+            processor_path=processor_path,
+        )
+        self._score_queue = asyncio.Queue()
+        self._consumer_task = None
+        self._consumer_lock = asyncio.Lock()
+        self._closed = False
+
+    async def _ensure_consumer(self):
+        if self._closed:
+            raise RuntimeError("PickScore scorer is closed")
+        if self._consumer_task is not None and not self._consumer_task.done():
+            return
+        async with self._consumer_lock:
+            if self._closed:
+                raise RuntimeError("PickScore scorer is closed")
+            if self._consumer_task is None or self._consumer_task.done():
+                self._consumer_task = asyncio.create_task(self._consumer_loop())
+
+    def _score_requests(self, requests):
+        prompts = [prompt for prompt, _, _ in requests]
+        images = [image for _, image, _ in requests]
+        return self._inferencer.score(prompts, images).tolist()
+
+    async def _consumer_loop(self):
+        loop = asyncio.get_running_loop()
+        while True:
+            request = await self._score_queue.get()
+            if request[0] is None:
+                return
+
+            requests = [request]
+            should_stop = False
+            # Let all compute_score() tasks created by compute_score_batch reach
+            # the queue before taking the rest of this micro-batch.
+            await asyncio.sleep(0)
+            while len(requests) < _MAX_BATCH_SIZE:
+                try:
+                    request = self._score_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if request[0] is None:
+                    should_stop = True
+                    break
+                requests.append(request)
+
+            try:
+                scores = await loop.run_in_executor(None, self._score_requests, requests)
+                for (_, _, future), score in zip(requests, scores, strict=True):
+                    if not future.done():
+                        future.set_result(score)
+            except BaseException as error:
+                for *_, future in requests:
+                    if not future.done():
+                        future.set_exception(error)
+
+            if should_stop:
+                return
+
+    async def score(self, prompts, images):
+        prompts = list(prompts)
+        images = list(images)
+        if len(prompts) != len(images):
+            raise ValueError("PickScore prompts and images must have the same length")
+        await self._ensure_consumer()
+        loop = asyncio.get_running_loop()
+        futures = []
+        for prompt, image in zip(prompts, images, strict=True):
+            future = loop.create_future()
+            futures.append(future)
+            await self._score_queue.put((prompt, image, future))
+        return await asyncio.gather(*futures)
+
+    async def close(self):
+        self._closed = True
+        if self._consumer_task is not None and not self._consumer_task.done():
+            await self._score_queue.put((None, None, None))
+            await self._consumer_task
+        self._consumer_task = None
+        # Drop the whole inferencer before clearing the allocator: retaining a
+        # local ``model`` variable here would keep its accelerator storage live.
+        if hasattr(self, "_inferencer"):
+            del self._inferencer
+        gc.collect()
+        accelerator = getattr(torch, get_device_name(), None)
+        empty_cache = getattr(accelerator, "empty_cache", None)
+        if callable(empty_cache) and getattr(accelerator, "is_available", lambda: False)():
+            empty_cache()
 
 
 def _to_pil_hwc(image) -> Image.Image:
@@ -166,7 +281,7 @@ async def _consumer_loop():
             break
 
 
-async def _ensure_consumer(device: str):
+async def _ensure_consumer(device: str | None):
     global _inferencer, _consumer_started, _consumer_task
     if _consumer_started:
         return
@@ -184,7 +299,7 @@ async def compute_score_pickscore(
     solution_image,
     ground_truth: str,
     extra_info: dict,
-    device: str = "cuda",
+    device: str | None = None,
     **kwargs,
 ) -> dict:
     await _ensure_consumer(device)

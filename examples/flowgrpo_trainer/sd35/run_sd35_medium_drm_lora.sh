@@ -96,7 +96,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     "+reward.reward_functions.drm.path=pkg://verl_omni.utils.reward_score.latent_http_scorer_client" \
     +reward.reward_functions.drm.name=compute_score \
     +reward.reward_functions.drm.weight=1.0 \
-    +reward.reward_functions.drm.required=true \
     "+reward.reward_functions.drm.server_url=$drm_server_url" \
     +reward.reward_functions.drm.noise_level=0.4 \
     +reward.reward_functions.drm.noise_seed=null \

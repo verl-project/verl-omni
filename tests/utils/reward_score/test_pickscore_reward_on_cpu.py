@@ -62,6 +62,30 @@ class _FeatureImage:
         self.feature = torch.tensor(feature)
 
 
+def test_inferencer_uses_platform_device_by_default(monkeypatch):
+    class _FakeLoadedModel:
+        def __init__(self):
+            self.to_calls = []
+
+        def eval(self):
+            return self
+
+        def to(self, *args, **kwargs):
+            self.to_calls.append((args, kwargs))
+            return self
+
+    model = _FakeLoadedModel()
+    monkeypatch.setattr(pickscore_reward, "get_device_name", lambda: "cuda")
+    monkeypatch.setattr(pickscore_reward, "get_device_id", lambda: 2)
+    monkeypatch.setattr(pickscore_reward.CLIPProcessor, "from_pretrained", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(pickscore_reward.CLIPModel, "from_pretrained", lambda *_args, **_kwargs: model)
+
+    inferencer = pickscore_reward._PickScoreInferencer()
+
+    assert inferencer.device == torch.device("cuda", 2)
+    assert model.to_calls[0] == ((torch.device("cuda", 2),), {})
+
+
 def test_score_encodes_duplicate_prompts_once_and_preserves_pairing():
     inferencer = object.__new__(pickscore_reward._PickScoreInferencer)
     inferencer.device = "cpu"
@@ -84,6 +108,28 @@ class _FakeInferencer:
     def score(self, prompts, images):
         self.batches.append((list(prompts), list(images)))
         return torch.tensor([float(image.getpixel((0, 0))) for image in images])
+
+
+@pytest.mark.asyncio
+async def test_native_scorer_batches_calls_and_closes_instance_consumer(monkeypatch):
+    inferencer = _FakeInferencer()
+    monkeypatch.setattr(pickscore_reward, "_PickScoreInferencer", lambda **kwargs: inferencer)
+    scorer = pickscore_reward.PickScoreNativeScorer(model_path="/models/pickscore", device="cpu")
+
+    results = await asyncio.gather(
+        *(
+            scorer.score(["shared prompt"], [Image.new("L", (1, 1), index)])
+            for index in range(4)
+        )
+    )
+
+    assert results == [[0.0], [1.0], [2.0], [3.0]]
+    assert len(inferencer.batches) == 1
+    assert inferencer.batches[0][0] == ["shared prompt"] * 4
+
+    await scorer.close()
+    assert not scorer._consumer_task
+    assert not hasattr(scorer, "_inferencer")
 
 
 @pytest.mark.asyncio
