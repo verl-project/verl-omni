@@ -91,6 +91,7 @@ examples/minimax_h3/flowgrpo_trainer_minimax_h3.md
 :maxdepth: 1
 :caption: Performance Tuning Guide
 
+perf/tuning_guide.md
 perf/diffusion_mfu.md
 perf/profiler.md
 ```
