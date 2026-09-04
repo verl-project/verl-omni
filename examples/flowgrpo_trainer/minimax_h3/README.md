@@ -1,6 +1,6 @@
 # MiniMax H3 T2VA and FL2VA FlowGRPO
 
-Last updated: 08/28/2026
+Last updated: 08/31/2026
 
 These recipes train `MiniMaxAI/MiniMax-H3` LoRA adapters with FlowGRPO for
 text-to-audio-video (T2VA) and first-frame image-to-audio-video (FL2VA)
@@ -176,6 +176,26 @@ bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_fl2va_lora.sh
 FL2VA reuses the same CPS FlowGRPO configuration as T2VA. The first-frame
 condition rows are held fixed across the reverse-SDE window and re-injected
 after every transition, so only the target video/audio rows are scored.
+
+### NVIDIA GPU (V1 sync)
+
+The V1 recipes use TransferQueue and ReplayBuffer synchronously. They preserve
+the corresponding V0 model, LoRA, reward, pipeline, and CPS FlowGRPO settings;
+they only select `main_diffusion_v1`, `trainer.use_v1=true`, and
+`trainer.v1.trainer_mode=sync`:
+
+```bash
+# T2VA
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1.sh
+
+# FL2VA
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_fl2va_lora_v1.sh
+```
+
+These recipes use the same GPU topology as their V0 counterparts. A
+`separate_async` MiniMax H3 recipe is not provided: it requires dedicated
+actor/rollout pools and checkpoint-engine synchronization rather than a
+mechanical V1 entrypoint switch.
 
 ### Ascend NPU
 
