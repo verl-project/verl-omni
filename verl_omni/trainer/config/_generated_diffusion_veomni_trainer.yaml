@@ -535,6 +535,7 @@ distillation:
       model_path: null
       world_size: 0
   teacher_key: data_source
+  scheduler: inline
 algorithm:
   _target_: verl_omni.trainer.config.DiffusionAlgoConfig
   trainer_type: policy_gradient

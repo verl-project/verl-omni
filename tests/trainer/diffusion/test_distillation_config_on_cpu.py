@@ -40,6 +40,14 @@ class TestDiffusionDistillationConfig:
                 teacher_models={"teacher_model": DiffusionDistillationTeacherModelConfig()},
             )
 
+    def test_unknown_scheduler_rejected(self):
+        with pytest.raises(ValueError, match="scheduler"):
+            DiffusionDistillationConfig(
+                enabled=True,
+                scheduler="bogus",
+                teacher_models={"teacher_model": DiffusionDistillationTeacherModelConfig(model_path="/ckpt/teacher")},
+            )
+
     def test_single_teacher_is_keyed_default(self):
         config = DiffusionDistillationConfig(
             enabled=True,

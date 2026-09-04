@@ -21,13 +21,20 @@
 # so the step-1 KL is positive) and needs no downloads; set MODEL_PATH and
 # TEACHER_PATH to run against real checkpoints instead.
 #
-# V1=1 runs the same smoke through the v1 sync trainer (`main_diffusion_v1`).
+# V1=1 runs the same smoke through the v1 trainer (`main_diffusion_v1`);
+# V1_MODE selects sync (default) or separate_async. separate_async reserves one
+# extra GPU for the standalone rollout, so it needs NUM_GPUS >= 2 (>= 4 with
+# SMOKE=standalone). SCHEDULER selects the teacher schedule, inline (default)
+# or one_step_off; the latter is only valid with V1_MODE=separate_async and
+# SMOKE=standalone, and raises num_warmup_batches to the 2 it requires.
 #
-# Override via env: NUM_GPUS, MODEL_PATH, TEACHER_PATH, TEACHER2_PATH, DATA_DIR, TOTAL_TRAIN_STEPS, SMOKE, V1
+# Override via env: NUM_GPUS, MODEL_PATH, TEACHER_PATH, TEACHER2_PATH, DATA_DIR, TOTAL_TRAIN_STEPS, SMOKE, V1, V1_MODE, SCHEDULER
 set -euo pipefail
 
 NUM_GPUS=${NUM_GPUS:-1}
 V1=${V1:-0}
+V1_MODE=${V1_MODE:-sync}
+SCHEDULER=${SCHEDULER:-inline}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/sd3-teacher-smoke-student}
 TEACHER_PATH=${TEACHER_PATH:-${HOME}/models/tiny-random/sd3-teacher-smoke-teacher}
 TEACHER2_PATH=${TEACHER2_PATH:-${HOME}/models/tiny-random/sd3-teacher-smoke-teacher2}
@@ -57,6 +64,9 @@ if [[ "${SMOKE}" == "standalone" ]]; then
     actor_gpus=$((NUM_GPUS - 2))
 else
     actor_gpus=${NUM_GPUS}
+fi
+if [[ "${V1}" == "1" && "${V1_MODE}" == "separate_async" ]]; then
+    actor_gpus=$((actor_gpus - 1))  # one GPU goes to the standalone rollout
 fi
 
 n_resp_per_prompt=2
@@ -135,7 +145,25 @@ entrypoint=verl_omni.trainer.main_diffusion
 v1_flags=()
 if [[ "${V1}" == "1" ]]; then
     entrypoint=verl_omni.trainer.main_diffusion_v1
-    v1_flags=(trainer.use_v1=true trainer.v1.trainer_mode=sync)
+    v1_flags=(trainer.use_v1=true "trainer.v1.trainer_mode=${V1_MODE}")
+    if [[ "${V1_MODE}" == "separate_async" ]]; then
+        # one_step_off fills a one-batch teacher pipeline and needs that much generation lead.
+        num_warmup_batches=0
+        if [[ "${SCHEDULER}" == "one_step_off" ]]; then
+            num_warmup_batches=2
+        fi
+        v1_flags+=(
+            actor_rollout_ref.rollout.mode=async
+            actor_rollout_ref.rollout.calculate_log_probs=True
+            actor_rollout_ref.rollout.nnodes=1
+            actor_rollout_ref.rollout.n_gpus_per_node=1
+            actor_rollout_ref.rollout.checkpoint_engine.backend=nccl
+            "actor_rollout_ref.actor.ppo_mini_batch_size=${train_batch_size}"
+            "trainer.v1.separate_async.num_warmup_batches=${num_warmup_batches}"
+            trainer.v1.separate_async.parameter_sync_step=1
+            "distillation.scheduler=${SCHEDULER}"
+        )
+    fi
 fi
 
 python3 -m ${entrypoint} \

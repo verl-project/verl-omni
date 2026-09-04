@@ -89,11 +89,11 @@ class DiffusionTeacherManager:
         teacher_output = tu.get_tensordict({"teacher_prev_sample_mean": prev_sample_mean.float()})
         return DataProto.from_tensordict(teacher_output)
 
-    def compute_prev_sample_mean(self, batch: DataProto) -> DataProto:
-        """Score ``batch`` with its teachers, returning ``teacher_prev_sample_mean`` in the input row order."""
+    def dispatch_prev_sample_mean(self, batch: DataProto):
+        """Send ``batch`` to its teachers without waiting; returns a handle for ``collect_prev_sample_mean``."""
         routing_keys = self._resolve_teacher_keys(batch)
         if len(self.teacher_model_configs) == 1:
-            return self._to_dataproto(self._infer(batch, routing_keys[0]).get())
+            return None, [(self._infer(batch, routing_keys[0]), 0)]
         # dispatch per teacher from the driver so every DP rank of a teacher sees a non-empty shard
         # that splits evenly into forward micro-batches
         order, pending = [], []
@@ -105,7 +105,18 @@ class DiffusionTeacherManager:
             padded, pad_size = pad_dataproto_to_divisor(batch.select_idxs(idxs), size_divisor)
             pending.append((self._infer(padded, teacher_key), pad_size))
             order.append(idxs)
+        return order, pending
+
+    def collect_prev_sample_mean(self, handle) -> DataProto:
+        """Wait on a ``dispatch_prev_sample_mean`` handle, returning scores in the input row order."""
+        order, pending = handle
         outputs = [unpad_dataproto(self._to_dataproto(future.get()), pad_size) for future, pad_size in pending]
+        if order is None:
+            return outputs[0]
         teacher_output = DataProto.concat(outputs)
         teacher_output.reorder(torch.from_numpy(np.argsort(np.concatenate(order))))
         return teacher_output
+
+    def compute_prev_sample_mean(self, batch: DataProto) -> DataProto:
+        """Score ``batch`` with its teachers, returning ``teacher_prev_sample_mean`` in the input row order."""
+        return self.collect_prev_sample_mean(self.dispatch_prev_sample_mean(batch))

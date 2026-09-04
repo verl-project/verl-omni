@@ -57,6 +57,11 @@ Routing and padding happen on the driver, before dispatch, so teacher
 placement is purely a resource decision: colocated teachers and a standalone
 pool see identical inputs and produce identical outputs.
 
+With `distillation.scheduler: one_step_off` the score and reassemble moves are
+split across steps: a batch is dispatched to its teachers as soon as it is
+sampled, and the result is collected right before that batch's actor update,
+one step later.
+
 ## Configuration Parameters
 
 ### `distillation.enabled` (bool)
@@ -139,6 +144,32 @@ multiple teachers must set it explicitly so the sum matches the pool size.
 Each teacher's sub-pool is its own worker group, so teachers are scored
 concurrently.
 
+### `distillation.scheduler` (str)
+
+When the teachers score a batch. Default: `"inline"`, which runs the scoring
+inside the training step, after rewards and before the actor update, on every
+trainer.
+
+`"one_step_off"` dispatches the scoring of the batch sampled at step *k* and
+lets it run while the actor updates on the batch sampled at step *k−1*, so the
+teacher stage leaves the critical path and only its residual wait remains. It
+requires the v1 `separate_async` trainer, a standalone teacher pool
+(`nnodes > 0`; colocated teachers share the actor's GPUs and have nothing to
+overlap with), `sync_compatible: false`, and
+`trainer.v1.separate_async.num_warmup_batches >= 2` — filling the pipeline
+consumes one batch of generation lead, and with the YAML default of `1` every
+step would wait on its own batch's generation. All four conditions are checked
+at startup, so a bare `distillation.scheduler=one_step_off` override on the
+default config fails there rather than at the first step.
+
+With the same generation lead both schedulers update on the same batch at the
+same step and report the same `trajectory_staleness`; `one_step_off` only
+samples that batch one step earlier. The replay buffer applies
+`max_off_policy_threshold` at sampling time, so with the same threshold the
+oldest batch `one_step_off` can update on is one step older than under
+`inline`. The teacher is frozen, so the delayed scoring adds no teacher
+staleness.
+
 ### Loss-side switches
 
 The distillation losses and their switches live under
@@ -172,8 +203,7 @@ teacher stage time without changing the scores.
 
 Supported scope: the policy-gradient trainer with online sampling and
 FSDP/FSDP2 engines, on both the legacy trainer (`main_diffusion`) and the v1
-sync trainer (`main_diffusion_v1` with `trainer.v1.trainer_mode=sync`; the
-v1 `separate_async` mode does not support distillation yet). Unsupported
+trainer (`main_diffusion_v1`, `sync` and `separate_async` modes). Unsupported
 combinations raise at startup.
 
 A complete working recipe is
@@ -251,10 +281,11 @@ actor_rollout_ref:
 Teachers can run on their own GPUs instead of the actor's: `nnodes > 0`
 allocates a `teacher_pool`, split into one sub-pool per teacher according to
 `world_size`. The actor's GPUs are set by `trainer.n_gpus_per_node`, the
-teachers' by `distillation.n_gpus_per_node`. Teacher scoring stays a serial
-stage of the training step, so a standalone pool does not make it faster than
-the same GPUs colocated; it isolates teacher memory from the actor and the
-rollout engine's sleep/wake cycle.
+teachers' by `distillation.n_gpus_per_node`. Under the default `inline`
+scheduler teacher scoring stays a serial stage of the training step, so a
+standalone pool does not make it faster than the same GPUs colocated; it
+isolates teacher memory from the actor and the rollout engine's sleep/wake
+cycle, and it is the prerequisite for `one_step_off` below.
 
 ```yaml
 trainer:
@@ -274,6 +305,38 @@ distillation:
       world_size: 1
 ```
 
+### One-step-off teacher scheduling
+
+On the v1 `separate_async` trainer a standalone pool can score the next batch
+while the actor updates on the current one. The saving is the teacher stage's
+share of the step, which grows with the rows each teacher GPU scores; measured
+on SD3.5-Medium it ranges from about 14% (dual-teacher pool) to 24% (one
+teacher scoring the whole batch) of the step time, with the loss and reward
+curves matching the inline schedule.
+
+```yaml
+trainer:
+  use_v1: true
+  v1:
+    trainer_mode: separate_async
+    separate_async:
+      num_warmup_batches: 2
+distillation:
+  enabled: true
+  n_gpus_per_node: 2
+  nnodes: 1
+  scheduler: one_step_off
+  teacher_models:
+    ocr:
+      key: ocr
+      model_path: /ckpt/sd35m-ocr-teacher
+      world_size: 1
+    aesthetic:
+      key: aesthetic
+      model_path: /ckpt/sd35m-aesthetic-teacher
+      world_size: 1
+```
+
 ## Metrics
 
 - `actor/distill_kl_loss` — per-step KL between student and teacher
@@ -282,3 +345,7 @@ distillation:
   the student matches the teacher.
 - `timing_s/teacher` — wall time of the once-per-step teacher scoring stage,
   reported alongside `timing_s/ref` and the other fit-loop stages.
+- `timing_s/wait_prev_teacher` — with `scheduler: one_step_off`, the residual
+  wait for the previous step's dispatched scoring; it replaces
+  `timing_s/teacher`, and a value near zero means the teacher stage is fully
+  hidden behind the actor update.

@@ -169,3 +169,29 @@ class TestComputePrevSampleMean:
 
         assert wg["default"].calls == [("default", 3)]
         torch.testing.assert_close(out.batch["teacher_prev_sample_mean"], torch.full((3, 4, 8, 3), 3.0))
+
+
+class TestDispatchCollectSplit:
+    def test_dispatch_does_not_block_and_collect_matches_compute(self):
+        log = []
+        wg = {"ocr": FakeTeacherWorkerGroup(1.0, 2, log), "aes": FakeTeacherWorkerGroup(2.0, 1, log)}
+        manager = make_manager(MULTI, wg)
+
+        pending = manager.dispatch_prev_sample_mean(make_batch(["ocr", "aes", "ocr", "aes", "ocr"]))
+        assert [kind for kind, _ in log] == ["infer", "infer"]
+
+        out = manager.collect_prev_sample_mean(pending)
+        assert [kind for kind, _ in log] == ["infer", "infer", "get", "get"]
+        expected = torch.tensor([1.0, 2.0, 1.0, 2.0, 1.0]).view(5, 1, 1, 1).expand(5, 4, 8, 3)
+        torch.testing.assert_close(out.batch["teacher_prev_sample_mean"], expected)
+
+    def test_single_teacher_dispatch_collect(self):
+        log = []
+        wg = {"default": FakeTeacherWorkerGroup(3.0, 2, log)}
+        manager = make_manager(SINGLE, wg)
+
+        pending = manager.dispatch_prev_sample_mean(make_batch(["x", "y"]))
+        assert [kind for kind, _ in log] == ["infer"]
+
+        out = manager.collect_prev_sample_mean(pending)
+        torch.testing.assert_close(out.batch["teacher_prev_sample_mean"], torch.full((2, 4, 8, 3), 3.0))
