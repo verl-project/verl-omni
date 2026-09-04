@@ -1,6 +1,6 @@
 # BAGEL-7B-MoT FlowGRPO training
 
-Last updated: 07/06/2026
+Last updated: 09/01/2026
 
 [BAGEL-7B-MoT](https://github.com/ByteDance-Seed/BAGEL) is a
 Mixture-of-Transformers model supporting both image understanding and
@@ -126,6 +126,26 @@ parameters after forward, reducing peak memory during gradient
 checkpointing.  The understanding pathway (``moe_und``) is not a LoRA
 wrapper replacement but simply has ``requires_grad=False`` set by the
 ``configure_trainable_params`` hook.
+
+## V1 (sync) training
+
+A V1-trainer counterpart of the PickScore LoRA recipe is available, using
+TransferQueue + ReplayBuffer via `verl_omni.trainer.main_diffusion_v1`:
+
+```bash
+bash examples/flowgrpo_trainer/bagel/run_bagel_pickscore_lora_v1.sh
+```
+
+Same dataset preparation and config as the PickScore LoRA recipe above; the
+only differences are the entrypoint and:
+
+```text
+trainer.use_v1=true
+trainer.v1.trainer_mode=sync
+```
+
+See the [Diffusion V1 guide](../../../docs/start/diffusion_v1.md) for the
+general V1 trainer architecture (documented there using the SD3.5 recipe).
 
 ## Key differences from Qwen-Image
 
