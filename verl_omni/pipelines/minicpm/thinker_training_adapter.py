@@ -53,6 +53,9 @@ _MINICPM_REQUIRED_DATA_KEYS = (
 # MiniCPMO.forward binds these before ``self.llm(..., **kwargs)``. The adapter wrap
 # must not forward engine copies or the LLM call raises TypeError.
 _MINICPM_LLM_BOUND_KEYS = ("input_ids", "position_ids", "inputs_embeds")
+_MINICPM_FROZEN_ENCODER_MODULES = ("vpm", "apm")
+_VISION_EMB_PATCH_ATTR = "_verl_omni_get_vision_embedding_patched"
+_VLLM_EMB_PATCH_ATTR = "_verl_omni_get_vllm_embedding_patched"
 
 
 def _register_minicpm_architectures(cls):
@@ -105,6 +108,109 @@ def patch_minicpm_whisper_encoder_layers(module) -> None:
         return
     for layer in layers:
         wrap_whisper_self_attn_forward(getattr(layer, "self_attn", None))
+
+
+def freeze_minicpm_encoder_modules(module) -> None:
+    """Freeze MiniCPM vision/audio encoders; LLM LoRA stays trainable."""
+    for name in _MINICPM_FROZEN_ENCODER_MODULES:
+        encoder = getattr(module, name, None)
+        if encoder is None:
+            continue
+        encoder.eval()
+        encoder.requires_grad_(False)
+
+
+def _has_pixel_slices(pixel_values) -> bool:
+    if pixel_values is None or pixel_values == []:
+        return False
+    if isinstance(pixel_values, (list | tuple)):
+        return any(_has_pixel_slices(sample) for sample in pixel_values)
+    return True
+
+
+def patch_minicpm_get_vision_embedding(module) -> None:
+    """Skip dummy vpm forwards and stop vision embeddings from entering autograd.
+
+    Frozen ``vpm`` does not need the remote training dummy image that exists only
+    to keep unused encoder parameters in the graph. Real images still go through
+    the original encoder, under ``torch.no_grad()``.
+    """
+    original = getattr(module, "get_vision_embedding", None)
+    if original is None or getattr(module, _VISION_EMB_PATCH_ATTR, False):
+        return
+
+    def get_vision_embedding(self, data, _original=original):
+        del self
+        if isinstance(data, dict) and "vision_hidden_states" in data:
+            return _original(data)
+        pixel_values = data.get("pixel_values") if isinstance(data, dict) else None
+        if not _has_pixel_slices(pixel_values):
+            return [[] for _ in (pixel_values or [])]
+        import torch
+
+        with torch.no_grad():
+            return _original(data)
+
+    module.get_vision_embedding = types.MethodType(get_vision_embedding, module)
+    setattr(module, _VISION_EMB_PATCH_ATTR, True)
+
+
+def _embed_tokens_module(module):
+    llm = getattr(module, "llm", None)
+    if llm is None:
+        return None
+    model = getattr(llm, "model", llm)
+    return getattr(model, "embed_tokens", None)
+
+
+def patch_minicpm_get_vllm_embedding(module) -> None:
+    """Clone text embeddings before vision scatter so LoRA backward is legal.
+
+    Remote ``get_vllm_embedding`` does ``vllm_embedding[i].scatter_(...)``.
+    PEFT ``enable_input_require_grads`` makes the embed_tokens output a leaf,
+    so that view in-place op fails. Clone each row, use out-of-place
+    ``scatter``, then ``stack``.
+    """
+    if getattr(module, _VLLM_EMB_PATCH_ATTR, False):
+        return
+    if _embed_tokens_module(module) is None or not hasattr(module, "get_vision_embedding"):
+        return
+
+    def get_vllm_embedding(self, data):
+        import torch
+
+        vision_hidden_states = self.get_vision_embedding(data)
+        vllm_embedding = _embed_tokens_module(self)(data["input_ids"])
+        llm_config = getattr(self.llm, "config", None)
+        if llm_config is not None and hasattr(llm_config, "scale_emb"):
+            vllm_embedding = vllm_embedding * llm_config.scale_emb
+
+        vision_hidden_states = [
+            i.type(vllm_embedding.dtype) if isinstance(i, torch.Tensor) else i for i in vision_hidden_states
+        ]
+
+        rows = []
+        batch_size = len(data["input_ids"])
+        image_bound = data.get("image_bound") or [[] for _ in range(batch_size)]
+        for i in range(batch_size):
+            row = vllm_embedding[i].clone()
+            cur_vs_hs = vision_hidden_states[i] if i < len(vision_hidden_states) else []
+            if len(cur_vs_hs) > 0:
+                cur_image_bound = image_bound[i]
+                if len(cur_image_bound) > 0:
+                    image_indices = torch.stack(
+                        [torch.arange(int(bound[0]), int(bound[1]), dtype=torch.long) for bound in cur_image_bound]
+                    ).to(vllm_embedding.device)
+                    src = cur_vs_hs.view(-1, cur_vs_hs.shape[-1]).to(device=row.device, dtype=row.dtype)
+                    index = image_indices.view(-1, 1).repeat(1, row.shape[-1])
+                    row = row.scatter(0, index, src)
+                elif self.training:
+                    row = row + cur_vs_hs[0].mean() * 0
+            rows.append(row)
+        return torch.stack(rows, dim=0), vision_hidden_states
+
+    module.get_vllm_embedding = types.MethodType(get_vllm_embedding, module)
+    setattr(module, _VLLM_EMB_PATCH_ATTR, True)
 
 
 def _first_existing_attr(module, names: list[str]):
@@ -239,10 +345,14 @@ class MiniCPMThinkerAdapter(OmniModelBase):
     @classmethod
     def configure_model(cls, module, model_config):
         module = super().configure_model(module, model_config)
+        freeze_minicpm_encoder_modules(module)
         patch_minicpm_whisper_encoder_layers(module)
+        patch_minicpm_get_vision_embedding(module)
+        patch_minicpm_get_vllm_embedding(module)
 
-        # Keep MiniCPMO.forward so vpm/resampler/apm stay in the training graph.
-        # Wrap it so verl's `module(**hf_kwargs)` becomes `forward(data, **llm_kwargs)`.
+        # Keep MiniCPMO.forward so vpm/resampler/apm still produce multimodal
+        # embeddings; wrap it so verl's `module(**hf_kwargs)` becomes
+        # `forward(data, **llm_kwargs)`.
         original_forward = module.__class__.forward
 
         def _forward(self, data=None, **kwargs):
