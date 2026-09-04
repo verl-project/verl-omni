@@ -1,9 +1,29 @@
 (http_scorer)=
 # Using an External HTTP Scorer Service
 
-Last updated: 08/09/2026
+Last updated: 09/04/2026
 
 VeRL-Omni ships a generic HTTP reward client (`verl_omni.utils.reward_score.http_scorer_client`) that sends generated images to an external scorer service over HTTP and returns the score. This is useful when your reward model is too large to co-locate with training, needs a different runtime (e.g., a separate GPU pool), or is shared across multiple experiments.
+
+Audio rollouts use `verl_omni.utils.reward_score.audio_http_scorer_client`.
+That client sends JSON containing a base64-encoded float32 waveform,
+`sample_rate`, target `prompt`, and scalar metadata. The service returns a JSON
+object with a finite `score` and optional diagnostics:
+
+```json
+{
+  "protocol_version": "1",
+  "waveform_f32_base64": "...",
+  "num_samples": 24000,
+  "sample_rate": 24000,
+  "prompt": "Text to synthesize",
+  "metadata": {"id": "stable-id"}
+}
+```
+
+The endpoint must return `{"score": 1.25}` and may include additional scalar
+diagnostics. The client retries only transient network, timeout, HTTP 408/429,
+and 5xx failures; malformed or non-finite responses fail closed.
 
 ## How it works
 
