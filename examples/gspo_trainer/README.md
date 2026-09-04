@@ -12,9 +12,6 @@ Both **GPU** and **NPU** training platforms are supported:
 
 - `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh`
   — **GPU**, **LoRA (r=32)** on a single node with **4 × H800 80GB**.
-- `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh`
-  — **NPU**, **full-parameter** on a single **Atlas 800T A3** node with
-  **16 × Ascend 910C 64GB**.
 - [`run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh)
   — **GPU**, **LoRA (r=32) V1** for text + image + audio AVQA training.
 - [`run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh)
@@ -47,21 +44,15 @@ python -c "import verl, verl_omni, vllm, vllm_omni; print('OK')"
 
 The GPU V1 and AVQA NPU launchers use `verl_omni.trainer.main_omni` and set
 `VERL_USE_EXTERNAL_MODULES=verl_omni`. Processor/model setup is handled by the
-registered Qwen3-Omni V1 adapter, so these launchers do not load the deprecated
-model monkey-patches through `external_lib`. The existing generic NPU launcher
-is left unchanged for backward compatibility.
+registered Qwen3-Omni V1 adapter, so these launchers do not load model
+monkey-patches through `external_lib`.
 
 The launchers colocate the FSDP actor and the `vllm-omni` rollout on the same
 devices. `run_qwen3_omni_thinker_gspo_lora_v1.sh` targets a single node with
-**4 × H800 80GB**; `run_qwen3_omni_thinker_gspo_npu.sh` targets a single
-**Atlas 800T A3** node with **16 × Ascend 910C 64GB** (full-parameter FSDP
-actor, rollout TP=2). The AVQA NPU launcher dynamically generates a thinker-only
-deploy config for each rollout replica from that replica's visible devices,
-avoiding cross-replica device-rank collisions.
-
-> **Deprecated:** `run_qwen3_omni_thinker_gspo_lora.sh` retains the old
-> `verl.trainer.main_ppo` and model monkey-patch path for backward compatibility.
-> New development should use the V1 launchers.
+**4 × H800 80GB**; `run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh` targets a single
+**Atlas 800T A3** node with **16 × Ascend 910C 64GB**. It dynamically generates
+a thinker-only deploy config for each rollout replica from that replica's
+visible devices, avoiding cross-replica device-rank collisions.
 
 ## Prepare the model
 
@@ -94,13 +85,9 @@ Launch from the repository root — pick the flavor that matches your hardware:
 # GPU, LoRA (r=32), 4 × H800 — V1 trainer (recommended)
 bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh
 
-# NPU, full-parameter, Atlas 800T A3 (16 × Ascend 910C 64GB)
-bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh
+# NPU, AVQA, Atlas 800T A3 (16 × Ascend 910C 64GB) — V1 trainer
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh
 ```
-
-> **Deprecated:** `run_qwen3_omni_thinker_gspo_lora.sh` (old
-> `verl.trainer.main_ppo` entrypoint with `external_lib` monkey-patches)
-> is kept for backward compatibility but no longer recommended.
 
 The V1 launchers use pure CLI overrides on `verl_omni.trainer.main_omni`
 (no `--config-path/--config-name`, no recipe YAML). Config precedence,
@@ -348,13 +335,7 @@ examples/gspo_trainer/
 │   ├── run_qwen3_omni_thinker_gspo_lora_v1.sh       ← V1 launch script (GPU, LoRA r=32, text)
 │   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh  ← V1 launch script (GPU, LoRA r=32, image)
 │   ├── run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh   ← V1 launch script (GPU, LoRA r=32, audio + image)
-│   ├── run_qwen3_omni_thinker_gspo_lora.sh           ← deprecated (old main_ppo entrypoint)
-│   ├── run_qwen3_omni_thinker_gspo_npu.sh            ← launch script (NPU, full-parameter)
 │   ├── run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh    ← V1 launch script (NPU, AVQA)
-│   ├── config/
-│   │   └── qwen3_omni_thinker_gspo.yaml              ← old recipe config (deprecated path only)
-│   ├── qwen3_omni_thinker_only.yaml                  ← old vllm-omni stage config (deprecated path only)
-│   └── qwen3_omni_thinker_only_npu.yaml              ← old vllm-omni stage config (deprecated path only)
 ├── data_process/
 │   ├── mmk12.py                                      ← MMK12 → verl RL parquet converter
 │   └── avqa.py                                       ← AVQA → verl RL parquet converter
