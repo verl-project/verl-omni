@@ -27,11 +27,7 @@ from typing import Any
 from verl_omni.pipelines.model_base import OmniModelBase
 
 _MINICPM_ARCHITECTURES = ("MiniCPMO",)
-_MINICPM_NO_SPLIT_MODULES = [
-    "Qwen3DecoderLayer",
-    "MiniCPMODecoderLayer",
-    "MiniCPMWhisperEncoder",
-]
+_MINICPM_NO_SPLIT_MODULES = ["Qwen3DecoderLayer", "MiniCPMODecoderLayer"]
 # Keys consumed by MiniCPMO.forward(data, **kwargs) / get_vllm_embedding / get_omni_embedding.
 _MINICPM_DATA_KEYS = (
     "input_ids",
@@ -215,6 +211,11 @@ class MiniCPMThinkerAdapter(OmniModelBase):
 
         module._no_split_modules = _MINICPM_NO_SPLIT_MODULES
         return module
+
+    @classmethod
+    def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
+        del model_config
+        return ["apm"]
 
     @classmethod
     def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:

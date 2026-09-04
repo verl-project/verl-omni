@@ -31,8 +31,10 @@ from verl.utils.fsdp_utils import fsdp_version
 from verl.utils.fsdp_utils import layered_summon_lora_params as _upstream_layered_summon_lora_params
 
 __all__ = [
+    "apply_fsdp2_excluding_module_names",
     "collect_lora_params",
     "export_fsdp_lora_adapter",
+    "fsdp_name_is_ignored",
     "fsdp_summon_full_params",
     "split_fused_moe_lora_targets",
 ]
@@ -41,6 +43,78 @@ __all__ = [
 # nn.Parameter, not nn.Linear. PEFT must target them via target_parameters.
 _FUSED_MOE_EXPERTS_MODULE = "experts"
 _FUSED_MOE_DEFAULT_TARGET_PARAMETERS = ("gate_up_proj", "down_proj")
+
+
+def fsdp_name_is_ignored(name: str, ignored_module_names: Sequence[str]) -> bool:
+    """True when ``name`` is ``apm`` or anything under it (including PEFT prefixes)."""
+    parts = name.split(".")
+    return any(ignored in parts for ignored in ignored_module_names)
+
+
+def apply_fsdp2_excluding_module_names(model, fsdp_kwargs, config, ignored_module_names: Sequence[str]):
+    """Like verl ``apply_fsdp2``, but do not ``fully_shard`` ignored subtrees.
+
+    Root ``fully_shard`` still runs; ignored parameters are passed as
+    ``ignored_params`` so they stay replicated tensors.
+    """
+    from torch.distributed.fsdp import fully_shard
+    from verl.utils.fsdp_utils import (
+        _select_fsdp2_wrap_targets,
+        maybe_patch_fsdp_module,
+    )
+
+    if not ignored_module_names:
+        from verl.utils.fsdp_utils import apply_fsdp2
+
+        apply_fsdp2(model, fsdp_kwargs, config)
+        return
+
+    try:
+        from torch.distributed.fsdp import FSDPModule
+    except ImportError:
+        from torch.distributed._composable.fsdp import FSDPModule
+
+    default_transformer_cls_names_to_wrap = getattr(model, "_no_split_modules", None)
+    fsdp_transformer_layer_cls_to_wrap = config.get("wrap_policy", {}).get(
+        "transformer_layer_cls_to_wrap", default_transformer_cls_names_to_wrap
+    )
+    if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
+        fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
+    if isinstance(fsdp_transformer_layer_cls_to_wrap, set):
+        fsdp_transformer_layer_cls_to_wrap = list(fsdp_transformer_layer_cls_to_wrap)
+
+    ignored_ids = {
+        id(module)
+        for name, module in model.named_modules()
+        if fsdp_name_is_ignored(name, ignored_module_names)
+    }
+    modules = [
+        module
+        for module in _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap)
+        if id(module) not in ignored_ids
+    ]
+    for module in modules:
+        with maybe_patch_fsdp_module(module):
+            fully_shard(module, **fsdp_kwargs)
+
+    ignored_params = {
+        param for name, param in model.named_parameters() if fsdp_name_is_ignored(name, ignored_module_names)
+    }
+    root_kwargs = dict(fsdp_kwargs)
+    if ignored_params:
+        root_kwargs["ignored_params"] = ignored_params
+    with maybe_patch_fsdp_module(model):
+        try:
+            fully_shard(model, **root_kwargs)
+        except TypeError:
+            fully_shard(model, **fsdp_kwargs)
+
+    if config.get("forward_prefetch", False):
+        fsdp_modules = [module for module in modules if isinstance(module, FSDPModule)]
+        for index, module in enumerate(fsdp_modules):
+            next_targets = fsdp_modules[index + 1 : index + 2]
+            if next_targets and hasattr(module, "set_modules_to_forward_prefetch"):
+                module.set_modules_to_forward_prefetch(next_targets)
 
 
 def _get_fsdp_module_cls():

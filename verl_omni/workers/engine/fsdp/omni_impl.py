@@ -245,3 +245,26 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
                     submodule.cast_input_dtype_enabled = False
 
         return module
+
+    def _build_fsdp_module(self, module):
+        import verl.workers.engine.fsdp.transformer_impl as transformer_impl
+
+        from verl_omni.utils.fsdp_utils import apply_fsdp2_excluding_module_names
+
+        ignored = []
+        adapter_cls = getattr(self, "model_adapter_cls", None)
+        if adapter_cls is not None:
+            ignored = list(adapter_cls.get_fsdp_ignored_module_names(self.model_config))
+        if not ignored:
+            return super()._build_fsdp_module(module)
+
+        original_apply = transformer_impl.apply_fsdp2
+
+        def _apply(model, fsdp_kwargs, config):
+            apply_fsdp2_excluding_module_names(model, fsdp_kwargs, config, ignored)
+
+        transformer_impl.apply_fsdp2 = _apply
+        try:
+            return super()._build_fsdp_module(module)
+        finally:
+            transformer_impl.apply_fsdp2 = original_apply

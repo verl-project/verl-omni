@@ -656,6 +656,15 @@ class OmniModelBase(ABC):
         return module
 
     @classmethod
+    def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
+        """Submodule names that must not be ``fully_shard``'d (FSDP2 leftover params).
+
+        Names match a path component, so ``apm`` also covers ``base_model.model.apm``.
+        """
+        del model_config
+        return []
+
+    @classmethod
     def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
         """Add model-native rollout data to an actor replay forward call.
 
