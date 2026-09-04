@@ -163,9 +163,6 @@ ar:
   # whether to trust remote code.
   trust_remote_code: False
 
-  # whether to use external libs for the model
-  external_lib: null
-
   # whether to enable gradient checkpointing.
   enable_gradient_checkpointing: True
 

@@ -1490,14 +1490,14 @@ class CompositeFSDPEngine(BaseEngine):
 
         # seperate engines, composite modules
         ar_model_config = self.build_ar_hf_model_config(model_config)
-        engine_config.model_type = "language_model"
+        ar_model_config.model_type = "language_model"
         self.ar_engine = FSDPEngineWithLMHead(
             model_config=ar_model_config,
             engine_config=engine_config,
             optimizer_config=optimizer_config,
             checkpoint_config=checkpoint_config,
         )
-        engine_config.model_type = "diffusion_model"
+        model_config.model_type = "diffusion_model"
         self.dit_engine = PPODiffusersFSDPEngine(
             model_config=model_config,
             engine_config=engine_config,
