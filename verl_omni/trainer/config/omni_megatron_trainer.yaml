@@ -153,3 +153,16 @@ algorithm:
 
     # Use rollout log probabilities directly for the fully asynchronous path.
     bypass_mode: true
+
+
+# Distillation config. Overrides only the teacher _target_ so vllm_omni is
+# accepted by _validate_topk_logprobs; all other defaults are inherited from
+# verl's distillation group.
+distillation:
+
+  teacher_models:
+
+    teacher_model:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl_omni.workers.config.omni.distillation.OmniDistillationTeacherModelConfig
