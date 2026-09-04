@@ -39,10 +39,7 @@ import numpy as np
 import torch
 
 from verl_omni.utils.dataset.qwen3_omni_transform import (
-    AUDIO_INPUT_INDEX,
     IGNORE_INDEX,
-    IMAGE_INPUT_INDEX,
-    VIDEO_INPUT_INDEX,
     _fetch_audios,
     _fetch_images,
 )
@@ -78,23 +75,6 @@ def _convert_token_to_id(tokenizer, token: str) -> int | None:
         return int(token_id)
     except (TypeError, ValueError):
         return None
-
-
-def _get_media_token_ids(processor) -> dict[str, int]:
-    tokenizer = _tokenizer_from_processor(processor)
-    candidates = {
-        "image": ("<image>", "<|image_pad|>", "<|IMAGE|>"),
-        "video": ("<video>", "<|video_pad|>", "<|VIDEO|>"),
-        "audio": ("<audio>", "<|audio_pad|>", "<|AUDIO|>"),
-    }
-    token_ids: dict[str, int] = {}
-    for modality, tokens in candidates.items():
-        for token in tokens:
-            token_id = _convert_token_to_id(tokenizer, token)
-            if token_id is not None:
-                token_ids[modality] = token_id
-                break
-    return token_ids
 
 
 def _append_content_text(parts: list[str], item: Any) -> None:
@@ -274,23 +254,169 @@ def _call_processor(
         },
     ]
     last_error: Exception | None = None
-    for kwargs in attempts:
+    for attempt_kwargs in attempts:
         try:
-            return _processor_data(processor(**_without_empty_media(kwargs)))
+            return _processor_data(processor(**_without_empty_media(attempt_kwargs)))
         except TypeError as exc:
             last_error = exc
             continue
+    # Empty media lists are stripped before the processor call, so a text-only
+    # sample already reaches the processor as ``text`` / ``padding`` only.
+    if images or videos or audios:
+        raise TypeError(
+            "MiniCPM processor rejected the supported training input signatures "
+            f"while media was present (images={len(images)}, audios={len(audios)}, "
+            f"videos={len(videos)}). Refusing a text-only tokenizer fallback."
+        ) from last_error
     tokenizer = _tokenizer_from_processor(processor)
     try:
         return _processor_data(tokenizer(text, return_tensors="pt", padding=True))
     except TypeError as exc:
-        raise TypeError("MiniCPM processor rejected the supported training input signatures.") from last_error or exc
+        raise TypeError(
+            "MiniCPM processor rejected the supported training input signatures, "
+            "and the tokenizer also failed for a text-only sample."
+        ) from last_error or exc
 
 
 def _squeeze_batch_dim(value: Any) -> Any:
     if isinstance(value, torch.Tensor) and value.ndim >= 2 and value.shape[0] == 1:
         return value.squeeze(0).contiguous()
     return value
+
+
+def _as_tensor(value: Any) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        return value
+    return torch.as_tensor(np.asarray(value))
+
+
+def _is_empty_audio_features(value: Any) -> bool:
+    """True when there are no mel frames, including collated empty placeholders.
+
+    MiniCPMO uses ``len(data['audio_features']) > 0`` to decide whether a batch
+    has audio. A collated image-only batch is often ``[[], [], ...]``, which has
+    length equal to the text batch size even though no clip exists.
+    """
+    if value is None:
+        return True
+    if isinstance(value, torch.Tensor):
+        return value.numel() == 0
+    if isinstance(value, np.ndarray):
+        return value.size == 0
+    if isinstance(value, (list, tuple)):
+        return len(value) == 0 or all(_is_empty_audio_features(item) for item in value)
+    return False
+
+
+def _one_sample_audio_feature_lens(sample: Any, device: torch.device) -> torch.Tensor:
+    if sample is None or (isinstance(sample, (list, tuple)) and not sample):
+        return torch.zeros(0, dtype=torch.long, device=device)
+    if isinstance(sample, torch.Tensor):
+        return sample.to(device=device, dtype=torch.long).reshape(-1).contiguous()
+    if isinstance(sample, np.ndarray):
+        return torch.as_tensor(sample, dtype=torch.long, device=device).reshape(-1).contiguous()
+    if isinstance(sample, (list, tuple)):
+        if len(sample) == 1 and isinstance(sample[0], (list, tuple, torch.Tensor, np.ndarray)):
+            return _one_sample_audio_feature_lens(sample[0], device)
+        if sample and not isinstance(sample[0], (int, float, np.integer, np.floating)):
+            return torch.cat([_one_sample_audio_feature_lens(item, device) for item in sample], dim=0)
+        return torch.as_tensor(sample, dtype=torch.long, device=device).reshape(-1).contiguous()
+    return torch.as_tensor(sample, dtype=torch.long, device=device).reshape(-1).contiguous()
+
+
+def _batch_audio_feature_lens(value: Any, device: torch.device) -> list[torch.Tensor]:
+    """List of 1D tensors so ``torch.hstack(audio_feature_lens_raw)`` succeeds."""
+    if _is_empty_audio_features(value):
+        return []
+    if isinstance(value, torch.Tensor) and value.ndim <= 1:
+        return [_one_sample_audio_feature_lens(value, device)]
+    if isinstance(value, (list, tuple)):
+        return [_one_sample_audio_feature_lens(sample, device) for sample in value]
+    return [_one_sample_audio_feature_lens(value, device)]
+
+
+def _normalize_audio_features(value: Any) -> torch.Tensor | list:
+    """Empty batches become ``[]``; real clips become ``(n_clips, 80, frames)``."""
+    if _is_empty_audio_features(value):
+        return []
+    if isinstance(value, torch.Tensor):
+        if value.ndim == 2:
+            return value.unsqueeze(0).contiguous()
+        return value.contiguous()
+    if isinstance(value, np.ndarray):
+        return _normalize_audio_features(torch.as_tensor(value))
+    if isinstance(value, (list, tuple)):
+        clips: list[torch.Tensor] = []
+        for item in value:
+            if _is_empty_audio_features(item):
+                continue
+            packed = _normalize_audio_features(item)
+            if isinstance(packed, list):
+                continue
+            if packed.ndim == 2:
+                clips.append(packed)
+            else:
+                clips.extend(clip.contiguous() for clip in packed)
+        if not clips:
+            return []
+        max_frames = max(int(clip.shape[-1]) for clip in clips)
+        padded = []
+        for clip in clips:
+            if clip.ndim != 2:
+                raise ValueError(f"MiniCPM audio clip must be (n_mels, frames), got shape {tuple(clip.shape)}.")
+            pad = max_frames - int(clip.shape[-1])
+            if pad:
+                clip = torch.nn.functional.pad(clip, (0, pad))
+            padded.append(clip)
+        return torch.stack(padded, dim=0)
+    return _normalize_audio_features(_as_tensor(value))
+
+
+def _sample_pixel_slices(pixel_values: Any) -> list[torch.Tensor]:
+    """Per-sample slices for MiniCPMO.get_vision_embedding.
+
+    The processor returns a batch list ``[[slice, slice, ...]]``.  Remote code
+    then does ``i.flatten(end_dim=1)`` on each slice, so each ``i`` must be a
+    tensor, not another list.
+    """
+    if pixel_values is None:
+        return []
+    if isinstance(pixel_values, torch.Tensor):
+        if pixel_values.numel() == 0:
+            return []
+        if pixel_values.ndim >= 3:
+            return [slice_tensor.contiguous() for slice_tensor in pixel_values]
+        return [pixel_values.contiguous()]
+    if isinstance(pixel_values, np.ndarray):
+        return _sample_pixel_slices(torch.as_tensor(pixel_values))
+    if isinstance(pixel_values, (list, tuple)):
+        if not pixel_values:
+            return []
+        first = pixel_values[0]
+        if isinstance(first, (list, tuple)):
+            if len(pixel_values) == 1:
+                return _sample_pixel_slices(first)
+            slices: list[torch.Tensor] = []
+            for item in pixel_values:
+                slices.extend(_sample_pixel_slices(item))
+            return slices
+        return [_as_tensor(item).contiguous() for item in pixel_values]
+    return [_as_tensor(pixel_values).contiguous()]
+
+
+def _sample_tgt_sizes(tgt_sizes: Any, *, n_slices: int, device: torch.device) -> torch.Tensor:
+    if tgt_sizes is None or (isinstance(tgt_sizes, (list | tuple)) and not tgt_sizes):
+        return torch.zeros(0, 2, dtype=torch.int32, device=device)
+    if isinstance(tgt_sizes, (list, tuple)) and len(tgt_sizes) == 1 and not isinstance(tgt_sizes[0], (int, float)):
+        inner = tgt_sizes[0]
+        if isinstance(inner, (list | tuple | np.ndarray | torch.Tensor)):
+            return _sample_tgt_sizes(inner, n_slices=n_slices, device=device)
+    sizes = torch.as_tensor(tgt_sizes, dtype=torch.int32, device=device)
+    if sizes.numel() == 0:
+        return torch.zeros(0, 2, dtype=torch.int32, device=device)
+    if sizes.ndim == 1:
+        sizes = sizes.unsqueeze(0)
+    return sizes.reshape(-1, 2).contiguous()
 
 
 def _encode_like_processor(tokenizer, text: str, *, max_length: int | None = None) -> list[int]:
@@ -324,7 +450,7 @@ def _normalise_image_sizes(image_sizes: Any) -> list[Any]:
     if isinstance(image_sizes, list):
         if len(image_sizes) == 1 and isinstance(image_sizes[0], list):
             inner = image_sizes[0]
-            if inner and isinstance(inner[0], (list, tuple)):
+            if inner and isinstance(inner[0], (list | tuple)):
                 return [tuple(item) for item in inner]
             return list(inner)
         return list(image_sizes)
@@ -501,6 +627,65 @@ def _default_position_ids(input_ids: torch.Tensor) -> torch.Tensor:
     return torch.arange(input_ids.shape[-1], dtype=torch.long, device=input_ids.device)
 
 
+def _empty_bound(device: torch.device) -> torch.Tensor:
+    return torch.zeros(0, 2, dtype=torch.long, device=device)
+
+
+def _sample_bound(value: Any, device: torch.device) -> torch.Tensor:
+    if value is None or (isinstance(value, (list, tuple)) and not value):
+        return _empty_bound(device)
+    if isinstance(value, (list, tuple)) and len(value) == 1 and isinstance(value[0], (torch.Tensor, np.ndarray, list)):
+        return _sample_bound(value[0], device)
+    bound = torch.as_tensor(value, dtype=torch.long, device=device)
+    if bound.numel() == 0:
+        return _empty_bound(device)
+    if bound.ndim == 1:
+        bound = bound.unsqueeze(0)
+    return bound.reshape(-1, 2).contiguous()
+
+
+def _fill_minicpm_forward_fields(model_inputs: dict[str, Any], input_ids: torch.Tensor) -> dict[str, Any]:
+    """Guarantee keys MiniCPMO.forward reads from ``data``.
+
+    Remote code indexes ``data["pixel_values"]``, ``data["tgt_sizes"]``,
+    ``data["image_bound"]``, ``data["audio_bounds"]``, ``data["position_ids"]``,
+    and ``len(data["input_ids"])``. Missing media keys must still be present as
+    empty per-sample values so batching can keep MiniCPM's list layout.
+    """
+    if "position_ids" not in model_inputs or model_inputs["position_ids"] is None:
+        model_inputs["position_ids"] = _default_position_ids(input_ids)
+    position_ids = model_inputs["position_ids"]
+    if not isinstance(position_ids, torch.Tensor):
+        position_ids = torch.tensor(position_ids, dtype=torch.long, device=input_ids.device)
+    if position_ids.ndim > 1 and position_ids.shape[0] == 1:
+        position_ids = position_ids.squeeze(0)
+    model_inputs["position_ids"] = position_ids.to(dtype=torch.long, device=input_ids.device)
+    if model_inputs["position_ids"].shape[-1] != input_ids.shape[-1]:
+        raise ValueError(
+            "MiniCPM position_ids length "
+            f"{model_inputs['position_ids'].shape[-1]} does not match input_ids length {input_ids.shape[-1]}."
+        )
+
+    model_inputs["pixel_values"] = _sample_pixel_slices(model_inputs.get("pixel_values"))
+    model_inputs["tgt_sizes"] = _sample_tgt_sizes(
+        model_inputs.get("tgt_sizes"),
+        n_slices=len(model_inputs["pixel_values"]),
+        device=input_ids.device,
+    )
+    model_inputs["image_bound"] = _sample_bound(model_inputs.get("image_bound"), input_ids.device)
+    model_inputs["audio_bounds"] = _sample_bound(model_inputs.get("audio_bounds"), input_ids.device)
+    audio_features = _normalize_audio_features(model_inputs.get("audio_features"))
+    if audio_features == []:
+        model_inputs.pop("audio_features", None)
+        model_inputs.pop("audio_feature_lens", None)
+    else:
+        model_inputs["audio_features"] = audio_features
+        model_inputs["audio_feature_lens"] = _batch_audio_feature_lens(
+            model_inputs.get("audio_feature_lens"), input_ids.device
+        )
+    return model_inputs
+
+
 def _fetch_minicpm_audios(sample: dict[str, Any], **kwargs) -> list[np.ndarray]:
     return _fetch_audios(sample.get("audios", []), **kwargs) if sample.get("audios") else []
 
@@ -508,7 +693,11 @@ def _fetch_minicpm_audios(sample: dict[str, Any], **kwargs) -> list[np.ndarray]:
 def process_minicpm_sample(sample: dict[str, Any], processor, position_id_func=None, **kwargs) -> list[dict[str, Any]]:
     """Transform one offline preference sample into MiniCPM model inputs."""
 
+    del position_id_func
+
     messages = _build_minicpm_messages(sample)
+    if sample.get("videos"):
+        raise ValueError("MiniCPM offline DPO does not support video rows. Use image-only or audio-only parquet.")
     images = _fetch_images(sample.get("images", []), **kwargs) if sample.get("images") else []
     audios = _fetch_minicpm_audios(sample, **kwargs)
     rendered_text = _render_processor_text(
@@ -528,7 +717,10 @@ def process_minicpm_sample(sample: dict[str, Any], processor, position_id_func=N
         "_minicpm_video_count": 0,
     }
     model_inputs = _call_processor(processor, text=rendered_text, images=images, videos=[], audios=audios, **kwargs)
-    model_inputs = {key: _squeeze_batch_dim(value) for key, value in model_inputs.items()}
+    model_inputs = {
+        key: value if key in {"audio_features", "audio_feature_lens"} else _squeeze_batch_dim(value)
+        for key, value in model_inputs.items()
+    }
 
     if "input_ids" not in model_inputs:
         raise ValueError("MiniCPM processor output must contain input_ids.")
@@ -539,40 +731,8 @@ def process_minicpm_sample(sample: dict[str, Any], processor, position_id_func=N
     if "attention_mask" not in model_inputs:
         model_inputs["attention_mask"] = torch.ones_like(input_ids)
 
-    media_token_ids_by_modality = _get_media_token_ids(processor)
-    media_token_ids = set(media_token_ids_by_modality.values())
-    for modality, token_id in media_token_ids_by_modality.items():
-        mask = input_ids == token_id
-        model_inputs[f"{modality}_mask"] = mask
-        if modality == "image":
-            model_inputs["input_ids"] = torch.where(
-                mask, torch.full_like(input_ids, IMAGE_INPUT_INDEX), model_inputs["input_ids"]
-            )
-        elif modality == "video":
-            model_inputs["input_ids"] = torch.where(
-                mask, torch.full_like(input_ids, VIDEO_INPUT_INDEX), model_inputs["input_ids"]
-            )
-        elif modality == "audio":
-            model_inputs["input_ids"] = torch.where(
-                mask, torch.full_like(input_ids, AUDIO_INPUT_INDEX), model_inputs["input_ids"]
-            )
-
     raw_input_ids = input_ids.clone()
-
-    if "position_ids" not in model_inputs:
-        if position_id_func is not None:
-            position_returns = position_id_func(
-                input_ids=model_inputs["input_ids"].unsqueeze(0),
-                attention_mask=model_inputs["attention_mask"].unsqueeze(0),
-                image_grid_thw=model_inputs.get("image_grid_thw"),
-                video_grid_thw=model_inputs.get("video_grid_thw"),
-            )
-            if isinstance(position_returns, dict):
-                model_inputs["position_ids"] = _squeeze_batch_dim(position_returns["position_ids"])
-            else:
-                model_inputs["position_ids"] = _squeeze_batch_dim(position_returns[0])
-        else:
-            model_inputs["position_ids"] = _default_position_ids(input_ids)
+    model_inputs = _fill_minicpm_forward_fields(model_inputs, raw_input_ids)
 
     labels = torch.full_like(raw_input_ids, fill_value=IGNORE_INDEX)
     assistant_mask = _final_assistant_token_mask(
