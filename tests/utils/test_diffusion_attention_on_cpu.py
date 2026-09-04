@@ -13,12 +13,14 @@
 # limitations under the License.
 
 import logging
+import sys
 
+import pytest
 from omegaconf import OmegaConf
 
 from tests.utils.smoke_attention import resolve_smoke_attention_backends
-from verl_omni.utils.diffusion_attention import fallback_fa_if_unavailable, validate_attention_consistency
-from verl_omni.workers.config.diffusion import DiffusionRolloutConfig
+from verl_omni.utils.diffusion_attention import validate_attention_consistency
+from verl_omni.workers.config.diffusion import DiffusionModelConfig, DiffusionRolloutConfig
 
 
 def test_rollout_config_builds_structured_vllm_omni_attention_config():
@@ -90,19 +92,18 @@ def test_native_actor_rejects_flash_attn_3_hub():
         raise AssertionError("expected ValueError")
 
 
-def test_fallback_hub_fa3_without_kernels_sets_sdpa(monkeypatch):
-    monkeypatch.setattr("verl_omni.utils.diffusion_attention.actor_fa_available", lambda: False)
-    config = OmegaConf.create(
-        {
-            "actor_rollout_ref": {
-                "model": {"attn_backend": "_flash_3_varlen_hub"},
-                "rollout": {"rollout_attn_backend": "FLASH_ATTN_3_HUB"},
-            }
-        }
-    )
-    fallback_fa_if_unavailable(config)
-    assert config.actor_rollout_ref.model.attn_backend == "native"
-    assert config.actor_rollout_ref.rollout.rollout_attn_backend == "TORCH_SDPA"
+@pytest.mark.parametrize("attn_backend", ["flash_varlen_hub", "_flash_3_varlen_hub"])
+def test_fa_actor_backend_without_kernels_raises(monkeypatch, tmp_path, attn_backend):
+    monkeypatch.setitem(sys.modules, "kernels", None)
+    with pytest.raises(ImportError, match="requires `kernels` package"):
+        DiffusionModelConfig(
+            path=str(tmp_path),
+            architecture="StableDiffusion3Pipeline",
+            algorithm="flow_grpo",
+            attn_backend=attn_backend,
+            load_tokenizer=False,
+            transformer_config={},
+        )
 
 
 def test_fa2_actor_allows_flash_attn():
@@ -117,21 +118,6 @@ def test_fa2_actor_allows_flash_attn():
             }
         )
     )
-
-
-def test_fallback_fa2_without_kernels_sets_sdpa(monkeypatch):
-    monkeypatch.setattr("verl_omni.utils.diffusion_attention.actor_fa_available", lambda: False)
-    config = OmegaConf.create(
-        {
-            "actor_rollout_ref": {
-                "model": {"attn_backend": "flash_varlen_hub"},
-                "rollout": {"rollout_attn_backend": "FLASH_ATTN_HUB"},
-            }
-        }
-    )
-    fallback_fa_if_unavailable(config)
-    assert config.actor_rollout_ref.model.attn_backend == "native"
-    assert config.actor_rollout_ref.rollout.rollout_attn_backend == "TORCH_SDPA"
 
 
 def test_resolve_smoke_attention_backends_prefers_local_fa(monkeypatch):
