@@ -64,7 +64,7 @@ for parquet in \
 done
 
 # Train MiniCPM understanding modules; exclude only generation-only audio/TTS paths.
-EXCLUDE_MODULES=${EXCLUDE_MODULES:-".*talker.*|.*code2wav.*|.*code_predictor.*|.*codec.*|.*audio_decoder.*|.*audio_generator.*|.*audio_head.*|.*tts.*|.*vocoder.*"}
+EXCLUDE_MODULES=${EXCLUDE_MODULES:-".*vpm.*|.*apm.*|.*talker.*|.*code2wav.*|.*code_predictor.*|.*codec.*|.*audio_decoder.*|.*audio_generator.*|.*audio_head.*|.*tts.*|.*vocoder.*"}
 
 python3 -m verl_omni.trainer.main_omni \
     algorithm.trainer_type=direct_preference \

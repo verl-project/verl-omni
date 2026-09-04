@@ -226,6 +226,64 @@ def test_configure_model_strips_generation_modules_and_keeps_outer_forward():
     assert MiniCPMThinkerAdapter.get_fsdp_ignored_module_names(_model_config()) == ["apm"]
 
 
+class _MiniCPMOWithEncoders(_MiniCPMOStyle):
+    def __init__(self):
+        super().__init__()
+        self.vpm = nn.Linear(4, 4)
+        self.apm = nn.Linear(4, 4)
+        self.vision_calls = 0
+
+    def get_vision_embedding(self, data):
+        self.vision_calls += 1
+        hidden = torch.ones(1, 2, 4, requires_grad=True)
+        return [hidden]
+
+
+def test_configure_model_freezes_vpm_and_apm():
+    module = _MiniCPMOWithEncoders()
+    assert all(param.requires_grad for param in module.vpm.parameters())
+    configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
+    assert configured.vpm.training is False
+    assert configured.apm.training is False
+    assert all(not param.requires_grad for param in configured.vpm.parameters())
+    assert all(not param.requires_grad for param in configured.apm.parameters())
+    assert all(param.requires_grad for param in configured.llm.embed.parameters())
+
+
+def test_patched_get_vision_embedding_skips_dummy_encoder_when_no_images():
+    module = _MiniCPMOWithEncoders()
+    configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
+    states = configured.get_vision_embedding({"pixel_values": [[], []], "input_ids": torch.ones(2, 3)})
+    assert states == [[], []]
+    assert configured.vision_calls == 0
+
+
+def test_patched_get_vision_embedding_runs_encoder_without_grad():
+    module = _MiniCPMOWithEncoders()
+    configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
+    states = configured.get_vision_embedding({"pixel_values": [[torch.zeros(3, 2, 2)]]})
+    assert configured.vision_calls == 1
+    assert states[0].requires_grad is False
+
+
+def test_cloned_vllm_embedding_scatter_supports_backward():
+    module = _MiniCPMOWithEncoders()
+    module.llm.model = nn.Module()
+    module.llm.model.embed_tokens = module.llm.embed
+    module.llm.config = SimpleNamespace()
+    configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
+    input_ids = torch.tensor([[1, 2, 3, 4]])
+    embeddings, _ = configured.get_vllm_embedding(
+        {
+            "input_ids": input_ids,
+            "pixel_values": [[torch.zeros(3, 2, 2)]],
+            "image_bound": [torch.tensor([[0, 2]])],
+        }
+    )
+    embeddings.sum().backward()
+    assert configured.llm.embed.weight.grad is not None
+
+
 def test_build_module_uses_transformers_auto_model(monkeypatch):
     from transformers import AutoModel
 
