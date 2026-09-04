@@ -72,6 +72,7 @@ algo/performance.md
 examples/flowgrpo_trainer.md
 examples/flowdppo_trainer.md
 examples/dpo_trainer.md
+examples/dapo_trainer.md
 examples/dancegrpo_trainer.md
 examples/diffusionnft_trainer.md
 examples/grpoguard_trainer.md

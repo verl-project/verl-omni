@@ -17,6 +17,7 @@ import json
 import os
 
 import pytest
+from verl.trainer.config.algorithm import AlgoConfig, FilterGroupsConfig
 from verl.workers.config.model import MtpConfig
 
 from verl_omni.trainer.config.algorithm import OmniAlgoConfig
@@ -33,6 +34,10 @@ class TestOmniAlgoConfig:
         assert cfg.adv_estimator == "dpo"
         assert cfg.norm_adv_by_std_in_grpo is True
         assert cfg.global_std is True
+        assert isinstance(cfg, AlgoConfig)
+        assert cfg.use_kl_in_reward is False
+        assert cfg.filter_groups is None
+        assert cfg.kl_ctrl.type == "fixed"
 
     @pytest.mark.parametrize(
         "field_name, value",
@@ -44,6 +49,47 @@ class TestOmniAlgoConfig:
     def test_invalid_values_raise(self, field_name, value):
         with pytest.raises(ValueError):
             OmniAlgoConfig(**{field_name: value})
+
+    def test_inherited_online_fields_survive_hydra_conversion(self):
+        from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
+
+        import verl_omni
+
+        config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            cfg = compose(
+                config_name="omni_trainer",
+                overrides=[
+                    "algorithm.filter_groups.enable=true",
+                    "algorithm.filter_groups.metric=acc",
+                    "algorithm.filter_groups.max_num_gen_batches=7",
+                    "algorithm.use_kl_in_reward=true",
+                    "algorithm.kl_penalty=low_var_kl",
+                    "algorithm.kl_ctrl.type=adaptive",
+                    "algorithm.kl_ctrl.kl_coef=0.02",
+                    "algorithm.kl_ctrl.target_kl=0.03",
+                    "algorithm.rollout_correction.rollout_is=token",
+                    "algorithm.rollout_correction.rollout_is_threshold=3.0",
+                ],
+            )
+
+        algorithm_cfg: OmniAlgoConfig = omega_conf_to_dataclass(cfg.algorithm)
+
+        assert isinstance(algorithm_cfg, OmniAlgoConfig)
+        assert isinstance(algorithm_cfg, AlgoConfig)
+        assert isinstance(algorithm_cfg.filter_groups, FilterGroupsConfig)
+        assert algorithm_cfg.filter_groups.enable is True
+        assert algorithm_cfg.filter_groups.metric == "acc"
+        assert algorithm_cfg.filter_groups.max_num_gen_batches == 7
+        assert algorithm_cfg.use_kl_in_reward is True
+        assert algorithm_cfg.kl_penalty == "low_var_kl"
+        assert algorithm_cfg.kl_ctrl.type == "adaptive"
+        assert algorithm_cfg.kl_ctrl.kl_coef == pytest.approx(0.02)
+        assert algorithm_cfg.kl_ctrl.target_kl == pytest.approx(0.03)
+        assert algorithm_cfg.rollout_correction is not None
+        assert algorithm_cfg.rollout_correction.get("rollout_is") == "token"
+        assert algorithm_cfg.rollout_correction.get("rollout_is_threshold") == pytest.approx(3.0)
 
 
 class TestOmniLossConfig:
