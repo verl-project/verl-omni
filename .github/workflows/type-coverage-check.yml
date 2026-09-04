@@ -8,6 +8,8 @@ on:
     types: [labeled]
     paths:
       - "**/*.py"
+      - .github/verl_pin.txt
+      - .github/vllm_omni_pin.txt
       - .github/workflows/type-coverage-check.yml
 
 concurrency:
