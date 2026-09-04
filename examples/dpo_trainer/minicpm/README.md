@@ -52,15 +52,3 @@ Key defaults in the launch script:
 
 - `data.train_files`: image + audio parquet only
 - `ModalityGroupedBatchSampler` weights: `{image, audio}` only
-
-## Verify preprocessing
-
-```bash
-export PYTHONPATH="$REPO_ROOT"
-export MINICPM_CACHE_DIR=/path/to/MiniCPM-o-4_5
-
-python examples/dpo_trainer/minicpm/verify_minicpm_dataset.py \
-  --train-files "$DATA_DIR/image/train.parquet" "$DATA_DIR/audio/train.parquet" \
-  --num-batches 4 \
-  --batch-size 2
-```
