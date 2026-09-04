@@ -151,6 +151,16 @@ def test_minicpm_adapter_registered_for_minicpmo_architecture():
     assert OmniModelBase.get_class_by_name("MiniCPMO", "thinker") is MiniCPMThinkerAdapter
 
 
+def test_fsdp_name_is_ignored_matches_peft_prefixed_apm():
+    from verl_omni.utils.fsdp_utils import fsdp_name_is_ignored
+
+    ignored = ["apm"]
+    assert fsdp_name_is_ignored("apm", ignored)
+    assert fsdp_name_is_ignored("apm.embed_positions.weight", ignored)
+    assert fsdp_name_is_ignored("base_model.model.apm.conv1.weight", ignored)
+    assert not fsdp_name_is_ignored("llm.layers.0.self_attn.q_proj.weight", ignored)
+
+
 def test_configure_model_strips_generation_modules_and_keeps_outer_forward():
     module = _MiniCPMOStyle()
     configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
@@ -163,7 +173,8 @@ def test_configure_model_strips_generation_modules_and_keeps_outer_forward():
     assert configured.get_input_embeddings.__self__ is configured.llm
     assert configured.set_input_embeddings.__self__ is configured.llm
     assert configured.prepare_inputs_for_generation.__self__ is configured.llm
-    assert configured._no_split_modules == ["Qwen3DecoderLayer", "MiniCPMODecoderLayer", "MiniCPMWhisperEncoder"]
+    assert configured._no_split_modules == ["Qwen3DecoderLayer", "MiniCPMODecoderLayer"]
+    assert MiniCPMThinkerAdapter.get_fsdp_ignored_module_names(_model_config()) == ["apm"]
 
 
 def test_build_module_uses_transformers_auto_model(monkeypatch):
