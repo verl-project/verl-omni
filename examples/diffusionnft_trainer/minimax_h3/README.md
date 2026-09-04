@@ -1,6 +1,6 @@
 # MiniMax-H3 text-to-audio-video DiffusionNFT training
 
-Last updated: 08/22/2026
+Last updated: 09/01/2026
 
 This recipe trains a rank-64 MiniMax H3 LoRA with online DiffusionNFT for
 text-to-audio-video (T2VA). A Diffusers transformer is trained with FSDP2 while
@@ -62,11 +62,12 @@ then install the repository-pinned vLLM-Omni revision:
 uv pip install -e ".[gpu]" --torch-backend=auto
 uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
 uv pip install -e ".[train,dev]"
-uv pip install "diffusers @ git+https://github.com/huggingface/diffusers.git@245d78fb48f1c87dfb560a94be6e191c9f9f1c0"
+uv pip install "diffusers @ git+https://github.com/huggingface/diffusers.git@d6726f38a0c5ca6c06a8f227fb7bade3486ed98d"
 ```
 
 The explicit Diffusers revision is the tested API target that provides
-`MiniMaxH3Transformer3DModel`.
+`MiniMaxH3Transformer3DModel` and the MiniMax H3 reference-conditioning
+components used by Ref2VA.
 
 ## Checkpoint
 
@@ -83,7 +84,7 @@ Convert prompt splits to prompt-only parquet (no condition images, and no
 negative prompts, since H3 is CFG-distilled):
 
 ```bash
-python3 examples/diffusionnft_trainer/minimax_h3/prepare_t2av_data.py \
+python3 examples/diffusionnft_trainer/minimax_h3/prepare_t2va_data.py \
     --input_dir /path/to/raw_prompts \
     --output_dir /path/to/h3_t2va_data
 ```
@@ -295,6 +296,74 @@ Rollout quantization is intentionally not enabled. On the pinned vLLM-Omni
 commit, a native custom pipeline combined with online FP8 can hit a meta-tensor
 placement failure during custom-pipeline initialization; BF16 TP=4 is the
 validated path.
+
+## Ref2VA (multi-reference) training
+
+Ref2VA trains against any mix of image, video and standalone-audio references
+(up to twelve files per row: at most nine images, three videos and three
+audios). The rollout uses the official `Ref2VA/` partition and the Actor loads
+the matching Diffusers weights from `transformer_ref/`. Reference rows remain
+fixed while DiffusionNFT noises and trains only the generated video/audio rows.
+
+### Data
+
+Prepare `train.jsonl` and `test.jsonl`. Each row needs at least one image or
+video reference; references may be given as the plural `images`/`videos`/`audios`
+lists or the singular `image`/`video`/`audio` keys, and videos accept an
+optional `start_time_seconds`:
+
+```json
+{"prompt":"Turn the reference character toward the camera.","images":["images/a.png","images/b.png"]}
+{"prompt":"Continue the clip with the same voice.","videos":[{"path":"clips/ref.mp4","start_time_seconds":1.5}],"audios":["audio/voice.wav"]}
+```
+
+Convert the splits to parquet:
+
+```bash
+python examples/diffusionnft_trainer/minimax_h3/prepare_ref2va_data.py \
+  --input_dir <raw-data-directory> \
+  --output_dir <parquet-directory>
+```
+
+Reference layouts may vary from row to row. The Agent Loop validates each
+reported row count, pads video and audio condition rows to
+`MAX_PROMPT_EMBEDS`, and emits validity masks so the standard Agent Loop
+manager can concatenate outputs from every rollout worker. Before Actor
+training, the trainer converts the padded rows to jagged tensors; the
+DiffusionNFT engine then restores only the largest row count needed by each
+minibatch. Invalid shapes, inconsistent counts or masks, and rows exceeding the
+configured limit fail instead of being silently truncated.
+
+### Checkpoint and run
+
+`MODEL_PATH` must point to the official MiniMax-H3 repository root containing
+both `Ref2VA/` and `transformer_ref/`:
+
+```bash
+MODEL_PATH=<MiniMax-H3-root> \
+DATA_DIR=<parquet-directory> \
+REF_IMAGE_SHORT_EDGE=512 \
+VAL_REF_IMAGE_SHORT_EDGE=1024 \
+bash examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_ref2va_lora.sh
+```
+
+The H3 Agent Loop keeps the user prompt token-ID-native while vLLM-Omni adds
+the reference presentation. The default `MAX_PROMPT_EMBEDS=12288` is both the
+prompt-embedding limit and the fixed transport limit for each video/audio
+condition-row tensor; it must cover the largest reference layout in the
+dataset. Global transport padding is removed before Actor minibatching, so it
+does not become the model's effective sequence length. `REF_IMAGE_SHORT_EDGE`
+configures training, while `VAL_REF_IMAGE_SHORT_EDGE` configures validation and
+defaults to the training value. Both accept multiples of 32 from 256 through
+2048. Reduce `MAX_PROMPT_EMBEDS` only after checking both the final prompt
+embedding and condition-row counts for the dataset. `TEXT_ENCODER_TP` defaults
+to `ROLLOUT_TP` so the Qwen3-VL encoder is sharded instead of residing on one
+DiT rank; supported values are `1` and `ROLLOUT_TP`.
+
+The initial recipe reuses CLAP and ImageBind to validate joint audio-video
+training. These rewards do not measure similarity to the reference image, so
+a separate reference-aware reward is required before evaluating reference
+fidelity.
 
 ## T2VA performance reference
 

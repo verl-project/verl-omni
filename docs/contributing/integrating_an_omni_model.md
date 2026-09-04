@@ -1,6 +1,6 @@
 # How to Add a New Omni Model
 
-Last updated: 08/24/2026.
+Last updated: 08/31/2026.
 
 This guide walks through adding a new omni (multimodal autoregressive) model to
 the verl-omni training framework. It uses the Qwen3-Omni Thinker adapter as a
@@ -60,6 +60,17 @@ adapt each implementation to your model's architecture:
   `module._no_split_modules` to the correct decoder layer class for FSDP.
   This method runs before FSDP wrapping and LoRA injection.
 
+- **`prepare_model_inputs(model_inputs, micro_batch, model_config)`**
+  (optional): Validate model-native trajectory or conditioning data retained by
+  rollout and add it to the actor forward inputs. Per-sample rollout data starts
+  under a model-defined, namespaced key in `AgentLoopOutput.extra_fields`;
+  `AgentLoopWorker` batches that key into the top level of `micro_batch`. For
+  example, data stored as `output.extra_fields["your_model_replay"]` is consumed
+  as `micro_batch["your_model_replay"]`. This is required when the policy token
+  sequence alone cannot reconstruct the exact sampled trajectory. Missing
+  required fields or inconsistent shapes should raise an actionable error; the
+  adapter must not silently reconstruct a different trajectory.
+
 Reference:
 [`verl_omni/pipelines/qwen3_omni/thinker_training_adapter.py`](../../verl_omni/pipelines/qwen3_omni/thinker_training_adapter.py)
 
@@ -86,6 +97,15 @@ Optional overrides: `ensure_pipeline_registered` (register non-standard
 pipeline variants with vLLM-Omni), `get_engine_hf_overrides` (HF config
 overrides like `enable_audio_output: false`), `get_stage_engine_extras`
 (per-stage overrides like `model_arch`).
+
+When training an omni model's autoregressive Talker stage, also override
+`postprocess_agent_loop_output`. Put the sampled policy sequence in
+`response_ids`, align `response_mask` and optional `response_logprobs`
+one-to-one, and retain model-native acoustic trajectory and conditioning data
+under a model-defined, namespaced key in `extra_fields`. The corresponding
+training adapter consumes the batched top-level key in `prepare_model_inputs`.
+The common contract intentionally does not prescribe the key name, its nested
+schema, a codebook count, or a conditioning source.
 
 Reference:
 [`verl_omni/pipelines/qwen3_omni/omni_rollout_adapter.py`](../../verl_omni/pipelines/qwen3_omni/omni_rollout_adapter.py)
@@ -129,6 +149,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.lora_rank=32 \
     actor_rollout_ref.actor.policy_loss.loss_mode=gspo \
     actor_rollout_ref.actor.strategy=fsdp2 \
+    actor_rollout_ref.rollout.agent.default_agent_loop=omni_single_turn_agent \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode="ar" \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name="your_pipeline_name" \
     trainer.n_gpus_per_node=4 \
@@ -141,6 +162,10 @@ Key points:
   triggered by `VERL_USE_EXTERNAL_MODULES=verl_omni`.
 - No `stage_configs_path` — the rollout deploy config is auto-generated
   from `pipeline_name` by `vLLMOmniHttpServer`.
+- Use `omni_single_turn_agent` only for an omni model's autoregressive Talker
+  stage when its rollout adapter must map model-native output to the Talker
+  policy sequence. Standard text-token stages such as the Thinker can keep
+  verl's `single_turn_agent`.
 - No `--config-path/--config-name` — all config comes from CLI overrides
   on `verl_omni`'s `omni_trainer.yaml` defaults.
 - The `"$@"` at the end lets callers override any field without editing

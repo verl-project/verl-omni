@@ -53,6 +53,8 @@ Launch the HPSv3 example from the repository root:
 bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_auto.sh
 ```
 
+For CUDA V1 sync (TransferQueue + ReplayBuffer), use `examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_v1.sh`.
+
 The script auto-detects the device (`npu` via `npu-smi info`, or `gpu` via `nvidia-smi`) and exits with an error if neither is found.
 
 #### Configurable environment variables

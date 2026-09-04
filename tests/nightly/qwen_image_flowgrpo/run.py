@@ -80,24 +80,24 @@ def _patch_require_fa3() -> None:
 
     import verl_omni.utils.diffusion_attention as diffusion_attention
 
-    if getattr(diffusion_attention.fallback_fa3_if_unavailable, "__nightly_require_fa3__", False):
+    if getattr(diffusion_attention.fallback_fa_if_unavailable, "__nightly_require_fa3__", False):
         return
 
-    def fallback_fa3_if_unavailable_or_raise(config) -> None:
+    def fallback_fa_if_unavailable_or_raise(config) -> None:
         attn_backend = config.actor_rollout_ref.model.get("attn_backend", diffusion_attention.ACTOR_FA3_BACKEND)
         if attn_backend != diffusion_attention.ACTOR_FA3_BACKEND:
             return
-        if diffusion_attention.fa3_available():
+        if diffusion_attention.fa_available():
             return
         raise RuntimeError(
             "FA3 is required for nightly but unavailable: "
-            f"actor_kernels={diffusion_attention.actor_fa3_available()}, "
-            f"rollout_fa={diffusion_attention.rollout_fa3_available()}. "
+            f"actor_kernels={diffusion_attention.actor_fa_available()}, "
+            f"rollout_fa={diffusion_attention.rollout_fa_available()}. "
             "Install pinned kernels and fa3-fwd, and use a supported GPU (SM 8.x)."
         )
 
-    fallback_fa3_if_unavailable_or_raise.__nightly_require_fa3__ = True
-    diffusion_attention.fallback_fa3_if_unavailable = fallback_fa3_if_unavailable_or_raise
+    fallback_fa_if_unavailable_or_raise.__nightly_require_fa3__ = True
+    diffusion_attention.fallback_fa_if_unavailable = fallback_fa_if_unavailable_or_raise
 
 
 def main() -> None:

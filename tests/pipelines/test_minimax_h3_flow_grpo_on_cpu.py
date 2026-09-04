@@ -64,6 +64,7 @@ def _trajectory() -> dict[str, torch.Tensor]:
         "h3_video_indices": torch.tensor([[0, 1]]),
         "h3_audio_indices": torch.tensor([[2, 3, 4]]),
         "h3_text_indices": torch.tensor([[5, 6]]),
+        "h3_video_update_mask": torch.ones(1, video.shape[1], dtype=torch.bool),
     }
 
 
@@ -185,6 +186,9 @@ def test_rollout_output_reaches_actor_and_replays_joint_transition(monkeypatch) 
     )
     server = object.__new__(vLLMOmniHttpServer)
     server.global_steps = 1
+    # The strategy resolves the audio sample rate from the adapter-declared
+    # DiffusionIOSpec, which is keyed by (architecture, algorithm).
+    server.model_config = SimpleNamespace(architecture="MiniMaxH3Pipeline", algorithm="flow_grpo")
     processed = DiffusionStrategy(server).process_output(final_res, None, {"output_type": "pt", "logprobs": True})
 
     for key in ("all_latents", "all_next_latents", "h3_step_indices", "h3_audio_timesteps"):
@@ -314,6 +318,10 @@ class _FakeH3Branch:
 
     def __init__(self, *, packed, text_embeddings, token_tags, device):
         del packed, text_embeddings, token_tags, device
+        self.img_pos = torch.arange(2)
+        self.audio_pos = torch.arange(2, 5)
+        self.update_mask_dev = torch.ones(2, dtype=torch.bool)
+        self.audio_update_mask = torch.ones(3, dtype=torch.bool)
 
     def forward_kwargs(self, *, video_rows, audio_rows, **kwargs):
         del kwargs
@@ -452,6 +460,112 @@ def test_rollout_denoise_window_records_replayable_aligned_trajectory(monkeypatc
     pipeline.record_denoise_step.assert_any_call(1, normalized_timestep=0.8)
     pipeline.record_denoise_step.assert_any_call(2, normalized_timestep=0.6)
     pipeline.record_denoise_step.assert_called_with(None)
+
+
+def test_fl2va_denoise_keeps_condition_rows_fixed_and_scores_only_targets(monkeypatch) -> None:
+    """FL2VA builds full video rows (one keyframe condition row + two targets), steps only
+    the target rows through the SDE, re-injects the fixed condition row every transition,
+    and stores the full-row trajectory for Actor replay."""
+
+    class _FakeFL2VABranch:
+        def __init__(self, *, packed, text_embeddings, token_tags, device):
+            del packed, text_embeddings, token_tags, device
+            self.img_pos = torch.arange(3)
+            self.audio_pos = torch.arange(3, 6)
+            self.update_mask_dev = torch.tensor([False, True, True])
+            self.audio_update_mask = torch.ones(3, dtype=torch.bool)
+
+        def forward_kwargs(self, *, video_rows, audio_rows, **kwargs):
+            del kwargs
+            return {"hidden_states": video_rows, "audio_hidden_states": audio_rows}
+
+    pipeline = object.__new__(MiniMaxH3PipelineWithLogProb)
+    pipeline.device = torch.device("cpu")
+    pipeline._flow_grpo_noise_level = 0.8
+    pipeline._flow_grpo_sde_type = "cps"
+    pipeline._flow_grpo_window_size = 2
+    pipeline._flow_grpo_window_range = [1, 3]
+    pipeline._flow_grpo_sde_contiguous = True
+    pipeline._flow_grpo_seed = 123
+    pipeline._h3_max_text_len = 2
+    pipeline._initial_noise = MagicMock(return_value=(torch.zeros(2, H3_VIDEO_WIDTH), torch.zeros(3, H3_AUDIO_WIDTH)))
+    pipeline.record_denoise_step = MagicMock()
+    pipeline.progress_bar = lambda total: nullcontext(SimpleNamespace(update=MagicMock()))
+    pipeline._resident_dit_layers_on_device = lambda enabled: nullcontext()
+    pipeline._layout_outputs = MagicMock(return_value=_layout_metadata())
+
+    def transformer(**model_inputs):
+        return (
+            torch.zeros_like(model_inputs["hidden_states"]),
+            torch.zeros_like(model_inputs["audio_hidden_states"]),
+        )
+
+    pipeline.transformer = transformer
+    pipeline._transformer_for_task = MagicMock(return_value=transformer)
+
+    video_sigmas = [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]
+    audio_sigmas = [1.0, 0.7, 0.5, 0.3, 0.1, 0.0]
+    video_sample_rows = []
+
+    def fake_transition(_scheduler, sample, _velocity, step, **kwargs):
+        is_video = sample.shape[-1] == H3_VIDEO_WIDTH
+        if is_video:
+            video_sample_rows.append(sample.shape[1])
+        log_prob = torch.tensor([0.2 if is_video else 0.6]) if kwargs["return_log_prob"] else None
+        return sample + float(step + 1), log_prob, sample, torch.tensor(0.1), torch.tensor(0.2)
+
+    unpatchify_rows = []
+
+    def fake_unpatchify(video_rows, **kwargs):
+        del kwargs
+        unpatchify_rows.append(int(video_rows.shape[0]))
+        return torch.tensor([11.0])
+
+    packed = {"token_tags": torch.zeros(7, dtype=torch.long), "text_pos": torch.tensor([5, 6])}
+    module = "verl_omni.pipelines.minimax_h3_flow_grpo.vllm_omni_rollout_adapter"
+    monkeypatch.setattr(f"{module}.minimax_h3_packed_sequence", lambda **kwargs: packed)
+    monkeypatch.setattr(f"{module}.MiniMaxH3DenoiseBranch", _FakeFL2VABranch)
+    monkeypatch.setattr(f"{module}.h3_sigma_schedules", lambda *args: (video_sigmas, audio_sigmas))
+    monkeypatch.setattr(f"{module}.configure_flow_scheduler", lambda *args: None)
+    monkeypatch.setattr(f"{module}.sample_h3_transition", fake_transition)
+    monkeypatch.setattr(
+        f"{module}.minimax_h3_imgvid_cond_noise_aug_rows",
+        lambda *args, **kwargs: torch.full((1, H3_VIDEO_WIDTH), 5.0),
+    )
+    monkeypatch.setattr(f"{module}.minimax_h3_unpatchify_video_tokens", fake_unpatchify)
+    monkeypatch.setattr(f"{module}.minimax_h3_unpack_audio_tokens", lambda *args, **kwargs: torch.tensor([22.0]))
+
+    pipeline.diffuse(
+        task="fl2va",
+        text_embeddings=torch.randn(2, 8),
+        text_tags=torch.ones(2, dtype=torch.long),
+        seed=7,
+        latent_t=1,
+        latent_h=4,
+        latent_w=4,
+        audio_t=3,
+        num_frames=1,
+        num_steps=6,
+        video_shift=12.0,
+        audio_shift=3.0,
+        visual_condition=torch.randn(1, 3, 8, 8),
+        visual_condition_shape=(1, 8, 8),
+        audio_condition=None,
+        ref_audio_t=None,
+        visual_condition_shapes=[(1, 8, 8)],
+        keyframe_frame_indices=[0],
+    )
+
+    trajectory = pipeline._flow_grpo_trajectory
+    # Every video transition steps only the two target rows, never the keyframe row.
+    assert video_sample_rows == [2, 2, 2, 2, 2]
+    # The final VAE decode consumes only the two target rows, not the condition row.
+    assert unpatchify_rows == [2]
+    # The stored trajectory keeps the full three-row video layout (cond + targets).
+    assert trajectory["all_latents"].shape == (1, 2, 1, 3 * H3_VIDEO_WIDTH + 3 * H3_AUDIO_WIDTH)
+    assert trajectory["all_next_latents"].shape == trajectory["all_latents"].shape
+    assert trajectory["all_log_probs"].shape == (1, 2)
+    assert trajectory["h3_step_indices"].tolist() == [[1, 2]]
 
 
 def _batched_actor_payload(batch_size: int = 2) -> dict[str, torch.Tensor]:

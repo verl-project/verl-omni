@@ -17,13 +17,13 @@ dynamic = ["version"]
 description = "verl-omni: Easy, fast, and stable RL training for diffusion and omni-modality models"
 license = {text = "Apache-2.0"}
 readme = {file = "README.md", content-type = "text/markdown"}
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "accelerate>=1.14.0",
     "cachetools",
     "codetiming",
     "datasets",
-    "diffusers>=0.37.1",
+    "diffusers>=0.40.0",
     "dill",
     "hydra-core",
     "imageio[ffmpeg]>=2.37.2",
@@ -38,7 +38,7 @@ dependencies = [
     "torchdata",
     # TODO: Remove this cap after the Qwen3-Omni adapter and tests support the
     # FSDP `_no_split_modules` metadata change introduced in Transformers 5.15.0.
-    "transformers>=5.10.1,<=5.14.1",
+    "transformers>=5.13.0,<=5.14.1",
     "wandb",
     "packaging>=20.0",
     "uvicorn",
@@ -52,15 +52,16 @@ dependencies = [
 [project.optional-dependencies]
 # Rollout engine (install in step 2, after gpu step 1).
 vllm-omni = [
-    "vllm-omni==0.27.0rc1",
+    "vllm-omni==0.28.0rc1",
     "qwen-vl-utils>=0.0.14",
 ]
 audio = [
     "qwen-omni-utils>=0.0.9",
+    "audioread",
 ]
 # CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
 gpu = [
-    "vllm==0.27.0",
+    "vllm==0.28.0",
     "kernels==0.16.0",
     "liger-kernel",
 ]
@@ -192,4 +193,5 @@ verl_omni = [
 [tool.uv]
 override-dependencies = [
     "accelerate>=1.14.0",
+    "kernels==0.16.0",
 ]

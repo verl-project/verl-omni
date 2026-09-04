@@ -21,10 +21,13 @@
 # so the step-1 KL is positive) and needs no downloads; set MODEL_PATH and
 # TEACHER_PATH to run against real checkpoints instead.
 #
-# Override via env: NUM_GPUS, MODEL_PATH, TEACHER_PATH, TEACHER2_PATH, DATA_DIR, TOTAL_TRAIN_STEPS, SMOKE
+# V1=1 runs the same smoke through the v1 sync trainer (`main_diffusion_v1`).
+#
+# Override via env: NUM_GPUS, MODEL_PATH, TEACHER_PATH, TEACHER2_PATH, DATA_DIR, TOTAL_TRAIN_STEPS, SMOKE, V1
 set -euo pipefail
 
 NUM_GPUS=${NUM_GPUS:-1}
+V1=${V1:-0}
 MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/sd3-teacher-smoke-student}
 TEACHER_PATH=${TEACHER_PATH:-${HOME}/models/tiny-random/sd3-teacher-smoke-teacher}
 TEACHER2_PATH=${TEACHER2_PATH:-${HOME}/models/tiny-random/sd3-teacher-smoke-teacher2}
@@ -128,7 +131,14 @@ case "${SMOKE}" in
         ;;
 esac
 
-python3 -m verl_omni.trainer.main_diffusion \
+entrypoint=verl_omni.trainer.main_diffusion
+v1_flags=()
+if [[ "${V1}" == "1" ]]; then
+    entrypoint=verl_omni.trainer.main_diffusion_v1
+    v1_flags=(trainer.use_v1=true trainer.v1.trainer_mode=sync)
+fi
+
+python3 -m ${entrypoint} \
     data.train_files="${DATA_DIR}/train.parquet" \
     data.val_files="${DATA_DIR}/test.parquet" \
     data.train_batch_size=${train_batch_size} \
@@ -188,6 +198,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.save_freq=-1 \
     trainer.resume_mode=disable \
     trainer.total_training_steps=${TOTAL_TRAIN_STEPS} \
+    "${v1_flags[@]}" \
     "$@"
 
 echo "Diffusion teacher e2e smoke (${SMOKE}) passed."

@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import pytest
 import torch
 from tensordict import TensorDict
 
@@ -49,6 +50,44 @@ def test_embeds_padding_2_no_padding_varying_lengths():
         assert sample_embed.shape[0] == vlen, f"Sample {i}: expected {vlen} tokens, got {sample_embed.shape[0]}"
         # Values should match the original (unpadded portion)
         torch.testing.assert_close(sample_embed, prompt_embeds[i, :vlen, :])
+
+
+def test_embeds_padding_2_no_padding_strips_reference_rows():
+    video_rows = torch.randn(2, 6, 96)
+    video_mask = torch.tensor([[True, True, False, False, False, False], [True] * 6])
+    audio_rows = torch.randn(2, 6, 32)
+    audio_mask = torch.tensor([[True, False, False, False, False, False], [True, True, True, False, False, False]])
+    data = TensorDict(
+        {
+            "condition_video_rows": video_rows,
+            "condition_video_rows_mask": video_mask,
+            "condition_audio_rows": audio_rows,
+            "condition_audio_rows_mask": audio_mask,
+        },
+        batch_size=2,
+    )
+
+    result = embeds_padding_2_no_padding(data)
+
+    assert result["condition_video_rows"].is_nested
+    assert result["condition_audio_rows"].is_nested
+    assert [result["condition_video_rows"][i].shape[0] for i in range(2)] == [2, 6]
+    assert [result["condition_audio_rows"][i].shape[0] for i in range(2)] == [1, 3]
+    torch.testing.assert_close(result["condition_video_rows"][0], video_rows[0, :2])
+    torch.testing.assert_close(result["condition_audio_rows"][1], audio_rows[1, :3])
+
+
+def test_embeds_padding_2_no_padding_rejects_mismatched_reference_mask():
+    data = TensorDict(
+        {
+            "condition_video_rows": torch.randn(2, 6, 96),
+            "condition_video_rows_mask": torch.ones(2, 5, dtype=torch.bool),
+        },
+        batch_size=2,
+    )
+
+    with pytest.raises(ValueError, match="mask shape .* does not match"):
+        embeds_padding_2_no_padding(data)
 
 
 def test_embeds_padding_2_no_padding_uniform_length():

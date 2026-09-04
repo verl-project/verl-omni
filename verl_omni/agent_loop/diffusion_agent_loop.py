@@ -24,11 +24,7 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from verl.base_config import BaseConfig
-from verl.experimental.agent_loop.agent_loop import (
-    AgentLoopMetrics,
-    DictConfigWrap,
-    _agent_loop_registry,
-)
+from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, DictConfigWrap, _agent_loop_registry
 from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.utils.config import omega_conf_to_dataclass
@@ -44,6 +40,39 @@ def _config_to_sampling_dict(config: Optional[BaseConfig]) -> dict:
     if config is None:
         return {}
     return {k: v for k, v in config.items() if not k.startswith("_")}
+
+
+def _pad_reference_rows(
+    key: str,
+    values: list[torch.Tensor],
+    counts: list[torch.Tensor],
+    target_length: int,
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Pad reference rows to one global length and return validity masks."""
+    if len(values) != len(counts):
+        raise ValueError(f"{key} and its row counts must have the same batch size.")
+
+    count_key = key.replace("_rows", "_row_count")
+    padded_values, masks = [], []
+    for value, count in zip(values, counts, strict=True):
+        if value.ndim != 3 or value.shape[0] != 1:
+            raise ValueError(f"{key} must have shape [1, rows, width], got {tuple(value.shape)}.")
+        if count.numel() != 1:
+            raise ValueError(f"{count_key} must contain one value per sample, got shape {tuple(count.shape)}.")
+        actual_rows = int(value.shape[1])
+        declared_rows = int(count.reshape(-1)[0])
+        if declared_rows != actual_rows:
+            raise ValueError(f"{key} row count {declared_rows} does not match tensor rows {actual_rows}.")
+        if actual_rows > target_length:
+            raise ValueError(
+                f"{key} has {actual_rows} rows, exceeding max_prompt_embed_length={target_length} "
+                "used for reference-row padding."
+            )
+        padded_values.append(F.pad(value, (0, 0, 0, target_length - actual_rows)))
+        mask = torch.zeros((1, target_length), dtype=torch.bool, device=value.device)
+        mask[:, :actual_rows] = True
+        masks.append(mask)
+    return padded_values, masks
 
 
 def _pad_prompt_extra_field(key: str, value: torch.Tensor, target_length: int) -> torch.Tensor:
@@ -342,6 +371,22 @@ class DiffusionAgentLoopWorker:
         input_non_tensor_batch: dict | None = None,
     ) -> DataProto:
         """Process the padded outputs from _run_agent_loop and combine them into a batch."""
+        for key in ("condition_video_rows", "condition_audio_rows"):
+            values = [item.extra_fields.get(key) for item in inputs]
+            present = [value for value in values if isinstance(value, torch.Tensor)]
+            if not present:
+                continue
+            if len(present) != len(inputs):
+                raise ValueError(f"Diffusion batch mixes samples with and without {key}.")
+            count_key = key.replace("_rows", "_row_count")
+            counts = [item.extra_fields.get(count_key) for item in inputs]
+            if not all(isinstance(count, torch.Tensor) for count in counts):
+                raise ValueError(f"{key} requires a tensor {count_key} for every sample.")
+            padded, masks = _pad_reference_rows(key, present, counts, self.max_prompt_embed_length)
+            for item, value, mask in zip(inputs, padded, masks, strict=True):
+                item.extra_fields[key] = value
+                item.extra_fields[f"{key}_mask"] = mask
+
         # Convert lists back to tensors and stack them to create a batch.
         prompt_ids = torch.cat([input.prompt_ids for input in inputs], dim=0)
         response_diffusion_output = torch.cat([input.response_diffusion_output for input in inputs], dim=0)

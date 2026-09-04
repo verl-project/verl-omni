@@ -43,6 +43,18 @@ logger = logging.getLogger(__name__)
 class OmniFSDPEngine(FSDPEngineWithLMHead):
     """FSDP engine for omni models"""
 
+    def prepare_model_inputs(self, micro_batch):
+        """Prepare standard LM inputs, then add model-native replay fields."""
+        model_inputs, output_args = super().prepare_model_inputs(micro_batch)
+        if not hasattr(self, "model_adapter_cls"):
+            raise RuntimeError("Omni model inputs cannot be prepared before the model adapter is initialized.")
+        model_inputs = self.model_adapter_cls.prepare_model_inputs(model_inputs, micro_batch, self.model_config)
+        if not isinstance(model_inputs, dict):
+            raise TypeError(
+                f"OmniModelBase.prepare_model_inputs must return a dict, got {type(model_inputs).__name__}."
+            )
+        return model_inputs, output_args
+
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
@@ -192,6 +204,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
                 self.model_config.model_stage,
                 self.model_config.get("external_lib"),
             )
+            self.model_adapter_cls = adapter_cls
             module = adapter_cls.configure_model(module, self.model_config)
 
             module.to(torch_dtype)

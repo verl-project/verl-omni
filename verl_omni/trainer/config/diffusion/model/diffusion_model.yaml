@@ -41,8 +41,8 @@ config_path: null
 transformer_subfolder: transformer
 
 # Diffusers attention backend.
-# Supported: "native", "_native_npu", "_flash_3_varlen_hub"
-# GPU default; NPU recipes override with _native_npu. Falls back to native when FA3 deps are missing.
+# Supported: "native", "_native_npu", "flash_varlen_hub", "_flash_3_varlen_hub"
+# GPU default; NPU recipes override with _native_npu. Falls back to native when FA2/FA3 deps are missing.
 attn_backend: _flash_3_varlen_hub
 
 # Set to positive value to enable LoRA (e.g., 32)
@@ -108,6 +108,9 @@ pipeline:
 
   # Distilled guidance scale
   guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
+
+  # Reference-image resize short edge for compatible pipelines
+  reference_image_short_edge: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_image_short_edge,null}
 
   # Wan2.2 video number of frames
   num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}

@@ -41,6 +41,8 @@ from verl.single_controller.ray import (
     ResourcePoolManager,
     create_colocated_worker_cls,
 )
+from verl.single_controller.ray.base import split_resource_pool
+from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.metric_utils import compute_variance_proxy_metrics, process_validation_metrics
 from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import Role, need_reference_policy, need_reward_model
@@ -62,7 +64,10 @@ from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
 )
-from verl_omni.trainer.diffusion.diffusion_trainer_utils import worker_group_port_ranges
+from verl_omni.trainer.diffusion.diffusion_trainer_utils import (
+    validate_distillation_config,
+    worker_group_port_ranges,
+)
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import _to_diffusion_worker_tensordict, compute_advantage
 from verl_omni.trainer.diffusion.rollout_correction import (
     apply_bypass_mode_to_diffusion_batch,
@@ -70,11 +75,12 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     compute_rollout_corr_metrics_from_batch,
     rollout_correction_enabled,
 )
+from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
 from verl_omni.trainer.diffusion.v1.tq_utils import (
     diffusion_tq_batch_to_dataproto,
     sort_diffusion_tq_keys,
 )
-from verl_omni.workers.engine_workers import ActorRolloutRefWorker
+from verl_omni.workers.engine_workers import ActorRolloutRefWorker, resolve_teacher_infer_micro_batch_size
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 logger = logging.getLogger(__name__)
@@ -118,6 +124,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self.parameter_sync_step = config.trainer.v1.get(self.trainer_mode, {}).get("parameter_sync_step", 1)
         self.use_reference_policy = need_reference_policy(config)
         self.use_rm = need_reward_model(config)
+        self.use_teacher_policy = is_distillation_enabled(config.get("distillation"))
+        self.distillation_config = omega_conf_to_dataclass(config.distillation) if self.use_teacher_policy else None
+        validate_distillation_config(config)
+        if self.use_teacher_policy and self.trainer_mode != "sync":
+            raise NotImplementedError("distillation is only supported with trainer_mode='sync'")
         self.replay_buffer = self._build_replay_buffer()
 
         # ref_in_actor: reference policy is the actor without lora applied.
@@ -313,7 +324,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         if self.reward_loop_manager.reward_loop_worker_handles is None and self.use_rm:
             with marked_timer("reward", timing_raw, color="yellow"):
                 self.checkpoint_manager.sleep_replicas()
-                data = self._compute_reward_colocate(data)
+                data = data.union(self._compute_reward_colocate(data))
                 self.checkpoint_manager.update_weights(self.global_steps)
 
         data = self._balance_batch(data, metrics=metrics)
@@ -346,6 +357,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             with marked_timer("ref", timing_raw, color="olive"):
                 ref_log_prob = self._compute_ref_log_prob(data)
                 data = data.union(ref_log_prob)
+
+        if self.use_teacher_policy:
+            # score the rollout trajectories with the frozen teacher
+            with marked_timer("teacher", timing_raw, color="olive"):
+                data = data.union(self.teacher_model_manager.compute_prev_sample_mean(data))
 
         with marked_timer("adv", timing_raw, color="brown"):
             data = self._compute_advantage(data)
@@ -615,6 +631,15 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 self.config.reward.reward_model.n_gpus_per_node = self.config.trainer.n_gpus_per_node
             self.mapping[Role.RewardModel] = "global_pool"
 
+        if self.use_teacher_policy and self.distillation_config.nnodes > 0:
+            if self.distillation_config.n_gpus_per_node <= 0:
+                raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
+            self.role_worker_mapping[Role.TeacherModel] = ray.remote(ActorRolloutRefWorker)
+            self.mapping[Role.TeacherModel] = "teacher_pool"
+            resource_pool_spec["teacher_pool"] = [
+                self.distillation_config.n_gpus_per_node
+            ] * self.distillation_config.nnodes
+
         self.resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
 
     def _init_colocated_workers(self):
@@ -624,9 +649,26 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         actor_rollout_cls = RayClassWithInitArgs(
             cls=self.role_worker_mapping[actor_role],
             config=self.config.actor_rollout_ref,
+            distillation_config=self.config.get("distillation"),
             role=str(actor_role),
         )
         self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
+
+        # standalone teachers: one sub-pool and worker group per teacher
+        if self.use_teacher_policy and Role.TeacherModel in self.role_worker_mapping:
+            teacher_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            teacher_models = self.distillation_config.teacher_models
+            split_pools = split_resource_pool(teacher_pool, split_size=[t.world_size for t in teacher_models.values()])
+            for key, pool in zip(teacher_models, split_pools, strict=True):
+                self.resource_pool_to_cls[pool] = {
+                    self._teacher_wg_name(key): RayClassWithInitArgs(
+                        self.role_worker_mapping[Role.TeacherModel],
+                        config=self.config.actor_rollout_ref,
+                        distillation_config=self.config.get("distillation"),
+                        role=str(Role.TeacherModel),
+                        teacher_key=key,
+                    )
+                }
 
         all_wg = {}
         wg_kwargs = {"device_name": self.config.trainer.device}
@@ -647,7 +689,28 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             self.ref_policy_wg = self.actor_rollout_wg
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
+
+        if self.use_teacher_policy:
+            if Role.TeacherModel in self.role_worker_mapping:
+                teacher_wg = {
+                    key: all_wg[self._teacher_wg_name(key)] for key in self.distillation_config.teacher_models
+                }
+                for wg in teacher_wg.values():
+                    wg.init_model()
+            else:
+                teacher_wg = {key: self.actor_rollout_wg for key in self.distillation_config.teacher_models}
+            self.teacher_model_manager = DiffusionTeacherManager(
+                self.distillation_config,
+                self.config.actor_rollout_ref.model,
+                teacher_wg,
+                infer_micro_batch_size_per_gpu=resolve_teacher_infer_micro_batch_size(self.config.actor_rollout_ref),
+            )
+
         return actor_rollout_resource_pool
+
+    @staticmethod
+    def _teacher_wg_name(key: str) -> str:
+        return f"teacher_{key.replace('/', '_')}"
 
     def _init_online_rollout_stack(self, actor_rollout_resource_pool):
         """Initialize reward loop, LLM server, and checkpoint engine managers."""
@@ -1010,7 +1073,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
             if self.use_rm and self.reward_loop_manager.reward_loop_worker_handles is None:
                 self.checkpoint_manager.sleep_replicas()
-                data = self._compute_reward_colocate(data)
+                data = data.union(self._compute_reward_colocate(data))
                 self.checkpoint_manager.update_weights(self.global_steps)
 
             input_ids = data.batch["prompts"]

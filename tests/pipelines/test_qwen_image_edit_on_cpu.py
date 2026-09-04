@@ -15,7 +15,6 @@
 import json
 import math
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -70,11 +69,8 @@ def test_processor_hook_preserves_existing_config(tmp_path):
     assert json.loads(config_path.read_text(encoding="utf-8")) == {"model_type": "custom"}
 
 
-def test_get_class_applies_qwen_ulysses_patch():
-    with patch("verl_omni.models.diffusers.qwen_image.apply_qwen_image_ulysses_mask_fix") as apply_patch:
-        assert DiffusionModelBase.get_class(_model_config()) is QwenImageEditPlusFlowGRPO
-
-    apply_patch.assert_called_once_with()
+def test_get_class_resolves_qwen_image_adapter():
+    assert DiffusionModelBase.get_class(_model_config()) is QwenImageEditPlusFlowGRPO
 
 
 def test_prepare_condition_unwraps_metadata():

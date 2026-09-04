@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""vLLM-Omni rollout adapter for MiniMax H3 T2VA FlowGRPO."""
+"""vLLM-Omni rollout adapter for MiniMax H3 T2VA and FL2VA FlowGRPO."""
 
 from __future__ import annotations
 
@@ -24,7 +24,12 @@ import torch
 import torch.nn.functional as F
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
-from vllm_omni.diffusion.models.minimax_h3.denoise_loop import MiniMaxH3DenoiseBranch
+from vllm_omni.diffusion.models.minimax_h3.condition_noise import minimax_h3_imgvid_cond_noise_aug_rows
+from vllm_omni.diffusion.models.minimax_h3.denoise_loop import (
+    MINIMAX_H3_AUDIO_REF_COND_TIMESTEP,
+    MINIMAX_H3_IMGVID_COND_TIMESTEP,
+    MiniMaxH3DenoiseBranch,
+)
 from vllm_omni.diffusion.models.minimax_h3.packed_sequence import minimax_h3_packed_sequence
 from vllm_omni.diffusion.models.minimax_h3.packed_tokens import (
     minimax_h3_unpack_audio_tokens,
@@ -35,6 +40,7 @@ from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from verl_omni.pipelines.diffusion_rollout_output import with_rollout_data
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import (
@@ -59,7 +65,7 @@ def _pad_first_dim(value: torch.Tensor, target: int) -> torch.Tensor:
 
 @VllmOmniPipelineBase.register("MiniMaxH3Pipeline", algorithm="flow_grpo")
 class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
-    """Adapt ``MiniMaxH3Pipeline`` for single-request T2VA FlowGRPO rollout.
+    """Adapt ``MiniMaxH3Pipeline`` for single-request T2VA / FL2VA FlowGRPO rollout.
 
     Overrides:
         - ``__init__`` adds request-scoped FlowGRPO and CPS state.
@@ -71,6 +77,13 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
     """
 
     supports_request_batch = False
+
+    #: Declares the joint video/audio rollout streams so the diffusion strategy
+    #: does not hard-code the audio tuple position or its 32 kHz sample rate.
+    diffusion_io_spec = DiffusionIOSpec(
+        primary=MediaSpec("video"),
+        auxiliary=(MediaSpec("audio", sample_rate=32000),),
+    )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
@@ -153,6 +166,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             "h3_video_indices": branch.img_pos.unsqueeze(0),
             "h3_audio_indices": branch.audio_pos.unsqueeze(0),
             "h3_text_indices": text_indices,
+            "h3_video_update_mask": branch.update_mask_dev.unsqueeze(0),
         }
 
     def diffuse(
@@ -180,19 +194,26 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
         keyframe_frame_indices: list[int] | None = None,
         base_schedule: Sequence[float] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        video_rows, audio_rows = self._initial_noise(
+        target_video_rows, audio_rows = self._initial_noise(
             seed=seed,
             latent_t=latent_t,
             latent_h=latent_h,
             latent_w=latent_w,
             audio_t=audio_t,
         )
-        video_rows = video_rows.to(self.device)
+        target_video_rows = target_video_rows.to(self.device)
         audio_rows = audio_rows.to(self.device)
 
         if task == "ref2va":
             # TODO: Build the Ref2VA packed blocks and preserve their anchors during Actor replay.
             raise NotImplementedError("MiniMax H3 FlowGRPO does not support Ref2VA yet.")
+        if audio_condition is not None:
+            # TODO: Add Ref2VA audio anchors to CPS transitions and Actor replay.
+            raise NotImplementedError("MiniMax H3 FlowGRPO does not support audio conditions yet.")
+        if task not in {"t2va", "fl2va"}:
+            raise NotImplementedError(f"MiniMax H3 FlowGRPO supports t2va and fl2va, got {task!r}.")
+
+        keyframe_indices = list(keyframe_frame_indices or [])
         packed = minimax_h3_packed_sequence(
             text_len=int(text_embeddings.shape[0]),
             latent_t=latent_t,
@@ -200,32 +221,10 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             latent_w=latent_w,
             audio_t=audio_t,
             include_keyframe_cond=task == "fl2va",
+            keyframe_frame_indices=keyframe_indices if task == "fl2va" else None,
+            frame_count=num_frames if task == "fl2va" else None,
         )
-
-        visual_anchor = visual_condition
-        if visual_anchor is not None:
-            # TODO: Add FL2VA/Ref2VA visual anchors to CPS transitions and Actor replay.
-            raise NotImplementedError("MiniMax H3 FlowGRPO does not support visual conditions yet.")
-
-        audio_anchor = audio_condition
-        if audio_anchor is not None:
-            # TODO: Add Ref2VA audio anchors to CPS transitions and Actor replay.
-            raise NotImplementedError("MiniMax H3 FlowGRPO does not support audio conditions yet.")
-
-        if task == "fl2va":
-            # A valid FL2VA request should carry a visual condition. Keep a
-            # clear boundary in case upstream request validation changes.
-            raise NotImplementedError("MiniMax H3 FlowGRPO does not support FL2VA yet.")
-        del (
-            base_schedule,
-            num_frames,
-            visual_condition_shape,
-            ref_audio_t,
-            ref_blocks,
-            visual_condition_shapes,
-            audio_condition_lengths,
-            keyframe_frame_indices,
-        )
+        del base_schedule, ref_audio_t, ref_blocks, audio_condition_lengths
         if not math.isclose(video_shift, H3_VIDEO_SHIFT, rel_tol=0.0, abs_tol=1e-6) or not math.isclose(
             audio_shift, H3_AUDIO_SHIFT, rel_tol=0.0, abs_tol=1e-6
         ):
@@ -242,6 +241,36 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             token_tags=tags,
             device=self.device,
         )
+        if not bool(branch.audio_update_mask.all()):
+            raise NotImplementedError("MiniMax H3 FlowGRPO does not support audio-reference condition rows.")
+
+        # FL2VA keyframe rows are fixed conditioning: build them once, place them at the
+        # non-update positions, and re-inject after every transition so the SDE never
+        # perturbs the anchor. T2VA keeps the mask all-True and the condition set empty,
+        # so the loop below is identical to the text-only path.
+        update_mask = branch.update_mask_dev
+        condition_rows = target_video_rows.new_zeros((0, target_video_rows.shape[-1]))
+        if task == "fl2va":
+            condition_shapes = visual_condition_shapes
+            if condition_shapes is None and visual_condition_shape is not None:
+                condition_shapes = [visual_condition_shape]
+            if visual_condition is None or not condition_shapes or not keyframe_indices:
+                raise ValueError("MiniMax H3 FL2VA rollout did not provide complete visual condition metadata.")
+            condition_rows = minimax_h3_imgvid_cond_noise_aug_rows(
+                visual_condition,
+                condition_shapes=condition_shapes,
+                target_latent_t=latent_t,
+                imgvid_cond_num_frames=len(condition_shapes),
+                seed=seed,
+                noise_aug=MINIMAX_H3_IMGVID_COND_TIMESTEP,
+            ).to(device=self.device, dtype=target_video_rows.dtype)
+
+        video_rows = target_video_rows.new_zeros((branch.img_pos.shape[0], target_video_rows.shape[-1]))
+        video_rows[update_mask] = target_video_rows
+        if condition_rows.shape[0] != int((~update_mask).sum().item()):
+            raise ValueError("MiniMax H3 FL2VA condition row count does not match the official packed layout.")
+        if condition_rows.numel():
+            video_rows[~update_mask] = condition_rows
 
         video_sigmas, audio_sigmas = h3_sigma_schedules(num_steps, video_shift, audio_shift)
         video_scheduler = FlowMatchSDEDiscreteScheduler()
@@ -289,15 +318,20 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
                         audio_rows=audio_rows,
                         t_video=video_t,
                         t_audio=audio_timestep,
-                        imgvid_cond_timestep=video_t,
-                        audio_ref_cond_timestep=audio_timestep,
+                        imgvid_cond_timestep=max(video_t, MINIMAX_H3_IMGVID_COND_TIMESTEP),
+                        audio_ref_cond_timestep=max(audio_timestep, MINIMAX_H3_AUDIO_REF_COND_TIMESTEP),
                     )
                     video_velocity, audio_velocity = transformer(**model_inputs)
                     is_selected = step in selected
+                    # The DiT emits one velocity per packed row; only the update-mask (target)
+                    # rows carry a stochastic transition and log-prob. Keyframe condition rows
+                    # stay fixed and are re-injected below (a no-op for T2VA's all-True mask).
+                    target_rows = video_rows[update_mask]
+                    target_velocity = video_velocity[update_mask]
                     video_transition = sample_h3_transition(
                         video_scheduler,
-                        video_rows.unsqueeze(0),
-                        video_velocity.unsqueeze(0),
+                        target_rows.unsqueeze(0),
+                        target_velocity.unsqueeze(0),
                         step,
                         noise_level=self._flow_grpo_noise_level if is_selected else 0.0,
                         sde_type=self._flow_grpo_sde_type,
@@ -314,13 +348,20 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
                         generator=generator,
                         return_log_prob=is_selected,
                     )
+                    next_video_rows = video_rows.clone()
+                    next_video_rows[update_mask] = video_transition[0][0]
+                    if condition_rows.numel():
+                        next_video_rows[~update_mask] = condition_rows
+                    next_audio_rows = audio_transition[0][0]
                     if is_selected:
                         video_log_prob = video_transition[1]
                         audio_log_prob = audio_transition[1]
                         if video_log_prob is None or audio_log_prob is None:
                             raise RuntimeError("MiniMax H3 rollout did not compute log probabilities.")
                         current_latents.append(flatten_joint_latents(video_rows.unsqueeze(0), audio_rows.unsqueeze(0)))
-                        next_latents.append(flatten_joint_latents(video_transition[0], audio_transition[0]))
+                        next_latents.append(
+                            flatten_joint_latents(next_video_rows.unsqueeze(0), next_audio_rows.unsqueeze(0))
+                        )
                         log_probs.append(
                             combine_log_probs(
                                 video_log_prob,
@@ -330,8 +371,8 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
                         step_indices.append(step)
                         selected_video_sigmas.append(video_sigma)
                         selected_audio_sigmas.append(audio_sigma)
-                    video_rows = video_transition[0][0]
-                    audio_rows = audio_transition[0][0]
+                    video_rows = next_video_rows
+                    audio_rows = next_audio_rows
                     progress.update()
         self.record_denoise_step(None)
 
@@ -348,7 +389,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
         }
 
         video_latent = minimax_h3_unpatchify_video_tokens(
-            video_rows,
+            video_rows[update_mask],
             latent_shape=(latent_t, latent_h // 2, latent_w // 2, 24),
             patch_size=(1, 2, 2),
         )
@@ -379,6 +420,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             "h3_video_indices",
             "h3_audio_indices",
             "h3_text_indices",
+            "h3_video_update_mask",
         )
         return with_rollout_data(
             output,

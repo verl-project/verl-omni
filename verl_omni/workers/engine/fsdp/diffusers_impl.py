@@ -223,13 +223,6 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
-        # TODO (mike): we will drop this after it supports in diffusers.
-        if self.use_ulysses_sp and self.model_config.attn_backend == "_flash_3_varlen_hub":
-            raise ValueError(
-                "_flash_3_varlen_hub does not support sequence parallelism. "
-                "Set fsdp_config.ulysses_sequence_parallel_size=1 or switch to a different attn_backend."
-            )
-
     def _build_module_from_registry(self, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
         """Try loading via ``DiffusionModelBase.build_module()``.
 
@@ -1175,6 +1168,31 @@ class DPODiffusersFSDPEngine(DiffusersFSDPEngine):
 class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
     """Diffusers FSDP engine for direct-preference / forward-process objectives (e.g. DiffusionNFT)."""
 
+    def _unpad_condition_rows(self, micro_batch: TensorDict) -> None:
+        """Restore globally padded condition rows to the minibatch-local length."""
+        for key in ("condition_video_rows", "condition_audio_rows"):
+            values = micro_batch.get(key, None)
+            if not isinstance(values, torch.Tensor):
+                continue
+            mask_key = f"{key}_mask"
+            mask = micro_batch.get(mask_key, None)
+            if values.is_nested:
+                if not isinstance(mask, torch.Tensor) or not mask.is_nested:
+                    raise ValueError(f"Nested {key} requires a nested {mask_key}.")
+                values, mask = self._unpad_nested_embeds(values, mask)
+                micro_batch[key] = values
+                micro_batch[mask_key] = mask
+
+            count_key = key.replace("_rows", "_row_count")
+            counts = micro_batch.get(count_key, None)
+            if isinstance(mask, torch.Tensor) and isinstance(counts, torch.Tensor):
+                declared = counts.reshape(counts.shape[0], -1)[:, 0].to(mask.device)
+                valid = mask.long().sum(dim=1)
+                if not torch.equal(valid, declared):
+                    raise ValueError(
+                        f"{mask_key} valid rows {valid.tolist()} do not match {count_key} {declared.tolist()}."
+                    )
+
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
     ) -> list[TensorDict]:
@@ -1215,6 +1233,7 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
                 negative_prompt_embeds, negative_prompt_embeds_mask, sp_size
             )
 
+        self._unpad_condition_rows(micro_batch)
         model_inputs, negative_model_inputs = prepare_model_inputs(
             module=self.module,
             model_config=self.model_config,

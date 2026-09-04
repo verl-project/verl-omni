@@ -15,7 +15,7 @@ The smoke suite is split by code-change coverage under `tests/gpu_smoke/`:
 
 | Group script | CI label | Default GPUs | What it covers |
 |---|---|---|---|
-| [`run_gpu_smoke_core.sh`](../../tests/gpu_smoke/run_gpu_smoke_core.sh) | `ci-core` | 2 | Rollout, engines, agent loop, reward loop |
+| [`run_gpu_smoke_core.sh`](../../tests/gpu_smoke/run_gpu_smoke_core.sh) | `ci-core` | 2 | Rollout, engines, agent loop, reward loop, Ulysses SP |
 | [`run_gpu_smoke_omni_e2e.sh`](../../tests/gpu_smoke/run_gpu_smoke_omni_e2e.sh) | `ci-e2e-omni` | 2 | Qwen3-Omni end-to-end training (GSPO + LoRA) |
 | [`run_gpu_smoke_diffusion_e2e.sh`](../../tests/gpu_smoke/run_gpu_smoke_diffusion_e2e.sh) | `ci-e2e-diffusion` | 4 | Diffusion end-to-end training (FlowGRPO, online DPO, DiffusionNFT, v1 separate_async) |
 
@@ -214,7 +214,7 @@ The mapping is intentionally conservative:
 |---|---|
 | `verl_omni/workers/**`, `verl_omni/agent_loop/**`, `verl_omni/reward_loop/**`, matching GPU tests | `ci-core` |
 | `verl_omni/trainer/omni/**`, `verl_omni/trainer/config/omni/**`, `qwen3_omni_thinker.py`, omni e2e scripts | `ci-e2e-omni` |
-| `verl_omni/trainer/diffusion/**`, `verl_omni/trainer/config/diffusion/**`, `verl_omni/pipelines/**`, `verl_omni/models/diffusers/**`, diffusion e2e scripts | `ci-e2e-diffusion` |
+| `verl_omni/trainer/diffusion/**`, `verl_omni/trainer/config/diffusion/**`, `verl_omni/pipelines/**`, diffusion e2e scripts | `ci-e2e-diffusion` |
 | shared CI/test helpers, package metadata, shared trainer config, or unknown GPU-smoke paths | all groups |
 
 Pushes to `main` and `v0.*` still run all groups. If future group definitions
