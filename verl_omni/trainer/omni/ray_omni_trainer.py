@@ -43,9 +43,7 @@ from verl.utils.fs import local_mkdir_safe
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import Tracking
-from verl.workers.config import DistillationConfig
 
-from verl_omni.experimental.teacher_loop import OmniMultiTeacherModelManager
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
     compute_throughput_metrics_diffusion,
@@ -58,7 +56,6 @@ from verl_omni.trainer.omni.omni_algos import (
 from verl_omni.utils.dataset.offline_mllm_dpo_dataset import get_batch_modality
 from verl_omni.utils.metrics_utils import GroupedMetricMean
 from verl_omni.workers.config import OmniModelConfig
-from verl_omni.workers.utils.padding import patched_padding_template
 
 sys_logger = logging.getLogger(__name__)
 
@@ -85,28 +82,6 @@ class OmniPPOTrainerSync(PPOTrainerSync):
     def on_step_end(self):
         super().on_step_end()
         self.checkpoint_manager.resume_generation_replicas()
-
-    def init(self):
-        # Disable teacher policy during super().init() to skip verl's default
-        # MultiTeacherModelManager (uses HFModelConfig, incompatible with vllm_omni).
-        # Build OmniMultiTeacherModelManager below instead.
-        use_teacher_policy = self.use_teacher_policy
-        self.use_teacher_policy = False
-        super().init()
-        self.use_teacher_policy = use_teacher_policy
-
-        if use_teacher_policy:
-            # Pad teacher-side fields (teacher_ids / teacher_logprobs) alongside student tokens.
-            import verl.trainer.ppo.padding_utils as _padding_utils
-
-            _padding_utils.construct_minimal_padding_template = patched_padding_template
-
-            teacher_resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
-            self.teacher_model_manager = OmniMultiTeacherModelManager(
-                config=self.config,
-                resource_pool=teacher_resource_pool,
-            )
-            self.distillation_config: DistillationConfig = omega_conf_to_dataclass(self.config.distillation)
 
 
 class OmniDirectPreferenceRayTrainer:
