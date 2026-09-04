@@ -1,0 +1,134 @@
+name: npu_smoke
+
+on:
+  push:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "verl_omni/**"
+      - "tests/npu_smoke/**"
+      - "tests/workers/**"
+      - "tests/special_e2e/**"
+      - "pyproject.toml"
+      - .github/workflows/npu_smoke.yml
+      - .github/vllm_omni_pin.txt
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    types: [opened, synchronize, reopened, labeled]  # 加上默认类型
+    paths:
+      - "verl_omni/**"
+      - "tests/npu_smoke/**"
+      - "tests/workers/**"
+      - "tests/special_e2e/**"
+      - "pyproject.toml"
+      - .github/workflows/npu_smoke.yml
+      - .github/vllm_omni_pin.txt
+
+# Declare permissions just read content and PR file metadata.
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  setup_runner:
+    if: github.repository_owner == 'verl-project'
+    runs-on: linux-aarch64-a2b4-8
+    timeout-minutes: 120
+    container:
+      image: swr.cn-north-4.myhuaweicloud.com/mindspeed/pr-verl-omni-a2:latest
+      options: >-
+        --shm-size 16g
+    env:
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      PIP_INDEX_URL: "http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple"
+      PIP_TRUSTED_HOST: "cache-service.nginx-pypi-cache.svc.cluster.local"
+      TRANSFORMERS_VERBOSITY: 'error'
+    steps:
+      - name: Resolve NPU CI mode
+        id: resolve-mode
+        shell: bash
+        run: |
+          mode="none"
+          pr_labels="${{ github.event_name == 'pull_request' && join(github.event.pull_request.labels.*.name, ',') || '' }}"
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            mode="all"
+          elif [[ ",${pr_labels}," == *",ready-for-ci,"* ]]; then
+            mode="all"
+          elif [[ ",${pr_labels}," == *",ci-npu,"* ]]; then
+            mode="all"
+          elif [[ ",${pr_labels}," == *",ci-npu-rollout,"* ]]; then
+            mode="rollout"
+          elif [[ ",${pr_labels}," == *",ci-npu-flowgrpo,"* ]]; then
+            mode="flowgrpo"
+          else
+            mode="all"
+          fi
+
+          echo "mode=${mode}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: steps.resolve-mode.outputs.mode != 'none'
+      - name: Upgrade vLLM stack
+        if: steps.resolve-mode.outputs.mode != 'none'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          
+          echo "===== Installed versions ====="
+          pip show vllm || true
+          pip show vllm-ascend || true
+          pip show vllm-omni || true
+      - id: resolve-groups
+        if: steps.resolve-mode.outputs.mode != 'none'
+        shell: bash
+        run: |
+          mode="${{ steps.resolve-mode.outputs.mode }}"
+
+          if [[ "${mode}" == "all" ]]; then
+            plan_json='{
+              "test_ids": ["0", "1"],
+              "group_count": 2,
+              "num_npus": 8,
+              "runner_size": 8
+            }'
+          elif [[ "${mode}" == "rollout" ]]; then
+            plan_json='{
+              "test_ids": ["0"],
+              "group_count": 1,
+              "num_npus": 8,
+              "runner_size": 8
+            }'
+          elif [[ "${mode}" == "flowgrpo" ]]; then
+            plan_json='{
+              "test_ids": ["1"],
+              "group_count": 1,
+              "num_npus": 8,
+              "runner_size": 8
+            }'
+          else
+            echo "Unknown NPU smoke mode: ${mode}"
+            exit 1
+          fi
+
+          echo "Resolved NPU smoke plan: ${plan_json}"
+
+          PLAN_JSON="${plan_json}" python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          plan = json.loads(os.environ["PLAN_JSON"])
+          print(f"group-count={plan['group_count']}")
+          print(f"num-npus={plan['num_npus']}")
+          print(f"runner-size={plan['runner_size']}")
+          print(f"test-ids={' '.join(plan['test_ids'])}")
+          PY
+      - name: Run NPU smoke tests
+        if: steps.resolve-mode.outputs.mode != 'none'
+        shell: bash
+        run: |
+          bash tests/npu_smoke/run_npu_smoke_tests.sh \
+            --num-npus "${{ steps.resolve-groups.outputs.num-npus }}" \
+            ${{ steps.resolve-groups.outputs.test-ids }}
