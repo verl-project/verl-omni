@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from verl.base_config import BaseConfig
-from verl.trainer.config.algorithm import RolloutCorrectionConfig
+from verl.trainer.config.algorithm import AlgoConfig, RolloutCorrectionConfig
 
 from verl_omni.trainer.diffusion.diffusion_trainer_utils import OLD_POLICY_DECAY_SCHEDULES
 
@@ -60,7 +60,7 @@ class DiffusionAlgoConfig(BaseConfig):
 
 
 @dataclass
-class OmniAlgoConfig(BaseConfig):
+class OmniAlgoConfig(AlgoConfig):
     """Omni-specific algorithm config."""
 
     trainer_type: str = "direct_preference"
