@@ -20,7 +20,11 @@ import pytest
 import torch
 import torch.nn as nn
 
-from verl_omni.pipelines.minicpm.thinker_training_adapter import MiniCPMThinkerAdapter, split_minicpm_forward_kwargs
+from verl_omni.pipelines.minicpm.thinker_training_adapter import (
+    MiniCPMThinkerAdapter,
+    patch_minicpm_whisper_encoder_layers,
+    split_minicpm_forward_kwargs,
+)
 from verl_omni.pipelines.model_base import OmniModelBase
 
 
@@ -112,6 +116,51 @@ def test_prepare_model_inputs_returns_data_dict_for_engine_unpack():
     assert packed["data"]["input_ids"] is input_ids
     assert packed["data"]["image_bound"] == [[]]
     assert packed["data"]["audio_bounds"] == [[]]
+
+
+def test_split_minicpm_forward_kwargs_drops_llm_bound_inputs_embeds():
+    _, llm_kwargs = split_minicpm_forward_kwargs(
+        {
+            "input_ids": torch.ones(1, 2, dtype=torch.long),
+            "position_ids": torch.arange(2).unsqueeze(0),
+            "inputs_embeds": torch.zeros(1, 2, 4),
+            "attention_mask": torch.ones(1, 2),
+        }
+    )
+    assert "inputs_embeds" not in llm_kwargs
+    assert "input_ids" not in llm_kwargs
+    assert "position_ids" not in llm_kwargs
+    assert "attention_mask" in llm_kwargs
+
+
+class _MiniCPMOLlmCall(_MiniCPMOStyle):
+    """Mirrors MiniCPMO.forward binding inputs_embeds before ``**kwargs``."""
+
+    def forward(self, data, **kwargs):
+        self.last_data = data
+        self.last_llm_kwargs = kwargs
+        embeds = torch.ones(*data["input_ids"].shape, 1)
+        return self.llm(
+            input_ids=None,
+            position_ids=data["position_ids"],
+            inputs_embeds=embeds,
+            **kwargs,
+        )
+
+
+def test_wrapped_forward_does_not_duplicate_inputs_embeds_into_llm():
+    module = _MiniCPMOLlmCall()
+    configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
+    configured(
+        input_ids=torch.ones(2, 3, dtype=torch.long),
+        position_ids=torch.arange(3).repeat(2, 1),
+        inputs_embeds=torch.zeros(2, 3, 4),
+        attention_mask=torch.ones(2, 3),
+        use_cache=False,
+    )
+    assert "inputs_embeds" not in configured.last_llm_kwargs
+    assert configured.last_llm_kwargs["attention_mask"].shape == (2, 3)
+    assert configured.last_llm_kwargs["use_cache"] is False
 
 
 def test_split_minicpm_forward_kwargs_collapses_empty_audio_placeholders():
@@ -212,3 +261,75 @@ def test_build_module_uses_transformers_auto_model(monkeypatch):
     assert calls[0][1]["trust_remote_code"] is True
     assert calls[0][1]["config"] is config.hf_config
     assert "init_tts" not in calls[0][1]
+
+
+class _TwoTupleWhisperAttn(nn.Module):
+    """Mirrors transformers WhisperAttention: returns (hidden_states, attn_weights)."""
+
+    def forward(self, hidden_states, **kwargs):
+        del kwargs
+        return hidden_states, None
+
+
+class _MiniCPMWhisperEncoderLayerStub(nn.Module):
+    """Mirrors MiniCPMWhisperEncoderLayer's 3-way unpack of self_attn."""
+
+    def __init__(self):
+        super().__init__()
+        self.self_attn = _TwoTupleWhisperAttn()
+
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        layer_head_mask=None,
+        output_attentions=False,
+        past_key_values=None,
+        use_cache=False,
+    ):
+        del use_cache
+        hidden_states, attn_weights, past_key_values = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            layer_head_mask=layer_head_mask,
+            output_attentions=output_attentions,
+            past_key_value=past_key_values,
+        )
+        del attn_weights
+        return hidden_states, past_key_values
+
+
+class _MiniCPMOWithAPM(_MiniCPMOStyle):
+    def __init__(self):
+        super().__init__()
+        self.apm = nn.Module()
+        self.apm.layers = nn.ModuleList([_MiniCPMWhisperEncoderLayerStub()])
+
+
+def test_unpatched_whisper_layer_cannot_unpack_two_tuple_attn():
+    layer = _MiniCPMWhisperEncoderLayerStub()
+    hidden = torch.ones(1, 2, 4)
+    with pytest.raises(ValueError, match="not enough values to unpack"):
+        layer(hidden)
+
+
+def test_configure_model_pads_whisper_self_attn_to_three_tuple():
+    module = _MiniCPMOWithAPM()
+    configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
+    hidden = torch.ones(1, 2, 4)
+
+    out, past = configured.apm.layers[0](hidden, past_key_values="cache")
+
+    assert torch.equal(out, hidden)
+    assert past == "cache"
+
+
+def test_patch_minicpm_whisper_encoder_layers_is_idempotent():
+    module = _MiniCPMOWithAPM()
+    patch_minicpm_whisper_encoder_layers(module)
+    first_forward = module.apm.layers[0].self_attn.forward
+    patch_minicpm_whisper_encoder_layers(module)
+    assert module.apm.layers[0].self_attn.forward is first_forward
+    hidden = torch.ones(1, 2, 4)
+    out, _ = module.apm.layers[0](hidden)
+    assert torch.equal(out, hidden)
