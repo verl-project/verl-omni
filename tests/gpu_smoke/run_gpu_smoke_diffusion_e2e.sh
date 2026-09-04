@@ -65,4 +65,8 @@ run_test 10 "Diffusion OPD v1 sync standalone teachers e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" V1=1 SMOKE=standalone \
     bash tests/special_e2e/run_diffusion_teacher_smoke.sh
 
+run_test 11 "MiniMax-H3 FlowGRPO T2VA+FL2VA+Ref2VA trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ROLLOUT_TP=2 TOTAL_TRAINING_STEPS=1 \
+    python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py
+
 gpu_smoke_summary
