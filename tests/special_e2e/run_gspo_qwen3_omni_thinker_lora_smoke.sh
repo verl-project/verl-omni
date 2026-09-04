@@ -31,8 +31,8 @@ export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 # Load verl_omni on the driver (rollout adapter) + the Qwen3-Omni patches (processor / automodel); workers also load the model patch via external_lib below.
 export VERL_USE_EXTERNAL_MODULES=verl_omni,verl_omni.models.transformers.qwen3_omni_thinker
 
-# Force exact versions: image ships older TransferQueue/accelerate and `.[gpu]`'s `>=` won't upgrade them (tf5 meta-init needs accelerate>=1.14).
-pip install --no-cache-dir TransferQueue==0.1.8 accelerate==1.14.0
+# Force exact versions because the image may ship older TransferQueue/accelerate.
+pip install --no-cache-dir TransferQueue==0.1.9 accelerate==1.14.0
 python3 -c "import transformers, accelerate; print('smoke deps: transformers', transformers.__version__, '| accelerate', accelerate.__version__)"
 
 NUM_GPUS=${NUM_GPUS:-2}

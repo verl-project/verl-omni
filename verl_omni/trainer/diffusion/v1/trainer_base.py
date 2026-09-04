@@ -27,6 +27,7 @@ import ray
 import torch
 import transfer_queue as tq
 from omegaconf import OmegaConf, open_dict
+from packaging.version import InvalidVersion, Version
 from PIL import Image
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
@@ -85,6 +86,19 @@ from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+
+def _tq_supports_checkpoint() -> bool:
+    """Return whether TransferQueue supports saving and loading checkpoints."""
+    try:
+        version_supported = Version(getattr(tq, "__version__", "")) >= Version("0.1.9")
+    except InvalidVersion:
+        return False
+    return (
+        version_supported
+        and callable(getattr(tq, "save_checkpoint", None))
+        and callable(getattr(tq, "load_checkpoint", None))
+    )
 
 
 DIFFUSION_TRAINER_REGISTRY: dict[str, type] = {}
@@ -201,6 +215,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         self.global_steps += 1
         SkipManager.set_step(self.global_steps)
+        self._reissue_inflight_prompts()
         self.on_train_begin()
         last_val_metrics = None
         while current_epoch < self.config.trainer.total_epochs and self.global_steps <= self.total_training_steps:
@@ -1364,6 +1379,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         local_mkdir_safe(local_global_step_folder)
         torch.save(self.train_dataloader.state_dict(), os.path.join(local_global_step_folder, "data.pt"))
 
+        if self.trainer_mode != "sync" and _tq_supports_checkpoint():
+            tq.save_checkpoint(
+                os.path.join(local_global_step_folder, "transfer_queue"),
+                metadata={"global_steps": self.global_steps},
+            )
+
         latest = os.path.join(self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
         with open(latest, "w") as f:
             f.write(str(self.global_steps))
@@ -1402,3 +1423,63 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             self.train_dataloader.load_state_dict(torch.load(dataloader_path, weights_only=False))
         else:
             logger.warning(f"No dataloader state at {dataloader_path}, starting from scratch")
+
+        if self.trainer_mode != "sync":
+            tq_checkpoint = os.path.join(global_step_folder, "transfer_queue")
+            if not _tq_supports_checkpoint():
+                logger.warning(
+                    "TransferQueue checkpoint recovery is unavailable; async queue state will start empty. "
+                    "TransferQueue >= 0.1.9 with save_checkpoint/load_checkpoint is required."
+                )
+            elif os.path.exists(tq_checkpoint):
+                logger.info(f"Loading TransferQueue state from {tq_checkpoint}")
+                tq.load_checkpoint(tq_checkpoint)
+            else:
+                logger.warning(f"No TransferQueue state at {tq_checkpoint}; async queue state will start empty")
+
+    def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
+        """Restart checkpointed pending and running prompt groups."""
+        if self.trainer_mode == "sync" or not _tq_supports_checkpoint():
+            return 0
+
+        data = tq.kv_list(partition_id)
+        if not data:
+            return 0
+        items = data.get(partition_id, {})
+        inflight_uids = [
+            key
+            for key, tag in items.items()
+            if tag.get("is_prompt", False) and tag.get("status") in ("pending", "running")
+        ]
+        if not inflight_uids:
+            return 0
+
+        batch = tq.kv_batch_get(keys=inflight_uids, partition_id=partition_id)
+        inflight_uid_set = set(inflight_uids)
+        partial_trajectory_keys = [
+            key
+            for key, tag in items.items()
+            if not tag.get("is_prompt", False) and self._trajectory_uid(key) in inflight_uid_set
+        ]
+        if partial_trajectory_keys:
+            tq.kv_clear(keys=partial_trajectory_keys, partition_id=partition_id)
+
+        tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
+        tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in inflight_uids]
+        from tensordict.tensorclass import NonTensorData
+
+        tq.kv_batch_put(
+            keys=inflight_uids,
+            partition_id=partition_id,
+            tags=tags,
+            fields=batch.select(*[key for key in batch.keys() if not isinstance(batch.get(key), NonTensorData)]),
+        )
+        self.agent_loop_manager.generate_sequences(batch)
+
+        logger.info(
+            "Re-issued %d in-flight prompts for step %d; cleared %d partial trajectories",
+            len(inflight_uids),
+            self.global_steps,
+            len(partial_trajectory_keys),
+        )
+        return len(inflight_uids)
