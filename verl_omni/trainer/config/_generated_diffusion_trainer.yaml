@@ -534,6 +534,7 @@ trainer:
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1
+  max_consecutive_nonfinite_grad_steps: 0
   esi_redundant_time: 0
   resume_mode: auto
   resume_from_path: null

@@ -667,7 +667,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         # if grad_norm is not finite, skip the update
         if not torch.isfinite(grad_norm):
-            print(f"WARN: grad_norm is not finite: {grad_norm}")
+            logger.error("grad_norm is not finite: %s; skipping this optimizer step.", grad_norm)
             self.optimizer.zero_grad()
         else:
             self.optimizer.step()
