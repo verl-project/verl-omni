@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU tests for trainer metric aggregation helpers."""
+"""CPU tests for ``verl_omni.utils.metrics_utils``."""
 
 from __future__ import annotations
 
@@ -90,3 +90,18 @@ def test_grouped_metric_mean_requires_grouping_attribute_when_configured():
 
     with pytest.raises(KeyError, match="Missing grouping attribute"):
         aggregator.update({"loss": 1.0}, weight=1)
+
+
+def test_agentic_reward_metrics_aggregate_mix_keys_only():
+    metrics = metrics_utils.AgenticRewardMetrics.aggregate(
+        {
+            "reward_tool_call": torch.tensor([1.0, 1.0]),
+            "reward_correctness": torch.tensor([0.8, 0.6]),
+            "reward_done": torch.tensor([]),
+            "reward_plan": torch.tensor([0.4]),
+        }
+    )
+    assert metrics["agentic_reward/tool_call/mean"] == pytest.approx(1.0)
+    assert metrics["agentic_reward/correctness/min"] == pytest.approx(0.6)
+    assert "agentic_reward/done/mean" not in metrics
+    assert "agentic_reward/plan/mean" not in metrics
