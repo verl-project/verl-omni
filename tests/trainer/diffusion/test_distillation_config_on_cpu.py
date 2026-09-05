@@ -13,6 +13,7 @@
 # limitations under the License.
 """CPU tests for the diffusion on-policy distillation config."""
 
+import dataclasses
 import os
 
 import pytest
@@ -22,9 +23,47 @@ import verl_omni
 from verl_omni.workers.config.diffusion import (
     DiffusionDistillationConfig,
     DiffusionDistillationTeacherModelConfig,
+    DiffusionDistributionMatchingConfig,
 )
 
 CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(verl_omni.__file__)), "trainer", "config")
+
+
+class TestDistributionMatchingConfig:
+    def test_defaults_select_dmd2_without_enabling_opd(self):
+        config = DiffusionDistillationConfig()
+        assert config.enabled is False
+        assert config.distribution_matching.recipe == "dmd2"
+        assert config.distribution_matching.profile is None
+        assert config.distribution_matching.fake_update_ratio is None
+
+    @pytest.mark.parametrize(
+        "kwargs,error",
+        [
+            ({"recipe": "typo"}, "Invalid recipe"),
+            ({"profile": "typo"}, "Invalid profile"),
+            ({"fake_update_ratio": 0}, "greater than 0"),
+            ({"fake_warmup_cycles": -1}, "non-negative"),
+            ({"rollout_strategy": "typo"}, "Invalid rollout_strategy"),
+            ({"data_mode": "typo"}, "Invalid data_mode"),
+            ({"export_role": "teacher_score"}, "Invalid export_role"),
+        ],
+    )
+    def test_invalid_values_fail_closed(self, kwargs, error):
+        with pytest.raises(ValueError, match=error):
+            DiffusionDistributionMatchingConfig(**kwargs)
+
+    def test_null_fields_use_recipe_specific_defaults(self):
+        from verl_omni.trainer.diffusion.distillation.recipes import build_plan
+
+        config = dataclasses.asdict(DiffusionDistributionMatchingConfig(recipe="dmd"))
+        plan = build_plan(
+            "dmd",
+            {**config, "model_path": "/m"},
+            frozenset({"distribution_matching"}),
+        )
+        assert plan.objective["profile"] == "paper"
+        assert plan.update_schedule.phases[1].repeats == 1
 
 
 class TestDiffusionDistillationConfig:
@@ -131,6 +170,8 @@ class TestDistillationConfigComposition:
         config = omega_conf_to_dataclass(cfg.distillation)
         assert isinstance(config, DiffusionDistillationConfig)
         assert config.enabled is False
+        assert isinstance(config.distribution_matching, DiffusionDistributionMatchingConfig)
+        assert config.distribution_matching.recipe == "dmd2"
 
     def test_cli_enable_with_teacher_path(self):
         from verl.utils.config import omega_conf_to_dataclass
@@ -146,6 +187,51 @@ class TestDistillationConfigComposition:
         assert config.teacher_key == "data_source"
         assert config.n_gpus_per_node == 0
         assert config.nnodes == 0
+
+    def test_cli_distribution_matching_overrides_do_not_enable_opd(self):
+        from verl.utils.config import omega_conf_to_dataclass
+
+        cfg = self._compose(
+            [
+                "algorithm.trainer_type=distillation",
+                "distillation.distribution_matching.recipe=dmd2",
+                "distillation.distribution_matching.fake_update_ratio=2",
+                "distillation.distribution_matching.rollout_strategy=consistency_renoise",
+            ]
+        )
+        config = omega_conf_to_dataclass(cfg.distillation)
+        assert config.enabled is False
+        assert config.distribution_matching.fake_update_ratio == 2
+        assert config.distribution_matching.rollout_strategy == "consistency_renoise"
+
+    def test_composed_config_builds_validated_plan(self):
+        from verl_omni.trainer.diffusion.distillation.recipes import build_plan_from_config
+
+        cfg = self._compose(
+            [
+                "algorithm.trainer_type=distillation",
+                "actor_rollout_ref.model.path=/m",
+                "distillation.distribution_matching.fake_update_ratio=2",
+            ]
+        )
+        plan = build_plan_from_config(cfg, frozenset({"distribution_matching"}))
+        assert plan.name == "dmd2"
+        assert plan.role_layout.groups[0].model_ref == "/m"
+        assert plan.update_schedule.phases[1].repeats == 2
+
+    def test_null_overrides_use_each_recipe_default(self):
+        from verl_omni.trainer.diffusion.distillation.recipes import build_plan_from_config
+
+        cfg = self._compose(
+            [
+                "algorithm.trainer_type=distillation",
+                "actor_rollout_ref.model.path=/m",
+                "distillation.distribution_matching.recipe=dmd",
+            ]
+        )
+        plan = build_plan_from_config(cfg, frozenset({"distribution_matching"}))
+        assert plan.objective["profile"] == "paper"
+        assert plan.update_schedule.phases[1].repeats == 1
 
     def test_cli_multi_teacher_entries(self):
         from verl.utils.config import omega_conf_to_dataclass

@@ -494,6 +494,15 @@ distillation:
       model_path: null
       world_size: 0
   teacher_key: data_source
+  distribution_matching:
+    _target_: verl_omni.workers.config.diffusion.DiffusionDistributionMatchingConfig
+    recipe: dmd2
+    profile: null
+    fake_update_ratio: null
+    fake_warmup_cycles: 0
+    rollout_strategy: null
+    data_mode: null
+    export_role: student_ema
 algorithm:
   _target_: verl_omni.trainer.config.DiffusionAlgoConfig
   trainer_type: policy_gradient

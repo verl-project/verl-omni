@@ -71,6 +71,13 @@ def validate_distillation_config(config) -> None:
     actor = config.actor_rollout_ref.actor
     distill_active = actor.diffusion_loss.get("loss_mode", "flow_grpo") == "distill_kl" or actor.use_distill_loss
     enabled = is_distillation_enabled(config.get("distillation"))
+    if config.algorithm.trainer_type == "distillation":
+        if enabled or distill_active:
+            raise ValueError(
+                "DMD-family training selected by algorithm.trainer_type=distillation must keep the OPD "
+                "distillation.enabled flag and actor distillation losses disabled."
+            )
+        return
     if enabled and not distill_active:
         raise ValueError(
             "distillation.enabled=true but no distillation loss is active; set "

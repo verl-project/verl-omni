@@ -130,8 +130,13 @@ def _get_trainer_cls(config):
         return PolicyGradientRayTrainer
     if trainer_type == "direct_preference":
         return DirectPreferenceRayTrainer
+    if trainer_type == "distillation":
+        from verl_omni.trainer.diffusion.distillation.ray_trainer import DistillationRayTrainer
+
+        return DistillationRayTrainer
     raise ValueError(
-        f"Unsupported diffusion trainer_type {trainer_type!r}. Expected one of: 'policy_gradient', 'direct_preference'."
+        f"Unsupported diffusion trainer_type {trainer_type!r}. "
+        f"Expected one of: 'policy_gradient', 'direct_preference', 'distillation'."
     )
 
 

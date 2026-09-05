@@ -44,3 +44,30 @@ teacher_models:
 
 # Key to route examples to the appropriate teacher model in multi-teacher setups. Should correspond to a field in the data proto, e.g., data_source.
 teacher_key: data_source
+
+# DMD-family settings used only when algorithm.trainer_type=distillation. Keep enabled=false; that flag belongs to OPD.
+distribution_matching:
+
+  # Target class for this configuration
+  _target_: verl_omni.workers.config.diffusion.DiffusionDistributionMatchingConfig
+
+  # Registered recipe name
+  recipe: dmd2
+
+  # Optional recipe profile; null selects the recipe default
+  profile: null
+
+  # Optional fake-score phase count; null selects the recipe default
+  fake_update_ratio: null
+
+  # Number of fake/discriminator-only cycles before student updates begin
+  fake_warmup_cycles: 0
+
+  # Optional registered rollout override; null selects the recipe default
+  rollout_strategy: null
+
+  # Optional data-mode override; null selects the recipe default
+  data_mode: null
+
+  # Semantic role exported to inference replicas
+  export_role: student_ema

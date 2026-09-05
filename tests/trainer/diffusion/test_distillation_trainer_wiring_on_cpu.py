@@ -46,6 +46,32 @@ class TestValidateDistillationConfig:
     def test_default_config_passes(self):
         validate_distillation_config(compose_cfg([]))
 
+    def test_distribution_matching_trainer_does_not_enable_opd(self):
+        validate_distillation_config(compose_cfg(["algorithm.trainer_type=distillation"]))
+
+    def test_distribution_matching_rejects_opd_enabled_flag(self):
+        with pytest.raises(ValueError, match="must keep the OPD"):
+            validate_distillation_config(
+                compose_cfg(
+                    ENABLE
+                    + [
+                        "algorithm.trainer_type=distillation",
+                        "actor_rollout_ref.actor.diffusion_loss.loss_mode=distill_kl",
+                    ]
+                )
+            )
+
+    def test_distribution_matching_rejects_actor_distillation_loss(self):
+        with pytest.raises(ValueError, match="must keep the OPD"):
+            validate_distillation_config(
+                compose_cfg(
+                    [
+                        "algorithm.trainer_type=distillation",
+                        "actor_rollout_ref.actor.diffusion_loss.loss_mode=distill_kl",
+                    ]
+                )
+            )
+
     def test_enabled_but_no_distill_loss_raises(self):
         with pytest.raises(ValueError, match="distill"):
             validate_distillation_config(compose_cfg(ENABLE))
