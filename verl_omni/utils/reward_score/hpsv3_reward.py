@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
 import math
 import os
 import threading
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -27,8 +29,47 @@ from verl.utils.device import get_device_name
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
+# Count flattened image/video frames rather than top-level reward requests.
+_DEFAULT_MAX_BATCH_SIZE = 4
+_MAX_QUEUED_REQUESTS = 64
+
 _lock = threading.Lock()
-_inferencer = None
+_inferencers = {}
+_BATCHING_STATE = threading.local()
+
+
+class _BatchingState:
+    def __init__(self, loop):
+        self.loop = loop
+        self.queue = asyncio.Queue(maxsize=_MAX_QUEUED_REQUESTS)
+        self.consumer_task = None
+        self.consumer_lock = asyncio.Lock()
+
+
+def _get_batching_state() -> _BatchingState:
+    loop = asyncio.get_running_loop()
+    state = getattr(_BATCHING_STATE, "value", None)
+    if state is None or state.loop is not loop:
+        state = _BatchingState(loop)
+        _BATCHING_STATE.value = state
+    return state
+
+
+@dataclass(slots=True)
+class _ScoreRequest:
+    prompt: str
+    solution_image: object
+    extra_info: dict
+    checkpoint_path: str
+    device: str
+    max_batch_size: int
+    reward_scale: float
+    future: asyncio.Future
+
+    @property
+    def batch_key(self):
+        return (self.checkpoint_path, self.device, self.max_batch_size)
+
 
 _INSTRUCTION = (
     "\nYou are tasked with evaluating a generated image based on Visual Quality and Text"
@@ -364,13 +405,12 @@ class _HPSv3Inferencer:
 
 
 def _get_inferencer(checkpoint_path: str, device: str):
-    global _inferencer
-
+    key = (checkpoint_path, device)
     with _lock:
-        if _inferencer is None:
-            _inferencer = _HPSv3Inferencer(checkpoint_path=checkpoint_path, device=device)
+        if key not in _inferencers:
+            _inferencers[key] = _HPSv3Inferencer(checkpoint_path=checkpoint_path, device=device)
 
-    return _inferencer
+    return _inferencers[key]
 
 
 def _to_pil_hwc(image) -> Image.Image:
@@ -385,18 +425,29 @@ def _to_pil_hwc(image) -> Image.Image:
 
 
 def _extract_frames(solution_image, frame_interval: int = 1) -> list[Image.Image]:
+    """Extract image frames, preferring the canonical CHW/TCHW layout."""
     is_channels_last = solution_image.shape[-1] in (1, 3) if solution_image.ndim >= 3 else False
 
     if solution_image.ndim == 3:
-        if is_channels_last:
-            solution_image = solution_image.permute(2, 0, 1)
+        if solution_image.shape[0] not in (1, 3):
+            if is_channels_last:
+                solution_image = solution_image.permute(2, 0, 1)
+            else:
+                raise ValueError(f"Expected CHW or HWC image input, got shape {tuple(solution_image.shape)}")
         solution_image = solution_image.unsqueeze(0)
 
     elif solution_image.ndim == 4:
-        if is_channels_last:
-            solution_image = solution_image.permute(3, 0, 1, 2)
-        solution_image = solution_image[:, ::frame_interval]
-        solution_image = solution_image.permute(1, 0, 2, 3)
+        if solution_image.shape[1] in (1, 3):
+            # The reward-manager contract is TCHW; sample its leading time axis.
+            solution_image = solution_image[::frame_interval]
+        elif is_channels_last:
+            # Keep the existing channels-last extension for THWC direct callers.
+            solution_image = solution_image[::frame_interval].permute(0, 3, 1, 2)
+        elif solution_image.shape[0] in (1, 3):
+            # Preserve compatibility with the legacy CTHW interpretation.
+            solution_image = solution_image[:, ::frame_interval].permute(1, 0, 2, 3)
+        else:
+            raise ValueError(f"Expected TCHW or THWC video input, got shape {tuple(solution_image.shape)}")
 
     elif solution_image.ndim == 5:
         if is_channels_last:
@@ -408,7 +459,142 @@ def _extract_frames(solution_image, frame_interval: int = 1) -> list[Image.Image
     return [_to_pil_hwc(frame) for frame in solution_image]
 
 
-def compute_score_hpsv3(
+def _score_batch(requests: list[_ScoreRequest]) -> list[dict | Exception]:
+    """Score ready requests in frame-bounded model/device-specific batches."""
+    results: list[dict | Exception | None] = [None] * len(requests)
+    grouped_frames: dict[tuple[str, str, int], list[tuple[int, str, Image.Image]]] = {}
+    request_raw_rewards: list[list[float]] = [[] for _ in requests]
+
+    for index, request in enumerate(requests):
+        try:
+            frame_interval = request.extra_info.get("frame_interval", 4)
+            pil_images = _extract_frames(request.solution_image, frame_interval=frame_interval)
+            if not pil_images:
+                raise ValueError("HPSv3 reward requires at least one image frame")
+            grouped_frames.setdefault(request.batch_key, []).extend(
+                (index, request.prompt, image) for image in pil_images
+            )
+        except Exception as e:
+            results[index] = e
+
+    for (checkpoint_path, device, max_batch_size), frames in grouped_frames.items():
+        try:
+            inferencer = _get_inferencer(checkpoint_path, device)
+        except Exception as e:
+            for request_index, _, _ in frames:
+                results[request_index] = e
+            continue
+
+        for start in range(0, len(frames), max_batch_size):
+            frame_batch = frames[start : start + max_batch_size]
+            try:
+                images = [image for _, _, image in frame_batch]
+                prompts = [prompt for _, prompt, _ in frame_batch]
+                logger.debug("Scoring HPSv3 micro-batch with %d frame(s)", len(frame_batch))
+                with _lock:
+                    raw_rewards = inferencer.reward(images, prompts)
+                raw_reward_values = raw_rewards[:, 0].detach().cpu().tolist()
+                for (request_index, _, _), raw_reward in zip(frame_batch, raw_reward_values, strict=True):
+                    request_raw_rewards[request_index].append(raw_reward)
+            except Exception as e:
+                for request_index, _, _ in frame_batch:
+                    results[request_index] = e
+
+    for index, request in enumerate(requests):
+        if results[index] is not None:
+            continue
+        raw_reward_values = request_raw_rewards[index]
+        if not raw_reward_values:
+            results[index] = RuntimeError("HPSv3 reward produced no frame scores")
+            continue
+        avg_raw = sum(raw_reward_values) / len(raw_reward_values)
+        results[index] = {"score": avg_raw * request.reward_scale, "hpsv3_raw": avg_raw}
+
+    final_results: list[dict | Exception] = []
+    for result in results:
+        assert result is not None
+        final_results.append(result)
+    return final_results
+
+
+def _fail_requests(requests: list[_ScoreRequest], error: Exception) -> None:
+    for request in requests:
+        if not request.future.done():
+            request.future.set_exception(error)
+
+
+def _drain_failed_requests(state: _BatchingState, error: Exception) -> None:
+    requests = []
+    while True:
+        try:
+            request = state.queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        if request is not None:
+            requests.append(request)
+    _fail_requests(requests, error)
+
+
+async def _consumer_loop(state: _BatchingState):
+    loop = asyncio.get_running_loop()
+    requests = []
+    stop_error = RuntimeError("HPSv3 batch consumer stopped before completing inference.")
+    try:
+        while True:
+            request = await state.queue.get()
+            if request is None:
+                _drain_failed_requests(state, stop_error)
+                break
+
+            requests = [request]
+            should_stop = False
+            await asyncio.sleep(0)
+            while len(requests) < _MAX_QUEUED_REQUESTS:
+                try:
+                    queued_request = state.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if queued_request is None:
+                    should_stop = True
+                    break
+                requests.append(queued_request)
+
+            results = await loop.run_in_executor(None, _score_batch, requests)
+            for scored_request, result in zip(requests, results, strict=True):
+                if scored_request.future.done():
+                    continue
+                if isinstance(result, Exception):
+                    logger.error("HPSv3 inference failed", exc_info=(type(result), result, result.__traceback__))
+                    scored_request.future.set_exception(result)
+                else:
+                    scored_request.future.set_result(result)
+            requests = []
+
+            if should_stop:
+                _drain_failed_requests(state, stop_error)
+                break
+    except asyncio.CancelledError:
+        error = RuntimeError("HPSv3 batch consumer was cancelled before completing inference.")
+        _fail_requests(requests, error)
+        _drain_failed_requests(state, error)
+        raise
+    except BaseException as error:
+        if not isinstance(error, Exception):
+            error = RuntimeError(f"HPSv3 batch consumer stopped unexpectedly: {type(error).__name__}")
+        _fail_requests(requests, error)
+        _drain_failed_requests(state, error)
+        raise
+
+
+async def _ensure_consumer(state: _BatchingState):
+    if state.consumer_task is not None and not state.consumer_task.done():
+        return
+    async with state.consumer_lock:
+        if state.consumer_task is None or state.consumer_task.done():
+            state.consumer_task = asyncio.create_task(_consumer_loop(state))
+
+
+async def compute_score_hpsv3(
     data_source: str,
     solution_image,
     ground_truth: str,
@@ -416,23 +602,31 @@ def compute_score_hpsv3(
     model_name: str = None,
     reward_scale: float = 0.1,
     device: str = None,
+    max_batch_size: int = _DEFAULT_MAX_BATCH_SIZE,
     **kwargs,
 ) -> dict:
+    """Compute HPSv3 reward by batching frames from ready concurrent requests."""
     checkpoint_path = os.getenv("custom_reward_model_path", model_name)
     assert checkpoint_path is not None, "HPSv3 checkpoint path must be provided via reward.reward_model.model_path"
     device = device or get_device_name()
-    inferencer = _get_inferencer(checkpoint_path, device)
+    if isinstance(max_batch_size, bool) or not isinstance(max_batch_size, int) or max_batch_size <= 0:
+        raise ValueError(f"max_batch_size must be a positive integer, got {max_batch_size!r}")
 
-    frame_interval = extra_info.get("frame_interval", 4)
-    pil_images = _extract_frames(solution_image, frame_interval=frame_interval)
-
-    prompt = ground_truth if ground_truth else ""
-    with _lock:
-        raw_rewards = inferencer.reward(pil_images, [prompt] * len(pil_images))
-        raw_reward_values = [raw_rewards[i][0].item() for i in range(len(pil_images))]
-        scores = [raw_reward_values[i] * reward_scale for i in range(len(pil_images))]
-
-    score = sum(scores) / len(scores)
-    avg_raw = sum(raw_reward_values) / len(raw_reward_values)
-
-    return {"score": score, "hpsv3_raw": avg_raw}
+    loop = asyncio.get_running_loop()
+    state = _get_batching_state()
+    future = loop.create_future()
+    await _ensure_consumer(state)
+    await state.queue.put(
+        _ScoreRequest(
+            prompt=ground_truth or "",
+            solution_image=solution_image,
+            extra_info=extra_info,
+            checkpoint_path=checkpoint_path,
+            device=device,
+            max_batch_size=max_batch_size,
+            reward_scale=reward_scale,
+            future=future,
+        )
+    )
+    await _ensure_consumer(state)
+    return await future

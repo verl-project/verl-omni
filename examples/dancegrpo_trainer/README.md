@@ -81,6 +81,19 @@ CUSTOM_REWARD_MODEL_PATH=/path/to/HPSv3.safetensors \
 bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_auto.sh
 ```
 
+The launcher configures HPSv3 reward micro-batching through
+`reward.custom_reward_function.reward_kwargs.max_batch_size` and defaults to `4` flattened frames per
+forward. To override it through Hydra configuration:
+
+```bash
+bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_auto.sh \
+  reward.custom_reward_function.reward_kwargs.max_batch_size=8
+```
+
+This value limits flattened frames rather than top-level reward requests. For example, frames sampled from
+several videos may share one HPSv3 forward until this limit is reached. Larger values use more GPU memory and
+are not guaranteed to be faster, so benchmark with a representative workload before changing the default.
+
 The script runs `python3 -m verl_omni.trainer.main_diffusion` with:
 
 - `algorithm.adv_estimator=dance_grpo`

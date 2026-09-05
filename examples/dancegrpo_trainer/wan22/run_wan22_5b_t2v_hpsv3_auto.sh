@@ -106,6 +106,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.reward_model.enable=False \
     reward.custom_reward_function.path=$custom_reward_function_path \
     reward.custom_reward_function.name=compute_score_hpsv3 \
+    +reward.custom_reward_function.reward_kwargs.max_batch_size=4 \
     trainer.logger='["console", "tensorboard"]' \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
