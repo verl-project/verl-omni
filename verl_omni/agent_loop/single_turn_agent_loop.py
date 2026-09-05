@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import logging
 import os
 from typing import Any
@@ -21,6 +22,7 @@ from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentL
 from verl.utils.profiler import simple_timer
 from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
 
+from verl_omni.agent_loop.composite_agent_loop import ARAgentLoopOutput
 from verl_omni.agent_loop.diffusion_agent_loop import DiffusionAgentLoopOutput
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 
@@ -204,3 +206,75 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
             extra_fields=output.extra_fields,
         )
         return output
+
+
+@register("composite_single_turn_agent")
+class CompositeSingleTurnAgentLoop(DiffusionSingleTurnAgentLoop):
+    """Agent loop for AR+Diffusion composite model staged serving."""
+
+    async def _run_ar(self, sampling_params: dict[str, Any], **kwargs) -> ARAgentLoopOutput:
+        # Stage 1: AR part
+        raw_prompt = kwargs["raw_prompt"]
+        prompt_ids = await self.apply_chat_template(raw_prompt)
+        metrics = {}
+        with simple_timer("generate_sequences", metrics):
+            output = await self.server_manager.generate(
+                request_id=uuid4().hex,
+                prompt_ids=prompt_ids,
+                sampling_params=sampling_params,
+            )
+        if metrics.get("num_preempted") is None:
+            metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
+
+        ar_response_ids = output.extra_fields.pop("ar_response_ids")
+        ar_log_probs = output.extra_fields.pop("ar_all_log_probs", None)
+        refined_prompt = output.extra_fields.pop("refined_prompt")
+        text_encoder_responses = output.extra_fields.pop("text_encoder_responses")
+
+        return ARAgentLoopOutput(
+            prompt_ids=prompt_ids,
+            response_ids=ar_response_ids,
+            ar_response_logprobs=ar_log_probs,
+            refined_prompt=refined_prompt,
+            num_turns=2,
+            metrics=metrics,
+            extra_fields={
+                **output.extra_fields,
+                "text_encoder_responses": text_encoder_responses,
+            },
+        )
+
+    async def run(
+        self, sampling_params: dict[str, Any], **kwargs
+    ) -> tuple[ARAgentLoopOutput, list[DiffusionAgentLoopOutput]]:
+        """Run two-stage ar generation->diffusion generation and package agent-loop output.
+        Stage 1: Input one raw prompt, generate one refined prompt.
+        Stage 2: Duplicate M refined prompts, generate M images.
+
+        Args:
+            sampling_params: Generation parameters forwarded to the server manager.
+            **kwargs: Per-sample fields from the dataset, including ``raw_prompt``
+                and optional ``raw_negative_prompt``.
+
+        Returns:
+            tuple[ARAgentLoopOutput, list[DiffusionAgentLoopOutput]]: AR output and
+            one diffusion output per ``diffusion_n`` sample.
+        """
+        # Stage 1: AR part LLM token generation
+        sampling_params["stage"] = "ar"
+        ar_output = await self._run_ar(sampling_params, **kwargs)
+
+        # Stage 2: images generation using the refined prompt from stage 1.
+        sampling_params["stage"] = "diffusion"
+        diffusion_kwargs = {**kwargs, "raw_prompt": [ar_output.refined_prompt]}
+        tasks = []
+        diffusion_n = diffusion_kwargs.pop("diffusion_n")
+        per_rollout_seeds = diffusion_kwargs.pop("per_rollout_seeds", None)
+        for i in range(diffusion_n):
+            task_sampling_params = sampling_params.copy()
+            if per_rollout_seeds is not None:
+                task_sampling_params["seed"] = per_rollout_seeds[i]
+            tasks.append(asyncio.create_task(super().run(task_sampling_params, **diffusion_kwargs)))
+        diffusion_outputs = await asyncio.gather(*tasks)
+
+        return ar_output, list(diffusion_outputs)

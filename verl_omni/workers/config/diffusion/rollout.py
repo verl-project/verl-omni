@@ -89,17 +89,24 @@ class DiffusionPipelineConfig(BaseConfig):
 
 
 @dataclass
+class DiffusionARConfig(BaseConfig):
+    # AR part sampling config
+    # text generation when needed
+    temperature: float = 1.0
+    top_k: int = 0
+    top_p: float = 1.0
+    repetition_penalty: float = 1.0
+    max_new_tokens: int = 1024
+
+
+@dataclass
 class DiffusionSamplingConfig(BaseConfig):
     # for validation only
     n: int = 1
     seed: int = 42
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
     algo: DiffusionRolloutAlgoConfig = field(default_factory=DiffusionRolloutAlgoConfig)
-
-    # for llm part when needed
-    temperature: float = 1.0
-    top_k: int = 0
-    top_p: float = 1.0
+    ar: DiffusionARConfig = field(default_factory=DiffusionARConfig)
 
 
 @dataclass
@@ -120,13 +127,7 @@ class DiffusionRolloutConfig(BaseConfig):
     nnodes: int = 0
     n_gpus_per_node: int = 8
     n: int = 1
-
-    # for llm part when needed
-    temperature: float = 1.0
-    top_k: int = 0
-    top_p: float = 1.0
-    repetition_penalty: float = 1.0
-    max_new_tokens: int = 256
+    m: int = 1  # Optional. AR stage 1 number of samples per prompt
 
     # Base seed for deterministic training rollout RNG. Per-step base is
     # ``seed + global_step - 1``. null disables rollout seeding.
@@ -183,7 +184,7 @@ class DiffusionRolloutConfig(BaseConfig):
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
 
     calculate_log_probs: bool = False
-    llm_calculate_log_probs: bool = False
+    ar_calculate_log_probs: bool = False
 
     rollout_adapter: str = "default"
 
@@ -222,6 +223,9 @@ class DiffusionRolloutConfig(BaseConfig):
     disaggregation: DisaggregationConfig = field(default_factory=DisaggregationConfig)
 
     external_lib: Optional[str] = None
+
+    # For multi-stage generation (e.g, text rewriting -> image generation)
+    ar: Optional[DiffusionARConfig] = field(default_factory=DiffusionARConfig)
 
     def to_vllm_omni_attention_config(self) -> dict:
         """Convert the rollout backend to vLLM-Omni's canonical config form."""

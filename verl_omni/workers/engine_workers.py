@@ -173,7 +173,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         if getattr(self.model_config, "hf_config", None) is not None:
             self.flops_counter = FlopsCounter(self.model_config.hf_config)
-        elif self.config.model_type in ("diffusion_model", "diffusion_dpo_model", "diffusion_nft_model"):
+        elif self.config.model_type in (
+            "diffusion_model",
+            "diffusion_composite_model",
+            "diffusion_dpo_model",
+            "diffusion_nft_model",
+        ):
             self.flops_counter = DiffusionFlopsCounter(
                 architecture=getattr(self.model_config, "architecture", None),
                 transformer_config=getattr(self.model_config, "transformer_config", None),
@@ -624,6 +629,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         )
         is_diffusion = model_config.get("model_type", "language_model") in (
             "diffusion_model",
+            "diffusion_composite_model",
             "diffusion_dpo_model",
             "diffusion_nft_model",
         )

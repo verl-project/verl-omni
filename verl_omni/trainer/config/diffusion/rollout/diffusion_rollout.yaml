@@ -112,6 +112,9 @@ disable_log_stats: True
 # number of responses (i.e. num sample times). > 1 for grpo
 n: 1
 
+# Optional stage 2: number of diffusion responses (i.e. num sample times). > 1 for grpo
+m: 1
+
 # Base seed for deterministic training rollout RNG.
 # Per-step base is ``seed + global_step - 1``. null disables rollout seeding.
 seed: 42
@@ -197,7 +200,7 @@ val_kwargs:
     # Named canvas aspect ratio for compatible pipelines (validation)
     aspect_ratio: ${oc.select:actor_rollout_ref.rollout.pipeline.aspect_ratio,null}
 
-# Rollout Algorithm configuration for validation
+  # Rollout Algorithm configuration for validation
   algo:
 
     # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
@@ -217,6 +220,23 @@ val_kwargs:
 
     # Whether selected SDE steps must form one consecutive window
     sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
+
+  # Optional. AR part rollout configuration for validation
+  ar:
+    # Sampling temperature for rollout.
+    temperature: ${oc.select:actor_rollout_ref.rollout.ar.temperature,1.0}
+
+    # Top-k sampling parameter. 0 for HF rollout.
+    top_k: ${oc.select:actor_rollout_ref.rollout.ar.top_k,0}
+
+    # Top-p sampling parameter. Default 1.0.
+    top_p: ${oc.select:actor_rollout_ref.rollout.ar.top_p,1.0}
+
+    # Repetition penalty parameter. Default to 1.0 (no panelty)
+    repetition_penalty: ${oc.select:actor_rollout_ref.rollout.ar.repetition_penalty,1.0}
+
+    # Max number of newly generated tokens for validation
+    max_new_tokens: ${oc.select:actor_rollout_ref.rollout.ar.max_new_tokens,1024}
 
 # Rollout Algorithm configuration
 algo:
@@ -296,29 +316,32 @@ pipeline:
   # Named canvas aspect ratio for compatible pipelines
   aspect_ratio: null
 
+# Optional. AR part rollout use.
+ar:
+  # Sampling temperature for rollout.
+  temperature: 1.0
+
+  # Top-k sampling parameter. 0 for HF rollout.
+  top_k: 0
+
+  # Top-p sampling parameter. Default 1.0.
+  top_p: 1.0
+
+  # Repetition penalty parameter. Default to 1.0 (no panelty)
+  repetition_penalty: 1.0
+
+  # Max number of newly generated tokens
+  max_new_tokens: int = 1024
+
 # support logging rollout prob for debugging purpose
 calculate_log_probs: False
 
-# Optional. LLM generation use
-llm_calculate_log_probs: False
-
-# Optional. LLM generation use
-temperature: 1.0
-
-# Optional. LLM generation use
-top_k: 0
-
-# Optional. LLM generation use
-top_p: 1.0
-
-# Optional. LLM generation use
-repetition_penalty: 1.0
-
-# Optional. Max number of LLM generated tokens
-max_new_tokens: 256
+# Support token-level log prob return in rollout
+ar_calculate_log_probs: False
 
 # Named adapter used by rollout generation
 rollout_adapter: default
+
 
 # [Experimental] agent loop based rollout configs
 agent:

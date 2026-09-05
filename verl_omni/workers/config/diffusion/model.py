@@ -29,9 +29,34 @@ from verl_omni.utils.fs import resolve_model_local_dir
 
 from .rollout import DiffusionPipelineConfig, DiffusionRolloutAlgoConfig
 
-__all__ = ["DiffusionModelConfig"]
+__all__ = ["DiffusionModelARConfig", "DiffusionModelConfig"]
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DiffusionModelARConfig(BaseConfig):
+    # AR part actor model config
+    # use when training AR part
+
+    # whether to use shared memory
+    use_shm: bool = False
+    trust_remote_code: bool = False
+
+    enable_gradient_checkpointing: bool = True
+
+    # LoRA configs
+    lora_rank: int = 0
+    lora_alpha: int = 16
+    target_modules: Optional[Any] = "all-linear"  # allow both "all-linear" and ["q_proj","k_proj"]
+    target_parameters: Optional[list[str]] = None  # for lora adapter on nn.Parameter
+
+    exclude_modules: Optional[str] = None
+
+    # path to pre-trained LoRA adapter to load for continued training
+    lora_adapter_path: Optional[str] = None
+
+    override_config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -120,8 +145,14 @@ class DiffusionModelConfig(BaseConfig):
     # ``<local_path>/<transformer_subfolder>``.
     config_path: Optional[str] = None
 
+    # Subfolder containing the diffusion text encoder weights/config.
+    text_encoder_subfolder: str = "text_encoder"
+
     # Subfolder containing the diffusion transformer weights/config.
     transformer_subfolder: str = "transformer"
+
+    # Trainable AR config
+    ar: DiffusionModelARConfig = field(default_factory=DiffusionModelARConfig)
 
     def __post_init__(self):
         import_external_libs(self.external_lib)

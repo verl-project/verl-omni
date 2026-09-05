@@ -30,6 +30,7 @@ __all__ = [
     "VeOmniDiffusionEngineConfig",
     "VeOmniDiffusionOptimizerConfig",
     "DiffusionActorConfig",
+    "DiffusionActorARConfig",
     "FSDPDiffusionActorConfig",
     "VeOmniDiffusionActorConfig",
 ]
@@ -56,6 +57,7 @@ class DiffusionLossConfig(BaseConfig):
             "diffusion_nft",
             "dpo",
             "dance_grpo",
+            "dual_grpo",
             "distill_kl",
             "distill_fm_mse",
         ]
@@ -69,6 +71,14 @@ class DiffusionLossConfig(BaseConfig):
             raise ValueError(f"adaptive_weight_min must be positive, got {self.adaptive_weight_min}.")
         if self.kl_mask_threshold <= 0:
             raise ValueError(f"kl_mask_threshold must be positive, got {self.kl_mask_threshold}.")
+
+
+@dataclass
+class DiffusionActorARConfig(BaseConfig):
+    # AR part actor config
+    # use when training AR part
+    entropy_coeff: float = 0
+    calculate_entropy: bool = False
 
 
 @dataclass
@@ -168,6 +178,9 @@ class DiffusionActorConfig(BaseConfig):
     # Rollout Correction config.
     # When bypass_mode=True, ``diffusion_loss`` computes per-step RS from here.
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
+
+    # Trainale AR config
+    ar: DiffusionActorARConfig = field(default_factory=DiffusionActorARConfig)
 
     def __post_init__(self):
         """Validate diffusion actor configuration parameters."""
