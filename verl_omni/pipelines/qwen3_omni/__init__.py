@@ -13,10 +13,16 @@
 # limitations under the License.
 """Qwen3-Omni pipeline adapters (Thinker training + rollout pipeline topology)."""
 
-from .omni_rollout_adapter import Qwen3OmniRolloutAdapter
+import os
+
 from .thinker_training_adapter import Qwen3OmniThinkerAdapter
 
-__all__ = [
-    "Qwen3OmniThinkerAdapter",
-    "Qwen3OmniRolloutAdapter",
-]
+__all__ = ["Qwen3OmniThinkerAdapter"]
+
+# The explicit stage-config launcher does not use the rollout topology adapter.
+# Keep that optional registration out of lightweight Ray actors because their
+# vLLM-Omni checkout can legitimately predate the generated-pipeline API.
+if os.environ.get("VERL_OMNI_SKIP_PIPELINES", "0").strip().lower() not in {"1", "true", "yes"}:
+    from .omni_rollout_adapter import Qwen3OmniRolloutAdapter as Qwen3OmniRolloutAdapter
+
+    __all__.append("Qwen3OmniRolloutAdapter")
