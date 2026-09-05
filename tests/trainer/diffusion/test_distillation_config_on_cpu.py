@@ -36,6 +36,12 @@ class TestDistributionMatchingConfig:
         assert config.distribution_matching.recipe == "dmd2"
         assert config.distribution_matching.profile is None
         assert config.distribution_matching.fake_update_ratio is None
+        assert config.distribution_matching.role_storage == "shared_base_adapters"
+        assert config.distribution_matching.student_micro_batch_size_per_gpu == 1
+        assert config.distribution_matching.fake_score_micro_batch_size_per_gpu == 1
+        assert config.distribution_matching.ema_decay == pytest.approx(0.999)
+        assert config.distribution_matching.ema_start_step == 0
+        assert config.distribution_matching.fake_score_optim.lr == pytest.approx(2e-5)
 
     @pytest.mark.parametrize(
         "kwargs,error",
@@ -47,6 +53,12 @@ class TestDistributionMatchingConfig:
             ({"rollout_strategy": "typo"}, "Invalid rollout_strategy"),
             ({"data_mode": "typo"}, "Invalid data_mode"),
             ({"export_role": "teacher_score"}, "Invalid export_role"),
+            ({"role_storage": "remote"}, "Invalid role_storage"),
+            ({"student_micro_batch_size_per_gpu": 0}, "greater than 0"),
+            ({"fake_score_micro_batch_size_per_gpu": 0}, "greater than 0"),
+            ({"ema_decay": -0.1}, "ema_decay"),
+            ({"ema_decay": 1.1}, "ema_decay"),
+            ({"ema_start_step": -1}, "non-negative"),
         ],
     )
     def test_invalid_values_fail_closed(self, kwargs, error):
@@ -194,6 +206,7 @@ class TestDistillationConfigComposition:
         cfg = self._compose(
             [
                 "algorithm.trainer_type=distillation",
+                "algorithm.sample_source=offline",
                 "distillation.distribution_matching.recipe=dmd2",
                 "distillation.distribution_matching.fake_update_ratio=2",
                 "distillation.distribution_matching.rollout_strategy=consistency_renoise",
@@ -203,6 +216,7 @@ class TestDistillationConfigComposition:
         assert config.enabled is False
         assert config.distribution_matching.fake_update_ratio == 2
         assert config.distribution_matching.rollout_strategy == "consistency_renoise"
+        assert config.distribution_matching.fake_score_optim.lr == pytest.approx(2e-5)
 
     def test_composed_config_builds_validated_plan(self):
         from verl_omni.trainer.diffusion.distillation.recipes import build_plan_from_config
@@ -210,6 +224,7 @@ class TestDistillationConfigComposition:
         cfg = self._compose(
             [
                 "algorithm.trainer_type=distillation",
+                "algorithm.sample_source=offline",
                 "actor_rollout_ref.model.path=/m",
                 "distillation.distribution_matching.fake_update_ratio=2",
             ]
@@ -225,6 +240,7 @@ class TestDistillationConfigComposition:
         cfg = self._compose(
             [
                 "algorithm.trainer_type=distillation",
+                "algorithm.sample_source=offline",
                 "actor_rollout_ref.model.path=/m",
                 "distillation.distribution_matching.recipe=dmd",
             ]

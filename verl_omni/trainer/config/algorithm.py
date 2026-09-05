@@ -46,6 +46,8 @@ class DiffusionAlgoConfig(BaseConfig):
         valid_trainer_types = {"policy_gradient", "direct_preference", "distillation"}
         if self.trainer_type not in valid_trainer_types:
             raise ValueError(f"Invalid trainer_type: {self.trainer_type}. Must be one of {sorted(valid_trainer_types)}")
+        if self.trainer_type == "distillation" and self.sample_source != "offline":
+            raise ValueError("The distillation trainer requires sample_source='offline'; rollout runs inside FSDP.")
         valid_adv_modes = {"continuous", "positive_only", "negative_only", "one_only", "binary"}
         if self.adv_mode not in valid_adv_modes:
             raise ValueError(f"Invalid adv_mode: {self.adv_mode}. Must be one of {sorted(valid_adv_modes)}")

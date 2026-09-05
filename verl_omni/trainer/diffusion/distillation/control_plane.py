@@ -20,7 +20,7 @@ controller free of Ray types makes its state machine testable in a CPU process
 (RFC §13.1).
 
 The cycle state machine follows RFC §14. Worker allocation, role binding, and
-checkpoint restore are deliberately delegated to the PR 2 executor; this module
+checkpoint restore are deliberately delegated to the bound phase executor; this module
 only controls validated phase execution:
 
 - Optional fake/discriminator warmup cycles: emit fake-only ``UpdateCycle``
@@ -197,6 +197,50 @@ class DistillationTrainerControlPlane:
     def metrics(self) -> dict[str, dict]:
         """Metrics recorded for the most recent phase of each kind."""
         return self._metrics
+
+    def state_dict(self) -> dict[str, Any]:
+        """Return completed-cycle driver state for atomic checkpointing."""
+        if self._failed:
+            raise RuntimeError("Cannot checkpoint a failed control plane; restore the last completed cycle instead.")
+        return {
+            "global_step": self.counters.global_step,
+            "optimizer_steps": dict(self.counters.optimizer_steps),
+            "completed_cycles": self.counters.completed_cycles,
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore validated counters into a fresh control plane."""
+        if self._failed:
+            raise RuntimeError("Cannot restore into a failed control plane; construct a new driver.")
+        required = {"global_step", "optimizer_steps", "completed_cycles"}
+        if set(state) != required:
+            raise ValueError(f"Control-plane state must contain exactly {sorted(required)}, got {sorted(state)}.")
+        global_step = state["global_step"]
+        completed_cycles = state["completed_cycles"]
+        optimizer_steps = state["optimizer_steps"]
+        if isinstance(global_step, bool) or not isinstance(global_step, int) or global_step < 0:
+            raise ValueError(f"global_step must be a non-negative integer, got {global_step!r}.")
+        if isinstance(completed_cycles, bool) or not isinstance(completed_cycles, int) or completed_cycles < 0:
+            raise ValueError(f"completed_cycles must be a non-negative integer, got {completed_cycles!r}.")
+        if not isinstance(optimizer_steps, dict) or any(
+            not isinstance(role, str) or isinstance(steps, bool) or not isinstance(steps, int) or steps < 0
+            for role, steps in optimizer_steps.items()
+        ):
+            raise ValueError("optimizer_steps must map role names to non-negative integer counters.")
+        trainable_roles = {binding.role for binding in self.plan.role_layout.bindings if binding.trainable}
+        unknown_roles = set(optimizer_steps) - trainable_roles
+        if unknown_roles:
+            raise ValueError(f"Checkpoint contains unknown optimizer roles: {sorted(unknown_roles)}.")
+        if optimizer_steps.get("student", 0) != global_step:
+            raise ValueError("The student optimizer counter must equal global_step.")
+        if completed_cycles < global_step:
+            raise ValueError("completed_cycles cannot be less than global_step.")
+        self.counters = TrainerCounters(
+            global_step=global_step,
+            optimizer_steps=dict(optimizer_steps),
+            completed_cycles=completed_cycles,
+        )
+        self._metrics = {}
 
     def reset(self) -> None:
         """Reset a healthy driver; failed drivers must be reconstructed from checkpoint."""

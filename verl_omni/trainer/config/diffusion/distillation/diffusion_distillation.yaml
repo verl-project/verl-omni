@@ -71,3 +71,69 @@ distribution_matching:
 
   # Semantic role exported to inference replicas
   export_role: student_ema
+
+  # Physical role storage: shared_base_adapters or colocated_independent
+  role_storage: shared_base_adapters
+
+  # Per-device micro-batch size for student phases
+  student_micro_batch_size_per_gpu: 1
+
+  # Per-device micro-batch size for fake-score phases
+  fake_score_micro_batch_size_per_gpu: 1
+
+  # Independent fake-score optimizer and scheduler configuration
+  fake_score_optim:
+
+    # Target optimizer configuration class
+    _target_: verl.workers.config.FSDPOptimizerConfig
+
+    # Optimizer class name
+    optimizer: AdamW
+
+    # Python module containing the optimizer class
+    optimizer_impl: torch.optim
+
+    # Fake-score learning rate
+    lr: 2.0e-5
+
+    # Warmup steps ratio when lr_warmup_steps is non-positive
+    lr_warmup_steps_ratio: 0.0
+
+    # Total fake-score optimizer steps; populated by the trainer
+    total_training_steps: -1
+
+    # Weight decay
+    weight_decay: 0.01
+
+    # Explicit warmup steps; non-positive delegates to the ratio
+    lr_warmup_steps: -1
+
+    # Adam beta coefficients
+    betas: [0.9, 0.999]
+
+    # Gradient clipping threshold
+    clip_grad: 1.0
+
+    # Minimum learning-rate ratio for cosine scheduling
+    min_lr_ratio: 0.0
+
+    # Number of cosine cycles
+    num_cycles: 0.5
+
+    # Learning-rate scheduler type
+    lr_scheduler_type: constant
+
+    # Whether scheduler step counting starts at zero
+    zero_indexed_step: true
+
+    # Deprecated scheduler alias
+    warmup_style: null
+
+    # Optional optimizer implementation overrides
+    override_optimizer_config: null
+
+  # EMA decay after a completed student optimizer step
+  ema_decay: 0.999
+
+  # First completed student step that updates EMA
+  ema_start_step: 0

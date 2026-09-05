@@ -775,15 +775,21 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
         if hasattr(peft_model, "peft_config"):  # LoRA
-            peft_config = peft_model.peft_config.get("default", None)
-            adapter_ctx = self.use_adapter(adapter_name) if adapter_name is not None else nullcontext()
+            resolved_adapter = adapter_name or "default"
+            peft_config = peft_model.peft_config.get(resolved_adapter, None)
+            if peft_config is None:
+                raise ValueError(
+                    f"Cannot export unknown LoRA adapter {resolved_adapter!r}; "
+                    f"available adapters: {sorted(peft_model.peft_config)}."
+                )
+            adapter_ctx = self.use_adapter(resolved_adapter)
             with adapter_ctx:
                 params = collect_lora_params(
                     module=self.module,
                     layered_summon=layered_summon,
                     base_sync_done=base_sync_done,
                     is_diffusers=True,
-                    adapter_name=adapter_name or "default",
+                    adapter_name=resolved_adapter,
                     layer_prefixes=self.model_config.fsdp_layer_prefixes,
                 )
         else:

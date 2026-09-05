@@ -280,6 +280,16 @@ class TestRecipePlans:
             assert role_groups["student"] == role_groups["student_ema"] == "causal_base"
             assert role_groups["teacher_score"] == role_groups["fake_score"] == "bidirectional_base"
 
+    def test_colocated_independent_materializes_one_group_per_role(self):
+        plan = build_plan(
+            "dmd2",
+            {"model_path": "/m", "role_storage": "colocated_independent"},
+            ALL_CAPS,
+        )
+        assert {group.storage for group in plan.role_layout.groups} == {"independent_module"}
+        assert len(plan.role_layout.groups) == len(plan.role_layout.bindings) == 4
+        assert all(binding.group == f"{binding.role}_model" for binding in plan.role_layout.bindings)
+
     @pytest.mark.parametrize(
         "name,config,error",
         [
@@ -291,6 +301,7 @@ class TestRecipePlans:
             ("dmd2", {"fake_update_ratio": 1.5, "model_path": "/m"}, "integer"),
             ("dmd2", {"fake_update_ratio": True, "model_path": "/m"}, "integer"),
             ("dmd2", {"fake_warmup_cycles": 1.5, "model_path": "/m"}, "integer"),
+            ("dmd2", {"role_storage": "remote", "model_path": "/m"}, "role_storage"),
         ],
     )
     def test_invalid_recipe_values_fail_closed(self, name, config, error):
@@ -365,6 +376,20 @@ class TestUpdateSchedule:
             UpdateSchedule(
                 phases=(self.student_phase(), self.fake_phase()),
                 warmup_phases=(self.student_phase(),),
+                warmup_cycles=1,
+            )
+
+    def test_warmup_cannot_reuse_a_missing_student_batch(self):
+        with pytest.raises(ValueError, match="cannot reuse a student batch"):
+            UpdateSchedule(
+                phases=(self.student_phase(), self.fake_phase()),
+                warmup_phases=(
+                    UpdatePhaseSpec(
+                        kind="fake_score",
+                        batch_policy="reuse_student",
+                        trainable_roles=("fake_score",),
+                    ),
+                ),
                 warmup_cycles=1,
             )
 

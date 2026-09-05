@@ -16,15 +16,20 @@
 import os
 import shutil
 import tempfile
+from copy import deepcopy
 from functools import partial
 
 import pytest
 import ray
 import torch
+from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.utils import tensordict_utils as tu
+from verl.utils.distributed import initialize_global_process_group_ray, set_numa_affinity
 
+from verl_omni.trainer.diffusion.distillation.contracts import RoleBinding, RoleGroupSpec
+from verl_omni.workers.engine.fsdp.distillation_impl import DistillationRoleGroupEngine
 from verl_omni.workers.engine_workers import TrainingWorker
 from verl_omni.workers.utils.losses import diffusion_loss
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
@@ -51,6 +56,89 @@ def _require_model_path() -> str:
             "Provide the model or adjust _DEFAULT_MODEL_PATH."
         )
     return _DEFAULT_MODEL_PATH
+
+
+class DistillationLoRAFSDPTestWorker(Worker):
+    """Tiny-model worker exercising the real multi-role FSDP engine."""
+
+    def __init__(self, training_config, model_path):
+        Worker.__init__(self)
+        initialize_global_process_group_ray(timeout_second=None)
+        set_numa_affinity()
+        model_config = deepcopy(training_config.model_config)
+        engine_config = deepcopy(training_config.engine_config)
+        optimizer_config = deepcopy(training_config.optimizer_config)
+        checkpoint_config = deepcopy(training_config.checkpoint_config)
+        object.__setattr__(model_config, "model_type", "diffusion_distillation_model")
+        object.__setattr__(engine_config, "use_orig_params", True)
+        group = RoleGroupSpec(
+            name="base",
+            model_ref=model_path,
+            storage="shared_base_adapters",
+            placement="colocated",
+        )
+        bindings = (
+            RoleBinding("student", "base", "student", True, "student_optim"),
+            RoleBinding("teacher_score", "base", None, False, None),
+            RoleBinding("fake_score", "base", "fake_score", True, "fake_score_optim"),
+            RoleBinding("student_ema", "base", "student_ema", False, None),
+        )
+        fake_optimizer_config = deepcopy(optimizer_config)
+        object.__setattr__(fake_optimizer_config, "lr", optimizer_config.lr * 0.5)
+        self.engine = DistillationRoleGroupEngine(
+            model_config=model_config,
+            engine_config=engine_config,
+            optimizer_config=optimizer_config,
+            checkpoint_config=checkpoint_config,
+            role_group=group,
+            role_bindings=bindings,
+            optimizer_configs={"student": optimizer_config, "fake_score": fake_optimizer_config},
+        )
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        self.engine.initialize()
+
+    def collect_adapter(self, role):
+        params, config = self.engine.get_per_tensor_param(adapter_name=role, base_sync_done=True)
+        return {name: tensor.detach().cpu() for name, tensor in params}, config
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def collect_roles(self):
+        student, student_config = self.collect_adapter("student")
+        fake, fake_config = self.collect_adapter("fake_score")
+        ema, ema_config = self.collect_adapter("student_ema")
+        return {
+            "student": student,
+            "fake_score": fake,
+            "student_ema": ema,
+            "student_config": student_config,
+            "fake_config": fake_config,
+            "ema_config": ema_config,
+        }
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def run_student_step_across_role_switches(self):
+        self.engine.optimizer_zero_grad("student")
+        with self.engine.use_role("student"):
+            student_parameters = self.engine.parameters_for_role("student")
+            loss = sum(parameter.float().square().mean() for parameter in student_parameters if parameter.numel())
+        with self.engine.use_role("teacher_score"):
+            assert not torch.is_grad_enabled()
+        with self.engine.use_role("fake_score", grad_enabled=False):
+            assert not torch.is_grad_enabled()
+        self.engine.backward_role("student", loss)
+        stepped, grad_norm = self.engine.optimizer_step("student")
+        self.engine.update_role_ema("student", "student_ema", decay=0.5)
+        return {"stepped": stepped, "grad_norm": grad_norm}
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def save_role_group(self, path, step):
+        self.engine.save_role_group_checkpoint(path, step)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def load_role_group(self, path):
+        self.engine.load_role_group_checkpoint(path)
 
 
 class LoRAFSDPTestWorker(TrainingWorker):
@@ -319,3 +407,62 @@ def test_diffusers_fsdp_lora_adapter_copy_ema(strategy):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for FSDP LoRA adapter tests.")
     _run_copy_ema_adapter_test(strategy)
+
+
+@pytest.mark.parametrize("strategy", ["fsdp", "fsdp2"])
+def test_distillation_role_isolation_ema_and_resume(strategy):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for distillation role-group tests.")
+    base_model_path = _require_model_path()
+    device_count = _resolve_lora_test_device_count(strategy)
+
+    ray.init()
+    tmp_dir = tempfile.mkdtemp(prefix="qwen_image_distillation_roles_")
+    try:
+        sp_enabled = device_count > 1 and _diffusers_sp_supported()
+        if sp_enabled:
+            model_path = _create_sp_compatible_model(tmp_dir, base_model_path, num_attention_heads=2)
+        else:
+            model_path = base_model_path
+        training_config, _ = create_training_config(
+            model_type="diffusion_distillation_model",
+            strategy=strategy,
+            device_count=device_count,
+            model=model_path,
+            policy_state_adapters=("default", "student", "fake_score", "student_ema"),
+        )
+        ray_cls_with_init = RayClassWithInitArgs(
+            cls=ray.remote(DistillationLoRAFSDPTestWorker),
+            training_config=training_config,
+            model_path=model_path,
+        )
+        resource_pool = RayResourcePool(process_on_nodes=[device_count])
+        wg = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init)
+        wg.init_model()
+
+        initial = wg.collect_roles()[0]
+        _lora_params_close(initial["student"], initial["student_ema"])
+        _lora_params_close(initial["student"], initial["fake_score"])
+        assert initial["student_config"] == initial["fake_config"] == initial["ema_config"]
+
+        step_result = wg.run_student_step_across_role_switches()[0]
+        assert step_result["stepped"]
+        assert step_result["grad_norm"] > 0
+        after_step = wg.collect_roles()[0]
+        _lora_params_differ(after_step["student"], initial["student"])
+        _lora_params_close(after_step["fake_score"], initial["fake_score"])
+        _assert_ema_blend(after_step["student_ema"], initial["student_ema"], after_step["student"], decay=0.5)
+
+        checkpoint_path = os.path.join(tmp_dir, "checkpoint")
+        wg.save_role_group(checkpoint_path, 1)
+        wg.run_student_step_across_role_switches()
+        changed = wg.collect_roles()[0]
+        _lora_params_differ(changed["student"], after_step["student"])
+        wg.load_role_group(checkpoint_path)
+        restored = wg.collect_roles()[0]
+        _lora_params_close(restored["student"], after_step["student"])
+        _lora_params_close(restored["fake_score"], after_step["fake_score"])
+        _lora_params_close(restored["student_ema"], after_step["student_ema"])
+    finally:
+        ray.shutdown()
+        shutil.rmtree(tmp_dir, ignore_errors=True)

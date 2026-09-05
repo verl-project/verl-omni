@@ -254,6 +254,28 @@ class DiffusionModelBase(ABC):
         return module(**model_inputs)[0]
 
 
+class DistributionMatchingModelAdapter:
+    """Optional capability mixin for DMD-family architecture adapters.
+
+    The generic distillation runtime owns role placement, optimization, EMA, and
+    checkpointing. Architecture packages implement the differentiable phase
+    program and declare capabilities without adding recipe branches to the
+    trainer or worker.
+    """
+
+    @classmethod
+    def distillation_capabilities(cls) -> frozenset[str]:
+        """Return capabilities accepted by distillation recipe validation."""
+        return frozenset({"distribution_matching"})
+
+    @classmethod
+    def build_distillation_phase_runner(cls, model_config, plan):
+        """Build the architecture-owned phase computation used by the worker."""
+        raise NotImplementedError(
+            f"{cls.__name__} declares distribution-matching support but does not build a phase runner."
+        )
+
+
 class DiffusionI2IModelBase(DiffusionModelBase):
     """Base class for image-conditioned diffusion model training helpers.
 

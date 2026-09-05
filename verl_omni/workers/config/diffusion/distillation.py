@@ -16,6 +16,12 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from verl.base_config import BaseConfig
+from verl.workers.config import FSDPOptimizerConfig
+
+
+def default_fake_score_optimizer() -> FSDPOptimizerConfig:
+    return FSDPOptimizerConfig(lr=2e-5, weight_decay=0.01, clip_grad=1.0, lr_scheduler_type="constant")
+
 
 __all__ = [
     "DiffusionDistillationTeacherModelConfig",
@@ -73,6 +79,18 @@ class DiffusionDistributionMatchingConfig(BaseConfig):
     data_mode: Optional[str] = None
     # Semantic role exported to inference replicas.
     export_role: str = "student_ema"
+    # Physical storage used by the initial colocated runtime.
+    role_storage: str = "shared_base_adapters"
+    # Per-device student phase micro-batch size.
+    student_micro_batch_size_per_gpu: int = 1
+    # Per-device fake-score phase micro-batch size.
+    fake_score_micro_batch_size_per_gpu: int = 1
+    # Independent fake-score optimizer and scheduler configuration.
+    fake_score_optim: FSDPOptimizerConfig = field(default_factory=default_fake_score_optimizer)
+    # EMA decay applied after successful student optimizer steps.
+    ema_decay: float = 0.999
+    # First completed student step that updates EMA.
+    ema_start_step: int = 0
 
     def __post_init__(self):
         valid_recipes = {"dmd", "dmd2", "causvid", "self_forcing"}
@@ -103,6 +121,22 @@ class DiffusionDistributionMatchingConfig(BaseConfig):
         valid_export_roles = {"student", "student_ema"}
         if self.export_role not in valid_export_roles:
             raise ValueError(f"Invalid export_role: {self.export_role}. Must be one of {sorted(valid_export_roles)}")
+        valid_role_storage = {"shared_base_adapters", "colocated_independent"}
+        if self.role_storage not in valid_role_storage:
+            raise ValueError(f"Invalid role_storage: {self.role_storage}. Must be one of {sorted(valid_role_storage)}")
+        if self.student_micro_batch_size_per_gpu <= 0:
+            raise ValueError(
+                f"student_micro_batch_size_per_gpu must be greater than 0, got {self.student_micro_batch_size_per_gpu}"
+            )
+        if self.fake_score_micro_batch_size_per_gpu <= 0:
+            raise ValueError(
+                "fake_score_micro_batch_size_per_gpu must be greater than 0, "
+                f"got {self.fake_score_micro_batch_size_per_gpu}"
+            )
+        if not 0.0 <= self.ema_decay <= 1.0:
+            raise ValueError(f"ema_decay must be in [0, 1], got {self.ema_decay}")
+        if self.ema_start_step < 0:
+            raise ValueError(f"ema_start_step must be non-negative, got {self.ema_start_step}")
 
 
 @dataclass

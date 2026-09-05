@@ -217,9 +217,33 @@ class TestControlPlanePurity:
         assert control_plane.counters.optimizer_steps == {}
         assert control_plane.metrics == {}
 
-    def test_failed_driver_cannot_be_reset(self):
+    def test_state_dict_round_trip_restores_completed_counters(self):
+        control_plane, _, _ = make_control_plane(make_plan(fake_repeats=2))
+        control_plane.run(3)
+        state = control_plane.state_dict()
+
+        restored, _, _ = make_control_plane(make_plan(fake_repeats=2))
+        restored.load_state_dict(state)
+        assert restored.counters.global_step == 3
+        assert restored.counters.completed_cycles == 3
+        assert restored.counters.optimizer_steps == {"student": 3, "fake_score": 6}
+
+    def test_invalid_checkpoint_state_is_rejected(self):
+        control_plane, _, _ = make_control_plane(make_plan())
+        with pytest.raises(ValueError, match="exactly"):
+            control_plane.load_state_dict({"global_step": 1})
+        with pytest.raises(ValueError, match="non-negative integer"):
+            control_plane.load_state_dict({"global_step": -1, "optimizer_steps": {}, "completed_cycles": 0})
+        with pytest.raises(ValueError, match="unknown optimizer roles"):
+            control_plane.load_state_dict({"global_step": 0, "optimizer_steps": {"unknown": 1}, "completed_cycles": 1})
+        with pytest.raises(ValueError, match="must equal global_step"):
+            control_plane.load_state_dict({"global_step": 2, "optimizer_steps": {"student": 1}, "completed_cycles": 2})
+
+    def test_failed_driver_cannot_be_checkpointed_or_reset(self):
         control_plane, _, _ = make_control_plane(make_plan(), executor=FakePhaseExecutor(fail_on="student"))
         with pytest.raises(RuntimeError):
             control_plane.run_cycle()
+        with pytest.raises(RuntimeError, match="Cannot checkpoint"):
+            control_plane.state_dict()
         with pytest.raises(RuntimeError, match="cannot be reset"):
             control_plane.reset()

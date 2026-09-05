@@ -304,6 +304,46 @@ def causal_bidirectional_layout(causal_model_ref: str, bidirectional_model_ref: 
     )
 
 
+def apply_role_storage(layout: RoleLayoutSpec, role_storage: str) -> RoleLayoutSpec:
+    """Materialize either shared groups or one colocated model per logical role."""
+    require_choice(
+        "role_storage",
+        role_storage,
+        {"shared_base_adapters", "colocated_independent"},
+    )
+    if role_storage == "shared_base_adapters":
+        return layout
+
+    source_groups = {group.name: group for group in layout.groups}
+    groups = []
+    bindings = []
+    for binding in layout.bindings:
+        source_group = source_groups[binding.group]
+        group_name = f"{binding.role}_model"
+        groups.append(
+            RoleGroupSpec(
+                name=group_name,
+                model_ref=source_group.model_ref,
+                storage="independent_module",
+                placement="colocated",
+            )
+        )
+        bindings.append(
+            RoleBinding(
+                role=binding.role,
+                group=group_name,
+                adapter=binding.adapter,
+                trainable=binding.trainable,
+                optimizer_key=binding.optimizer_key,
+            )
+        )
+    return RoleLayoutSpec(
+        groups=tuple(groups),
+        bindings=tuple(bindings),
+        score_transport=layout.score_transport,
+    )
+
+
 def build_update_schedule(
     fake_repeats: int, fake_warmup_cycles: int = 0, with_discriminator: bool = False
 ) -> UpdateSchedule:
@@ -378,7 +418,10 @@ class DMDRecipe(DistillationRecipeBase):
         model_ref = get_config_value(config, "model_path", "") or ""
         return DistillationPlan(
             name="dmd",
-            role_layout=shared_base_layout(model_ref),
+            role_layout=apply_role_storage(
+                shared_base_layout(model_ref),
+                get_config_or_default(config, "role_storage", "shared_base_adapters"),
+            ),
             data_requirements={"mode": data_mode},
             objective={"name": "dmd", "profile": profile},
             rollout={"strategy": rollout},
@@ -412,7 +455,10 @@ class DMD2Recipe(DistillationRecipeBase):
         model_ref = get_config_value(config, "model_path", "") or ""
         return DistillationPlan(
             name="dmd2",
-            role_layout=shared_base_layout(model_ref, with_discriminator=adversarial),
+            role_layout=apply_role_storage(
+                shared_base_layout(model_ref, with_discriminator=adversarial),
+                get_config_or_default(config, "role_storage", "shared_base_adapters"),
+            ),
             data_requirements={"mode": data_mode},
             objective={"name": "dmd2", "profile": profile, "adversarial": adversarial},
             rollout={"strategy": rollout},
@@ -446,7 +492,10 @@ class CausVidRecipe(DistillationRecipeBase):
         bidirectional_ref = get_config_value(config, "bidirectional_model_path", model_ref) or model_ref
         return DistillationPlan(
             name="causvid",
-            role_layout=causal_bidirectional_layout(causal_ref, bidirectional_ref),
+            role_layout=apply_role_storage(
+                causal_bidirectional_layout(causal_ref, bidirectional_ref),
+                get_config_or_default(config, "role_storage", "shared_base_adapters"),
+            ),
             data_requirements={"mode": data_mode},
             objective={"name": "dmd", "profile": "distribution_only"},
             rollout={"strategy": rollout},
@@ -478,7 +527,10 @@ class SelfForcingRecipe(DistillationRecipeBase):
         bidirectional_ref = get_config_value(config, "bidirectional_model_path", model_ref) or model_ref
         return DistillationPlan(
             name="self_forcing",
-            role_layout=causal_bidirectional_layout(causal_ref, bidirectional_ref),
+            role_layout=apply_role_storage(
+                causal_bidirectional_layout(causal_ref, bidirectional_ref),
+                get_config_or_default(config, "role_storage", "shared_base_adapters"),
+            ),
             data_requirements={"mode": data_mode},
             objective={"name": "dmd", "profile": "distribution_only"},
             rollout={"strategy": rollout},
@@ -524,7 +576,7 @@ def build_plan_from_config(config, capabilities) -> DistillationPlan:
         "fake_warmup_cycles": get_config_value(distribution_matching, "fake_warmup_cycles", 0),
         "export_role": get_config_value(distribution_matching, "export_role", "student_ema"),
     }
-    for optional_key in ("profile", "fake_update_ratio", "rollout_strategy", "data_mode"):
+    for optional_key in ("profile", "fake_update_ratio", "rollout_strategy", "data_mode", "role_storage"):
         value = get_config_value(distribution_matching, optional_key)
         if value is not None:
             recipe_config[optional_key] = value

@@ -363,6 +363,8 @@ class UpdateSchedule:
             raise ValueError("warmup_phases require warmup_cycles > 0.")
         if any(phase.kind == "student" for phase in self.warmup_phases):
             raise ValueError("Warmup phases must not contain a student phase.")
+        if any(phase.batch_policy == "reuse_student" for phase in self.warmup_phases):
+            raise ValueError("Warmup phases cannot reuse a student batch before any student phase has run.")
 
     def next_cycle(self, counters: TrainerCounters) -> UpdateCycle:
         """Expand either the next warmup cycle or the normal static phases."""

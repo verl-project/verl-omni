@@ -503,6 +503,30 @@ distillation:
     rollout_strategy: null
     data_mode: null
     export_role: student_ema
+    role_storage: shared_base_adapters
+    student_micro_batch_size_per_gpu: 1
+    fake_score_micro_batch_size_per_gpu: 1
+    fake_score_optim:
+      _target_: verl.workers.config.FSDPOptimizerConfig
+      optimizer: AdamW
+      optimizer_impl: torch.optim
+      lr: 2.0e-05
+      lr_warmup_steps_ratio: 0.0
+      total_training_steps: -1
+      weight_decay: 0.01
+      lr_warmup_steps: -1
+      betas:
+      - 0.9
+      - 0.999
+      clip_grad: 1.0
+      min_lr_ratio: 0.0
+      num_cycles: 0.5
+      lr_scheduler_type: constant
+      zero_indexed_step: true
+      warmup_style: null
+      override_optimizer_config: null
+    ema_decay: 0.999
+    ema_start_step: 0
 algorithm:
   _target_: verl_omni.trainer.config.DiffusionAlgoConfig
   trainer_type: policy_gradient

@@ -161,6 +161,17 @@ class TaskRunner:
         from verl.single_controller.ray import RayWorkerGroup
         from verl.trainer.ppo.ray_trainer import Role
 
+        if config.algorithm.trainer_type == "distillation":
+            from verl_omni.workers.diffusion_distillation_worker import DiffusionDistillationWorker
+
+            if config.algorithm.sample_source != "offline":
+                raise ValueError("The distillation trainer requires algorithm.sample_source=offline.")
+            if not hasattr(Role, "Actor"):
+                raise ValueError("Distillation training requires verl Role.Actor support.")
+            self.role_worker_mapping[Role.Actor] = ray.remote(DiffusionDistillationWorker)
+            self.mapping[Role.Actor] = "global_pool"
+            return DiffusionDistillationWorker, RayWorkerGroup
+
         from verl_omni.workers.engine_workers import ActorRolloutRefWorker
 
         actor_rollout_cls = ActorRolloutRefWorker
