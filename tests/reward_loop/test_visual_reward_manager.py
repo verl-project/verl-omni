@@ -14,6 +14,7 @@
 
 import os
 
+import pytest
 import ray
 import torch
 from hydra import compose, initialize_config_dir
@@ -23,28 +24,32 @@ from verl.utils import hf_tokenizer
 
 from ..utils.gpu_test_topology import resolve_reward_loop_gpu_topology
 
+# Point these at your local model dirs. rollout_model only needs its tokenizer/.
+ROLLOUT_MODEL_PATH = os.path.expanduser("~/models/tiny-random/Qwen-Image")
+REWARD_MODEL_PATH = os.path.expanduser("~/models/tiny-random/qwen3-vl")
 
-def create_data_samples(tokenizer, data_source="ocr") -> DataProto:
-    prompts = ['a photo of displaying "OCR"'] * 3
-    responses = [torch.randint(256, (3, 512, 512), dtype=torch.uint8)] * 3
-    data_source = [data_source] * len(responses)
-    reward_info = [{"ground_truth": "OCR"}] * len(responses)
-    extra_info = [{}] * len(responses)
 
-    responses = torch.stack(responses)
-    prompt_length = 1024
+def _encode_prompts(prompts, tokenizer, prompt_length: int = 1024) -> torch.Tensor:
     pad_token_id = tokenizer.pad_token_id
     prompt_ids = []
     for prompt in prompts:
         prompt_tokens = tokenizer.encode(prompt)
         padded_prompt = [pad_token_id] * (prompt_length - len(prompt_tokens)) + prompt_tokens
         prompt_ids.append(torch.tensor(padded_prompt))
-    prompt_ids = torch.stack(prompt_ids)
+    return torch.stack(prompt_ids)
+
+
+def create_data_samples(tokenizer, data_source="ocr") -> DataProto:
+    prompts = ['a photo of displaying "OCR"'] * 3
+    responses = [torch.randint(0, 256, (3, 512, 512), dtype=torch.uint8) for _ in range(3)]
+    data_source = [data_source] * len(responses)
+    reward_info = [{"ground_truth": "OCR"} for _ in range(len(responses))]
+    extra_info = [{} for _ in range(len(responses))]
 
     data = DataProto.from_dict(
         tensors={
-            "input_ids": prompt_ids,
-            "responses": responses,
+            "input_ids": _encode_prompts(prompts, tokenizer),
+            "responses": torch.stack(responses),
         },
         non_tensors={
             "data_source": data_source,
@@ -65,15 +70,14 @@ def test_reward_model_genrm():
                 "VLLM_USE_V1": "1",
                 "FLASHINFER_DISABLE_VERSION_CHECK": os.environ.get("FLASHINFER_DISABLE_VERSION_CHECK", "1"),
             }
-        },
-        ignore_reinit_error=True,
+        }
     )
     try:
         with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config")):
             config = compose(config_name="diffusion_trainer")
 
-        rollout_model_name = os.path.expanduser("~/models/tiny-random/Qwen-Image")
-        reward_model_name = os.path.expanduser("~/models/tiny-random/qwen3-vl")
+        rollout_model_name = ROLLOUT_MODEL_PATH
+        reward_model_name = REWARD_MODEL_PATH
         reward_model_gpus, tp_size = resolve_reward_loop_gpu_topology()
 
         config.actor_rollout_ref.model.path = rollout_model_name
@@ -111,6 +115,96 @@ def test_reward_model_genrm():
         ray.shutdown()
 
 
+def _build_deterministic_reward_config(seed: int, num_replicas: int = 1):
+    with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config")):
+        config = compose(config_name="diffusion_trainer")
+
+    rollout_model_name = ROLLOUT_MODEL_PATH
+    reward_model_name = REWARD_MODEL_PATH
+    reward_model_gpus, tp_size = resolve_reward_loop_gpu_topology()
+    if num_replicas > reward_model_gpus:
+        pytest.skip(f"Need >= {num_replicas} GPUs for {num_replicas} replicas, got {reward_model_gpus}")
+    if num_replicas > 1:
+        tp_size = 1
+        reward_model_gpus = num_replicas
+
+    config.actor_rollout_ref.model.path = rollout_model_name
+    config.actor_rollout_ref.model.tokenizer_path = os.path.join(rollout_model_name, "tokenizer")
+    config.reward.custom_reward_function.path = "verl_omni/utils/reward_score/genrm_ocr.py"
+    config.reward.custom_reward_function.name = "compute_score_ocr"
+    config.reward.reward_model.enable = True
+    config.reward.reward_model.enable_resource_pool = True
+    config.reward.reward_model.n_gpus_per_node = reward_model_gpus
+    config.reward.reward_model.nnodes = 1
+    config.reward.reward_model.model_path = reward_model_name
+    config.reward.reward_model.rollout.name = os.getenv("ROLLOUT_NAME", "vllm")
+    config.reward.reward_model.rollout.gpu_memory_utilization = 0.9
+    config.reward.reward_model.rollout.tensor_model_parallel_size = tp_size
+    config.reward.reward_model.rollout.skip_tokenizer_init = False
+    config.reward.reward_model.rollout.prompt_length = 2048
+    config.reward.reward_model.rollout.response_length = 32
+    config.reward.reward_model.full_determinism = True
+    config.reward.reward_model.seed = seed
+    from omegaconf import open_dict
+
+    with open_dict(config.reward.reward_model.rollout):
+        config.reward.reward_model.rollout.full_determinism = True
+        config.reward.reward_model.rollout.seed = seed
+    return config
+
+
+_DETERMINISM_RAY_RUNTIME_ENV = {
+    "env_vars": {
+        "TOKENIZERS_PARALLELISM": "true",
+        "NCCL_DEBUG": "WARN",
+        "VLLM_LOGGING_LEVEL": "INFO",
+        "VLLM_USE_V1": "1",
+        "FLASHINFER_DISABLE_VERSION_CHECK": "1",
+    }
+}
+
+
+def _run_rm_with_seed(seed: int, data, num_replicas: int = 1) -> list:
+    """Build a fresh RewardLoopManager (new RM server process(es)) and score ``data``.
+
+    Ray is (re)started per call so each run owns independent RM server actor(s),
+    mirroring the cross-run reproducibility a real training session requires.
+    """
+    ray.init(runtime_env=_DETERMINISM_RAY_RUNTIME_ENV)
+    try:
+        manager = RewardLoopManager(_build_deterministic_reward_config(seed=seed, num_replicas=num_replicas))
+        return manager.compute_rm_score(data)
+    finally:
+        ray.shutdown()
+
+
+def _assert_determinism(num_replicas: int):
+    """Same seed across two independent RM runs → bitwise-aligned outputs."""
+    rollout_tokenizer = hf_tokenizer(os.path.join(ROLLOUT_MODEL_PATH, "tokenizer"))
+    torch.manual_seed(42)
+    data = create_data_samples(rollout_tokenizer)
+
+    run1 = _run_rm_with_seed(seed=42, data=data, num_replicas=num_replicas)
+    run2 = _run_rm_with_seed(seed=42, data=data, num_replicas=num_replicas)
+    for idx, (o1, o2) in enumerate(zip(run1, run2, strict=False)):
+        assert torch.equal(o1.batch["rm_scores"], o2.batch["rm_scores"]), (
+            f"[replicas={num_replicas}] same-seed rm_scores[{idx}] differ: "
+            f"{o1.batch['rm_scores']} vs {o2.batch['rm_scores']}"
+        )
+        assert o1.non_tensor_batch["genrm_response"] == o2.non_tensor_batch["genrm_response"], (
+            f"[replicas={num_replicas}] same-seed genrm_response[{idx}] differs: "
+            f"{o1.non_tensor_batch['genrm_response']} vs {o2.non_tensor_batch['genrm_response']}"
+        )
+
+
+def test_deterministic_reward_reproducibility_single_replica():
+    _assert_determinism(num_replicas=1)
+
+
+def test_deterministic_reward_reproducibility_multi_replica():
+    _assert_determinism(num_replicas=2)
+
+
 def test_rule_reward():
     ray.init(
         runtime_env={
@@ -121,14 +215,13 @@ def test_rule_reward():
                 "VLLM_USE_V1": "1",
                 "FLASHINFER_DISABLE_VERSION_CHECK": os.environ.get("FLASHINFER_DISABLE_VERSION_CHECK", "1"),
             }
-        },
-        ignore_reinit_error=True,
+        }
     )
     try:
         with initialize_config_dir(config_dir=os.path.abspath("verl_omni/trainer/config")):
             config = compose(config_name="diffusion_trainer")
 
-        rollout_model_name = os.path.expanduser("~/models/tiny-random/Qwen-Image")
+        rollout_model_name = ROLLOUT_MODEL_PATH
 
         config.actor_rollout_ref.model.path = rollout_model_name
         config.actor_rollout_ref.model.tokenizer_path = os.path.join(rollout_model_name, "tokenizer")

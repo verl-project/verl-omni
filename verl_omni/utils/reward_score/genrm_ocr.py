@@ -101,6 +101,7 @@ async def compute_score_ocr(
     reward_router_address: str,
     reward_model_tokenizer: PreTrainedTokenizer = None,
     model_name: Optional[str] = None,
+    sampling_params: dict = None,
 ):
     """Compute an image OCR score via a generative reward model (GRM).
 
@@ -120,6 +121,11 @@ async def compute_score_ocr(
             for interface consistency.
         model_name: Name or path of the GRM. Defaults to
             ``DEFAULT_GRM_MODEL_PATH``.
+        sampling_params: Override the defaults from :func:`_sampling_params`
+            (which may read ``GENRM_OCR_*`` env vars). When a ``seed`` key is
+            absent the merged params drop any env-inherited seed, keeping
+            nondeterministic sampling unless the caller opts in via
+            ``reward_model.full_determinism``.
 
     Returns:
         dict: ``{"score": float, "genrm_response": str}``.
@@ -182,11 +188,15 @@ async def compute_score_ocr(
                 ],
             },
         ]
-        # TODO: make sampling params configurable
+        params = _sampling_params()
+        if sampling_params is not None:
+            params.update(sampling_params)
+            if "seed" not in sampling_params:
+                params.pop("seed", None)
         chat_complete_request = {
             "messages": messages,
             "model": model_name,
-            **_sampling_params(),
+            **params,
         }
         result = await _chat_complete(
             router_address=reward_router_address,

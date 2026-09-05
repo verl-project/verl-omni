@@ -896,6 +896,13 @@ class BaseRayDiffusionTrainer(ABC):
 
     def _init_online_rollout_stack(self, actor_rollout_resource_pool):
         """Initialize rollout, reward, and checkpoint engines (online sampling only)."""
+        if self.use_rm:
+            rm_cfg = self.config.reward.reward_model
+            if rm_cfg.get("full_determinism", False):
+                with open_dict(rm_cfg.rollout):
+                    rm_cfg.rollout.full_determinism = True
+                    rm_cfg.rollout.seed = rm_cfg.get("seed", 42)
+
         # create reward loop manager
         from verl_omni.reward_loop import OmniRewardLoopManager
 

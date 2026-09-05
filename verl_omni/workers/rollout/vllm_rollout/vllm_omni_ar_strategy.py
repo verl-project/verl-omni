@@ -201,6 +201,8 @@ class ARStrategy(OmniStrategyBase):
         else:
             sampling_params["logprobs"] = None
         sampling_params.setdefault("repetition_penalty", getattr(self.server.config, "repetition_penalty", 1.0))
+        if getattr(self.server.config, "full_determinism", False):
+            sampling_params.setdefault("seed", getattr(self.server.config, "seed", 42))
         params = SamplingParams(max_tokens=max_tokens, **sampling_params)
 
         prompt = {"prompt_token_ids": prompt_ids}

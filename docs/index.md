@@ -62,6 +62,7 @@ algo/diffusionnft.md
 algo/grpo_guard.md
 algo/mixgrpo.md
 algo/diffusion_opd.md
+algo/deterministic_post_training.md
 algo/performance.md
 ```
 
