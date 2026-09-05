@@ -1,11 +1,13 @@
 # Diffusion V1 training
 
-Last updated: 08/25/2026
+Last updated: 08/26/2026
 
 This guide runs the diffusion V1 trainer in synchronous or separate-asynchronous
-mode using the provided Stable Diffusion 3.5 Medium FlowGRPO OCR recipes. The V1
+mode using the provided Stable Diffusion 3.5 Medium FlowGRPO OCR recipes.
+Qwen-Image FlowGRPO now has a matching V1 sync LoRA recipe as well. The V1
 trainer uses TransferQueue and ReplayBuffer to move rollout trajectories into
-the training loop.
+the training loop. Synchronous mode waits for a complete rollout batch before
+each training step.
 
 The examples support a single-node NVIDIA GPU setup. Sync mode uses two GPUs for
 the colocated actor and rollout plus one reward GPU. Separate-async mode also
@@ -88,6 +90,19 @@ Checkpoints are written by default to:
 ```text
 checkpoints/flow_grpo/sd35_medium_ocr_lora_v1
 ```
+
+Qwen-Image FlowGRPO uses the same V1 sync entrypoint and flags. Launch the
+4-GPU LoRA OCR recipe with:
+
+```bash
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh
+```
+
+Model, LoRA, reward, pipeline, and SDE knobs match the v0 script
+`run_qwen_image_ocr_lora.sh`. Prepare the Qwen-Image OCR parquet files as in
+the {doc}`FlowGRPO quickstart <flowgrpo_quickstart>` (use `qwenimage_ocr.py`,
+not the SD3 converter above). Checkpoints default to
+`checkpoints/flow_grpo/qwen_image_ocr_lora_v1`.
 
 ## Run V1 separate-async mode
 

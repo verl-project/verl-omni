@@ -100,6 +100,10 @@ class DiffusionStrategy(OmniStrategyBase):
             return _NPU_WORKER_EXTENSION
         return _GPU_WORKER_EXTENSION
 
+    def preprocess_engine_kwargs(self, engine_kwargs: dict[str, Any]) -> None:
+        super().preprocess_engine_kwargs(engine_kwargs)
+        engine_kwargs.pop("diffusion_batch_size", None)
+
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
         import_external_libs(self.server.config.external_lib)
 
@@ -107,7 +111,8 @@ class DiffusionStrategy(OmniStrategyBase):
             architecture=self.server.model_config.architecture,
             algorithm=self.server.model_config.algorithm,
         )
-        # TODO (mike): read custom_pipeline from engine_args.
+        pipeline_cls = None
+        step_execution = False
         if pipeline_path is not None:
             engine_args["enable_dummy_pipeline"] = True
             engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
@@ -117,17 +122,26 @@ class DiffusionStrategy(OmniStrategyBase):
                 algorithm=self.server.model_config.algorithm,
             )
             step_execution = getattr(self.server.config, "step_execution", False)
-            if (
-                pipeline_cls is not None
-                and not getattr(pipeline_cls, "supports_request_batch", False)
-                and not step_execution
-                and int(engine_args.get("max_num_seqs") or 1) > 1
-            ):
-                logger.info(
-                    "Pipeline %s does not support request-level batching; clamping max_num_seqs to 1.",
-                    pipeline_cls.__name__,
-                )
-                engine_args["max_num_seqs"] = 1
+        effective_max_num_seqs = int(
+            engine_args.get("max_num_seqs") or getattr(self.server.config, "max_num_seqs", 1) or 1
+        )
+        if (
+            pipeline_cls is not None
+            and not getattr(pipeline_cls, "supports_request_batch", False)
+            and not step_execution
+            and effective_max_num_seqs > 1
+        ):
+            logger.info(
+                "Pipeline %s does not support request-level batching; clamping max_num_seqs to 1.",
+                pipeline_cls.__name__,
+            )
+            engine_args["max_num_seqs"] = 1
+            effective_max_num_seqs = 1
+
+        # Sync diffusion_batch_size with max_num_seqs to prevent vllm-omni
+        # launch_diffusion_stage_replica from defaulting batch_size to 1 and
+        # overriding od_config.max_num_seqs.
+        engine_args["diffusion_batch_size"] = effective_max_num_seqs
 
         engine_args["enable_prompt_embed_cache"] = self.server.config.enable_prompt_embed_cache
         engine_args["prompt_embed_cache_size"] = self.server.config.prompt_embed_cache_size

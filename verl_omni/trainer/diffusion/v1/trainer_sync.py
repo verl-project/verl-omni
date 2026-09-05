@@ -63,5 +63,8 @@ class PolicyGradientDiffusionTrainerV1Sync(PolicyGradientDiffusionTrainerV1):
             self.checkpoint_manager.update_weights(self.global_steps)
 
     def on_sample_end(self):
+        # Wait until TQ generate tasks finish so CuMem sleep runs on an idle
+        # GPU, matching v0's blocking generate_sequences.
+        self._wait_for_generate_idle()
         # sleep all replicas to discard weights and (no-op) KV cache
         self.checkpoint_manager.sleep_replicas()

@@ -16,7 +16,7 @@ import os
 import time
 
 import torch
-from verl.utils.device import get_visible_devices_keyword
+from verl.utils.device import get_torch_device, get_visible_devices_keyword
 from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID, VLLM_LORA_NAME, VLLM_LORA_PATH, set_death_signal
 from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
 
@@ -232,6 +232,32 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 else:
                     raise RuntimeError("Diffusion pipeline worker has no load_weights-capable pipeline")
                 receiver.receive_weights(on_bucket_received=lambda weights, *args, **kwargs: load_fn(weights))
+
+    def _is_diffusion_pipeline_worker(self) -> bool:
+        return getattr(getattr(self, "model_runner", None), "pipeline", None) is not None
+
+    def _idle_gpu_before_cumem_sleep(self) -> None:
+        """Idle the GPU before CuMem offload on diffusion workers.
+
+        v1 TQ generate is fire-and-forget, so sleep can race leftover CUDA
+        work; v0 generate is blocking. AR workers have no pipeline and are
+        unchanged. Still calls CuMem afterward.
+        """
+        if not self._is_diffusion_pipeline_worker():
+            return
+        device = get_torch_device()
+        ipc_collect = getattr(device, "ipc_collect", None)
+        if ipc_collect is not None:
+            try:
+                ipc_collect()
+            except Exception:
+                pass
+        if device.is_available():
+            device.synchronize()
+
+    def sleep(self, level: int = 1):
+        self._idle_gpu_before_cumem_sleep()
+        return super().sleep(level)
 
     def _get_zmq_handle(self) -> str:
         """Get the ZMQ handle matching the co-located trainer actor on this rank.

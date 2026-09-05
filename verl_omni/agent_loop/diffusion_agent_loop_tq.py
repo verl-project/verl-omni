@@ -131,7 +131,9 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         """Spawn ``rollout.n`` sessions per prompt and write trajectories to TQ."""
         uid = prompt["uid"]
         partition_id = "val" if trajectory["validate"] else "train"
-        await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
+        status_task = asyncio.create_task(
+            tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
+        )
         tasks = []
         try:
             config = self.rollout_config
@@ -151,6 +153,10 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 tasks.append(task)
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                await status_task
+            except Exception as e:
+                logger.warning(f"Error updating running status for uid={uid}: {e}")
             errors = [result for result in results if isinstance(result, BaseException)]
             for error in errors:
                 logger.error(
@@ -163,6 +169,10 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             logger.exception(f"Error in _run_prompt for uid={uid}: {e}")
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                await status_task
+            except Exception:
+                pass
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
 
     async def _run_agent_loop(
@@ -264,6 +274,20 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             tags=tags,
             partition_id=partition_id,
         )
+
+    async def wait_for_background_tasks(self) -> None:
+        """Block until fire-and-forget generate tasks finish (v0 generate is blocking)."""
+        pending = list(self.background_tasks)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
+def wait_for_diffusion_tq_background_tasks(manager) -> None:
+    """Wait until every TQ worker has finished its in-flight generate tasks."""
+    workers = getattr(manager, "agent_loop_workers", None)
+    if not workers:
+        return
+    ray.get([worker.wait_for_background_tasks.remote() for worker in workers])
 
 
 @auto_await

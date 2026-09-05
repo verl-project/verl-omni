@@ -1173,8 +1173,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         elif not offloaded:
             self._offload_actor_and_empty_cache(timings)
 
-        # 5. resume kv_cache
-        if self.config.rollout.free_cache_engine:
+        # 5. resume kv_cache for AR. Diffusion has no prefix/KV cache.
+        is_diffusion = self.config.model.get("model_type", "language_model") in (
+            "diffusion_model",
+            "diffusion_dpo_model",
+            "diffusion_nft_model",
+        )
+        if not is_diffusion and self.config.rollout.free_cache_engine:
             await _timed_await("resume_kv_cache", timings, self.rollout.resume(tags=["kv_cache"]))
         log_gpu_memory_usage("After resume kv_cache", logger=logger)
 

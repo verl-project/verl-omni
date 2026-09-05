@@ -286,6 +286,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         combined_keys: list = []
         combined_tags: list = []
         combined_partition_id = "train"
+        self._step_data_list = []
         for trigger_idx in range(self.parameter_sync_step):
             self.local_trigger_step = trigger_idx
             iter_metrics: dict = {}
@@ -323,9 +324,18 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # [OPTIONAL] colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None and self.use_rm:
             with marked_timer("reward", timing_raw, color="yellow"):
-                self.checkpoint_manager.sleep_replicas()
+                # v0 sleeps once after generate, then rewards while rollout
+                # stays off GPU. v1 sync already slept in on_sample_end, so a
+                # second CuMem sleep (and the wake that follows) is redundant.
+                already_slept = self.trainer_mode == "sync"
+                if not already_slept:
+                    self.checkpoint_manager.sleep_replicas()
+                # compute_rm_score returns an rm_scores-only DataProto; union so
+                # the rollout fields (prompts/responses/all_latents/all_timesteps)
+                # survive for old_log_prob and the actor update.
                 data = data.union(self._compute_reward_colocate(data))
-                self.checkpoint_manager.update_weights(self.global_steps)
+                if not already_slept:
+                    self.checkpoint_manager.update_weights(self.global_steps)
 
         data = self._balance_batch(data, metrics=metrics)
 
@@ -386,6 +396,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             data_for_tq,
             fields=["old_log_probs", "advantages", "returns", "sample_level_scores", "sample_level_rewards"],
         )
+        # Store computed DataProto reference so _compute_metrics does not have to
+        # re-fetch the entire batch (images, latents, etc.) from TransferQueue IPC.
+        if hasattr(self, "_step_data_list"):
+            self._step_data_list.append(data)
+
         return batch_meta
 
     def on_init_end(self):
@@ -429,6 +444,15 @@ class PolicyGradientDiffusionTrainerV1(ABC):
     def on_sample_end(self):
         """Called after sampling a batch from the replay buffer."""
         return
+
+    def _wait_for_generate_idle(self) -> None:
+        """Make v1 generate→sleep timing match v0 (blocking generate)."""
+        manager = getattr(self, "agent_loop_manager", None)
+        if manager is None:
+            return
+        from verl_omni.agent_loop.diffusion_agent_loop_tq import wait_for_diffusion_tq_background_tasks
+
+        wait_for_diffusion_tq_background_tasks(manager)
 
     def release_rollout_cache_for_weight_sync(self) -> None:
         """No-op for pure diffusion models (no KV cache)."""
@@ -1072,7 +1096,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 continue
 
             if self.use_rm and self.reward_loop_manager.reward_loop_worker_handles is None:
+                self._wait_for_generate_idle()
                 self.checkpoint_manager.sleep_replicas()
+                # Same union as the training path: keep prompts/responses for logging.
                 data = data.union(self._compute_reward_colocate(data))
                 self.checkpoint_manager.update_weights(self.global_steps)
 
@@ -1288,7 +1314,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         return metric_dict
 
     def _compute_metrics(self, batch_meta: KVBatchMeta, metrics, timing_raw, global_steps, epoch):
-        data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
+        step_data = getattr(self, "_step_data_list", None)
+        if step_data:
+            data = step_data[0] if len(step_data) == 1 else DataProto.concat(step_data)
+            self._step_data_list = []
+        else:
+            data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
         metrics.update({"training/global_step": global_steps, "training/epoch": epoch})
         metrics.update(compute_data_metrics_diffusion(batch=data))
         n_gpus = self.resource_pool_manager.get_n_gpus()

@@ -91,12 +91,14 @@ def _stack_field(value: Any, padding: float = 0.0) -> torch.Tensor | None:
 def diffusion_tq_batch_to_dataproto(
     batch_meta: KVBatchMeta,
     pad_token_id: int = 0,
+    select_fields: list[str] | None = None,
 ) -> DataProto:
     """Read selected TQ rows and assemble a diffusion ``DataProto``.
 
     Args:
         batch_meta: ``KVBatchMeta`` returned by ``ReplayBuffer.sample``.
         pad_token_id: Padding token id for variable-length prompt token tensors.
+        select_fields: Optional subset of fields to fetch from TransferQueue.
 
     Returns:
         ``DataProto`` whose ``batch`` carries diffusion tensors (prompts,
@@ -106,9 +108,14 @@ def diffusion_tq_batch_to_dataproto(
     keys = list(batch_meta.keys)
     partition_id = batch_meta.partition_id
 
+    get_kwargs = {}
+    if select_fields is not None:
+        get_kwargs["select_fields"] = select_fields
+
     data = tq.kv_batch_get(
         keys=keys,
         partition_id=partition_id,
+        **get_kwargs,
     )
 
     batch_dict: dict[str, torch.Tensor] = {}

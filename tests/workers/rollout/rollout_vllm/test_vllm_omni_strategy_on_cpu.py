@@ -249,11 +249,43 @@ def test_diffusion_strategy_preserves_engine_argument_preparation(monkeypatch):
     assert imported == [["extension"]]
     assert engine_args == {
         "max_num_seqs": 1,
+        "diffusion_batch_size": 1,
         "enable_dummy_pipeline": True,
         "custom_pipeline_args": {"pipeline_class": "package.Adapter"},
         "enable_prompt_embed_cache": True,
         "prompt_embed_cache_size": 16,
     }
+
+
+def test_diffusion_strategy_syncs_diffusion_batch_size_when_batching_supported(monkeypatch):
+    monkeypatch.setattr(diffusion_strategy_module, "import_external_libs", lambda *args: None)
+    monkeypatch.setattr(
+        diffusion_strategy_module.VllmOmniPipelineBase,
+        "get_pipeline_path",
+        staticmethod(lambda **kwargs: "package.Adapter"),
+    )
+    pipeline_cls = SimpleNamespace(__name__="Adapter", supports_request_batch=True)
+    monkeypatch.setattr(
+        diffusion_strategy_module.VllmOmniPipelineBase,
+        "get_class",
+        staticmethod(lambda **kwargs: pipeline_cls),
+    )
+    server = SimpleNamespace(
+        config=SimpleNamespace(
+            external_lib=[],
+            step_execution=False,
+            enable_prompt_embed_cache=False,
+            prompt_embed_cache_size=32,
+        ),
+        model_config=SimpleNamespace(architecture="Architecture", algorithm="Algorithm"),
+    )
+    strategy = DiffusionStrategy(server)
+    engine_args = {"max_num_seqs": 64}
+
+    strategy.prepare_engine_args(engine_args, Namespace())
+
+    assert engine_args["max_num_seqs"] == 64
+    assert engine_args["diffusion_batch_size"] == 64
 
 
 def test_diffusion_strategy_preserves_multistage_prompt_shape():
