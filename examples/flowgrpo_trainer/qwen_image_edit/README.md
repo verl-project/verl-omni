@@ -1,6 +1,6 @@
 # Qwen-Image-Edit-2511 FlowGRPO training
 
-Last updated: 07/14/2026
+Last updated: 08/26/2026
 
 This guide shows how to prepare an image-edit dataset and train
 [Qwen-Image-Edit-2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511)
@@ -95,6 +95,30 @@ NUM_GPUS_ACTOR_ROLLOUT_REWARD=8 \
 bash examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora.sh \
     trainer.logger=console
 ```
+
+### V1 sync trainer
+
+A v1 counterpart launches `main_diffusion_v1` in synchronous TransferQueue
+mode. It keeps the same parquet layout (`images` condition bytes), Hydra data
+paths, and model/reward knobs as the v0 LoRA recipe:
+
+```bash
+WORKSPACE=$PWD \
+NUM_GPUS_ACTOR_ROLLOUT_REWARD=8 \
+bash examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora_v1.sh \
+    trainer.logger=console
+```
+
+The v1 launcher differs only in the trainer entrypoint and:
+
+```text
+python3 -m verl_omni.trainer.main_diffusion_v1
+trainer.use_v1=true
+trainer.v1.trainer_mode=sync
+```
+
+See [Diffusion V1 training](../../../docs/start/diffusion_v1.md) for
+TransferQueue prerequisites.
 
 By default, the launcher reads:
 
