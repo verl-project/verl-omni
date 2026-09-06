@@ -564,10 +564,10 @@ class MiniMaxH3RolloutWeightSyncMixin:
             finally:
                 self.tokenizer = tokenizer
 
-        from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import _broadcast_tensor, _dit_rank_world
-        from vllm_omni.diffusion.models.minimax_h3.presentation import (
-            minimax_h3_multi_image_presentation_ids,
-            minimax_h3_multi_image_presentation_token_tags,
+        from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import (
+            _broadcast_tensor,
+            _dit_rank_world,
+            minimax_h3_multi_image_presentation,
         )
 
         _, rank, _ = _dit_rank_world()
@@ -587,10 +587,7 @@ class MiniMaxH3RolloutWeightSyncMixin:
                 image_grid = vision["image_grid_thw"]
                 merge = int(self.processor.image_processor.merge_size) ** 2
                 image_token_counts = [int(grid.prod().item()) // merge for grid in image_grid]
-                prefix_ids = minimax_h3_multi_image_presentation_ids(
-                    self.tokenizer, prompt="", image_token_counts=image_token_counts
-                )
-                prefix_tags = minimax_h3_multi_image_presentation_token_tags(
+                prefix_ids, prefix_tags = minimax_h3_multi_image_presentation(
                     self.tokenizer, prompt="", image_token_counts=image_token_counts
                 )
                 ids = torch.cat([prefix_ids, prompt_ids])

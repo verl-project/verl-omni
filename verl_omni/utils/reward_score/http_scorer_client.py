@@ -124,11 +124,7 @@ async def compute_score(
                 else:
                     response_data = pickle.loads(response_bytes)
                     break
-        except (
-            aiohttp.ClientConnectionError,
-            aiohttp.ClientPayloadError,
-            asyncio.TimeoutError,
-        ) as exc:
+        except (TimeoutError, aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as exc:
             last_error = exc
         if attempt < max_retries:
             await asyncio.sleep(retry_backoff * (2**attempt))

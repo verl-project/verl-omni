@@ -1,11 +1,12 @@
-# MiniMax-H3 text-to-audio-video DiffusionNFT training
+# MiniMax H3 T2VA, FL2VA, and Ref2VA DiffusionNFT
 
-Last updated: 09/01/2026
+Last updated: 09/04/2026
 
-This recipe trains a rank-64 MiniMax H3 LoRA with online DiffusionNFT for
-text-to-audio-video (T2VA). A Diffusers transformer is trained with FSDP2 while
-vLLM-Omni generates joint video and audio rollouts. CLAP and ImageBind provide
-the default multi-reward (audio-video alignment).
+These recipes train rank-64 MiniMax H3 LoRA adapters with online DiffusionNFT
+for text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
+reference-to-audio-video (Ref2VA) generation. A Diffusers transformer is
+trained with FSDP2 while vLLM-Omni generates joint video and audio rollouts.
+CLAP and ImageBind provide the default multi-reward (audio-video alignment).
 
 A ready-made FL2VA first-frame dataset built with the data pipeline below is
 published at https://huggingface.co/datasets/zyfenghit/dancegrpo-t2av

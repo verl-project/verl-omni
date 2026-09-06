@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""vLLM-Omni rollout adapter for MiniMax H3 T2VA and FL2VA FlowGRPO."""
+"""vLLM-Omni rollout adapter for MiniMax H3 T2VA, FL2VA, and Ref2VA FlowGRPO."""
 
 from __future__ import annotations
 
@@ -24,13 +24,19 @@ import torch
 import torch.nn.functional as F
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
-from vllm_omni.diffusion.models.minimax_h3.condition_noise import minimax_h3_imgvid_cond_noise_aug_rows
+from vllm_omni.diffusion.models.minimax_h3.condition_noise import (
+    minimax_h3_audio_cond_noise_aug_rows,
+    minimax_h3_imgvid_cond_noise_aug_rows,
+)
 from vllm_omni.diffusion.models.minimax_h3.denoise_loop import (
     MINIMAX_H3_AUDIO_REF_COND_TIMESTEP,
     MINIMAX_H3_IMGVID_COND_TIMESTEP,
     MiniMaxH3DenoiseBranch,
 )
-from vllm_omni.diffusion.models.minimax_h3.packed_sequence import minimax_h3_packed_sequence
+from vllm_omni.diffusion.models.minimax_h3.packed_sequence import (
+    minimax_h3_packed_sequence,
+    minimax_h3_packed_sequence_ref2va_blocks,
+)
 from vllm_omni.diffusion.models.minimax_h3.packed_tokens import (
     minimax_h3_unpack_audio_tokens,
     minimax_h3_unpatchify_video_tokens,
@@ -39,6 +45,11 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from verl_omni.pipelines.diffusion_rollout_output import with_rollout_data
+from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
+    ref2va_reference_image_short_edge,
+    serialize_ref_blocks,
+    validate_ref2va_reference_image_short_edge,
+)
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
@@ -65,27 +76,27 @@ def _pad_first_dim(value: torch.Tensor, target: int) -> torch.Tensor:
 
 @VllmOmniPipelineBase.register("MiniMaxH3Pipeline", algorithm="flow_grpo")
 class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
-    """Adapt ``MiniMaxH3Pipeline`` for single-request T2VA / FL2VA FlowGRPO rollout.
+    """Adapt ``MiniMaxH3Pipeline`` for single-request T2VA, FL2VA, and Ref2VA FlowGRPO.
 
     Overrides:
         - ``__init__`` adds request-scoped FlowGRPO and CPS state.
-        - ``diffuse`` replaces the standard denoise loop with CPS sampling and records joint video/audio transitions,
-          log probabilities, and Actor replay metadata.
-        - ``forward`` restores the prompt text, configures FlowGRPO, and attaches the trajectory to ``DiffusionOutput``.
+        - ``diffuse`` replaces the standard denoise loop with CPS sampling and records target-only video/audio
+          transitions, log probabilities, and Actor replay metadata.
+        - ``forward`` preserves Agent Loop token IDs, configures FlowGRPO, and attaches the trajectory to
+          ``DiffusionOutput``.
 
-    Prompt encoding, including text-encoder TP, is handled by the upstream H3 pipeline.
+    The weight-sync mixin extends upstream prompt encoding while retaining its text-encoder TP collectives.
     """
 
     supports_request_batch = False
 
-    #: Declares the joint video/audio rollout streams so the diffusion strategy
-    #: does not hard-code the audio tuple position or its 32 kHz sample rate.
     diffusion_io_spec = DiffusionIOSpec(
         primary=MediaSpec("video"),
         auxiliary=(MediaSpec("audio", sample_rate=32000),),
     )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
+        self._reference_image_short_edge = validate_ref2va_reference_image_short_edge()
         super().__init__(od_config=od_config, prefix=prefix)
         self.install_h3_lora_layout()
         self._flow_grpo_noise_level = 0.8
@@ -111,25 +122,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
         global_step = int(extra_args.get("global_steps", 1))
         self._flow_grpo_seed = int(extra_args.get("sde_window_seed", 42)) + max(global_step - 1, 0)
         self._h3_max_text_len = int(request.sampling_params.max_sequence_length or 1024)
-
-    def _inject_prompt_text(self, request: OmniDiffusionRequest) -> None:
-        # TODO: Let upstream H3 consume prompt token IDs directly. Its text
-        # encoder uses tensor parallelism, and overriding encode_prompt would
-        # duplicate substantial encoding and distributed-communication logic.
-        # For now, decode the truncated IDs back to text and reuse upstream.
-        if not isinstance(request.prompt, dict):
-            raise TypeError("MiniMax H3 rollout expects a dict prompt containing `prompt_token_ids`.")
-        token_ids = request.prompt.get("prompt_token_ids")
-        if isinstance(token_ids, torch.Tensor):
-            token_ids = token_ids.detach().cpu().reshape(-1).tolist()
-        elif token_ids and isinstance(token_ids[0], list):
-            token_ids = token_ids[0]
-        if not token_ids:
-            raise ValueError("MiniMax H3 rollout requires non-empty `prompt_token_ids`.")
-        prompt = self.tokenizer.decode(token_ids, skip_special_tokens=False)
-        if not prompt:
-            raise ValueError("MiniMax H3 tokenizer decoded an empty prompt.")
-        request.prompt = {**request.prompt, "prompt": prompt}
+        self._flow_grpo_trajectory = {}
 
     def _layout_outputs(
         self,
@@ -169,6 +162,58 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             "h3_video_update_mask": branch.update_mask_dev.unsqueeze(0),
         }
 
+    def _ref2va_replay_outputs(
+        self,
+        *,
+        text_embeddings: torch.Tensor,
+        text_tags: torch.Tensor,
+        target_video_rows: torch.Tensor,
+        target_audio_rows: torch.Tensor,
+        visual_anchor: torch.Tensor | None,
+        audio_anchor: torch.Tensor | None,
+        ref_blocks: list[dict[str, Any]],
+        latent_t: int,
+        latent_h: int,
+        latent_w: int,
+        audio_t: int,
+    ) -> dict[str, torch.Tensor]:
+        text_len = int(text_embeddings.shape[0])
+        if text_len > self._h3_max_text_len:
+            raise ValueError(
+                f"MiniMax H3 encoded text length {text_len} exceeds max_sequence_length={self._h3_max_text_len}."
+            )
+        prompt = F.pad(text_embeddings, (0, 0, 0, self._h3_max_text_len - text_len)).unsqueeze(0)
+        prompt_mask = F.pad(
+            torch.ones(text_len, dtype=torch.long, device=text_embeddings.device),
+            (0, self._h3_max_text_len - text_len),
+        ).unsqueeze(0)
+        prompt_tags = F.pad(text_tags, (0, self._h3_max_text_len - text_len)).unsqueeze(0)
+        ref_block_meta, ref_block_count = serialize_ref_blocks(ref_blocks)
+        condition_video = (
+            visual_anchor
+            if visual_anchor is not None
+            else target_video_rows.new_zeros((0, target_video_rows.shape[-1]))
+        )
+        condition_audio = (
+            audio_anchor if audio_anchor is not None else target_audio_rows.new_zeros((0, target_audio_rows.shape[-1]))
+        )
+        return {
+            "prompt_embeds": prompt,
+            "prompt_embeds_mask": prompt_mask,
+            "prompt_token_tags": prompt_tags,
+            "latent_meta": torch.tensor(
+                [[target_video_rows.shape[0], target_audio_rows.shape[0], latent_t, latent_h, latent_w, audio_t]],
+                dtype=torch.long,
+                device=text_embeddings.device,
+            ),
+            "condition_video_rows": condition_video.unsqueeze(0),
+            "condition_audio_rows": condition_audio.unsqueeze(0),
+            "condition_video_row_count": torch.tensor([[condition_video.shape[0]]], dtype=torch.long),
+            "condition_audio_row_count": torch.tensor([[condition_audio.shape[0]]], dtype=torch.long),
+            "ref_block_meta": ref_block_meta.to(text_embeddings.device).unsqueeze(0),
+            "ref_block_count": torch.tensor([[ref_block_count]], dtype=torch.long),
+        }
+
     def diffuse(
         self,
         *,
@@ -194,7 +239,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
         keyframe_frame_indices: list[int] | None = None,
         base_schedule: Sequence[float] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        target_video_rows, audio_rows = self._initial_noise(
+        target_video_rows, target_audio_rows = self._initial_noise(
             seed=seed,
             latent_t=latent_t,
             latent_h=latent_h,
@@ -202,29 +247,35 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             audio_t=audio_t,
         )
         target_video_rows = target_video_rows.to(self.device)
-        audio_rows = audio_rows.to(self.device)
+        target_audio_rows = target_audio_rows.to(self.device)
 
         if task == "ref2va":
-            # TODO: Build the Ref2VA packed blocks and preserve their anchors during Actor replay.
-            raise NotImplementedError("MiniMax H3 FlowGRPO does not support Ref2VA yet.")
-        if audio_condition is not None:
-            # TODO: Add Ref2VA audio anchors to CPS transitions and Actor replay.
-            raise NotImplementedError("MiniMax H3 FlowGRPO does not support audio conditions yet.")
-        if task not in {"t2va", "fl2va"}:
-            raise NotImplementedError(f"MiniMax H3 FlowGRPO supports t2va and fl2va, got {task!r}.")
-
-        keyframe_indices = list(keyframe_frame_indices or [])
-        packed = minimax_h3_packed_sequence(
-            text_len=int(text_embeddings.shape[0]),
-            latent_t=latent_t,
-            latent_h=latent_h,
-            latent_w=latent_w,
-            audio_t=audio_t,
-            include_keyframe_cond=task == "fl2va",
-            keyframe_frame_indices=keyframe_indices if task == "fl2va" else None,
-            frame_count=num_frames if task == "fl2va" else None,
-        )
-        del base_schedule, ref_audio_t, ref_blocks, audio_condition_lengths
+            if not ref_blocks:
+                raise ValueError("MiniMax H3 Ref2VA requires reference block metadata.")
+            packed = minimax_h3_packed_sequence_ref2va_blocks(
+                text_len=int(text_embeddings.shape[0]),
+                latent_t=latent_t,
+                latent_h=latent_h,
+                latent_w=latent_w,
+                audio_t=audio_t,
+                ref_blocks=ref_blocks,
+            )
+        elif task in {"t2va", "fl2va"}:
+            keyframe_indices = list(keyframe_frame_indices or [])
+            packed = minimax_h3_packed_sequence(
+                text_len=int(text_embeddings.shape[0]),
+                latent_t=latent_t,
+                latent_h=latent_h,
+                latent_w=latent_w,
+                audio_t=audio_t,
+                include_keyframe_cond=task == "fl2va",
+                keyframe_frame_indices=keyframe_indices if task == "fl2va" else None,
+                frame_count=num_frames if task == "fl2va" else None,
+            )
+        else:
+            raise NotImplementedError(f"MiniMax H3 FlowGRPO supports t2va, fl2va, and ref2va, got {task!r}.")
+        if base_schedule is not None:
+            raise NotImplementedError("MiniMax H3 FlowGRPO does not support distilled checkpoint sigma schedules.")
         if not math.isclose(video_shift, H3_VIDEO_SHIFT, rel_tol=0.0, abs_tol=1e-6) or not math.isclose(
             audio_shift, H3_AUDIO_SHIFT, rel_tol=0.0, abs_tol=1e-6
         ):
@@ -241,36 +292,66 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             token_tags=tags,
             device=self.device,
         )
-        if not bool(branch.audio_update_mask.all()):
-            raise NotImplementedError("MiniMax H3 FlowGRPO does not support audio-reference condition rows.")
 
-        # FL2VA keyframe rows are fixed conditioning: build them once, place them at the
-        # non-update positions, and re-inject after every transition so the SDE never
-        # perturbs the anchor. T2VA keeps the mask all-True and the condition set empty,
-        # so the loop below is identical to the text-only path.
-        update_mask = branch.update_mask_dev
-        condition_rows = target_video_rows.new_zeros((0, target_video_rows.shape[-1]))
-        if task == "fl2va":
+        visual_anchor = visual_condition
+        if task == "fl2va" and (visual_anchor is None or not keyframe_indices):
+            raise ValueError("MiniMax H3 FL2VA rollout did not provide complete visual condition metadata.")
+        if visual_anchor is not None:
             condition_shapes = visual_condition_shapes
             if condition_shapes is None and visual_condition_shape is not None:
                 condition_shapes = [visual_condition_shape]
-            if visual_condition is None or not condition_shapes or not keyframe_indices:
-                raise ValueError("MiniMax H3 FL2VA rollout did not provide complete visual condition metadata.")
-            condition_rows = minimax_h3_imgvid_cond_noise_aug_rows(
-                visual_condition,
+            if not condition_shapes:
+                raise ValueError("MiniMax H3 visual condition shape is missing.")
+            visual_anchor = minimax_h3_imgvid_cond_noise_aug_rows(
+                visual_anchor,
                 condition_shapes=condition_shapes,
                 target_latent_t=latent_t,
                 imgvid_cond_num_frames=len(condition_shapes),
                 seed=seed,
                 noise_aug=MINIMAX_H3_IMGVID_COND_TIMESTEP,
-            ).to(device=self.device, dtype=target_video_rows.dtype)
+            ).to(self.device)
+
+        audio_anchor = audio_condition
+        if audio_anchor is not None:
+            condition_audio_t = audio_condition_lengths
+            if condition_audio_t is None and ref_audio_t is not None:
+                condition_audio_t = [ref_audio_t]
+            if not condition_audio_t:
+                raise ValueError("MiniMax H3 reference audio length is missing.")
+            audio_anchor = minimax_h3_audio_cond_noise_aug_rows(
+                audio_anchor,
+                condition_audio_t=condition_audio_t,
+                seed=seed,
+                noise_aug=MINIMAX_H3_AUDIO_REF_COND_TIMESTEP,
+            ).to(self.device)
 
         video_rows = target_video_rows.new_zeros((branch.img_pos.shape[0], target_video_rows.shape[-1]))
-        video_rows[update_mask] = target_video_rows
-        if condition_rows.shape[0] != int((~update_mask).sum().item()):
-            raise ValueError("MiniMax H3 FL2VA condition row count does not match the official packed layout.")
-        if condition_rows.numel():
-            video_rows[~update_mask] = condition_rows
+        video_rows[branch.update_mask_dev] = target_video_rows
+        num_condition_video = int((~branch.update_mask_dev).sum().item())
+        if visual_anchor is None:
+            if num_condition_video:
+                raise ValueError("MiniMax H3 Ref2VA visual condition rows are missing.")
+        elif visual_anchor.shape[0] != num_condition_video:
+            raise ValueError(
+                f"MiniMax H3 visual condition rows {visual_anchor.shape[0]} do not match layout rows "
+                f"{num_condition_video}."
+            )
+        else:
+            video_rows[~branch.update_mask_dev] = visual_anchor
+
+        audio_rows = target_audio_rows.new_zeros((branch.audio_pos.shape[0], target_audio_rows.shape[-1]))
+        audio_rows[branch.audio_update_mask_dev] = target_audio_rows
+        num_condition_audio = int((~branch.audio_update_mask_dev).sum().item())
+        if audio_anchor is None:
+            if num_condition_audio:
+                raise ValueError("MiniMax H3 Ref2VA audio condition rows are missing.")
+        elif audio_anchor.shape[0] != num_condition_audio:
+            raise ValueError(
+                f"MiniMax H3 audio condition rows {audio_anchor.shape[0]} do not match layout rows "
+                f"{num_condition_audio}."
+            )
+        else:
+            audio_rows[~branch.audio_update_mask_dev] = audio_anchor
 
         video_sigmas, audio_sigmas = h3_sigma_schedules(num_steps, video_shift, audio_shift)
         video_scheduler = FlowMatchSDEDiscreteScheduler()
@@ -323,15 +404,10 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
                     )
                     video_velocity, audio_velocity = transformer(**model_inputs)
                     is_selected = step in selected
-                    # The DiT emits one velocity per packed row; only the update-mask (target)
-                    # rows carry a stochastic transition and log-prob. Keyframe condition rows
-                    # stay fixed and are re-injected below (a no-op for T2VA's all-True mask).
-                    target_rows = video_rows[update_mask]
-                    target_velocity = video_velocity[update_mask]
                     video_transition = sample_h3_transition(
                         video_scheduler,
-                        target_rows.unsqueeze(0),
-                        target_velocity.unsqueeze(0),
+                        video_rows[branch.update_mask_dev].unsqueeze(0),
+                        video_velocity[branch.update_mask_dev].unsqueeze(0),
                         step,
                         noise_level=self._flow_grpo_noise_level if is_selected else 0.0,
                         sde_type=self._flow_grpo_sde_type,
@@ -340,8 +416,8 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
                     )
                     audio_transition = sample_h3_transition(
                         audio_scheduler,
-                        audio_rows.unsqueeze(0),
-                        audio_velocity.unsqueeze(0),
+                        audio_rows[branch.audio_update_mask_dev].unsqueeze(0),
+                        audio_velocity[branch.audio_update_mask_dev].unsqueeze(0),
                         step,
                         noise_level=self._flow_grpo_noise_level if is_selected else 0.0,
                         sde_type=self._flow_grpo_sde_type,
@@ -349,25 +425,31 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
                         return_log_prob=is_selected,
                     )
                     next_video_rows = video_rows.clone()
-                    next_video_rows[update_mask] = video_transition[0][0]
-                    if condition_rows.numel():
-                        next_video_rows[~update_mask] = condition_rows
-                    next_audio_rows = audio_transition[0][0]
+                    next_video_rows[branch.update_mask_dev] = video_transition[0][0]
+                    if visual_anchor is not None:
+                        next_video_rows[~branch.update_mask_dev] = visual_anchor
+                    next_audio_rows = audio_rows.clone()
+                    next_audio_rows[branch.audio_update_mask_dev] = audio_transition[0][0]
+                    if audio_anchor is not None:
+                        next_audio_rows[~branch.audio_update_mask_dev] = audio_anchor
                     if is_selected:
                         video_log_prob = video_transition[1]
                         audio_log_prob = audio_transition[1]
                         if video_log_prob is None or audio_log_prob is None:
                             raise RuntimeError("MiniMax H3 rollout did not compute log probabilities.")
-                        current_latents.append(flatten_joint_latents(video_rows.unsqueeze(0), audio_rows.unsqueeze(0)))
-                        next_latents.append(
-                            flatten_joint_latents(next_video_rows.unsqueeze(0), next_audio_rows.unsqueeze(0))
+                        if task == "ref2va":
+                            current_video = video_rows[branch.update_mask_dev]
+                            current_audio = audio_rows[branch.audio_update_mask_dev]
+                            next_video = next_video_rows[branch.update_mask_dev]
+                            next_audio = next_audio_rows[branch.audio_update_mask_dev]
+                        else:
+                            current_video, current_audio = video_rows, audio_rows
+                            next_video, next_audio = next_video_rows, next_audio_rows
+                        current_latents.append(
+                            flatten_joint_latents(current_video.unsqueeze(0), current_audio.unsqueeze(0))
                         )
-                        log_probs.append(
-                            combine_log_probs(
-                                video_log_prob,
-                                audio_log_prob,
-                            )
-                        )
+                        next_latents.append(flatten_joint_latents(next_video.unsqueeze(0), next_audio.unsqueeze(0)))
+                        log_probs.append(combine_log_probs(video_log_prob, audio_log_prob))
                         step_indices.append(step)
                         selected_video_sigmas.append(video_sigma)
                         selected_audio_sigmas.append(audio_sigma)
@@ -378,6 +460,22 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
 
         if not current_latents:
             raise RuntimeError("MiniMax H3 rollout selected no stochastic transitions.")
+        if task == "ref2va":
+            replay_outputs = self._ref2va_replay_outputs(
+                text_embeddings=text_embeddings,
+                text_tags=text_tags,
+                target_video_rows=target_video_rows,
+                target_audio_rows=target_audio_rows,
+                visual_anchor=visual_anchor,
+                audio_anchor=audio_anchor,
+                ref_blocks=ref_blocks,
+                latent_t=latent_t,
+                latent_h=latent_h,
+                latent_w=latent_w,
+                audio_t=audio_t,
+            )
+        else:
+            replay_outputs = self._layout_outputs(branch, packed, text_embeddings)
         self._flow_grpo_trajectory = {
             "all_latents": torch.stack(current_latents, dim=1),
             "all_next_latents": torch.stack(next_latents, dim=1),
@@ -385,15 +483,19 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             "all_log_probs": torch.stack(log_probs, dim=1),
             "h3_step_indices": torch.tensor(step_indices, device=self.device).unsqueeze(0),
             "h3_audio_timesteps": (1.0 - torch.tensor(selected_audio_sigmas, device=self.device)).unsqueeze(0),
-            **self._layout_outputs(branch, packed, text_embeddings),
+            **replay_outputs,
         }
 
         video_latent = minimax_h3_unpatchify_video_tokens(
-            video_rows[update_mask],
+            video_rows[branch.update_mask_dev],
             latent_shape=(latent_t, latent_h // 2, latent_w // 2, 24),
             patch_size=(1, 2, 2),
         )
-        audio_latent = minimax_h3_unpack_audio_tokens(audio_rows, audio_t=audio_t * 2, audio_channel=2)
+        audio_latent = minimax_h3_unpack_audio_tokens(
+            audio_rows[branch.audio_update_mask_dev],
+            audio_t=audio_t * 2,
+            audio_channel=2,
+        )
         return video_latent, audio_latent
 
     @torch.no_grad()
@@ -401,9 +503,22 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
         if len(request.requests) != 1:
             raise ValueError(f"MiniMax H3 FlowGRPO expects one request, got {len(request.requests)}.")
         req = request.requests[0]
-        self._inject_prompt_text(req)
         self._configure_flow_grpo(req)
-        output = super().forward(request)
+        extra_args = req.sampling_params.extra_args or {}
+        short_edge = extra_args.get(
+            "reference_image_short_edge",
+            getattr(req.sampling_params, "reference_image_short_edge", None),
+        )
+        if short_edge is None:
+            short_edge = getattr(self, "_reference_image_short_edge", None)
+        with ref2va_reference_image_short_edge(short_edge):
+            self._ensure_prompt_text(request)
+            try:
+                output = super().forward(request)
+            finally:
+                self._h3_prompt_ids = None
+        if not self._flow_grpo_trajectory:
+            raise RuntimeError("MiniMax H3 FlowGRPO rollout produced no trajectory.")
         trajectory = {
             key: value.detach().cpu() if isinstance(value, torch.Tensor) else value
             for key, value in self._flow_grpo_trajectory.items()
@@ -421,7 +536,16 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             "h3_audio_indices",
             "h3_text_indices",
             "h3_video_update_mask",
+            "prompt_token_tags",
+            "latent_meta",
+            "condition_video_rows",
+            "condition_audio_rows",
+            "condition_video_row_count",
+            "condition_audio_row_count",
+            "ref_block_meta",
+            "ref_block_count",
         )
+        replay_fields = tuple(key for key in replay_fields if key in trajectory)
         return with_rollout_data(
             output,
             trajectory_latents=trajectory["all_latents"],

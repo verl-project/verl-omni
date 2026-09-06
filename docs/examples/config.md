@@ -159,7 +159,7 @@ actor_rollout_ref:
 - `actor_rollout_ref.model.tokenizer_path`: Optional tokenizer path if not under `path` (falls back to `<path>/tokenizer` or `path`).
 - `actor_rollout_ref.model.config_path`: Optional transformer config path. If null, backends use `<path>/<transformer_subfolder>`.
 - `actor_rollout_ref.model.transformer_subfolder`: Subfolder with diffusion transformer weights/config (default `transformer`).
-- `actor_rollout_ref.model.attn_backend`: Diffusers attention backend. One of `native`, `_native_npu`, `_flash_3_varlen_hub`. Must stay consistent with `rollout.rollout_attn_backend`.
+- `actor_rollout_ref.model.attn_backend`: Diffusers attention backend. One of `native`, `_native_npu`, `flash_varlen_hub`, `_flash_3_varlen_hub`. Must stay consistent with `rollout.rollout_attn_backend`.
 - `actor_rollout_ref.model.lora_rank`: LoRA rank; `> 0` enables LoRA.
 - `actor_rollout_ref.model.lora_alpha`: LoRA scaling factor.
 - `actor_rollout_ref.model.lora_init_weights`: LoRA init method (default `gaussian`).

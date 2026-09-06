@@ -24,6 +24,7 @@ from tensordict import TensorDict
 from vllm_omni.diffusion.data import DiffusionOutput as VllmDiffusionOutput
 from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
 
+from verl_omni.pipelines.minimax_h3_diffusion_nft.common import MINIMAX_H3_TOKEN_ID_NATIVE_KEY
 from verl_omni.pipelines.minimax_h3_flow_grpo.agent_loop import MiniMaxH3DiffusionSingleTurnAgentLoop
 from verl_omni.pipelines.minimax_h3_flow_grpo.common import (
     H3_AUDIO_WIDTH,
@@ -148,29 +149,33 @@ def test_rollout_output_reaches_actor_and_replays_joint_transition(monkeypatch) 
     trajectory = _trajectory()
     pipeline = object.__new__(MiniMaxH3PipelineWithLogProb)
     pipeline.tokenizer = MagicMock()
-    pipeline.tokenizer.decode.return_value = "a bounded piano performance"
     pipeline._flow_grpo_trajectory = trajectory
     request = SimpleNamespace(
         prompt={"prompt_token_ids": [1, 2]},
         sampling_params=SimpleNamespace(
-            extra_args={},
+            extra_args={MINIMAX_H3_TOKEN_ID_NATIVE_KEY: True},
             max_sequence_length=2,
             num_outputs_per_prompt=1,
         ),
     )
-    request_batch = SimpleNamespace(requests=[request])
+    request_batch = SimpleNamespace(
+        requests=[request],
+        prompts=[request.prompt],
+        sampling_params=request.sampling_params,
+    )
     video_pixels = torch.zeros(1, 3, 2, 8, 8, dtype=torch.uint8)
     audio_waveform = torch.zeros(1, 32000)
 
-    with patch.object(
-        MiniMaxH3Pipeline,
-        "forward",
-        return_value=VllmDiffusionOutput(output=(video_pixels, audio_waveform)),
-    ):
+    def fake_forward(*args):
+        pipeline._flow_grpo_trajectory = trajectory
+        return VllmDiffusionOutput(output=(video_pixels, audio_waveform))
+
+    with patch.object(MiniMaxH3Pipeline, "forward", side_effect=fake_forward):
         rollout_output = pipeline.forward(request_batch)
 
-    pipeline.tokenizer.decode.assert_called_once_with([1, 2], skip_special_tokens=False)
-    assert request.prompt["prompt"] == "a bounded piano performance"
+    pipeline.tokenizer.decode.assert_not_called()
+    assert request.prompt["prompt"] == "[pretokenized]"
+    assert pipeline._h3_prompt_ids is None
     torch.testing.assert_close(rollout_output.trajectory_latents, trajectory["all_latents"])
     metadata = rollout_output.output["metadata"]
     assert set(metadata["prompt_embeddings"]) == {"prompt_embeds", "prompt_embeds_mask"}
@@ -191,7 +196,12 @@ def test_rollout_output_reaches_actor_and_replays_joint_transition(monkeypatch) 
     server.model_config = SimpleNamespace(architecture="MiniMaxH3Pipeline", algorithm="flow_grpo")
     processed = DiffusionStrategy(server).process_output(final_res, None, {"output_type": "pt", "logprobs": True})
 
-    for key in ("all_latents", "all_next_latents", "h3_step_indices", "h3_audio_timesteps"):
+    for key in (
+        "all_latents",
+        "all_next_latents",
+        "h3_step_indices",
+        "h3_audio_timesteps",
+    ):
         assert key in processed.extra_fields
     assert processed.extra_fields["audio_sample_rate"] == 32000
 
@@ -313,6 +323,22 @@ def test_lora_weight_sync_splits_geglu_and_rewrites_targets() -> None:
     assert mapped_config["target_modules"] == ["fc1_0", "fc1_1", "to_q"]
 
 
+def test_ref2va_weight_sync_targets_the_combined_ref_transformer() -> None:
+    pipeline = _SyncPipeline()
+    pipeline.partition = "combined"
+    pipeline.transformers_ref = _Component({})
+    tensor = torch.ones(4, 4)
+
+    mapped, _ = pipeline.map_lora_update_to_engine(
+        {"base_model.model.transformer_blocks.0.attn.to_q.lora_A.weight": tensor},
+        {"r": 4, "target_modules": ["to_q"]},
+    )
+    pipeline.load_weights([("transformer.audio_proj_in.weight", tensor)])
+
+    assert "transformers_ref.blocks.0.attn.to_q.lora_A.weight" in mapped
+    assert pipeline.forwarded[0][0] == "transformers_ref.audio_patch_proj.weight"
+
+
 class _FakeH3Branch:
     """Small stand-in that keeps the denoise test focused on trajectory semantics."""
 
@@ -322,6 +348,7 @@ class _FakeH3Branch:
         self.audio_pos = torch.arange(2, 5)
         self.update_mask_dev = torch.ones(2, dtype=torch.bool)
         self.audio_update_mask = torch.ones(3, dtype=torch.bool)
+        self.audio_update_mask_dev = self.audio_update_mask
 
     def forward_kwargs(self, *, video_rows, audio_rows, **kwargs):
         del kwargs
@@ -474,6 +501,7 @@ def test_fl2va_denoise_keeps_condition_rows_fixed_and_scores_only_targets(monkey
             self.audio_pos = torch.arange(3, 6)
             self.update_mask_dev = torch.tensor([False, True, True])
             self.audio_update_mask = torch.ones(3, dtype=torch.bool)
+            self.audio_update_mask_dev = self.audio_update_mask
 
         def forward_kwargs(self, *, video_rows, audio_rows, **kwargs):
             del kwargs

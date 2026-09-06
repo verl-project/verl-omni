@@ -11,10 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from .diffusers import apply_flash_attention_3_varlen_hub_fix, apply_qwen_image_ulysses_mask_fix
-
-# register diffusers patches
-apply_flash_attention_3_varlen_hub_fix()  # apply FA3 varlen hub fix universally
-
-__all__ = ["apply_flash_attention_3_varlen_hub_fix", "apply_qwen_image_ulysses_mask_fix"]

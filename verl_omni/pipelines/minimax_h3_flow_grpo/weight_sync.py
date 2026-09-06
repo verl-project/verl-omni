@@ -15,8 +15,11 @@
 """Map Diffusers MiniMax H3 weights to vLLM-Omni's fused DiT layout."""
 
 from collections.abc import Iterable
+from typing import Any
 
 import torch
+
+from verl_omni.pipelines.minimax_h3_diffusion_nft.common import MINIMAX_H3_TOKEN_ID_NATIVE_KEY
 
 # Diffusers and vLLM-Omni use different names for the same H3 modules. QKV
 # and GEGLU projections also have different tensor layouts and are handled
@@ -71,11 +74,71 @@ def _lora_target_suffix(target: str) -> str | None:
     return next((suffix for suffix in H3_LORA_TARGETS if target == suffix or target.endswith("." + suffix)), None)
 
 
+class _PromptTokenOverride:
+    def __init__(self, tokenizer: Any, prompt: str, prompt_ids: torch.Tensor) -> None:
+        self._tokenizer = tokenizer
+        self._prompt = prompt
+        self._prompt_ids = prompt_ids.detach().cpu().reshape(-1).tolist()
+
+    def __call__(self, text: str, *args, **kwargs):
+        if text == self._prompt:
+            return {"input_ids": list(self._prompt_ids)}
+        return self._tokenizer(text, *args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._tokenizer, name)
+
+
 # TODO: Remove this MiniMax H3-specific mapping once vLLM-Omni natively
 # supports syncing Diffusers full weights and LoRA updates into its fused
 # QKV/GEGLU inference layout.
 class MiniMaxH3WeightSyncMixin:
-    """Translate Diffusers Actor weights before loading them into vLLM-Omni."""
+    """Translate Diffusers Actor weights and token-ID-native H3 prompts."""
+
+    def _h3_weight_component_name(self) -> str:
+        if getattr(self, "partition", None) == "combined" and hasattr(self, "transformers_ref"):
+            return "transformers_ref"
+        return "transformer"
+
+    def encode_prompt(self, *, task: str, prompt: str, **kwargs):
+        """Let upstream encode references while preserving Agent Loop prompt IDs."""
+        prompt_ids = getattr(self, "_h3_prompt_ids", None)
+        if prompt_ids is None:
+            return super().encode_prompt(task=task, prompt=prompt, **kwargs)
+
+        tokenizer = self.tokenizer
+        self.tokenizer = _PromptTokenOverride(tokenizer, prompt, prompt_ids)
+        try:
+            return super().encode_prompt(task=task, prompt=prompt, **kwargs)
+        finally:
+            self.tokenizer = tokenizer
+
+    def _ensure_prompt_text(self, request: Any) -> None:
+        """Expose Agent Loop IDs while satisfying upstream's text check."""
+        self._h3_prompt_ids = None
+        prompts = getattr(request, "prompts", None)
+        custom_prompt = prompts[0] if prompts and isinstance(prompts[0], dict) else getattr(request, "prompt", None)
+        if not isinstance(custom_prompt, dict):
+            return
+        token_ids = custom_prompt.get("prompt_token_ids")
+        if token_ids is None:
+            return
+        sampling_params = getattr(request, "sampling_params", None)
+        extra_args = getattr(sampling_params, "extra_args", None) or {}
+        if extra_args.get(MINIMAX_H3_TOKEN_ID_NATIVE_KEY) is not True:
+            raise ValueError(
+                "MiniMax H3 token-ID-native rollout requires "
+                "actor_rollout_ref.rollout.agent.default_agent_loop="
+                "minimax_h3_diffusion_single_turn_agent."
+            )
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.detach().cpu().reshape(-1).tolist()
+        elif token_ids and isinstance(token_ids[0], list):
+            token_ids = token_ids[0]
+        self._h3_prompt_ids = torch.as_tensor([int(token) for token in token_ids], dtype=torch.long)
+        if self._h3_prompt_ids.numel() == 0:
+            raise ValueError("MiniMax H3 requires non-empty prompt_token_ids.")
+        custom_prompt["prompt"] = "[pretokenized]"
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load full weights through vLLM-Omni's TP-aware parameter loaders."""
@@ -87,6 +150,7 @@ class MiniMaxH3WeightSyncMixin:
             if separator != "." or component not in {"transformer", "transformers_ref"}:
                 translated.append((name, tensor))
                 continue
+            target_component = self._h3_weight_component_name() if component == "transformer" else component
 
             # PEFT's merged full-weight path may retain ``base_layer`` in names.
             inner = inner.replace(".base_layer", "")
@@ -96,9 +160,11 @@ class MiniMaxH3WeightSyncMixin:
             if inner.endswith((".attn.to_q.weight", ".attn.to_k.weight", ".attn.to_v.weight")):
                 block, projection = inner.rsplit(".attn.to_", 1)
                 target_name = f"{_diffusers_to_vllm_name(block)}.attn.qkv_proj.weight"
-                params = component_params.get(component)
+                params = component_params.get(target_component)
                 if params is None:
-                    params = component_params[component] = dict(getattr(self, component).named_parameters())
+                    params = component_params[target_component] = dict(
+                        getattr(self, target_component).named_parameters()
+                    )
                 param = params[target_name]
 
                 # Keep Q/K/V separate. The fused parameter's native loader packs
@@ -109,9 +175,11 @@ class MiniMaxH3WeightSyncMixin:
 
             if inner.endswith(".ff.net.0.proj.weight"):
                 target_name = _diffusers_to_vllm_name(inner).replace(".ff.net.0.proj.", ".mlp.fc1.")
-                params = component_params.get(component)
+                params = component_params.get(target_component)
                 if params is None:
-                    params = component_params[component] = dict(getattr(self, component).named_parameters())
+                    params = component_params[target_component] = dict(
+                        getattr(self, target_component).named_parameters()
+                    )
                 param = params[target_name]
 
                 # Diffusers GEGLU stores [up, gate], while H3's fused fc1 expects
@@ -122,7 +190,7 @@ class MiniMaxH3WeightSyncMixin:
                 loaded.add(f"{component}.{target_name}")
                 continue
 
-            translated.append((f"{component}.{_diffusers_to_vllm_name(inner)}", tensor))
+            translated.append((f"{target_component}.{_diffusers_to_vllm_name(inner)}", tensor))
 
         # Native H3 loading still handles all parameters that only need renaming.
         if translated:
@@ -131,7 +199,7 @@ class MiniMaxH3WeightSyncMixin:
 
     def install_h3_lora_layout(self) -> None:
         """Expose H3's fused QKV and GEGLU layout to the LoRA manager."""
-        transformer = getattr(self, "transformer", None)
+        transformer = getattr(self, self._h3_weight_component_name(), None)
         if transformer is not None and not getattr(transformer, "stacked_params_mapping", None):
             transformer.stacked_params_mapping = list(_LORA_STACKED_PARAMS_MAPPING)
 
@@ -157,7 +225,8 @@ class MiniMaxH3WeightSyncMixin:
                 f"unsupported targets: {unsupported or sorted(requested_targets)}."
             )
 
-        ff_half = self.transformer.arch.ffn_hidden_size
+        component = self._h3_weight_component_name()
+        ff_half = getattr(self, component).arch.ffn_hidden_size
         mapped: dict[str, torch.Tensor] = {}
         for name, tensor in tensors.items():
             is_lora_a = name.endswith(".lora_A.weight")
@@ -188,15 +257,15 @@ class MiniMaxH3WeightSyncMixin:
                     # A is shared by both logical FC1 slices; B carries the output
                     # rows and must be split and reordered from [up, gate].
                     up, gate = tensor.chunk(2, dim=0)
-                    mapped[f"transformer.{base}_0{suffix}"] = gate.contiguous()
-                    mapped[f"transformer.{base}_1{suffix}"] = up.contiguous()
+                    mapped[f"{component}.{base}_0{suffix}"] = gate.contiguous()
+                    mapped[f"{component}.{base}_1{suffix}"] = up.contiguous()
                 else:
-                    mapped[f"transformer.{base}_0{suffix}"] = tensor
-                    mapped[f"transformer.{base}_1{suffix}"] = tensor
+                    mapped[f"{component}.{base}_0{suffix}"] = tensor
+                    mapped[f"{component}.{base}_1{suffix}"] = tensor
                 continue
 
             vllm_module = _diffusers_to_vllm_name(module + ".")[:-1]
-            mapped[f"transformer.{vllm_module}{suffix}"] = tensor
+            mapped[f"{component}.{vllm_module}{suffix}"] = tensor
 
         # Configure only the fused submodules requested by the Actor recipe.
         new_config = dict(peft_config)
