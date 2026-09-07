@@ -68,6 +68,16 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         """
         self._pending_lora_peft_config = peft_config
 
+    def _move_diffusion_lora_stacks_to_device(self) -> None:
+        """Move unregistered LoRA stacks to the worker device before execution."""
+        # TODO(@NancyFyong): Move this into vLLM-Omni's DiffusionLoRAManager.
+        manager = getattr(self, "lora_manager", None)
+        for module in getattr(manager, "_lora_modules", {}).values():
+            for name in ("lora_a_stacked", "lora_b_stacked"):
+                tensors = getattr(module, name, None)
+                if tensors is not None:
+                    setattr(module, name, tuple(tensor.to(self.device, non_blocking=True) for tensor in tensors))
+
     def _get_standard_weight_model_and_config(self):
         """Return ``(model, model_config)`` for the standard (non-LoRA) AR weight path.
 
@@ -166,6 +176,8 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 )
             t2 = time.perf_counter()
             self.add_lora(lora_request)
+            if self._get_standard_weight_model_and_config() is None:
+                self._move_diffusion_lora_stacks_to_device()
             t3 = time.perf_counter()
             logger.debug("add_lora took %.3f ms", (t3 - t2) * 1000)
             logger.debug(
@@ -191,6 +203,17 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 
                 patch_vllm_moe_model_weight_loader(model)
+
+                # On Ascend, process_weights_after_loading transposes w13/w2 for
+                # fused-MoE compute; revert it so load_weights sees checkpoint-shape
+                # params. The post-load process_weights_after_loading re-transposes.
+                from verl_omni.workers.rollout.vllm_rollout.npu_utils import (
+                    _is_npu_platform,
+                    restore_moe_param_layout,
+                )
+
+                if _is_npu_platform():
+                    restore_moe_param_layout(model, model_config.hf_text_config.hidden_size)
                 receiver.receive_weights(
                     on_bucket_received=lambda weights, *args, **kwargs: model.load_weights(weights)
                 )

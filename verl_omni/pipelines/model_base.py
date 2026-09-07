@@ -60,19 +60,7 @@ class DiffusionModelBase(ABC):
     @classmethod
     def get_class(cls, model_config: DiffusionModelConfig) -> type["DiffusionModelBase"]:
         """Return the registered subclass for ``(architecture, algorithm)``."""
-        architecture = model_config.architecture
-        algorithm = model_config.algorithm
-
-        if architecture in {"QwenImagePipeline", "QwenImageEditPlusPipeline"}:
-            logger.info(
-                "Applying monkey-patch for QwenImageTransformer2DModel Ulysses SP "
-                "This workaround will be removed once we upgrade to a diffusers release that "
-                "includes the upstream fix."
-            )
-            from verl_omni.models.diffusers.qwen_image import apply_qwen_image_ulysses_mask_fix
-
-            apply_qwen_image_ulysses_mask_fix()
-        return cls.get_class_by_name(architecture, algorithm, model_config.external_lib)
+        return cls.get_class_by_name(model_config.architecture, model_config.algorithm, model_config.external_lib)
 
     @classmethod
     def peek_class(cls, architecture: str, algorithm: str) -> Optional[type["DiffusionModelBase"]]:

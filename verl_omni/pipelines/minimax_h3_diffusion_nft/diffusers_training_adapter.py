@@ -23,6 +23,7 @@ from verl_omni.workers.config import DiffusionModelConfig
 
 from .common import (
     build_layout_from_meta,
+    build_ref2va_layout_from_meta,
     build_row_timesteps,
     h3_dit_timestep,
     h3_velocity_to_flow_match,
@@ -89,6 +90,9 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
         condition_video_rows = micro_batch.get("condition_video_rows", None)
         if condition_video_rows is None:
             condition_video_rows = video_rows.new_zeros((video_rows.shape[0], 0, video_rows.shape[-1]))
+        condition_audio_rows = micro_batch.get("condition_audio_rows", None)
+        if condition_audio_rows is None:
+            condition_audio_rows = audio_rows.new_zeros((audio_rows.shape[0], 0, audio_rows.shape[-1]))
         frame_indices = micro_batch.get("keyframe_frame_indices", None)
         frame_indices = [] if frame_indices is None else frame_indices[0].reshape(-1).tolist()
         prompt_token_tags = micro_batch.get("prompt_token_tags", None)
@@ -97,7 +101,13 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
             "video_rows": video_rows,
             "audio_rows": audio_rows,
             "condition_video_rows": condition_video_rows,
+            "condition_audio_rows": condition_audio_rows,
+            # Per-sample counts undo the cross-worker padding; None keeps the pre-multi-reference behavior.
+            "condition_video_row_count": micro_batch.get("condition_video_row_count", None),
+            "condition_audio_row_count": micro_batch.get("condition_audio_row_count", None),
             "keyframe_anchors": keyframe_indices_to_anchors(frame_indices),
+            "ref_block_meta": micro_batch.get("ref_block_meta", None),
+            "ref_block_count": micro_batch.get("ref_block_count", None),
             "prompt_token_tags": prompt_token_tags,
             "encoder_hidden_states": prompt_embeds,
             "encoder_mask": prompt_embeds_mask,
@@ -119,7 +129,12 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
         video_rows = model_inputs["video_rows"]
         audio_rows = model_inputs["audio_rows"]
         condition_video_rows = model_inputs["condition_video_rows"]
+        condition_audio_rows = model_inputs["condition_audio_rows"]
+        condition_video_row_count = model_inputs["condition_video_row_count"]
+        condition_audio_row_count = model_inputs["condition_audio_row_count"]
         keyframe_anchors = model_inputs["keyframe_anchors"]
+        ref_block_meta = model_inputs["ref_block_meta"]
+        ref_block_count = model_inputs["ref_block_count"]
         prompt_token_tags = model_inputs["prompt_token_tags"]
         encoder_hidden_states = model_inputs["encoder_hidden_states"]
         encoder_mask = model_inputs["encoder_mask"]
@@ -139,21 +154,45 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
         for index in range(batch):
             num_text_tokens = int(text_lengths[index])
             sample_text_tags = None if prompt_token_tags is None else prompt_token_tags[index, :num_text_tokens]
-            position_ids, token_tags, video_indices, audio_indices, text_indices, num_cond_video, num_cond_audio = (
-                build_layout_from_meta(
+            if ref_block_meta is None:
+                layout = build_layout_from_meta(
                     meta,
                     num_text_tokens,
                     patch_size,
                     keyframe_anchors=keyframe_anchors,
                     text_token_tags=sample_text_tags,
                 )
-            )
-            sample_condition = condition_video_rows[index]
-            if sample_condition.shape[0] != num_cond_video:
-                raise ValueError(
-                    f"MiniMax H3 condition rows {sample_condition.shape[0]} do not match layout rows {num_cond_video}."
+            else:
+                if ref_block_count is None:
+                    raise ValueError("MiniMax H3 Ref2VA requires ref_block_count.")
+                layout = build_ref2va_layout_from_meta(
+                    meta,
+                    num_text_tokens,
+                    ref_block_meta[index],
+                    int(ref_block_count[index].reshape(-1)[0]),
+                    text_token_tags=sample_text_tags,
                 )
-            full_video_rows = torch.cat([sample_condition, video_rows[index]], dim=0).unsqueeze(0)
+            position_ids, token_tags, video_indices, audio_indices, text_indices, num_cond_video, num_cond_audio = (
+                layout
+            )
+            sample_video_condition = condition_video_rows[index]
+            if condition_video_row_count is not None:
+                sample_video_condition = sample_video_condition[: int(condition_video_row_count[index].reshape(-1)[0])]
+            sample_audio_condition = condition_audio_rows[index]
+            if condition_audio_row_count is not None:
+                sample_audio_condition = sample_audio_condition[: int(condition_audio_row_count[index].reshape(-1)[0])]
+            if sample_video_condition.shape[0] != num_cond_video:
+                raise ValueError(
+                    f"MiniMax H3 condition video rows {sample_video_condition.shape[0]} "
+                    f"do not match layout rows {num_cond_video}."
+                )
+            if sample_audio_condition.shape[0] != num_cond_audio:
+                raise ValueError(
+                    f"MiniMax H3 condition audio rows {sample_audio_condition.shape[0]} "
+                    f"do not match layout rows {num_cond_audio}."
+                )
+            full_video_rows = torch.cat([sample_video_condition, video_rows[index]], dim=0).unsqueeze(0)
+            full_audio_rows = torch.cat([sample_audio_condition, audio_rows[index]], dim=0).unsqueeze(0)
             video_t = float(timestep[index])
             unique_timesteps, timestep_indices = build_row_timesteps(
                 video_indices,
@@ -164,11 +203,11 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
                 video_timestep=video_t,
                 audio_timestep=video_t,
                 condition_video_timestep=max(video_t, 0.999),
-                condition_audio_timestep=video_t,
+                condition_audio_timestep=1.0 if ref_block_meta is not None else video_t,
             )
             result = module(
                 hidden_states=full_video_rows,
-                audio_hidden_states=audio_rows[index : index + 1],
+                audio_hidden_states=full_audio_rows,
                 encoder_hidden_states=encoder_hidden_states[index : index + 1, :num_text_tokens],
                 timestep=unique_timesteps.to(device),
                 timestep_indices=timestep_indices.to(device),
@@ -181,6 +220,7 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
             )
             v_video, v_audio = split_dual_velocity(result)
             v_video = v_video[:, num_cond_video:]
+            v_audio = v_audio[:, num_cond_audio:]
             packed_velocities.append(
                 pack_video_audio_rows(h3_velocity_to_flow_match(v_video), h3_velocity_to_flow_match(v_audio))
             )

@@ -90,12 +90,12 @@ def collect_env_metadata(*, attn_backend: str | None = None, rollout_attn_backen
         from verl_omni.utils import diffusion_attention as da
 
         fa3_flags = {
-            "fa3_available": da.fa3_available(),
-            "actor_fa3_available": da.actor_fa3_available(),
-            "rollout_fa3_available": da.rollout_fa3_available(),
+            "fa_available": da.fa_available(),
+            "actor_fa_available": da.actor_fa_available(),
+            "rollout_fa_available": da.rollout_fa_available(),
         }
     except Exception as exc:
-        fa3_flags = {"fa3_check_error": str(exc)}
+        fa3_flags = {"fa_check_error": str(exc)}
 
     metadata: dict[str, Any] = {
         "python": sys.version.split()[0],

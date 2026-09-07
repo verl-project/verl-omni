@@ -156,7 +156,7 @@ async def compute_score(
             raw_score = await _request_score(server_url, payload, timeout)
             score = raw_score * score_scale + score_bias
             return {"score": score, "drm_raw_score": raw_score}
-        except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+        except (TimeoutError, aiohttp.ClientError, RuntimeError) as exc:
             last_error = exc
             if attempt < max_retries:
                 await asyncio.sleep(retry_backoff * (2**attempt))

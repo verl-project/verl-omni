@@ -39,6 +39,24 @@ def _request_output(diffusion_output, multimodal_output=None):
     )
 
 
+def test_diffusion_prompt_preserves_multimodal_processor_kwargs(diffusion_strategy):
+    diffusion_strategy.server.engine = SimpleNamespace(default_sampling_params_list=[object()])
+    multi_modal_data = {"image": ["image"], "audio": ["audio"]}
+    mm_processor_kwargs = {"fps": 24, "sampling_rate": 32000}
+
+    prompt, _ = diffusion_strategy.preprocess_input(
+        [1, 2, 3],
+        {"task": "ref2va"},
+        multi_modal_data,
+        None,
+        None,
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
+
+    assert prompt["multi_modal_data"] == multi_modal_data
+    assert prompt["mm_processor_kwargs"] == mm_processor_kwargs
+
+
 def test_pixel_output_is_always_uint8(diffusion_strategy):
     pixels = torch.tensor([-1.0, 0.0, 0.25, 0.5, 1.0, 2.0])
 

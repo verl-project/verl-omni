@@ -19,51 +19,54 @@ from tensordict import TensorDict
 
 def embeds_padding_2_no_padding(data: TensorDict) -> TensorDict:
     """
-    Convert TensorDict from prompt embeds with padding to no-padding format.
-    For diffusion model training only.
+    Convert padded diffusion sequence fields to jagged nested tensors.
 
-    Currently we expect the prompt embedding mask to be [1111000...] format,
-    which means the valid tokens are continuous and start from the left.
+    Masks are expected to be left-aligned (``[1111000...]``). Prompt embeddings
+    are always considered; row tensors are discovered through ``*_rows_mask``.
 
     Args:
-        data: TensorDict with ``prompt_embeds``, ``prompt_embeds_mask``,
-            ``negative_prompt_embeds``, ``negative_prompt_embeds_mask``.
+        data: TensorDict containing padded sequence tensors and their masks.
 
     Returns:
-        TensorDict where ``prompt_embeds`` and ``negative_prompt_embeds`` are
-        replaced with jagged ``torch.nested`` tensors. Tensor masks are also
-        converted to nested tensors after stripping padding; missing or non-tensor
-        masks leave the full embedding sequence intact.
+        TensorDict with padding stripped from prompt embeddings and masked row
+        tensors. Missing prompt masks keep the full embedding sequence intact.
     """
 
-    def _to_nested(embeds: torch.Tensor, mask: torch.Tensor | None):
-        """Strip padding from (bs, seq_len, dim) embeds and return nested tensors."""
+    def _to_nested(values: torch.Tensor, mask: torch.Tensor | None, key: str):
+        """Strip sequence padding from a dense tensor and return jagged tensors."""
+        if values.ndim != 3:
+            raise ValueError(f"{key} must have shape [batch, sequence, width], got {tuple(values.shape)}.")
         if mask is None:
             return (
-                torch.nested.as_nested_tensor([embeds[i] for i in range(embeds.shape[0])], layout=torch.jagged),
+                torch.nested.as_nested_tensor([values[i] for i in range(values.shape[0])], layout=torch.jagged),
                 None,
             )
+        if mask.ndim != 2 or mask.shape != values.shape[:2]:
+            raise ValueError(
+                f"{key}_mask shape {tuple(mask.shape)} does not match {key} batch/sequence shape "
+                f"{tuple(values.shape[:2])}."
+            )
 
-        embeds_list, mask_list = [], []
+        values_list, mask_list = [], []
         for i in range(mask.shape[0]):
             curr_mask = mask[i].bool()
-            embeds_list.append(embeds[i, curr_mask, :])
+            values_list.append(values[i, curr_mask, :])
             mask_list.append(curr_mask[curr_mask])
         return (
-            torch.nested.as_nested_tensor(embeds_list, layout=torch.jagged),
+            torch.nested.as_nested_tensor(values_list, layout=torch.jagged),
             torch.nested.as_nested_tensor(mask_list, layout=torch.jagged),
         )
 
-    prompt_embeds = data.get("prompt_embeds", None)
-    if isinstance(prompt_embeds, torch.Tensor):
-        prompt_embeds_mask = data.get("prompt_embeds_mask", None)
-        data["prompt_embeds"], data["prompt_embeds_mask"] = _to_nested(prompt_embeds, prompt_embeds_mask)
-
-    negative_prompt_embeds = data.get("negative_prompt_embeds", None)
-    if isinstance(negative_prompt_embeds, torch.Tensor):
-        negative_prompt_embeds_mask = data.get("negative_prompt_embeds_mask", None)
-        data["negative_prompt_embeds"], data["negative_prompt_embeds_mask"] = _to_nested(
-            negative_prompt_embeds, negative_prompt_embeds_mask
-        )
+    padded_keys = {"prompt_embeds", "negative_prompt_embeds"}
+    padded_keys.update(
+        key.removesuffix("_mask") for key in data.keys() if isinstance(key, str) and key.endswith("_rows_mask")
+    )
+    for key in padded_keys:
+        values = data.get(key, None)
+        if not isinstance(values, torch.Tensor) or values.is_nested:
+            continue
+        mask_key = f"{key}_mask"
+        mask = data.get(mask_key, None)
+        data[key], data[mask_key] = _to_nested(values, mask, key)
 
     return data

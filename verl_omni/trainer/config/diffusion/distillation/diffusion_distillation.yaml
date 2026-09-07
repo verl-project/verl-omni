@@ -44,3 +44,7 @@ teacher_models:
 
 # Key to route examples to the appropriate teacher model in multi-teacher setups. Should correspond to a field in the data proto, e.g., data_source.
 teacher_key: data_source
+
+# Teacher scoring schedule: inline scores within the training step; one_step_off overlaps the scoring of
+# batch k with the actor update on batch k-1 (v1 separate_async with standalone teachers only).
+scheduler: inline
