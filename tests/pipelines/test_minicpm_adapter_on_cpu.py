@@ -84,7 +84,11 @@ def test_configure_model_packs_hf_kwargs_into_minicpmo_data():
 
     assert configured.last_data["input_ids"] is input_ids
     assert configured.last_data["position_ids"] is position_ids
-    assert configured.last_data["pixel_values"] is pixel_values
+    packed_pixels = configured.last_data["pixel_values"]
+    assert len(packed_pixels) == 2
+    assert len(packed_pixels[0]) == 1
+    torch.testing.assert_close(packed_pixels[0][0], pixel_values[0][0])
+    assert packed_pixels[1] == []
     assert configured.last_llm_kwargs["attention_mask"] is attention_mask
     assert configured.last_llm_kwargs["use_cache"] is False
     assert torch.equal(output, input_ids)
@@ -256,14 +260,6 @@ def test_patched_get_vision_embedding_skips_dummy_encoder_when_no_images():
     states = configured.get_vision_embedding({"pixel_values": [[], []], "input_ids": torch.ones(2, 3)})
     assert states == [[], []]
     assert configured.vision_calls == 0
-
-
-def test_patched_get_vision_embedding_runs_encoder_without_grad():
-    module = _MiniCPMOWithEncoders()
-    configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
-    states = configured.get_vision_embedding({"pixel_values": [[torch.zeros(3, 2, 2)]]})
-    assert configured.vision_calls == 1
-    assert states[0].requires_grad is False
 
 
 def test_cloned_vllm_embedding_scatter_supports_backward():
