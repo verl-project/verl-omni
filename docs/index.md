@@ -119,6 +119,13 @@ api/utils.rst
 
 ```{toctree}
 :maxdepth: 1
+:caption: Community
+
+community/governance.md
+```
+
+```{toctree}
+:maxdepth: 1
 :caption: Developer Guide
 
 contributing/editing-agent-instructions.md

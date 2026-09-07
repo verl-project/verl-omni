@@ -97,6 +97,10 @@ Additional guides:
 - [CI/CD Layers](docs/contributing/ci_cd.md)
 - [Common Pitfalls](docs/contributing/common_pitfalls.md)
 
+## Governance
+
+Project roles, module ownership, and the committer nomination process are documented in [`docs/community/governance.md`](docs/community/governance.md). Path-based reviewer routing lives in [`.github/CODEOWNERS`](.github/CODEOWNERS).
+
 ## Pull Requests & Code Reviews
 
 Thanks for submitting a PR! To streamline reviews:
