@@ -135,6 +135,21 @@ def test_merged_weights_materialized_and_actor_restored(monkeypatch):
     torch.testing.assert_close(wrapped.base_layer.weight, base_weight)
 
 
+def test_merge_branch_rejects_named_adapter(monkeypatch):
+    module = _ToyModel()
+
+    _patch_sync_helpers(monkeypatch)
+    _passthrough_names(monkeypatch)
+    monkeypatch.setattr(diffusers_impl, "merged_lora_context", MagicMock())
+
+    engine = _make_engine(module, lora_config={"merge": True})
+    with pytest.raises(ValueError, match="rollout_adapter='old'"):
+        engine.get_per_tensor_param(base_sync_done=True, adapter_name="old")
+    # "default" is what the weight-sync call sites pass and must stay accepted.
+    _, peft_config = engine.get_per_tensor_param(base_sync_done=True, adapter_name="default")
+    assert peft_config is None
+
+
 def test_merged_stream_offloads_on_finally(monkeypatch):
     _patch_sync_helpers(
         monkeypatch,

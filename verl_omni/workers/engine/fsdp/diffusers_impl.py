@@ -791,6 +791,14 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                         layer_prefixes=self.model_config.fsdp_layer_prefixes,
                     )
             else:  # merge lora
+                if adapter_name not in (None, "default"):
+                    # merged_lora_context merges the active ("default") adapter only;
+                    # silently exporting it for a named rollout_adapter would sync the
+                    # wrong policy.
+                    raise ValueError(
+                        f"model.lora.merge=True exports the active 'default' adapter only; "
+                        f"got rollout_adapter={adapter_name!r}."
+                    )
                 # state_dict() aliases the live parameter storage and merged_lora_context
                 # restores the un-merged base weights on exit, so tensors must be
                 # materialized while the context is still open (inside the generator).
