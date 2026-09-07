@@ -33,13 +33,13 @@
 /verl_omni/workers/ @zhtmike
 
 # Rollout and agent loop (overrides workers/rollout)
-/verl_omni/agent_loop/ @knlnguyen1802 @Sky-Trigger @NancyFyong
-/verl_omni/workers/rollout/ @knlnguyen1802 @Sky-Trigger @NancyFyong
-/verl_omni/utils/vllm_omni/ @knlnguyen1802 @Sky-Trigger @NancyFyong
+/verl_omni/agent_loop/ @knlnguyen1802 @Sky-Trigger @NancyFyong @ZihaoW123
+/verl_omni/workers/rollout/ @knlnguyen1802 @Sky-Trigger @NancyFyong @ZihaoW123
+/verl_omni/utils/vllm_omni/ @knlnguyen1802 @Sky-Trigger @NancyFyong @ZihaoW123
 
 # Reward system
-/verl_omni/reward_loop/ @ruihanglix @chenyingshu @Sky-Trigger
-/verl_omni/utils/reward_score/ @ruihanglix @chenyingshu @Sky-Trigger
+/verl_omni/reward_loop/ @ruihanglix @chenyingshu @Sky-Trigger @ZihaoW123
+/verl_omni/utils/reward_score/ @ruihanglix @chenyingshu @Sky-Trigger @ZihaoW123
 
 # Pipeline and model adaptation
-/verl_omni/pipelines/ @chenyingshu @NancyFyong
+/verl_omni/pipelines/ @chenyingshu @NancyFyong @ZihaoW123
