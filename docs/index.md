@@ -1,6 +1,8 @@
 # Welcome to VeRL-Omni's documentation!
 
-Last updated: 07/20/2026
+<!-- 2026-09-02, tianqi, add NPU install page to Getting Started toctree -->
+Last updated: 09/02/2026
+<!-- end -->
 
 [VeRL-Omni](https://github.com/verl-project/verl-omni) is a general RL training framework focused on multimodal generative models, built on top of [verl](https://github.com/verl-project/verl). It originated from the multi-modal generation RL effort in `verl`, and now has a dedicated home so it can evolve in a more focused way.
 
@@ -22,16 +24,19 @@ VeRL-Omni targets RL post-training for three families of generative models:
 
 See {doc}`start/models` for the full model catalogue and which algorithms run on each model.
 
+<!-- 2026-09-02, tianqi, list NPU install next to GPU install in Getting Started -->
 ```{toctree}
 :maxdepth: 2
 :caption: Getting Started
 
 start/install.md
+start/install_npu.md
 start/models.md
 start/flowgrpo_quickstart.md
 start/multi_node_training.md
 start/metrics.md
 ```
+<!-- end -->
 
 ```{toctree}
 :maxdepth: 1
@@ -74,6 +79,7 @@ examples/flowdppo_trainer.md
 examples/dpo_trainer.md
 examples/dapo_trainer.md
 examples/dancegrpo_trainer.md
+examples/flux1/dancegrpo_trainer_flux1.md
 examples/diffusionnft_trainer.md
 examples/grpoguard_trainer.md
 examples/gspo_trainer.md
@@ -85,6 +91,7 @@ examples/qwen_image_edit/flowgrpo_trainer_qwen_image_edit.md
 examples/ltx2/flowgrpo_trainer_ltx2.md
 examples/minimax_h3/diffusionnft_trainer_minimax_h3.md
 examples/boogu_image/flowgrpo_trainer_boogu_image.md
+examples/minimax_h3/flowgrpo_trainer_minimax_h3.md
 ```
 
 ```{toctree}

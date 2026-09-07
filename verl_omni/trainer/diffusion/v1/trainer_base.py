@@ -41,6 +41,8 @@ from verl.single_controller.ray import (
     ResourcePoolManager,
     create_colocated_worker_cls,
 )
+from verl.single_controller.ray.base import split_resource_pool
+from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.metric_utils import compute_variance_proxy_metrics, process_validation_metrics
 from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import Role, need_reference_policy, need_reward_model
@@ -56,11 +58,18 @@ from verl.utils.skip import SkipManager
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
+from verl_omni.trainer.diffusion.diffusion_algos import get_diffusion_loss_fn
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
+    compute_old_policy_metrics,
     compute_reward_extra_metrics_diffusion,
     compute_throughput_metrics_diffusion,
     compute_timing_metrics_diffusion,
+)
+from verl_omni.trainer.diffusion.diffusion_trainer_utils import (
+    old_policy_decay,
+    validate_distillation_config,
+    worker_group_port_ranges,
 )
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import _to_diffusion_worker_tensordict, compute_advantage
 from verl_omni.trainer.diffusion.rollout_correction import (
@@ -69,11 +78,13 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     compute_rollout_corr_metrics_from_batch,
     rollout_correction_enabled,
 )
+from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
 from verl_omni.trainer.diffusion.v1.tq_utils import (
     diffusion_tq_batch_to_dataproto,
+    put_dataproto_fields_to_tq,
     sort_diffusion_tq_keys,
 )
-from verl_omni.workers.engine_workers import ActorRolloutRefWorker
+from verl_omni.workers.engine_workers import ActorRolloutRefWorker, resolve_teacher_infer_micro_batch_size
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
 logger = logging.getLogger(__name__)
@@ -115,8 +126,31 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self.config = config
         self.trainer_mode = config.trainer.v1.trainer_mode
         self.parameter_sync_step = config.trainer.v1.get(self.trainer_mode, {}).get("parameter_sync_step", 1)
-        self.use_reference_policy = need_reference_policy(config)
+        loss_mode = config.actor_rollout_ref.actor.diffusion_loss.loss_mode
+        self._is_direct_preference = config.algorithm.get("trainer_type", "policy_gradient") == "direct_preference"
+        if self._is_direct_preference:
+            if config.algorithm.get("sample_source", "online") == "offline":
+                raise NotImplementedError(
+                    "Diffusion offline DPO stays on the v0 trainer. Use "
+                    "`python -m verl_omni.trainer.main_diffusion` with trainer.use_v1=false."
+                )
+            self._loss_fn = get_diffusion_loss_fn(loss_mode)
+            self._has_old_adapter = "old" in tuple(
+                config.actor_rollout_ref.model.get("policy_state_adapters", ("default",))
+            )
+            if self._has_old_adapter:
+                self._validate_old_adapter_config()
+        else:
+            self._loss_fn = None
+            self._has_old_adapter = False
+        # DPO needs trainer-side ref noise preds even when KL is disabled.
+        self.use_reference_policy = need_reference_policy(config) or (loss_mode == "dpo")
         self.use_rm = need_reward_model(config)
+        self.use_teacher_policy = is_distillation_enabled(config.get("distillation"))
+        self.distillation_config = omega_conf_to_dataclass(config.distillation) if self.use_teacher_policy else None
+        validate_distillation_config(config)
+        self._teacher_one_step_off = self.use_teacher_policy and self.distillation_config.scheduler == "one_step_off"
+        self._pending_teacher_batch = None
         self.replay_buffer = self._build_replay_buffer()
 
         # ref_in_actor: reference policy is the actor without lora applied.
@@ -152,6 +186,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
     def init(self):
         """Initialize workers, rollout server, reward loop, checkpoint engine."""
         self._setup()
+        if self._has_old_adapter:
+            self.actor_rollout_wg.copy_adapter(source="default", target="old")
         self.on_init_end()
 
     def fit(self, agent_loop_manager: AgentLoopManager):
@@ -294,26 +330,57 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
     def _step_once(self, metrics: dict, timing_raw: dict, sample_batch_size: int) -> KVBatchMeta:
         """Sample one mini-batch from the replay buffer and run the diffusion PG pipeline."""
+        batch_meta = self._sample_batch(metrics, timing_raw, sample_batch_size)
+        if not self._teacher_one_step_off:
+            return self._train_sampled_batch(metrics, timing_raw, batch_meta)
+
+        # One-step-off: teacher scoring of the batch sampled here overlaps the actor
+        # update on the previously sampled batch. The first step samples twice to
+        # fill the pipeline; the last sampled batch is never trained.
+        prev, self._pending_teacher_batch = self._pending_teacher_batch, self._convert_and_dispatch(batch_meta)
+        if prev is None:
+            next_meta = self._sample_batch(metrics, timing_raw, sample_batch_size)
+            prev, self._pending_teacher_batch = self._pending_teacher_batch, self._convert_and_dispatch(next_meta)
+        batch_meta, data, teacher_handle = prev
+        return self._train_sampled_batch(metrics, timing_raw, batch_meta, data=data, teacher_handle=teacher_handle)
+
+    def _sample_batch(self, metrics: dict, timing_raw: dict, sample_batch_size: int) -> KVBatchMeta:
+        """Sample one mini-batch from the replay buffer inside the rollout-mode hooks."""
         with marked_timer("gen", timing_raw, color="red"):
             self.on_sample_begin()
             batch_meta, off_policy_metrics = self._sample_training_batch(sample_batch_size)
             metrics.update(off_policy_metrics)
             self.on_sample_end()
+        return batch_meta
 
-        return self._train_sampled_batch(metrics, timing_raw, batch_meta)
+    def _convert_and_dispatch(self, batch_meta: KVBatchMeta):
+        """Convert a sampled batch and start teacher scoring without waiting on it."""
+        data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
+        return batch_meta, data, self.teacher_model_manager.dispatch_prev_sample_mean(data)
 
-    def _train_sampled_batch(self, metrics: dict, timing_raw: dict, batch_meta: KVBatchMeta) -> KVBatchMeta:
+    def _train_sampled_batch(
+        self,
+        metrics: dict,
+        timing_raw: dict,
+        batch_meta: KVBatchMeta,
+        data: DataProto | None = None,
+        teacher_handle=None,
+    ) -> KVBatchMeta:
         """Run one diffusion policy-gradient update on an already sampled mini-batch."""
         # Convert TQ rows to diffusion DataProto; from here on the driver owns the
         # DataProto compute contract (no KVBatchMeta passed to diffusion workers).
-        data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
+        if data is None:
+            data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
 
         # [OPTIONAL] colocated reward model
         if self.reward_loop_manager.reward_loop_worker_handles is None and self.use_rm:
             with marked_timer("reward", timing_raw, color="yellow"):
                 self.checkpoint_manager.sleep_replicas()
-                data = self._compute_reward_colocate(data)
+                data = data.union(self._compute_reward_colocate(data))
                 self.checkpoint_manager.update_weights(self.global_steps)
+
+        if self._is_direct_preference:
+            return self._train_direct_preference_batch(metrics, timing_raw, batch_meta, data)
 
         data = self._balance_batch(data, metrics=metrics)
 
@@ -346,6 +413,16 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 ref_log_prob = self._compute_ref_log_prob(data)
                 data = data.union(ref_log_prob)
 
+        if self.use_teacher_policy:
+            if teacher_handle is not None:
+                # one-step-off: scoring was dispatched when this batch was sampled
+                with marked_timer("wait_prev_teacher", timing_raw, color="olive"):
+                    data = data.union(self.teacher_model_manager.collect_prev_sample_mean(teacher_handle))
+            else:
+                # score the rollout trajectories with the frozen teacher
+                with marked_timer("teacher", timing_raw, color="olive"):
+                    data = data.union(self.teacher_model_manager.compute_prev_sample_mean(data))
+
         with marked_timer("adv", timing_raw, color="brown"):
             data = self._compute_advantage(data)
 
@@ -357,8 +434,6 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # Persist computed fields back to TransferQueue so the sampled keys carry
         # the full trajectory for metrics/dumping (keys are cleared after step).
         # Slice to the original key count in case ``_balance_batch`` appended pad rows.
-        from verl_omni.trainer.diffusion.v1.tq_utils import put_dataproto_fields_to_tq
-
         n_keys = len(batch_meta.keys)
         if len(data) > n_keys:
             data_for_tq = data.select_idxs(list(range(n_keys)))
@@ -369,6 +444,121 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             data_for_tq,
             fields=["old_log_probs", "advantages", "returns", "sample_level_scores", "sample_level_rewards"],
         )
+        return batch_meta
+
+    def _validate_old_adapter_config(self):
+        """Require the NFT old-adapter rollout/loss contract."""
+        rollout_cfg = self.config.actor_rollout_ref.rollout
+        actor_loss_cfg = self.config.actor_rollout_ref.actor.diffusion_loss
+        if rollout_cfg.rollout_adapter != "old":
+            raise ValueError("Old-adapter algorithms require actor_rollout_ref.rollout.rollout_adapter=old.")
+        if actor_loss_cfg.loss_mode != "diffusion_nft":
+            raise ValueError(
+                "Old-adapter algorithms require actor_rollout_ref.actor.diffusion_loss.loss_mode=diffusion_nft."
+            )
+
+    def _prepare_actor_batch(self, batch: DataProto, reward_tensor: torch.Tensor) -> DataProto:
+        """Delegate algorithm-specific rollout-to-actor batch preparation."""
+        reward_tensor = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
+        return self._loss_fn.prepare_actor_batch(batch, reward_tensor, self.config)
+
+    def _compute_ref_noise_pred(self, data: DataProto) -> DataProto | None:
+        """Reference transformer output and shared flow tensors for DPO."""
+        batch_td = _to_diffusion_worker_tensordict(data)
+        batch_td = embeds_padding_2_no_padding(batch_td)
+        metadata = {
+            "compute_loss": False,
+            "height": self.config.actor_rollout_ref.model.pipeline.height,
+            "width": self.config.actor_rollout_ref.model.pipeline.width,
+            "vae_scale_factor": self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
+        }
+        if self.ref_in_actor:
+            metadata["no_lora_adapter"] = True
+        tu.assign_non_tensor(batch_td, **metadata)
+        if self.ref_in_actor:
+            output = self.actor_rollout_wg.infer_actor_batch(batch_td)
+        else:
+            output = self.ref_policy_wg.infer_ref_batch(batch_td)
+        if output is None:
+            return None
+
+        noise_pred = tu.get(output, "noise_pred")
+        if noise_pred is None:
+            raise RuntimeError(
+                "Reference infer returned noise_pred=None. Diffusion DPO requires "
+                "model_type=diffusion_dpo_model so infer_actor_batch / infer_ref_batch "
+                "emit noise_pred rather than SDE log_probs."
+            )
+        if noise_pred.ndim >= 2 and noise_pred.shape[1] == 1:
+            noise_pred = noise_pred[:, 0]
+        noise = tu.get(output, "noise")
+        if noise.ndim >= 2 and noise.shape[1] == 1:
+            noise = noise[:, 0]
+        timesteps = tu.get(output, "timesteps")
+        if timesteps.ndim >= 2 and timesteps.shape[1] == 1:
+            timesteps = timesteps[:, 0]
+        ref_output = {
+            "ref_noise_pred": noise_pred.float(),
+            "noise": noise.float(),
+            "timesteps": timesteps.float(),
+        }
+        return DataProto.from_tensordict(tu.get_tensordict(ref_output))
+
+    def _update_old_policy(self) -> tuple[bool, float, str]:
+        """Refresh the NFT old-policy adapter (copy or EMA)."""
+        algo_cfg = self.config.algorithm
+        if self.global_steps % algo_cfg.old_policy_update_interval != 0:
+            return False, 0.0, "none"
+
+        decay = algo_cfg.old_policy_decay
+        if decay is None:
+            decay = old_policy_decay(self.global_steps, algo_cfg.old_policy_decay_schedule)
+
+        if decay == 0:
+            self.actor_rollout_wg.copy_adapter(source="default", target="old")
+            return True, float(decay), "copy"
+        self.actor_rollout_wg.ema_update_adapter(source="default", target="old", decay=decay)
+        return True, float(decay), "ema"
+
+    def _train_direct_preference_batch(
+        self, metrics: dict, timing_raw: dict, batch_meta: KVBatchMeta, data: DataProto
+    ) -> KVBatchMeta:
+        """Online DPO / DiffusionNFT update: pair (or NFT-prep) then ref noise + actor.
+
+        Unlike Flow-GRPO, DPO does not recompute SDE ``old_log_probs``. The DPO
+        engine returns ``noise_pred`` from ``infer_actor_batch``, so the PG
+        old-log-prob hop would crash with ``log_probs is None``.
+        """
+        with marked_timer("prepare_actor_batch", timing_raw, color="brown"):
+            reward_tensor, reward_extra_infos_dict = extract_reward(data)
+            data.batch["sample_level_scores"] = reward_tensor
+            if reward_extra_infos_dict:
+                data.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+            # Persist unpaired scores for metrics before pairing shrinks the batch.
+            data.batch["sample_level_rewards"] = data.batch["sample_level_scores"]
+            n_keys = len(batch_meta.keys)
+            data_for_tq = data.select_idxs(list(range(n_keys))) if len(data) > n_keys else data
+            put_dataproto_fields_to_tq(
+                batch_meta,
+                data_for_tq,
+                fields=["sample_level_scores", "sample_level_rewards"],
+            )
+            data = self._prepare_actor_batch(data, reward_tensor)
+            data.batch["sample_level_rewards"] = data.batch["sample_level_scores"]
+
+        if self.use_reference_policy:
+            with marked_timer("ref", timing_raw, color="olive"):
+                ref_infer_res = self._compute_ref_noise_pred(data)
+                if ref_infer_res is not None:
+                    data = data.union(ref_infer_res)
+
+        with marked_timer("update_actor", timing_raw, color="red"):
+            actor_output = self._update_actor(data)
+            actor_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+            metrics.update(actor_metrics)
+            if self._has_old_adapter:
+                metrics.update(compute_old_policy_metrics(self._update_old_policy()))
+
         return batch_meta
 
     def on_init_end(self):
@@ -614,6 +804,15 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 self.config.reward.reward_model.n_gpus_per_node = self.config.trainer.n_gpus_per_node
             self.mapping[Role.RewardModel] = "global_pool"
 
+        if self.use_teacher_policy and self.distillation_config.nnodes > 0:
+            if self.distillation_config.n_gpus_per_node <= 0:
+                raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
+            self.role_worker_mapping[Role.TeacherModel] = ray.remote(ActorRolloutRefWorker)
+            self.mapping[Role.TeacherModel] = "teacher_pool"
+            resource_pool_spec["teacher_pool"] = [
+                self.distillation_config.n_gpus_per_node
+            ] * self.distillation_config.nnodes
+
         self.resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
 
     def _init_colocated_workers(self):
@@ -623,17 +822,35 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         actor_rollout_cls = RayClassWithInitArgs(
             cls=self.role_worker_mapping[actor_role],
             config=self.config.actor_rollout_ref,
+            distillation_config=self.config.get("distillation"),
             role=str(actor_role),
         )
         self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
 
+        # standalone teachers: one sub-pool and worker group per teacher
+        if self.use_teacher_policy and Role.TeacherModel in self.role_worker_mapping:
+            teacher_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherModel)
+            teacher_models = self.distillation_config.teacher_models
+            split_pools = split_resource_pool(teacher_pool, split_size=[t.world_size for t in teacher_models.values()])
+            for key, pool in zip(teacher_models, split_pools, strict=True):
+                self.resource_pool_to_cls[pool] = {
+                    self._teacher_wg_name(key): RayClassWithInitArgs(
+                        self.role_worker_mapping[Role.TeacherModel],
+                        config=self.config.actor_rollout_ref,
+                        distillation_config=self.config.get("distillation"),
+                        role=str(Role.TeacherModel),
+                        teacher_key=key,
+                    )
+                }
+
         all_wg = {}
         wg_kwargs = {"device_name": self.config.trainer.device}
-        if OmegaConf.select(self.config.trainer, "ray_master_port_range") is not None:
-            wg_kwargs["master_port_range"] = OmegaConf.to_container(self.config.trainer.ray_master_port_range)
-        for resource_pool, class_dict in self.resource_pool_to_cls.items():
-            if not class_dict:
-                continue
+        pools = [(pool, class_dict) for pool, class_dict in self.resource_pool_to_cls.items() if class_dict]
+        master_port_range = OmegaConf.select(self.config.trainer, "ray_master_port_range")
+        port_ranges = worker_group_port_ranges(master_port_range, len(pools))
+        for (resource_pool, class_dict), port_range in zip(pools, port_ranges, strict=True):
+            if port_range is not None:
+                wg_kwargs["master_port_range"] = port_range
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = RayWorkerGroup(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls, **wg_kwargs)
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
@@ -645,14 +862,39 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             self.ref_policy_wg = self.actor_rollout_wg
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
+
+        if self.use_teacher_policy:
+            if Role.TeacherModel in self.role_worker_mapping:
+                teacher_wg = {
+                    key: all_wg[self._teacher_wg_name(key)] for key in self.distillation_config.teacher_models
+                }
+                for wg in teacher_wg.values():
+                    wg.init_model()
+            else:
+                teacher_wg = {key: self.actor_rollout_wg for key in self.distillation_config.teacher_models}
+            self.teacher_model_manager = DiffusionTeacherManager(
+                self.distillation_config,
+                self.config.actor_rollout_ref.model,
+                teacher_wg,
+                infer_micro_batch_size_per_gpu=resolve_teacher_infer_micro_batch_size(self.config.actor_rollout_ref),
+            )
+
         return actor_rollout_resource_pool
+
+    @staticmethod
+    def _teacher_wg_name(key: str) -> str:
+        return f"teacher_{key.replace('/', '_')}"
 
     def _init_online_rollout_stack(self, actor_rollout_resource_pool):
         """Initialize reward loop, LLM server, and checkpoint engine managers."""
-        from verl_omni.reward_loop import OmniRewardLoopManager
+        from verl_omni.reward_loop.local_accelerator_reward_loop import create_v1_reward_loop_manager
 
         resource_pool = self.resource_pool_manager.get_resource_pool(Role.RewardModel) if self.use_rm else None
-        self.reward_loop_manager = OmniRewardLoopManager(config=self.config, rm_resource_pool=resource_pool)
+        self.reward_loop_manager = create_v1_reward_loop_manager(
+            config=self.config,
+            rm_resource_pool=resource_pool,
+            accelerator_resource_pool=actor_rollout_resource_pool,
+        )
 
         # Streaming agent reward loop when there is no rm, or the rm has a separate pool.
         self.enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
@@ -889,6 +1131,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         )
         output = self.actor_rollout_wg.infer_actor_batch(batch_td)
         log_probs = tu.get(output, "log_probs")
+        if log_probs is None:
+            raise RuntimeError(
+                "Actor infer_actor_batch returned log_probs=None. Direct-preference "
+                "algorithms (DPO / DiffusionNFT) must set algorithm.trainer_type="
+                "direct_preference so the trainer skips old-log-prob recomputation."
+            )
         old_log_prob_dict = {"old_log_probs": log_probs.float()}
         prev_sample_mean = tu.get(output, "prev_sample_mean")
         if prev_sample_mean is not None:
@@ -946,14 +1194,30 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         batch_td = _to_diffusion_worker_tensordict(data)
         batch_td = embeds_padding_2_no_padding(batch_td)
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        paired = bool(self.config.algorithm.get("paired_preference", False)) and getattr(
+            self, "_is_direct_preference", False
+        )
+        if paired:
+            ppo_mini_batch_size = ppo_mini_batch_size * 2
+        else:
+            ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
+        seed = self.config.actor_rollout_ref.actor.data_loader_seed
+        shuffle = self.config.actor_rollout_ref.actor.shuffle
+        if paired and shuffle:
+            logger.warning(
+                "Shuffle is not supported for direct preference during actor update."
+                "This is to prevent the chosen/rejected pairs from being split across different micro batches."
+                "Setting shuffle to False."
+            )
+            shuffle = False
         tu.assign_non_tensor(
             batch_td,
             global_batch_size=ppo_mini_batch_size,
             mini_batch_size=ppo_mini_batch_size,
-            epochs=self.config.actor_rollout_ref.actor.ppo_epochs,
-            seed=self.config.actor_rollout_ref.actor.data_loader_seed,
-            dataloader_kwargs={"shuffle": self.config.actor_rollout_ref.actor.shuffle},
+            epochs=ppo_epochs,
+            seed=seed,
+            dataloader_kwargs={"shuffle": shuffle},
             height=self.config.actor_rollout_ref.model.pipeline.height,
             width=self.config.actor_rollout_ref.model.pipeline.width,
             vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
@@ -1008,7 +1272,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
             if self.use_rm and self.reward_loop_manager.reward_loop_worker_handles is None:
                 self.checkpoint_manager.sleep_replicas()
-                data = self._compute_reward_colocate(data)
+                data = data.union(self._compute_reward_colocate(data))
                 self.checkpoint_manager.update_weights(self.global_steps)
 
             input_ids = data.batch["prompts"]

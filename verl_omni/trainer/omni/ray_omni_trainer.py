@@ -72,6 +72,17 @@ class OmniPPOTrainerSync(PPOTrainerSync):
         self.tokenizer = model_config.tokenizer
         self.processor = model_config.processor
 
+    # The rollout server resumes admission after every successful wake; this
+    # bridge remains a safety net for holds not preceded by a wake (init).
+    # TODO (long): check and fix the resume bridge on the rollout side.
+    def on_init_end(self):
+        super().on_init_end()
+        self.checkpoint_manager.resume_generation_replicas()
+
+    def on_step_end(self):
+        super().on_step_end()
+        self.checkpoint_manager.resume_generation_replicas()
+
 
 class OmniDirectPreferenceRayTrainer:
     """Standalone Omni AR direct-preference Ray trainer.

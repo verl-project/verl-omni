@@ -5,8 +5,8 @@
 #
 # Override pinned versions (defaults match pyproject.toml extras):
 #   docker build -f docker/Dockerfile.cuda -t verl-omni:gpu \
-#     --build-arg VLLM_VERSION=0.27.0 \
-#     --build-arg KERNELS_VERSION=0.14.1 \
+#     --build-arg VLLM_VERSION=0.28.0 \
+#     --build-arg KERNELS_VERSION=0.16.0 \
 #     --build-arg VERL_GIT_REF=fefb080262e1c015a0ea05f958822a6a512dc795 .
 #
 # Build with dev extras (pytest, pre-commit, …):
@@ -17,8 +17,8 @@
 
 ARG CUDA_VERSION=13.0.2
 ARG UBUNTU_VERSION=22.04
-ARG VLLM_VERSION=0.27.0
-ARG KERNELS_VERSION=0.14.1
+ARG VLLM_VERSION=0.28.0
+ARG KERNELS_VERSION=0.16.0
 # Default: read from .github/verl_pin.txt at build time (override with VERL_GIT_REF).
 ARG VERL_GIT_REF=
 

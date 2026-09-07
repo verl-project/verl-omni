@@ -72,6 +72,7 @@ from verl_omni.trainer.diffusion.diffusion_trainer_utils import (
     _to_diffusion_worker_tensordict,
     old_policy_decay,
     validate_distillation_config,
+    worker_group_port_ranges,
 )
 from verl_omni.trainer.diffusion.rollout_correction import (
     apply_bypass_mode_to_diffusion_batch,
@@ -827,8 +828,6 @@ class BaseRayDiffusionTrainer(ABC):
         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
-        if OmegaConf.select(self.config.trainer, "ray_master_port_range") is not None:
-            wg_kwargs["master_port_range"] = OmegaConf.to_container(self.config.trainer.ray_master_port_range)
         # Forward profiling steps and (when nsys is selected) per-worker Nsight options to the
         # Ray worker group so that workers can be launched under nsys with the right capture range.
         if OmegaConf.select(self.config, "global_profiler.steps") is not None:
@@ -844,9 +843,12 @@ class BaseRayDiffusionTrainer(ABC):
                 wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(worker_nsight_options)
         wg_kwargs["device_name"] = self.device_name
 
-        for resource_pool, class_dict in self.resource_pool_to_cls.items():
-            if not class_dict:
-                continue
+        pools = [(pool, class_dict) for pool, class_dict in self.resource_pool_to_cls.items() if class_dict]
+        master_port_range = OmegaConf.select(self.config.trainer, "ray_master_port_range")
+        port_ranges = worker_group_port_ranges(master_port_range, len(pools))
+        for (resource_pool, class_dict), port_range in zip(pools, port_ranges, strict=True):
+            if port_range is not None:
+                wg_kwargs["master_port_range"] = port_range
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = self.ray_worker_group_cls(
                 resource_pool=resource_pool,

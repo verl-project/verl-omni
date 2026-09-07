@@ -21,29 +21,7 @@ from verl.utils.ray_utils import get_event_loop
 from verl.utils.tokenizer import normalize_token_ids
 
 from verl_omni.agent_loop.single_turn_agent_loop import DiffusionSingleTurnAgentLoop
-
-
-def _messages_to_text(messages: Any) -> str:
-    """Extract textual message content without applying a chat template."""
-    if isinstance(messages, str):
-        return messages
-    if isinstance(messages, dict):
-        messages = [messages]
-
-    parts = []
-    for message in messages or []:
-        if not isinstance(message, dict):
-            continue
-        content = message.get("content", "")
-        if isinstance(content, str):
-            parts.append(content)
-            continue
-        for item in content or []:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict) and item.get("type") == "text":
-                parts.append(item.get("text", ""))
-    return "\n".join(part for part in parts if part).strip()
+from verl_omni.agent_loop.utils import messages_to_text as _messages_to_text
 
 
 @register("ltx2_diffusion_single_turn_agent")

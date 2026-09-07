@@ -42,6 +42,7 @@ def _assert_dapo_without_dynamic_sampling_contract(script: str) -> None:
     assert set(DAPO_WITHOUT_DYNAMIC_SAMPLING_SETTINGS) <= settings
     assert "actor_rollout_ref.actor.policy_loss.loss_mode=gspo" not in settings
     assert "algorithm.filter_groups.enable=true" not in settings
+    assert "overlong_buffer_cfg" not in script
 
 
 def test_dapo_example_launcher_has_phase_one_contract():

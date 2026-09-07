@@ -27,6 +27,7 @@ from vllm_omni.diffusion.worker.utils import StepRequestState
 from verl_omni.pipelines.diffusion_rollout_output import rollout_output, with_rollout_data
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.common import apply_true_cfg, build_img_shapes
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 
 __all__ = ["QwenImageDPOPipeline"]
 
@@ -38,6 +39,10 @@ def _coalesce_not_none(value, default):
 @VllmOmniPipelineBase.register("QwenImagePipeline", algorithm="dpo")
 class QwenImageDPOPipeline(QwenImagePipeline):
     """Rollout pipeline that returns DPO training tensors with generated images."""
+
+    #: Declares the primary rollout media stream so downstream consumers read
+    #: the modality from the adapter instead of inferring it from tensor rank.
+    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)

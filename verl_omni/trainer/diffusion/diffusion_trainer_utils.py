@@ -13,7 +13,8 @@
 # limitations under the License.
 """Shared helpers for diffusion Ray trainers."""
 
-from typing import Any
+from collections.abc import Sequence
+from typing import Any, Optional
 
 from verl import DataProto
 from verl.trainer.distillation import is_distillation_enabled
@@ -48,6 +49,23 @@ def old_policy_decay(step: int, schedule: str) -> float:
     return 0.0 if step < warmup_steps else min((step - warmup_steps) * ramp_rate, max_decay)
 
 
+def worker_group_port_ranges(master_port_range: Optional[Sequence[int]], num_groups: int) -> list[Optional[list[int]]]:
+    """Slice a rendezvous port range into one disjoint sub-range per worker group.
+
+    Ports are only bound at ``init_model``, after every group has been spawned, so groups
+    sharing a range would all pick its first free port.
+    """
+    if master_port_range is None:
+        return [None] * num_groups
+    lo, hi = (int(port) for port in master_port_range)
+    stride = (hi - lo) // num_groups
+    if stride < 1:
+        raise ValueError(
+            f"trainer.ray_master_port_range={master_port_range} has fewer ports than worker groups ({num_groups})."
+        )
+    return [[lo + i * stride, hi if i == num_groups - 1 else lo + (i + 1) * stride] for i in range(num_groups)]
+
+
 def validate_distillation_config(config) -> None:
     """Cross-check the distillation switch against the losses that consume teacher outputs."""
     actor = config.actor_rollout_ref.actor
@@ -70,6 +88,25 @@ def validate_distillation_config(config) -> None:
         )
     if enabled and config.algorithm.trainer_type != "policy_gradient":
         raise NotImplementedError("Diffusion distillation requires algorithm.trainer_type=policy_gradient.")
+    if enabled and config.distillation.get("scheduler", "inline") == "one_step_off":
+        v1 = config.trainer.get("use_v1", False) and config.trainer.v1.trainer_mode == "separate_async"
+        if not v1 or config.distillation.nnodes <= 0:
+            raise ValueError(
+                "distillation.scheduler=one_step_off requires the v1 separate_async trainer and standalone "
+                "teachers (distillation.nnodes > 0); colocated teachers share the actor GPUs and have "
+                "nothing to overlap with."
+            )
+        if config.trainer.v1.separate_async.get("sync_compatible", False):
+            raise ValueError(
+                "distillation.scheduler=one_step_off contradicts "
+                "trainer.v1.separate_async.sync_compatible=true, which emulates synchronous training."
+            )
+        if config.trainer.v1.separate_async.get("num_warmup_batches", 1) < 2:
+            raise ValueError(
+                "distillation.scheduler=one_step_off requires trainer.v1.separate_async.num_warmup_batches >= 2: "
+                "the teacher pipeline consumes one batch of generation lead at start-up, and with less lead every "
+                "sample waits on its own batch's generation."
+            )
 
 
 class NoOpCheckpointManager:

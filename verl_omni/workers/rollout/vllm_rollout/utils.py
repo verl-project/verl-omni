@@ -16,6 +16,7 @@ import os
 import time
 
 import torch
+from verl.utils.device import get_visible_devices_keyword
 from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID, VLLM_LORA_NAME, VLLM_LORA_PATH, set_death_signal
 from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
 
@@ -24,6 +25,11 @@ from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_han
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _split_visible_devices(value: str) -> list[str]:
+    """Split a visible-devices env value into stripped, non-empty entries."""
+    return [entry.strip() for entry in value.split(",") if entry.strip()]
 
 
 class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
@@ -61,6 +67,16 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         later full-weight sync is not misrouted.
         """
         self._pending_lora_peft_config = peft_config
+
+    def _move_diffusion_lora_stacks_to_device(self) -> None:
+        """Move unregistered LoRA stacks to the worker device before execution."""
+        # TODO(@NancyFyong): Move this into vLLM-Omni's DiffusionLoRAManager.
+        manager = getattr(self, "lora_manager", None)
+        for module in getattr(manager, "_lora_modules", {}).values():
+            for name in ("lora_a_stacked", "lora_b_stacked"):
+                tensors = getattr(module, name, None)
+                if tensors is not None:
+                    setattr(module, name, tuple(tensor.to(self.device, non_blocking=True) for tensor in tensors))
 
     def _get_standard_weight_model_and_config(self):
         """Return ``(model, model_config)`` for the standard (non-LoRA) AR weight path.
@@ -160,6 +176,8 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 )
             t2 = time.perf_counter()
             self.add_lora(lora_request)
+            if self._get_standard_weight_model_and_config() is None:
+                self._move_diffusion_lora_stacks_to_device()
             t3 = time.perf_counter()
             logger.debug("add_lora took %.3f ms", (t3 - t2) * 1000)
             logger.debug(
@@ -185,6 +203,17 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 
                 patch_vllm_moe_model_weight_loader(model)
+
+                # On Ascend, process_weights_after_loading transposes w13/w2 for
+                # fused-MoE compute; revert it so load_weights sees checkpoint-shape
+                # params. The post-load process_weights_after_loading re-transposes.
+                from verl_omni.workers.rollout.vllm_rollout.npu_utils import (
+                    _is_npu_platform,
+                    restore_moe_param_layout,
+                )
+
+                if _is_npu_platform():
+                    restore_moe_param_layout(model, model_config.hf_text_config.hidden_size)
                 receiver.receive_weights(
                     on_bucket_received=lambda weights, *args, **kwargs: model.load_weights(weights)
                 )
@@ -205,14 +234,24 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 receiver.receive_weights(on_bucket_received=lambda weights, *args, **kwargs: load_fn(weights))
 
     def _get_zmq_handle(self) -> str:
-        """Get ZMQ handle for communication.
-        Uses Ray job id + replica_rank + local_rank to form the handle so it
-        matches the sender side regardless of CUDA_VISIBLE_DEVICES differences,
-        avoids collisions when multiple replicas share the same node, and is
-        unique per Ray job to avoid cross-job collisions on shared hosts. The
-        job id is forwarded by the vLLMHttpServer actor as VERL_RAY_JOB_ID and
-        inherited by this vLLM worker subprocess.
+        """Get the ZMQ handle matching the co-located trainer actor on this rank.
+
+        The handle is formed from the Ray job id, the replica rank, and the
+        node-local rank. ``self.local_rank`` is stage-local in multi-stage
+        deploys (each stage is pinned to a GPU subset), so it is remapped
+        through the replica-level device list in VERL_ZMQ_BASE_VISIBLE_DEVICES
+        to the node-local rank the actor derives: the index of the worker's
+        device within the replica list. Falls back to the stage-local rank
+        when the lists are absent or the device is not in the replica list.
         """
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
         job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
-        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{self.local_rank}.sock"
+        local_rank = int(self.local_rank)
+        stage_devices = os.environ.get(get_visible_devices_keyword(), "")
+        replica_devices = os.environ.get("VERL_ZMQ_BASE_VISIBLE_DEVICES", "")
+        if stage_devices and replica_devices:
+            stage_entries = _split_visible_devices(stage_devices)
+            replica_entries = _split_visible_devices(replica_devices)
+            if 0 <= local_rank < len(stage_entries) and stage_entries[local_rank] in replica_entries:
+                local_rank = replica_entries.index(stage_entries[local_rank])
+        return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{local_rank}.sock"

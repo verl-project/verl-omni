@@ -2,6 +2,7 @@
 set -x
 
 export TORCH_COMPILE_DISABLE=1
+export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
 
 # Set WORKSPACE to any writable directory; defaults to $HOME.
 WORKSPACE=${WORKSPACE:-$HOME}

@@ -19,7 +19,7 @@ writes prompt-only parquet consumed by ``run_minimax_h3_t2va_lora.sh``.
 
 Example:
 
-    python3 examples/diffusionnft_trainer/minimax_h3/prepare_t2av_data.py \
+    python3 examples/diffusionnft_trainer/minimax_h3/prepare_t2va_data.py \
         --input_dir /path/to/raw_prompts \
         --output_dir /path/to/h3_t2va_data
 """
@@ -59,7 +59,7 @@ def _convert_split(input_dir: Path, split: str, max_samples: int) -> pd.DataFram
     for index, prompt in enumerate(prompts):
         rows.append(
             {
-                "data_source": "minimax_h3_t2av",
+                "data_source": "minimax_h3_t2va",
                 "prompt": [{"role": "user", "content": prompt}],
                 "ability": "text_to_audio_video",
                 "reward_model": {"style": "model", "ground_truth": prompt},

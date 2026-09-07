@@ -1,6 +1,6 @@
 # Diffusion On-Policy Distillation Trainer
 
-Last updated: 08/10/2026
+Last updated: 08/31/2026
 
 This example distills an OCR-tuned `SD3.5-Medium` teacher into a fresh `SD3.5-Medium` student. The student generates images with its own policy, a frozen teacher scores every denoising step of those trajectories, and the student minimizes the KL between its transition and the teacher's (`distill_kl`). The OCR reward is only monitored, never optimized — the reward curve shows the student reaching the teacher's reward level through distillation alone.
 
@@ -47,6 +47,10 @@ The teacher is a full diffusers checkpoint from the same pipeline family as the 
 TEACHER_PATH=/path/to/merged-teacher \
   bash examples/diffusionopd_trainer/sd35/run_sd35_medium_ocr_distill.sh
 ```
+
+The multi-teacher recipe (`run_sd35_medium_mopd_distill.sh`) routes each row to
+its task's teacher by `data_source`; `run_sd35_medium_mopd_distill_v1.sh` is
+the same recipe on the v1 sync trainer.
 
 ## What to expect
 

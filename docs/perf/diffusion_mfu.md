@@ -1,7 +1,7 @@
 (diffusion_mfu)=
 # Diffusion FLOPs / MFU
 
-Last updated: 06/02/2026
+Last updated: 08/29/2026
 
 VeRL-Omni reports **Model FLOPs Utilization (MFU)** for diffusion RL
 training using the same actor keys upstream
@@ -45,6 +45,22 @@ vs optimisation) on the same setup, not as cross-cluster benchmarks.
 > therefore an over-estimate of the *achieved* compute (its backward
 > skips `∂L/∂w` for frozen weights), but it lets you compare relative
 > throughput across runs on one metric.
+
+## Supported architectures
+
+The registry (`verl_omni.utils.mfu.diffusion_flops_counter._REGISTRY`) currently ships estimators for:
+
+| Architecture | Registry key(s) | Attention topology |
+|---|---|---|
+| Qwen-Image | `QwenImagePipeline`, `QwenImagePipelineWithLogProb` | dual-stream joint full attention |
+| Stable Diffusion 3 / 3.5 (no `dual_attention_layers`) | `StableDiffusion3Pipeline`, `StableDiffusion3PipelineWithLogProb` | dual-stream joint full attention, `context_pre_only` last block |
+| Wan2.1 / Wan2.2 | `WanPipeline` | single-stream self-attention + cross-attention to text |
+
+Any other architecture (Bagel, Boogu-Image, LTX2, MiniMax-H3, SD3.5's
+`dual_attention_layers` variant, Qwen-Image-Edit, Qwen3-Omni, ...) is not
+yet registered; `DiffusionFlopsCounter` degrades to `MFU=0` with a
+`RuntimeWarning` for those until an estimator is added. See [Adding a new
+architecture](#adding-a-new-architecture).
 
 ## How FLOPs are computed
 
@@ -297,13 +313,19 @@ Two facts matter for the estimator:
 
 ### Step 3 — Write the architecture class
 
-```python
-# verl_omni/utils/mfu/qwen_image.py
+`WanFlops` ships in `verl_omni/utils/mfu/wan.py` and is registered under
+`WanPipeline` (see [Supported architectures](#supported-architectures)).
+The snippet below is a simplified version of it for illustration; the
+shipped class additionally accounts for `patch_embedding` /
+`proj_out` / `text_embedder` (which scale with token count, not batch
+size) and overrides `get_latent_seqlens` to divide by the 3D patch
+volume, since Wan's raw `(B, C, T, H, W)` latents are patchified
+*inside* the transformer rather than pre-packed by the pipeline.
 
-@register_diffusion_architecture(
-    "WanPipeline",
-    "WanPipelineWithLogProb",   # alias, if you ship a custom rollout class
-)
+```python
+# verl_omni/utils/mfu/wan.py
+
+@register_diffusion_architecture("WanPipeline")
 class WanFlops(DiffusionModelFlops):
     """Wan2.2 DiT FLOPs estimator (self-attn + cross-attn topology)."""
 

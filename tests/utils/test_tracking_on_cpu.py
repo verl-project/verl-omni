@@ -28,7 +28,7 @@ pytest.importorskip("diffusers")
 wandb = pytest.importorskip("wandb")
 imageio = pytest.importorskip("imageio")
 
-from verl_omni.utils.tracking import wrap_val_samples_for_wandb  # noqa: E402
+from verl_omni.utils.tracking import _video_tensor_to_rgb24, wrap_val_samples_for_wandb  # noqa: E402
 
 
 def _warm_clip(t=8, h=32, w=32):
@@ -38,6 +38,16 @@ def _warm_clip(t=8, h=32, w=32):
     clip[:, 1] = 89  # G
     clip[:, 2] = 38  # B
     return clip
+
+
+def test_channels_first_video_is_normalized_to_rgb24_frames():
+    video = _warm_clip(t=5, h=8, w=12).permute(1, 0, 2, 3)
+
+    frames, width, height = _video_tensor_to_rgb24(video)
+
+    assert frames.shape == (5, 8, 12, 3)
+    assert (width, height) == (12, 8)
+    np.testing.assert_array_equal(frames[0, 0, 0], np.array([191, 89, 38], dtype=np.uint8))
 
 
 def test_video_samples_become_wandb_video_with_a_real_mp4_in_output_dir(monkeypatch, tmp_path):
