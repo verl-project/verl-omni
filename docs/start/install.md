@@ -95,7 +95,7 @@ actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN_3_HUB
 `FLASH_ATTN_3_HUB` is provided by vLLM-Omni (`kernels-community/flash-attn3`). The legacy
 `FLASH_ATTN` rollout path still uses local FA packages (`fa3-fwd` / `flash-attn`).
 
-If FA3 deps are missing at runtime, training falls back to native/SDPA automatically. NPU recipes override with `actor_rollout_ref.model.attn_backend=_native_npu`.
+If FA deps are missing or broken at runtime, requesting an FA2/FA3 backend fails fast instead of silently downgrading to native/SDPA. Fix the install or select `native` / `TORCH_SDPA` explicitly. NPU recipes override with `actor_rollout_ref.model.attn_backend=_native_npu`.
 
 On older GPUs, prefer FA2 over the FA3 default — both use the same `kernels` Hub path, so nothing extra to install:
 

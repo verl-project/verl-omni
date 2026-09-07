@@ -11,6 +11,7 @@ on:
       - "pyproject.toml"
       - .github/workflows/cpu_unit_tests.yml
       - .github/vllm_omni_pin.txt
+      - .github/verl_pin.txt
   pull_request:
     branches:
       - main
@@ -22,6 +23,7 @@ on:
       - "pyproject.toml"
       - .github/workflows/cpu_unit_tests.yml
       - .github/vllm_omni_pin.txt
+      - .github/verl_pin.txt
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -64,6 +66,10 @@ jobs:
           pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
           pip install ".[dev]"
           pip install --no-deps -e .
+      - name: Verify the documented train install resolves
+        run: |
+          pip install uv
+          uv pip install --dry-run --python "$(command -v python)" -e ".[train]"
       - name: Run CPU unit tests
         run: |
           echo '[pytest]' > pytest.ini
