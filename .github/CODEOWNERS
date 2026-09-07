@@ -12,7 +12,7 @@
 # Being listed here does not grant committer status or merge rights.
 
 # Default owner for unmatched paths
-* @samithuang
+* @samithuang @zhtmike
 
 # Tests, CI, packaging, environment, and documentation
 /.github/ @wtomin
