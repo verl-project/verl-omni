@@ -1,7 +1,7 @@
 (tuning_guide)=
 # Performance Tuning Guide
 
-Last updated: 08/31/2026
+Last updated: 09/07/2026
 
 This page is the starting point for tuning a VeRL-Omni diffusion RL run. It
 does not repeat the detail already covered by the more specific pages —
@@ -56,11 +56,11 @@ Once the GPU layout is fixed, the rollout engine has its own batching
 tradeoff that is independent of everything else: step-wise continuous
 batching vs. request-level batching. See {ref}`rollout_batching` for how to
 choose between them, the config knobs (`step_execution`,
-`++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs`,
+`actor_rollout_ref.rollout.max_num_seqs`,
 `++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.request_batch_max_wait_ms`),
-and measured before/after numbers for the example recipes. Set these under
-`engine_kwargs.vllm_omni` — the bare `rollout.max_num_seqs` dataclass field is
-a different knob and overriding it silently has no effect on batching.
+and measured before/after numbers for the example recipes. `max_num_seqs` is
+the top-level engine concurrency knob in both modes; only
+`request_batch_max_wait_ms` goes under `engine_kwargs.vllm_omni`.
 
 ## 3. Tune actor throughput and memory
 
@@ -85,12 +85,18 @@ Symptoms that show up regardless of which stage causes them:
   cache, and it leaves less headroom for the packed activation memory a high
   `max_num_seqs` needs.
 
-**OOM during `update_actor` / `update_weights`**
-- This is the actor-side path — go through the offload ordering in
+**OOM during actor forward/backward**
+- Decrease `ppo_micro_batch_size_per_gpu` first — this lowers activation
+  memory without changing the effective batch size (see the FAQ table in
+  [FlowGRPO Quickstart](../start/flowgrpo_quickstart.md#faq-tuning-oom-related-parameters)).
+
+**OOM during `update_actor` / `update_weights` after micro-batching is already tight**
+- This is an optimizer/parameter-state OOM, not an activation OOM — go
+  through the offload ordering in
   [Tuning and Improving MFU](diffusion_mfu.md#tuning-and-improving-mfu)
-  (`optimizer_offload=True` first, then
-  `param_offload=True` as a last resort) rather than reducing batch size
-  first, since offloading costs less throughput than a smaller micro-batch.
+  (`optimizer_offload=True` first, then `param_offload=True` as a last
+  resort), since offloading costs less throughput than a smaller
+  micro-batch once activation memory is no longer the bottleneck.
 - If both offload flags are already `True`, confirm `layered_summon=True` —
   disabling it under offload tends to OOM during weight sync.
 
