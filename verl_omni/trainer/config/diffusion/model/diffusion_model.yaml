@@ -63,6 +63,12 @@ target_parameters: null
 # Exclude modules from LoRA adaptation
 exclude_modules: null
 
+# LoRA (Low-Rank Adaptation) configuration
+lora:
+
+  # whether to merge LoRA into base weights before transferring to vllm_omni
+  merge: False
+
 # Path to pre-trained LoRA adapter to load for continued training
 lora_adapter_path: null
 

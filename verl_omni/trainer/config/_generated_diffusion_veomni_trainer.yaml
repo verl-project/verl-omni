@@ -356,6 +356,8 @@ actor_rollout_ref:
     target_modules: all-linear
     target_parameters: null
     exclude_modules: null
+    lora:
+      merge: false
     lora_adapter_path: null
     policy_state_adapters:
     - default
