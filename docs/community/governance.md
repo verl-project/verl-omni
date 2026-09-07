@@ -33,7 +33,6 @@ Committers have write access and merge rights. They typically have deep expertis
 
 - [@AndyZhou952](https://github.com/AndyZhou952) (Jingan Zhou): Trainer and algorithm core; Diffusion Models
 - [@chenyingshu](https://github.com/chenyingshu) (Susan, Yingshu Chen): Trainer and algorithm core; Reward system; Pipeline and model adaptation; Datasets and examples
-- [@cr-gao](https://github.com/cr-gao) (Chenrui Gao): Workers and training engines
 - [@knlnguyen1802](https://github.com/knlnguyen1802) (Long): Rollout and agent loop
 - [@NancyFyong](https://github.com/NancyFyong) (Zhiyong Feng): Trainer and algorithm core; Rollout and agent loop; Pipeline and model adaptation; Datasets and examples
 - [@ruihanglix](https://github.com/ruihanglix) (Ruihang Li): Reward system
@@ -48,7 +47,7 @@ Directory rules cover the whole tree unless a more specific path below overrides
 | Path | Committers |
 | --- | --- |
 | `verl_omni/trainer/` | [@chenyingshu](https://github.com/chenyingshu), [@NancyFyong](https://github.com/NancyFyong) |
-| `verl_omni/workers/` | [@cr-gao](https://github.com/cr-gao), [@zhtmike](https://github.com/zhtmike) |
+| `verl_omni/workers/` | [@zhtmike](https://github.com/zhtmike) |
 | `verl_omni/agent_loop/` <br> `verl_omni/workers/rollout/` <br> `verl_omni/utils/vllm_omni/` | [@knlnguyen1802](https://github.com/knlnguyen1802), [@Sky-Trigger](https://github.com/Sky-Trigger), [@NancyFyong](https://github.com/NancyFyong) |
 | `verl_omni/reward_loop/` <br> `verl_omni/utils/reward_score/` | [@ruihanglix](https://github.com/ruihanglix), [@chenyingshu](https://github.com/chenyingshu), [@Sky-Trigger](https://github.com/Sky-Trigger) |
 | `verl_omni/pipelines/` | [@chenyingshu](https://github.com/chenyingshu), [@NancyFyong](https://github.com/NancyFyong) |

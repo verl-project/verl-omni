@@ -30,7 +30,7 @@
 /verl_omni/trainer/ @chenyingshu @NancyFyong
 
 # Workers and training engines (FSDP/VeOmni, actor/ref, LoRA, checkpointing)
-/verl_omni/workers/ @cr-gao @zhtmike
+/verl_omni/workers/ @zhtmike
 
 # Rollout and agent loop (overrides workers/rollout)
 /verl_omni/agent_loop/ @knlnguyen1802 @Sky-Trigger @NancyFyong
