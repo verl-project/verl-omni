@@ -1,7 +1,7 @@
 <!-- 2026-09-06, tianqi, resolve merge conflicts with main: keep GPU-only page; take Python>=3.11, vllm 0.28 extras, and FA fail-fast from main -->
-# Installation (NVIDIA GPU)
+# Installation
 
-Last updated: 09/06/2026
+Last updated: 09/07/2026
 
 For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`.
 

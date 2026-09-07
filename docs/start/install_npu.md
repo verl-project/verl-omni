@@ -1,7 +1,7 @@
 <!-- 2026-09-06, tianqi, sync NPU install page with main: Python>=3.11 and vllm 0.28 after merge -->
-# Installation (Ascend NPU)
+# Installation (NPU)
 
-Last updated: 09/06/2026
+Last updated: 09/07/2026
 
 For NVIDIA GPU, see the {doc}`GPU installation guide <install>`.
 
