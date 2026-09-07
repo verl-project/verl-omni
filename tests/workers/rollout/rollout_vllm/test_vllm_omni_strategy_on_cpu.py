@@ -218,6 +218,66 @@ def test_ar_strategy_preserves_engine_argument_normalization():
     }
 
 
+def test_ar_strategy_accepts_qwen3_omni_audio_at_16khz():
+    strategy = ARStrategy(
+        SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_omni_moe")))
+    )
+
+    strategy.validate_multimodal_args(
+        image_data=None,
+        video_data=None,
+        audio_data=["waveform"],
+        mm_processor_kwargs={"sampling_rate": 16000},
+    )
+
+
+@pytest.mark.parametrize(
+    ("mm_processor_kwargs", "error"),
+    [
+        ({"sampling_rate": 8000}, "requires sampling_rate=16000"),
+        ({"sampling_rate": 16000, "use_audio_in_video": True}, "unsupported processor kwargs"),
+    ],
+)
+def test_ar_strategy_rejects_unvalidated_audio_processor_args(mm_processor_kwargs, error):
+    strategy = ARStrategy(
+        SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_omni_moe")))
+    )
+
+    with pytest.raises(ValueError, match=error):
+        strategy.validate_multimodal_args(
+            image_data=None,
+            video_data=None,
+            audio_data=["waveform"],
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
+
+
+def test_ar_strategy_rejects_audio_for_non_qwen3_omni_model():
+    strategy = ARStrategy(
+        SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen2_5_omni")))
+    )
+
+    with pytest.raises(NotImplementedError, match="audio_data, mm_processor_kwargs"):
+        strategy.validate_multimodal_args(
+            image_data=None,
+            video_data=None,
+            audio_data=["waveform"],
+            mm_processor_kwargs={"sampling_rate": 16000},
+        )
+
+
+def test_diffusion_strategy_rejects_unwired_audio_args():
+    strategy = DiffusionStrategy(SimpleNamespace())
+
+    with pytest.raises(NotImplementedError, match="audio_data, mm_processor_kwargs"):
+        strategy.validate_multimodal_args(
+            image_data=None,
+            video_data=None,
+            audio_data=["waveform"],
+            mm_processor_kwargs={"sampling_rate": 16000},
+        )
+
+
 def test_diffusion_strategy_preserves_engine_argument_preparation(monkeypatch):
     imported = []
     monkeypatch.setattr(diffusion_strategy_module, "import_external_libs", imported.append)

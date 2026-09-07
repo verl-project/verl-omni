@@ -155,6 +155,22 @@ class OmniStrategyBase(ABC):
         """
         engine_kwargs.pop("output_mode", None)
 
+    def validate_multimodal_args(
+        self,
+        *,
+        image_data: Optional[list[Any]],
+        video_data: Optional[list[Any]],
+        audio_data: Optional[list[Any]],
+        mm_processor_kwargs: Optional[dict[str, Any]],
+    ) -> None:
+        """Validate mode-specific multimodal request arguments.
+
+        The base strategy accepts the public rollout contract unchanged.
+        Concrete strategies override this hook when their backend supports a
+        narrower set of inputs.
+        """
+        return None
+
     @abstractmethod
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
         """Mutate ``engine_args`` in place with mode-specific engine arguments.
@@ -190,6 +206,12 @@ class OmniStrategyBase(ABC):
             ``TokenOutput`` for AR mode or ``DiffusionOutput`` for diffusion mode.
         """
         prompt_ids = normalize_token_ids(prompt_ids)
+        self.validate_multimodal_args(
+            image_data=image_data,
+            video_data=video_data,
+            audio_data=audio_data,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
         multi_modal_data = self._build_multi_modal_data(image_data, video_data, audio_data)
         lora_request = await self.server._resolve_lora_request()
         prompt, params = self.preprocess_input(
