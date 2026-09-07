@@ -5,6 +5,11 @@
 #       --model_path ~/models/ByteDance-Seed/BAGEL-7B-MoT \
 #       --input_dir ~/data/ocr \
 #       --output_dir ~/data/ocr/bagel
+#
+# NOTE: on vllm-omni >= 0.24 BAGEL LoRA requires merged weight sync
+# (actor_rollout_ref.model.lora.merge=True) — adapter sync silently binds zero
+# modules on the fused MoT layout and reward stays flat. Merged sync is not yet
+# validated on NPU, so it is not enabled here.
 set -x
 export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
 ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.0.0}
@@ -31,6 +36,7 @@ ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
 
+echo "WARNING: BAGEL LoRA on vllm-omni >= 0.24 needs actor_rollout_ref.model.lora.merge=True (NPU validation pending); reward may stay flat without it" >&2
 python3 -m verl_omni.trainer.main_diffusion \
     trainer.device=npu \
     data.train_files=$ocr_train_path \

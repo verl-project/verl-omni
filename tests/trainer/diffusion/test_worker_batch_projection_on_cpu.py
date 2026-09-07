@@ -152,6 +152,7 @@ def test_teacher_manager_hop_excludes_responses():
     [
         ("_compute_old_log_prob", "actor_rollout_wg", "infer_actor_batch"),
         ("_compute_ref_log_prob", "ref_policy_wg", "infer_ref_batch"),
+        ("_compute_ref_noise_pred", "ref_policy_wg", "infer_ref_batch"),
         ("_update_actor", "actor_rollout_wg", "update_actor"),
     ],
 )
