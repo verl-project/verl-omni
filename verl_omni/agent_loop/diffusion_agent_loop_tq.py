@@ -98,7 +98,8 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                     prompt,
                     sampling_params,
                     trajectory=trajectory_info[i],
-                    sample_index=i,
+                    # Use the global prompt index so worker chunks cannot reuse rollout seeds.
+                    sample_index=int(index[i]),
                     rollout_base_seed=rollout_base_seed,
                 )
             )
