@@ -1,16 +1,13 @@
-<!-- 2026-09-06, tianqi, sync NPU install page with main: Python>=3.11 and vllm 0.28 after merge -->
 # Installation (NPU)
 
-Last updated: 09/07/2026
+Last updated: 09/09/2026
 
 For NVIDIA GPU, see the {doc}`GPU installation guide <install>`.
 
 ## Requirements
 
-<!-- 2026-09-06, tianqi, bump NPU Python requirement to >=3.11 to match main -->
 * **Python**: Version >= 3.11
 * **CANN**: Version == 9.1.0
-<!-- end -->
 
 ## Install
 
@@ -28,12 +25,10 @@ source .venv/bin/activate
 
 2. Install the platform backend
 
-<!-- 2026-09-06, tianqi, bump NPU vllm pin to 0.28.0 to match main / pyproject gpu extra -->
 ```bash
 uv pip install vllm==0.28.0
 uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@$(cat .github/vllm_ascend_pin.txt)"
 ```
-<!-- end -->
 
 3. Install vLLM-Omni and VeRL-Omni
 
@@ -55,14 +50,12 @@ This installs `vllm-omni`, then `verl` and `verl-omni`.
 
 ### Extras
 
-<!-- 2026-09-06, tianqi, bump NPU extras table vllm-omni to 0.28.0rc1 to match pyproject.toml -->
 | Extra       | Adds                                                          | When                     |
 | ----------- | ------------------------------------------------------------- | ------------------------ |
 | `vllm-omni` | `vllm-omni==0.28.0rc1`                                        | Optional PyPI baseline only; CI/docs use the git pin above |
 | `train`     | `verl` @ [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | RL training              |
 | `dev`       | `pytest`, `pre-commit`, `Levenshtein`, …                      | Local development / CI   |
 | `ocr`       | `Levenshtein`                                                 | OCR reward (FlowGRPO)    |
-<!-- end -->
 
 The CUDA `gpu` extra (`vllm`, `kernels`, `liger-kernel`) is not used on NPU. NPU recipes override the attention backend with `actor_rollout_ref.model.attn_backend=_native_npu`.
 
@@ -291,4 +284,3 @@ The script launches `python3 -m verl_omni.trainer.main_diffusion` with FlowGRPO 
 ```bash
 checkpoints/flow_grpo/qwen_image_ocr_lora
 ```
-<!-- end -->

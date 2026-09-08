@@ -1,7 +1,6 @@
-<!-- 2026-09-06, tianqi, resolve merge conflicts with main: keep GPU-only page; take Python>=3.11, vllm 0.28 extras, and FA fail-fast from main -->
 # Installation
 
-Last updated: 09/07/2026
+Last updated: 09/09/2026
 
 For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`.
 
@@ -228,4 +227,3 @@ The script launches `python3 -m verl_omni.trainer.main_diffusion` with FlowGRPO 
 ```bash
 checkpoints/flow_grpo/qwen_image_ocr_lora
 ```
-<!-- end -->
