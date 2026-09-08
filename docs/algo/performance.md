@@ -1,7 +1,7 @@
 (performance)=
 # Performance Reference
 
-Last updated: 09/07/2026
+Last updated: 09/09/2026
 
 Below are reference benchmark results for VeRL-Omni training runs.
 
@@ -192,4 +192,25 @@ Reference wandb curve [here](https://wandb.ai/andyzhou/VeRL-Omni-demo/runs/djrzz
 
 <div align="center">
 <img width="600" alt="DiffusionNFT LoRA OCR training validation curve" src="https://github.com/user-attachments/assets/9cc0e639-58c7-4ef7-ab8a-ee8e8aef2d53" />
+</div>
+
+## GSPO OPD: Qwen3-Omni-30B-A3B training on 32xNPU (2 x Atlas 800T A3)
+
+> Experiments used Atlas 800T A3 NPUs, LoRA rank 32 applied to attention linear modules, `train_batch_size=128` and rollout `n=16` per prompt, and the full 2k validation set.
+
+> We add Gaussian noise (σ = 0.25·∥W∥) to the weights of Qwen3-Omni-30B-A3B-Instruct as the student model, while keeping the original un-noised model as the teacher. Both models are served by vllm_omni in AR mode. We compare the proposed OPD (Offline Preference Distillation) against a standard GSPO baseline, which trains the same noised Qwen3-Omni model directly under identical settings.
+
+| Script | # NPUs | # NPUs for Actor | # NPUs for Rollout | # NPUs for Teacher Model | # NPUs for Async Reward | Batch Size | Rollouts per Prompt | LR | Time per Step (s) |
+|--------|--------|------------------|--------------------|--------------------------|-------------------------|------------|-------------------|----|-------------------|
+| `run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh` | 32 | 16 | 16 | 16 | 0 (sync) | 128 | 16 | 3e-6 | 1800 |
+
+### Training Reward Curve (OPD vs GSPO)
+<div align="center">
+<img width="763" height="261" alt="Training reward curve of GSPO OPD vs GSPO" src="https://github.com/user-attachments/assets/7fd1dc67-85c0-4adc-9f7a-10cdbec005d0" />
+</div>
+
+### Validation Reward Curve (OPD vs GSPO)
+
+<div align="center">
+<img width="763" height="261" alt="Validation curve of GSPO OPD vs GSPO" src="https://github.com/user-attachments/assets/fe25b199-10e1-4a90-b4e5-18248d40d3fa" />
 </div>
