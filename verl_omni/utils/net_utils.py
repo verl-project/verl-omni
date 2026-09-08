@@ -33,6 +33,8 @@ def get_non_ephemeral_free_port(address: str = "127.0.0.1") -> int:
     connections in that window (later failing to listen with ``EADDRINUSE``).
     """
     lo, _ = ephemeral_port_range()
+    if lo <= 1024:
+        raise RuntimeError(f"Ephemeral port range starts at {lo}; no non-privileged candidate ports below it.")
     candidates = range(1024, lo)
     start = random.randrange(len(candidates))
     for offset in range(len(candidates)):

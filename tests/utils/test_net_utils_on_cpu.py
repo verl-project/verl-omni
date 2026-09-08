@@ -53,3 +53,9 @@ def test_raises_when_all_candidates_are_bound(monkeypatch):
     finally:
         for holder in holders:
             holder.close()
+
+
+def test_raises_when_ephemeral_range_leaves_no_candidates(monkeypatch):
+    monkeypatch.setattr(net_utils, "ephemeral_port_range", lambda: (1024, 60999))
+    with pytest.raises(RuntimeError, match="no non-privileged candidate ports"):
+        net_utils.get_non_ephemeral_free_port("127.0.0.1")

@@ -62,7 +62,7 @@ def _pad_llm_generation_outputs(
     gen_len = int(response_ids.shape[-1])
     if gen_len > max_new_tokens:
         raise ValueError(f"llm_response_ids length {gen_len} exceeds rollout.max_new_tokens={max_new_tokens}")
-    attention_mask = torch.zeros(*response_ids.shape[:-1], max_new_tokens, dtype=torch.long)
+    attention_mask = torch.zeros(*response_ids.shape[:-1], max_new_tokens, dtype=torch.long, device=response_ids.device)
     attention_mask[..., :gen_len] = 1
     padded_ids = F.pad(response_ids, (0, max_new_tokens - gen_len), value=pad_token_id)
     padded_log_probs = None
