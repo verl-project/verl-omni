@@ -21,7 +21,6 @@ from typing import Any, Optional
 import ray
 import torch
 import vllm_omni.entrypoints.cli.serve
-from verl.utils.net_utils import get_free_port
 from verl.workers.config import RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, TokenOutput
 from verl.workers.rollout.utils import run_uvicorn
@@ -37,6 +36,7 @@ from vllm_omni.entrypoints import AsyncOmni
 from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
 from vllm_omni.lora.request import LoRARequest
 
+from verl_omni.utils.net_utils import get_non_ephemeral_free_port
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig, OmniModelConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
@@ -157,8 +157,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if engine_args.get("seed") is None:
             engine_args.pop("seed", None)
 
-        diffusion_master_port, diffusion_master_sock = get_free_port("127.0.0.1", with_alive_sock=True)
-        diffusion_master_sock.close()
+        # The port stays unbound until vllm-omni's rank-0 DiffusionWorker
+        # listens on it; see get_non_ephemeral_free_port for why it must not
+        # come from the ephemeral range.
+        # TODO (mike): drop once vllm-omni passes a FileStore-backed
+        # distributed_init_method to its workers instead of env:// MASTER_PORT.
+        diffusion_master_port = get_non_ephemeral_free_port("127.0.0.1")
 
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = str(diffusion_master_port)
