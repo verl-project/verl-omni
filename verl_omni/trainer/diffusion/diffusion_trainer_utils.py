@@ -88,6 +88,25 @@ def validate_distillation_config(config) -> None:
         )
     if enabled and config.algorithm.trainer_type != "policy_gradient":
         raise NotImplementedError("Diffusion distillation requires algorithm.trainer_type=policy_gradient.")
+    if enabled and config.distillation.get("scheduler", "inline") == "one_step_off":
+        v1 = config.trainer.get("use_v1", False) and config.trainer.v1.trainer_mode == "separate_async"
+        if not v1 or config.distillation.nnodes <= 0:
+            raise ValueError(
+                "distillation.scheduler=one_step_off requires the v1 separate_async trainer and standalone "
+                "teachers (distillation.nnodes > 0); colocated teachers share the actor GPUs and have "
+                "nothing to overlap with."
+            )
+        if config.trainer.v1.separate_async.get("sync_compatible", False):
+            raise ValueError(
+                "distillation.scheduler=one_step_off contradicts "
+                "trainer.v1.separate_async.sync_compatible=true, which emulates synchronous training."
+            )
+        if config.trainer.v1.separate_async.get("num_warmup_batches", 1) < 2:
+            raise ValueError(
+                "distillation.scheduler=one_step_off requires trainer.v1.separate_async.num_warmup_batches >= 2: "
+                "the teacher pipeline consumes one batch of generation lead at start-up, and with less lead every "
+                "sample waits on its own batch's generation."
+            )
 
 
 class NoOpCheckpointManager:

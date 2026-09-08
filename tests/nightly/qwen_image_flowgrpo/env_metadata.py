@@ -117,13 +117,12 @@ def collect_env_metadata(*, attn_backend: str | None = None, rollout_attn_backen
             "accelerate": _distribution_version("accelerate"),
         },
         "attention": {
-            "attn_backend": attn_backend or os.environ.get("NIGHTLY_ATTN_BACKEND"),
-            "rollout_attn_backend": rollout_attn_backend or os.environ.get("NIGHTLY_ROLLOUT_ATTN_BACKEND"),
+            "attn_backend": attn_backend,
+            "rollout_attn_backend": rollout_attn_backend,
             **fa3_flags,
         },
         "nightly": {
             "deterministic_seed": os.environ.get("NIGHTLY_DETERMINISTIC_SEED"),
-            "require_fa3": os.environ.get("NIGHTLY_REQUIRE_FA3"),
         },
     }
     return metadata
