@@ -13,6 +13,8 @@ on:
       - "docs/**"
       # Example READMEs are the Sphinx sources via git symlinks under docs/examples/.
       - "examples/**"
+      - .github/verl_pin.txt
+      - .github/vllm_omni_pin.txt
       - .github/workflows/doc.yml
 
 concurrency:

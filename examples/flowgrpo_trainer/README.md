@@ -50,8 +50,8 @@ bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
 GPU training defaults to matched kernels FA3 in config (`attn_backend: _flash_3_varlen_hub`;
-`rollout_attn_backend: FLASH_ATTN_3_HUB`). Training falls back to native/SDPA if FA3 deps
-are unavailable.
+`rollout_attn_backend: FLASH_ATTN_3_HUB`). Missing FA3 deps fail fast; install them or
+switch to native/`TORCH_SDPA` explicitly.
 
 Optional KL loss tuning:
 

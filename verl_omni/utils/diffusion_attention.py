@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""FA2/FA3 availability checks and fallback for matched actor/rollout attention."""
+"""FA2/FA3 availability checks and validation for matched actor/rollout attention."""
 
 from __future__ import annotations
 
@@ -28,7 +28,6 @@ ROLLOUT_SDPA_BACKEND = "TORCH_SDPA"
 
 # Keep in sync with vllm-omni diffusion attention backends for FA train/rollout pairs.
 FA_ROLLOUT_BACKENDS = ("FLASH_ATTN", "FLASH_ATTN_HUB", "FLASH_ATTN_3_HUB")
-KERNELS_HUB_ROLLOUT_BACKENDS = ("FLASH_ATTN_HUB", "FLASH_ATTN_3_HUB")
 ACTOR_BACKENDS = (ACTOR_FA2_BACKEND, ACTOR_FA3_BACKEND, ACTOR_NATIVE_BACKEND, "_native_npu")
 ROLLOUT_BACKENDS = FA_ROLLOUT_BACKENDS + (ROLLOUT_SDPA_BACKEND,)
 
@@ -64,38 +63,8 @@ def fa_available() -> bool:
     return actor_fa_available() and rollout_fa_available()
 
 
-# TODO (mike): drop this fallback and raise instead — a silent FA-to-native downgrade hides a broken kernels stack.
-def fallback_fa_if_unavailable(config: Any) -> None:
-    """Downgrade explicit FA2/FA3 settings to native/SDPA when deps are missing."""
-    attn_backend = config.actor_rollout_ref.model.get("attn_backend", ACTOR_FA3_BACKEND)
-    if attn_backend not in (ACTOR_FA2_BACKEND, ACTOR_FA3_BACKEND):
-        return
-
-    rollout_backend = config.actor_rollout_ref.rollout.get("rollout_attn_backend")
-    if rollout_backend in KERNELS_HUB_ROLLOUT_BACKENDS:
-        if actor_fa_available():
-            return
-    elif fa_available():
-        return
-
-    logger.warning(
-        "FA2/FA3 requested but unavailable for matched actor+rollout (kernels=%s, rollout_fa=%s); "
-        "falling back to actor=%s, rollout=%s.",
-        actor_fa_available(),
-        rollout_fa_available(),
-        ACTOR_NATIVE_BACKEND,
-        ROLLOUT_SDPA_BACKEND,
-    )
-    config.actor_rollout_ref.model.attn_backend = ACTOR_NATIVE_BACKEND
-    if rollout_backend in FA_ROLLOUT_BACKENDS:
-        config.actor_rollout_ref.rollout.rollout_attn_backend = ROLLOUT_SDPA_BACKEND
-
-
 def validate_attention_consistency(config: Any) -> None:
     """Validate that rollout and training attention backends match.
-
-    Called after ``fallback_fa_if_unavailable`` so any FA→native downgrade
-    has already updated both config fields.
 
     Rules:
         - If the training engine is VeOmni, skip validation.

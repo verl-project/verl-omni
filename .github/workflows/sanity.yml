@@ -13,6 +13,8 @@ on:
     paths:
       - "**/*.py"
       - .github/vllm_ascend_pin.txt
+      - .github/vllm_omni_pin.txt
+      - .github/verl_pin.txt
       - .github/workflows/sanity.yml
       - "tests/special_sanity/**"
 

@@ -1,16 +1,15 @@
-# MiniMax H3 T2VA and FL2VA FlowGRPO
+# MiniMax H3 T2VA, FL2VA, and Ref2VA FlowGRPO
 
-Last updated: 08/28/2026
+Last updated: 09/02/2026
 
 These recipes train `MiniMaxAI/MiniMax-H3` LoRA adapters with FlowGRPO for
-text-to-audio-video (T2VA) and first-frame image-to-audio-video (FL2VA)
-generation. The launchers configure a Diffusers H3 Actor and vLLM-Omni rollout
-for joint video and audio generation, with CLAP and ImageBind as the default
-alignment rewards.
+text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
+reference-to-audio-video (Ref2VA) generation. The launchers configure a
+Diffusers H3 Actor and vLLM-Omni rollout for joint video and audio generation,
+with CLAP and ImageBind as the default rewards.
 
-The T2VA launchers support NVIDIA GPUs and Ascend NPUs; the FL2VA launcher
-targets NVIDIA GPUs. Ref2VA training is not yet supported by the FlowGRPO
-adapters.
+T2VA supports NVIDIA GPUs and Ascend NPUs. The FL2VA and full multimodal
+Ref2VA paths target NVIDIA GPUs.
 
 ## Install
 
@@ -58,9 +57,12 @@ The recipe uses two representations from that download:
 
 ```text
 MiniMax-H3/
-|-- FL2VA/             # vLLM-Omni T2VA/FL2VA rollout pipeline
+|-- FL2VA/             # vLLM-Omni T2VA rollout pipeline
 |   `-- transformer/
-`-- transformer/       # Diffusers Actor weights and config
+|-- Ref2VA/            # vLLM-Omni Ref2VA rollout pipeline
+|   `-- transformer/
+|-- transformer/       # Diffusers T2VA Actor weights and config
+`-- transformer_ref/   # Diffusers Ref2VA Actor weights and config
 ```
 
 Set the corresponding paths before launching:
@@ -71,9 +73,10 @@ export ACTOR_CONFIG_PATH="$MODEL_ROOT/transformer"
 ```
 
 The scripts derive `ACTOR_CONFIG_PATH` as `$(dirname "$MODEL_PATH")/transformer`
-when it is not set explicitly. Do not replace the official `FL2VA/transformer`
-with a symlink to the root Diffusers transformer; rollout and Actor loading use
-different checkpoint layouts.
+when it is not set explicitly. The Ref2VA launcher takes the repository root
+as `MODEL_PATH` and resolves `Ref2VA/` and `transformer_ref/` separately. Do not
+replace either official rollout transformer with a symlink to a Diffusers
+transformer; rollout and Actor loading use different checkpoint layouts.
 
 ## Prepare the data
 
@@ -95,7 +98,7 @@ python3 examples/diffusionnft_trainer/minimax_h3/prepare_t2av_data.py \
 ```
 
 This writes `$DATA_DIR/train.parquet` and `$DATA_DIR/test.parquet`, the paths
-consumed by both launchers. Use `--train_size` or `--val_size` to create a
+consumed by the T2VA launchers. Use `--train_size` or `--val_size` to create a
 smaller debugging dataset.
 
 FL2VA conditions each clip on a first frame. Reuse the DiffusionNFT FL2VA
@@ -115,6 +118,35 @@ python3 examples/flowgrpo_trainer/minimax_h3/prepare_fl2va_data.py \
 Each `train.jsonl` / `test.jsonl` row carries a prompt and a first-frame image
 path relative to the input directory; see the DiffusionNFT FL2VA recipe for the
 exact schema.
+
+For Ref2VA, create `train.jsonl` and `test.jsonl` under one input directory.
+Each row accepts `images`, `videos`, and `audios`; paths may be absolute or
+relative to the input directory. At least one image or video is required.
+Video entries may be paths or objects with `path` and `start_time_seconds`:
+
+```json
+{"prompt":"The subject waves while the scene remains unchanged.","images":["refs/person.png"],"videos":[{"path":"refs/motion.mp4","start_time_seconds":0.0}],"audios":["refs/music.wav"]}
+```
+
+Convert both splits with:
+
+```bash
+python3 examples/flowgrpo_trainer/minimax_h3/prepare_ref2va_data.py \
+  --input_dir /path/to/ref2va_jsonl_and_media \
+  --output_dir "$HOME/data/minimax_h3_ref2va"
+```
+
+The official limits are at most 9 images, 3 videos, 3 standalone audios, and
+12 files total. Each video/audio clip must be 2–15 seconds and total reference
+media duration must not exceed 15 seconds. A standalone audio reference needs
+at least one visual reference. Video soundtracks are detected and conditioned
+automatically; do not list them again under `audios`.
+
+Reference-condition rows are padded to `MAX_PROMPT_EMBEDS`, with explicit row
+counts retained for Actor replay. The value must cover the largest per-sample
+condition layout; multiple references at the default 2048-pixel short edge may
+require a larger cap or a smaller `REF_IMAGE_SHORT_EDGE`. Generated target
+trajectories remain fixed-size and never repeat reference rows across SDE steps.
 
 ## Install reward dependencies
 
@@ -141,6 +173,8 @@ export IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth
 By default, CLAP runs on `$REWARD_DEVICE:0` and ImageBind on
 `$REWARD_DEVICE:1`, where `REWARD_DEVICE` is `cuda` for the GPU launcher and
 `npu` for the NPU launcher. Both devices must be visible to the reward worker.
+These rewards validate generated audio/video alignment but do not directly
+measure fidelity to the supplied references.
 
 
 ## Launch
@@ -176,6 +210,28 @@ bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_fl2va_lora.sh
 FL2VA reuses the same CPS FlowGRPO configuration as T2VA. The first-frame
 condition rows are held fixed across the reverse-SDE window and re-injected
 after every transition, so only the target video/audio rows are scored.
+
+### NVIDIA GPU (Ref2VA)
+
+```bash
+MODEL_PATH="$MODEL_ROOT" \
+DATA_DIR="$HOME/data/minimax_h3_ref2va" \
+IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
+REF_IMAGE_SHORT_EDGE=512 \
+VAL_REF_IMAGE_SHORT_EDGE=1024 \
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_ref2va_lora.sh
+```
+
+Ref2VA preserves the original Agent Loop token IDs and adds the official
+reference presentation in rollout. Reference image/video rows use timestep
+`0.999`, reference-audio rows use `1.0`, and all reference rows remain fixed
+through every stochastic reverse-SDE transition. They are transported once and
+reinserted by the Actor; only generated video and audio rows are stored in the
+trajectory and contribute to the FlowGRPO log probability. The launcher keeps
+the official reference-image short edge of 2048 by default. Set
+`REF_IMAGE_SHORT_EDGE` for training and `VAL_REF_IMAGE_SHORT_EDGE` for
+validation to multiples of 32 from 256 through 2048. The validation setting
+defaults to the training value.
 
 ### Ascend NPU
 
@@ -213,6 +269,12 @@ metrics local. Checkpoints and logs are written under
 | CPS window | 3 contiguous transitions from `[0, 8)` |
 | Total training steps | 100 |
 
+The Ref2VA launcher defaults to rollout/text-encoder TP 4, `448x288`, 96
+requested frames, 10 inference steps, `MAX_PROMPT_EMBEDS=12288`, rollout n=8,
+and Actor micro-batch 1. It enables layerwise rollout offload and FSDP2 Actor
+parameter/optimizer offload because reference presentations can be much longer
+than T2VA prompts.
+
 `NUM_GPUS` must be divisible by `ROLLOUT_TP`. `TEXT_ENCODER_TP` cannot exceed
 `ROLLOUT_TP`; H3 supports text-encoder TP sizes 1, 2, 4, and 8. The recipe uses
 an Actor micro-batch of 1 because samples with different packed
@@ -236,6 +298,9 @@ Common environment overrides are:
 | `NUM_GPUS` | Devices per node |
 | `ROLLOUT_TP` | vLLM-Omni DiT tensor parallel size |
 | `TEXT_ENCODER_TP` | H3 text-encoder tensor parallel size |
+| `MAX_PROMPT_EMBEDS` | Prompt/reference-row padding cap; defaults to 12288 |
+| `REF_IMAGE_SHORT_EDGE` | Ref2VA training image short edge; defaults to 2048 |
+| `VAL_REF_IMAGE_SHORT_EDGE` | Ref2VA validation image short edge; defaults to the training value |
 | `REWARD_NUM_WORKERS` | Number of reward workers |
 | `REWARD_DEVICE` | Reward device type, such as `cuda` or `npu` |
 | `CLAP_MODEL_PATH` | CLAP model ID or local path |
@@ -253,6 +318,9 @@ Extra Hydra overrides may be appended to either launcher command.
 
 ## Current limitations
 
-- T2VA and FL2VA rollout and training are supported. Ref2VA is a TODO.
+- The TransferQueue-specific Agent Loop path does not yet support variable
+  reference-row padding; the default diffusion Agent Loop manager does.
+- Distilled checkpoint-specific sigma schedules are rejected because Actor and
+  rollout replay currently use the standard H3 video/audio schedules.
 - CLAP and ImageBind are required by the provided launchers; change the reward
   configuration explicitly if either reward is unavailable.

@@ -61,6 +61,9 @@ class DiffusionDistillationConfig(BaseConfig):
     teacher_key (str):
         Key to route examples to the appropriate teacher model in multi-teacher setups. Should correspond to a field in
         the data proto, e.g., data_source.
+    scheduler (str):
+        Teacher scoring schedule. ``inline`` scores within the training step; ``one_step_off`` overlaps the scoring
+        of batch k with the actor update on batch k-1 (v1 separate_async with standalone teachers only).
 
     NOTE: The `teacher_model` entry is in the `teacher_models` dict by default.
     Since it is popped when other teacher entries are added, using `teacher_model` as
@@ -90,10 +93,14 @@ class DiffusionDistillationConfig(BaseConfig):
     nnodes: int = 0
     teacher_models: dict[str, DiffusionDistillationTeacherModelConfig] = field(default_factory=dict)
     teacher_key: str = "data_source"
+    scheduler: str = "inline"
 
     def __post_init__(self):
         if not self.enabled:
             return
+
+        if self.scheduler not in ("inline", "one_step_off"):
+            raise ValueError(f"Unknown distillation scheduler {self.scheduler!r}; expected 'inline' or 'one_step_off'.")
 
         self.teacher_models = self._resolve_teacher_models()
         if self.nnodes > 0:

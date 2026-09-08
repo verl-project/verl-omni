@@ -6,8 +6,9 @@ Last updated: |today| (API docstrings are auto-generated).
 VeRL-Omni reward pipelines support both rule-based scoring (e.g. JPEG
 compressibility) and model-based generative reward models (e.g. OCR via a
 vision-language model served behind an OpenAI-compatible router). Reward
-computation is dispatched per sample by the
-:class:`~verl_omni.reward_loop.reward_manager.VisualRewardManager`, which
+computation is dispatched per sample by modality-specific reward managers,
+including :class:`~verl_omni.reward_loop.reward_manager.VisualRewardManager`
+and :class:`~verl_omni.reward_loop.reward_manager.AudioRewardManager`, which
 plugs into :class:`~verl_omni.reward_loop.reward_loop.OmniRewardLoopManager` —
 verl's :class:`~verl.experimental.reward_loop.RewardLoopManager` extended with
 profiler control over the reward-model rollout servers.
@@ -17,8 +18,10 @@ profiler control over the reward-model rollout servers.
 
    verl_omni.reward_loop.reward_loop.OmniRewardLoopManager
    verl_omni.reward_loop.reward_manager.VisualRewardManager
+   verl_omni.reward_loop.reward_manager.AudioRewardManager
    verl_omni.utils.reward_score.default_compute_score_image
    verl_omni.utils.reward_score.http_scorer_client.compute_score
+   verl_omni.utils.reward_score.audio_http_scorer_client.compute_score
    verl_omni.utils.reward_score.unified_reward.compute_score_unified_reward
 
 Reward Loop Manager
@@ -32,6 +35,13 @@ Reward Manager
 
 .. autoclass:: verl_omni.reward_loop.reward_manager.VisualRewardManager
    :members: __init__, run_single
+
+.. autoclass:: verl_omni.reward_loop.reward_manager.AudioRewardManager
+   :members: __init__, run_single
+
+``AudioRewardManager`` reads ``audio`` and ``audio_sample_rate`` from rollout
+``extra_info``, validates a finite CPU float waveform, and calls a synchronous
+or asynchronous custom scorer with ``solution_audio=(waveform, sample_rate)``.
 
 Default Score Dispatcher
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -58,6 +68,12 @@ HTTP Scorer Client
 ^^^^^^^^^^^^^^^^^^^
 
 .. automodule:: verl_omni.utils.reward_score.http_scorer_client
+   :members: compute_score
+
+Audio HTTP Scorer Client
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: verl_omni.utils.reward_score.audio_http_scorer_client
    :members: compute_score
 
 UnifiedReward Scorer
