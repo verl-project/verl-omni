@@ -233,8 +233,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         if self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip wake_up in standalone mode")
             return
-        with RLInsightLogger.trace_state("vllm_wake_up", state_lane_id=f"replica_{self.replica_rank}"):
-            resolved_tags = tags if tags is not None else self._get_wake_up_tags()
+        resolved_tags = tags if tags is not None else self._get_wake_up_tags()
+        with RLInsightLogger.trace_state(
+            f"vllm_wake_up[{','.join(resolved_tags)}]", state_lane_id=f"replica_{self.replica_rank}"
+        ):
             acks = await self.engine.wake_up(tags=resolved_tags)
             self._validate_acks("wake_up", acks)
             await self.engine.resume_generation()
