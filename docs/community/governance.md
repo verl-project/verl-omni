@@ -33,10 +33,12 @@ Committers have write access and merge rights. They typically have deep expertis
 
 - [@AndyZhou952](https://github.com/AndyZhou952) (Jingan Zhou): Trainer and algorithm core; Diffusion Models
 - [@chenyingshu](https://github.com/chenyingshu) (Susan, Yingshu Chen): Trainer and algorithm core; Reward system; Pipeline and model adaptation; Datasets and examples
-- [@knlnguyen1802](https://github.com/knlnguyen1802) (Long): Rollout and agent loop
+- [@cr-gao](https://github.com/cr-gao) (Chenrui Gao): Workers and training engines
+- [@knlnguyen1802](https://github.com/knlnguyen1802) (Long Nguyen): Rollout and agent loop; Pipeline and model adaptation
 - [@NancyFyong](https://github.com/NancyFyong) (Zhiyong Feng): Trainer and algorithm core; Rollout and agent loop; Pipeline and model adaptation; Datasets and examples
 - [@ruihanglix](https://github.com/ruihanglix) (Ruihang Li): Reward system
 - [@Sky-Trigger](https://github.com/Sky-Trigger) (Mengbo Wang): Rollout and agent loop; Reward system
+- [@WenzheWang](https://github.com/WenzheWang) (Wenzhe Wang): Trainer and algorithm core
 - [@wtomin](https://github.com/wtomin) (Didan DENG): Tests and CI; Packaging and environment; Documentation
 - [@ZihaoW123](https://github.com/ZihaoW123) (Zihao Wang): Rollout and agent loop; Reward system; Pipeline and model adaptation
 - [@zhtmike](https://github.com/zhtmike) (Cheung Ka Wai): Workers and training engines
@@ -47,11 +49,11 @@ Directory rules cover the whole tree unless a more specific path below overrides
 
 | Path | Committers |
 | --- | --- |
-| `verl_omni/trainer/` | [@chenyingshu](https://github.com/chenyingshu), [@NancyFyong](https://github.com/NancyFyong) |
-| `verl_omni/workers/` | [@zhtmike](https://github.com/zhtmike) |
+| `verl_omni/trainer/` | [@chenyingshu](https://github.com/chenyingshu), [@NancyFyong](https://github.com/NancyFyong), [@WenzheWang](https://github.com/WenzheWang) |
+| `verl_omni/workers/` | [@cr-gao](https://github.com/cr-gao), [@zhtmike](https://github.com/zhtmike) |
 | `verl_omni/agent_loop/` <br> `verl_omni/workers/rollout/` <br> `verl_omni/utils/vllm_omni/` | [@knlnguyen1802](https://github.com/knlnguyen1802), [@Sky-Trigger](https://github.com/Sky-Trigger), [@NancyFyong](https://github.com/NancyFyong), [@ZihaoW123](https://github.com/ZihaoW123) |
 | `verl_omni/reward_loop/` <br> `verl_omni/utils/reward_score/` | [@ruihanglix](https://github.com/ruihanglix), [@chenyingshu](https://github.com/chenyingshu), [@Sky-Trigger](https://github.com/Sky-Trigger), [@ZihaoW123](https://github.com/ZihaoW123) |
-| `verl_omni/pipelines/` | [@chenyingshu](https://github.com/chenyingshu), [@NancyFyong](https://github.com/NancyFyong), [@ZihaoW123](https://github.com/ZihaoW123) |
+| `verl_omni/pipelines/` | [@chenyingshu](https://github.com/chenyingshu), [@NancyFyong](https://github.com/NancyFyong), [@ZihaoW123](https://github.com/ZihaoW123), [@knlnguyen1802](https://github.com/knlnguyen1802) |
 | `verl_omni/utils/dataset/` <br> `examples/` | [@chenyingshu](https://github.com/chenyingshu), [@NancyFyong](https://github.com/NancyFyong) |
 | `tests/` <br> `.github/` <br> `scripts/` <br> `docker/` <br> `docs/` <br> `.agents/` | [@wtomin](https://github.com/wtomin) |
 

@@ -27,10 +27,10 @@
 /verl_omni/utils/dataset/ @chenyingshu @NancyFyong
 
 # Trainer and algorithm core
-/verl_omni/trainer/ @chenyingshu @NancyFyong
+/verl_omni/trainer/ @chenyingshu @NancyFyong @WenzheWang
 
 # Workers and training engines (FSDP/VeOmni, actor/ref, LoRA, checkpointing)
-/verl_omni/workers/ @zhtmike
+/verl_omni/workers/ @cr-gao @zhtmike
 
 # Rollout and agent loop (overrides workers/rollout)
 /verl_omni/agent_loop/ @knlnguyen1802 @Sky-Trigger @NancyFyong @ZihaoW123
@@ -42,4 +42,4 @@
 /verl_omni/utils/reward_score/ @ruihanglix @chenyingshu @Sky-Trigger @ZihaoW123
 
 # Pipeline and model adaptation
-/verl_omni/pipelines/ @chenyingshu @NancyFyong @ZihaoW123
+/verl_omni/pipelines/ @chenyingshu @NancyFyong @ZihaoW123 @knlnguyen1802
