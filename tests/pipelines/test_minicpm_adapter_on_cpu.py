@@ -22,7 +22,6 @@ import torch.nn as nn
 
 from verl_omni.pipelines.minicpm.thinker_training_adapter import (
     MiniCPMThinkerAdapter,
-    patch_minicpm_whisper_encoder_layers,
     split_minicpm_forward_kwargs,
 )
 from verl_omni.pipelines.model_base import OmniModelBase
@@ -296,7 +295,7 @@ def test_build_module_uses_transformers_auto_model(monkeypatch):
 
     monkeypatch.setattr(AutoModel, "from_pretrained", fake_from_pretrained)
     monkeypatch.setattr(
-        "verl_omni.models.transformers.remote_code_compat.patch_remote_auto_model_init",
+        "verl_omni.models.transformers.minicpm_o.patch_remote_auto_model_init",
         fake_patch,
     )
     config = _model_config()
@@ -317,73 +316,11 @@ def test_build_module_uses_transformers_auto_model(monkeypatch):
     assert "init_tts" not in calls[0][1]
 
 
-class _TwoTupleWhisperAttn(nn.Module):
-    """Mirrors transformers WhisperAttention: returns (hidden_states, attn_weights)."""
+def test_configure_model_applies_remote_whisper_compat(monkeypatch):
+    from verl_omni.models.transformers import minicpm_o
 
-    def forward(self, hidden_states, **kwargs):
-        del kwargs
-        return hidden_states, None
-
-
-class _MiniCPMWhisperEncoderLayerStub(nn.Module):
-    """Mirrors MiniCPMWhisperEncoderLayer's 3-way unpack of self_attn."""
-
-    def __init__(self):
-        super().__init__()
-        self.self_attn = _TwoTupleWhisperAttn()
-
-    def forward(
-        self,
-        hidden_states,
-        attention_mask=None,
-        layer_head_mask=None,
-        output_attentions=False,
-        past_key_values=None,
-        use_cache=False,
-    ):
-        del use_cache
-        hidden_states, attn_weights, past_key_values = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            layer_head_mask=layer_head_mask,
-            output_attentions=output_attentions,
-            past_key_value=past_key_values,
-        )
-        del attn_weights
-        return hidden_states, past_key_values
-
-
-class _MiniCPMOWithAPM(_MiniCPMOStyle):
-    def __init__(self):
-        super().__init__()
-        self.apm = nn.Module()
-        self.apm.layers = nn.ModuleList([_MiniCPMWhisperEncoderLayerStub()])
-
-
-def test_unpatched_whisper_layer_cannot_unpack_two_tuple_attn():
-    layer = _MiniCPMWhisperEncoderLayerStub()
-    hidden = torch.ones(1, 2, 4)
-    with pytest.raises(ValueError, match="not enough values to unpack"):
-        layer(hidden)
-
-
-def test_configure_model_pads_whisper_self_attn_to_three_tuple():
-    module = _MiniCPMOWithAPM()
-    configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
-    hidden = torch.ones(1, 2, 4)
-
-    out, past = configured.apm.layers[0](hidden, past_key_values="cache")
-
-    assert torch.equal(out, hidden)
-    assert past == "cache"
-
-
-def test_patch_minicpm_whisper_encoder_layers_is_idempotent():
-    module = _MiniCPMOWithAPM()
-    patch_minicpm_whisper_encoder_layers(module)
-    first_forward = module.apm.layers[0].self_attn.forward
-    patch_minicpm_whisper_encoder_layers(module)
-    assert module.apm.layers[0].self_attn.forward is first_forward
-    hidden = torch.ones(1, 2, 4)
-    out, _ = module.apm.layers[0](hidden)
-    assert torch.equal(out, hidden)
+    seen = []
+    monkeypatch.setattr(minicpm_o, "patch_remote_whisper_self_attn", lambda module: seen.append(module))
+    module = _MiniCPMOStyle()
+    MiniCPMThinkerAdapter.configure_model(module, _model_config())
+    assert seen == [module]
