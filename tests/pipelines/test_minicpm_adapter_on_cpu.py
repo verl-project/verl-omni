@@ -21,6 +21,7 @@ import torch
 import torch.nn as nn
 
 from verl_omni.pipelines.minicpm.thinker_training_adapter import (
+    MiniCPMO,
     MiniCPMThinkerAdapter,
     split_minicpm_forward_kwargs,
 )
@@ -201,6 +202,7 @@ def _model_config(**override_config):
 
 def test_minicpm_adapter_registered_for_minicpmo_architecture():
     assert OmniModelBase.get_class_by_name("MiniCPMO", "thinker") is MiniCPMThinkerAdapter
+    assert MiniCPMThinkerAdapter.auto_model_class is MiniCPMO
 
 
 def test_fsdp_name_is_ignored_matches_peft_prefixed_apm():
@@ -278,7 +280,7 @@ def test_cloned_vllm_embedding_scatter_supports_backward():
     assert configured.llm.embed.weight.grad is not None
 
 
-def test_build_module_uses_transformers_auto_model(monkeypatch):
+def test_minicpmo_from_pretrained_patches_then_loads_auto_model(monkeypatch):
     from transformers import AutoModel
 
     loaded = MagicMock(spec=nn.Module)
@@ -299,7 +301,12 @@ def test_build_module_uses_transformers_auto_model(monkeypatch):
     )
     config = _model_config()
 
-    module = MiniCPMThinkerAdapter.build_module(config, torch.bfloat16)
+    module = MiniCPMO.from_pretrained(
+        "/fake/minicpm",
+        torch_dtype=torch.bfloat16,
+        config=config.hf_config,
+        trust_remote_code=True,
+    )
 
     assert module is loaded
     assert patch_calls == [

@@ -26,7 +26,6 @@ from typing import Any
 
 from verl_omni.pipelines.model_base import OmniModelBase
 
-_MINICPM_ARCHITECTURES = ("MiniCPMO",)
 _MINICPM_NO_SPLIT_MODULES = ["Qwen3DecoderLayer", "MiniCPMODecoderLayer"]
 # Keys consumed by MiniCPMO.forward(data, **kwargs) / get_vllm_embedding / get_omni_embedding.
 _MINICPM_DATA_KEYS = (
@@ -52,12 +51,6 @@ _MINICPM_REQUIRED_DATA_KEYS = (
 # MiniCPMO.forward binds these before ``self.llm(..., **kwargs)``. The adapter wrap
 # must not forward engine copies or the LLM call raises TypeError.
 _MINICPM_LLM_BOUND_KEYS = ("input_ids", "position_ids", "inputs_embeds")
-
-
-def _register_minicpm_architectures(cls):
-    for architecture in _MINICPM_ARCHITECTURES:
-        OmniModelBase.register(architecture, stage="thinker")(cls)
-    return cls
 
 
 def _first_existing_attr(module, names: list[str]):
@@ -150,44 +143,36 @@ def split_minicpm_forward_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any]
     return data, llm_kwargs
 
 
-@_register_minicpm_architectures
-class MiniCPMThinkerAdapter(OmniModelBase):
-    """Training adapter for MiniCPM multimodal understanding-only DPO."""
+class MiniCPMO:
+    """HF ``architectures[0]`` loader for MiniCPM-o remote code.
+
+    ``OmniFSDPEngine._build_module`` calls ``from_pretrained`` on this class.
+    The checkpoint's remote ``MiniCPMO`` type is resolved through ``AutoModel``.
+    """
 
     @classmethod
-    def get_strip_modules(cls, model_config) -> list[str]:
-        return [
-            "talker",
-            "tts",
-            "audio_decoder",
-            "audio_generator",
-            "audio_head",
-            "audio_detokenizer",
-            "codec",
-            "code2wav",
-            "code_predictor",
-            "snac",
-            "vocoder",
-        ]
-
-    @classmethod
-    def build_module(cls, model_config, torch_dtype):
+    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         from transformers import AutoModel
 
         from verl_omni.models.transformers.minicpm_o import patch_remote_auto_model_init
 
         patch_remote_auto_model_init(
-            model_config.local_path,
-            trust_remote_code=model_config.trust_remote_code,
-            config=model_config.hf_config,
+            pretrained_model_name_or_path,
+            trust_remote_code=kwargs.get("trust_remote_code", False),
+            config=kwargs.get("config"),
         )
+        return AutoModel.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
 
-        return AutoModel.from_pretrained(
-            model_config.local_path,
-            torch_dtype=torch_dtype,
-            config=model_config.hf_config,
-            trust_remote_code=model_config.trust_remote_code,
-        )
+
+@OmniModelBase.register("MiniCPMO", stage="thinker")
+class MiniCPMThinkerAdapter(OmniModelBase):
+    """Training adapter for MiniCPM multimodal understanding."""
+
+    auto_model_class = MiniCPMO
+
+    @classmethod
+    def get_strip_modules(cls, model_config) -> list[str]:
+        return ["tts"]
 
     @classmethod
     def configure_model(cls, module, model_config):

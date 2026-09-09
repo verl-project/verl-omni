@@ -46,10 +46,10 @@ MODEL_PATH=openbmb/MiniCPM-o-4_5 \
 bash examples/dpo_trainer/minicpm/run_minicpm_omni_preference_lora.sh
 ```
 
-The script uses `AutoModel.from_pretrained(..., trust_remote_code=True)` through
-the MiniCPM omni adapter. It auto-detects the architecture from the checkpoint
-config and sets `init_tts=false` through the Hugging Face config override so the
-inference-only TTS module is not initialized for training.
+`OmniFSDPEngine._build_module` loads MiniCPM-o through
+`MiniCPMThinkerAdapter.auto_model_class` (`architectures[0]` is `MiniCPMO`). The launch script sets `init_tts=false` through the
+Hugging Face config override so the inference-only TTS module is not initialized
+for training.
 
 Key defaults in the launch script:
 
