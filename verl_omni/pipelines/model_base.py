@@ -476,6 +476,10 @@ class OmniModelBase(ABC):
     The registry key is ``(architecture, stage)`` where *architecture*
     matches the HF config ``architectures[0]`` and *stage* is
     ``thinker``, ``talker``, or ``all``.
+
+    Set ``auto_model_class`` to a Transformers auto/model class with
+    ``from_pretrained``. Leave it ``None`` to keep the default
+    ``AutoModelForMultimodalLM`` path.
     """
 
     _registry: dict[tuple[str, str], type["OmniModelBase"]] = {}
@@ -623,10 +627,9 @@ class OmniModelBase(ABC):
     def build_module(cls, model_config, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
         """Optionally load the trainable module for this omni architecture.
 
-        Return ``None`` to use the default ``AutoModelForMultimodalLM`` path.
-        Override this for models that must be loaded through a different
-        Transformers auto class, such as MiniCPM's ``AutoModel`` remote-code
-        entrypoint.
+        Return ``None`` to use ``AutoModelForMultimodalLM``. This method is
+        skipped when ``auto_model_class`` is set; the engine loads through
+        that class instead.
         """
         return None
 

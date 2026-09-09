@@ -529,6 +529,56 @@ def test_build_module_rejects_mixed_frozen_parameters_without_fsdp1_orig_params(
             engine._build_module()
 
 
+def test_build_module_uses_adapter_auto_model_class():
+    """When ``auto_model_class`` is set, load through it instead of AutoModelForMultimodalLM."""
+    omni_impl = _get_omni_impl_module()
+    model_config = _make_mock_model_config(architecture="MiniCPMO")
+
+    fake_loaded_module = MagicMock(spec=torch.nn.Module)
+    fake_configured_module = MagicMock(spec=torch.nn.Module)
+    fake_configured_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
+
+    class _AutoModel:
+        @staticmethod
+        def from_pretrained(**kwargs):
+            _AutoModel.kwargs = kwargs
+            return fake_loaded_module
+
+    class _Adapter:
+        auto_model_class = _AutoModel
+
+        @staticmethod
+        def configure_model(module, model_config):
+            del model_config
+            return fake_configured_module if module is fake_loaded_module else module
+
+    model_base_mod = sys.modules["verl_omni.pipelines.model_base"]
+
+    with (
+        patch.object(omni_impl.AutoModelForMultimodalLM, "from_pretrained") as mock_default,
+        patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=_Adapter),
+        patch.object(omni_impl, "get_init_weight_context_manager", return_value=MagicMock()),
+        patch.object(omni_impl.warnings, "catch_warnings", return_value=MagicMock()),
+        patch("verl.utils.torch_dtypes.PrecisionType") as mock_precision,
+    ):
+        mock_precision.to_dtype.return_value = torch.bfloat16
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine.model_config = model_config
+        engine.engine_config = MagicMock()
+        engine.engine_config.model_dtype = None
+        engine.engine_config.forward_only = True
+        engine.device_mesh = None
+
+        result = engine._build_module()
+
+    mock_default.assert_not_called()
+    assert _AutoModel.kwargs["pretrained_model_name_or_path"] == model_config.local_path
+    assert _AutoModel.kwargs["trust_remote_code"] == model_config.trust_remote_code
+    assert _AutoModel.kwargs["config"] is model_config.hf_config
+    assert _AutoModel.kwargs["torch_dtype"] is torch.bfloat16
+    assert result is fake_configured_module
+
+
 @pytest.mark.parametrize("option", ["use_liger", "use_fused_kernels"])
 def test_build_module_rejects_unsupported_optimizations_before_model_load(option):
     omni_impl = _get_omni_impl_module()

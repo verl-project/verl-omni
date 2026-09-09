@@ -69,7 +69,7 @@ def apply_fsdp2_excluding_module_names(model, fsdp_kwargs, config, ignored_modul
     original_fully_shard = verl_fsdp_utils.fully_shard
 
     def _fully_shard(module, *args, **kwargs):
-        if module is model and ignored_params:
+        if ignored_params:
             kwargs = {**kwargs, "ignored_params": ignored_params}
         return original_fully_shard(module, *args, **kwargs)
 
