@@ -237,20 +237,19 @@ class _MiniCPMOWithEncoders(_MiniCPMOStyle):
         self.vision_calls = 0
 
     def get_vision_embedding(self, data):
+        del data
         self.vision_calls += 1
         hidden = torch.ones(1, 2, 4, requires_grad=True)
         return [hidden]
 
 
-def test_configure_model_freezes_vpm_and_apm():
+def test_configure_model_does_not_freeze_encoders():
     module = _MiniCPMOWithEncoders()
-    assert all(param.requires_grad for param in module.vpm.parameters())
     configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
-    assert configured.vpm.training is False
-    assert configured.apm.training is False
-    assert all(not param.requires_grad for param in configured.vpm.parameters())
-    assert all(not param.requires_grad for param in configured.apm.parameters())
-    assert all(param.requires_grad for param in configured.llm.embed.parameters())
+    assert configured.vpm.training is True
+    assert configured.apm.training is True
+    assert all(param.requires_grad for param in configured.vpm.parameters())
+    assert all(param.requires_grad for param in configured.apm.parameters())
 
 
 def test_patched_get_vision_embedding_skips_dummy_encoder_when_no_images():
