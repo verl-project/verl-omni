@@ -31,10 +31,8 @@ from verl.utils.fsdp_utils import fsdp_version
 from verl.utils.fsdp_utils import layered_summon_lora_params as _upstream_layered_summon_lora_params
 
 __all__ = [
-    "apply_fsdp2_excluding_module_names",
     "collect_lora_params",
     "export_fsdp_lora_adapter",
-    "fsdp_name_is_ignored",
     "fsdp_summon_full_params",
     "split_fused_moe_lora_targets",
 ]
@@ -43,43 +41,6 @@ __all__ = [
 # nn.Parameter, not nn.Linear. PEFT must target them via target_parameters.
 _FUSED_MOE_EXPERTS_MODULE = "experts"
 _FUSED_MOE_DEFAULT_TARGET_PARAMETERS = ("gate_up_proj", "down_proj")
-
-
-def fsdp_name_is_ignored(name: str, ignored_module_names: Sequence[str]) -> bool:
-    """True when ``name`` is ``apm`` or anything under it (including PEFT prefixes)."""
-    parts = name.split(".")
-    return any(ignored in parts for ignored in ignored_module_names)
-
-
-def apply_fsdp2_excluding_module_names(model, fsdp_kwargs, config, ignored_module_names: Sequence[str]):
-    """Run verl ``apply_fsdp2`` with root ``ignored_params`` from ``named_parameters()``.
-
-    Does not change ``requires_grad``. FSDP2 will not all-reduce grads on ignored
-    tensors; callers that train them must sync grads themselves.
-    """
-    import verl.utils.fsdp_utils as verl_fsdp_utils
-
-    if not ignored_module_names:
-        verl_fsdp_utils.apply_fsdp2(model, fsdp_kwargs, config)
-        return
-
-    ignored_params = {
-        param for name, param in model.named_parameters() if fsdp_name_is_ignored(name, ignored_module_names)
-    }
-    original_fully_shard = verl_fsdp_utils.fully_shard
-
-    def _fully_shard(module, *args, **kwargs):
-        # FSDP2 takes ignored_params on the root fully_shard call only; nested
-        # calls must not carry the root's set.
-        if module is model and ignored_params:
-            kwargs = {**kwargs, "ignored_params": ignored_params}
-        return original_fully_shard(module, *args, **kwargs)
-
-    verl_fsdp_utils.fully_shard = _fully_shard
-    try:
-        verl_fsdp_utils.apply_fsdp2(model, fsdp_kwargs, config)
-    finally:
-        verl_fsdp_utils.fully_shard = original_fully_shard
 
 
 def _get_fsdp_module_cls():

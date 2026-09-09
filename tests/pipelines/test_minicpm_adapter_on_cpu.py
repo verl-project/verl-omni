@@ -205,16 +205,6 @@ def test_minicpm_adapter_registered_for_minicpmo_architecture():
     assert MiniCPMThinkerAdapter.auto_model_class is MiniCPMO
 
 
-def test_fsdp_name_is_ignored_matches_peft_prefixed_apm():
-    from verl_omni.utils.fsdp_utils import fsdp_name_is_ignored
-
-    ignored = ["apm"]
-    assert fsdp_name_is_ignored("apm", ignored)
-    assert fsdp_name_is_ignored("apm.embed_positions.weight", ignored)
-    assert fsdp_name_is_ignored("base_model.model.apm.conv1.weight", ignored)
-    assert not fsdp_name_is_ignored("llm.layers.0.self_attn.q_proj.weight", ignored)
-
-
 def test_configure_model_strips_generation_modules_and_keeps_outer_forward():
     module = _MiniCPMOStyle()
     configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
