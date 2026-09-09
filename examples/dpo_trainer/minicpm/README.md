@@ -52,3 +52,5 @@ Key defaults in the launch script:
 
 - `data.train_files`: image + audio parquet only
 - `ModalityGroupedBatchSampler` weights: `{image, audio}` only
+- `actor_rollout_ref.model.exclude_modules`: skip LoRA on `vpm` / `apm` and
+  generation-only modules.
