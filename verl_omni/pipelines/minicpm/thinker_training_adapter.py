@@ -24,6 +24,8 @@ from __future__ import annotations
 import types
 from typing import Any
 
+import torch
+
 from verl_omni.pipelines.model_base import OmniModelBase
 
 _MINICPM_NO_SPLIT_MODULES = ["Qwen3DecoderLayer", "MiniCPMODecoderLayer"]
@@ -106,7 +108,8 @@ def split_minicpm_forward_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any]
         raise ValueError(
             "MiniCPMO.forward expects per-sample sequences in data['input_ids'], but the batch "
             f"was packed to shape {tuple(data['input_ids'].shape)} while image_bound has "
-            f"{len(image_bound)} samples. Set actor_rollout_ref.model.use_remove_padding=false."
+            f"{len(image_bound)} samples. A packed (use_remove_padding=true) batch reached the "
+            "model without going through MiniCPMThinkerAdapter.prepare_model_inputs."
         )
     data.setdefault("pixel_values", [[] for _ in range(batch_size)])
     data.setdefault("tgt_sizes", [[] for _ in range(batch_size)])
@@ -164,6 +167,95 @@ class MiniCPMO:
         return AutoModel.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
 
 
+def _media_in_data(data: dict[str, Any]) -> bool:
+    pixel_values = data.get("pixel_values")
+    has_pixels = bool(pixel_values) and any(len(sample) for sample in pixel_values)
+    audio_features = data.get("audio_features")
+    has_audio = audio_features is not None and len(audio_features) > 0
+    return has_pixels or has_audio
+
+
+def _is_packed_batch(data: dict[str, Any]) -> bool:
+    """rmpad layout: flattened ``[1, total]`` ids with resetting position_ids."""
+    input_ids = data.get("input_ids")
+    position_ids = data.get("position_ids")
+    if input_ids is None or position_ids is None or input_ids.ndim != 2 or input_ids.shape[0] != 1:
+        return False
+    resets = int((position_ids.reshape(-1) == 0).sum().item())
+    return resets > 1
+
+
+def _apply_media_bounds(data: dict[str, Any], model_config) -> None:
+    """Derive ``image_bound`` / ``audio_bounds`` from the (already expanded) ids.
+
+    Cross-checks span counts against the media-feature counts so a train/rollout
+    expansion mismatch fails here instead of scattering wrong embeddings.
+    Text-only batches keep the empty defaults from the split.
+    """
+    if not _media_in_data(data):
+        return
+    processor = getattr(model_config, "processor", None)
+    if processor is None:
+        raise RuntimeError(
+            "MiniCPM media batches require model_config.processor to derive "
+            "image_bound/audio_bounds; the model config did not load a processor."
+        )
+    from verl_omni.pipelines.minicpm.prompt_parity import resolve_media_tokens
+
+    tokens = resolve_media_tokens(processor)
+
+    def _counts_match(spans: list[list[int]], expected: int, kind: str) -> None:
+        if len(spans) != expected:
+            raise ValueError(
+                f"MiniCPM {kind} parity failure: ids expanded into {len(spans)} spans but the "
+                f"processor features describe {expected}. The rollout and actor renderings "
+                "disagree; compare slot expansion on both sides before training."
+            )
+
+    if _is_packed_batch(data):
+        image_bounds, audio_bounds = tokens.derive_media_bounds(data["input_ids"].reshape(-1))
+        _counts_match(image_bounds, sum(len(sample) for sample in data["pixel_values"]), "image")
+        _counts_match(audio_bounds, sum(len(sample) for sample in data["audio_feature_lens"]), "audio")
+        data["image_bound"] = [image_bounds]
+        data["audio_bounds"] = [audio_bounds]
+    else:
+        per_row_image, per_row_audio = [], []
+        for row in range(data["input_ids"].shape[0]):
+            image_bounds, audio_bounds = tokens.derive_media_bounds(data["input_ids"][row])
+            per_row_image.append(image_bounds)
+            per_row_audio.append(audio_bounds)
+        _counts_match(
+            [span for spans in per_row_image for span in spans],
+            sum(len(sample) for sample in data["pixel_values"]),
+            "image",
+        )
+        _counts_match(
+            [span for spans in per_row_audio for span in spans],
+            sum(len(sample) for sample in data["audio_feature_lens"]),
+            "audio",
+        )
+        data["image_bound"] = per_row_image
+        data["audio_bounds"] = per_row_audio
+
+
+def _merge_packed_media(data: dict[str, Any]) -> None:
+    """Fold per-sample media into one pseudo-sample for the flattened batch.
+
+    ``MiniCPMO.get_vllm_embedding`` / ``get_omni_embedding`` scatter per batch
+    row; with the packed layout the single row is the concatenation of all
+    samples, so media and bounds must be presented as that one row's load —
+    order (sample-major, media order within) matches the id scan.
+    """
+    data["pixel_values"] = [slice_ for sample in data["pixel_values"] for slice_ in sample]
+    tgt_sizes = [sample for sample in data["tgt_sizes"] if int(sample.numel()) > 0]
+    data["tgt_sizes"] = [torch.cat(tgt_sizes, dim=0)] if tgt_sizes else [torch.zeros(0, 2, dtype=torch.int32)]
+    data["audio_feature_lens"] = [
+        [lens for sample in data["audio_feature_lens"] for lens in torch.as_tensor(sample).reshape(-1).tolist()]
+    ]
+    data["image_bound"] = [span for spans in data["image_bound"] for span in spans]
+    data["audio_bounds"] = [span for spans in data["audio_bounds"] for span in spans]
+
+
 @OmniModelBase.register("MiniCPMO", stage="thinker")
 class MiniCPMThinkerAdapter(OmniModelBase):
     """Training adapter for MiniCPM multimodal understanding."""
@@ -182,6 +274,12 @@ class MiniCPMThinkerAdapter(OmniModelBase):
             patch_remote_whisper_self_attn,
         )
 
+        version = str(getattr(getattr(module, "config", None), "version", ""))
+        if version != "4.5":
+            raise ValueError(
+                f"MiniCPMThinkerAdapter supports MiniCPM-o 4.5 checkpoints only; "
+                f"config.version={version!r}. MiniCPM-o 2.6 is rejected by vLLM-Omni."
+            )
         module = super().configure_model(module, model_config)
         patch_remote_whisper_self_attn(module)
         patch_minicpm_get_vision_embedding(module)
@@ -220,13 +318,21 @@ class MiniCPMThinkerAdapter(OmniModelBase):
 
     @classmethod
     def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
-        del micro_batch, model_config
+        del micro_batch
         data, llm_kwargs = split_minicpm_forward_kwargs(dict(model_inputs))
+        _apply_media_bounds(data, model_config)
+        if _is_packed_batch(data):
+            _merge_packed_media(data)
+            # FA2 derives cu_seqlens from position_ids; a padded attention_mask
+            # would contradict the packed layout.
+            llm_kwargs.pop("attention_mask", None)
         return {"data": data, **llm_kwargs}
 
     @classmethod
     def configure_processor(cls, model_path: str, model_config) -> Any:
         from transformers import AutoProcessor
+
+        from verl_omni.pipelines.minicpm.prompt_parity import bind_minicpm_processor
 
         try:
             processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=model_config.trust_remote_code)
@@ -237,7 +343,7 @@ class MiniCPMThinkerAdapter(OmniModelBase):
             ) from exc
         if getattr(processor, "tokenizer", None) is None:
             processor.tokenizer = cls.configure_tokenizer(model_path, model_config)
-        return processor
+        return bind_minicpm_processor(processor)
 
     @classmethod
     def configure_tokenizer(cls, model_path: str, model_config) -> Any:

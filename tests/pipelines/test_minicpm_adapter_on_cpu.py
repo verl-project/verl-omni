@@ -53,6 +53,7 @@ class _MiniCPMOStyle(nn.Module):
 
     def __init__(self):
         super().__init__()
+        self.config = SimpleNamespace(version="4.5")
         self.llm = _LLM()
         self.llm.prepare_inputs_for_generation = MethodType(_prepare_inputs_for_generation, self.llm)
         self.tts = nn.Linear(4, 4)
@@ -179,8 +180,8 @@ def test_split_minicpm_forward_kwargs_collapses_empty_audio_placeholders():
     assert data["audio_feature_lens"] == []
 
 
-def test_split_minicpm_forward_kwargs_rejects_packed_rmpad_batch():
-    with pytest.raises(ValueError, match="use_remove_padding=false"):
+def test_split_minicpm_forward_kwargs_rejects_unprepared_packed_batch():
+    with pytest.raises(ValueError, match="without going through MiniCPMThinkerAdapter.prepare_model_inputs"):
         split_minicpm_forward_kwargs(
             {
                 "input_ids": torch.ones(1, 8, dtype=torch.long),
@@ -328,3 +329,24 @@ def test_configure_model_applies_remote_whisper_compat(monkeypatch):
     module = _MiniCPMOStyle()
     MiniCPMThinkerAdapter.configure_model(module, _model_config())
     assert seen == [module]
+
+
+def test_rollout_adapter_registers_thinker_only_text_pipeline():
+    from verl_omni.pipelines.minicpm.omni_rollout_adapter import MiniCPMORolloutAdapter
+    from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
+
+    assert OmniRolloutPipelineBase.get_class("minicpmo_4_5") is MiniCPMORolloutAdapter
+    stages = MiniCPMORolloutAdapter.build_stage_configs("thinker_only")
+    assert len(stages) == 1
+    assert stages[0].engine_output_type == "text"
+    assert stages[0].final_output_type == "text"
+    # AVQA feeds both encoders; the adapter must not disable audio like the
+    # text-only RFC design did.
+    assert stages[0].requires_multimodal_data is True
+    assert MiniCPMORolloutAdapter.get_pipeline_id("thinker_only") == "minicpmo_4_5_thinker_only"
+    assert MiniCPMORolloutAdapter.get_stage_engine_extras(0, "thinker_only") == {
+        "model_arch": "MiniCPMO45OmniLLMForConditionalGeneration"
+    }
+    assert MiniCPMORolloutAdapter.get_engine_hf_overrides("thinker_only") == {}
+    with pytest.raises(ValueError, match="thinker_only only"):
+        MiniCPMORolloutAdapter.build_stage_configs("full")
