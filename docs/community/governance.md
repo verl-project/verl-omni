@@ -1,5 +1,7 @@
 # Governance
 
+Last updated: 09/09/2026
+
 VeRL-Omni is an open-source project. Committer status is earned through contribution, maintenance, and stewardship — not purchased or assigned by company affiliation.
 
 ## Values
