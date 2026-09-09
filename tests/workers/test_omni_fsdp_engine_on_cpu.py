@@ -930,3 +930,93 @@ class TestAdapterNameForwarding:
         assert captured["adapter_name"] == "old"
         assert peft_config == {"adapter": "old"}
         assert dict(per_tensor_param).keys() == {"w"}
+
+
+def _fsdp2_engine(omni_impl, module, ignored_names, strategy="fsdp2"):
+    """A bare engine whose adapter declares ``ignored_names`` for _build_fsdp_module."""
+    engine = object.__new__(omni_impl.OmniFSDPEngine)
+    engine.model_config = _make_mock_model_config()
+    engine.model_config.enable_activation_offload = False
+    engine.model_config.enable_gradient_checkpointing = False
+    engine.device_mesh = None
+    adapter_cls = MagicMock()
+    if ignored_names is None:
+        del adapter_cls.get_fsdp_ignored_module_names
+    else:
+        adapter_cls.get_fsdp_ignored_module_names.return_value = ignored_names
+    engine.model_adapter_cls = adapter_cls
+    engine.engine_config = types.SimpleNamespace(
+        strategy=strategy,
+        mixed_precision=None,
+        offload_policy=False,
+        forward_only=False,
+        reshard_after_forward=True,
+        get=lambda key, default=None: {},
+    )
+    return engine
+
+
+class _MiniCPMStyleModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.apm = torch.nn.Linear(4, 4)
+        self.llm = torch.nn.Module()
+        self.llm.layer = torch.nn.Linear(4, 4)
+        self._no_split_modules = ["Qwen3DecoderLayer"]
+
+
+def test_build_fsdp_module_injects_ignored_params_on_root_only(monkeypatch):
+    omni_impl = _get_omni_impl_module()
+    module = _MiniCPMStyleModule()
+
+    class _Layer(torch.nn.Module):
+        pass
+
+    wrap_target = _Layer()
+    module.llm.layer = wrap_target
+    calls = []
+
+    def fake_fully_shard(target, **kwargs):
+        calls.append((target, kwargs.get("ignored_params")))
+        return target
+
+    import verl.utils.fsdp_utils as verl_fsdp_utils
+    import verl.utils.torch_dtypes as torch_dtypes
+
+    monkeypatch.setattr(torch.distributed.fsdp, "fully_shard", fake_fully_shard)
+    monkeypatch.setattr(verl_fsdp_utils, "_select_fsdp2_wrap_targets", lambda model, names: [wrap_target])
+    monkeypatch.setattr(verl_fsdp_utils, "maybe_patch_fsdp_module", lambda model: contextmanager(lambda: (yield))())
+    monkeypatch.setattr(verl_fsdp_utils, "fsdp2_load_full_state_dict", lambda *args, **kwargs: None)
+    monkeypatch.setattr(torch_dtypes.PrecisionType, "to_dtype", staticmethod(lambda name: torch.bfloat16))
+
+    engine = _fsdp2_engine(omni_impl, module, ["apm"])
+    result = engine._build_fsdp_module(module)
+
+    assert result is module
+    assert len(calls) == 2
+    # Nested wrap target never carries the root's ignored set...
+    assert calls[0][0] is wrap_target and calls[0][1] is None
+    # ...only the root fully_shard call gets the apm parameters.
+    assert calls[1][0] is module
+    assert calls[1][1] == set(module.apm.parameters())
+
+
+def test_build_fsdp_module_delegates_to_verl_without_ignored_names(monkeypatch):
+    omni_impl = _get_omni_impl_module()
+    module = _MiniCPMStyleModule()
+    delegated = []
+
+    monkeypatch.setattr(
+        omni_impl.OmniFSDPEngine.__bases__[0], "_build_fsdp_module", lambda self, m: delegated.append(m)
+    )
+    engine = _fsdp2_engine(omni_impl, module, None)
+    engine._build_fsdp_module(module)
+    assert delegated == [module]
+
+
+def test_build_fsdp_module_rejects_fsdp1_with_ignored_names():
+    omni_impl = _get_omni_impl_module()
+    module = _MiniCPMStyleModule()
+    engine = _fsdp2_engine(omni_impl, module, ["apm"], strategy="fsdp")
+    with pytest.raises(NotImplementedError, match="strategy=fsdp2"):
+        engine._build_fsdp_module(module)
