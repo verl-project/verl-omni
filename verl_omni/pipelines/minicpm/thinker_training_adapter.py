@@ -28,7 +28,6 @@ from verl_omni.pipelines.model_base import OmniModelBase
 
 _MINICPM_ARCHITECTURES = ("MiniCPMO",)
 _MINICPM_NO_SPLIT_MODULES = ["Qwen3DecoderLayer", "MiniCPMODecoderLayer"]
-_WHISPER_ATTN_RETURN3_ATTR = "_verl_omni_whisper_attn_return3"
 # Keys consumed by MiniCPMO.forward(data, **kwargs) / get_vllm_embedding / get_omni_embedding.
 _MINICPM_DATA_KEYS = (
     "input_ids",
@@ -62,52 +61,6 @@ def _register_minicpm_architectures(cls):
     for architecture in _MINICPM_ARCHITECTURES:
         OmniModelBase.register(architecture, stage="thinker")(cls)
     return cls
-
-
-def _pad_whisper_self_attn_output(output, past_key_values=None):
-    """Normalize WhisperAttention output to the 3-tuple MiniCPM unpacks."""
-    if not isinstance(output, tuple):
-        return output, None, past_key_values
-    if len(output) == 2:
-        hidden_states, attn_weights = output
-        return hidden_states, attn_weights, past_key_values
-    return output
-
-
-def wrap_whisper_self_attn_forward(attn_module) -> None:
-    """Make ``self_attn`` always return ``(hidden_states, attn_weights, past_key_values)``.
-
-    MiniCPM-o's remote ``MiniCPMWhisperEncoderLayer`` still does::
-
-        hidden_states, attn_weights, past_key_values = self.self_attn(...)
-
-    Transformers WhisperAttention now returns only ``(hidden_states, attn_weights)``
-    and renamed ``past_key_value`` to ``past_key_values``. Training still runs the
-    audio encoder on dummy wavs, so the unpack fails even without real audio.
-    """
-    if attn_module is None or getattr(attn_module, _WHISPER_ATTN_RETURN3_ATTR, False):
-        return
-
-    original_forward = attn_module.forward
-
-    def _forward(*args, _original=original_forward, **kwargs):
-        past_key_values = kwargs.get("past_key_values", kwargs.get("past_key_value"))
-        if "past_key_value" in kwargs and "past_key_values" not in kwargs:
-            kwargs["past_key_values"] = kwargs.pop("past_key_value")
-        return _pad_whisper_self_attn_output(_original(*args, **kwargs), past_key_values)
-
-    attn_module.forward = _forward
-    setattr(attn_module, _WHISPER_ATTN_RETURN3_ATTR, True)
-
-
-def patch_minicpm_whisper_encoder_layers(module) -> None:
-    """Patch MiniCPM audio-encoder layers after remote-code ``from_pretrained``."""
-    apm = getattr(module, "apm", None)
-    layers = getattr(apm, "layers", None) if apm is not None else None
-    if not layers:
-        return
-    for layer in layers:
-        wrap_whisper_self_attn_forward(getattr(layer, "self_attn", None))
 
 
 def freeze_minicpm_encoder_modules(module) -> None:
@@ -327,7 +280,7 @@ class MiniCPMThinkerAdapter(OmniModelBase):
     def build_module(cls, model_config, torch_dtype):
         from transformers import AutoModel
 
-        from verl_omni.models.transformers.remote_code_compat import patch_remote_auto_model_init
+        from verl_omni.models.transformers.minicpm_o import patch_remote_auto_model_init
 
         patch_remote_auto_model_init(
             model_config.local_path,
@@ -344,9 +297,11 @@ class MiniCPMThinkerAdapter(OmniModelBase):
 
     @classmethod
     def configure_model(cls, module, model_config):
+        from verl_omni.models.transformers.minicpm_o import patch_remote_whisper_self_attn
+
         module = super().configure_model(module, model_config)
         freeze_minicpm_encoder_modules(module)
-        patch_minicpm_whisper_encoder_layers(module)
+        patch_remote_whisper_self_attn(module)
         patch_minicpm_get_vision_embedding(module)
         patch_minicpm_get_vllm_embedding(module)
 
