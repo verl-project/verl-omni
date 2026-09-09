@@ -26,6 +26,7 @@ VeRL-Omni aims to be an easy, fast, and stable RL training framework for diffusi
 Lead maintainers are responsible for the overall direction and strategy of the project:
 
 - [@samithuang](https://github.com/samithuang) (Yongxiang Huang)
+- [@wuxibin89](https://github.com/wuxibin89) (Xibin Wu)
 
 ### Active Committers
 
