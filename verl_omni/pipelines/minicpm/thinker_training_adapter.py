@@ -231,7 +231,6 @@ class MiniCPMThinkerAdapter(OmniModelBase):
 
     @classmethod
     def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
-        del model_config
         return ["apm"]
 
     @classmethod

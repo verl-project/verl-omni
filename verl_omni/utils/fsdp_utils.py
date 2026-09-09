@@ -52,69 +52,32 @@ def fsdp_name_is_ignored(name: str, ignored_module_names: Sequence[str]) -> bool
 
 
 def apply_fsdp2_excluding_module_names(model, fsdp_kwargs, config, ignored_module_names: Sequence[str]):
-    """Like verl ``apply_fsdp2``, but do not ``fully_shard`` ignored subtrees.
+    """Run verl ``apply_fsdp2`` with root ``ignored_params`` from ``named_parameters()``.
 
-    Root ``fully_shard`` still runs; ignored parameters are passed as
-    ``ignored_params`` so they stay replicated tensors.
+    Does not change ``requires_grad``. FSDP2 will not all-reduce grads on ignored
+    tensors; callers that train them must sync grads themselves.
     """
-    from torch.distributed.fsdp import fully_shard
-    from verl.utils.fsdp_utils import (
-        _select_fsdp2_wrap_targets,
-        maybe_patch_fsdp_module,
-    )
+    import verl.utils.fsdp_utils as verl_fsdp_utils
 
     if not ignored_module_names:
-        from verl.utils.fsdp_utils import apply_fsdp2
-
-        apply_fsdp2(model, fsdp_kwargs, config)
+        verl_fsdp_utils.apply_fsdp2(model, fsdp_kwargs, config)
         return
-
-    try:
-        from torch.distributed.fsdp import FSDPModule
-    except ImportError:
-        from torch.distributed._composable.fsdp import FSDPModule
-
-    default_transformer_cls_names_to_wrap = getattr(model, "_no_split_modules", None)
-    fsdp_transformer_layer_cls_to_wrap = config.get("wrap_policy", {}).get(
-        "transformer_layer_cls_to_wrap", default_transformer_cls_names_to_wrap
-    )
-    if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
-        fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
-    if isinstance(fsdp_transformer_layer_cls_to_wrap, set):
-        fsdp_transformer_layer_cls_to_wrap = list(fsdp_transformer_layer_cls_to_wrap)
-
-    ignored_ids = {
-        id(module)
-        for name, module in model.named_modules()
-        if fsdp_name_is_ignored(name, ignored_module_names)
-    }
-    modules = [
-        module
-        for module in _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap)
-        if id(module) not in ignored_ids
-    ]
-    for module in modules:
-        with maybe_patch_fsdp_module(module):
-            fully_shard(module, **fsdp_kwargs)
 
     ignored_params = {
         param for name, param in model.named_parameters() if fsdp_name_is_ignored(name, ignored_module_names)
     }
-    root_kwargs = dict(fsdp_kwargs)
-    if ignored_params:
-        root_kwargs["ignored_params"] = ignored_params
-    with maybe_patch_fsdp_module(model):
-        try:
-            fully_shard(model, **root_kwargs)
-        except TypeError:
-            fully_shard(model, **fsdp_kwargs)
+    original_fully_shard = verl_fsdp_utils.fully_shard
 
-    if config.get("forward_prefetch", False):
-        fsdp_modules = [module for module in modules if isinstance(module, FSDPModule)]
-        for index, module in enumerate(fsdp_modules):
-            next_targets = fsdp_modules[index + 1 : index + 2]
-            if next_targets and hasattr(module, "set_modules_to_forward_prefetch"):
-                module.set_modules_to_forward_prefetch(next_targets)
+    def _fully_shard(module, *args, **kwargs):
+        if module is model and ignored_params:
+            kwargs = {**kwargs, "ignored_params": ignored_params}
+        return original_fully_shard(module, *args, **kwargs)
+
+    verl_fsdp_utils.fully_shard = _fully_shard
+    try:
+        verl_fsdp_utils.apply_fsdp2(model, fsdp_kwargs, config)
+    finally:
+        verl_fsdp_utils.fully_shard = original_fully_shard
 
 
 def _get_fsdp_module_cls():
