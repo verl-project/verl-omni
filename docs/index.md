@@ -137,6 +137,13 @@ contributing/gpu_smoke_tests.md
 contributing/common_pitfalls.md
 ```
 
+```{toctree}
+:maxdepth: 1
+:caption: Community
+
+community/governance.md
+```
+
 ## Contribution
 
 VeRL-Omni is free software; you can redistribute it and/or modify it under the terms
