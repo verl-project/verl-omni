@@ -159,7 +159,7 @@ actor_rollout_ref:
 - `actor_rollout_ref.model.tokenizer_path`: Optional tokenizer path if not under `path` (falls back to `<path>/tokenizer` or `path`).
 - `actor_rollout_ref.model.config_path`: Optional transformer config path. If null, backends use `<path>/<transformer_subfolder>`.
 - `actor_rollout_ref.model.transformer_subfolder`: Subfolder with diffusion transformer weights/config (default `transformer`).
-- `actor_rollout_ref.model.attn_backend`: Diffusers attention backend. One of `native`, `_native_npu`, `_flash_3_varlen_hub`. Must stay consistent with `rollout.rollout_attn_backend`.
+- `actor_rollout_ref.model.attn_backend`: Diffusers attention backend. One of `native`, `_native_npu`, `flash_varlen_hub`, `_flash_3_varlen_hub`. Must stay consistent with `rollout.rollout_attn_backend`.
 - `actor_rollout_ref.model.lora_rank`: LoRA rank; `> 0` enables LoRA.
 - `actor_rollout_ref.model.lora_alpha`: LoRA scaling factor.
 - `actor_rollout_ref.model.lora_init_weights`: LoRA init method (default `gaussian`).
@@ -240,6 +240,7 @@ actor_rollout_ref:
       true_cfg_scale: 1.0
       max_sequence_length: 512
       guidance_scale: null
+      reference_image_short_edge: null
       num_frames: 1
       task: null
 ```
@@ -249,6 +250,7 @@ actor_rollout_ref:
 - `actor_rollout_ref.rollout.pipeline.true_cfg_scale`: True classifier-free guidance scale; values `> 1.0` enable CFG with a negative prompt (e.g. Qwen-Image).
 - `actor_rollout_ref.rollout.pipeline.max_sequence_length`: Max text-encoder token length for prompt encoding.
 - `actor_rollout_ref.rollout.pipeline.guidance_scale`: Distilled guidance scale for models with guidance embeddings; `null` disables.
+- `actor_rollout_ref.rollout.pipeline.reference_image_short_edge`: Reference-image resize short edge for compatible pipelines. MiniMax-H3 Ref2VA accepts multiples of 32 from 256 through 2048; use `val_kwargs.pipeline.reference_image_short_edge` for a different validation value.
 - `actor_rollout_ref.rollout.pipeline.num_frames`: Wan2.2 (and similar) video frame count (`81` ≈ 3s at 24 fps; image models keep `1`).
 - `actor_rollout_ref.rollout.pipeline.task`: Optional task label forwarded to the pipeline's request contract (vLLM-Omni reads it as the request `task`); values are pipeline-specific (e.g. MiniMax-H3: `t2va` / `fl2va` / `ref2va`), `null` lets the engine infer it.
 - `actor_rollout_ref.rollout.pipeline.output_type`: Pipeline output modality (dataclass default `image`).

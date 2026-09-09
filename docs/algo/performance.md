@@ -1,9 +1,65 @@
 (performance)=
 # Performance Reference
 
-Last updated: 06/17/2026
+Last updated: 09/09/2026
 
 Below are reference benchmark results for VeRL-Omni training runs.
+
+## DAPO Phase 1: LoRA Training on Qwen3-Omni Thinker AVQA
+
+This reference uses the {doc}`Thinker DAPO Phase-1 recipe <../examples/dapo_trainer>`:
+vanilla token-level clipping with GRPO advantages, without dynamic sampling or
+overlong reward shaping. It is a single-seed run on AVQA, not the full DAPO recipe.
+
+### Experiment Settings
+
+| Setting | Value |
+|---------|-------|
+| Model | `Qwen3-Omni-30B-A3B-Instruct`, Thinker only |
+| Hardware / actor | 4 × NVIDIA A800, FSDP2 LoRA |
+| Dataset / reward | AVQA; `naive` reward manager with `choice_reward` |
+| LoRA rank / alpha | 32 / 64 |
+| Learning rate / train batch size | `3e-6` / 128 prompts |
+| Rollout samples / tensor parallel size | `n=16` / 2 |
+| Policy loss / clipping / aggregation | `vanilla` / `0.2`–`0.28` / `token-mean` |
+| Advantage estimator / KL | GRPO / disabled |
+| Data seed | 42 |
+| Validation | All 1,911 AVQA examples, before training and every 10 steps |
+| Validation decoding | Greedy: `n=1`, `temperature=0`, `top_p=1.0`, `top_k=-1` |
+
+### Long-Run Validation Reward
+
+The run was resumed from step 50 and continued through step 235 without changing
+or tuning the training configuration. The recorded full-validation curve extends
+through step 220; each point is the mean choice reward over the same validation set.
+
+<div align="center">
+<img width="800" alt="Single-seed AVQA validation reward from step 0 to 220: 0.728414 initially, best 0.869702 at step 180, and 0.866039 at step 220" src="https://raw.githubusercontent.com/WenzheWang/verl-omni/e956f8f5f15b0124681ac1f8d2dc0e4cacdc02fb/.github/pr-assets/456/qwen3-omni-thinker-dapo-avqa-validation-long-curve.png" />
+</div>
+
+| Checkpoint | Step | Validation reward |
+|------------|------|-------------------|
+| Initial | 0 | 0.728414 |
+| Initial run end | 50 | 0.824176 |
+| Best observed | 180 | 0.869702 |
+| Latest recorded validation | 220 | 0.866039 |
+
+Validation reward improved by 14.1287 percentage points from the initial to the
+best checkpoint. At steps 150–220, it fluctuated between `0.858189` and `0.869702`.
+The curve shows observed values without smoothing or interpolation; it does not
+reach the GSPO+LoRA reference value of `0.88` in this window.
+
+The GSPO reference uses a different validation sampling configuration
+(`temperature=1.0`, `top_p=0.7`, `top_k=-1`). Re-evaluating the retained
+step-50/150/200 checkpoints with that tuple gave `0.821559` / `0.856096` /
+`0.859759`, versus `0.824176` / `0.860283` / `0.859759` with greedy decoding.
+These single-seed, single-decode observations do not establish GSPO performance
+parity or a systematic advantage for either validation temperature.
+
+The experiment used implementation commit
+[`c4671984`](https://github.com/verl-project/verl-omni/commit/c4671984d6975f0ccbdae77ee6c87c105b1db55e).
+See the [long-run evidence and configuration comparison](https://github.com/verl-project/verl-omni/pull/456#issuecomment-5534647748)
+for the run record; later documentation updates do not change its tested revision.
 
 ## FlowGRPO: LoRA Training on Qwen-Image OCR
 
@@ -136,4 +192,25 @@ Reference wandb curve [here](https://wandb.ai/andyzhou/VeRL-Omni-demo/runs/djrzz
 
 <div align="center">
 <img width="600" alt="DiffusionNFT LoRA OCR training validation curve" src="https://github.com/user-attachments/assets/9cc0e639-58c7-4ef7-ab8a-ee8e8aef2d53" />
+</div>
+
+## GSPO OPD: Qwen3-Omni-30B-A3B training on 32xNPU (2 x Atlas 800T A3)
+
+> Experiments used Atlas 800T A3 NPUs, LoRA rank 32 applied to attention linear modules, `train_batch_size=128` and rollout `n=16` per prompt, and the full 2k validation set.
+
+> We add Gaussian noise (σ = 0.25·∥W∥) to the weights of Qwen3-Omni-30B-A3B-Instruct as the student model, while keeping the original un-noised model as the teacher. Both models are served by vllm_omni in AR mode. We compare the proposed OPD (Offline Preference Distillation) against a standard GSPO baseline, which trains the same noised Qwen3-Omni model directly under identical settings.
+
+| Script | # NPUs | # NPUs for Actor | # NPUs for Rollout | # NPUs for Teacher Model | # NPUs for Async Reward | Batch Size | Rollouts per Prompt | LR | Time per Step (s) |
+|--------|--------|------------------|--------------------|--------------------------|-------------------------|------------|-------------------|----|-------------------|
+| `run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh` | 32 | 16 | 16 | 16 | 0 (sync) | 128 | 16 | 3e-6 | 1800 |
+
+### Training Reward Curve (OPD vs GSPO)
+<div align="center">
+<img width="763" height="261" alt="Training reward curve of GSPO OPD vs GSPO" src="https://github.com/user-attachments/assets/7fd1dc67-85c0-4adc-9f7a-10cdbec005d0" />
+</div>
+
+### Validation Reward Curve (OPD vs GSPO)
+
+<div align="center">
+<img width="763" height="261" alt="Validation curve of GSPO OPD vs GSPO" src="https://github.com/user-attachments/assets/fe25b199-10e1-4a90-b4e5-18248d40d3fa" />
 </div>

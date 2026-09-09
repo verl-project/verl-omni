@@ -25,6 +25,9 @@ import torch
 
 server_module = pytest.importorskip("verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server")
 tracking_module = pytest.importorskip("verl_omni.utils.tracking")
+# The strategy resolves H3's audio sample rate from the adapter-declared
+# DiffusionIOSpec, so the pipeline adapter must be imported/registered.
+pytest.importorskip("verl_omni.pipelines.minimax_h3_flow_grpo.vllm_omni_rollout_adapter")
 
 _VIDEO_T, _VIDEO_C, _VIDEO_H, _VIDEO_W = 107, 3, 384, 640
 _AUDIO_SR = 32000
@@ -61,6 +64,8 @@ def _make_h3_final_res(batch_size: int = 1):
 def _server():
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.global_steps = 3
+    # Keys the adapter-declared DiffusionIOSpec (audio sample rate 32000).
+    server.model_config = SimpleNamespace(architecture="MiniMaxH3Pipeline", algorithm="flow_grpo")
     server._to_tensor = __import__("torchvision").transforms.PILToTensor()
     return server
 

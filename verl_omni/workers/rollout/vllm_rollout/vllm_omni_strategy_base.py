@@ -56,8 +56,8 @@ class OmniStrategyBase(ABC):
     * optionally override the concrete hooks (:meth:`init_config`,
       :meth:`init_model_config`, :meth:`validate_configs`, :meth:`post_init`,
       :meth:`apply_quantization`, :meth:`override_generation_config`,
-      :meth:`preprocess_engine_kwargs`) when the mode needs behavior beyond the
-      shared defaults.
+      :meth:`preprocess_engine_kwargs`, :meth:`collective_rpc_stage_ids`) when
+      the mode needs behavior beyond the shared defaults.
 
     The two concrete subclasses are
     :class:`~verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy.ARStrategy`
@@ -154,6 +154,14 @@ class OmniStrategyBase(ABC):
             engine_kwargs: The engine keyword-argument dict, mutated in place.
         """
         engine_kwargs.pop("output_mode", None)
+
+    def collective_rpc_stage_ids(self, method: Any) -> list[int] | None:
+        """Return pipeline stages targeted by a shared collective RPC.
+
+        ``None`` preserves the engine default of broadcasting to every stage.
+        AR adapters can narrow actor weight synchronization to trainable stages.
+        """
+        return None
 
     @abstractmethod
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:

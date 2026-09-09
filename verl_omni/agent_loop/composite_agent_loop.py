@@ -48,6 +48,29 @@ def _config_to_sampling_dict(config: Optional[BaseConfig]) -> dict:
     return {k: v for k, v in config.items() if not k.startswith("_")}
 
 
+def _pad_llm_generation_outputs(
+    response_ids: torch.Tensor,
+    log_probs: torch.Tensor | None,
+    max_new_tokens: int,
+    pad_token_id: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Right-pad per-request AR generation tensors to ``max_new_tokens``.
+
+    Per-request ``generate`` stops at EOS, so samples reach ``_postprocess``
+    with different lengths while it batches them with ``torch.cat``.
+    """
+    gen_len = int(response_ids.shape[-1])
+    if gen_len > max_new_tokens:
+        raise ValueError(f"llm_response_ids length {gen_len} exceeds rollout.max_new_tokens={max_new_tokens}")
+    attention_mask = torch.zeros(*response_ids.shape[:-1], max_new_tokens, dtype=torch.long, device=response_ids.device)
+    attention_mask[..., :gen_len] = 1
+    padded_ids = F.pad(response_ids, (0, max_new_tokens - gen_len), value=pad_token_id)
+    padded_log_probs = None
+    if log_probs is not None:
+        padded_log_probs = F.pad(log_probs, (0, 0, 0, max_new_tokens - log_probs.shape[-2]), value=0.0)
+    return padded_ids, attention_mask, padded_log_probs
+
+
 class CompositeAgentLoopOutput(DiffusionAgentLoopOutput):
     """Agent loop output. Supplement additional fields for AR part."""
 
@@ -188,6 +211,18 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
         """Perform post-processing operations on the output of each individual agent loop."""
         output = CompositeAgentLoopOutput(**dict(output))
 
+        llm_response_ids = output.extra_fields.get("llm_response_ids")
+        llm_log_probs = output.extra_fields.get("llm_all_log_probs")
+        llm_response_mask: torch.Tensor | None = None
+        if isinstance(llm_response_ids, torch.Tensor):
+            pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
+            llm_response_ids, llm_response_mask, llm_log_probs = _pad_llm_generation_outputs(
+                llm_response_ids,
+                llm_log_probs if isinstance(llm_log_probs, torch.Tensor) else None,
+                self.rollout_config.max_new_tokens,
+                pad_token_id,
+            )
+
         # Pad extra tensor outputs from vllm-omni (e.g. prompt embeddings).
         extra_fields = {}
         for k, v in output.extra_fields.items():
@@ -198,9 +233,15 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
                 elif k in ["prompt_embeds_mask", "negative_prompt_embeds_mask"]:
                     pad_tuple = (0, self.max_prompt_embed_length - v.shape[0])
                     v = F.pad(v, pad_tuple, value=0)
+                elif k == "llm_response_ids" and llm_response_ids is not None:
+                    v = llm_response_ids
+                elif k == "llm_all_log_probs" and llm_log_probs is not None:
+                    v = llm_log_probs
                 extra_fields[k] = v.unsqueeze(0)
             else:
                 extra_fields[k] = v
+        if llm_response_mask is not None:
+            extra_fields["llm_response_attention_mask"] = llm_response_mask.unsqueeze(0)
 
         extra_fields["raw_prompt"] = kwargs["raw_prompt"]
 
@@ -226,8 +267,8 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
         if output.response_logprobs is not None:
             response_logprobs = output.response_logprobs.unsqueeze(0)
         llm_response_logprobs = None
-        if output.extra_fields.get("llm_all_log_probs", None) is not None:
-            llm_response_logprobs = output.extra_fields["llm_all_log_probs"].unsqueeze(0)
+        if llm_log_probs is not None:
+            llm_response_logprobs = llm_log_probs.unsqueeze(0)
 
         prompt_ids = prompt_output["input_ids"]
         extra_fields["attention_mask"] = prompt_output["attention_mask"]

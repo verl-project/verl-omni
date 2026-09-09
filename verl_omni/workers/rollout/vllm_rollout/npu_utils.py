@@ -91,6 +91,31 @@ def _skip_diffusers_npu_empty_cache():
 
 
 # ---------------------------------------------------------------------------
+# Restore checkpoint-layout FusedMoE params (reverse of process_weights_after_loading)
+# ---------------------------------------------------------------------------
+
+
+def restore_moe_param_layout(model, hidden_size: int) -> None:
+    """Revert the w13/w2 transpose applied by vllm-ascend's
+    ``process_weights_after_loading`` for ``npu_grouped_matmul``, so IPC
+    ``load_weights`` can write checkpoint-shape weights. NPU-only and idempotent.
+    """
+    from vllm.model_executor.utils import replace_parameter
+
+    for name, param in model.named_parameters():
+        if param.ndim != 3:
+            continue
+        if "w2_weight" in name and param.shape[2] == hidden_size:
+            parts = name.split(".")
+            parent_module = model.get_submodule(".".join(parts[:-1]))
+            replace_parameter(parent_module, parts[-1], param.transpose(1, 2))
+        elif "w13_weight" in name and param.shape[1] == hidden_size:
+            parts = name.split(".")
+            parent_module = model.get_submodule(".".join(parts[:-1]))
+            replace_parameter(parent_module, parts[-1], param.transpose(1, 2))
+
+
+# ---------------------------------------------------------------------------
 # Mixin: NPU-specific overrides for vLLMOmniColocateWorkerExtension
 # ---------------------------------------------------------------------------
 

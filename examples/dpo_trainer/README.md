@@ -1,6 +1,6 @@
 # DPO Training
 
-Last updated: 08/14/2026
+Last updated: 09/03/2026
 
 This directory contains examples for **direct-preference** training (DPO and
 related losses). Three workflows are supported:
@@ -43,6 +43,14 @@ then `examples/flowgrpo_trainer/data_process/qwenimage_ocr.py` to write
 
 ```bash
 bash examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora.sh \
+  data.train_files=$WORKSPACE/data/ocr/qwen_image/train.parquet \
+  data.val_files=$WORKSPACE/data/ocr/qwen_image/test.parquet
+```
+
+For CUDA V1 sync (TransferQueue + ReplayBuffer), use `examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora_v1.sh`.
+
+```bash
+bash examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora_v1.sh \
   data.train_files=$WORKSPACE/data/ocr/qwen_image/train.parquet \
   data.val_files=$WORKSPACE/data/ocr/qwen_image/test.parquet
 ```

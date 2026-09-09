@@ -42,6 +42,7 @@ from verl_omni.pipelines.diffusion_rollout_output import (
     wrap_rollout_postprocessor,
 )
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import sd3_time_shift, seed_from_prompt_ids
@@ -107,6 +108,10 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
 
     Registered under ``("WanPipeline", "dance_grpo")``.
     """
+
+    #: Declares the primary rollout media stream so downstream consumers read
+    #: the modality from the adapter instead of inferring it from tensor rank.
+    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("video"))
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)

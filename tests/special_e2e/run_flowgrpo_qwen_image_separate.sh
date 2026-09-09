@@ -39,7 +39,7 @@ max_prompt_length=256
 
 ATTN_BACKEND=_flash_3_varlen_hub
 ROLLOUT_ATTN_BACKEND=FLASH_ATTN
-if ! python3 -c 'from verl_omni.utils.diffusion_attention import fa3_available; raise SystemExit(0 if fa3_available() else 1)' >/dev/null 2>&1; then
+if ! python3 -c 'from verl_omni.utils.diffusion_attention import fa_available; raise SystemExit(0 if fa_available() else 1)' >/dev/null 2>&1; then
     ATTN_BACKEND=native
     ROLLOUT_ATTN_BACKEND=TORCH_SDPA
 fi

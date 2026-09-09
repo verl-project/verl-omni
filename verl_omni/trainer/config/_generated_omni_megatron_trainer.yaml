@@ -910,6 +910,7 @@ reward:
   custom_reward_function:
     path: null
     name: compute_score
+    use_accelerator: false
   reward_functions: {}
   aggregation: weighted_sum
   reward_manager:
@@ -975,7 +976,7 @@ distillation:
   nnodes: 0
   teacher_models:
     teacher_model:
-      _target_: verl.workers.config.DistillationTeacherModelConfig
+      _target_: verl_omni.workers.config.omni.distillation.OmniDistillationTeacherModelConfig
       key: null
       model_path: null
       num_replicas: 0

@@ -22,11 +22,11 @@ every generated stage so it reaches ``DiffusionParallelConfig``.
 """
 
 import types
-from unittest.mock import MagicMock
 
 import yaml
 from verl.utils.device import get_visible_devices_keyword
 
+from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 
 
@@ -39,14 +39,27 @@ def _run_write_deploy_config(
     fake_self = types.SimpleNamespace(
         config=types.SimpleNamespace(**config_kwargs),
     )
-    adapter = MagicMock()
-    adapter.build_stage_configs.return_value = [types.SimpleNamespace(stage_id=0)]
-    adapter.get_pipeline_id.return_value = "minimax_h3"
-    adapter.get_stage_engine_extras.return_value = {}
+
+    class Adapter(OmniRolloutPipelineBase):
+        @classmethod
+        def build_stage_configs(cls, pipeline_mode="thinker_only"):
+            return [
+                types.SimpleNamespace(
+                    stage_id=0,
+                    final_output=True,
+                    final_output_type="audio",
+                    sampling_constraints={},
+                )
+            ]
+
+        @classmethod
+        def get_pipeline_id(cls, pipeline_mode="thinker_only"):
+            return "minimax_h3"
+
     monkeypatch.setenv(get_visible_devices_keyword(), "0,1,2,3")
 
     engine_kwargs: dict = {}
-    ARStrategy(fake_self)._write_deploy_config(engine_kwargs, "minimax_h3", adapter, "t2av")
+    ARStrategy(fake_self)._write_deploy_config(engine_kwargs, "minimax_h3", Adapter, "t2av")
     with open(engine_kwargs["deploy_config"]) as f:
         return yaml.safe_load(f)
 

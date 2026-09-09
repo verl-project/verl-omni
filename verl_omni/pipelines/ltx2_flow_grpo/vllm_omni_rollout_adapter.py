@@ -50,6 +50,7 @@ from verl_omni.pipelines.diffusion_rollout_output import (
     wrap_rollout_postprocessor,
 )
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import calculate_shift, normalize_ltx_output_type
@@ -73,6 +74,14 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
     """Sample LTX-2.3 with CPS/SDE transitions and return joint log-probs."""
 
     supports_request_batch = False
+
+    #: Declares the joint video/audio rollout streams. The runtime audio sample
+    #: rate (from the vocoder) is attached via rollout metadata and takes
+    #: precedence over this declared default.
+    diffusion_io_spec = DiffusionIOSpec(
+        primary=MediaSpec("video"),
+        auxiliary=(MediaSpec("audio", sample_rate=24000),),
+    )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:
         super().__init__(od_config=od_config, prefix=prefix)

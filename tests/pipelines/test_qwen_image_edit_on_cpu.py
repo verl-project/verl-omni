@@ -13,8 +13,8 @@
 # limitations under the License.
 
 import json
+import math
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -69,11 +69,8 @@ def test_processor_hook_preserves_existing_config(tmp_path):
     assert json.loads(config_path.read_text(encoding="utf-8")) == {"model_type": "custom"}
 
 
-def test_get_class_applies_qwen_ulysses_patch():
-    with patch("verl_omni.models.diffusers.qwen_image.apply_qwen_image_ulysses_mask_fix") as apply_patch:
-        assert DiffusionModelBase.get_class(_model_config()) is QwenImageEditPlusFlowGRPO
-
-    apply_patch.assert_called_once_with()
+def test_get_class_resolves_qwen_image_adapter():
+    assert DiffusionModelBase.get_class(_model_config()) is QwenImageEditPlusFlowGRPO
 
 
 def test_prepare_condition_unwraps_metadata():
@@ -150,6 +147,7 @@ def test_inject_condition_updates_qwen_image_shapes():
     assert output["img_shapes"] == image_shapes
     assert negative_output["img_shapes"] == image_shapes
     assert output["hidden_states"].shape == (1, 5, 4)
+    assert output["hidden_states"].shape[1] == sum(math.prod(shape) for shape in output["img_shapes"][0])
 
 
 def test_inject_condition_validates_qwen_sequence_parallel_alignment():

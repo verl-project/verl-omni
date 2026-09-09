@@ -1,19 +1,45 @@
 # CODEOWNERS for verl-project/verl-omni
 #
-# Syntax: <pattern> <owner1> [<owner2> ...]
-# - The LAST matching pattern for a given file wins.
-# - Owners must have write access to the repo.
-# - See https://docs.github.com/articles/about-code-owners
+# Used to automatically request PR reviewers.
+# Format: <pattern> @username [@username ...]
+# See https://docs.github.com/articles/about-code-owners
+#
+# Derived from the module table in docs/community/governance.md.
+# When updating ownership, update governance.md first, then the matching
+# rule here.
+#
+# Last-match-wins: more specific rules must come AFTER broader ones.
+# Being listed here does not grant committer status or merge rights.
 
-# Default owner for everything in the repo
-*                @samithuang
+# Default owner for unmatched paths
+* @samithuang @zhtmike
 
-/verl_omni/      @zhtmike @wtomin @knlnguyen1802 @AndyZhou952 @samithuang
-/examples/       @knlnguyen1802
+# Tests, CI, packaging, environment, and documentation
+/.github/ @wtomin
+/docker/ @wtomin
+/tests/ @wtomin
+/docs/ @wtomin
+/scripts/ @wtomin
+/.agents/ @wtomin
 
-/docker/         @wtomin
-/tests/          @wtomin
+# Datasets and examples
+/examples/ @chenyingshu @NancyFyong
+/verl_omni/utils/dataset/ @chenyingshu @NancyFyong
 
-# Documentation
-/docs/           @AndyZhou952
-*.md             @samithuang
+# Trainer and algorithm core
+/verl_omni/trainer/ @chenyingshu @NancyFyong @WenzheWang
+
+# Workers and training engines (FSDP/VeOmni, actor/ref, LoRA, checkpointing)
+/verl_omni/workers/ @cr-gao @zhtmike
+
+# Rollout and agent loop (overrides workers/rollout)
+/verl_omni/agent_loop/ @knlnguyen1802 @Sky-Trigger @NancyFyong @ZihaoW123
+/verl_omni/workers/rollout/ @knlnguyen1802 @Sky-Trigger @NancyFyong @ZihaoW123
+/verl_omni/utils/vllm_omni/ @knlnguyen1802 @Sky-Trigger @NancyFyong @ZihaoW123
+
+# Reward system
+/verl_omni/reward_loop/ @ruihanglix @chenyingshu @Sky-Trigger @ZihaoW123
+/verl_omni/utils/reward_score/ @ruihanglix @chenyingshu @Sky-Trigger @ZihaoW123
+
+# Pipeline and model adaptation
+/verl_omni/pipelines/ @chenyingshu @NancyFyong @ZihaoW123 @knlnguyen1802
