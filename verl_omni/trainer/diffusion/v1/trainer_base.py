@@ -271,11 +271,15 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 pprint(f"Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
                 self._shutdown_dataloaders()
+                if hasattr(self, "logger") and self.logger is not None:
+                    self.logger.finish()
                 return
 
         self.on_train_end()
         self._shutdown_dump_executor()
         self._shutdown_dataloaders()
+        if hasattr(self, "logger") and self.logger is not None:
+            self.logger.finish()
 
     def step(self, metrics: dict, timing_raw: dict) -> KVBatchMeta:
         """Feed one train batch and run ``parameter_sync_step`` local updates."""
