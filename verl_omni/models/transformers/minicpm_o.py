@@ -11,13 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Transformers-version shims for MiniCPM-o remote-code models.
+"""Runtime shims for MiniCPM-o Hugging Face remote-code models.
 
-MiniCPM-o checkpoints ship modeling code written against transformers 4.x
-(MiniCPM-o-4_5 targets ~4.10). verl-omni runs transformers >= 5. The two API
-breaks below are the only version gaps; keep every MiniCPM-o transformers-version
-patch in this file.
+Keep MiniCPM-o remote-code patches in this file. Call sites should import
+helpers from here rather than reimplementing them.
 
+Transformers version (remote code ~4.10 vs transformers >= 5)
+-------------------------------------------------------------
 1. ``post_init()`` / ``all_tied_weights_keys``
    Transformers 5 requires every ``PreTrainedModel.__init__`` to call ``post_init()``,
    which sets ``all_tied_weights_keys`` before weight loading. MiniCPM-o remote
@@ -36,17 +36,34 @@ patch in this file.
    (including dummy wavs), so the unpack crashes. ``patch_remote_whisper_self_attn``
    wraps each ``apm`` layer's ``self_attn`` after load: pad a 2-tuple to a 3-tuple
    and rename the cache kwarg. Apply this *after* ``from_pretrained``.
+
+3. ``get_vision_embedding``
+   Remote MiniCPM-o still forwards a dummy image when ``pixel_values`` is empty so
+   unused encoder parameters stay in the autograd graph. LoRA ``exclude_modules``
+   already skips adapters on ``vpm``, so that dummy is wasted compute and would
+   put vision tensors on the backward path. Empty ``pixel_values`` skip the
+   encoder; real images still go through the original method under
+   ``torch.no_grad()``.
+
+4. ``get_vllm_embedding``
+   Remote ``get_vllm_embedding`` does ``vllm_embedding[i].scatter_(...)``. PEFT
+   ``enable_input_require_grads`` makes the embed_tokens output a leaf, so that
+   view in-place op fails. Clone each row, use out-of-place ``scatter``, then
+   ``stack``.
 """
 
 from __future__ import annotations
 
 import logging
+import types
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 _POST_INIT_PATCHED_ATTR = "_verl_omni_post_init_patched"
 _WHISPER_ATTN_PATCHED_ATTR = "_verl_omni_whisper_attn_return3"
+_VISION_EMB_PATCH_ATTR = "_verl_omni_get_vision_embedding_patched"
+_VLLM_EMB_PATCH_ATTR = "_verl_omni_get_vllm_embedding_patched"
 # Back-compat alias for tests that reset the post_init wrap.
 _PATCHED_ATTR = _POST_INIT_PATCHED_ATTR
 
@@ -165,3 +182,101 @@ def patch_remote_whisper_self_attn(module) -> None:
         return
     for layer in layers:
         wrap_whisper_self_attn_forward(getattr(layer, "self_attn", None))
+
+
+def _has_pixel_slices(pixel_values) -> bool:
+    if pixel_values is None or pixel_values == []:
+        return False
+    if isinstance(pixel_values, (list | tuple)):
+        return any(_has_pixel_slices(sample) for sample in pixel_values)
+    return True
+
+
+def patch_minicpm_get_vision_embedding(module) -> None:
+    """Skip dummy vpm forwards and stop vision embeddings from entering autograd.
+
+    Why (remote dummy image vs LoRA-excluded ``vpm``):
+        Remote ``get_vision_embedding`` still forwards a dummy image during
+        training so unused encoder parameters stay in the autograd graph.
+        LoRA ``exclude_modules`` leaves ``vpm`` without adapters, so that dummy
+        is wasted compute and would put vision tensors on the backward path.
+        Empty ``pixel_values`` skip the encoder; real images still go through
+        the original method under ``torch.no_grad()``.
+    """
+    original = getattr(module, "get_vision_embedding", None)
+    if original is None or getattr(module, _VISION_EMB_PATCH_ATTR, False):
+        return
+
+    def get_vision_embedding(self, data, _original=original):
+        del self
+        if isinstance(data, dict) and "vision_hidden_states" in data:
+            return _original(data)
+        pixel_values = data.get("pixel_values") if isinstance(data, dict) else None
+        if not _has_pixel_slices(pixel_values):
+            return [[] for _ in (pixel_values or [])]
+        import torch
+
+        with torch.no_grad():
+            return _original(data)
+
+    module.get_vision_embedding = types.MethodType(get_vision_embedding, module)
+    setattr(module, _VISION_EMB_PATCH_ATTR, True)
+
+
+def _embed_tokens_module(module):
+    llm = getattr(module, "llm", None)
+    if llm is None:
+        return None
+    model = getattr(llm, "model", llm)
+    return getattr(model, "embed_tokens", None)
+
+
+def patch_minicpm_get_vllm_embedding(module) -> None:
+    """Clone text embeddings before vision scatter so LoRA backward is legal.
+
+    Why (remote MiniCPM-o ``scatter_`` vs PEFT input grads):
+        Remote ``get_vllm_embedding`` does ``vllm_embedding[i].scatter_(...)``.
+        PEFT ``enable_input_require_grads`` makes the embed_tokens output a leaf,
+        so that view in-place op fails. Clone each row, use out-of-place
+        ``scatter``, then ``stack``.
+    """
+    if getattr(module, _VLLM_EMB_PATCH_ATTR, False):
+        return
+    if _embed_tokens_module(module) is None or not hasattr(module, "get_vision_embedding"):
+        return
+
+    def get_vllm_embedding(self, data):
+        import torch
+
+        vision_hidden_states = self.get_vision_embedding(data)
+        vllm_embedding = _embed_tokens_module(self)(data["input_ids"])
+        llm_config = getattr(self.llm, "config", None)
+        if llm_config is not None and hasattr(llm_config, "scale_emb"):
+            vllm_embedding = vllm_embedding * llm_config.scale_emb
+
+        vision_hidden_states = [
+            i.type(vllm_embedding.dtype) if isinstance(i, torch.Tensor) else i for i in vision_hidden_states
+        ]
+
+        rows = []
+        batch_size = len(data["input_ids"])
+        image_bound = data.get("image_bound") or [[] for _ in range(batch_size)]
+        for i in range(batch_size):
+            row = vllm_embedding[i].clone()
+            cur_vs_hs = vision_hidden_states[i] if i < len(vision_hidden_states) else []
+            if len(cur_vs_hs) > 0:
+                cur_image_bound = image_bound[i]
+                if len(cur_image_bound) > 0:
+                    image_indices = torch.stack(
+                        [torch.arange(int(bound[0]), int(bound[1]), dtype=torch.long) for bound in cur_image_bound]
+                    ).to(vllm_embedding.device)
+                    src = cur_vs_hs.view(-1, cur_vs_hs.shape[-1]).to(device=row.device, dtype=row.dtype)
+                    index = image_indices.view(-1, 1).repeat(1, row.shape[-1])
+                    row = row.scatter(0, index, src)
+                elif self.training:
+                    row = row + cur_vs_hs[0].mean() * 0
+            rows.append(row)
+        return torch.stack(rows, dim=0), vision_hidden_states
+
+    module.get_vllm_embedding = types.MethodType(get_vllm_embedding, module)
+    setattr(module, _VLLM_EMB_PATCH_ATTR, True)
