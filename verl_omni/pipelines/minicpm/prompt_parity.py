@@ -344,6 +344,13 @@ class _MiniCPMProcessorParityWrapper:
     def __call__(self, text=None, images=None, audio=None, audios=None, **kwargs):
         if audio is not None and audios is None:
             audios = audio
+        # The remote processor expresses "no media" as None (its __call__
+        # branches on `is not None`; audio_feature_extract indexes audios[0]).
+        # verl forwards empty containers, so normalize them at this boundary.
+        if isinstance(images, list | tuple) and len(images) == 0:
+            images = None
+        if isinstance(audios, list | tuple) and len(audios) == 0:
+            audios = None
         if isinstance(text, list):
             text = [self._normalize_text(item, images, audios) if isinstance(item, str) else item for item in text]
         elif isinstance(text, str):
