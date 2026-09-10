@@ -1080,7 +1080,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 return
 
             per_tensor_param, _ = self.actor.engine.get_per_tensor_param(adapter_name=self.rollout_adapter)
-            await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
+            with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
+                await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
             return
 
         # Per-component wall-clock timings (seconds) for monitoring.

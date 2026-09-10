@@ -561,6 +561,7 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.engine = Engine()
     server.global_steps = 3
+    server.replica_rank = 0
     strategy = ARStrategy(server)
     strategy._rollout_output_modalities = ["latent", "audio"]
     strategy._rollout_adapter = Adapter

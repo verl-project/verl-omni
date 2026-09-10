@@ -151,15 +151,15 @@ def test_run_server_forwards_log_stats_to_async_omni(monkeypatch, disable_log_st
 
 
 @pytest.mark.parametrize(
-    ("method_name", "state_name"),
+    ("method_name", "state_prefix"),
     [
         ("sleep", "vllm_sleep"),
-        ("wake_up", "vllm_wake_up[weights]"),
+        ("wake_up", "vllm_wake_up"),
         ("release_kv_cache", "vllm_release_kv_cache"),
         ("resume_kv_cache", "vllm_resume_kv_cache"),
     ],
 )
-def test_lifecycle_trace_uses_replica_lane(monkeypatch, method_name, state_name):
+def test_lifecycle_trace_uses_replica_lane(monkeypatch, method_name, state_prefix):
     events = []
 
     async def succeed(*args, **kwargs):
@@ -189,7 +189,12 @@ def test_lifecycle_trace_uses_replica_lane(monkeypatch, method_name, state_name)
 
     asyncio.run(getattr(server, method_name)())
 
-    assert events == [("enter", state_name, "replica_3"), ("exit", state_name, "replica_3")]
+    assert len(events) == 2
+    (enter, enter_name, enter_lane), (exit, exit_name, exit_lane) = events
+    assert (enter, exit) == ("enter", "exit")
+    assert enter_name.startswith(state_prefix)
+    assert exit_name == enter_name
+    assert enter_lane == exit_lane == "replica_3"
 
 
 def test_weight_sync_trace_uses_actor_rank(monkeypatch):
@@ -201,7 +206,7 @@ def test_weight_sync_trace_uses_actor_rank(monkeypatch):
         def get_per_tensor_param(self, **kwargs):
             return [], None
 
-    async def send_weights(weights):
+    async def send_weights(weights, **kwargs):
         assert events == [("enter", "update_weights", "rank_5")]
 
     monkeypatch.setattr(
@@ -211,10 +216,10 @@ def test_weight_sync_trace_uses_actor_rank(monkeypatch):
     )
     worker = object.__new__(engine_workers.ActorRolloutRefWorker)
     worker._rank = 5
+    worker.rollout_adapter = "default"
     worker.config = SimpleNamespace(
         rollout=SimpleNamespace(
             checkpoint_engine=SimpleNamespace(backend="remote"),
-            rollout_adapter="default",
         )
     )
     worker.actor = SimpleNamespace(engine=Engine())

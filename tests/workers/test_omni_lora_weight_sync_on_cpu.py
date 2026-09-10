@@ -55,6 +55,7 @@ def _fast_path_worker(rollout_rank=0):
             checkpoint_engine=SimpleNamespace(backend="naive", update_weights_bucket_megabytes=16),
         )
     )
+    worker._rank = 0
     worker.peft_merge = False
     worker.base_sync_done = True
     worker.layered_summon = False
