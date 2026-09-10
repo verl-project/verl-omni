@@ -53,9 +53,16 @@ def _record_trace(events, state_name, *, state_lane_id):
     events.append(("exit", state_name, state_lane_id))
 
 
+def _clear_rl_insight_enable(monkeypatch):
+    # Record the original env so pytest restores it. A bare delenv() when the
+    # variable is absent does not undo a later os.environ assignment.
+    monkeypatch.setenv("VERL_RL_INSIGHT_ENABLE", "0")
+    monkeypatch.delenv("VERL_RL_INSIGHT_ENABLE", raising=False)
+
+
 @pytest.mark.parametrize("logger", ["rl_insight", ["console", "rl_insight"]])
 def test_enable_rl_insight_accepts_string_or_list_logger(monkeypatch, logger):
-    monkeypatch.delenv("VERL_RL_INSIGHT_ENABLE", raising=False)
+    _clear_rl_insight_enable(monkeypatch)
     config = SimpleNamespace(trainer={"logger": logger})
 
     enable_rl_insight(config)
@@ -65,7 +72,7 @@ def test_enable_rl_insight_accepts_string_or_list_logger(monkeypatch, logger):
 
 @pytest.mark.parametrize("logger", [None, "console", ["console"]])
 def test_enable_rl_insight_leaves_environment_unchanged_when_not_selected(monkeypatch, logger):
-    monkeypatch.delenv("VERL_RL_INSIGHT_ENABLE", raising=False)
+    _clear_rl_insight_enable(monkeypatch)
     config = SimpleNamespace(trainer={"logger": logger})
 
     enable_rl_insight(config)
@@ -78,7 +85,7 @@ def test_enable_rl_insight_warns_when_ray_is_already_initialized(monkeypatch, ca
     if already_enabled:
         monkeypatch.setenv("VERL_RL_INSIGHT_ENABLE", "1")
     else:
-        monkeypatch.delenv("VERL_RL_INSIGHT_ENABLE", raising=False)
+        _clear_rl_insight_enable(monkeypatch)
     monkeypatch.setattr("verl_omni.utils.rl_insight.ray.is_initialized", lambda: True)
     config = SimpleNamespace(trainer={"logger": ["rl_insight"]})
 
