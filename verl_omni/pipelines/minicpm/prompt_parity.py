@@ -375,14 +375,41 @@ def _parity_call(self, text=None, images=None, audio=None, audios=None, **kwargs
 
 
 def _safe_convert_to_tensors(self, tensor_type=None):
-    # The remote MiniCPMOBatchFeature override drops the `return value` for
-    # already-tensor leaves, so a single convert_to_tensors("pt") nulls every
-    # tensor feature (pixel_values, audio_features, bounds, lens, tgt_sizes).
-    # The stock transformers BatchFeature implementation is correct — delegate
-    # to it instead of reimplementing.
-    from transformers.feature_extraction_utils import BatchFeature
+    # Two remote/stock defects to survive:
+    # 1. The remote MiniCPMOBatchFeature override drops the `return value`
+    #    for already-tensor leaves, so a single convert_to_tensors("pt")
+    #    nulls every tensor feature — tensors therefore always pass through
+    #    unchanged.
+    # 2. The stock converter stacks every array-like leaf and raises on
+    #    ragged structures (its own docstring says so); MiniCPM's
+    #    pixel_values is a per-sample list of patch tensors with varying
+    #    shapes/counts, and verl converts the whole batch output at once —
+    #    so a leaf whose conversion raises keeps its container structure
+    #    and only its convertible parts tensorize. Uniform leaves still
+    #    convert exactly as the stock contract promises.
+    if tensor_type is None:
+        return self
 
-    return BatchFeature.convert_to_tensors(self, tensor_type)
+    is_tensor, as_tensor = self._get_is_as_tensor_fns(tensor_type)
+
+    def convert(value):
+        if is_tensor(value):
+            return value
+        try:
+            return as_tensor(value)
+        except Exception:
+            pass  # ragged or otherwise unconvertible: descend, do not raise
+        if isinstance(value, list):
+            return [convert(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(convert(item) for item in value)
+        if isinstance(value, dict):
+            return {key: convert(item) for key, item in value.items()}
+        return value
+
+    for key, value in self.items():
+        self[key] = convert(value)
+    return self
 
 
 def _upgrade_batch_feature(feature: Any) -> Any:
@@ -392,9 +419,11 @@ def _upgrade_batch_feature(feature: Any) -> Any:
     with the remote bug every already-tensor leaf maps to None, silently
     wiping all media features so every training forward runs text-only while
     the rollout stays multimodal. The same in-place class upgrade as the
-    processor itself: ``convert_to_tensors`` is re-pointed at the stock
-    (correct) transformers implementation. Non-BatchFeature results and
-    classes that no longer override the method pass through untouched.
+    processor itself: ``convert_to_tensors`` is re-pointed at a converter
+    that keeps the stock contract (tensors pass through, uniform structures
+    tensorize) and additionally survives the ragged media structures the
+    stock converter refuses. Non-BatchFeature results and classes that no
+    longer override the method pass through untouched.
     """
     from transformers.feature_extraction_utils import BatchFeature
 
