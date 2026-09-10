@@ -127,9 +127,7 @@ def test_run_server_forwards_log_stats_to_async_omni(monkeypatch, disable_log_st
 
     monkeypatch.setattr(vllm_omni_async_server.OmniEngineArgs, "from_cli_args", lambda args: EngineArgs())
     monkeypatch.setattr(vllm_omni_async_server, "orchestrator_field_names", lambda: set())
-    monkeypatch.setattr(
-        vllm_omni_async_server, "get_free_port", lambda *args, **kwargs: (12345, SimpleNamespace(close=lambda: None))
-    )
+    monkeypatch.setattr(vllm_omni_async_server, "get_non_ephemeral_free_port", lambda *args, **kwargs: 12345)
     monkeypatch.setattr(vllm_omni_async_server, "AsyncOmni", capture_engine_args)
     server = object.__new__(vllm_omni_async_server.vLLMOmniHttpServer)
     server.config = SimpleNamespace(
@@ -149,7 +147,7 @@ def test_run_server_forwards_log_stats_to_async_omni(monkeypatch, disable_log_st
     ("method_name", "state_name"),
     [
         ("sleep", "vllm_sleep"),
-        ("wake_up", "vllm_wake_up"),
+        ("wake_up", "vllm_wake_up[weights]"),
         ("release_kv_cache", "vllm_release_kv_cache"),
         ("resume_kv_cache", "vllm_resume_kv_cache"),
     ],
@@ -205,7 +203,7 @@ def test_weight_sync_trace_uses_actor_rank(monkeypatch):
         lambda *args, **kwargs: _record_trace(events, *args, **kwargs),
     )
     worker = object.__new__(engine_workers.ActorRolloutRefWorker)
-    worker.rank = 5
+    worker._rank = 5
     worker.config = SimpleNamespace(
         rollout=SimpleNamespace(
             checkpoint_engine=SimpleNamespace(backend="remote"),

@@ -149,6 +149,7 @@ async def test_server_wake_up_resumes_admission_after_ack():
     server_module = pytest.importorskip("verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server")
     server = object.__new__(server_module.vLLMOmniHttpServer)
     server.node_rank = 0
+    server.replica_rank = 0
 
     from verl.workers.rollout.replica import RolloutMode
 
