@@ -598,3 +598,44 @@ def test_apply_chat_template_raises_loudly_when_nothing_can_render():
     templated.tokenizer.chat_template = None  # tokenizer present but template-less
     with pytest.raises(ValueError, match="No renderable chat template"):
         templated.apply_chat_template(_block_messages())
+
+
+def test_convert_to_tensors_keeps_ragged_media_features():
+    from transformers.feature_extraction_utils import BatchFeature
+
+    from verl_omni.pipelines.minicpm.prompt_parity import _safe_convert_to_tensors
+
+    feature = BatchFeature(
+        {
+            # Per-sample patch packs with varying shapes/counts — what the
+            # MiniCPM processor actually emits and what the stock converter
+            # refuses ("only one element tensors can be converted...").
+            "pixel_values": [
+                [torch.zeros(3, 4, 4), torch.zeros(3, 2, 2)],
+                [torch.zeros(3, 8, 8), torch.zeros(3, 5, 5)],
+            ],
+            "input_ids": [[1, 2, 3]],
+            "raw_lens": [5, 7],
+        }
+    )
+    with pytest.raises(ValueError, match="pixel_values"):  # the stock behavior we must survive
+        BatchFeature.convert_to_tensors(feature, "pt")
+
+    converted = _safe_convert_to_tensors(feature, "pt")
+    assert torch.is_tensor(converted["input_ids"]) and converted["input_ids"].tolist() == [[1, 2, 3]]
+    assert torch.is_tensor(converted["raw_lens"])  # uniform leaves still convert (stock contract)
+    pixel_values = converted["pixel_values"]
+    assert isinstance(pixel_values, list) and len(pixel_values) == 2  # ragged structure kept
+    assert pixel_values[0][0].shape == (3, 4, 4) and pixel_values[1][1].shape == (3, 5, 5)
+    assert torch.is_tensor(pixel_values[0][0])
+
+
+def test_convert_to_tensors_leaves_unconvertible_scalars_alone():
+    from transformers.feature_extraction_utils import BatchFeature
+
+    from verl_omni.pipelines.minicpm.prompt_parity import _safe_convert_to_tensors
+
+    feature = BatchFeature({"note": "metadata", "ids": [1, 2]})
+    converted = _safe_convert_to_tensors(feature, "pt")
+    assert converted["note"] == "metadata"  # non-container leaves stay as-is
+    assert torch.is_tensor(converted["ids"])
