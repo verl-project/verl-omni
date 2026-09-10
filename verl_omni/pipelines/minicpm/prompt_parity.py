@@ -295,78 +295,94 @@ def flatten_block_content_to_slots(messages: list[dict]) -> list[dict]:
     return flattened
 
 
-class _MiniCPMProcessorParityWrapper:
-    """Delegate everything to the remote processor except ``__call__``.
+def _parity_apply_chat_template(self, messages, **kwargs):
+    # The MiniCPM-o template only renders string content; flatten verl's
+    # blocks (image/audio -> slot markers) at this processor boundary — the
+    # single choke point for both rollout renders and the dataset's doc2len.
+    base = type(self).__bases__[0]
+    return base.apply_chat_template(self, flatten_block_content_to_slots(messages), **kwargs)
 
-    A wrapper class (not an instance-attribute patch) because ``processor(...)``
-    dispatches ``__call__`` on the type; instance assignment never intercepts it.
-    """
 
-    def __init__(self, processor: Any, tokens: MiniCPMMediaTokens):
-        self._processor = processor
-        self._tokens = tokens
-        self.tokenizer = processor.tokenizer
+def _parity_dedup_pad_tokens(self, input_ids: list[int]) -> list[int]:
+    # Collapse happens entirely in id space: re-encoding decoded text risks
+    # BPE drift that would silently desync the engine prompt from the
+    # training ids. Text-only prompts come back byte-identical.
+    tokens: MiniCPMMediaTokens = self._parity_tokens
+    if not tokens.has_media_tokens(torch.tensor(input_ids)):
+        return list(input_ids)
+    return tokens.collapse_ids_to_slots(list(input_ids))
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._processor, name)
 
-    def apply_chat_template(self, messages, **kwargs):
-        # The MiniCPM-o template only renders string content; flatten verl's
-        # blocks (image/audio -> slot markers) at this processor boundary — the
-        # single choke point for both rollout renders and the dataset's doc2len.
-        return self._processor.apply_chat_template(flatten_block_content_to_slots(messages), **kwargs)
+def _parity_normalize_text(tokens: MiniCPMMediaTokens, text: str, images: Any, audios: Any) -> str:
+    # verl always renders one prompt per processor call (text=[str]).
+    normalized = tokens.collapse_to_slots(text, engine_slots=False)
+    if images is not None:
+        n_images = len(images) if not isinstance(images, str | bytes) else 1
+        have_images, _ = tokens.count_slots(normalized)
+        if have_images > n_images:
+            raise ValueError(f"Text carries {have_images} image slots but only {n_images} images were given.")
+        normalized += MINICPM_IMAGE_SLOT * (n_images - have_images)
+    if audios is not None:
+        n_audios = len(audios) if not isinstance(audios, str | bytes) else 1
+        _, have_audios = tokens.count_slots(normalized)
+        if have_audios > n_audios:
+            raise ValueError(f"Text carries {have_audios} audio slots but only {n_audios} audios were given.")
+        normalized += MINICPM_AUDIO_SLOT * (n_audios - have_audios)
+    return normalized
 
-    def dedup_pad_tokens(self, input_ids: list[int]) -> list[int]:
-        # Collapse happens entirely in id space: re-encoding decoded text risks
-        # BPE drift that would silently desync the engine prompt from the
-        # training ids. Text-only prompts come back byte-identical.
-        if not self._tokens.has_media_tokens(torch.tensor(input_ids)):
-            return list(input_ids)
-        return self._tokens.collapse_ids_to_slots(list(input_ids))
 
-    def _normalize_text(self, text: str, images: Any, audios: Any) -> str:
-        # verl always renders one prompt per processor call (text=[str]).
-        normalized = self._tokens.collapse_to_slots(text, engine_slots=False)
-        if images is not None:
-            n_images = len(images) if not isinstance(images, str | bytes) else 1
-            have_images, _ = self._tokens.count_slots(normalized)
-            if have_images > n_images:
-                raise ValueError(f"Text carries {have_images} image slots but only {n_images} images were given.")
-            normalized += MINICPM_IMAGE_SLOT * (n_images - have_images)
-        if audios is not None:
-            n_audios = len(audios) if not isinstance(audios, str | bytes) else 1
-            _, have_audios = self._tokens.count_slots(normalized)
-            if have_audios > n_audios:
-                raise ValueError(f"Text carries {have_audios} audio slots but only {n_audios} audios were given.")
-            normalized += MINICPM_AUDIO_SLOT * (n_audios - have_audios)
-        return normalized
-
-    def __call__(self, text=None, images=None, audio=None, audios=None, **kwargs):
-        if audio is not None and audios is None:
-            audios = audio
-        # The remote processor expresses "no media" as None (its __call__
-        # branches on `is not None`; audio_feature_extract indexes audios[0]).
-        # verl forwards empty containers, so normalize them at this boundary.
-        if isinstance(images, list | tuple) and len(images) == 0:
-            images = None
-        if isinstance(audios, list | tuple) and len(audios) == 0:
-            audios = None
-        if isinstance(text, list):
-            text = [self._normalize_text(item, images, audios) if isinstance(item, str) else item for item in text]
-        elif isinstance(text, str):
-            text = self._normalize_text(text, images, audios)
-        return self._processor(text=text, images=images, audios=audios, **kwargs)
+def _parity_call(self, text=None, images=None, audio=None, audios=None, **kwargs):
+    if audio is not None and audios is None:
+        audios = audio
+    # The remote processor expresses "no media" as None (its __call__
+    # branches on `is not None`; audio_feature_extract indexes audios[0]).
+    # verl forwards empty containers, so normalize them at this boundary.
+    if isinstance(images, list | tuple) and len(images) == 0:
+        images = None
+    if isinstance(audios, list | tuple) and len(audios) == 0:
+        audios = None
+    tokens: MiniCPMMediaTokens = self._parity_tokens
+    if isinstance(text, list):
+        text = [
+            _parity_normalize_text(tokens, item, images, audios) if isinstance(item, str) else item for item in text
+        ]
+    elif isinstance(text, str):
+        text = _parity_normalize_text(tokens, text, images, audios)
+    base = type(self).__bases__[0]
+    return base.__call__(self, text=text, images=images, audios=audios, **kwargs)
 
 
 def bind_minicpm_processor(processor: Any) -> Any:
-    """Bind the parity helpers a MiniCPM-o processor needs for RL rollout.
+    """Upgrade a MiniCPM-o processor in place with the RL parity behaviors.
 
-    - ``dedup_pad_tokens``: the AR strategy's pre-engine hook collapses the
-      expanded spans of the agent-loop ids into vLLM's parenthesized slots.
-    - ``__call__`` wrapper: adapts verl's ``audio=`` kwarg to the remote
-      ``audios=``, collapses any expanded spans found in text, and appends
-      canonical slots when media is present but the decoded text lost its
+    A runtime subclass of the processor's own class (assigned via
+    ``__class__``) rather than a wrapping proxy: attribute access stays
+    native — inherited methods, properties, isinstance checks, and pickle/dill
+    probes behave exactly as the wrapped processor's do, with no
+    ``__getattr__`` delegation to guard or maintain. The overrides are
+    module-level functions so the dynamic class stays reference-picklable
+    for datasets/dill worker shipping.
+
+    - ``__call__``: adapts verl's ``audio=`` kwarg to the remote ``audios=``,
+      normalizes empty media to None, collapses expanded spans found in text,
+      and appends canonical slots when media is present but the text lost its
       slots (features are position-independent, so appended slots only
       satisfy the remote one-slot-per-media assert).
+    - ``apply_chat_template``: flattens verl's block content to the string
+      form the MiniCPM-o template can render.
+    - ``dedup_pad_tokens``: the AR strategy's pre-engine hook collapses the
+      expanded spans of the agent-loop ids into vLLM's parenthesized slots,
+      in id space.
     """
-    return _MiniCPMProcessorParityWrapper(processor, resolve_media_tokens(processor))
+    parity_cls = type(
+        "MiniCPMOParityProcessor",
+        (type(processor),),
+        {
+            "_parity_tokens": resolve_media_tokens(processor),
+            "__call__": _parity_call,
+            "apply_chat_template": _parity_apply_chat_template,
+            "dedup_pad_tokens": _parity_dedup_pad_tokens,
+        },
+    )
+    processor.__class__ = parity_cls
+    return processor
