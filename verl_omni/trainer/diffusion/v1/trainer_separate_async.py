@@ -38,6 +38,7 @@ import os
 from enum import Enum
 
 import ray
+import transfer_queue as tq
 from omegaconf import DictConfig
 from transfer_queue import KVBatchMeta
 from verl import DataProto
@@ -72,7 +73,7 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
 
     - ``on_init_end``: update weights on both the standalone and colocated
       checkpoint managers.
-    - ``on_train_begin``: enqueue ``num_warmup_batches`` prompt batches.
+    - ``on_train_begin``: top up the configured warmup depth after restoring in-flight prompts.
     - ``on_validate_begin``: switch to rollout mode if currently training.
     - ``on_sample_begin``: switch to rollout mode if training and the switch
       strategy says so.
@@ -232,9 +233,24 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
 
     def on_train_begin(self):
         num_warmup_batches = self.config.trainer.v1.separate_async.num_warmup_batches
-        for _ in range(num_warmup_batches):
+        train_batch_size = self.config.data.train_batch_size
+        target_warmup_prompts = num_warmup_batches * train_batch_size
+        queue_state = tq.kv_list("train") or {}
+        restored_inflight_prompts = sum(
+            tag.get("is_prompt", False) and tag.get("status") in ("pending", "running")
+            for tag in queue_state.get("train", {}).values()
+        )
+        prompts_to_add = max(0, target_warmup_prompts - restored_inflight_prompts)
+        full_batches, remaining_prompts = divmod(prompts_to_add, train_batch_size)
+        for _ in range(full_batches):
             self._add_batch_to_generate()
-        logger.info(f"Added {num_warmup_batches} warmup batches to the agent loop manager")
+        if remaining_prompts:
+            self._add_prompts_to_generate(remaining_prompts)
+        logger.info(
+            "Added %d warmup prompts to the agent loop manager; restored %d in-flight prompts",
+            prompts_to_add,
+            restored_inflight_prompts,
+        )
 
     def on_validate_begin(self):
         if self.current_mode == HybridEngineMode.TRAINER and self._colocated_slept:

@@ -46,7 +46,7 @@ dependencies = [
     "latex2sympy2_extended",
     "math_verify",
     "tensorboard",
-    "TransferQueue==0.1.8",
+    "TransferQueue==0.1.9",
 ]
 
 [project.optional-dependencies]
