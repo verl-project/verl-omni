@@ -35,9 +35,27 @@ __all__ = [
 ]
 
 
+def _unwrap_collated(value: Any) -> Any:
+    """Normalize DataProto's ragged-collation artifacts to plain containers.
+
+    Ragged media (per-slice pixel arrays, variable-length clip lists) is
+    collated into object-dtype ndarrays, and short slots are padded with
+    ``None``; ``torch.as_tensor`` can convert neither directly. Recurse
+    through nested containers and object arrays, drop the ``None`` padding,
+    and keep everything else — structure and order preserved.
+    """
+    if isinstance(value, np.ndarray) and value.dtype == object:
+        return _unwrap_collated(value.tolist())
+    if isinstance(value, list | tuple):
+        return [item for item in (_unwrap_collated(member) for member in value) if item is not None]
+    return value
+
+
 def _as_tensor(value: Any) -> torch.Tensor:
     if isinstance(value, torch.Tensor):
         return value
+    if isinstance(value, np.ndarray) and value.dtype == object:
+        return _as_tensor(_unwrap_collated(value))
     return torch.as_tensor(np.asarray(value))
 
 
@@ -77,6 +95,7 @@ def _one_sample_audio_feature_lens(sample: Any, device: torch.device) -> torch.T
 
 def batch_audio_feature_lens(value: Any, device: torch.device) -> list[torch.Tensor]:
     """List of 1D tensors so ``torch.hstack(audio_feature_lens_raw)`` succeeds."""
+    value = _unwrap_collated(value)
     if _is_empty_audio_features(value):
         return []
     if isinstance(value, torch.Tensor) and value.ndim <= 1:
@@ -88,6 +107,7 @@ def batch_audio_feature_lens(value: Any, device: torch.device) -> list[torch.Ten
 
 def normalize_audio_features(value: Any) -> torch.Tensor | list:
     """Empty batches become ``[]``; real clips become ``(n_clips, 80, frames)``."""
+    value = _unwrap_collated(value)
     if _is_empty_audio_features(value):
         return []
     if isinstance(value, torch.Tensor):
@@ -130,6 +150,7 @@ def sample_pixel_slices(pixel_values: Any) -> list[torch.Tensor]:
     then does ``i.flatten(end_dim=1)`` on each slice, so each ``i`` must be a
     tensor, not another list.
     """
+    pixel_values = _unwrap_collated(pixel_values)
     if pixel_values is None:
         return []
     if isinstance(pixel_values, torch.Tensor):
@@ -157,6 +178,7 @@ def sample_pixel_slices(pixel_values: Any) -> list[torch.Tensor]:
 
 def sample_tgt_sizes(tgt_sizes: Any, *, n_slices: int, device: torch.device) -> torch.Tensor:
     del n_slices  # kept for signature parity with the #550 helpers
+    tgt_sizes = _unwrap_collated(tgt_sizes)
     if tgt_sizes is None or (isinstance(tgt_sizes, (list | tuple)) and not tgt_sizes):
         return torch.zeros(0, 2, dtype=torch.int32, device=device)
     if isinstance(tgt_sizes, list | tuple) and len(tgt_sizes) == 1 and not isinstance(tgt_sizes[0], int | float):
