@@ -71,6 +71,10 @@ class OmniPPOTrainerSync(PPOTrainerSync):
         model_config: OmniModelConfig = omega_conf_to_dataclass(self.config.actor_rollout_ref.model, OmniModelConfig)
         self.tokenizer = model_config.tokenizer
         self.processor = model_config.processor
+        if self.config.distillation.enabled:
+            from verl_omni.trainer.omni.distillation import validate_teacher_tokenizers
+
+            validate_teacher_tokenizers(self.tokenizer, self.config)
 
     # The rollout server resumes admission after every successful wake; this
     # bridge remains a safety net for holds not preceded by a wake (init).

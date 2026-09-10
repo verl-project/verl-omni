@@ -21,6 +21,7 @@ from typing import Any, Optional
 import ray
 import torch
 import vllm_omni.entrypoints.cli.serve
+from omegaconf import DictConfig, OmegaConf
 from verl.workers.config import RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, TokenOutput
 from verl.workers.rollout.utils import run_uvicorn
@@ -510,6 +511,15 @@ class vLLMOmniReplica(vLLMReplica):
         is_teacher_model: bool = False,
         name_suffix: str = "",
     ):
+        if is_teacher_model and isinstance(model_config, dict | DictConfig):
+            engine_kwargs = config.engine_kwargs.get("vllm_omni", {})
+            if engine_kwargs.get("output_mode") == "ar":
+                # Checkpoint workers construct the model config before the HTTP server does.
+                model_config = OmegaConf.merge(
+                    {"trust_remote_code": engine_kwargs.get("trust_remote_code", False)},
+                    model_config,
+                    {"_target_": "verl_omni.workers.config.OmniModelConfig"},
+                )
         super().__init__(
             replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
         )

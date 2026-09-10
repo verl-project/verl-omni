@@ -1,6 +1,6 @@
 # Supported Models
 
-Last updated: 09/09/2026.
+Last updated: 09/10/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
@@ -199,6 +199,18 @@ BAGEL uses a per-stage deploy YAML that overrides top-level vLLM engine argument
 ---
 
 ## Omni-Modality Models
+
+### MiniCPM-o 4.5 Thinker (simplex OPD)
+
+| Property | Detail |
+|----------|--------|
+| **Hugging Face ID** | `openbmb/MiniCPM-o-4_5` |
+| **Modality** | Text, images, and at most one audio clip → text |
+| **Trainer type** | Selected-token reverse-KL OPD through the omni V1 trainer |
+| **FSDP** | FSDP2 with LLM LoRA; frozen encoders and merged-weight sync |
+| **Rollout / teacher** | Native vLLM-Omni thinker stage; separate frozen teacher pool |
+
+See [the simplex OPD recipe](../../examples/opd_trainer/minicpm_o/README.md) for data conversion, checkpoint compatibility, and launch settings. Video, speech-policy training, and streaming duplex are not supported by this initial recipe.
 
 ### Qwen3-Omni-30B-A3B Thinker
 

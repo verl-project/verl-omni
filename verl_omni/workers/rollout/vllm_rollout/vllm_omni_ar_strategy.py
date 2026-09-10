@@ -66,6 +66,7 @@ class ARStrategy(OmniStrategyBase):
         self._rollout_fields_by_request_id: dict[str, dict[str, Any]] = {}
         self._policy_stage_index = 0
         self._policy_sampling_constraints: dict[str, Any] = {}
+        self._single_model_stage: str | None = None
 
     def validate_configs(self) -> None:
         if self.server.config.max_model_len is None:
@@ -130,6 +131,7 @@ class ARStrategy(OmniStrategyBase):
         """Write a deploy config YAML from the adapter's stage topology."""
         adapter_cls.ensure_pipeline_registered(pipeline_mode)
         stages = adapter_cls.build_stage_configs(pipeline_mode=pipeline_mode)
+        self._single_model_stage = getattr(stages[0], "model_stage", None) if len(stages) == 1 else None
         stage_ids = [stage.stage_id for stage in stages]
         policy_stage_id = adapter_cls.policy_stage_id(pipeline_mode=pipeline_mode)
         if policy_stage_id not in stage_ids:
@@ -221,6 +223,8 @@ class ARStrategy(OmniStrategyBase):
             # The generated per-stage deploy config owns model_stage for
             # multi-output pipelines.
             engine_args["model_stage"] = None
+        elif self._single_model_stage is not None:
+            engine_args["model_stage"] = self._single_model_stage
         for timeout_key in ("stage_init_timeout", "init_timeout"):
             timeout_value = getattr(args, timeout_key, None)
             if timeout_value is not None:
@@ -384,17 +388,16 @@ class ARStrategy(OmniStrategyBase):
         extra_fields = {"global_steps": self.server.global_steps}
         extra_fields.update(rollout_fields)
 
-        num_prompt_logprobs = getattr(params, "prompt_logprobs", None)
-        if num_prompt_logprobs is not None and hasattr(req_output, "prompt_logprobs"):
-            extract_prompt_logprobs(
-                output=req_output,
-                num_prompt_logprobs=num_prompt_logprobs,
-                result_dict=extra_fields,
-            )
-
         token_ids = req_output.outputs[0].token_ids
         log_probs = None
         policy_params = params[self._policy_stage_index] if isinstance(params, list) else params
+        if getattr(req_output, "prompt_token_ids", None) is not None:
+            extra_fields["rollout_prompt_ids"] = list(req_output.prompt_token_ids)
+        num_prompt_logprobs = getattr(policy_params, "prompt_logprobs", None)
+        if num_prompt_logprobs is not None:
+            if getattr(req_output, "prompt_logprobs", None) is None:
+                raise RuntimeError("The omni teacher did not return requested prompt log probabilities.")
+            extract_prompt_logprobs(req_output, num_prompt_logprobs, extra_fields)
         if policy_params.logprobs is not None:
             log_probs = [
                 logprobs[token_ids[index]].logprob for index, logprobs in enumerate(req_output.outputs[0].logprobs)
