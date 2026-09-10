@@ -320,3 +320,54 @@ def test_wrapper_apply_chat_template_string_content_untouched():
     messages = [{"role": "user", "content": "plain question"}]
     processor.apply_chat_template(messages)
     assert processor.template_calls[-1]["messages"][0]["content"] == "plain question"
+
+
+def _flatten_ints(nested):
+    out = []
+    for item in nested:
+        if isinstance(item, list | tuple):
+            out.extend(_flatten_ints(item))
+        elif hasattr(item, "tolist"):
+            out.extend(_flatten_ints(item.tolist()))
+        else:
+            out.append(int(item))
+    return out
+
+
+def test_prepare_model_inputs_discards_stale_processor_bounds():
+    # verl's extract path hands the processor's per-sample bounds to the model
+    # call even after rmpad flattened the ids to (1, total); trusting them
+    # trips the packed guard. They must be dropped and re-derived instead.
+    # (Bounds nesting is asserted in the merge tests; here it is flattened so
+    # the assertion targets the values, which is what this fix owns.)
+    data, sample_a_len = _packed_data()
+    model_inputs = {key: value for key, value in data.items() if key not in ("image_bound", "audio_bounds")}
+    model_inputs["image_bound"] = [torch.tensor([[7, 9]]), torch.zeros(0, 2, dtype=torch.long)]  # stale
+    model_inputs["audio_bounds"] = [torch.zeros(0, 2, dtype=torch.long), torch.tensor([[99, 103]])]  # stale
+    model_inputs["attention_mask"] = torch.ones_like(model_inputs["input_ids"])
+    packed = MiniCPMThinkerAdapter.prepare_model_inputs(
+        model_inputs, micro_batch=None, model_config=SimpleNamespace(processor=_StubProcessor())
+    )
+    assert "attention_mask" not in packed  # packed layout confirmed: no tripwire fired
+    assert _flatten_ints(packed["data"]["image_bound"]) == [2, 4]  # stale 7/9 gone
+    audio_start = sample_a_len + 2
+    assert _flatten_ints(packed["data"]["audio_bounds"]) == [audio_start, audio_start + 3]  # 99/103 gone
+
+
+def test_prepare_model_inputs_padded_batch_also_rederives_bounds():
+    tokenizer = _StubTokenizer()
+    row = tokenizer.encode("A" + "<image><unk><unk></image>" + "a")
+    model_inputs = {
+        "input_ids": torch.tensor([row, row], dtype=torch.long),
+        "position_ids": torch.arange(len(row)).repeat(2, 1),
+        "attention_mask": torch.ones(2, len(row), dtype=torch.long),
+        "pixel_values": [[torch.zeros(2, 2)], [torch.zeros(2, 2)]],
+        "tgt_sizes": [torch.tensor([[1, 1]], dtype=torch.int32), torch.zeros(0, 2, dtype=torch.int32)],
+        "audio_features": [],
+        "audio_feature_lens": [[], []],
+        "image_bound": [torch.tensor([[99, 103]])],  # stale: wrong rows, wrong span
+    }
+    prepared = MiniCPMThinkerAdapter.prepare_model_inputs(
+        model_inputs, micro_batch=None, model_config=SimpleNamespace(processor=_StubProcessor())
+    )
+    assert prepared["data"]["image_bound"] == [[[2, 4]], [[2, 4]]]
