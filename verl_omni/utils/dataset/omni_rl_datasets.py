@@ -146,7 +146,8 @@ class MiniCPMORLHFDataset(OmniAudioRLHFDataset):
                         image_ref = image_ref.get("url")
                     if image_ref is None:
                         raise ValueError(f"MiniCPM image block has no path: {block!r}")
-                    images.append(Image.open(image_ref).convert("RGB"))
+                    with Image.open(image_ref) as image:  # convert() returns a new image; close the handle
+                        images.append(image.convert("RGB"))
                 elif block_type == "audio":
                     audio_ref = block.get("audio") or block.get("audio_url")
                     if audio_ref is None:

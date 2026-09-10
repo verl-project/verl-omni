@@ -399,4 +399,11 @@ class MiniCPMThinkerAdapter(OmniModelBase):
     def configure_tokenizer(cls, model_path: str, model_config) -> Any:
         from transformers import AutoTokenizer
 
-        return AutoTokenizer.from_pretrained(model_path, trust_remote_code=model_config.trust_remote_code)
+        from verl_omni.models.transformers.minicpm_o import keep_answer_tags_when_decoding
+
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=model_config.trust_remote_code)
+        # The reward manager decodes with skip_special_tokens=True; without the
+        # demotion the <answer> tags vanish from the scored string and the
+        # choice reward is identically zero.
+        keep_answer_tags_when_decoding(tokenizer)
+        return tokenizer

@@ -60,6 +60,8 @@ def test_minicpmo_gspo_launcher_contract():
     )
 
     # AVQA reward and proven hyperparameters from the Qwen3-Omni recipe.
+    assert "data.max_response_length=12288" in settings  # 4096 CLI overrides truncate MiniCPM's think
+    assert "actor_rollout_ref.rollout.temperature=0.6" in settings  # checkpoint think default, not Qwen's 1.0
     assert "reward.reward_manager.source=register" in settings
     assert "reward.reward_manager.name=naive" in settings
     assert "reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py" in settings

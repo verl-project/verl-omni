@@ -371,3 +371,58 @@ def patch_minicpm_get_audio_embedding(module) -> None:
 
     module.get_audio_embedding = types.MethodType(get_audio_embedding, module)
     setattr(module, _AUDIO_DUMMY_PATCH_ATTR, True)
+
+
+_ANSWER_TAG_TOKENS = ("<answer>", "</answer>")
+
+
+def keep_answer_tags_when_decoding(tokenizer) -> bool:
+    """Demote ``<answer>`` / ``</answer>`` from special to plain added tokens.
+
+    Why (MiniCPM-o 4.5 special flags vs verl's reward decode):
+        The checkpoint registers the answer tags as ``special: true`` while
+        ``<think>`` / ``</think>`` are plain. verl's reward manager decodes
+        responses with ``skip_special_tokens=True``, which strips exactly the
+        answer tags — ``choice_reward`` then never sees an ``<answer>`` payload
+        and scores every response 0 (the bring-up zero-reward symptom). Only
+        the decode skip filter consults the special flag: token ids, atomic
+        encoding, and generation are unchanged, and the tags now survive the
+        scored string exactly as the prompt shows them.
+
+        The flag lives in the Rust backend's added-token registry; Python-side
+        mutation (``added_tokens_decoder[id].special = False``) is cosmetic
+        and re-adding the token does not flip the backend. The fix rebuilds
+        the backend from its own serialization with the two flags flipped —
+        no disk roundtrip, ids stable. Returns whether anything was demoted;
+        tokens already non-special (e.g. fixed upstream) are a no-op. A
+        special-but-unfixable tokenizer raises rather than silently zeroing
+        rewards again.
+    """
+    decoder = getattr(tokenizer, "added_tokens_decoder", None) or {}
+    needs_demotion = any(
+        getattr(decoder.get(tokenizer.convert_tokens_to_ids(token)), "special", False) for token in _ANSWER_TAG_TOKENS
+    )
+    if not needs_demotion:
+        return False
+
+    import json
+
+    from tokenizers import Tokenizer
+
+    backend = getattr(tokenizer, "backend_tokenizer", None) or getattr(tokenizer, "_tokenizer", None)
+    if backend is None or not hasattr(backend, "to_str"):
+        raise RuntimeError(
+            "MiniCPM-o answer tags are special tokens but the tokenizer has no fast backend "
+            "to demote them on; skip_special_tokens=True would strip the tags and zero the "
+            "choice reward."
+        )
+    data = json.loads(backend.to_str())
+    demoted = False
+    for entry in data.get("added_tokens", []):
+        if entry.get("content") in _ANSWER_TAG_TOKENS and entry.get("special", False):
+            entry["special"] = False
+            demoted = True
+    if not demoted:
+        return False
+    tokenizer._tokenizer = Tokenizer.from_str(json.dumps(data))
+    return demoted
