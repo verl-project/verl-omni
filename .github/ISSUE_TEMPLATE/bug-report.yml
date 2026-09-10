@@ -9,17 +9,6 @@ body:
         Thanks for taking the time to fill out this bug report! 🤗
 
   - type: textarea
-    id: bug-description
-    attributes:
-      label: Describe the bug
-      description: |
-        Please provide a clear and concise description of the bug.
-        If you intend to submit a pull request for this issue, please mention it here.
-      placeholder: Bug description
-    validations:
-      required: true
-
-  - type: textarea
     id: system-info
     attributes:
       label: System Info
