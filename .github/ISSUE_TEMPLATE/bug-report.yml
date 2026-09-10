@@ -9,6 +9,17 @@ body:
         Thanks for taking the time to fill out this bug report! 🤗
 
   - type: textarea
+    id: bug-description
+    attributes:
+      label: Describe the bug
+      description: |
+        Please provide a clear and concise description of the bug.
+        If you intend to submit a pull request for this issue, please mention it here.
+      placeholder: Bug description
+    validations:
+      required: true
+
+  - type: textarea
     id: system-info
     attributes:
       label: System Info
@@ -63,3 +74,38 @@ body:
     attributes:
       label: Expected behavior
       description: "A clear and concise description of what you would expect to happen."
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Please include the relevant Python logs, error messages, and stack traces if available.
+      render: shell
+
+  - type: textarea
+    id: who-can-help
+    attributes:
+      label: Who can help?
+      description: |
+        Please tag at most two maintainers who are familiar with the affected area.
+        If you are unsure, leave this blank and a core maintainer will route the issue.
+
+        Questions on algorithms and training:
+        - PPO-related algorithms: @knlnguyen1802 @NancyFyong
+        - Distillation: @cr-gao
+        - DAPO: @WenzheWang
+        - Diffusion NFT and DPO: @wtomin
+
+        Questions on infrastructure and hardware:
+        - NPU: @Sky-Trigger
+        - FSDP engine: @zhtmike
+        - Rollout or trainer: @zhtmike @knlnguyen1802 @ZihaoW123
+        - vLLM-Omni: @samithuang
+
+        Questions on rewards and pipelines:
+        - Reward: @chenyingshu @ruihanglix
+        - VeOmni: @WenzheWang
+
+        Questions on CI, Docker, or documentation:
+        - CI, Docker, or documentation: @wtomin
+      placeholder: "@Username ..."
