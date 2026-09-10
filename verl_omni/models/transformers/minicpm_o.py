@@ -139,7 +139,7 @@ def wrap_model_init_with_post_init(model_cls: type) -> None:
     )
 
 
-def patch_remote_siglip_flash_attn_support(model_path: str, *, trust_remote_code: bool) -> None:
+def patch_remote_siglip_flash_attn_support(model_path: str, *, trust_remote_code: bool, config: Any = None) -> None:
     """Alias the remote SigLIP's transformers-4.x FA2 flag to the >= 5 name.
 
     Why (remote code written for 4.x vs transformers >= 5 dispatch):
@@ -155,21 +155,46 @@ def patch_remote_siglip_flash_attn_support(model_path: str, *, trust_remote_code
         own declaration only — it never enables support the remote did not
         claim.
 
+    Why resolve via auto_map (local-path cache-hash divergence):
+        For local model paths, transformers derives the dynamic-module cache
+        directory from the file-set closure of the *requested* module.
+        Requesting ``modeling_navit_siglip`` directly hashes only the siglip
+        file set, while ``AutoModel.from_pretrained`` loads
+        ``modeling_minicpmo`` whose closure spans the full remote file set —
+        two cache dirs, two distinct ``SiglipVisionTransformer`` class
+        objects, and the alias landed on the orphan while init-time dispatch
+        rejected FA2 on the class the model actually imports. Resolving the
+        auto_map ``AutoModel`` entry — the same entry the loader uses —
+        lands in the loader's namespace; the scan then covers that main
+        modeling module and the home module of every ``PreTrainedModel``
+        subclass bound there. Hub-hosted checkpoints share one commit-hash
+        namespace and never diverge.
+
     Call this before ``AutoModel.from_pretrained``. No-op on transformers < 5.
     """
     if not _needs_transformers5_compat() or not trust_remote_code:
         return
 
-    from transformers import PreTrainedModel
+    from transformers import AutoConfig, PreTrainedModel
     from transformers.models.auto.auto_factory import get_class_from_dynamic_module
 
-    vision_cls = get_class_from_dynamic_module(
-        "modeling_navit_siglip.SiglipVisionTransformer",
-        model_path,
-        trust_remote_code=trust_remote_code,
-    )
-    module = sys.modules[vision_cls.__module__]
-    for value in vars(module).values():
+    resolved_config = config
+    if resolved_config is None:
+        resolved_config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
+    auto_map = getattr(resolved_config, "auto_map", None) or {}
+    main_class_ref = auto_map.get("AutoModel") or auto_map.get("AutoModelForCausalLM")
+    if main_class_ref is None:
+        return
+
+    model_cls = get_class_from_dynamic_module(main_class_ref, model_path, trust_remote_code=trust_remote_code)
+    main_module = sys.modules.get(model_cls.__module__)
+    if main_module is None:
+        return
+
+    # The main modeling module binds SiglipVisionTransformer via its remote
+    # import, so its namespace holds the exact class object the model
+    # constructs — alias flagged classes found there.
+    for value in vars(main_module).values():
         if (
             isinstance(value, type)
             and issubclass(value, PreTrainedModel)
