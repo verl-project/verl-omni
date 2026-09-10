@@ -48,7 +48,6 @@ python3 -m verl_omni.trainer.main_omni \
     +actor_rollout_ref.model.override_config.init_tts=false \
     +actor_rollout_ref.model.override_config.use_cache=false \
     +actor_rollout_ref.model.override_config.stream_input=false \
-    actor_rollout_ref.actor.freeze_vision_tower=true \
     actor_rollout_ref.actor.strategy=fsdp2 \
     actor_rollout_ref.actor.optim.lr=3e-6 \
     actor_rollout_ref.actor.optim.weight_decay=0.01 \

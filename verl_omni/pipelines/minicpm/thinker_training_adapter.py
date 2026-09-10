@@ -141,6 +141,9 @@ def split_minicpm_forward_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any]
         ]
     data["audio_features"] = normalize_audio_features(data.get("audio_features"))
     if data["audio_features"] == []:
+        # NOTE: an empty-features/nonnull-lens inconsistency is laundered into
+        # "no audio" here; the dangerous direction (ids carry audio spans, no
+        # features) is caught fail-closed in _apply_media_bounds.
         data["audio_feature_lens"] = []
     else:
         data["audio_feature_lens"] = batch_audio_feature_lens(data.get("audio_feature_lens"), data["input_ids"].device)

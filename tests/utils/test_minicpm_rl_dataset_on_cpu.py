@@ -108,4 +108,5 @@ def test_qwen_dataset_keeps_qwen_resolution_order():
         pytest.skip("qwen-omni-utils not installed")
     messages = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
     images, videos, audios = QwenOmniRLHFDataset._resolve_media_from_messages(messages, None)
-    assert images == [] and videos == [] and audios == []
+    # Newer qwen_omni_utils returns None instead of [] for absent modalities.
+    assert images in ([], None) and videos in ([], None) and audios in ([], None)
