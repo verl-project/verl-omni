@@ -1,6 +1,6 @@
 # How to Integrate an Image-to-Image Diffusion Model
 
-Last updated: 07/14/2026.
+Last updated: 09/08/2026.
 
 This guide explains the image-to-image (I2I) contracts required to add a new
 image-edit diffusion model to VeRL-Omni. It builds on
@@ -306,19 +306,22 @@ The rollout adapter has five I2I-specific responsibilities.
 ### 4.1 Parse condition images
 
 Use the shared
-[`ImageGenerationRequest`](../../verl_omni/pipelines/utils.py) parser instead
-of depending on one internal request layout:
+[`condition_images_from_payload`](../../verl_omni/pipelines/rollout_request.py) parser
+instead of depending on one internal request layout:
 
 ```python
+from verl_omni.pipelines.rollout_request import condition_images_from_payload
+
 custom_prompt = req.prompts[0] if req.prompts else {}
-generation_request = ImageGenerationRequest.from_request_payload(custom_prompt)
-condition_images = generation_request.images
+condition_images = condition_images_from_payload(custom_prompt)
 if not condition_images:
     raise ValueError("MyEditPipeline requires a condition image")
 ```
 
 The parser normalizes images from top-level `images`/`image` fields,
-multimodal request data, and vLLM-Omni's `additional_information` fallback.
+multimodal request data, and vLLM-Omni's `additional_information` field.
+Multiple aliases must contain equivalent images; conflicting values raise
+instead of silently selecting one. With no images, the parser returns `[]`.
 Validate the supported number of images and aspect ratios before encoding.
 
 ### 4.2 Encode prompts with image features when required

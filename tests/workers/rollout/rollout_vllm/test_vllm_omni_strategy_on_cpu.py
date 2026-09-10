@@ -24,6 +24,7 @@ import yaml
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.qwen3_omni.omni_rollout_adapter import Qwen3OmniRolloutAdapter
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
+from verl_omni.pipelines.rollout_request import OmniRolloutRequest
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_ar_strategy as ar_strategy_module
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_async_server as server_module
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_diffusion_strategy as diffusion_strategy_module
@@ -148,14 +149,12 @@ def test_ar_strategy_preserves_prompt_and_sampling_preprocessing():
     strategy = ARStrategy(server)
     sampling_params = {"max_new_tokens": 10, "logprobs": True}
 
-    prompt, params = strategy.preprocess_input(
+    request = OmniRolloutRequest.from_generate_kwargs(
         prompt_ids=[1, 2, 3],
-        sampling_params=sampling_params,
-        multi_modal_data={"image": ["image"]},
-        lora_request=None,
-        negative_prompt_ids=None,
+        image_data=["image"],
         mm_processor_kwargs={"size": 224},
     )
+    prompt, params = strategy.preprocess_input(request, sampling_params, None)
 
     assert prompt == {
         "prompt_token_ids": [1, 2],
@@ -165,6 +164,28 @@ def test_ar_strategy_preserves_prompt_and_sampling_preprocessing():
     assert params.max_tokens == 6
     assert params.logprobs == 0
     assert params.repetition_penalty == 1.1
+
+
+@pytest.mark.parametrize("output_modalities", [None, ["latent", "audio"]])
+def test_ar_strategy_rejects_unsupported_prompt_fields(output_modalities):
+    strategy = ARStrategy(SimpleNamespace())
+    strategy._rollout_output_modalities = output_modalities
+    request = OmniRolloutRequest.from_generate_kwargs(
+        prompt_ids=[1],
+        prompt_mask=torch.tensor([True]),
+        negative_prompt_ids=[2],
+        extra_prompt_ids={"encoder": [3]},
+        negative_extra_prompt_ids={"encoder": [4]},
+    )
+
+    with pytest.raises(ValueError, match="ARStrategy does not support request fields") as exc_info:
+        strategy.preprocess_input(request, {}, None)
+
+    message = str(exc_info.value)
+    assert "prompt_mask" in message
+    assert "negative_prompt_ids" in message
+    assert "extra_prompt_ids" in message
+    assert "negative_extra_prompt_ids" in message
 
 
 def test_ar_strategy_preserves_output_conversion():
@@ -450,11 +471,10 @@ def test_ar_strategy_prepares_sampling_params_for_nonzero_policy_stage():
     strategy._policy_stage_index = 1
     strategy._policy_sampling_constraints = {}
 
+    request = OmniRolloutRequest.from_generate_kwargs(prompt_ids=[5, 6])
     prompt, params = strategy.preprocess_input(
-        [5, 6],
+        request,
         {"temperature": 0.8, "logprobs": True},
-        {},
-        None,
         None,
     )
 
@@ -466,10 +486,8 @@ def test_ar_strategy_prepares_sampling_params_for_nonzero_policy_stage():
     assert params[1].logprobs == 0
 
     _, next_params = strategy.preprocess_input(
-        [5, 6],
+        request,
         {"temperature": 0.2, "logprobs": True},
-        {},
-        None,
         None,
     )
     assert params[0] is next_params[0]
@@ -513,7 +531,7 @@ def test_ar_strategy_rejects_invalid_adapter_prompt(adapter_prompt, message):
     strategy._rollout_adapter = Adapter
 
     with pytest.raises((RuntimeError, TypeError), match=message):
-        strategy.preprocess_input([5, 6], {}, {}, None, None)
+        strategy.preprocess_input(OmniRolloutRequest.from_generate_kwargs(prompt_ids=[5, 6]), {}, None)
 
 
 @pytest.mark.asyncio
@@ -534,7 +552,7 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
             self.rpc_kwargs = kwargs
             return "rpc-result"
 
-    class Adapter:
+    class Adapter(OmniRolloutPipelineBase):
         @staticmethod
         def combine_engine_outputs(outputs, prompt):
             assert outputs == [policy]
@@ -565,6 +583,32 @@ async def test_ar_strategy_retains_requested_stage_outputs_and_targets_weight_sy
     assert output.extra_fields == {"global_steps": 3, "audio_sample_rate": 24_000}
     assert strategy._rollout_fields_by_request_id == {}
 
+    server.config = SimpleNamespace(max_model_len=8, prompt_length=4, response_length=4)
+    server.model_config = SimpleNamespace(processor=None)
+    server._resolve_lora_request = AsyncMock(return_value=None)
+    server.engine.default_sampling_params_list = [ar_strategy_module.SamplingParams(), SimpleNamespace(stage="audio")]
+    output = await strategy.generate(
+        prompt_ids=[1],
+        sampling_params={"max_new_tokens": 2},
+        request_id="request-0",
+        image_data=["image"],
+        audio_data=["audio"],
+        mm_processor_kwargs={"size": 224},
+    )
+
+    assert server.engine.generate_kwargs["prompt"] == {
+        "prompt_token_ids": [1],
+        "multi_modal_data": {"image": ["image"], "audio": ["audio"]},
+        "mm_processor_kwargs": {"size": 224},
+    }
+    params = server.engine.generate_kwargs["sampling_params_list"]
+    assert params[0].max_tokens == 2
+    assert params[1] is server.engine.default_sampling_params_list[1]
+    assert server.engine.generate_kwargs["output_modalities"] == ["latent", "audio"]
+    assert output.token_ids == [7]
+    assert output.extra_fields == {"global_steps": 3, "audio_sample_rate": 24_000}
+    assert strategy._rollout_fields_by_request_id == {}
+
 
 def test_ar_strategy_preserves_qwen3_omni_thinker_only_contract():
     server = SimpleNamespace(
@@ -587,11 +631,9 @@ def test_ar_strategy_preserves_qwen3_omni_thinker_only_contract():
     assert engine_args["model_stage"] == "thinker"
 
     prompt, params = strategy.preprocess_input(
-        prompt_ids=[1, 2],
+        request=OmniRolloutRequest.from_generate_kwargs(prompt_ids=[1, 2]),
         sampling_params={"max_new_tokens": 2, "logprobs": True},
-        multi_modal_data={},
         lora_request=None,
-        negative_prompt_ids=None,
     )
     assert prompt == {"prompt_token_ids": [1, 2]}
     assert isinstance(params, ar_strategy_module.SamplingParams)
@@ -708,16 +750,16 @@ def test_diffusion_strategy_preserves_multistage_prompt_shape():
     strategy = DiffusionStrategy(server)
     prompt_mask = torch.tensor([True, False])
 
-    prompt, params = strategy.preprocess_input(
+    request = OmniRolloutRequest.from_generate_kwargs(
         prompt_ids=[1, 2],
-        sampling_params={"pipeline_private_arg": 7},
-        multi_modal_data={"image": ["image"]},
-        lora_request=None,
-        negative_prompt_ids=[3, 4],
         prompt_mask=prompt_mask,
+        negative_prompt_ids=[3, 4],
         extra_prompt_ids={"encoder": [5]},
         negative_extra_prompt_ids={"encoder": [6]},
+        mm_processor_kwargs={"video_fps": 24, "audio_sample_rate": 32_000},
+        image_data=["image"],
     )
+    prompt, params = strategy.preprocess_input(request, {"pipeline_private_arg": 7}, None)
 
     assert prompt["prompt_token_ids"] == [1, 2]
     assert prompt["prompt_mask"] is prompt_mask
@@ -727,8 +769,17 @@ def test_diffusion_strategy_preserves_multistage_prompt_shape():
     assert prompt["negative_extra_prompt_ids"] == {"encoder": [6]}
     assert prompt["multi_modal_data"] == {"image": ["image"]}
     assert prompt["extra_args"] == {"multi_modal_data": {"image": ["image"]}}
+    assert prompt["mm_processor_kwargs"] == {"video_fps": 24, "audio_sample_rate": 32_000}
     assert params[0] == "ar-stage"
     assert params[-1].extra_args == {"pipeline_private_arg": 7}
+
+
+@pytest.mark.asyncio
+async def test_diffusion_strategy_rejects_nonzero_priority():
+    strategy = DiffusionStrategy(SimpleNamespace())
+
+    with pytest.raises(ValueError, match="does not support nonzero request priority"):
+        await strategy.run_generation(None, None, "request-id", None, priority=1)
 
 
 def _joint_video_audio_final_res():
@@ -793,14 +844,14 @@ def test_diffusion_strategy_omits_audio_sample_rate_without_declared_spec(monkey
 
 
 @pytest.mark.parametrize(
-    ("strategy_cls", "expected_extra_keys"),
+    ("strategy_cls", "priority", "expected_extra_keys"),
     [
-        (ARStrategy, {"lora_request", "priority"}),
-        (DiffusionStrategy, set()),
+        (ARStrategy, 3, {"lora_request", "priority"}),
+        (DiffusionStrategy, 0, set()),
     ],
 )
 @pytest.mark.asyncio
-async def test_strategy_preserves_mode_specific_engine_call(strategy_cls, expected_extra_keys):
+async def test_strategy_preserves_mode_specific_engine_call(strategy_cls, priority, expected_extra_keys):
     class _Engine:
         def generate(self, **kwargs):
             self.kwargs = kwargs
@@ -819,7 +870,7 @@ async def test_strategy_preserves_mode_specific_engine_call(strategy_cls, expect
         params=["params"],
         request_id="request-1",
         lora_request="lora",
-        priority=3,
+        priority=priority,
     )
 
     assert result == "last"

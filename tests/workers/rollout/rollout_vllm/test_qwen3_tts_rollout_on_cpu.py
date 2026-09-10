@@ -37,6 +37,7 @@ from verl_omni.pipelines.qwen3_tts.omni_rollout_adapter import (
 )
 from verl_omni.pipelines.qwen3_tts.rollout_utils import QWEN3_TTS_REPLAY_KEY
 from verl_omni.pipelines.qwen3_tts.talker_training_adapter import Qwen3TTSTalkerAdapter
+from verl_omni.pipelines.rollout_request import OmniRolloutRequest
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
@@ -367,10 +368,8 @@ def test_ar_strategy_prepares_stage_specific_sampling_params():
     strategy._policy_sampling_constraints = {}
 
     prompt, params = strategy.preprocess_input(
-        [5, 6],
+        OmniRolloutRequest.from_generate_kwargs(prompt_ids=[5, 6]),
         {"temperature": 0.8, "logprobs": True},
-        {},
-        None,
         None,
     )
 
@@ -403,7 +402,7 @@ def test_ar_strategy_rejects_invalid_adapter_prompt(adapter_prompt, message):
     strategy._rollout_adapter = Adapter
 
     with pytest.raises((RuntimeError, TypeError), match=message):
-        strategy.preprocess_input([5, 6], {}, {}, None, None)
+        strategy.preprocess_input(OmniRolloutRequest.from_generate_kwargs(prompt_ids=[5, 6]), {}, None)
 
 
 @pytest.mark.asyncio

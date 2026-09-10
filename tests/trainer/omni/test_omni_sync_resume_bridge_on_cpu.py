@@ -170,4 +170,4 @@ async def test_server_wake_up_resumes_admission_after_ack():
 
     await server.wake_up()
 
-    assert calls == ["wake_up(tags=['weights'])", "resume_generation"]
+    assert calls == ["wake_up(tags=['kv_cache', 'weights'])", "resume_generation"]

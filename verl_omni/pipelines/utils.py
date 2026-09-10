@@ -15,8 +15,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional
+from typing import Optional
 
 import torch
 from diffusers import ModelMixin, SchedulerMixin
@@ -29,7 +28,6 @@ from verl_omni.workers.config import DiffusionModelConfig
 from .model_base import DiffusionI2IModelBase, DiffusionModelBase
 
 __all__ = [
-    "ImageGenerationRequest",
     "build_scheduler",
     "forward",
     "forward_and_sample_previous_step",
@@ -39,80 +37,6 @@ __all__ = [
     "sample_noise_and_timesteps",
     "set_timesteps",
 ]
-
-
-@dataclass
-class ImageGenerationRequest:
-    """Image generation request shared by t2i and image-conditioned backends.
-
-    Parses prompt / prompt token ids and condition images from verl-omni's
-    rollout request payload (``custom_prompt`` dict), checking multiple image
-    candidate keys: ``images``, ``image``, ``multi_modal_data.image``,
-    ``extra_args.multi_modal_data.image``, ``additional_information.condition_images``.
-    """
-
-    prompt: Any
-    images: list[Any] = field(default_factory=list)
-    """Condition images: empty for t2i, single-element for image editing, multi-element for multi-image conditioning."""
-
-    negative_prompt: Any | None = None
-    metadata: Mapping[str, Any] | None = None
-
-    @classmethod
-    def from_request_payload(cls, request_payload: Mapping[str, Any]) -> ImageGenerationRequest:
-        """Build a request from verl-omni's rollout request payload (``custom_prompt``)."""
-        prompt = request_payload.get("prompt")
-        if prompt is None:
-            prompt = request_payload.get("prompt_token_ids")
-        if prompt is None:
-            raise ValueError(
-                "ImageGenerationRequest missing required 'prompt' or 'prompt_token_ids' field. "
-                "The rollout request payload must carry one of them in custom_prompt."
-            )
-
-        multi_modal_data = request_payload.get("multi_modal_data")
-        extra_args = request_payload.get("extra_args")
-        extra_multi_modal_data = extra_args.get("multi_modal_data") if isinstance(extra_args, Mapping) else None
-        additional_information = request_payload.get("additional_information")
-
-        image_candidates = [
-            request_payload.get("images"),
-            request_payload.get("image"),
-            multi_modal_data.get("image") if isinstance(multi_modal_data, Mapping) else None,
-            extra_multi_modal_data.get("image") if isinstance(extra_multi_modal_data, Mapping) else None,
-            additional_information.get("condition_images") if isinstance(additional_information, Mapping) else None,
-        ]
-        images = []
-        # Select the first image source explicitly present in the request.
-        for candidate in image_candidates:
-            if candidate is not None:
-                images = candidate
-                break
-        if isinstance(images, tuple):
-            images = list(images)
-        elif not isinstance(images, list):
-            images = [images]
-
-        metadata_candidates = [
-            request_payload.get("metadata"),
-            request_payload.get("extra_info"),
-            additional_information,
-        ]
-        metadata = None
-        # Select the first metadata source explicitly present in the request.
-        for candidate in metadata_candidates:
-            if candidate is not None:
-                metadata = candidate
-                break
-        if not isinstance(metadata, Mapping):
-            metadata = None
-
-        return cls(
-            prompt=prompt,
-            images=images,
-            negative_prompt=request_payload.get("negative_prompt"),
-            metadata=metadata,
-        )
 
 
 def prepare_model_inputs(

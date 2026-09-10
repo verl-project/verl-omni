@@ -214,11 +214,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         )
 
     # -----------------------------------------------------------------------
-    # wake_up hook: Omni does not restore KV cache on wake-up
+    # wake_up hook: full wake must include kv_cache
     # -----------------------------------------------------------------------
 
     def _get_wake_up_tags(self) -> list[str]:
-        return ["weights"]
+        # AsyncOmni.generate() rejects leftover sleeping tags. Weights-only left
+        # kv_cache asleep and every generate() failed.
+        return ["kv_cache", "weights"]
 
     def _resolve_sleep_level(self) -> int:
         """
@@ -268,7 +270,13 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             self._invalidate_lora_request_cache()
 
     async def release_kv_cache(self):
-        """Free cache around a weight sync without discarding Omni weights."""
+        """Free cache around a weight sync without discarding Omni weights.
+
+        Sleeps both tags then wakes weights only so NCCL can write into the
+        existing buffers. Do not resume generation here: kv_cache is still
+        asleep and AsyncOmni.generate() rejects that state. resume_kv_cache()
+        restores the cache and re-opens admission after the sync.
+        """
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
         if self.rollout_mode == RolloutMode.COLOCATED:
@@ -280,11 +288,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             self._invalidate_lora_request_cache()
             acks = await self.engine.wake_up(tags=["weights"])
             self._validate_acks("wake_up", acks)
-            await self.engine.resume_generation()
             self._invalidate_lora_request_cache()
 
     async def resume_kv_cache(self):
-        """Restore after a weight sync."""
+        """Restore kv_cache after a weight sync and re-open generate admission."""
         if self.node_rank != 0 or not self.config.free_cache_engine:
             return
         if self.rollout_mode == RolloutMode.COLOCATED:

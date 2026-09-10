@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 import torch
 
+from verl_omni.pipelines.rollout_request import OmniRolloutRequest
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import DiffusionStrategy
 
@@ -44,14 +45,13 @@ def test_diffusion_prompt_preserves_multimodal_processor_kwargs(diffusion_strate
     multi_modal_data = {"image": ["image"], "audio": ["audio"]}
     mm_processor_kwargs = {"fps": 24, "sampling_rate": 32000}
 
-    prompt, _ = diffusion_strategy.preprocess_input(
-        [1, 2, 3],
-        {"task": "ref2va"},
-        multi_modal_data,
-        None,
-        None,
+    request = OmniRolloutRequest.from_generate_kwargs(
+        prompt_ids=[1, 2, 3],
+        image_data=multi_modal_data["image"],
+        audio_data=multi_modal_data["audio"],
         mm_processor_kwargs=mm_processor_kwargs,
     )
+    prompt, _ = diffusion_strategy.preprocess_input(request, {"task": "ref2va"}, None)
 
     assert prompt["multi_modal_data"] == multi_modal_data
     assert prompt["mm_processor_kwargs"] == mm_processor_kwargs

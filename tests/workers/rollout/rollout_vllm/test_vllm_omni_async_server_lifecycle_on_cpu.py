@@ -183,7 +183,8 @@ async def test_sleep_and_wake_delegate_with_level_one_and_keyword_tags():
         assert [c for c in engine.calls if c in ("sleep", "wake_up")] == ["sleep", "wake_up"]
         assert engine.sleep_calls == [{"stage_ids": None, "level": 1, "mode": "abort"}]
         # Keyword tags only: a positional call would have bound to stage_ids.
-        assert engine.wake_calls == [{"stage_ids": None, "tags": ["weights"]}]
+        # Full wake must include kv_cache; weights-only leaves generate() rejected.
+        assert engine.wake_calls == [{"stage_ids": None, "tags": ["kv_cache", "weights"]}]
         assert server._lora_request_cache is server_module._LORA_REQUEST_CACHE_MISS
 
 
@@ -318,7 +319,7 @@ async def test_ack_validation_fails_closed():
     engine = _FakeAsyncOmni(wake_acks=[])
     server = _make_server(engine)
     await server.wake_up()
-    assert engine.wake_calls == [{"stage_ids": None, "tags": ["weights"]}]
+    assert engine.wake_calls == [{"stage_ids": None, "tags": ["kv_cache", "weights"]}]
 
 
 async def test_engine_side_rpc_failure_propagates_from_all_four_methods():
@@ -529,8 +530,9 @@ async def test_ar_sleep_wake_requires_resume_generation_contrast():
 
 
 # ---------------------------------------------------------------------------
-# admission resume rides every successful server-side wake — no per-trainer
-# bridge needed (the engine keeps the sleep hold through its own wake_up)
+# admission resume rides a *full* wake (wake_up / resume_kv_cache). A
+# weights-only wake inside release_kv_cache must keep the hold: kv_cache
+# is still asleep and generate() would be rejected.
 # ---------------------------------------------------------------------------
 
 
@@ -540,19 +542,28 @@ async def test_wake_up_resumes_engine_admission():
 
     await server.wake_up()
 
-    assert engine.wake_calls == [{"stage_ids": None, "tags": ["weights"]}]
+    assert engine.wake_calls == [{"stage_ids": None, "tags": ["kv_cache", "weights"]}]
     assert engine.resumed == 1
 
 
-async def test_release_and_resume_kv_cache_resume_admission():
+async def test_release_kv_cache_holds_admission_until_resume():
+    """Weights-only wake must not admit generate: kv_cache is still asleep.
+
+    CheckpointEngineManager.update_weights aborts, then release_kv_cache,
+    then NCCL, then resume_kv_cache. If release resumes, FullyAsyncLLMServerClient
+    reissues into AsyncOmni.generate() while kv_cache is still asleep and
+    generation fails ("Currently sleeping tags: ['kv_cache']").
+    """
     engine = _FakeAsyncOmni()
     server = _make_server(engine)
 
     await server.release_kv_cache()
-    assert engine.resumed == 1
+    assert engine.wake_calls == [{"stage_ids": None, "tags": ["weights"]}]
+    assert engine.resumed == 0
 
     await server.resume_kv_cache()
-    assert engine.resumed == 2
+    assert engine.wake_calls[-1] == {"stage_ids": None, "tags": ["kv_cache"]}
+    assert engine.resumed == 1
 
 
 async def test_failed_wake_skips_admission_resume():
