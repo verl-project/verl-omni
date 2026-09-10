@@ -81,6 +81,9 @@ class MiniCPMMediaTokens:
         self.tokenizer = tokenizer
         self._image_span_re = self._compile_image_span_re()
         self._audio_span_re = self._compile_audio_span_re()
+        # Engine slot encodings are fixed strings — encode once, splice many.
+        self._engine_image_slot_ids = tokenizer.encode(MINICPM_ENGINE_IMAGE_SLOT, add_special_tokens=False)
+        self._engine_audio_slot_ids = tokenizer.encode(MINICPM_ENGINE_AUDIO_SLOT, add_special_tokens=False)
 
     def _compile_image_span_re(self) -> re.Pattern:
         s = self.strings
@@ -123,6 +126,103 @@ class MiniCPMMediaTokens:
             len(re.findall(re.escape(MINICPM_IMAGE_SLOT), text)),
             len(re.findall(re.escape(MINICPM_AUDIO_SLOT), text)),
         )
+
+    def _image_id_token_ids(self) -> tuple[int | None, int | None]:
+        tokenizer = self.tokenizer
+        id_open = tokenizer.convert_tokens_to_ids("<image_id>")
+        id_close = tokenizer.convert_tokens_to_ids("</image_id>")
+        if isinstance(id_open, int) and id_open >= 0 and isinstance(id_close, int) and id_close >= 0:
+            return int(id_open), int(id_close)
+        return None, None
+
+    def _is_whitespace_token(self, token_id: int) -> bool:
+        decoded = self.tokenizer.decode([token_id])
+        return bool(decoded) and decoded.strip() == ""
+
+    def _scan_to(self, ids: list[int], start: int, end_id: int, what: str) -> int:
+        """Index just past the next ``end_id``; raises when the block is unterminated."""
+        index = start
+        while index < len(ids) and ids[index] != end_id:
+            index += 1
+        if index >= len(ids):
+            raise ValueError(f"Unbalanced MiniCPM media ids: unterminated {what} block starting at token {start}.")
+        return index + 1
+
+    def collapse_ids_to_slots(self, input_ids: list[int]) -> list[int]:
+        """Splice engine slot ids directly in id space, leaving all else untouched.
+
+        Rebuilding the engine prompt via decode -> text -> re-encode risks BPE
+        boundary drift around the media markers (this tokenizer has known
+        encode/decode inconsistencies there), which would silently desync the
+        engine context from the training ids. Instead the expanded spans are
+        recognized by marker-token ids — an optional ``<image_id>N</image_id>``
+        prefix, the ``<image>...</image>`` block plus newline-tolerant
+        ``<slice>...</slice>`` grid cells, or consecutive
+        ``<|audio_start|>...<|audio_end|>`` chunks — and replaced by the
+        pre-encoded parenthesized engine slots. Every id outside a span is
+        passed through verbatim; malformed marker leftovers raise instead of
+        producing a mismatched prompt.
+        """
+        ids = [int(token_id) for token_id in input_ids]
+        image_id_open, image_id_close = self._image_id_token_ids()
+        marker = self.ids
+        # Tokens that are only valid inside a span; a span consumes its
+        # contents atomically, so meeting one at unit position is malformed.
+        orphan_markers = {
+            marker["unk"],
+            marker["im_end"],
+            marker["slice_start"],
+            marker["slice_end"],
+            marker["audio_end"],
+        }
+        if image_id_close is not None and image_id_open is not None:
+            orphan_markers.add(image_id_close)
+
+        out: list[int] = []
+        i = 0
+        while i < len(ids):
+            token = ids[i]
+            if token in orphan_markers:
+                raise ValueError(
+                    f"Unbalanced MiniCPM media ids: token {token} at position {i} is only valid "
+                    "inside an expanded media span; refusing to build a mismatched engine prompt."
+                )
+            if image_id_open is not None and token == image_id_open:
+                if image_id_close is None:
+                    raise ValueError("Unbalanced MiniCPM media ids: <image_id> without </image_id>.")
+                after = self._scan_to(ids, i + 1, image_id_close, "<image_id>")
+                if after < len(ids) and ids[after] == marker["im_start"]:
+                    i = after  # prefix consumed; the image block below handles the unit
+                    continue
+                out.extend(ids[i:after])  # stray id pair with no image block: keep verbatim
+                i = after
+                continue
+            if token == marker["im_start"]:
+                i = self._scan_to(ids, i + 1, marker["im_end"], "<image>")
+                while True:  # slice grid cells of the same image, newline-tolerant
+                    probe = i
+                    while (
+                        probe < len(ids)
+                        and self._is_whitespace_token(ids[probe])
+                        and probe + 1 < len(ids)
+                        and ids[probe + 1] == marker["slice_start"]
+                    ):
+                        probe += 1
+                    if probe < len(ids) and ids[probe] == marker["slice_start"]:
+                        i = self._scan_to(ids, probe + 1, marker["slice_end"], "<slice>")
+                    else:
+                        break
+                out.extend(self._engine_image_slot_ids)
+                continue
+            if token == marker["audio_start"]:
+                i = self._scan_to(ids, i + 1, marker["audio_end"], "<audio>")
+                while i < len(ids) and ids[i] == marker["audio_start"]:  # consecutive chunks
+                    i = self._scan_to(ids, i + 1, marker["audio_end"], "<audio>")
+                out.extend(self._engine_audio_slot_ids)
+                continue
+            out.append(token)
+            i += 1
+        return out
 
     def derive_media_bounds(self, input_ids_1d: torch.Tensor) -> tuple[list[list[int]], list[list[int]]]:
         """Scan expanded ids for media spans, mirroring the remote scan.
@@ -217,18 +317,12 @@ class _MiniCPMProcessorParityWrapper:
         return self._processor.apply_chat_template(flatten_block_content_to_slots(messages), **kwargs)
 
     def dedup_pad_tokens(self, input_ids: list[int]) -> list[int]:
-        tokenizer = self.tokenizer
-        text = tokenizer.decode(input_ids, skip_special_tokens=False)
-        if self._tokens.has_media_tokens(torch.tensor(input_ids)):
-            collapsed = self._tokens.collapse_to_slots(text, engine_slots=True)
-            n_images, n_audios = self._tokens.count_slots(collapsed)
-            if n_images == 0 and n_audios == 0:
-                raise ValueError(
-                    "Prompt ids contain MiniCPM media tokens but no expanded span matched the "
-                    "collapse patterns; refusing to send a mismatched prompt to vLLM-Omni."
-                )
-            text = collapsed
-        return tokenizer.encode(text, add_special_tokens=False)
+        # Collapse happens entirely in id space: re-encoding decoded text risks
+        # BPE drift that would silently desync the engine prompt from the
+        # training ids. Text-only prompts come back byte-identical.
+        if not self._tokens.has_media_tokens(torch.tensor(input_ids)):
+            return list(input_ids)
+        return self._tokens.collapse_ids_to_slots(list(input_ids))
 
     def _normalize_text(self, text: str, images: Any, audios: Any) -> str:
         # verl always renders one prompt per processor call (text=[str]).

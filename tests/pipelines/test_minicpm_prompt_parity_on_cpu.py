@@ -167,10 +167,40 @@ def test_dedup_pad_tokens_text_only_prompt_is_untouched():
 
 def test_dedup_pad_tokens_raises_when_media_tokens_do_not_form_spans():
     processor = bind_minicpm_processor(_StubProcessor())
-    # A lone </image> with no <image> start: media token present, no span match.
+    # A lone </image> with no <image> start: orphan end marker at unit position.
     ids = processor.tokenizer.encode("broken </image> prompt")
-    with pytest.raises(ValueError, match="no expanded span matched"):
+    with pytest.raises(ValueError, match="only valid.*inside an expanded media span"):
         processor.dedup_pad_tokens(ids)
+    # Unterminated <image> block.
+    ids = processor.tokenizer.encode("<image>" + "<unk>" * 3)
+    with pytest.raises(ValueError, match="unterminated <image> block"):
+        processor.dedup_pad_tokens(ids)
+
+
+def test_dedup_pad_tokens_preserves_surrounding_ids_verbatim():
+    processor = bind_minicpm_processor(_StubProcessor())
+    tokenizer = processor.tokenizer
+    prefix = tokenizer.encode("<|im_start|>user\nlook at this: ")
+    suffix = tokenizer.encode(" and listen<|im_end|>")
+    expanded = tokenizer.encode(
+        "<image_id>0</image_id><image><unk><unk><unk></image>"
+        + "<|audio_start|><unk><unk><|audio_end|><|audio_start|><unk><|audio_end|>"
+    )
+    result = processor.dedup_pad_tokens(prefix + expanded + suffix)
+    # ids outside media spans pass through byte-for-byte — no decode/re-encode.
+    assert result[: len(prefix)] == prefix
+    assert result[-len(suffix) :] == suffix
+    middle = tokenizer.decode(result[len(prefix) : len(result) - len(suffix)])
+    assert middle == MINICPM_ENGINE_IMAGE_SLOT + MINICPM_ENGINE_AUDIO_SLOT
+
+
+def test_dedup_pad_tokens_collapses_slice_grid_with_newlines():
+    processor = bind_minicpm_processor(_StubProcessor())
+    tokenizer = processor.tokenizer
+    ids = tokenizer.encode("q <image><unk></image><slice><unk></slice>\n<slice><unk></slice> tail")
+    result = processor.dedup_pad_tokens(ids)
+    decoded = tokenizer.decode(result)
+    assert decoded == "q " + MINICPM_ENGINE_IMAGE_SLOT + " tail"
 
 
 def test_processor_call_adapts_audio_kwarg_and_appends_missing_slots():
