@@ -570,6 +570,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     ):
         Worker.__init__(self)
         self.config = config
+        self.gc_diagnostics = config.get("gc_diagnostics", False)
+        if not isinstance(self.gc_diagnostics, bool):
+            raise ValueError(f"gc_diagnostics must be a boolean, got {self.gc_diagnostics!r}")
         self.distillation_config = distillation_config
         self.distillation_enabled = is_distillation_enabled(distillation_config)
         self.teacher_key = teacher_key
@@ -698,6 +701,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 optimizer_config=actor_config.optim,
                 checkpoint_config=actor_config.checkpoint,
             )
+            if hasattr(actor_training_config.engine_config, "gc_diagnostics"):
+                actor_training_config.engine_config.gc_diagnostics = self.gc_diagnostics
 
             if is_diffusion:
                 # Diffusion models don't use dynamic batching or token packing.
@@ -962,7 +967,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         start = time.perf_counter()
         if self.actor.engine.is_param_offload_enabled:
             self.actor.engine.to("cpu", model=True, optimizer=False, grad=False)
-        aggressive_empty_cache(force_sync=True)
+        if "gc_on_actor_offload" in self.config.rollout:
+            aggressive_empty_cache(
+                force_sync=True,
+                gc_setting=self.config.rollout.gc_on_actor_offload,
+                gc_diagnostics_point="actor_offload" if self.gc_diagnostics else None,
+            )
+        else:
+            aggressive_empty_cache(force_sync=True)
         if timings is not None:
             timings["offload_actor_to_cpu"] = time.perf_counter() - start
 
@@ -1123,6 +1135,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 zmq_handle=zmq_handle,
                 bucket_size_mb=bucket_size_mb,
                 use_shm=self.rollout.use_shm,
+                gc_on_cleanup=self.config.rollout.checkpoint_engine.gc_on_weight_transfer_cleanup,
+                gc_diagnostics=self.gc_diagnostics,
             )
             await sender.async_send_weights(lora_weights.items())
             if future is not None:
@@ -1156,11 +1170,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     adapter_name=self.config.rollout.rollout_adapter,
                 )
                 await self.rollout.update_weights(
-                    per_tensor_param_base, peft_config=peft_config, base_sync_done=False, global_steps=global_steps
+                    per_tensor_param_base,
+                    peft_config=peft_config,
+                    base_sync_done=False,
+                    global_steps=global_steps,
+                    gc_diagnostics=self.gc_diagnostics,
                 )
 
             await self.rollout.update_weights(
-                per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+                per_tensor_param,
+                peft_config=peft_config,
+                base_sync_done=True,
+                global_steps=global_steps,
+                gc_diagnostics=self.gc_diagnostics,
             )
 
         log_gpu_memory_usage("After update_weights", logger=logger)

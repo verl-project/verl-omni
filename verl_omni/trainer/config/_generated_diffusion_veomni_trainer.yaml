@@ -229,6 +229,7 @@ actor_rollout_ref:
     enforce_eager: false
     cudagraph_capture_sizes: null
     free_cache_engine: true
+    gc_on_actor_offload: true
     tensor_model_parallel_size: 2
     text_encoder_tp_size: 1
     data_parallel_size: 1
@@ -323,6 +324,7 @@ actor_rollout_ref:
       _target_: verl.workers.config.CheckpointEngineConfig
       backend: naive
       update_weights_bucket_megabytes: 2048
+      gc_on_weight_transfer_cleanup: true
       engine_kwargs: {}
       custom_backend_module: null
     skip_tokenizer_init: true
@@ -391,6 +393,7 @@ actor_rollout_ref:
     model_type: diffusion_model
   separate: false
   hybrid_engine: true
+  gc_diagnostics: false
   nccl_timeout: 600
 data:
   tokenizer: null

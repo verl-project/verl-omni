@@ -16,6 +16,7 @@ from typing import Optional
 
 from omegaconf import MISSING
 from verl.base_config import BaseConfig
+from verl.utils.memory_utils import GCSetting, validate_gc_setting
 from verl.utils.profiler import ProfilerConfig
 from verl.workers.config.disaggregation import DisaggregationConfig
 from verl.workers.config.model import MtpConfig
@@ -148,6 +149,8 @@ class DiffusionRolloutConfig(BaseConfig):
     # Default FLASH_ATTN_3_HUB pairs with actor attn_backend=_flash_3_varlen_hub.
     rollout_attn_backend: str = "FLASH_ATTN_3_HUB"
     free_cache_engine: bool = True
+    # Python GC after actor offload: True for full collection, False to disable, or a generation integer.
+    gc_on_actor_offload: GCSetting = True
     data_parallel_size: int = 1
     expert_parallel_size: int = 1
     tensor_model_parallel_size: int = 2
@@ -229,6 +232,8 @@ class DiffusionRolloutConfig(BaseConfig):
 
     def __post_init__(self):
         """Validate the diffusion rollout config"""
+        validate_gc_setting(self.gc_on_actor_offload, name="gc_on_actor_offload")
+
         if self.max_prompt_embed_length is not None and self.max_prompt_embed_length <= 0:
             raise ValueError(f"max_prompt_embed_length must be positive when set, got {self.max_prompt_embed_length}.")
         if self.mode == "sync":

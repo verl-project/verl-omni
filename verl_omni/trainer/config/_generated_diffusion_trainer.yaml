@@ -25,7 +25,7 @@ actor_rollout_ref:
       warmup_style: null
       override_optimizer_config: null
     fsdp_config:
-      _target_: verl.workers.config.FSDPEngineConfig
+      _target_: verl_omni.workers.config.diffusion.DiffusionFSDPEngineConfig
       wrap_policy:
         min_num_params: 0
       param_offload: false
@@ -42,6 +42,8 @@ actor_rollout_ref:
       forward_only: false
       strategy: fsdp
       dtype: bfloat16
+      gc_on_train_device_load: true
+      gc_on_eval_device_load: true
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: torch
@@ -112,7 +114,7 @@ actor_rollout_ref:
     strategy: ${actor_rollout_ref.actor.strategy}
     log_prob_micro_batch_size_per_gpu: null
     fsdp_config:
-      _target_: verl.workers.config.FSDPEngineConfig
+      _target_: verl_omni.workers.config.diffusion.DiffusionFSDPEngineConfig
       wrap_policy:
         min_num_params: 0
       param_offload: false
@@ -129,6 +131,8 @@ actor_rollout_ref:
       forward_only: true
       strategy: fsdp
       dtype: bfloat16
+      gc_on_train_device_load: true
+      gc_on_eval_device_load: true
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: torch
@@ -188,6 +192,7 @@ actor_rollout_ref:
     enforce_eager: false
     cudagraph_capture_sizes: null
     free_cache_engine: true
+    gc_on_actor_offload: true
     tensor_model_parallel_size: 2
     text_encoder_tp_size: 1
     data_parallel_size: 1
@@ -282,6 +287,7 @@ actor_rollout_ref:
       _target_: verl.workers.config.CheckpointEngineConfig
       backend: naive
       update_weights_bucket_megabytes: 2048
+      gc_on_weight_transfer_cleanup: true
       engine_kwargs: {}
       custom_backend_module: null
     skip_tokenizer_init: true
@@ -350,6 +356,7 @@ actor_rollout_ref:
     model_type: diffusion_model
   separate: false
   hybrid_engine: true
+  gc_diagnostics: false
   nccl_timeout: 600
 data:
   tokenizer: null

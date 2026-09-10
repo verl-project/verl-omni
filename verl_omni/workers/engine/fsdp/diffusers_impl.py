@@ -51,10 +51,10 @@ from verl.utils.fsdp_utils import (
     offload_fsdp_model_to_cpu,
     offload_fsdp_optimizer,
 )
-from verl.utils.memory_utils import aggressive_empty_cache
+from verl.utils.memory_utils import aggressive_empty_cache, collect_garbage
 from verl.utils.model import convert_weight_keys
 from verl.utils.py_functional import append_to_dict
-from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig
+from verl.workers.config import FSDPOptimizerConfig
 from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.fsdp.utils import create_device_mesh, get_sharding_strategy
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
@@ -68,7 +68,7 @@ from verl_omni.pipelines.utils import (
     prepare_noisy_latents,
 )
 from verl_omni.utils.fsdp_utils import collect_lora_params
-from verl_omni.workers.config import DiffusionModelConfig
+from verl_omni.workers.config import DiffusionFSDPEngineConfig, DiffusionModelConfig
 from verl_omni.workers.engine.lora_adapter_mixin import LoRAAdapterMixin
 
 logger = logging.getLogger(__file__)
@@ -116,7 +116,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
     def __init__(
         self,
         model_config: DiffusionModelConfig,
-        engine_config: FSDPEngineConfig,
+        engine_config: DiffusionFSDPEngineConfig,
         optimizer_config: FSDPOptimizerConfig,
         checkpoint_config: CheckpointConfig,
     ):
@@ -730,11 +730,25 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         assert device in (device_name, "cpu")
         if device == device_name:
+            if self.mode not in (None, "train", "eval"):
+                raise RuntimeError(f"Unexpected {type(self).__name__} mode: {self.mode!r}")
             if model:
                 load_fsdp_model_to_gpu(self.module)
             if optimizer and self.optimizer is not None:
                 load_fsdp_optimizer(self.optimizer, device)
-            gc.collect()
+            if self.mode in ("train", "eval"):
+                gc_setting = (
+                    self.engine_config.gc_on_train_device_load
+                    if self.mode == "train"
+                    else self.engine_config.gc_on_eval_device_load
+                )
+                collect_garbage(
+                    gc_setting,
+                    diagnostics_point=(f"{self.mode}_device_load" if self.engine_config.gc_diagnostics else None),
+                )
+            elif self.mode is None:
+                # Manual loads are not associated with a train/eval GC point.
+                collect_garbage()
         elif device == "cpu":
             if model:
                 offload_fsdp_model_to_cpu(self.module)

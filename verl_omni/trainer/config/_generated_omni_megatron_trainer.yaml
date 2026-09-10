@@ -386,6 +386,7 @@ actor_rollout_ref:
       _target_: verl.workers.config.CheckpointEngineConfig
       backend: nccl
       update_weights_bucket_megabytes: 2048
+      gc_on_weight_transfer_cleanup: true
       engine_kwargs: {}
       custom_backend_module: null
     trace:
@@ -521,6 +522,7 @@ actor_rollout_ref:
     max_audio_tokens: null
     max_video_tokens: null
   hybrid_engine: false
+  gc_diagnostics: false
   nccl_timeout: 600
 data:
   tokenizer: null

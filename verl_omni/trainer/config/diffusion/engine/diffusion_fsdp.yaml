@@ -1,5 +1,5 @@
 # Target class for this configuration
-_target_: verl.workers.config.FSDPEngineConfig
+_target_: verl_omni.workers.config.diffusion.DiffusionFSDPEngineConfig
 
 # policy for wrapping the model
 wrap_policy:
@@ -52,3 +52,9 @@ strategy: fsdp
 
 # Mixed precision training param dtype. Options: ["bfloat16", "float16"]
 dtype: bfloat16
+
+# Python GC after the training load: true for full collection, false to disable, or a generation integer
+gc_on_train_device_load: true
+
+# Python GC after the evaluation load: true for full collection, false to disable, or a generation integer
+gc_on_eval_device_load: true

@@ -78,4 +78,8 @@ run_test 13 "MiniMax-H3 FlowGRPO T2VA trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ROLLOUT_TP=2 TOTAL_TRAINING_STEPS=1 \
     python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task t2va
 
+run_test 14 "GC diagnostics" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    bash tests/special_e2e/run_gc_diagnostics_qwen_image.sh "${diffusion_trainer_args[@]}"
+
 gpu_smoke_summary

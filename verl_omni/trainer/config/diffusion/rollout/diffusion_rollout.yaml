@@ -56,6 +56,9 @@ cudagraph_capture_sizes: null
 # Whether to free engine cache after generation.
 free_cache_engine: True
 
+# Python GC after actor offload: true for full collection, false to disable, or a generation integer
+gc_on_actor_offload: true
+
 # TP size for rollout
 tensor_model_parallel_size: 2
 
@@ -354,6 +357,9 @@ checkpoint_engine:
   # 2. Manually set `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`
   # when using Tensor Parallelism (TP) >= 8.
   update_weights_bucket_megabytes: 2048
+
+  # Python GC after weight-transfer sender cleanup: true for full collection, false to disable, or a generation integer
+  gc_on_weight_transfer_cleanup: true
 
   # Additional keyword arguments to pass to the checkpoint engine constructor
   engine_kwargs: {}

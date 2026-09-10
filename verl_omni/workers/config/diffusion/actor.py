@@ -19,6 +19,7 @@ from omegaconf import MISSING
 from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig
 from verl.trainer.config.algorithm import RolloutCorrectionConfig
+from verl.utils.memory_utils import GCSetting, validate_gc_setting
 from verl.utils.profiler import ProfilerConfig
 from verl.workers.config.engine import EngineConfig, FSDPEngineConfig
 from verl.workers.config.optimizer import OptimizerConfig
@@ -26,6 +27,7 @@ from verl.workers.config.optimizer import OptimizerConfig
 from .model import DiffusionModelConfig
 
 __all__ = [
+    "DiffusionFSDPEngineConfig",
     "DiffusionLossConfig",
     "VeOmniDiffusionEngineConfig",
     "VeOmniDiffusionOptimizerConfig",
@@ -33,6 +35,23 @@ __all__ = [
     "FSDPDiffusionActorConfig",
     "VeOmniDiffusionActorConfig",
 ]
+
+
+@dataclass
+class DiffusionFSDPEngineConfig(FSDPEngineConfig):
+    _mutable_fields = FSDPEngineConfig._mutable_fields | {"gc_diagnostics"}
+
+    # Runtime copy of the global GC diagnostics switch; not a separate user setting.
+    gc_diagnostics: bool = False
+    # Python GC after loading the actor for training.
+    gc_on_train_device_load: GCSetting = True
+    # Python GC after loading the actor for evaluation.
+    gc_on_eval_device_load: GCSetting = True
+
+    def __post_init__(self):
+        super().__post_init__()
+        for field_name in ("gc_on_train_device_load", "gc_on_eval_device_load"):
+            validate_gc_setting(getattr(self, field_name), name=field_name)
 
 
 @dataclass
@@ -185,7 +204,7 @@ class FSDPDiffusionActorConfig(DiffusionActorConfig):
     # Training strategy: fsdp or fsdp2
     strategy: str = "fsdp"
     grad_clip: float = 1.0
-    fsdp_config: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
+    fsdp_config: DiffusionFSDPEngineConfig = field(default_factory=DiffusionFSDPEngineConfig)
 
     def __post_init__(self):
         """Validate diffusion FSDP actor configuration parameters."""

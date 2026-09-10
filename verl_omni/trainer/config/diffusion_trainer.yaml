@@ -45,6 +45,9 @@ actor_rollout_ref:
   # Whether to colocate actor and rollout in a hybrid engine
   hybrid_engine: true
 
+  # Whether to print diagnostics for the configurable diffusion GC points
+  gc_diagnostics: false
+
   # Timeout for operations executed against the process group
   nccl_timeout: 600
 
