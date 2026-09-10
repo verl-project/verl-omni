@@ -80,9 +80,10 @@ body:
         If you are unsure, leave this blank and a core maintainer will route the issue.
 
         Questions on algorithms:
-        - PPO-related (e.g., FlowGRPO): @knlnguyen1802 @NancyFyong
-        - Distillation (e.g., OPD): @cr-gao
+        - Diffusion PPO-related (e.g., FlowGRPO): @knlnguyen1802 @NancyFyong
+        - Omni PPO-related (e.g., Qwen3-Omni+GSPO): @zhtmike
         - DAPO: @WenzheWang
+        - Distillation (e.g., OPD): @cr-gao
         - Diffusion NFT: @NancyFyong
         - DPO: @wtomin
 
