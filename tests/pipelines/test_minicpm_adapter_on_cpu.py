@@ -318,7 +318,7 @@ def test_minicpmo_from_pretrained_patches_then_loads_auto_model(monkeypatch):
     assert calls[0][1]["trust_remote_code"] is True
     assert calls[0][1]["config"] is config.hf_config
     assert "init_tts" not in calls[0][1]
-    assert siglip_calls == [(("/fake/minicpm",), {"trust_remote_code": True})]
+    assert siglip_calls == [(("/fake/minicpm",), {"trust_remote_code": True, "config": config.hf_config})]
 
 
 def test_configure_model_applies_remote_whisper_compat(monkeypatch):

@@ -170,25 +170,39 @@ def test_patch_remote_whisper_self_attn_noop_without_apm():
     minicpm_o.patch_remote_whisper_self_attn(nn.Linear(4, 4))
 
 
-def _fake_siglip_module(monkeypatch, *classes):
-    """Point the dynamic-module resolver at a synthetic siglip module."""
+def _wire_main_model_module(monkeypatch, *bound_classes):
+    """Bind classes into the auto_map-resolved main modeling module's namespace.
+
+    Mirrors the loader: get_class_from_dynamic_module resolves the config's
+    auto_map entry, and the main module's namespace holds the classes the
+    remote ``from .modeling_navit_siglip import ...`` binds. Classes NOT
+    passed model the orphaned copies a divergent cache dir produces.
+    """
     import sys
     import types as types_module
 
-    module = types_module.ModuleType("transformers_modules.fake.modeling_navit_siglip")
-    for fake_cls in classes:
-        module.__dict__[fake_cls.__name__] = fake_cls
-        fake_cls.__module__ = module.__name__  # the patch scans sys.modules[cls.__module__]
-    sys.modules[module.__name__] = module
+    from transformers import PreTrainedModel
+
+    main_name = "transformers_modules.fake.modeling_minicpmo"
+    main_module = types_module.ModuleType(main_name)
+    for bound_cls in bound_classes:
+        setattr(main_module, bound_cls.__name__, bound_cls)
+
+    class _FakeMainModel(PreTrainedModel):
+        pass
+
+    _FakeMainModel.__module__ = main_name
+    main_module.MiniCPMO = _FakeMainModel
+    monkeypatch.setitem(sys.modules, main_name, main_module)
 
     import transformers.models.auto.auto_factory as auto_factory
 
     monkeypatch.setattr(
         auto_factory,
         "get_class_from_dynamic_module",
-        lambda *args, **kwargs: classes[0],
+        lambda *args, **kwargs: _FakeMainModel,
     )
-    return module
+    return SimpleNamespace(auto_map={"AutoModel": "modeling_minicpmo.MiniCPMO"})
 
 
 def test_patch_remote_siglip_flash_attn_support_aliases_old_flag(monkeypatch):
@@ -199,12 +213,11 @@ def test_patch_remote_siglip_flash_attn_support_aliases_old_flag(monkeypatch):
     class _RemoteSiglip(PreTrainedModel):
         _supports_flash_attn_2 = True
 
-    fake_cls = _RemoteSiglip
-    _fake_siglip_module(monkeypatch, fake_cls)
-    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True)
+    config = _wire_main_model_module(monkeypatch, _RemoteSiglip)
+    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True, config=config)
 
-    assert fake_cls.__dict__["_supports_flash_attn"] is True
-    assert fake_cls._supports_flash_attn_2 is True  # remote declaration untouched
+    assert _RemoteSiglip.__dict__["_supports_flash_attn"] is True
+    assert _RemoteSiglip._supports_flash_attn_2 is True  # remote declaration untouched
 
 
 def test_patch_remote_siglip_flash_attn_support_is_idempotent(monkeypatch):
@@ -215,11 +228,11 @@ def test_patch_remote_siglip_flash_attn_support_is_idempotent(monkeypatch):
     class _RemoteSiglip(PreTrainedModel):
         _supports_flash_attn_2 = True
 
-    _fake_siglip_module(monkeypatch, _RemoteSiglip)
-    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True)
+    config = _wire_main_model_module(monkeypatch, _RemoteSiglip)
+    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True, config=config)
     marker = object()
     _RemoteSiglip._supports_flash_attn = marker
-    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True)
+    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True, config=config)
     assert _RemoteSiglip._supports_flash_attn is marker  # second call is a no-op
 
 
@@ -235,10 +248,32 @@ def test_patch_remote_siglip_never_fabricates_support(monkeypatch):
         _supports_flash_attn_2 = True
         _supports_flash_attn = False
 
-    _fake_siglip_module(monkeypatch, _NoFlashAttn, _AlreadyRenamed)
-    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True)
+    config = _wire_main_model_module(monkeypatch, _NoFlashAttn, _AlreadyRenamed)
+    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True, config=config)
     assert "_supports_flash_attn" not in _NoFlashAttn.__dict__  # old flag False: no alias
     assert "_verl_omni_siglip_fa2_aliased" not in _AlreadyRenamed.__dict__  # new name declared: untouched
+
+
+def test_patch_remote_siglip_aliases_the_class_the_model_module_uses(monkeypatch):
+    # Local-path cache-hash divergence: two distinct SiglipVisionTransformer
+    # class objects; only the one bound into the auto_map-resolved main
+    # modeling module is the class the model imports — the alias must land
+    # there, not on the orphan.
+    from transformers import PreTrainedModel
+
+    from verl_omni.models.transformers import minicpm_o
+
+    class _OrphanCopy(PreTrainedModel):
+        _supports_flash_attn_2 = True
+
+    class _UsedCopy(PreTrainedModel):
+        _supports_flash_attn_2 = True
+
+    config = _wire_main_model_module(monkeypatch, _UsedCopy)  # the orphan is never bound into main
+    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True, config=config)
+
+    assert _UsedCopy.__dict__.get("_supports_flash_attn") is True
+    assert "_supports_flash_attn" not in _OrphanCopy.__dict__  # orphan untouched
 
 
 def test_patch_remote_siglip_skips_without_trust_or_transformers4(monkeypatch):

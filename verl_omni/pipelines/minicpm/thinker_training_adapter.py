@@ -180,6 +180,7 @@ class MiniCPMO:
         patch_remote_siglip_flash_attn_support(
             pretrained_model_name_or_path,
             trust_remote_code=trust_remote_code,
+            config=kwargs.get("config"),
         )
         return AutoModel.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
 
