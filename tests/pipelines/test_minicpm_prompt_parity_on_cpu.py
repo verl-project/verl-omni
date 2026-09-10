@@ -28,6 +28,7 @@ from verl_omni.pipelines.minicpm.prompt_parity import (
     MINICPM_IMAGE_SLOT,
     MiniCPMMediaTokens,
     bind_minicpm_processor,
+    flatten_block_content_to_slots,
 )
 from verl_omni.pipelines.minicpm.thinker_training_adapter import (
     MiniCPMThinkerAdapter,
@@ -95,10 +96,15 @@ class _StubProcessor:
     def __init__(self):
         self.tokenizer = _StubTokenizer()
         self.calls = []
+        self.template_calls = []
 
     def __call__(self, text=None, images=None, audios=None, **kwargs):
         self.calls.append({"text": text, "images": images, "audios": audios, **kwargs})
         return {"input_ids": torch.tensor([self.tokenizer.encode(text if isinstance(text, str) else text[0])])}
+
+    def apply_chat_template(self, messages, **kwargs):
+        self.template_calls.append({"messages": messages, **kwargs})
+        return "".join(f"<{m['role']}>{m['content']}</{m['role']}>" for m in messages)
 
 
 def _tokens():
@@ -258,3 +264,59 @@ def test_configure_model_rejects_non_45_checkpoints():
     module.config = SimpleNamespace(version="2.6")
     with pytest.raises(ValueError, match="MiniCPM-o 4.5 checkpoints only"):
         MiniCPMThinkerAdapter.configure_model(module, SimpleNamespace())
+
+
+def _block_messages():
+    return [
+        {"role": "system", "content": "Answer with <answer>X</answer>."},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": "/tmp/frame.png"},
+                {"type": "audio", "audio": "/tmp/clip.wav"},
+                {"type": "text", "text": "Which song is playing?"},
+            ],
+        },
+    ]
+
+
+def test_flatten_block_content_renders_slots_in_order():
+    flattened = flatten_block_content_to_slots(_block_messages())
+    assert flattened[0]["content"] == "Answer with <answer>X</answer>."
+    assert flattened[1]["content"] == MINICPM_IMAGE_SLOT + MINICPM_AUDIO_SLOT + "Which song is playing?"
+
+
+def test_flatten_block_content_does_not_mutate_input():
+    messages = _block_messages()
+    flatten_block_content_to_slots(messages)
+    assert isinstance(messages[1]["content"], list)
+    assert messages[1]["content"][0] == {"type": "image", "image": "/tmp/frame.png"}
+
+
+def test_flatten_block_content_rejects_unsupported_blocks():
+    with pytest.raises(ValueError, match="cannot render content block type 'video'"):
+        flatten_block_content_to_slots([{"role": "user", "content": [{"type": "video", "video": "/tmp/x.mp4"}]}])
+    with pytest.raises(ValueError, match="content blocks must be dicts"):
+        flatten_block_content_to_slots([{"role": "user", "content": ["raw string"]}])
+    # string content passes through untouched
+    assert flatten_block_content_to_slots([{"role": "user", "content": "plain"}])[0]["content"] == "plain"
+
+
+def test_wrapper_apply_chat_template_flattens_and_delegates():
+    processor = bind_minicpm_processor(_StubProcessor())
+    messages = _block_messages()
+    rendered = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    sent = processor.template_calls[-1]["messages"]
+    assert sent[1]["content"] == MINICPM_IMAGE_SLOT + MINICPM_AUDIO_SLOT + "Which song is playing?"
+    assert isinstance(messages[1]["content"], list)  # caller's messages untouched
+    assert rendered == (
+        "<system>Answer with <answer>X</answer>.</system>"
+        "<user>" + MINICPM_IMAGE_SLOT + MINICPM_AUDIO_SLOT + "Which song is playing?</user>"
+    )
+
+
+def test_wrapper_apply_chat_template_string_content_untouched():
+    processor = bind_minicpm_processor(_StubProcessor())
+    messages = [{"role": "user", "content": "plain question"}]
+    processor.apply_chat_template(messages)
+    assert processor.template_calls[-1]["messages"][0]["content"] == "plain question"

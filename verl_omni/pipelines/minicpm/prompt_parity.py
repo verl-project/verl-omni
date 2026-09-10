@@ -159,6 +159,42 @@ def resolve_media_tokens(processor: Any) -> MiniCPMMediaTokens:
     return MiniCPMMediaTokens(tokenizer)
 
 
+def flatten_block_content_to_slots(messages: list[dict]) -> list[dict]:
+    """Render verl's OpenAI-style content blocks into MiniCPM-o slot strings.
+
+    verl's ``RLHFDataset._build_messages`` turns ``<image>``/``<audio>`` markers
+    into structured blocks; the MiniCPM-o 4.5 chat template is the plain Qwen3
+    text template and string-concatenates ``message.content`` (list content
+    raises ``TypeError``). Media blocks become the processor's slot markers in
+    content order; messages with string content pass through unchanged and the
+    caller's message dicts are never mutated.
+    """
+    flattened: list[dict] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            flattened.append(message)
+            continue
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                raise ValueError(f"MiniCPM-o content blocks must be dicts, got {block!r}.")
+            block_type = block.get("type")
+            if block_type == "image":
+                parts.append(MINICPM_IMAGE_SLOT)
+            elif block_type == "audio":
+                parts.append(MINICPM_AUDIO_SLOT)
+            elif block_type == "text":
+                parts.append(block.get("text", ""))
+            else:
+                raise ValueError(
+                    f"MiniCPM-o chat template cannot render content block type {block_type!r}; "
+                    "supported: image, audio, text."
+                )
+        flattened.append({**message, "content": "".join(parts)})
+    return flattened
+
+
 class _MiniCPMProcessorParityWrapper:
     """Delegate everything to the remote processor except ``__call__``.
 
@@ -173,6 +209,12 @@ class _MiniCPMProcessorParityWrapper:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._processor, name)
+
+    def apply_chat_template(self, messages, **kwargs):
+        # The MiniCPM-o template only renders string content; flatten verl's
+        # blocks (image/audio -> slot markers) at this processor boundary — the
+        # single choke point for both rollout renders and the dataset's doc2len.
+        return self._processor.apply_chat_template(flatten_block_content_to_slots(messages), **kwargs)
 
     def dedup_pad_tokens(self, input_ids: list[int]) -> list[int]:
         tokenizer = self.tokenizer
