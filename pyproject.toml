@@ -96,6 +96,9 @@ ocr = [
 # -------------------------------
 # tool.ruff - Linting configuration
 # -------------------------------
+[project.entry-points."vllm.general_plugins"]
+verl_omni_minicpmo_embed_multimodal = "verl_omni.vllm_plugins:register"
+
 [tool.ruff]
 # Note: While the formatter will attempt to format lines such that they remain within the line-length,
 # it isn't a hard upper bound, and formatted lines may exceed the line-length.
