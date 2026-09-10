@@ -66,6 +66,7 @@ _WHISPER_ATTN_PATCHED_ATTR = "_verl_omni_whisper_attn_return3"
 _VISION_EMB_PATCH_ATTR = "_verl_omni_get_vision_embedding_patched"
 _VLLM_EMB_PATCH_ATTR = "_verl_omni_get_vllm_embedding_patched"
 _SIGLIP_FA2_PATCHED_ATTR = "_verl_omni_siglip_fa2_aliased"
+_AUDIO_DUMMY_PATCH_ATTR = "_verl_omni_get_audio_embedding_patched"
 # Back-compat alias for tests that reset the post_init wrap.
 _PATCHED_ATTR = _POST_INIT_PATCHED_ATTR
 
@@ -328,3 +329,45 @@ def patch_minicpm_get_vllm_embedding(module) -> None:
 
     module.get_vllm_embedding = types.MethodType(get_vllm_embedding, module)
     setattr(module, _VLLM_EMB_PATCH_ATTR, True)
+
+
+def patch_minicpm_get_audio_embedding(module) -> None:
+    """Skip the dummy Whisper forward for audio-free batches in training.
+
+    Why (remote dummy wav vs frozen, FSDP2-ignored ``apm``):
+        Remote ``get_audio_embedding`` forwards a dummy ``(1, 80, 100)`` wav
+        when training with empty ``audio_features``, solely to keep unused
+        encoder parameters in the autograd graph. Here ``apm`` is frozen
+        (LoRA-excluded and adapter-ignored under FSDP2), so that is pure
+        wasted compute — and the dummy path reads
+        ``self.embed_positions.weight`` directly, assuming the subtree is not
+        FSDP-managed. Returning ``[]`` instead would break the remote
+        ``get_omni_embedding`` contract (``audio_embeddings[0].mean() * 0``
+        for the training no-audio branch), so the patched path returns one
+        zero tensor shaped like a single pooled audio token: no Whisper
+        forward, contract preserved. Non-empty audio batches delegate to the
+        original method unchanged.
+    """
+    apm = getattr(module, "apm", None)
+    llm = getattr(module, "llm", None)
+    original = getattr(module, "get_audio_embedding", None)
+    if apm is None or llm is None or original is None or getattr(module, _AUDIO_DUMMY_PATCH_ATTR, False):
+        return
+
+    def get_audio_embedding(self, data, chunk_length=-1, dummy=True, **kwargs):
+        # Mirrors the remote get_omni_embedding emptiness test (post-split
+        # normalization empties are exactly []); no `or` — features may be a
+        # tensor and tensor truthiness is ambiguous.
+        features = data.get("audio_features", [])
+        if features is None:
+            features = []
+        if self.training and len(features) == 0:
+            import torch
+
+            weight = self.apm.conv1.weight
+            hidden = getattr(getattr(self.llm, "config", None), "hidden_size", 1)
+            return [torch.zeros(1, hidden, 1, device=weight.device, dtype=weight.dtype)]
+        return original(data, chunk_length=chunk_length, dummy=dummy, **kwargs)
+
+    module.get_audio_embedding = types.MethodType(get_audio_embedding, module)
+    setattr(module, _AUDIO_DUMMY_PATCH_ATTR, True)
