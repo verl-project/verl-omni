@@ -35,6 +35,7 @@ from verl_omni.pipelines.minicpm.thinker_training_adapter import (
     _apply_media_bounds,
     _is_packed_batch,
     _merge_packed_media,
+    split_minicpm_forward_kwargs,
 )
 
 _SPECIAL_TOKENS = {
@@ -384,3 +385,27 @@ def test_prepare_model_inputs_padded_batch_also_rederives_bounds():
         model_inputs, micro_batch=None, model_config=SimpleNamespace(processor=_StubProcessor())
     )
     assert prepared["data"]["image_bound"] == [[[2, 4]], [[2, 4]]]
+
+
+def test_split_classifies_image_sizes_as_data_not_llm_kwargs():
+    data, llm_kwargs = split_minicpm_forward_kwargs(
+        {
+            "input_ids": torch.ones(1, 4, dtype=torch.long),
+            "position_ids": torch.arange(4).unsqueeze(0),
+            "image_sizes": [[(8, 8)]],
+            "attention_mask": torch.ones(1, 4),
+        }
+    )
+    assert data["image_sizes"] == [[(8, 8)]]
+    assert "image_sizes" not in llm_kwargs
+
+
+def test_prepare_model_inputs_drops_image_sizes_entirely():
+    data, _ = _packed_data()
+    model_inputs = {key: value for key, value in data.items() if key not in ("image_bound", "audio_bounds")}
+    model_inputs["image_sizes"] = [[(8, 8)], [(8, 8)]]
+    prepared = MiniCPMThinkerAdapter.prepare_model_inputs(
+        model_inputs, micro_batch=None, model_config=SimpleNamespace(processor=_StubProcessor())
+    )
+    assert "image_sizes" not in prepared
+    assert "image_sizes" not in prepared["data"]
