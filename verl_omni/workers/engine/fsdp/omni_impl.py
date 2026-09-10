@@ -39,6 +39,32 @@ from verl_omni.workers.config import OmniModelConfig
 logger = logging.getLogger(__name__)
 
 
+def _filter_ignored_wrap_targets(wrap_targets, root, ignored_names):
+    """Drop wrap targets nested under adapter-ignored subtrees.
+
+    verl's ``_select_fsdp2_wrap_targets`` blanket-wraps every ``nn.Embedding``.
+    A target inside an ignored subtree — MiniCPM-o's Whisper
+    ``apm.embed_positions`` — would be claimed by its nested ``fully_shard``
+    call BEFORE the root call, and the root's ``ignored_params`` cannot
+    retroactively unmanage already-claimed params: the unit stays sharded
+    while the remote encoder reads ``self.embed_positions.weight`` directly
+    (never a module call), mixing plain tensors with DTensors in forward.
+    Dropping such targets leaves their params unclaimed so the root's ignored
+    set takes them.
+    """
+    if not ignored_names:
+        return wrap_targets
+    names_by_id = {id(submodule): name for name, submodule in root.named_modules()}
+    kept = []
+    for target in wrap_targets:
+        name = names_by_id.get(id(target))
+        if name is not None and any(part in ignored_names for part in name.split(".")):
+            logger.debug("Skipping FSDP2 wrap target %s: inside an ignored subtree.", name)
+            continue
+        kept.append(target)
+    return kept
+
+
 @EngineRegistry.register(model_type="omni_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class OmniFSDPEngine(FSDPEngineWithLMHead):
     """FSDP engine for omni models"""
@@ -338,7 +364,9 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         # Nested fully_shard calls must NOT carry the root's ignored set (torch
         # rejects params a nested call does not own); only the root call below
         # passes ignored_params.
-        wrap_targets = _select_fsdp2_wrap_targets(module, transformer_cls_names)
+        wrap_targets = _filter_ignored_wrap_targets(
+            _select_fsdp2_wrap_targets(module, transformer_cls_names), module, ignored_names
+        )
         for target in wrap_targets:
             with maybe_patch_fsdp_module(target):
                 fully_shard(target, **fsdp_kwargs)
