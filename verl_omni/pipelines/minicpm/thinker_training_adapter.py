@@ -29,12 +29,18 @@ import torch
 from verl_omni.pipelines.model_base import OmniModelBase
 
 _MINICPM_NO_SPLIT_MODULES = ["Qwen3DecoderLayer", "MiniCPMODecoderLayer"]
-# Keys consumed by MiniCPMO.forward(data, **kwargs) / get_vllm_embedding / get_omni_embedding.
+# Keys routed into MiniCPMO's ``data`` dict instead of ``self.llm(**kwargs)``.
+# Most are consumed by MiniCPMO.forward / get_vllm_embedding /
+# get_omni_embedding; ``image_sizes`` is processor-emitted metadata no
+# MiniCPM-o forward consumes (the remote chat() likewise pops it) — it is
+# classified here so it can never reach the Qwen3 decoder, which rejects
+# unknown kwargs.
 _MINICPM_DATA_KEYS = (
     "input_ids",
     "position_ids",
     "pixel_values",
     "tgt_sizes",
+    "image_sizes",
     "image_bound",
     "audio_features",
     "audio_feature_lens",
@@ -332,6 +338,9 @@ class MiniCPMThinkerAdapter(OmniModelBase):
         # dropped instead of trusted.
         model_inputs.pop("image_bound", None)
         model_inputs.pop("audio_bounds", None)
+        # image_sizes is processor-emitted metadata that neither MiniCPMO.forward
+        # nor the LLM consumes; the remote chat() pops it before generate too.
+        model_inputs.pop("image_sizes", None)
         data, llm_kwargs = split_minicpm_forward_kwargs(model_inputs)
         _apply_media_bounds(data, model_config)
         if _is_packed_batch(data):
