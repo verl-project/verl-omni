@@ -1020,3 +1020,63 @@ def test_build_fsdp_module_rejects_fsdp1_with_ignored_names():
     engine = _fsdp2_engine(omni_impl, module, ["apm"], strategy="fsdp")
     with pytest.raises(NotImplementedError, match="strategy=fsdp2"):
         engine._build_fsdp_module(module)
+
+
+class _WhisperStyleModule(torch.nn.Module):
+    """Mirrors the MiniCPM-o layout that hits the embed_positions hole."""
+
+    def __init__(self):
+        super().__init__()
+        self.apm = torch.nn.Module()
+        self.apm.embed_positions = torch.nn.Embedding(16, 4)  # blanket-wrapped by verl's selector
+        self.apm.conv1 = torch.nn.Linear(4, 4)
+        self.llm = torch.nn.Module()
+        self.llm.layer = torch.nn.Linear(4, 4)
+        self.model = torch.nn.Module()
+        self.model.embed_tokens = torch.nn.Embedding(16, 4)  # top-level embedding, NOT ignored
+        self._no_split_modules = ["Qwen3DecoderLayer"]
+
+
+def test_build_fsdp_module_skips_wrap_targets_under_ignored_subtrees(monkeypatch):
+    omni_impl = _get_omni_impl_module()
+    module = _WhisperStyleModule()
+
+    calls = []
+
+    def fake_fully_shard(target, **kwargs):
+        calls.append((target, kwargs.get("ignored_params")))
+        return target
+
+    import verl.utils.fsdp_utils as verl_fsdp_utils
+    import verl.utils.torch_dtypes as torch_dtypes
+
+    # verl's selector blanket-wraps every nn.Embedding, including apm.embed_positions.
+    monkeypatch.setattr(
+        verl_fsdp_utils,
+        "_select_fsdp2_wrap_targets",
+        lambda model, names: [module.llm.layer, module.apm.embed_positions, module.model.embed_tokens],
+    )
+    monkeypatch.setattr(torch.distributed.fsdp, "fully_shard", fake_fully_shard)
+    monkeypatch.setattr(verl_fsdp_utils, "maybe_patch_fsdp_module", lambda model: contextmanager(lambda: (yield))())
+    monkeypatch.setattr(verl_fsdp_utils, "fsdp2_load_full_state_dict", lambda *args, **kwargs: None)
+    monkeypatch.setattr(torch_dtypes.PrecisionType, "to_dtype", staticmethod(lambda name: torch.bfloat16))
+
+    engine = _fsdp2_engine(omni_impl, module, ["apm"])
+    engine._build_fsdp_module(module)
+
+    wrapped = [target for target, _ in calls[:-1]]
+    assert module.llm.layer in wrapped
+    assert module.model.embed_tokens in wrapped  # top-level embedding still wrapped
+    # The ignored-subtree embedding is never claimed by a nested fully_shard...
+    assert module.apm.embed_positions not in wrapped
+    # ...so the root's ignored set owns every apm param, embed_positions included.
+    root_ignored = calls[-1][1]
+    assert module.apm.embed_positions.weight in root_ignored
+    assert module.apm.conv1.weight in root_ignored
+
+
+def test_filter_ignored_wrap_targets_identity_without_ignored_names():
+    omni_impl = _get_omni_impl_module()
+    module = _WhisperStyleModule()
+    targets = [module.llm.layer, module.apm.embed_positions]
+    assert omni_impl._filter_ignored_wrap_targets(targets, module, []) == targets
