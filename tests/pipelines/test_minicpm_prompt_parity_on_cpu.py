@@ -239,13 +239,26 @@ def test_apply_media_bounds_raises_on_count_mismatch():
 
 
 def test_merge_packed_media_folds_samples_into_one_row():
-    data, _ = _packed_data()
+    data, sample_a_len = _packed_data()
     _apply_media_bounds(data, SimpleNamespace(processor=_StubProcessor()))
     _merge_packed_media(data)
+    # One pseudo-row (remote embedders iterate rows, bs == 1 under packing)...
+    assert len(data["pixel_values"]) == 1
     assert len(data["image_bound"]) == 1 and len(data["audio_bounds"]) == 1
-    assert len(data["pixel_values"]) == 1 and data["pixel_values"][0].shape == (2, 2)
+    # ...holding every slice/span of every sample, not flattened past the row.
+    pixel_row = data["pixel_values"][0]
+    assert len(pixel_row) == 1 and pixel_row[0].shape == (2, 2)
+    assert data["image_bound"] == [[[2, 4]]]
+    audio_start = sample_a_len + 2
+    assert data["audio_bounds"] == [[[audio_start, audio_start + 3]]]
     assert data["audio_feature_lens"] == [[3]]
     assert data["tgt_sizes"][0].shape == (1, 2)
+    # Idempotent: merging the already-merged form changes nothing.
+    again = {key: value for key, value in data.items()}
+    _merge_packed_media(again)
+    assert again["pixel_values"][0][0] is data["pixel_values"][0][0] and len(again["pixel_values"]) == 1
+    assert again["image_bound"] == data["image_bound"]
+    assert again["audio_bounds"] == data["audio_bounds"]
 
 
 def test_prepare_model_inputs_packed_drops_attention_mask():

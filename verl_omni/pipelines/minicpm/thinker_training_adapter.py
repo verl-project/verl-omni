@@ -241,19 +241,23 @@ def _apply_media_bounds(data: dict[str, Any], model_config) -> None:
 def _merge_packed_media(data: dict[str, Any]) -> None:
     """Fold per-sample media into one pseudo-sample for the flattened batch.
 
-    ``MiniCPMO.get_vllm_embedding`` / ``get_omni_embedding`` scatter per batch
-    row; with the packed layout the single row is the concatenation of all
-    samples, so media and bounds must be presented as that one row's load —
-    order (sample-major, media order within) matches the id scan.
+    The remote embedders keep the batch-row dimension: ``get_vision_embedding``
+    iterates ``data["pixel_values"]`` per row (each row a list of that row's
+    slices), and ``get_vllm_embedding`` / ``get_omni_embedding`` index
+    ``data["image_bound"][i]`` / ``data["audio_bounds"][i]`` per row. With the
+    packed layout ``bs == 1`` and that single row is the concatenation of all
+    samples — so pixel_values and the bounds must be ONE pseudo-row holding
+    every slice/span (sample-major, media order within, matching the id scan),
+    not flattened past the row dimension.
     """
-    data["pixel_values"] = [slice_ for sample in data["pixel_values"] for slice_ in sample]
+    data["pixel_values"] = [[slice_ for sample in data["pixel_values"] for slice_ in sample]]
     tgt_sizes = [sample for sample in data["tgt_sizes"] if int(sample.numel()) > 0]
     data["tgt_sizes"] = [torch.cat(tgt_sizes, dim=0)] if tgt_sizes else [torch.zeros(0, 2, dtype=torch.int32)]
     data["audio_feature_lens"] = [
         [lens for sample in data["audio_feature_lens"] for lens in torch.as_tensor(sample).reshape(-1).tolist()]
     ]
-    data["image_bound"] = [span for spans in data["image_bound"] for span in spans]
-    data["audio_bounds"] = [span for spans in data["audio_bounds"] for span in spans]
+    data["image_bound"] = [[span for spans in data["image_bound"] for span in spans]]
+    data["audio_bounds"] = [[span for spans in data["audio_bounds"] for span in spans]]
 
 
 @OmniModelBase.register("MiniCPMO", stage="thinker")
