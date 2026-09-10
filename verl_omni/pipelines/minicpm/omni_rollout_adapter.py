@@ -92,13 +92,25 @@ class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
 
     @classmethod
     def get_stage_engine_extras(cls, stage_id: int, pipeline_mode: str = "thinker_only") -> dict:
-        """Pin stage 0 to the plain vLLM LLM class.
+        """Pin stage 0 to the plain vLLM LLM class, on the sync scheduler.
 
         ``MiniCPMO45OmniLLMForConditionalGeneration`` is a standard vLLM LLM
         class: normal logprob support (the omni wrapper hardcodes
         ``logprobs_tensors=None``) and thinker-LLM-only weights, which the
         merged-LoRA sync path (`llm.` → `thinker.` remap) targets.
+
+        ``async_scheduling=False`` mirrors the upstream MiniCPM-o deploy
+        profiles: vllm-omni's AR async scheduler never forwards ``is_stale``
+        to the base scheduler, and frames that escape its drain predicates
+        after a zeroing event decrement an already-zero
+        ``num_output_placeholders`` (assert in vllm's async_scheduler.py) —
+        hit minutes into an RL rollout once KV-cache pressure starts
+        preempting. This key is engine-owned and flows from engine_extras
+        into the stage SchedulerConfig.
         """
         if pipeline_mode == "thinker_only" and stage_id == 0:
-            return {"model_arch": "MiniCPMO45OmniLLMForConditionalGeneration"}
+            return {
+                "model_arch": "MiniCPMO45OmniLLMForConditionalGeneration",
+                "async_scheduling": False,
+            }
         return {}

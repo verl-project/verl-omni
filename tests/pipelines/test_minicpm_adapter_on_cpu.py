@@ -345,7 +345,11 @@ def test_rollout_adapter_registers_thinker_only_text_pipeline():
     assert stages[0].requires_multimodal_data is True
     assert MiniCPMORolloutAdapter.get_pipeline_id("thinker_only") == "minicpmo_4_5_thinker_only"
     assert MiniCPMORolloutAdapter.get_stage_engine_extras(0, "thinker_only") == {
-        "model_arch": "MiniCPMO45OmniLLMForConditionalGeneration"
+        "model_arch": "MiniCPMO45OmniLLMForConditionalGeneration",
+        # Mirrors the upstream MiniCPM-o deploy profiles: the AR async
+        # scheduler's placeholder accounting underflows under KV-cache
+        # preemption (assert in vllm async_scheduler.py).
+        "async_scheduling": False,
     }
     assert MiniCPMORolloutAdapter.get_engine_hf_overrides("thinker_only") == {}
     with pytest.raises(ValueError, match="thinker_only only"):
