@@ -477,3 +477,71 @@ def test_bound_processor_survives_dill_roundtrip():
     call = restored.calls[-1]
     assert call["audios"] == [b"wav"]
     assert call["text"] == ["Which song?" + MINICPM_IMAGE_SLOT + MINICPM_AUDIO_SLOT]
+
+
+def test_processor_call_fixes_tensor_nulling_convert_to_tensors():
+    # Mirror of the remote MiniCPMOBatchFeature bug: the converter returns
+    # only in the not-is_tensor branch, so already-tensor leaves become None.
+    from transformers.feature_extraction_utils import BatchFeature
+
+    class _RemoteBuggyFeature(BatchFeature):
+        def convert_to_tensors(self, tensor_type=None):
+            if tensor_type is None:
+                return self
+
+            def converter(value):
+                if not torch.is_tensor(value):
+                    return torch.tensor(value)
+
+            for key, value in self.items():
+                self[key] = converter(value)
+            return self
+
+    class _BuggyStubProcessor(_StubProcessor):
+        def __call__(self, text=None, images=None, audios=None, **kwargs):
+            self.calls.append({"text": text, "images": images, "audios": audios, **kwargs})
+            return _RemoteBuggyFeature({"input_ids": torch.tensor([[1, 2]]), "raw_lens": [3]})
+
+    processor = bind_minicpm_processor(_BuggyStubProcessor())
+    feature = processor(text=["hi"])
+
+    # Unpatched, the buggy converter nulls the tensor leaf.
+    assert _RemoteBuggyFeature({"input_ids": torch.tensor([[1, 2]])}).convert_to_tensors("pt")["input_ids"] is None
+
+    converted = feature.convert_to_tensors("pt")
+    assert torch.is_tensor(converted["input_ids"])  # tensor values survive
+    assert converted["input_ids"].tolist() == [[1, 2]]
+    assert torch.is_tensor(converted["raw_lens"])  # non-tensors still convert (contract kept)
+    assert dict(converted)["input_ids"].tolist() == [[1, 2]]  # verl's dict(feature.convert_to_tensors(...)) path
+
+
+def test_upgrade_batch_feature_passes_through_stock_and_non_features():
+    from transformers.feature_extraction_utils import BatchFeature
+
+    from verl_omni.pipelines.minicpm.prompt_parity import _upgrade_batch_feature
+
+    plain = {"input_ids": torch.tensor([1])}
+    assert _upgrade_batch_feature(plain) is plain
+    stock = BatchFeature({"input_ids": torch.tensor([1])})
+    assert _upgrade_batch_feature(stock) is stock  # no override -> untouched
+
+
+def test_apply_media_bounds_refuses_media_ids_without_features():
+    data, _ = _packed_data()
+    stripped = {key: value for key, value in data.items() if key not in ("image_bound", "audio_bounds")}
+    stripped["pixel_values"] = [[], []]
+    stripped["audio_features"] = []
+    stripped["audio_feature_lens"] = [[], []]
+    with pytest.raises(ValueError, match="no media features survived"):
+        _apply_media_bounds(stripped, SimpleNamespace(processor=_StubProcessor()))
+
+    # Text-only ids with no features stay silent.
+    tokenizer = _StubTokenizer()
+    text_only = {
+        "input_ids": torch.tensor([tokenizer.encode("plain question")], dtype=torch.long),
+        "position_ids": torch.arange(11).unsqueeze(0),
+        "pixel_values": [[], []],
+        "audio_features": [],
+        "audio_feature_lens": [[], []],
+    }
+    _apply_media_bounds(text_only, SimpleNamespace(processor=_StubProcessor()))  # no raise

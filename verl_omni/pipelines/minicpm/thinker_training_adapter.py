@@ -207,6 +207,21 @@ def _apply_media_bounds(data: dict[str, Any], model_config) -> None:
     Text-only batches keep the empty defaults from the split.
     """
     if not _media_in_data(data):
+        # Fail closed: expanded media spans in the ids with no surviving media
+        # features means the forward would run text-only over media positions
+        # (the exact silent failure of the remote convert_to_tensors nulling
+        # tensor leaves) while the rollout stayed multimodal.
+        processor = getattr(model_config, "processor", None)
+        if processor is not None:
+            from verl_omni.pipelines.minicpm.prompt_parity import resolve_media_tokens
+
+            if resolve_media_tokens(processor).has_media_tokens(data["input_ids"]):
+                raise ValueError(
+                    "MiniCPM training ids carry expanded media spans but no media features "
+                    "survived into the batch (pixel_values/audio_features are empty). The "
+                    "processor output was wiped after the call — refusing to train text-only "
+                    "over media positions. Inspect multi_modal_inputs for None values."
+                )
         return
     processor = getattr(model_config, "processor", None)
     if processor is None:

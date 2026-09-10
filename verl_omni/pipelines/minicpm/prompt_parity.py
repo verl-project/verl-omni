@@ -349,7 +349,43 @@ def _parity_call(self, text=None, images=None, audio=None, audios=None, **kwargs
     elif isinstance(text, str):
         text = _parity_normalize_text(tokens, text, images, audios)
     base = type(self).__bases__[0]
-    return base.__call__(self, text=text, images=images, audios=audios, **kwargs)
+    return _upgrade_batch_feature(base.__call__(self, text=text, images=images, audios=audios, **kwargs))
+
+
+def _safe_convert_to_tensors(self, tensor_type=None):
+    # The remote MiniCPMOBatchFeature override drops the `return value` for
+    # already-tensor leaves, so a single convert_to_tensors("pt") nulls every
+    # tensor feature (pixel_values, audio_features, bounds, lens, tgt_sizes).
+    # The stock transformers BatchFeature implementation is correct — delegate
+    # to it instead of reimplementing.
+    from transformers.feature_extraction_utils import BatchFeature
+
+    return BatchFeature.convert_to_tensors(self, tensor_type)
+
+
+def _upgrade_batch_feature(feature: Any) -> Any:
+    """Fix the remote BatchFeature's tensor-nulling convert_to_tensors in place.
+
+    verl stores processor output via ``dict(feature.convert_to_tensors("pt"))``;
+    with the remote bug every already-tensor leaf maps to None, silently
+    wiping all media features so every training forward runs text-only while
+    the rollout stays multimodal. The same in-place class upgrade as the
+    processor itself: ``convert_to_tensors`` is re-pointed at the stock
+    (correct) transformers implementation. Non-BatchFeature results and
+    classes that no longer override the method pass through untouched.
+    """
+    from transformers.feature_extraction_utils import BatchFeature
+
+    if not isinstance(feature, BatchFeature):
+        return feature
+    if type(feature).convert_to_tensors is BatchFeature.convert_to_tensors:
+        return feature  # not overridden (e.g. already fixed upstream) — nothing to do
+    feature.__class__ = type(
+        "MiniCPMOBatchFeatureSafe",
+        (type(feature),),
+        {"convert_to_tensors": _safe_convert_to_tensors},
+    )
+    return feature
 
 
 def bind_minicpm_processor(processor: Any) -> Any:
