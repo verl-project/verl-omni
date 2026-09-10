@@ -24,6 +24,8 @@ from typing import Any
 import numpy as np
 import torch
 
+from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
+
 VIDEO_ROW_WIDTH = 96
 AUDIO_ROW_WIDTH = 32
 LATENT_META_WIDTH = 6
@@ -706,7 +708,7 @@ class MiniMaxH3RolloutWeightSyncMixin:
         if not prompts or not isinstance(prompts[0], dict):
             return
         custom_prompt = prompts[0]
-        token_ids = custom_prompt.get("prompt_token_ids")
+        token_ids = prompt_ids_from_payload(custom_prompt)
         if token_ids is None:
             return
         sampling_params = getattr(request, "sampling_params", None)
@@ -723,5 +725,5 @@ class MiniMaxH3RolloutWeightSyncMixin:
             token_ids = token_ids[0]
         self._h3_prompt_ids = torch.as_tensor([int(token) for token in token_ids], dtype=torch.long)
         if self._h3_prompt_ids.numel() == 0:
-            raise ValueError("MiniMax H3 requires non-empty prompt_token_ids.")
+            raise ValueError("MiniMax H3 requires non-empty prompt_ids.")
         custom_prompt["prompt"] = "[pretokenized]"

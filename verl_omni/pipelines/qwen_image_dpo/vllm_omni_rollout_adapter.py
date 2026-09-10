@@ -15,19 +15,26 @@
 """Qwen-Image rollout-side adapter for online diffusion DPO."""
 
 import copy
+from dataclasses import replace
 from typing import Any
 
 import torch
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
-from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.request import DUMMY_DIFFUSION_REQUEST_ID, OmniDiffusionRequest
 from vllm_omni.diffusion.worker.utils import StepRequestState
 
-from verl_omni.pipelines.diffusion_rollout_output import rollout_output, with_rollout_data
+from verl_omni.pipelines.diffusion_rollout_output import (
+    rollout_output,
+    wants_decoded_preview,
+    with_rollout_data,
+    with_visual_artifacts,
+)
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.common import apply_true_cfg, build_img_shapes
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
+from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 
 __all__ = ["QwenImageDPOPipeline"]
 
@@ -42,7 +49,12 @@ class QwenImageDPOPipeline(QwenImagePipeline):
 
     #: Declares the primary rollout media stream so downstream consumers read
     #: the modality from the adapter instead of inferring it from tensor rank.
-    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
+    diffusion_io_spec = DiffusionIOSpec(
+        artifacts={
+            "image_preview": MediaSpec("image", "decoded", "CHW"),
+            "image_latent": MediaSpec("image", "latent", "LC"),
+        }
+    )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
@@ -55,7 +67,7 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         negative_prompt_ids = None
         negative_prompt_mask = None
         if isinstance(prompt, dict):
-            prompt_ids = prompt.get("prompt_token_ids")
+            prompt_ids = prompt_ids_from_payload(prompt)
             prompt_mask = prompt.get("prompt_mask")
             negative_prompt_ids = prompt.get("negative_prompt_ids")
             negative_prompt_mask = prompt.get("negative_prompt_mask")
@@ -96,7 +108,7 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         if prompt_ids is None:
             raise ValueError(
                 f"{self.__class__.__name__}.prepare_encode requires either "
-                "'prompt_token_ids' or a text 'prompt' on state.prompt."
+                "'prompt_ids' or a text 'prompt' on state.prompt."
             )
 
         height = sampling.height or self.default_sample_size * self.vae_scale_factor
@@ -241,10 +253,15 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         **kwargs: Any,
     ) -> DiffusionOutput:
         """Decode step execution output with DPO training tensors."""
-        del kwargs
         self._current_timestep = None
-        output = self._decode_latents(state.latents, state.extra["height"], state.extra["width"], "pil")
-        return with_rollout_data(
+        output_type = kwargs.get("output_type") or state.sampling.output_type or "pil"
+        decode = wants_decoded_preview(output_type, state.sampling)
+        output = self._decode_latents(
+            state.latents, state.extra["height"], state.extra["width"], "pil" if decode else "latent"
+        )
+        if state.request_id == DUMMY_DIFFUSION_REQUEST_ID:
+            return replace(output, output=None, to_cpu=True)
+        result = with_rollout_data(
             output,
             prompt_embeddings={
                 "prompt_embeds": state.prompt_embeds,
@@ -254,6 +271,15 @@ class QwenImageDPOPipeline(QwenImagePipeline):
             },
             rl={"latents_clean": state.latents.float()},
             to_cpu=True,
+        )
+        return with_visual_artifacts(
+            result,
+            decoded=output.output if decode else None,
+            latents=state.latents,
+            latent_layout="LC",
+            output_type=output_type,
+            context=f"pipeline={type(self).__name__}, request_id={state.request_id}",
+            requested=(state.sampling.extra_args or {}).get("requested_outputs"),
         )
 
     def _get_qwen_prompt_embeds(
@@ -354,15 +380,15 @@ class QwenImageDPOPipeline(QwenImagePipeline):
         attention_kwargs: dict[str, Any] | None = None,
         max_sequence_length: int = 512,
     ) -> DiffusionOutput:
-        del output_type
         custom_prompt = req.prompts[0] if req.prompts else {}
         if isinstance(custom_prompt, dict):
-            prompt_ids = custom_prompt.get("prompt_token_ids", prompt_ids)
+            prompt_ids = prompt_ids_from_payload(custom_prompt, prompt_ids)
             prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
             negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
             negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)
 
         sampling_params = req.sampling_params
+        output_type = sampling_params.output_type or output_type or "pil"
         height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
         num_inference_steps = sampling_params.num_inference_steps or num_inference_steps
@@ -482,20 +508,10 @@ class QwenImageDPOPipeline(QwenImagePipeline):
 
         self._current_timestep = None
         latents_clean = latents.float()
-        unpacked_latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
-        unpacked_latents = unpacked_latents.to(self.vae.dtype)
-        latents_mean = (
-            torch.tensor(self.vae.config.latents_mean)
-            .view(1, self.vae.config.z_dim, 1, 1, 1)
-            .to(unpacked_latents.device, unpacked_latents.dtype)
-        )
-        latents_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(1, self.vae.config.z_dim, 1, 1, 1).to(
-            unpacked_latents.device, unpacked_latents.dtype
-        )
-        unpacked_latents = unpacked_latents / latents_std + latents_mean
-        image = self.vae.decode(unpacked_latents, return_dict=False)[0][:, :, 0]
+        decode = wants_decoded_preview(output_type, sampling_params)
+        image = self._decode_latents(latents, height, width, "pil").output if decode else None
 
-        return rollout_output(
+        result = rollout_output(
             media=image,
             prompt_embeddings={
                 "prompt_embeds": prompt_embeds,
@@ -505,4 +521,13 @@ class QwenImageDPOPipeline(QwenImagePipeline):
             },
             rl={"latents_clean": latents_clean},
             to_cpu=True,
+        )
+        return with_visual_artifacts(
+            result,
+            decoded=image,
+            latents=latents,
+            latent_layout="LC",
+            output_type=output_type,
+            context=f"pipeline={type(self).__name__}, request_id={req.request_id}",
+            requested=(sampling_params.extra_args or {}).get("requested_outputs"),
         )

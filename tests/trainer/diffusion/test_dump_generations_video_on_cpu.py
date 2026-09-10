@@ -13,7 +13,7 @@
 # limitations under the License.
 """CPU tests for ``BaseRayDiffusionTrainer._dump_generations`` media handling.
 
-The dump branches on tensor rank: 5-D video batches ``[N, T, C, H, W]`` are
+The dump reads the declared media kind: video batches ``[N, T, C, H, W]`` are
 written as ``{i}.mp4`` and 4-D image batches ``[N, C, H, W]`` as ``{i}.jpg``,
 while ``max_samples`` bounds how many samples (and JSONL rows) are emitted.
 The method only reads ``self.global_steps``, so a lightweight stub stands in
@@ -21,6 +21,7 @@ for the trainer.
 """
 
 import json
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -37,7 +38,9 @@ import verl_omni.trainer.diffusion.ray_diffusion_trainer as ray_diffusion_traine
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import BaseRayDiffusionTrainer
 
 
-def _dump(dump_path, outputs, *, max_samples=None, global_steps=0, audios=None, audio_sample_rates=None):
+def _dump(
+    dump_path, outputs, *, max_samples=None, global_steps=0, audios=None, audio_sample_rates=None, media_kind="video"
+):
     """Invoke the unbound ``_dump_generations`` with a minimal stub ``self``."""
     n = outputs.shape[0]
     stub = SimpleNamespace(global_steps=global_steps)
@@ -59,6 +62,7 @@ def _dump(dump_path, outputs, *, max_samples=None, global_steps=0, audios=None, 
         str(dump_path),
         max_samples=max_samples,
         fps=8,
+        media_kind=media_kind,
         **kwargs,
     )
 
@@ -129,7 +133,7 @@ class TestDumpGenerations:
     def test_image_batch_writes_one_jpg_per_sample(self, tmp_path):
         # Image regression: the 4-D path must stay byte-for-byte behaviour.
         outputs = torch.randint(256, (2, 3, 16, 16), dtype=torch.uint8)  # [N, C, H, W]
-        _dump(tmp_path, outputs)
+        _dump(tmp_path, outputs, media_kind="image")
 
         visual = os.path.join(str(tmp_path), "0")
         jpgs = sorted(f for f in os.listdir(visual) if f.endswith(".jpg"))
@@ -139,6 +143,39 @@ class TestDumpGenerations:
         rows = _read_jsonl(tmp_path)
         assert len(rows) == 2
         assert all(row["output"].endswith(".jpg") for row in rows)
+
+    def test_image_save_failure_is_recorded_without_losing_other_samples(self, monkeypatch, tmp_path, caplog):
+        caplog.set_level(logging.WARNING, logger=ray_diffusion_trainer.sys_logger.name)
+        original_save = ray_diffusion_trainer.Image.Image.save
+
+        def save(image, filename, *args, **kwargs):
+            if str(filename).endswith("0.jpg"):
+                raise OSError("simulated full filesystem")
+            return original_save(image, filename, *args, **kwargs)
+
+        monkeypatch.setattr(ray_diffusion_trainer.Image.Image, "save", save)
+        _dump(tmp_path, torch.zeros(2, 3, 8, 8, dtype=torch.uint8), media_kind="image")
+
+        rows = _read_jsonl(tmp_path)
+        assert rows[0]["output"] is None
+        assert "simulated full filesystem" in rows[0]["image_export_error"]
+        assert rows[1]["output"].endswith("1.jpg")
+        assert "step 0 sample 0" in caplog.text
+
+    @pytest.mark.parametrize("operation", ["mkdir", "jsonl"])
+    def test_filesystem_failure_is_logged_and_skipped(self, monkeypatch, tmp_path, caplog, operation):
+        caplog.set_level(logging.WARNING, logger=ray_diffusion_trainer.sys_logger.name)
+
+        def fail(*args, **kwargs):
+            raise OSError("simulated filesystem failure")
+
+        if operation == "mkdir":
+            monkeypatch.setattr(ray_diffusion_trainer.os, "makedirs", fail)
+        else:
+            monkeypatch.setattr(ray_diffusion_trainer, "open", fail, raising=False)
+        _dump(tmp_path, torch.zeros(1, 3, 8, 8, dtype=torch.uint8), global_steps=7, media_kind="image")
+        assert "step 7" in caplog.text
+        assert "simulated filesystem failure" in caplog.text
 
     def test_max_samples_bounds_video_dump(self, tmp_path):
         outputs = torch.randint(256, (3, 8, 3, 16, 16), dtype=torch.uint8)

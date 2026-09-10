@@ -53,23 +53,14 @@ def _get_batching_state() -> _BatchingState:
 
 
 def _get_audio(extra_info: dict) -> tuple[torch.Tensor, int]:
-    audio = extra_info.get("audio")
-    if audio is None:
-        raise KeyError("CLAP reward requires decoded audio in extra_info['audio'].")
-    audio = torch.as_tensor(audio).detach().float().cpu()
-    while audio.ndim > 2 and audio.shape[0] == 1:
-        audio = audio[0]
-    if audio.ndim == 2:
-        audio = audio.mean(dim=0)
-    elif audio.ndim != 1:
-        raise ValueError(f"Expected audio shape (T,) or (C,T), got {tuple(audio.shape)}.")
+    from verl_omni.pipelines.rollout_artifacts import ArtifactContractError, select_artifact
 
-    sample_rate = extra_info.get("audio_sample_rate", _CLAP_SAMPLE_RATE)
-    if isinstance(sample_rate, torch.Tensor):
-        sample_rate = sample_rate.item()
-    if sample_rate is None:
-        raise KeyError("CLAP reward requires extra_info['audio_sample_rate'].")
-    return audio, int(sample_rate)
+    artifact = select_artifact(
+        extra_info.get("media_artifacts", {}), name="audio", modality="audio", representation="decoded"
+    )
+    if artifact.spec.layout != "CT":
+        raise ArtifactContractError(f"CLAP requires canonical CT audio, got {artifact.spec.layout}")
+    return artifact.data.detach().float().cpu().mean(dim=0), artifact.spec.sample_rate
 
 
 def _load_clap(model_name_or_path: str, device: str):

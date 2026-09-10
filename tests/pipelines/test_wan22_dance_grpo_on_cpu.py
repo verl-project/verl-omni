@@ -129,7 +129,8 @@ def test_wan22_dance_grpo_forward_accepts_vllm_omni_request_batch(monkeypatch) -
         output_type="np",
     )
 
-    assert output is expected
+    assert output.output["metadata"]["media_artifacts"]["primary"] == "video_latent"
+    torch.testing.assert_close(output.output["payload"]["video"][0]["video_latent"], latents[0])
     encoded_prompt_ids = pipeline.encode_prompt.call_args.kwargs["prompt_ids"]
     assert encoded_prompt_ids.tolist() == [11, 12, 13]
     prepare_kwargs = pipeline.prepare_latents.call_args.kwargs
@@ -139,7 +140,7 @@ def test_wan22_dance_grpo_forward_accepts_vllm_omni_request_batch(monkeypatch) -
     assert prepare_kwargs["generator"].initial_seed() == 321
     pipeline.diffuse.assert_called_once()
     rollout_output.assert_called_once_with(
-        media=latents,
+        media=None,
         media_key="video",
         trajectory_latents=trajectory_latents,
         trajectory_log_probs=trajectory_log_probs,

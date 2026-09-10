@@ -22,31 +22,63 @@ from PIL import Image
 
 
 def normalize_video_tensor(video: torch.Tensor) -> torch.Tensor:
-    """Normalize an RGB uint8 video to the ``[T, 3, H, W]`` layout.
-
-    Accepted layouts are time-first channels-first ``[T, 3, H, W]``,
-    channels-first temporal ``[3, T, H, W]``, and channels-last
-    ``[T, H, W, 3]``. Ambiguous shapes such as ``[3, 3, H, W]`` retain the
-    canonical time-first interpretation.
-    """
+    """Validate canonical RGB uint8 TCHW; layout conversion belongs to the adapter."""
     if not isinstance(video, torch.Tensor) or video.dtype != torch.uint8:
         dtype = video.dtype if isinstance(video, torch.Tensor) else type(video)
         raise ValueError(f"Expected a uint8 video tensor, got {dtype}")
     if video.ndim != 4:
         raise ValueError(f"Expected an RGB video tensor with shape [T, 3, H, W], got {tuple(video.shape)}")
 
-    if video.shape[1] == 3:
-        normalized = video
-    elif video.shape[0] == 3:
-        normalized = video.permute(1, 0, 2, 3)
-    elif video.shape[-1] == 3:
-        normalized = video.permute(0, 3, 1, 2)
-    else:
-        raise ValueError(f"Expected an RGB video tensor with shape [T, 3, H, W], got {tuple(video.shape)}")
+    if video.shape[1] != 3 or any(size <= 0 for size in video.shape):
+        raise ValueError(f"Expected a nonempty RGB video with shape [T, 3, H, W], got {tuple(video.shape)}")
+    return video
 
-    if normalized.shape[0] == 0 or normalized.shape[2] == 0 or normalized.shape[3] == 0:
-        raise ValueError(f"Expected a video with non-empty time and spatial dimensions, got {tuple(video.shape)}")
-    return normalized
+
+def visual_reward_frames(solution_image, extra_info: dict, frame_interval: int = 1) -> torch.Tensor:
+    """Select decoded visual media and return NCHW frames using declared modality, never rank."""
+    from verl_omni.pipelines.rollout_artifacts import PREVIEW_ARTIFACT, ArtifactContractError, MediaArtifact
+    from verl_omni.pipelines.rollout_media import MediaSpec
+
+    if isinstance(frame_interval, bool) or not isinstance(frame_interval, int) or frame_interval < 1:
+        raise ValueError("frame_interval must be a positive integer")
+    artifacts = extra_info.get("media_artifacts")
+    if artifacts is not None:
+        name = extra_info.get(PREVIEW_ARTIFACT)
+        if name not in artifacts:
+            raise ArtifactContractError(
+                f"Decoded preview artifact={name!r} is absent; cannot score latent responses as pixels"
+            )
+        artifact = artifacts[name]
+    else:
+        kind = extra_info.get("media_kind")
+        if kind not in ("image", "video"):
+            raise ArtifactContractError("Visual rewards require named artifacts or an explicit media_kind")
+        artifact = MediaArtifact(
+            MediaSpec(kind, "decoded", "CHW" if kind == "image" else "TCHW", fps=extra_info.get("fps")),
+            solution_image,
+        )
+    try:
+        artifact.validate(context="visual reward", name="preview")
+    except (TypeError, ValueError) as error:
+        raise ArtifactContractError(str(error)) from error
+    expected_layout = {"image": "CHW", "video": "TCHW"}.get(artifact.spec.modality)
+    if artifact.spec.representation != "decoded" or artifact.spec.layout != expected_layout:
+        raise ArtifactContractError(f"Visual rewards require canonical decoded media, got {artifact.spec}")
+    if artifact.spec.modality == "image":
+        return artifact.data.unsqueeze(0)
+    return artifact.data[::frame_interval]
+
+
+def image_tensor_to_pil(image: torch.Tensor) -> Image.Image:
+    """Convert an explicitly canonical uint8 CHW image to RGB PIL."""
+    from verl_omni.pipelines.rollout_artifacts import MediaArtifact
+    from verl_omni.pipelines.rollout_media import MediaSpec
+
+    MediaArtifact(MediaSpec("image", "decoded", "CHW"), image).validate(context="PIL conversion", name="image")
+    array = image.detach().permute(1, 2, 0).cpu().numpy()
+    if image.shape[0] == 1:
+        array = array[:, :, 0]
+    return Image.fromarray(array).convert("RGB")
 
 
 def video_tensor_to_pil_frames(video: torch.Tensor) -> list[Image.Image]:

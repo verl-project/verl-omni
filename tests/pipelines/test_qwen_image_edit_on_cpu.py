@@ -195,6 +195,39 @@ def test_prompt_encoding_requires_condition_images():
         )
 
 
+@pytest.mark.parametrize("as_list", [False, True])
+def test_raw_and_engine_preprocessed_images_are_distinct_named_views(monkeypatch, as_list):
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from verl_omni.pipelines.qwen_image_edit_flow_grpo import vllm_omni_rollout_adapter as adapter
+
+    class Captured(Exception):
+        pass
+
+    raw = Image.new("RGB", (32, 32), "blue")
+    processed = raw.resize((384, 384))
+    prompt = {
+        "prompt_ids": [1, 2],
+        "multi_modal_data": {"image": [raw] if as_list else raw},
+        "additional_information": {"condition_images": [processed], "vae_image_sizes": [(1024, 1024)]},
+    }
+    request = SimpleNamespace(
+        prompts=[prompt], sampling_params=SimpleNamespace(height=64, width=64, output_type="image")
+    )
+
+    def capture(images, sizes, **kwargs):
+        assert images == [raw]
+        assert images[0].size == (32, 32)
+        assert sizes == [(1024, 1024)]
+        raise Captured
+
+    monkeypatch.setattr(adapter, "_validate_condition_image_sizes", capture)
+    with pytest.raises(Captured):
+        QwenImageEditPlusPipelineWithLogProb.forward(SimpleNamespace(), request)
+
+
 def test_condition_images_require_fixed_square_latents():
     _validate_condition_image_sizes(["image"], [(1024, 1024)])
     with pytest.raises(ValueError, match="vae_image_sizes"):

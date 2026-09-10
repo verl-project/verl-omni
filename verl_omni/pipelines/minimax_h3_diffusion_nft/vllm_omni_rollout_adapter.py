@@ -35,6 +35,7 @@ from verl_omni.pipelines.diffusion_rollout_output import with_rollout_data
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 
+from .artifacts import with_h3_artifacts
 from .common import (
     AUDIO_ROW_WIDTH,
     MiniMaxH3RolloutWeightSyncMixin,
@@ -56,8 +57,12 @@ class MiniMaxH3DiffusionNFTPipeline(MiniMaxH3RolloutWeightSyncMixin, MiniMaxH3Pi
     #: Declares the joint video/audio rollout streams so the diffusion strategy
     #: does not hard-code the audio tuple position or its 32 kHz sample rate.
     diffusion_io_spec = DiffusionIOSpec(
-        primary=MediaSpec("video"),
-        auxiliary=(MediaSpec("audio", sample_rate=32000),),
+        artifacts={
+            "video_preview": MediaSpec("video", "decoded", "TCHW"),
+            "audio": MediaSpec("audio", "decoded", "CT", sample_rate=32000),
+            "video_latent": MediaSpec("video", "latent", "CTHW"),
+            "audio_latent": MediaSpec("audio", "latent", "CLT"),
+        }
     )
 
     def __init__(self, *, od_config: Any, prefix: str = "") -> None:
@@ -218,7 +223,7 @@ class MiniMaxH3DiffusionNFTPipeline(MiniMaxH3RolloutWeightSyncMixin, MiniMaxH3Pi
                 }
             )
 
-        return with_rollout_data(
+        result = with_rollout_data(
             output,
             prompt_embeddings={
                 "prompt_embeds": prompt_embeds,
@@ -226,6 +231,16 @@ class MiniMaxH3DiffusionNFTPipeline(MiniMaxH3RolloutWeightSyncMixin, MiniMaxH3Pi
             },
             rl=rl,
             to_cpu=True,
+        )
+        video, audio = output.output
+        return with_h3_artifacts(
+            result,
+            video=video,
+            audio=audio,
+            video_latent=capture["video_latent"],
+            audio_latent=capture["audio_latent"],
+            sampling=request.sampling_params,
+            context=f"pipeline={type(self).__name__}, request_id={request.request_id}",
         )
 
     @staticmethod

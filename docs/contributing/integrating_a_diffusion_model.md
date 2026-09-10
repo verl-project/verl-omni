@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 08/21/2026.
+Last updated: 09/08/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -104,8 +104,9 @@ expects pre-tokenised input on every request.
 
 ### Single text encoder (Qwen-Image and similar)
 
-One tokenizer, one text encoder. The agent loop sends `prompt_token_ids`; your
-rollout adapter overrides `encode_prompt` to accept `prompt_ids=` (and an
+One tokenizer, one text encoder. The agent loop sends `prompt_ids` to the server;
+the diffusion prompt keeps that canonical spelling. Your rollout adapter overrides
+`encode_prompt` to accept `prompt_ids=` (and an
 optional attention mask) and runs the text encoder directly — see
 [`qwen_image_flow_grpo/common.py`](../../verl_omni/pipelines/qwen_image_flow_grpo/common.py).
 
@@ -137,12 +138,21 @@ t5:   {path: tokenizer_3, max_length: 256}   # feeds T5; align max_length with p
 **Rollout transport**
 
 [`vLLMOmniHttpServer`](../../verl_omni/workers/rollout/vllm_rollout/vllm_omni_async_server.py)
-forwards `extra_prompt_ids` / `negative_extra_prompt_ids` on the diffusion
-custom prompt dict alongside `prompt_token_ids`.
+places `extra_prompt_ids` / `negative_extra_prompt_ids` inside the diffusion
+prompt's `extra_args`, alongside the top-level canonical `prompt_ids`. Media and
+`mm_processor_kwargs` stay at the top level: the pinned MiniMax/Bagel runtime reads
+them there, even though upstream's `OmniCustomPrompt` TypedDict omits those fields.
+The server never duplicates media into `extra_args`.
+
+Multistage rollout whose first stage is AR still needs vLLM's `prompt_token_ids`
+at that entrance. `prompt_ids_from_payload` is the sole shared adapter bridge for
+that spelling and rejects conflicting IDs. The public Ray keyword API and AR
+strategy are unchanged. Historical condition-image aliases are accepted only by
+the conflict-checking compatibility parser, not emitted on the new wire path.
 
 **Rollout adapter behaviour**
 
-Read `req.prompts[0]["extra_prompt_ids"]`, pad each id list to the encoder's
+Read `req.prompts[0]["extra_args"]["extra_prompt_ids"]`, pad each id list to the encoder's
 fixed length using **that tokenizer's** `pad_token_id` (SD3 CLIP-L and CLIP-G
 use different pad tokens even though they share a vocab), run the text
 encoders on `input_ids`, and concatenate embeddings exactly as the upstream
@@ -391,7 +401,7 @@ class MyModelPipelineWithLogProb(MyModelPipeline):
     ...
 ```
 
-Your subclass must do four things:
+Your subclass must do five things:
 
 1. **Replace the upstream scheduler** (typically Euler-based) with
    `FlowMatchSDEDiscreteScheduler`.
@@ -410,75 +420,75 @@ Your subclass must do four things:
 4. **Override `forward(req, ...)`** so that:
    - Sampling parameters come from `req.sampling_params` (use
      `extra_args` for SDE-specific knobs).
-   - Trajectory and metadata fields are returned via `rollout_output(...)`
-     from [`verl_omni.pipelines.diffusion_rollout_output`](../../verl_omni/pipelines/diffusion_rollout_output.py).
+   - Build trajectory and algorithm metadata with `rollout_output(...)` or
+     `with_rollout_data(...)` from
+     [`diffusion_rollout_output`](../../verl_omni/pipelines/diffusion_rollout_output.py).
    - `prompt_embeds`, `prompt_embeds_mask`, `negative_prompt_embeds`,
      and `negative_prompt_embeds_mask` are placed in `prompt_embeddings`. The diffusion agent loop
      ([`diffusion_agent_loop.py`](../../verl_omni/agent_loop/diffusion_agent_loop.py))
      reads these field names verbatim — **do not rename them**.
+5. **Attach named media artifacts** with `with_visual_artifacts`,
+   `with_batched_media_artifacts` or `with_media_artifacts`, including both
+   `forward` and `post_decode` when step execution is supported. Preserve the
+   named envelope through the engine postprocessor; do not return a bare legacy
+   tensor/tuple from the rollout boundary.
 
 ### 4.1 Rollout response contract
 
-The rollout server normalizes the representation transported in `responses`:
+The adapter declares representation, layout and media kind, then normalizes
+**decoded** outputs once. `responses` is a compatibility projection of the
+explicitly selected primary artifact, not an unlabelled media tensor:
 
-- Pixel-valued outputs are quantized once to `torch.uint8` in `[0, 255]`.
-  Images reach a single-sample reward scorer as `(C, H, W)` and videos as
-  `(T, C, H, W)`.
-- `output_type=latent` keeps `responses` in floating point. With
-  `output_type=both`, the pixel response is uint8 and the clean latent remains a
-  separate floating-point field in `extra_info`.
-- Generated audio is transported separately and is not quantized to uint8.
+- Decoded image/video is `torch.uint8` `[0,255]` in `CHW` / `TCHW` per sample.
+- Native/packed latents retain their layout and floating dtype. They coexist
+  with decoded previews rather than standing in for missing preview data.
+- Decoded audio is floating `CT`, with an explicit sample rate; it is never
+  quantized as pixels. Video artifacts carry their own FPS.
 
-Reward managers validate `responses` against the active training or validation
-`output_type` and then forward it without dtype conversion. A pixel scorer that
-needs normalized model input must convert locally with
-`solution_image.float() / 255.0`; this normalizes the quantized pixels but cannot
-restore precision discarded at the rollout boundary. Do not multiply uint8 pixels
-by 255 again before PIL, JPEG, or HTTP serialization.
+Both reward managers reconstruct named artifacts and validate the primary
+projection. Pixel scorers select the decoded preview; latent scoring selects
+`image_latent`. A scorer needing normalized pixels converts locally with
+`.float() / 255.0`, not a second multiplication by 255. See the full
+[named-artifact contract](diffusion_media_artifacts.md) for selectors, requested
+outputs, batching, transport and fail-fast validation.
 
 (diffusion-io-spec)=
 ### 4.2 Declare the media output contract (`diffusion_io_spec`)
 
-Set a `diffusion_io_spec` class attribute on the registered pipeline so the
-shared `DiffusionStrategy` knows what media your `forward` emits. The strategy
-reads it (via `VllmOmniPipelineBase.get_class(architecture, algorithm)`) when it
-converts the raw pipeline output into the rollout response, so model-specific
-conventions — which tuple position carries audio, what audio sample rate to
-attach — live in the adapter instead of being hardcoded in the shared strategy.
+Set `diffusion_io_spec` to the named outputs your adapter can produce. The
+strategy resolves it by `(architecture, algorithm)` and checks returned names,
+modality, representation and layout against it. `DiffusionIOSpec` and `MediaSpec`
+retain their names and import location. The positional `primary` / `auxiliary`
+declaration is replaced by named artifacts, with `representation` and `layout`
+added to `MediaSpec`:
 
 ```python
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 
 @VllmOmniPipelineBase.register("MyModelPipeline", algorithm="flow_grpo")
 class MyModelPipelineWithLogProb(MyModelPipeline):
-    # Image-only pipeline:
-    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
+    diffusion_io_spec = DiffusionIOSpec(artifacts={
+        "image_preview": MediaSpec("image", "decoded", "CHW"),
+        "image_latent": MediaSpec("image", "latent", "LC"),
+    })
 ```
 
-- **`primary`** — the main media stream (`MediaSpec("image")` or
-  `MediaSpec("video")`), carried in `responses`.
-- **`auxiliary`** — additional streams in tuple order: `auxiliary[i]` maps to
-  output tuple position `i + 1` (position `0` is the primary). A `forward` that
-  returns `(video, audio)` declares one auxiliary audio stream:
+- Declare **canonical decoded axes** and the model's **native final latent
+  axes**, not guessed channel-size conventions. Verify actual VAE outputs
+  separately from the sampler's packed training representation.
+- Runtime selectors identify primary, optional decoded preview and optional
+  decoded audio by name. `preview=None` skips export; a missing non-null selector
+  fails rather than falling back to latents.
+- Runtime video FPS and audio sample rate are required. A fixed sample rate can
+  be constrained in the declaration; otherwise read the real decoder/vocoder
+  configuration. LTX BWE can produce 48000 Hz audio, not 24000 Hz.
+- `pipeline.requested_outputs` requires extra named artifacts, e.g.
+  `[image_preview]` with `output_type=latent`. It is also available in the model
+  and validation configs. See [named artifacts](diffusion_media_artifacts.md)
+  for decoding behavior and batch-union semantics.
+- Subclasses inherit the declaration when they use the same output contract.
 
-```python
-    diffusion_io_spec = DiffusionIOSpec(
-        primary=MediaSpec("video"),
-        auxiliary=(MediaSpec("audio", sample_rate=32000),),
-    )
-```
-
-- **`MediaSpec.sample_rate`** is the *default* audio sample rate in Hz. If your
-  `forward` attaches a runtime rate through the `rl` rollout metadata, that value
-  takes precedence and the strategy only falls back to this default. Declare the
-  rate your model actually decodes (MiniMax H3 → `32000`, LTX-2 → `24000`).
-- `MediaSpec.fps` is an optional video default; `Modality` is
-  `image | video | audio`.
-- Subclasses inherit the attribute, so a pipeline that subclasses another adapter
-  (e.g. `qwen_image_dual_grpo` extends `qwen_image_flow_grpo`) reuses its
-  `diffusion_io_spec` unless it overrides it.
-
-Every registered diffusion adapter declares one; see
+Every registered diffusion adapter declares named artifacts; see
 [`rollout_media.py`](../../verl_omni/pipelines/rollout_media.py) and the
 `test_diffusion_io_spec_on_cpu.py` completeness test.
 
@@ -655,7 +665,7 @@ third model demands the same code, then unify.
 Before opening the PR, confirm every box:
 
 - [ ] Prompt tokenisation follows [Prompt Tokenisation](#prompt-tokenisation-agent-loop--rollout):
-      single-encoder models use `prompt_token_ids` only; multi-encoder models
+      single-encoder diffusion prompts use `prompt_ids`; multi-encoder models
       configure `extra_tokenizers` and a token-id-native rollout encoder
       (no decode-and-re-encode in the pipeline).
 - [ ] `verl_omni/pipelines/<model>_flow_grpo/` contains `__init__.py`,
@@ -666,10 +676,10 @@ Before opening the PR, confirm every box:
       `model_index.json::_class_name`; the `algorithm=` keyword matches
       the algorithm you are integrating against (e.g. `"flow_grpo"` for
       FlowGRPO).
-- [ ] The registered pipeline declares a `diffusion_io_spec`
-      ([`DiffusionIOSpec`](../../verl_omni/pipelines/rollout_media.py)) whose
-      `primary` modality matches what `forward` emits, plus an `auxiliary`
-      audio stream (with its `sample_rate`) for joint audio/video models.
+- [ ] The registered pipeline declares `diffusion_io_spec.artifacts`, verifies
+      real VAE/packed latent layouts, and emits named outputs from every supported
+      execution mode. Runtime FPS/sample rate and primary/preview/audio selectors
+      must be explicit; missing requested media must fail, never fall back.
 - [ ] Scheduler returns latents in fp32 (no `model_output.dtype` cast in `step()`),
       `diffuse()` casts to model dtype before transformer forward and casts
       noise_pred to float32 before `scheduler.step()`

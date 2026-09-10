@@ -16,18 +16,25 @@ from __future__ import annotations
 
 import copy
 import os
+from dataclasses import replace
 from typing import Any, Literal
 
 import torch
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
-from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
+from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline, pipeline_qwen_image
 from vllm_omni.diffusion.models.qwen_image.rope_utils import txt_seq_lens_from_embeds
-from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.request import DUMMY_DIFFUSION_REQUEST_ID, OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 from vllm_omni.diffusion.worker.utils import StepRequestState
 
-from verl_omni.pipelines.diffusion_rollout_output import rollout_output, with_rollout_data
+from verl_omni.pipelines.diffusion_rollout_output import (
+    rollout_output,
+    wants_decoded_preview,
+    with_rollout_data,
+    with_visual_artifacts,
+    wrap_rollout_postprocessor,
+)
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.request_batch import (
     collate_prompt_mask as _collate_prompt_mask,
@@ -35,6 +42,7 @@ from verl_omni.pipelines.request_batch import (
 from verl_omni.pipelines.request_batch import (
     collate_prompt_rows as _collate_prompt_rows,
 )
+from verl_omni.pipelines.request_batch import requested_outputs_for_batch
 from verl_omni.pipelines.request_batch import (
     sample_per_sample_sde_windows as _sample_per_sample_sde_windows,
 )
@@ -42,11 +50,22 @@ from verl_omni.pipelines.request_batch import (
     split_diffusion_output_by_request as _split_diffusion_output_by_request,
 )
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
+from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import QwenImageTokenIdPromptMixin, apply_true_cfg, build_img_shapes, coalesce_not_none
 
 __all__ = ["QwenImagePipelineWithLogProb"]
+
+_QWEN_POST_PROCESS_FACTORY = pipeline_qwen_image.get_qwen_image_post_process_func
+
+
+def get_rollout_post_process_func(od_config):
+    """Leave named media intact; ordinary upstream inference still uses its native processor."""
+    return wrap_rollout_postprocessor(_QWEN_POST_PROCESS_FACTORY(od_config))
+
+
+pipeline_qwen_image.get_qwen_image_post_process_func = get_rollout_post_process_func
 
 
 @VllmOmniPipelineBase.register("QwenImagePipeline", algorithm="flow_grpo")
@@ -64,10 +83,12 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
 
     supports_request_batch = True
 
-    #: Declares the primary rollout media stream so downstream consumers read
-    #: the modality from the adapter instead of inferring it from tensor rank.
-    #: Inherited by the dual-GRPO and mix-GRPO Qwen-Image subclasses.
-    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
+    diffusion_io_spec = DiffusionIOSpec(
+        artifacts={
+            "image_preview": MediaSpec("image", "decoded", "CHW"),
+            "image_latent": MediaSpec("image", "latent", "LC"),
+        }
+    )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
@@ -192,7 +213,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         if prompts:
             p0 = prompts[0]
             if isinstance(p0, dict):
-                prompt_ids = p0.get("prompt_token_ids", None)
+                prompt_ids = prompt_ids_from_payload(p0)
                 prompt_mask = p0.get("prompt_mask", None)
                 negative_prompt_ids = p0.get("negative_prompt_ids", None)
                 negative_prompt_mask = p0.get("negative_prompt_mask", None)
@@ -245,7 +266,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         if prompt_ids is None:
             raise ValueError(
                 f"{self.__class__.__name__}.prepare_encode requires either "
-                "'prompt_ids'/'prompt_token_ids' or a text 'prompt' on state.prompt."
+                "'prompt_ids' or a text 'prompt' on state.prompt."
             )
 
         height = sampling.height or self.default_sample_size * self.vae_scale_factor
@@ -631,9 +652,14 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         ``None`` (which becomes a non-tensor ``LinkedList`` in the
         ``TensorDict`` and breaks ``mask.shape[0]``).
         """
-        output = super().post_decode(state, **kwargs)
+        output_type = kwargs.get("output_type") or state.sampling.output_type or "pil"
+        decode = wants_decoded_preview(output_type, state.sampling)
+        output = super().post_decode(state, **{**kwargs, "output_type": "pil" if decode else "latent"})
         if not isinstance(output, DiffusionOutput):
             return output
+        if state.request_id == DUMMY_DIFFUSION_REQUEST_ID:
+            # One-step scheduler warmup may contain NaNs; it is not a serving result.
+            return replace(output, output=None, to_cpu=True)
 
         all_latents = state.all_latents
         all_log_probs = state.all_log_probs
@@ -647,7 +673,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             torch.stack(all_timesteps).unsqueeze(0).expand(state.latents.shape[0], -1) if all_timesteps else None
         )
 
-        return with_rollout_data(
+        result = with_rollout_data(
             output,
             trajectory_latents=stacked_latents,
             trajectory_log_probs=stacked_log_probs,
@@ -659,6 +685,15 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
                 "negative_prompt_embeds_mask": state.negative_prompt_embeds_mask,
             },
             to_cpu=True,
+        )
+        return with_visual_artifacts(
+            result,
+            decoded=output.output if decode else None,
+            latents=state.latents,
+            latent_layout="LC",
+            output_type=output_type,
+            context=f"pipeline={type(self).__name__}, request_id={state.request_id}",
+            requested=(state.sampling.extra_args or {}).get("requested_outputs"),
         )
 
     def forward(
@@ -756,7 +791,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         # The prompt cache wraps encode_prompt, so keep token inputs as lists until that boundary.
         prompt_token_ids, prompt_token_lengths = _collate_prompt_rows(
             prompts,
-            ("prompt_token_ids", "prompt_ids"),
+            ("prompt_ids",),
             prompt_token_ids,
             device=self.device,
             field_name="prompt_token_ids",
@@ -792,6 +827,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         )
 
         sampling_params = request_batch.sampling_params_list[0]
+        requested_outputs = requested_outputs_for_batch(request_batch)
         height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
         num_inference_steps = sampling_params.num_inference_steps or num_inference_steps
@@ -921,8 +957,10 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         )
 
         self._current_timestep = None
-        if output_type == "latent":
-            image = latents
+        native_latents = latents
+        decode = output_type != "latent" or "image_preview" in requested_outputs
+        if not decode:
+            image = None
         else:
             latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
             latents = latents.to(self.vae.dtype)
@@ -949,6 +987,15 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
                 "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
             },
             to_cpu=True,
+        )
+        result = with_visual_artifacts(
+            result,
+            decoded=image,
+            latents=native_latents,
+            latent_layout="LC",
+            output_type=output_type,
+            context=f"pipeline={type(self).__name__}, request_id={[r.request_id for r in request_batch.requests]}",
+            requested=requested_outputs,
         )
         outputs = _split_diffusion_output_by_request(
             result,

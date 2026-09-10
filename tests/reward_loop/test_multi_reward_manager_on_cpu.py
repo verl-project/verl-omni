@@ -49,6 +49,14 @@ def reward_raises(data_source, solution_image, ground_truth, extra_info):
     raise ValueError("intentional failure")
 
 
+def reward_requires_audio(data_source, solution_image, ground_truth, extra_info):
+    """Exercise a real artifact selection failure, not an optional network failure."""
+    from verl_omni.utils.reward_score.clap import _get_audio
+
+    _get_audio(extra_info)
+    return {"score": 1.0}
+
+
 async def reward_async(data_source, solution_image, ground_truth, extra_info):
     """Async reward that returns 0.8."""
     return 0.8
@@ -89,6 +97,7 @@ def _make_single_data(data_source: str = "test_source") -> DataProto:
         non_tensors={
             "data_source": [data_source],
             "reward_model": [{"ground_truth": "hello"}],
+            "media_kind": ["image"],
             "extra_info": [{}],
         },
     )
@@ -98,6 +107,16 @@ def _build_manager(reward_functions: dict) -> MultiVisualRewardManager:
     config = _make_config(reward_functions)
     tokenizer = MagicMock()
     return MultiVisualRewardManager(config, tokenizer, compute_score=None)
+
+
+def test_optional_reward_does_not_swallow_artifact_contract_errors():
+    from verl_omni.pipelines.rollout_artifacts import ArtifactContractError
+
+    manager = _build_manager(
+        {"audio": {"path": DUMMY_REWARDS_PATH, "name": "reward_requires_audio", "required": False}}
+    )
+    with pytest.raises(ArtifactContractError, match="audio.*absent"):
+        manager.loop.run_until_complete(manager.run_single(_make_single_data()))
 
 
 def _build_visual_latent_manager() -> VisualRewardManager:
@@ -295,6 +314,7 @@ class TestMultiVisualRewardManagerRunSingle:
             non_tensors={
                 "data_source": ["jpeg_compressibility"],
                 "reward_model": [{"ground_truth": "hello"}],
+                "media_kind": ["image"],
                 "extra_info": [{}],
             },
         )

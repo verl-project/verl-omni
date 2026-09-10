@@ -27,7 +27,11 @@ from vllm_omni.diffusion.models.boogu_image.pipeline_boogu_image import BooguIma
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
-from verl_omni.pipelines.diffusion_rollout_output import rollout_output, wrap_rollout_postprocessor
+from verl_omni.pipelines.diffusion_rollout_output import (
+    rollout_output,
+    with_visual_artifacts,
+    wrap_rollout_postprocessor,
+)
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.common import QwenImageTokenIdPromptMixin, coalesce_not_none
 from verl_omni.pipelines.request_batch import (
@@ -36,6 +40,7 @@ from verl_omni.pipelines.request_batch import (
 from verl_omni.pipelines.request_batch import (
     collate_prompt_rows as _collate_prompt_rows,
 )
+from verl_omni.pipelines.request_batch import requested_outputs_for_batch
 from verl_omni.pipelines.request_batch import (
     sample_per_sample_sde_windows as _sample_per_sample_sde_windows,
 )
@@ -43,7 +48,7 @@ from verl_omni.pipelines.request_batch import (
     split_diffusion_output_by_request as _split_diffusion_output_by_request,
 )
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
-from verl_omni.pipelines.rollout_request import condition_images_from_payload
+from verl_omni.pipelines.rollout_request import condition_images_from_payload, prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import (
@@ -93,7 +98,12 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
 
     #: Declares the primary rollout media stream so downstream consumers read
     #: the modality from the adapter instead of inferring it from tensor rank.
-    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
+    diffusion_io_spec = DiffusionIOSpec(
+        artifacts={
+            "image_preview": MediaSpec("image", "decoded", "CHW"),
+            "image_latent": MediaSpec("image", "latent", "CHW"),
+        }
+    )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:
         super().__init__(od_config=od_config, prefix=prefix)
@@ -218,7 +228,7 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
         if prompts:
             p0 = prompts[0]
             if isinstance(p0, dict):
-                prompt_ids = p0.get("prompt_token_ids", None)
+                prompt_ids = prompt_ids_from_payload(p0)
                 prompt_mask = p0.get("prompt_mask", None)
                 negative_prompt_ids = p0.get("negative_prompt_ids", None)
                 negative_prompt_mask = p0.get("negative_prompt_mask", None)
@@ -240,7 +250,7 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
         """
         prompt_ids, token_lengths = _collate_prompt_rows(
             prompts,
-            ("prompt_token_ids", "prompt_ids"),
+            ("prompt_ids",),
             None,
             device=self.device,
             field_name="prompt_token_ids",
@@ -453,6 +463,7 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
             return outputs if return_batch else outputs[0]
 
         sampling_params = request_batch.sampling_params_list[0]
+        requested_outputs = requested_outputs_for_batch(request_batch)
         height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
         num_inference_steps = sampling_params.num_inference_steps or 50
@@ -579,8 +590,8 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
 
         # Decode the way upstream does: undo the VAE scaling/shift, resize back.
         output_type = sampling_params.output_type or "pil"
-        if output_type == "latent":
-            image = latents
+        if output_type == "latent" and "image_preview" not in requested_outputs:
+            image = None
         else:
             decode_latents = latents.to(dtype=self.vae.dtype)
             if self.vae.config.scaling_factor is not None:
@@ -606,6 +617,15 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
             # training side's ``condition_image_latents`` stays absent there.
             rl=None if condition_image_latents is None else {"condition_image_latents": condition_image_latents},
             to_cpu=True,
+        )
+        result = with_visual_artifacts(
+            result,
+            decoded=image,
+            latents=latents,
+            latent_layout="CHW",
+            output_type=output_type,
+            context=f"pipeline={type(self).__name__}, request_id={[r.request_id for r in request_batch.requests]}",
+            requested=requested_outputs,
         )
         outputs = _split_diffusion_output_by_request(
             result,

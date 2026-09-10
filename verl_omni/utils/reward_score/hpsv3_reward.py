@@ -17,7 +17,6 @@ import math
 import os
 import threading
 
-import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image
@@ -374,38 +373,15 @@ def _get_inferencer(checkpoint_path: str, device: str):
 
 
 def _to_pil_hwc(image) -> Image.Image:
-    if isinstance(image, torch.Tensor):
-        image = image.cpu().numpy()
-    if isinstance(image, np.ndarray):
-        if image.ndim == 3 and image.shape[0] in (1, 3):
-            image = image.transpose(1, 2, 0)
-        image = Image.fromarray(image)
-    assert isinstance(image, Image.Image)
-    return image
+    from verl_omni.utils.reward_score.reward_utils import image_tensor_to_pil
+
+    return image_tensor_to_pil(image)
 
 
-def _extract_frames(solution_image, frame_interval: int = 1) -> list[Image.Image]:
-    is_channels_last = solution_image.shape[-1] in (1, 3) if solution_image.ndim >= 3 else False
+def _extract_frames(solution_image, frame_interval: int = 1, *, extra_info: dict) -> list[Image.Image]:
+    from verl_omni.utils.reward_score.reward_utils import visual_reward_frames
 
-    if solution_image.ndim == 3:
-        if is_channels_last:
-            solution_image = solution_image.permute(2, 0, 1)
-        solution_image = solution_image.unsqueeze(0)
-
-    elif solution_image.ndim == 4:
-        if is_channels_last:
-            solution_image = solution_image.permute(3, 0, 1, 2)
-        solution_image = solution_image[:, ::frame_interval]
-        solution_image = solution_image.permute(1, 0, 2, 3)
-
-    elif solution_image.ndim == 5:
-        if is_channels_last:
-            solution_image = solution_image.permute(0, 4, 1, 2, 3)
-        solution_image = solution_image[:, :, ::frame_interval]
-        solution_image = solution_image.permute(0, 2, 1, 3, 4)
-        solution_image = solution_image.reshape(-1, *solution_image.shape[2:])
-
-    return [_to_pil_hwc(frame) for frame in solution_image]
+    return [_to_pil_hwc(frame) for frame in visual_reward_frames(solution_image, extra_info, frame_interval)]
 
 
 def compute_score_hpsv3(
@@ -424,7 +400,7 @@ def compute_score_hpsv3(
     inferencer = _get_inferencer(checkpoint_path, device)
 
     frame_interval = extra_info.get("frame_interval", 4)
-    pil_images = _extract_frames(solution_image, frame_interval=frame_interval)
+    pil_images = _extract_frames(solution_image, frame_interval=frame_interval, extra_info=extra_info)
 
     prompt = ground_truth if ground_truth else ""
     with _lock:

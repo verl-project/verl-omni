@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import os
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -42,15 +43,18 @@ from vllm_omni.diffusion.models.ltx2.ltx2_latents import (
 from vllm_omni.diffusion.models.ltx2.ltx2_recipes import LTXPhaseRecipe
 from vllm_omni.diffusion.models.ltx2.ltx2_request import LTXRequestInputs
 from vllm_omni.diffusion.models.ltx2.pipeline_ltx2 import LTX2Pipeline
-from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.request import DUMMY_DIFFUSION_REQUEST_ID, OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from verl_omni.pipelines.diffusion_rollout_output import (
+    quantize_pixels,
     rollout_output,
+    with_batched_media_artifacts,
     wrap_rollout_postprocessor,
 )
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
+from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import calculate_shift, normalize_ltx_output_type
@@ -75,12 +79,13 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
 
     supports_request_batch = False
 
-    #: Declares the joint video/audio rollout streams. The runtime audio sample
-    #: rate (from the vocoder) is attached via rollout metadata and takes
-    #: precedence over this declared default.
     diffusion_io_spec = DiffusionIOSpec(
-        primary=MediaSpec("video"),
-        auxiliary=(MediaSpec("audio", sample_rate=24000),),
+        artifacts={
+            "video_preview": MediaSpec("video", "decoded", "TCHW"),
+            "audio": MediaSpec("audio", "decoded", "CT"),
+            "video_latent": MediaSpec("video", "latent", "CTHW"),
+            "audio_latent": MediaSpec("audio", "latent", "CTF"),
+        }
     )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:
@@ -149,9 +154,9 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
     def _inject_precomputed_prompt_embeds(self, req: OmniDiffusionRequest) -> None:
         """Convert verl token-ID request fields into LTX raw text-encoder embeddings."""
         if not isinstance(req.prompt, dict):
-            raise TypeError("LTX-2.3 FlowGRPO expects a dict prompt containing `prompt_token_ids`.")
+            raise TypeError("LTX-2.3 FlowGRPO expects a dict prompt containing `prompt_ids`.")
         payload = dict(req.prompt)
-        prompt_ids = payload.get("prompt_token_ids")
+        prompt_ids = prompt_ids_from_payload(payload)
         if prompt_ids is None:
             return
 
@@ -228,7 +233,6 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
         prompt_context: LTXPromptContext | None = None,
     ) -> LTXPhaseResult:
         """Prepare and execute one phase with FlowGRPO SDE transitions."""
-        del phase_recipe
         self._check_forward_inputs(request_inputs, image=image)
         guidance_parallel_ready = self._setup_forward_runtime(req, request_inputs, attention_kwargs)
         device = self.device
@@ -313,6 +317,7 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
             original_audio_num_frames=original_audio_num_frames,
             padded_audio_num_frames=padded_audio_num_frames,
             timesteps=timesteps_tensor,
+            sampler=phase_recipe.sampler,
             audio_scheduler=audio_scheduler,
             video_audio_step_adapter=video_audio_step_adapter,
         )
@@ -428,6 +433,15 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
         )
         return LTXAVState(video=video, audio=audio)
 
+    def _decode_output(self, *, latents, audio_latents, output_type, **kwargs):
+        self._flow_grpo_native_latents = (latents, audio_latents)
+        return super()._decode_output(
+            latents=latents,
+            audio_latents=audio_latents,
+            output_type="pt" if self._artifact_decode else "latent",
+            **kwargs,
+        )
+
     @torch.no_grad()
     def forward(self, req: DiffusionRequestBatch, **kwargs: Any) -> DiffusionOutput | list[DiffusionOutput]:
         """Generate one request and attach the FlowGRPO trajectory contract."""
@@ -436,25 +450,31 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
         request = req.requests[0]
         self._configure_flow_grpo(request)
         self._inject_precomputed_prompt_embeds(request)
+        output_type = request.sampling_params.output_type or "pt"
+        requested = (request.sampling_params.extra_args or {}).get("requested_outputs")
+        self._artifact_decode = output_type != "latent" or bool(set(requested or ()) & {"video_preview", "audio"})
+        self._flow_grpo_native_latents = None
         output = super().forward(req, **kwargs)
         if isinstance(output, list):
             if len(output) != 1:
                 raise RuntimeError(f"Single-request LTX rollout returned {len(output)} outputs.")
             output = output[0]
+        if request.request_id == DUMMY_DIFFUSION_REQUEST_ID:
+            self._flow_grpo_native_latents = None
+            return replace(output, output=None, to_cpu=True)
         video, audio = output.output
-        if isinstance(video, torch.Tensor) and video.ndim == 5:
-            if video.shape[0] != 1:
-                raise ValueError(f"Expected one video per diffusion request, got shape {tuple(video.shape)}.")
-            video = video[0]
+        if self.distributed_video_decode and torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
+            self._flow_grpo_native_latents = None
+            return output
+        if self._flow_grpo_native_latents is None:
+            raise RuntimeError("LTX rollout did not capture native final latents")
+        video_latent, audio_latent = self._flow_grpo_native_latents
+        self._flow_grpo_native_latents = None
         prompt_context = self._flow_grpo_prompt_context
         if prompt_context is None:
             raise RuntimeError("LTX-2.3 rollout did not prepare prompt connector outputs.")
 
-        audio_sample_rate = (
-            self.vocoder.config.output_sampling_rate
-            if hasattr(self, "vocoder") and self.vocoder is not None and hasattr(self.vocoder, "config")
-            else 24000
-        )
+        audio_sample_rate = self.vocoder.config.output_sampling_rate if self._artifact_decode else None
         result = rollout_output(
             media=(video, audio),
             media_key="video",
@@ -472,10 +492,31 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
             rl={
                 "all_next_latents": self._flow_grpo_trajectory.get("all_next_latents"),
                 "video_seq_len": self._flow_grpo_trajectory.get("video_seq_len"),
-                "audio": audio,
-                "audio_sample_rate": audio_sample_rate,
             },
             to_cpu=True,
         )
         self._current_timestep = None
-        return result
+        context = f"pipeline={type(self).__name__}, request_id={request.request_id}"
+        specs = {
+            "video_latent": MediaSpec("video", "latent", "CTHW"),
+            "audio_latent": MediaSpec("audio", "latent", "CTF"),
+        }
+        data = {"video_latent": video_latent, "audio_latent": audio_latent}
+        if self._artifact_decode:
+            specs.update(
+                {
+                    "video_preview": MediaSpec("video", "decoded", "TCHW", fps=request.sampling_params.frame_rate),
+                    "audio": MediaSpec("audio", "decoded", "CT", sample_rate=audio_sample_rate),
+                }
+            )
+            data.update({"video_preview": quantize_pixels(video, "zero_one", context=context), "audio": audio})
+        return with_batched_media_artifacts(
+            result,
+            data=data,
+            specs=specs,
+            primary="video_latent" if output_type == "latent" else "video_preview",
+            preview="video_preview" if self._artifact_decode else None,
+            audio="audio" if self._artifact_decode else None,
+            context=context,
+            requested=requested,
+        )

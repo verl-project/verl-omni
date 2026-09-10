@@ -107,7 +107,7 @@ class _FakeInferencer:
 
     def score(self, prompts, images):
         self.batches.append((list(prompts), list(images)))
-        return torch.tensor([float(image.getpixel((0, 0))) for image in images])
+        return torch.tensor([float(image.convert("L").getpixel((0, 0))) for image in images])
 
 
 @pytest.mark.asyncio
@@ -124,9 +124,9 @@ async def test_consumer_batches_burst_requests_and_preserves_order(monkeypatch):
         *(
             pickscore_reward.compute_score_pickscore(
                 data_source="test",
-                solution_image=Image.new("L", (1, 1), index),
+                solution_image=torch.full((3, 1, 1), index, dtype=torch.uint8),
                 ground_truth="shared prompt",
-                extra_info={},
+                extra_info={"media_kind": "image"},
                 device="cpu",
             )
             for index in range(4)
@@ -184,7 +184,7 @@ async def test_consumer_isolates_invalid_image_from_batch(monkeypatch):
     await consumer
 
     assert results[0] == 1.0
-    assert isinstance(results[1], AssertionError)
+    assert isinstance(results[1], TypeError)
     assert results[2] == 3.0
     assert len(inferencer.batches) == 1
     assert inferencer.batches[0][0] == ["prompt", "prompt"]

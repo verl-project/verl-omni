@@ -459,7 +459,7 @@ class TestMiniMaxH3TokenIdNativePrompt:
     def test_empty_prompt_ids_are_rejected(self):
         pipeline = _StubSyncPipeline()
 
-        with pytest.raises(ValueError, match="non-empty prompt_token_ids"):
+        with pytest.raises(ValueError, match="non-empty prompt_ids"):
             pipeline._ensure_prompt_text(self._request({"prompt_token_ids": []}))
 
     def test_generic_agent_loop_ids_are_rejected(self):

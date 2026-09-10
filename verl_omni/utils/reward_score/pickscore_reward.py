@@ -16,7 +16,6 @@ import asyncio
 import logging
 import os
 
-import numpy as np
 import torch
 from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
@@ -98,14 +97,9 @@ class _PickScoreInferencer:
 
 
 def _to_pil_hwc(image) -> Image.Image:
-    if isinstance(image, torch.Tensor):
-        image = image.cpu().numpy()
-    if isinstance(image, np.ndarray):
-        if image.ndim == 3 and image.shape[0] in (1, 3):
-            image = image.transpose(1, 2, 0)
-        image = Image.fromarray(image)
-    assert isinstance(image, Image.Image)
-    return image
+    from verl_omni.utils.reward_score.reward_utils import image_tensor_to_pil
+
+    return image if isinstance(image, Image.Image) else image_tensor_to_pil(image)
 
 
 def _score_batch(requests) -> list[float | Exception]:
@@ -190,6 +184,12 @@ async def compute_score_pickscore(
     device: str | None = None,
     **kwargs,
 ) -> dict:
+    from verl_omni.utils.reward_score.reward_utils import visual_reward_frames
+
+    frames = visual_reward_frames(solution_image, extra_info)
+    if len(frames) != 1:
+        raise ValueError("PickScore requires a single decoded image")
+    solution_image = frames[0]
     await _ensure_consumer(device)
 
     prompt = ground_truth if ground_truth else ""

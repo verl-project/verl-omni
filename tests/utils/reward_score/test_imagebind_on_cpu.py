@@ -21,6 +21,9 @@ from types import ModuleType
 import pytest
 import torch
 
+from verl_omni.pipelines.rollout_artifacts import MediaArtifact
+from verl_omni.pipelines.rollout_media import MediaSpec
+
 
 def _load_scorer_module():
     module_path = Path(__file__).parents[3] / "verl_omni/utils/reward_score/imagebind.py"
@@ -51,10 +54,12 @@ def _install_imagebind_modules(monkeypatch, imagebind_model=None):
     monkeypatch.setitem(sys.modules, "imagebind.models.imagebind_model", model_module)
 
 
-def test_to_tchw_accepts_channels_last_video():  # trufflehog:ignore
+def test_to_tchw_requires_adapter_normalized_video():
     video = torch.full((3, 8, 10, 3), 255, dtype=torch.uint8)
-
-    converted = imagebind._to_tchw(video)
+    with pytest.raises(ValueError, match="T, 3, H, W"):
+        imagebind._to_tchw(video)
+    artifact = MediaArtifact(MediaSpec("video", "decoded", "THWC", fps=24), video)
+    converted = imagebind._to_tchw(artifact.normalized(context="adapter", name="video_preview"))
 
     assert converted.shape == (3, 3, 8, 10)
     assert converted.max() == 1.0
@@ -62,7 +67,7 @@ def test_to_tchw_accepts_channels_last_video():  # trufflehog:ignore
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.int32])
 def test_to_tchw_rejects_non_uint8_video(dtype):
-    with pytest.raises(ValueError, match=rf"Expected uint8 video input, got {dtype}\."):
+    with pytest.raises(ValueError, match=rf"Expected a uint8 video tensor, got {dtype}"):
         imagebind._to_tchw(torch.zeros(3, 8, 10, 3, dtype=dtype))
 
 
@@ -107,7 +112,14 @@ def test_compute_score_supports_flowfactory_modes(
         data_source="test",
         solution_image=torch.zeros(2, 3, 8, 8, dtype=torch.uint8),
         ground_truth="forest ambience",
-        extra_info={} if mode == "text_video" else {"audio": torch.ones(16)},
+        extra_info={
+            "media_artifacts": {
+                "video_preview": MediaArtifact(
+                    MediaSpec("video", "decoded", "TCHW", fps=24), torch.zeros(2, 3, 8, 8, dtype=torch.uint8)
+                ),
+                "audio": MediaArtifact(MediaSpec("audio", "decoded", "CT", sample_rate=16000), torch.ones(1, 16)),
+            }
+        },
         device="cpu",
         mode=mode,
     )

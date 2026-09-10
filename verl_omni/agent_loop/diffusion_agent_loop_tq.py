@@ -31,6 +31,7 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
     _InternalDiffusionAgentLoopOutput,
 )
 from verl_omni.agent_loop.utils import _derive_rollout_seed
+from verl_omni.pipelines.rollout_artifacts import ARTIFACT_CONTEXT, ARTIFACT_SPECS, PREVIEW_ARTIFACT, PRIMARY_ARTIFACT
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -238,6 +239,20 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             extra_fields_out["img_shapes"] = extra["img_shapes"]
         if reward_extra_info is not None:
             extra_fields_out["reward_extra_info"] = reward_extra_info
+        # Tensor media (for example generated audio) is already carried as a
+        # top-level TQ field above. Preserve its non-tensor declaration/metadata
+        # in the envelope that ``diffusion_tq_batch_to_dataproto`` restores.
+        for media_key in (
+            "media_kind",
+            "audio_sample_rate",
+            ARTIFACT_SPECS,
+            PRIMARY_ARTIFACT,
+            PREVIEW_ARTIFACT,
+            ARTIFACT_CONTEXT,
+        ):
+            media_value = extra.get(media_key)
+            if media_key in extra and not isinstance(media_value, torch.Tensor):
+                extra_fields_out[media_key] = media_value
         # Track the rollout model version this trajectory was generated against.
         step = trajectory["step"] if trajectory else global_steps
         extra_fields_out["min_global_steps"] = step

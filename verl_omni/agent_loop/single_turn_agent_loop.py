@@ -195,6 +195,15 @@ class DiffusionSingleTurnAgentLoop(AgentLoopBase):
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
 
+        if output.artifacts:
+            from verl_omni.pipelines.rollout_artifacts import artifact_fields
+
+            fields = artifact_fields(output.artifacts, output.primary_artifact, output.preview_artifact)
+            collisions = fields.keys() & output.extra_fields.keys()
+            if collisions:
+                raise ValueError(f"Artifact transport collides with rollout metadata: {sorted(collisions)}")
+            output.extra_fields.update(fields)
+
         output = DiffusionAgentLoopOutput(
             prompt_ids=prompt_ids,
             response_diffusion_output=output.diffusion_output,
