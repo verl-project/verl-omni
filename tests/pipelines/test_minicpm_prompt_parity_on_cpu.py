@@ -454,3 +454,26 @@ def test_processor_call_keeps_nonempty_media():
     processor(text=["<image>./</image> listen"], images=["img.png"], audio=[b"wav"])
     call = processor.calls[-1]
     assert call["images"] == ["img.png"] and call["audios"] == [b"wav"]
+
+
+def test_bind_upgrades_processor_in_place():
+    processor = _StubProcessor()
+    bound = bind_minicpm_processor(processor)
+    assert bound is processor
+    assert type(processor).__name__ == "MiniCPMOParityProcessor"
+    # Native inheritance, no proxying: isinstance and plain attributes work.
+    assert isinstance(processor, _StubProcessor)
+    assert processor.calls == []
+    assert processor.tokenizer is processor.tokenizer
+
+
+def test_bound_processor_survives_dill_roundtrip():
+    dill = pytest.importorskip("dill")
+    processor = bind_minicpm_processor(_StubProcessor())
+    restored = dill.loads(dill.dumps(processor))
+    # datasets ships the dataset (holding the processor) into .filter workers;
+    # the upgraded class must unpickle with its behaviors intact.
+    restored(text=["Which song?"], images=["img.png"], audio=[b"wav"])
+    call = restored.calls[-1]
+    assert call["audios"] == [b"wav"]
+    assert call["text"] == ["Which song?" + MINICPM_IMAGE_SLOT + MINICPM_AUDIO_SLOT]
