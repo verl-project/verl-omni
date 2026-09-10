@@ -219,6 +219,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             if self.config.trainer.get("val_only", False):
                 self._shutdown_dump_executor()
                 self._shutdown_dataloaders()
+                if hasattr(self, "logger") and self.logger is not None:
+                    self.logger.finish()
                 return
 
         current_epoch = self.global_steps // self.steps_per_epoch
@@ -1558,6 +1560,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 scores=scores,
                 reward_extra_infos_dict=reward_extra_infos_dict,
                 dump_path=rollout_data_dir,
+                max_samples=self.config.trainer.get("rollout_data_max_samples", None),
                 fps=int(self.config.trainer.get("video_fps", 24)),
                 audios=data.batch.get("audio"),
                 audio_sample_rates=(
