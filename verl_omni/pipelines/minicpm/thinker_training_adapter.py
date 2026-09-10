@@ -319,7 +319,16 @@ class MiniCPMThinkerAdapter(OmniModelBase):
     @classmethod
     def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
         del micro_batch
-        data, llm_kwargs = split_minicpm_forward_kwargs(dict(model_inputs))
+        model_inputs = dict(model_inputs)
+        # The processor emits image_bound/audio_bounds in its own per-sample
+        # batch layout; verl's rmpad flattening invalidates those coordinates
+        # (and they trip the packed-batch tripwire in the split below). Bounds
+        # are re-derived from the actual training ids in _apply_media_bounds —
+        # the ids are the single source of truth — so the stale copies are
+        # dropped instead of trusted.
+        model_inputs.pop("image_bound", None)
+        model_inputs.pop("audio_bounds", None)
+        data, llm_kwargs = split_minicpm_forward_kwargs(model_inputs)
         _apply_media_bounds(data, model_config)
         if _is_packed_batch(data):
             _merge_packed_media(data)
