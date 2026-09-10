@@ -168,3 +168,92 @@ def test_patch_remote_whisper_self_attn_is_idempotent():
 
 def test_patch_remote_whisper_self_attn_noop_without_apm():
     minicpm_o.patch_remote_whisper_self_attn(nn.Linear(4, 4))
+
+
+def _fake_siglip_module(monkeypatch, *classes):
+    """Point the dynamic-module resolver at a synthetic siglip module."""
+    import sys
+    import types as types_module
+
+    module = types_module.ModuleType("transformers_modules.fake.modeling_navit_siglip")
+    for fake_cls in classes:
+        module.__dict__[fake_cls.__name__] = fake_cls
+        fake_cls.__module__ = module.__name__  # the patch scans sys.modules[cls.__module__]
+    sys.modules[module.__name__] = module
+
+    import transformers.models.auto.auto_factory as auto_factory
+
+    monkeypatch.setattr(
+        auto_factory,
+        "get_class_from_dynamic_module",
+        lambda *args, **kwargs: classes[0],
+    )
+    return module
+
+
+def test_patch_remote_siglip_flash_attn_support_aliases_old_flag(monkeypatch):
+    from transformers import PreTrainedModel
+
+    from verl_omni.models.transformers import minicpm_o
+
+    class _RemoteSiglip(PreTrainedModel):
+        _supports_flash_attn_2 = True
+
+    fake_cls = _RemoteSiglip
+    _fake_siglip_module(monkeypatch, fake_cls)
+    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True)
+
+    assert fake_cls.__dict__["_supports_flash_attn"] is True
+    assert fake_cls._supports_flash_attn_2 is True  # remote declaration untouched
+
+
+def test_patch_remote_siglip_flash_attn_support_is_idempotent(monkeypatch):
+    from transformers import PreTrainedModel
+
+    from verl_omni.models.transformers import minicpm_o
+
+    class _RemoteSiglip(PreTrainedModel):
+        _supports_flash_attn_2 = True
+
+    _fake_siglip_module(monkeypatch, _RemoteSiglip)
+    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True)
+    marker = object()
+    _RemoteSiglip._supports_flash_attn = marker
+    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True)
+    assert _RemoteSiglip._supports_flash_attn is marker  # second call is a no-op
+
+
+def test_patch_remote_siglip_never_fabricates_support(monkeypatch):
+    from transformers import PreTrainedModel
+
+    from verl_omni.models.transformers import minicpm_o
+
+    class _NoFlashAttn(PreTrainedModel):
+        _supports_flash_attn_2 = False
+
+    class _AlreadyRenamed(PreTrainedModel):
+        _supports_flash_attn_2 = True
+        _supports_flash_attn = False
+
+    _fake_siglip_module(monkeypatch, _NoFlashAttn, _AlreadyRenamed)
+    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True)
+    assert "_supports_flash_attn" not in _NoFlashAttn.__dict__  # old flag False: no alias
+    assert "_verl_omni_siglip_fa2_aliased" not in _AlreadyRenamed.__dict__  # new name declared: untouched
+
+
+def test_patch_remote_siglip_skips_without_trust_or_transformers4(monkeypatch):
+    import transformers.models.auto.auto_factory as auto_factory
+
+    from verl_omni.models.transformers import minicpm_o
+
+    calls = []
+    monkeypatch.setattr(
+        auto_factory,
+        "get_class_from_dynamic_module",
+        lambda *args, **kwargs: calls.append(args),
+    )
+    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=False)
+    assert calls == []  # never resolves remote code without trust_remote_code
+    monkeypatch.setattr(minicpm_o, "_needs_transformers5_compat", lambda: False)
+    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True)
+    assert calls == []  # no-op on transformers < 5

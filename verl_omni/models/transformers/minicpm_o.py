@@ -55,6 +55,7 @@ Transformers version (remote code ~4.10 vs transformers >= 5)
 from __future__ import annotations
 
 import logging
+import sys
 import types
 from typing import Any
 
@@ -64,6 +65,7 @@ _POST_INIT_PATCHED_ATTR = "_verl_omni_post_init_patched"
 _WHISPER_ATTN_PATCHED_ATTR = "_verl_omni_whisper_attn_return3"
 _VISION_EMB_PATCH_ATTR = "_verl_omni_get_vision_embedding_patched"
 _VLLM_EMB_PATCH_ATTR = "_verl_omni_get_vllm_embedding_patched"
+_SIGLIP_FA2_PATCHED_ATTR = "_verl_omni_siglip_fa2_aliased"
 # Back-compat alias for tests that reset the post_init wrap.
 _PATCHED_ATTR = _POST_INIT_PATCHED_ATTR
 
@@ -134,6 +136,52 @@ def wrap_model_init_with_post_init(model_cls: type) -> None:
         "Patched %s.__init__ to call post_init() for transformers >= 5 compatibility.",
         model_cls.__name__,
     )
+
+
+def patch_remote_siglip_flash_attn_support(model_path: str, *, trust_remote_code: bool) -> None:
+    """Alias the remote SigLIP's transformers-4.x FA2 flag to the >= 5 name.
+
+    Why (remote code written for 4.x vs transformers >= 5 dispatch):
+        The remote ``modeling_navit_siglip.py`` declares
+        ``_supports_flash_attn_2 = True`` (the 4.x class flag) on
+        ``SiglipVisionTransformer`` and implements ``SiglipFlashAttention2``
+        natively — the per-layer choice is driven by
+        ``config._attn_implementation``, which transformers 5 still honors.
+        Transformers 5 renamed the class flag to ``_supports_flash_attn`` and
+        its init-time dispatch hard-rejects ``flash_attention_2`` when only
+        the old flag is present, crashing ``MiniCPMO``'s vision-tower
+        construction before any weights load. The alias copies the remote's
+        own declaration only — it never enables support the remote did not
+        claim.
+
+    Call this before ``AutoModel.from_pretrained``. No-op on transformers < 5.
+    """
+    if not _needs_transformers5_compat() or not trust_remote_code:
+        return
+
+    from transformers import PreTrainedModel
+    from transformers.models.auto.auto_factory import get_class_from_dynamic_module
+
+    vision_cls = get_class_from_dynamic_module(
+        "modeling_navit_siglip.SiglipVisionTransformer",
+        model_path,
+        trust_remote_code=trust_remote_code,
+    )
+    module = sys.modules[vision_cls.__module__]
+    for value in vars(module).values():
+        if (
+            isinstance(value, type)
+            and issubclass(value, PreTrainedModel)
+            and getattr(value, "_supports_flash_attn_2", False)
+            and "_supports_flash_attn" not in value.__dict__
+            and not getattr(value, _SIGLIP_FA2_PATCHED_ATTR, False)
+        ):
+            value._supports_flash_attn = True
+            setattr(value, _SIGLIP_FA2_PATCHED_ATTR, True)
+            logger.debug(
+                "Aliased %s._supports_flash_attn_2 to the transformers>=5 _supports_flash_attn name.",
+                value.__name__,
+            )
 
 
 def _pad_whisper_self_attn_output(output, past_key_values=None):

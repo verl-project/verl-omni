@@ -163,12 +163,20 @@ class MiniCPMO:
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         from transformers import AutoModel
 
-        from verl_omni.models.transformers.minicpm_o import patch_remote_auto_model_init
+        from verl_omni.models.transformers.minicpm_o import (
+            patch_remote_auto_model_init,
+            patch_remote_siglip_flash_attn_support,
+        )
 
+        trust_remote_code = kwargs.get("trust_remote_code", False)
         patch_remote_auto_model_init(
             pretrained_model_name_or_path,
-            trust_remote_code=kwargs.get("trust_remote_code", False),
+            trust_remote_code=trust_remote_code,
             config=kwargs.get("config"),
+        )
+        patch_remote_siglip_flash_attn_support(
+            pretrained_model_name_or_path,
+            trust_remote_code=trust_remote_code,
         )
         return AutoModel.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
 
