@@ -257,3 +257,61 @@ def test_patch_remote_siglip_skips_without_trust_or_transformers4(monkeypatch):
     monkeypatch.setattr(minicpm_o, "_needs_transformers5_compat", lambda: False)
     minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True)
     assert calls == []  # no-op on transformers < 5
+
+
+class _AudioModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.apm = torch.nn.Module()
+        self.apm.conv1 = torch.nn.Linear(4, 4)
+        self.llm = torch.nn.Module()
+        self.llm.config = SimpleNamespace(hidden_size=8)
+        self.original_calls = []
+
+    def get_audio_embedding(self, data, chunk_length=-1, dummy=True):
+        self.original_calls.append((data, chunk_length, dummy))
+        return [torch.zeros(1, 8, 1)]
+
+
+def _fresh_audio_module():
+    module = _AudioModule()
+    if hasattr(module, "_verl_omni_get_audio_embedding_patched"):
+        delattr(module, "_verl_omni_get_audio_embedding_patched")
+    return module
+
+
+def test_patch_get_audio_embedding_returns_zero_token_for_empty_training_batch():
+    from verl_omni.models.transformers import minicpm_o
+
+    module = _fresh_audio_module()
+    module.train()
+    minicpm_o.patch_minicpm_get_audio_embedding(module)
+    result = module.get_audio_embedding({"audio_features": []}, chunk_length=1.0)
+    assert len(result) == 1
+    # One zero "audio token": get_omni_embedding's `audio_embeddings[0].mean() * 0`
+    # branch works without running the Whisper encoder at all.
+    assert result[0].shape == (1, 8, 1)
+    assert result[0].dtype == module.apm.conv1.weight.dtype
+    assert module.original_calls == []
+
+
+def test_patch_get_audio_embedding_delegates_for_real_audio_or_eval():
+    from verl_omni.models.transformers import minicpm_o
+
+    module = _fresh_audio_module()
+    module.train()
+    minicpm_o.patch_minicpm_get_audio_embedding(module)
+    module.get_audio_embedding({"audio_features": torch.zeros(1, 80, 10)}, chunk_length=1.0)
+    assert len(module.original_calls) == 1  # real audio: original Whisper path
+
+    module.eval()
+    module.get_audio_embedding({"audio_features": []}, chunk_length=1.0)
+    assert len(module.original_calls) == 2  # eval: remote's own no-dummy branch
+
+
+def test_patch_get_audio_embedding_noop_without_apm_or_llm():
+    from verl_omni.models.transformers import minicpm_o
+
+    bare = torch.nn.Linear(4, 4)
+    minicpm_o.patch_minicpm_get_audio_embedding(bare)
+    assert not hasattr(bare, "_verl_omni_get_audio_embedding_patched")
