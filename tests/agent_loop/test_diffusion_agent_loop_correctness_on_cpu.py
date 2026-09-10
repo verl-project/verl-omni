@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import torch
-from tensordict import TensorDict
+from tensordict import NonTensorData, NonTensorStack, TensorDict
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics
 from verl.protocol import DataProto
 from verl.utils import tensordict_utils as tu
@@ -32,6 +32,7 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
 )
 from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopWorkerTQ
 from verl_omni.agent_loop.single_turn_agent_loop import DiffusionSingleTurnAgentLoop
+from verl_omni.agent_loop.utils import maybe_per_rollout_seeds
 from verl_omni.trainer.diffusion.v1 import tq_utils
 
 
@@ -259,6 +260,49 @@ def test_tq_batch_restores_non_tensor_trajectory_metadata(monkeypatch):
 
     assert data.non_tensor_batch["img_shapes"].tolist() == img_shapes
     assert tu.get(data.to_tensordict(), "img_shapes") == img_shapes
+
+
+@pytest.mark.asyncio
+async def test_tq_rollout_seeds_are_global_across_worker_chunks(monkeypatch):
+    num_prompts, num_workers, n = 48, 4, 16
+    rollout_base_seed = 42
+    batch = TensorDict(
+        {
+            "index": torch.arange(num_prompts),
+            "uid": NonTensorStack(*(NonTensorData(str(i)) for i in range(num_prompts))),
+            "global_steps": NonTensorData(1),
+            "rollout_seed": NonTensorData(rollout_base_seed),
+        },
+        batch_size=num_prompts,
+    )
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_put", AsyncMock())
+    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
+    seeds_by_rollout = {}
+
+    async def capture_rollout(sampling_params, *, uid, session_id, **kwargs):
+        seeds_by_rollout[int(uid) * n + session_id] = sampling_params["seed"]
+
+    for chunk in batch.chunk(num_workers):
+        assert len(chunk) == 12
+        worker = object.__new__(worker_cls)
+        worker.rollout_config = SimpleNamespace(
+            pipeline=None,
+            algo=None,
+            calculate_log_probs=False,
+            agent=SimpleNamespace(default_agent_loop="diffusion_single_turn_agent"),
+            n=n,
+        )
+        worker.background_tasks = set()
+        worker._run_agent_loop = capture_rollout
+        await worker.generate_sequences(chunk)
+        await asyncio.gather(*worker.background_tasks)
+
+    assert len(seeds_by_rollout) == num_prompts * n
+    seeds = [seeds_by_rollout[i] for i in range(num_prompts * n)]
+    assert len(set(seeds)) == num_prompts * n
+    assert seeds == maybe_per_rollout_seeds(
+        {"rollout_seed": rollout_base_seed}, num_prompts * n, range(num_prompts * n)
+    )
 
 
 @pytest.mark.asyncio
