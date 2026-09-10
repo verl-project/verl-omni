@@ -10,6 +10,7 @@ on:
       - "tests/**/*_on_cpu.py"
       - "pyproject.toml"
       - .github/workflows/cpu_unit_tests.yml
+      - .github/qwen_tts_pin.txt
       - .github/vllm_omni_pin.txt
       - .github/verl_pin.txt
   pull_request:
@@ -22,6 +23,7 @@ on:
       - "tests/**/*_on_cpu.py"
       - "pyproject.toml"
       - .github/workflows/cpu_unit_tests.yml
+      - .github/qwen_tts_pin.txt
       - .github/vllm_omni_pin.txt
       - .github/verl_pin.txt
 
@@ -56,6 +58,7 @@ jobs:
           cache: pip
           cache-dependency-path: |
             pyproject.toml
+            .github/qwen_tts_pin.txt
             .github/vllm_omni_pin.txt
             .github/verl_pin.txt
       - name: Install dependencies
@@ -64,7 +67,9 @@ jobs:
           pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
           pip install TransferQueue==0.1.8
           pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
-          pip install ".[dev]"
+          pip install ".[omni,dev]"
+          pip install --no-deps \
+            "qwen-tts @ git+https://github.com/QwenLM/Qwen3-TTS.git@$(cat .github/qwen_tts_pin.txt)"
           pip install --no-deps -e .
       - name: Verify the documented train install resolves
         run: |

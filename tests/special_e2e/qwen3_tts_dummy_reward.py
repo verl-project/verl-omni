@@ -11,8 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""CPU-only reward used by the Qwen3-TTS execution smoke test."""
 
-# DEPRECATED: This package will be removed in v0.3.0.
-# The legacy Qwen3-Omni monkey-patches are no longer needed with the V1 trainer
-# (verl_omni.trainer.main_omni). Please see run_qwen3_omni_thinker_gspo_lora_v1.sh
-# for the V1 migration path.
+import numpy as np
+
+
+def compute_score(solution_audio, **kwargs):
+    del kwargs
+    waveform, sample_rate = solution_audio
+    duration_s = np.asarray(waveform).size / sample_rate
+    return {"score": float(duration_s), "duration_s": float(duration_s)}
