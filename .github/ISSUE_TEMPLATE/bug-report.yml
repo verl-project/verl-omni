@@ -90,21 +90,21 @@ body:
         Please tag at most two maintainers who are familiar with the affected area.
         If you are unsure, leave this blank and a core maintainer will route the issue.
 
-        Questions on algorithms and training:
-        - PPO-related algorithms: @knlnguyen1802 @NancyFyong
-        - Distillation: @cr-gao
+        Questions on algorithms:
+        - PPO-related (e.g., FlowGRPO): @knlnguyen1802 @NancyFyong
+        - Distillation (e.g., OPD): @cr-gao
         - DAPO: @WenzheWang
         - Diffusion NFT and DPO: @wtomin
 
         Questions on infrastructure and hardware:
         - NPU: @Sky-Trigger
-        - FSDP engine: @zhtmike
-        - Rollout or trainer: @zhtmike @knlnguyen1802 @ZihaoW123
+        - VeOmni: @WenzheWang
         - vLLM-Omni: @samithuang
 
-        Questions on rewards and pipelines:
+        Questions on core components:
+        - FSDP engine: @zhtmike
+        - Rollout or trainer: @zhtmike @knlnguyen1802 @ZihaoW123
         - Reward: @chenyingshu @ruihanglix
-        - VeOmni: @WenzheWang
 
         Questions on CI, Docker, or documentation:
         - CI, Docker, or documentation: @wtomin
