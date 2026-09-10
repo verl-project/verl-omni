@@ -300,7 +300,29 @@ def _parity_apply_chat_template(self, messages, **kwargs):
     # blocks (image/audio -> slot markers) at this processor boundary — the
     # single choke point for both rollout renders and the dataset's doc2len.
     base = type(self).__bases__[0]
-    return base.apply_chat_template(self, flatten_block_content_to_slots(messages), **kwargs)
+    flattened = flatten_block_content_to_slots(messages)
+    if "apply_chat_template" in base.__dict__:
+        # The processor class ships its own rendering — delegate to it.
+        return base.apply_chat_template(self, flattened, **kwargs)
+    # transformers >= 5's generic ProcessorMixin.apply_chat_template requires
+    # a processor-level template and never consults the tokenizer; MiniCPM-o
+    # ships the template on the tokenizer only (local-path checkpoint dirs
+    # carry no chat_template.json). Dispatch deterministically — custom
+    # implementation > processor-level template > tokenizer template — and
+    # raise here, loudly, when nothing can render. Every verl call site
+    # renders with tokenize=False (doc2len, the ct-builder), where tokenizer
+    # and processor rendering are equivalent.
+    if getattr(self, "chat_template", None) is not None:
+        return base.apply_chat_template(self, flattened, **kwargs)
+    if self.tokenizer is not None and getattr(self.tokenizer, "chat_template", None) is not None:
+        return self.tokenizer.apply_chat_template(flattened, **kwargs)
+    raise ValueError(
+        "No renderable chat template for MiniCPM-o: the processor class does not "
+        "implement apply_chat_template, the processor has no chat_template, and the "
+        "tokenizer has none either. The checkpoint should ship one in "
+        "tokenizer_config.json (or a chat_template.json next to it) — without it "
+        "every prompt render fails."
+    )
 
 
 def _parity_dedup_pad_tokens(self, input_ids: list[int]) -> list[int]:

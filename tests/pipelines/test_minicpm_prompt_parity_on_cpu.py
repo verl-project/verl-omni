@@ -92,6 +92,11 @@ class _StubTokenizer:
                 parts.append(chr(token_id - 1000))
         return "".join(parts)
 
+    chat_template = "<stub template>"
+
+    def apply_chat_template(self, messages, **kwargs):
+        return "".join(f"<{m['role']}>{m['content']}</{m['role']}>" for m in messages)
+
 
 class _StubProcessor:
     def __init__(self):
@@ -545,3 +550,51 @@ def test_apply_media_bounds_refuses_media_ids_without_features():
         "audio_feature_lens": [[], []],
     }
     _apply_media_bounds(text_only, SimpleNamespace(processor=_StubProcessor()))  # no raise
+
+
+class _FakeProcessorMixin:
+    """Mimics transformers >= 5's generic ProcessorMixin: no tokenizer fallback."""
+
+    def apply_chat_template(self, messages, **kwargs):
+        raise ValueError("Cannot use apply_chat_template because this processor does not have a chat template")
+
+
+class _RemoteStyleProcessor(_FakeProcessorMixin):
+    """The remote MiniCPMOProcessor shape: does NOT override apply_chat_template."""
+
+    def __init__(self):
+        self.tokenizer = _StubTokenizer()
+        self.calls = []
+
+    def __call__(self, text=None, images=None, audios=None, **kwargs):
+        self.calls.append({"text": text, "images": images, "audios": audios, **kwargs})
+        return {"input_ids": torch.tensor([1])}
+
+
+def test_apply_chat_template_renders_via_tokenizer_when_processor_has_none():
+    processor = bind_minicpm_processor(_RemoteStyleProcessor())
+    rendered = processor.apply_chat_template(_block_messages(), tokenize=False, add_generation_prompt=True)
+    # Rendered by the tokenizer the flattened slots survive, instead of the
+    # generic base raising "no chat template" (which silently emptied the
+    # dataset through filter_overlong_prompts).
+    assert f"<user>{MINICPM_IMAGE_SLOT}{MINICPM_AUDIO_SLOT}Which song is playing?</user>" in rendered
+    assert "<system>Answer with <answer>X</answer>.</system>" in rendered
+
+
+def test_apply_chat_template_delegates_when_processor_class_overrides():
+    processor = bind_minicpm_processor(_StubProcessor())
+    processor.apply_chat_template(_block_messages())
+    sent = processor.template_calls[-1]["messages"]
+    assert sent[1]["content"] == MINICPM_IMAGE_SLOT + MINICPM_AUDIO_SLOT + "Which song is playing?"
+
+
+def test_apply_chat_template_raises_loudly_when_nothing_can_render():
+    processor = bind_minicpm_processor(_RemoteStyleProcessor())
+    processor.tokenizer = None  # binding needs one; the apply path must not
+    with pytest.raises(ValueError, match="No renderable chat template"):
+        processor.apply_chat_template(_block_messages())
+
+    templated = bind_minicpm_processor(_RemoteStyleProcessor())
+    templated.tokenizer.chat_template = None  # tokenizer present but template-less
+    with pytest.raises(ValueError, match="No renderable chat template"):
+        templated.apply_chat_template(_block_messages())
