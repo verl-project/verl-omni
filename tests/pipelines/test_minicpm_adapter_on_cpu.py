@@ -283,10 +283,19 @@ def test_minicpmo_from_pretrained_patches_then_loads_auto_model(monkeypatch):
     def fake_patch(*args, **kwargs):
         patch_calls.append((args, kwargs))
 
+    siglip_calls = []
+
+    def fake_siglip_patch(*args, **kwargs):
+        siglip_calls.append((args, kwargs))
+
     monkeypatch.setattr(AutoModel, "from_pretrained", fake_from_pretrained)
     monkeypatch.setattr(
         "verl_omni.models.transformers.minicpm_o.patch_remote_auto_model_init",
         fake_patch,
+    )
+    monkeypatch.setattr(
+        "verl_omni.models.transformers.minicpm_o.patch_remote_siglip_flash_attn_support",
+        fake_siglip_patch,
     )
     config = _model_config()
 
@@ -309,6 +318,7 @@ def test_minicpmo_from_pretrained_patches_then_loads_auto_model(monkeypatch):
     assert calls[0][1]["trust_remote_code"] is True
     assert calls[0][1]["config"] is config.hf_config
     assert "init_tts" not in calls[0][1]
+    assert siglip_calls == [(("/fake/minicpm",), {"trust_remote_code": True})]
 
 
 def test_configure_model_applies_remote_whisper_compat(monkeypatch):
