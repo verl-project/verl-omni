@@ -439,3 +439,18 @@ def test_prepare_model_inputs_drops_image_sizes_entirely():
     )
     assert "image_sizes" not in prepared
     assert "image_sizes" not in prepared["data"]
+
+
+def test_processor_call_normalizes_empty_media_to_none():
+    processor = bind_minicpm_processor(_StubProcessor())
+    processor(text=["text-only prompt"], images=[], audio=[])
+    call = processor.calls[-1]
+    assert call["images"] is None and call["audios"] is None
+    assert call["text"] == ["text-only prompt"]  # no slots appended for empty media
+
+
+def test_processor_call_keeps_nonempty_media():
+    processor = bind_minicpm_processor(_StubProcessor())
+    processor(text=["<image>./</image> listen"], images=["img.png"], audio=[b"wav"])
+    call = processor.calls[-1]
+    assert call["images"] == ["img.png"] and call["audios"] == [b"wav"]
