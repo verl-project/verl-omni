@@ -34,3 +34,26 @@ def test_diffusion_lora_stacks_follow_the_worker_device():
 
     assert layer.lora_a_stacked[0].device.type == "meta"
     assert layer.lora_b_stacked[0].device.type == "meta"
+
+
+class _QwenStyleEngine:
+    def __init__(self):
+        self.model = object()
+
+
+class _MiniCPMStyleEngine:
+    def __init__(self):
+        self.llm = object()  # MiniCPM-o nests its LLM as .llm
+
+
+class _ACLGraphWrapped:
+    def __init__(self):
+        self.runnable = _QwenStyleEngine()
+
+
+def test_moe_weight_loader_patch_applies_gate():
+    from verl_omni.workers.rollout.vllm_rollout.utils import _moe_weight_loader_patch_applies
+
+    assert _moe_weight_loader_patch_applies(_QwenStyleEngine())  # .model resolves -> patch runs
+    assert _moe_weight_loader_patch_applies(_ACLGraphWrapped())  # ACLGraph unwrap, same as verl
+    assert not _moe_weight_loader_patch_applies(_MiniCPMStyleEngine())  # .llm only -> skip, no ValueError
