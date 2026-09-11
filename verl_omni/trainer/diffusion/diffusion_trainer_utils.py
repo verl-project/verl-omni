@@ -72,7 +72,7 @@ def track_nonfinite_grad_streak(streak: int, grad_norm: Optional[float], max_con
     if grad_norm is None or math.isfinite(grad_norm):
         return 0
     streak += 1
-    if max_consecutive > 0 and streak > max_consecutive:
+    if max_consecutive > 0 and streak >= max_consecutive:
         raise RuntimeError(
             f"grad_norm has been non-finite for {streak} consecutive optimizer steps "
             f"(trainer.max_consecutive_nonfinite_grad_steps={max_consecutive}); aborting instead of "

@@ -37,20 +37,20 @@ class TestTrackNonfiniteGradStreak:
             streak = track_nonfinite_grad_streak(streak, math.nan, max_consecutive=0)
         assert streak == 100
 
-    def test_raises_once_streak_exceeds_threshold(self):
+    def test_raises_once_streak_reaches_threshold(self):
         streak = 0
-        for _ in range(3):
+        for _ in range(2):
             streak = track_nonfinite_grad_streak(streak, math.nan, max_consecutive=3)
-        assert streak == 3
+        assert streak == 2
         with pytest.raises(RuntimeError, match="non-finite"):
             track_nonfinite_grad_streak(streak, math.nan, max_consecutive=3)
 
     def test_intervening_finite_step_prevents_abort(self):
         streak = 0
-        for _ in range(3):
+        for _ in range(2):
             streak = track_nonfinite_grad_streak(streak, math.nan, max_consecutive=3)
         streak = track_nonfinite_grad_streak(streak, 2.0, max_consecutive=3)
         assert streak == 0
-        for _ in range(3):
+        for _ in range(2):
             streak = track_nonfinite_grad_streak(streak, math.nan, max_consecutive=3)
-        assert streak == 3
+        assert streak == 2
