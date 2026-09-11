@@ -35,6 +35,7 @@ into — mirroring the remote ``get_inputs_ids`` scan.
 from __future__ import annotations
 
 import logging
+import numbers
 import re
 from functools import lru_cache
 from typing import Any
@@ -374,8 +375,23 @@ def _parity_call(self, text=None, images=None, audio=None, audios=None, **kwargs
     return _upgrade_batch_feature(base.__call__(self, text=text, images=images, audios=audios, **kwargs))
 
 
+def _scalar_tree(value: Any) -> bool:
+    """True when every recursive leaf of a container is a scalar.
+
+    Stacking scalars into one tensor is unambiguous (the stock contract:
+    ``input_ids`` / ``raw_lens``), but stacking non-scalar leaves changes
+    per-item semantics — a sample whose S same-shape slices stack into one
+    tensor counts as one slice downstream, tripping the media parity check
+    only for images whose slices are all identical (data-dependent, hours
+    to spot). Only pure-scalar containers may convert wholesale.
+    """
+    if isinstance(value, list | tuple):
+        return bool(value) and all(_scalar_tree(item) for item in value)
+    return isinstance(value, numbers.Number)
+
+
 def _safe_convert_to_tensors(self, tensor_type=None):
-    # Two remote/stock defects to survive:
+    # Three remote/stock defects to survive:
     # 1. The remote MiniCPMOBatchFeature override drops the `return value`
     #    for already-tensor leaves, so a single convert_to_tensors("pt")
     #    nulls every tensor feature — tensors therefore always pass through
@@ -385,8 +401,12 @@ def _safe_convert_to_tensors(self, tensor_type=None):
     #    pixel_values is a per-sample list of patch tensors with varying
     #    shapes/counts, and verl converts the whole batch output at once —
     #    so a leaf whose conversion raises keeps its container structure
-    #    and only its convertible parts tensorize. Uniform leaves still
-    #    convert exactly as the stock contract promises.
+    #    and only its convertible parts tensorize.
+    # 3. transformers' ``as_tensor`` wrapper stacks a list of same-shape
+    #    tensors (plain ``torch.as_tensor`` refuses), so any container
+    #    holding tensor leaves must descend instead of converting — see
+    #    ``_scalar_tree``. Uniform scalar structures still convert exactly
+    #    as the stock contract promises.
     if tensor_type is None:
         return self
 
@@ -395,17 +415,26 @@ def _safe_convert_to_tensors(self, tensor_type=None):
     def convert(value):
         if is_tensor(value):
             return value
-        try:
-            return as_tensor(value)
-        except Exception:
-            pass  # ragged or otherwise unconvertible: descend, do not raise
         if isinstance(value, list):
+            if _scalar_tree(value):
+                try:
+                    return as_tensor(value)
+                except Exception:
+                    pass  # ragged scalars: descend, do not raise
             return [convert(item) for item in value]
         if isinstance(value, tuple):
+            if _scalar_tree(value):
+                try:
+                    return as_tensor(value)
+                except Exception:
+                    pass
             return tuple(convert(item) for item in value)
         if isinstance(value, dict):
             return {key: convert(item) for key, item in value.items()}
-        return value
+        try:
+            return as_tensor(value)  # bare leaves (np arrays, scalars)
+        except Exception:
+            return value
 
     for key, value in self.items():
         self[key] = convert(value)
