@@ -1,7 +1,7 @@
 (tuning_guide)=
 # Performance Tuning Guide
 
-Last updated: 09/07/2026
+Last updated: 09/11/2026
 
 This page is the starting point for tuning a VeRL-Omni diffusion RL run. It
 does not repeat the detail already covered by the more specific pages —
@@ -24,6 +24,11 @@ dominates wall time — see [Profiling FlowGRPO / diffusion training](profiler.m
 Guessing which stage is slow from symptoms alone is unreliable: a rollout
 that looks slow is often actually reward-bound once you profile it (see
 [Async Reward](../algo/async_reward.md#motivation)).
+
+For a live view of where time goes across a run — instead of a one-off
+profiler trace — see [Monitor Training with RL-Insight](../start/rl_insight.md),
+which surfaces trainer, rollout, and TransferQueue metrics in Grafana
+dashboards.
 
 ## 1. Decide your GPU layout first
 
@@ -121,6 +126,7 @@ Symptoms that show up regardless of which stage causes them:
 ## See also
 
 - [Profiling FlowGRPO / diffusion training](profiler.md)
+- [Monitor Training with RL-Insight](../start/rl_insight.md)
 - {ref}`diffusion_mfu`
 - {ref}`rollout_batching`
 - [Async Reward](../algo/async_reward.md)
