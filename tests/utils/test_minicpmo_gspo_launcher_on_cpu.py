@@ -51,6 +51,9 @@ def test_minicpmo_gspo_launcher_contract():
     assert "data.custom_cls.path=pkg://verl_omni.utils.dataset.omni_rl_datasets" in settings
     assert "data.custom_cls.name=MiniCPMORLHFDataset" in settings
     assert "+data.mm_processor_kwargs.sampling_rate=16000" in settings
+    # OpenBMB's supported render mode: the template pre-fills an empty think
+    # block instead of making the model close its own.
+    assert "+data.apply_chat_template_kwargs.enable_thinking=false" in settings
     assert "+actor_rollout_ref.model.override_config.init_tts=false" in settings
     assert "+actor_rollout_ref.model.override_config.use_cache=false" in settings
     assert "+actor_rollout_ref.model.override_config.stream_input=false" in settings
