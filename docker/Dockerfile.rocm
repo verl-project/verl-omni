@@ -1,0 +1,115 @@
+# verl-omni AMD GPU (ROCm) image — dependency versions aligned with docs/start/install_rocm.md
+#
+# Build (from repo root):
+#   docker build -f docker/Dockerfile.rocm -t verl-omni:rocm .
+#
+# Build for a single architecture — much faster (gfx950 = MI350X, gfx942 = MI300X):
+#   docker build -f docker/Dockerfile.rocm -t verl-omni:rocm \
+#     --build-arg PYTORCH_ROCM_ARCH=gfx950 .
+#
+# Override pinned versions (defaults match pyproject.toml extras):
+#   docker build -f docker/Dockerfile.rocm -t verl-omni:rocm \
+#     --build-arg VLLM_VERSION=v0.28.0 \
+#     --build-arg VERL_GIT_REF=fefb080262e1c015a0ea05f958822a6a512dc795 .
+#
+# Run:
+#   docker run --device=/dev/kfd --device=/dev/dri --group-add video \
+#     --security-opt seccomp=unconfined --shm-size=16g -it verl-omni:rocm
+
+# Base provides torch 2.12 + ROCm 7.14, a vLLM checkout at /workspace/vllm, and hipcc.
+ARG BASE_IMAGE=verlai/verl:rocm7.14_torch2.12_release_0724
+ARG VLLM_VERSION=v0.28.0
+# Default: read from .github/verl_pin.txt at build time (override with VERL_GIT_REF).
+ARG VERL_GIT_REF=
+
+FROM ${BASE_IMAGE}
+
+ARG VLLM_VERSION
+ARG VERL_GIT_REF
+ARG PYTORCH_ROCM_ARCH="gfx942;gfx950"  # both current CDNA generations; narrow to halve build time
+
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+# Step 1 — vLLM from source: PyPI publishes no ROCm wheels. Runs before any pip
+# install so the build environment stays the one the base image validated.
+# --force because base images may carry local tags that would clobber; the tag
+# itself is required since setuptools_scm derives the wheel version from it.
+RUN cd /workspace/vllm \
+ && git fetch --depth=1 --force origin \
+      "refs/tags/${VLLM_VERSION}:refs/tags/${VLLM_VERSION}" \
+ && git worktree add /workspace/vllm-src "${VLLM_VERSION}" \
+ && cd /workspace/vllm-src \
+ && VLLM_TARGET_DEVICE=rocm \
+    PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}" \
+    ROCM_AMDGPU_TARGETS="${PYTORCH_ROCM_ARCH}" \
+    GPU_ARCHS="${PYTORCH_ROCM_ARCH}" \
+    CMAKE_BUILD_PARALLEL_LEVEL="${MAX_JOBS:-32}" \
+    pip wheel . --no-deps --no-build-isolation -w /tmp/vllm-wheel \
+ && pip uninstall -y vllm \
+ && pip install --no-deps /tmp/vllm-wheel/vllm-*.whl \
+ && cd / \
+ && rm -rf /tmp/vllm-wheel /workspace/vllm-src \
+ && git -C /workspace/vllm worktree prune \
+ && python3 -c "import vllm; print('vllm', vllm.__version__)"
+
+# Step 2 — pin the accelerator packages. AMD's torch build is not on PyPI, so any
+# resolver that "upgrades" it silently swaps in a CUDA wheel; fail loudly instead.
+RUN python3 - > /opt/rocm-constraints.txt <<'PY'
+from importlib.metadata import version, PackageNotFoundError
+for pkg in ("torch", "torchvision", "torchaudio", "vllm"):
+    try:
+        print(f"{pkg}=={version(pkg)}")
+    except PackageNotFoundError:
+        pass
+PY
+ENV PIP_CONSTRAINT=/opt/rocm-constraints.txt
+
+WORKDIR /workspace/verl-omni
+
+COPY pyproject.toml setup.py README.md ./
+COPY .github/verl_pin.txt .github/vllm_omni_pin.txt ./.github/
+COPY verl_omni ./verl_omni
+
+# Step 3 — vllm-omni at the git pin, --no-deps so its vllm==0.28.0 requirement does
+# not pull the CUDA wheel over the ROCm build. The rest are the runtime imports
+# --no-deps therefore skips; see install_rocm.md for what is deliberately omitted.
+RUN VLLM_OMNI_REF="$(tr -d '[:space:]' < .github/vllm_omni_pin.txt)" \
+ && echo "Installing vllm-omni@${VLLM_OMNI_REF}" \
+ && pip install --no-deps \
+      "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@${VLLM_OMNI_REF}" \
+ && pip install --no-deps \
+      aenum==3.1.16 \
+      janus \
+      torchsde \
+      x-transformers \
+      cache-dit==1.5.0 \
+      onnxruntime \
+      prettytable \
+      gguf \
+      kernels==0.14.1 \
+      kernels-data==0.16.1  # not optional: kernels loads it via an entry point
+
+# Step 4 — corrections the ROCm base needs.
+RUN pip install --no-deps diffusers==0.40.0 \
+ && pip install --no-deps -U "torchao>=0.16.0"  # peft >=0.19 rejects torchao <0.16
+
+# Step 5 — verl at the pin: the base ships 0.9.0.dev0, whose agent loop reads a
+# data.continuous_token key the diffusion trainer config does not define.
+RUN VERL_REF="${VERL_GIT_REF:-$(tr -d '[:space:]' < .github/verl_pin.txt)}" \
+ && echo "Installing verl@${VERL_REF}" \
+ && pip install --no-deps --force-reinstall \
+      "verl @ git+https://github.com/verl-project/verl.git@${VERL_REF}"
+
+# Step 6 — verl-omni, plus the core dependencies the ROCm base lacks.
+RUN pip install --no-deps -e . \
+ && pip install "imageio[ffmpeg]>=2.37.2" latex2sympy2_extended math_verify
+
+# Device-independent checks only. vllm_omni / verl_omni pull in vLLM's cumem
+# allocator, which asserts the GPU runtime is loaded — impossible without a
+# device, so they are verified at container start; see install_rocm.md.
+RUN python3 -c "import torch; print('torch', torch.__version__, '| HIP', torch.version.hip)" \
+ && python3 -c "import vllm; print('vllm', vllm.__version__)" \
+ && python3 -c "import verl; print('verl', verl.__version__)" \
+ && python3 -c "from importlib.metadata import version; print('vllm-omni', version('vllm-omni'))"
+
+CMD ["/bin/bash"]
