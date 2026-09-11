@@ -35,6 +35,7 @@ python3 -m verl_omni.trainer.main_omni \
     data.custom_cls.path=pkg://verl_omni.utils.dataset.omni_rl_datasets \
     data.custom_cls.name=MiniCPMORLHFDataset \
     +data.mm_processor_kwargs.sampling_rate=16000 \
+    +data.apply_chat_template_kwargs.enable_thinking=false \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.trust_remote_code=True \
     actor_rollout_ref.model.lora_rank=32 \
