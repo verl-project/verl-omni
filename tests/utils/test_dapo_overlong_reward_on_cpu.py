@@ -17,7 +17,10 @@
 import numpy as np
 import torch
 from omegaconf import OmegaConf
-from transformers import AutoTokenizer
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 from verl import DataProto
 from verl.experimental.reward_loop.reward_manager.dapo import DAPORewardManager
 
@@ -26,11 +29,22 @@ OVERLONG_BUFFER_LEN = 4
 OVERLONG_PENALTY_FACTOR = 1.0
 
 
+def _build_local_tokenizer(tmp_path) -> AutoTokenizer:
+    # A tiny in-memory tokenizer, so this test needs no network access or
+    # downloaded artifacts (the DAPO manager only calls tokenizer.decode()).
+    vocab = {"[UNK]": 0, **{str(i): i + 1 for i in range(100)}}
+    tokenizer = Tokenizer(WordLevel(vocab=vocab, unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = Whitespace()
+    fast_tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer, unk_token="[UNK]")
+    fast_tokenizer.save_pretrained(tmp_path)
+    return AutoTokenizer.from_pretrained(tmp_path)
+
+
 def _compute_score(data_source, solution_str, ground_truth, extra_info=None):
     return 1.0
 
 
-def _build_manager(overlong_enable: bool) -> DAPORewardManager:
+def _build_manager(overlong_enable: bool, tokenizer) -> DAPORewardManager:
     config = OmegaConf.create(
         {
             "reward": {
@@ -46,7 +60,6 @@ def _build_manager(overlong_enable: bool) -> DAPORewardManager:
             }
         }
     )
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
     return DAPORewardManager(config, tokenizer, _compute_score)
 
 
@@ -65,11 +78,12 @@ def _make_truncated_response() -> DataProto:
     )
 
 
-def test_overlong_penalty_changes_reward_on_truncated_response():
+def test_overlong_penalty_changes_reward_on_truncated_response(tmp_path):
     batch = _make_truncated_response()
+    tokenizer = _build_local_tokenizer(tmp_path)
 
-    disabled = _build_manager(overlong_enable=False)
-    enabled = _build_manager(overlong_enable=True)
+    disabled = _build_manager(overlong_enable=False, tokenizer=tokenizer)
+    enabled = _build_manager(overlong_enable=True, tokenizer=tokenizer)
 
     result_disabled = disabled.loop.run_until_complete(disabled.run_single(batch))
     result_enabled = enabled.loop.run_until_complete(enabled.run_single(batch))

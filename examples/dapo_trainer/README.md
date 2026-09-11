@@ -19,14 +19,24 @@ policy loss with asymmetric clipping, GRPO advantages, and no KL penalty. The
 registered naive reward manager calls the AVQA `choice_reward`; the reward
 manager name alone does not select the optimization algorithm.
 
-**Phase 2 (#446): overlong reward buffer.** Overlong shaping is wired through
-`reward.reward_kwargs` and only applies with `reward.reward_manager.name=dapo`
-(`source=register`) — it is a no-op under the `naive` manager this example
-uses. See `tests/special_e2e/run_dapo_qwen3_omni_thinker_lora_v1_smoke.sh` for
-a working `name=dapo` recipe with overlong shaping enabled, and
+**Overlong reward buffer.** Overlong shaping penalizes responses that run past
+`reward.reward_kwargs.max_resp_len`, tapering the reward to zero (then to a
+full penalty) over the trailing `reward.reward_kwargs.overlong_buffer_cfg.len`
+tokens. It is wired through `reward.reward_kwargs` and only applies with
+`reward.reward_manager.name=dapo` (`source=register`) — it is a no-op under
+the `naive` manager this example uses. Enable it with:
+
+```text
+reward.reward_kwargs.overlong_buffer_cfg.enable=true
+reward.reward_kwargs.overlong_buffer_cfg.len=<buffer_len>
+reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=<factor>
+reward.reward_kwargs.max_resp_len=<max_response_length>
+```
+
+See `tests/special_e2e/run_dapo_qwen3_omni_thinker_lora_v1_smoke.sh` for a
+working `name=dapo` recipe with overlong shaping enabled, and
 `tests/utils/test_dapo_overlong_reward_on_cpu.py` for the reward-shape
-contract: `reward.reward_kwargs.overlong_buffer_cfg.{enable,len,penalty_factor,log}`
-and `reward.reward_kwargs.max_resp_len`.
+contract.
 
 ## Run
 
