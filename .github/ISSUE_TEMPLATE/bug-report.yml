@@ -63,3 +63,40 @@ body:
     attributes:
       label: Expected behavior
       description: "A clear and concise description of what you would expect to happen."
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Please include the relevant Python logs, error messages, and stack traces if available.
+      render: shell
+
+  - type: textarea
+    id: who-can-help
+    attributes:
+      label: Who can help?
+      description: |
+        Please tag at most two maintainers who are familiar with the affected area.
+        If you are unsure, leave this blank and a core maintainer will route the issue.
+
+        Questions on algorithms:
+        - Diffusion PPO-related (e.g., FlowGRPO): @knlnguyen1802 @NancyFyong
+        - Omni PPO-related (e.g., Qwen3-Omni+GSPO): @zhtmike
+        - DAPO: @WenzheWang
+        - Distillation (e.g., OPD): @cr-gao
+        - Diffusion NFT: @NancyFyong @AndyZhou952 
+        - DPO: @wtomin
+
+        Questions on infrastructure and backend:
+        - NPU: @Sky-Trigger
+        - VeOmni: @WenzheWang @FoolPlayer
+        - vLLM-Omni: @samithuang @knlnguyen1802
+
+        Questions on core components:
+        - FSDP engine: @zhtmike
+        - Rollout or trainer: @zhtmike @knlnguyen1802 @ZihaoW123
+        - Reward: @chenyingshu @ruihanglix
+
+        Questions on CI, Docker, or documentation:
+        - CI, Docker, or documentation: @wtomin
+      placeholder: "@Username ..."
