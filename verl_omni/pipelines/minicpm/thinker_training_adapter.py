@@ -417,3 +417,12 @@ class MiniCPMThinkerAdapter(OmniModelBase):
         # choice reward is identically zero.
         keep_answer_tags_when_decoding(tokenizer)
         return tokenizer
+
+    @classmethod
+    def prepare_reward_decode_tokenizer(cls, tokenizer, model_config=None) -> None:
+        # Same demotion as configure_tokenizer: the reward loop builds its own
+        # tokenizer that never passes through the adapter, so decode-relevant
+        # preparation must be re-applied there (see OmniModelBase hook).
+        from verl_omni.models.transformers.minicpm_o import keep_answer_tags_when_decoding
+
+        keep_answer_tags_when_decoding(tokenizer)
