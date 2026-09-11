@@ -960,6 +960,8 @@ class _MiniCPMStyleModule(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.apm = torch.nn.Linear(4, 4)
+        # Ignored subtrees must be frozen: FSDP2 never syncs their gradients.
+        self.apm.requires_grad_(False)
         self.llm = torch.nn.Module()
         self.llm.layer = torch.nn.Linear(4, 4)
         self._no_split_modules = ["Qwen3DecoderLayer"]
@@ -1022,6 +1024,55 @@ def test_build_fsdp_module_rejects_fsdp1_with_ignored_names():
         engine._build_fsdp_module(module)
 
 
+def test_build_fsdp_module_rejects_trainable_ignored_params(monkeypatch):
+    # FSDP2 never communicates gradients for ignored params; a trainable one
+    # would silently diverge across ranks on a multi-rank mesh.
+    omni_impl = _get_omni_impl_module()
+    module = _MiniCPMStyleModule()
+    module.apm.requires_grad_(True)  # e.g. a LoRA target/exclude drift
+
+    import verl.utils.fsdp_utils as verl_fsdp_utils
+    import verl.utils.torch_dtypes as torch_dtypes
+
+    monkeypatch.setattr(torch.distributed.fsdp, "fully_shard", lambda target, **kwargs: target)
+    monkeypatch.setattr(verl_fsdp_utils, "_select_fsdp2_wrap_targets", lambda model, names: [])
+    monkeypatch.setattr(verl_fsdp_utils, "maybe_patch_fsdp_module", lambda model: contextmanager(lambda: (yield))())
+    monkeypatch.setattr(verl_fsdp_utils, "fsdp2_load_full_state_dict", lambda *args, **kwargs: None)
+    monkeypatch.setattr(torch_dtypes.PrecisionType, "to_dtype", staticmethod(lambda name: torch.bfloat16))
+
+    engine = _fsdp2_engine(omni_impl, module, ["apm"])
+    engine.device_mesh = types.SimpleNamespace(size=lambda: 2)
+    with pytest.raises(ValueError, match="FSDP2-ignored parameters must be frozen"):
+        engine._build_fsdp_module(module)
+
+
+def test_build_fsdp_module_allows_trainable_ignored_params_on_single_rank(monkeypatch):
+    # A single-rank mesh has no cross-rank gradient sync to lose.
+    omni_impl = _get_omni_impl_module()
+    module = _MiniCPMStyleModule()
+    module.apm.requires_grad_(True)
+
+    import verl.utils.fsdp_utils as verl_fsdp_utils
+    import verl.utils.torch_dtypes as torch_dtypes
+
+    calls = []
+
+    def fake_fully_shard(target, **kwargs):
+        calls.append((target, kwargs.get("ignored_params")))
+        return target
+
+    monkeypatch.setattr(torch.distributed.fsdp, "fully_shard", fake_fully_shard)
+    monkeypatch.setattr(verl_fsdp_utils, "_select_fsdp2_wrap_targets", lambda model, names: [])
+    monkeypatch.setattr(verl_fsdp_utils, "maybe_patch_fsdp_module", lambda model: contextmanager(lambda: (yield))())
+    monkeypatch.setattr(verl_fsdp_utils, "fsdp2_load_full_state_dict", lambda *args, **kwargs: None)
+    monkeypatch.setattr(torch_dtypes.PrecisionType, "to_dtype", staticmethod(lambda name: torch.bfloat16))
+
+    engine = _fsdp2_engine(omni_impl, module, ["apm"])
+    engine.device_mesh = types.SimpleNamespace(size=lambda: 1)
+    assert engine._build_fsdp_module(module) is module
+    assert calls[-1][1] == set(module.apm.parameters())
+
+
 class _WhisperStyleModule(torch.nn.Module):
     """Mirrors the MiniCPM-o layout that hits the embed_positions hole."""
 
@@ -1030,6 +1081,8 @@ class _WhisperStyleModule(torch.nn.Module):
         self.apm = torch.nn.Module()
         self.apm.embed_positions = torch.nn.Embedding(16, 4)  # blanket-wrapped by verl's selector
         self.apm.conv1 = torch.nn.Linear(4, 4)
+        # Ignored subtrees must be frozen: FSDP2 never syncs their gradients.
+        self.apm.requires_grad_(False)
         self.llm = torch.nn.Module()
         self.llm.layer = torch.nn.Linear(4, 4)
         self.model = torch.nn.Module()

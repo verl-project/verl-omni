@@ -281,9 +281,9 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         branch) plus the wrap-target loop of ``verl.utils.fsdp_utils.apply_fsdp2``,
         so the root ``fully_shard`` call can pass torch's formal
         ``ignored_params`` for submodules that must not be FSDP-managed at all
-        (MiniCPM-o's frozen Whisper ``apm``). Adapters declare them via a
-        ``get_fsdp_ignored_module_names`` classmethod; every adapter without
-        that method keeps verl's untouched behavior via ``super()``.
+        (MiniCPM-o's frozen apm/vpm/resampler towers). Adapters declare them
+        via a ``get_fsdp_ignored_module_names`` classmethod; every adapter
+        without that method keeps verl's untouched behavior via ``super()``.
 
         Maintenance note: re-diff this override against the verl pin at every
         bump (upstream actively edits the copied code), and delete it once verl
@@ -344,10 +344,26 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             "reshard_after_forward": self.engine_config.reshard_after_forward,
         }
 
-        # ``apm`` must also cover PEFT-prefixed paths like base_model.model.apm.
-        ignored_params = {
-            param for name, param in module.named_parameters() if any(part in ignored_names for part in name.split("."))
-        }
+        # ``ignored_names`` must also cover PEFT-prefixed paths like
+        # base_model.model.apm.
+        ignored_params = set()
+        trainable_ignored: list[str] = []
+        for name, param in module.named_parameters():
+            if any(part in ignored_names for part in name.split(".")):
+                ignored_params.add(param)
+                if param.requires_grad:
+                    trainable_ignored.append(name)
+        # FSDP2 never communicates gradients for ignored params, so a trainable
+        # one would silently diverge across ranks — frozen-only is the contract
+        # the adapter ignore list relies on. Single-rank meshes have nothing to
+        # desync.
+        if trainable_ignored and (self.device_mesh is None or self.device_mesh.size() > 1):
+            raise ValueError(
+                f"{type(self).__name__}: FSDP2-ignored parameters must be frozen, but these require "
+                f"gradients: {trainable_ignored}. Either remove them from the adapter's "
+                "get_fsdp_ignored_module_names or exclude them from training (LoRA target/exclude "
+                "modules) — ignored params get no gradient synchronization."
+            )
 
         transformer_cls_names = self.engine_config.get("wrap_policy", {}).get(
             "transformer_layer_cls_to_wrap", getattr(module, "_no_split_modules", None)
