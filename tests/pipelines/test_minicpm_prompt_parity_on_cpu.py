@@ -630,6 +630,36 @@ def test_convert_to_tensors_keeps_ragged_media_features():
     assert torch.is_tensor(pixel_values[0][0])
 
 
+def test_convert_to_tensors_never_stacks_uniform_slice_lists():
+    # transformers' as_tensor wrapper stacks a list of same-shape tensors
+    # (plain torch.as_tensor refuses). The processor emits batch-style
+    # pixel_values=[[slice x S]]; a uniform per-sample list that stacks to
+    # one 4-D tensor counts as a single slice downstream and trips the
+    # media parity check only for images whose slices are all identical.
+    from transformers.feature_extraction_utils import BatchFeature
+
+    from verl_omni.pipelines.minicpm.media_inputs import sample_pixel_slices
+    from verl_omni.pipelines.minicpm.prompt_parity import _safe_convert_to_tensors
+
+    uniform = torch.zeros(3, 14, 14504)
+    feature = BatchFeature(
+        {
+            "pixel_values": [
+                [uniform.clone() for _ in range(5)],  # 960x720-style: all slices identical
+                [torch.zeros(3, 4, 4), torch.zeros(3, 2, 2)],  # ragged sibling sample
+            ]
+        }
+    )
+
+    converted = _safe_convert_to_tensors(feature, "pt")
+    pixel_values = converted["pixel_values"]
+    # The uniform sample must stay a 5-slice list, not stack to T(5, 3, 14, 14504).
+    assert isinstance(pixel_values[0], list) and len(pixel_values[0]) == 5
+    assert all(slice_.shape == (3, 14, 14504) for slice_ in pixel_values[0])
+    # Slice counting agrees with the id-side span count for both samples.
+    assert [len(sample_pixel_slices(sample)) for sample in pixel_values] == [5, 2]
+
+
 def test_convert_to_tensors_leaves_unconvertible_scalars_alone():
     from transformers.feature_extraction_utils import BatchFeature
 
