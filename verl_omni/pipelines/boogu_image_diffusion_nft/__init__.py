@@ -13,5 +13,6 @@
 # limitations under the License.
 
 from .diffusers_training_adapter import *  # noqa: F401,F403
+from .vllm_omni_rollout_adapter import *  # noqa: F401,F403
 
-__all__ = ["BooguImageDiffusionNFT"]
+__all__ = ["BooguImageDiffusionNFT", "BooguImageDiffusionNFTPipeline"]

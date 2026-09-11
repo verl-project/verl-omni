@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU tests for the Boogu-Image DiffusionNFT training adapter."""
+"""CPU tests for the Boogu-Image DiffusionNFT adapters."""
 
 import importlib
 import sys
@@ -26,7 +26,7 @@ from tensordict import TensorDict
 
 @pytest.fixture(scope="module")
 def adapters():
-    """Load real training modules while isolating unrelated rollout imports."""
+    """Load real Boogu modules while isolating unrelated rollout imports."""
     root = Path(__file__).resolve().parents[2] / "verl_omni"
     with patch.dict(sys.modules):
         for name in list(sys.modules):
@@ -53,6 +53,11 @@ def adapters():
             common=importlib.import_module("verl_omni.pipelines.boogu_image_flow_grpo.common"),
             flow=importlib.import_module("verl_omni.pipelines.boogu_image_flow_grpo.diffusers_training_adapter"),
             nft=importlib.import_module("verl_omni.pipelines.boogu_image_diffusion_nft.diffusers_training_adapter"),
+            rollout=pipelines.BooguImageDiffusionNFTPipeline,
+            rollout_base=importlib.import_module("verl_omni.pipelines.model_base").VllmOmniPipelineBase,
+            flow_rollout=importlib.import_module(
+                "verl_omni.pipelines.boogu_image_flow_grpo.vllm_omni_rollout_adapter"
+            ).BooguImagePipelineWithLogProb,
             config=importlib.import_module("verl_omni.workers.config"),
         )
 
@@ -70,6 +75,93 @@ def test_registered_for_boogu_image_diffusion_nft(adapters):
     assert adapters.base.get_class_by_name("BooguImagePipeline", "diffusion_nft") is adapters.adapter
     assert adapters.base.get_class(_model_config(adapters)) is adapters.adapter
     assert "BooguImageDiffusionNFT" in adapters.pipelines.__all__
+
+
+def test_rollout_registered_for_boogu_image_diffusion_nft(adapters):
+    assert adapters.rollout_base.get_class("BooguImagePipeline", "diffusion_nft") is adapters.rollout
+    assert adapters.rollout_base.get_class("BooguImagePipeline", "flow_grpo") is adapters.flow_rollout
+    assert "BooguImageDiffusionNFTPipeline" in adapters.pipelines.__all__
+
+
+def test_rollout_supports_request_batching(adapters):
+    assert adapters.rollout.supports_request_batch is True
+
+
+def test_rollout_inherits_boogu_pipeline_and_media_contract(adapters):
+    assert issubclass(adapters.rollout, adapters.flow_rollout)
+    assert "diffusion_io_spec" not in adapters.rollout.__dict__
+    assert adapters.rollout.diffusion_io_spec is adapters.flow_rollout.diffusion_io_spec
+
+
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("guidance_scale", [1.0, 4.0])
+def test_rollout_returns_clean_latents_with_deterministic_cfg_steps(adapters, packed, guidance_scale):
+    from vllm_omni.diffusion.request import OmniDiffusionRequest
+    from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
+    from vllm_omni.inputs.data import OmniDiffusionSamplingParams
+
+    rollout_module = importlib.import_module(adapters.rollout.__module__)
+    batch_size = 2 if packed else 1
+    pipeline = object.__new__(adapters.rollout)
+    pipeline.device = torch.device("cpu")
+    pipeline.transformer = SimpleNamespace(in_channels=3, axes_dim_rope=[4, 2, 2], axes_lens=[8, 8, 8])
+    pipeline._boogu_scheduler = None
+    pipeline._extract_reference_images = lambda prompts: (None, [None] * len(prompts))
+    pipeline._resolve_output_size = lambda height, width: (height, width, height, width)
+    embeds = torch.ones(batch_size, 3, 8, dtype=torch.bfloat16)
+    mask = torch.ones(batch_size, 3, dtype=torch.bool)
+    pipeline.encode_prompt = MagicMock(side_effect=[(embeds, mask), (embeds * 0, mask)])
+    pipeline.prepare_latents = MagicMock(return_value=torch.zeros(batch_size, 3, 2, 2))
+    positive = torch.full((batch_size, 3, 2, 2), 2.0, dtype=torch.bfloat16)
+    negative = torch.ones_like(positive)
+    pipeline.predict = MagicMock(side_effect=[positive, negative] * 2 if guidance_scale > 1 else [positive] * 2)
+
+    def step(velocity, timestep, sample, **kwargs):
+        assert sample.dtype == velocity.dtype == torch.float32
+        assert kwargs["noise_level"] == 0.0
+        assert kwargs["return_logprobs"] is False
+        return sample - 0.5 * velocity, None, None, None
+
+    pipeline.scheduler = SimpleNamespace(
+        timesteps=torch.tensor([750.0, 250.0]),
+        config=SimpleNamespace(num_train_timesteps=1000),
+        set_begin_index=MagicMock(),
+        step=MagicMock(side_effect=step),
+    )
+    requests = [
+        OmniDiffusionRequest(
+            request_id=str(index),
+            prompt={"prompt_token_ids": [1, 2, 3], "negative_prompt_ids": [3, 2, 1]},
+            sampling_params=OmniDiffusionSamplingParams(
+                height=16,
+                width=16,
+                num_inference_steps=2,
+                guidance_scale=guidance_scale,
+                output_type="latent",
+                seed=index,
+            ),
+        )
+        for index in range(batch_size)
+    ]
+    with (
+        patch.object(rollout_module, "configure_boogu_sde_timesteps"),
+        patch.object(rollout_module, "get_boogu_freqs_cis", return_value=None),
+    ):
+        result = pipeline.forward(DiffusionRequestBatch(requests=requests) if packed else requests[0])
+
+    outputs = result if packed else [result]
+    assert len(outputs) == batch_size
+    # Raw BOOGU velocity is 2 (unguided) or 2 + 3 * (2 - 1) = 5 (CFG).
+    # Two Euler steps of length -0.5 on its negation produce clean values 2/5.
+    expected = 5.0 if guidance_scale > 1 else 2.0
+    for output in outputs:
+        rl = output.output["metadata"]["rl"]
+        torch.testing.assert_close(rl["latents_clean"], torch.full((1, 3, 2, 2), expected))
+        torch.testing.assert_close(rl["train_timesteps"], torch.tensor([[750.0, 250.0]]))
+        assert output.trajectory_latents is None
+        assert output.trajectory_log_probs is None
+    times = [args.args[0].item() for args in pipeline.predict.call_args_list]
+    assert times == ([0.25, 0.25, 0.75, 0.75] if guidance_scale > 1 else [0.25, 0.75])
 
 
 @pytest.mark.parametrize("has_condition", [False, True])
