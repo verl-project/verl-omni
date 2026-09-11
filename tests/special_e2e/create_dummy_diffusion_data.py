@@ -41,21 +41,16 @@ USER_PROMPTS = [
 ]
 
 
-def build_rows(split: str, n: int, data_sources: list[str]):
+def build_rows(split: str, n: int, data_sources: list[str], user_prompt_only: bool = False):
     rows = []
+    prefix = [] if user_prompt_only else [{"role": "system", "content": SYSTEM_PROMPT}]
     for i in range(n):
         prompt_text = USER_PROMPTS[i % len(USER_PROMPTS)]
         rows.append(
             {
                 "data_source": data_sources[i % len(data_sources)],
-                "prompt": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt_text},
-                ],
-                "negative_prompt": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": " "},
-                ],
+                "prompt": prefix + [{"role": "user", "content": prompt_text}],
+                "negative_prompt": prefix + [{"role": "user", "content": " "}],
                 "reward_model": {"style": "rule", "ground_truth": ""},
                 "extra_info": {"split": split, "index": i},
             }
@@ -77,13 +72,16 @@ def main():
         default="jpeg_compressibility",
         help="Comma-separated data_source values assigned to rows in round-robin order",
     )
+    parser.add_argument(
+        "--user_prompt_only", action="store_true", help="Leave model-specific system templating to the encoder"
+    )
     args = parser.parse_args()
     data_sources = args.data_sources.split(",")
 
     os.makedirs(args.local_save_dir, exist_ok=True)
 
-    train_df = pd.DataFrame(build_rows("train", args.train_size, data_sources))
-    val_df = pd.DataFrame(build_rows("test", args.val_size, data_sources))
+    train_df = pd.DataFrame(build_rows("train", args.train_size, data_sources, args.user_prompt_only))
+    val_df = pd.DataFrame(build_rows("test", args.val_size, data_sources, args.user_prompt_only))
 
     train_path = os.path.join(args.local_save_dir, "train.parquet")
     val_path = os.path.join(args.local_save_dir, "test.parquet")

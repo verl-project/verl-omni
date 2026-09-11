@@ -109,8 +109,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
     def __init__(self, config: TrainingWorkerConfig):
         Worker.__init__(self)
 
-        from verl.workers.engine import BaseEngine, EngineRegistry
-
         # TODO(jhz): Switch to `set_expandable_segments` when the torch_npu library
         # supports `torch.npu.memory._set_allocator_settings`
         if is_npu_available:
@@ -155,14 +153,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         )
 
         self.model_config.model_type = self.config.model_type
-        self.engine: BaseEngine = EngineRegistry.new(
-            model_type=self.config.model_type,
-            backend=self.engine_config.strategy,
-            model_config=self.model_config,
-            engine_config=self.engine_config,
-            optimizer_config=self.optimizer_config,
-            checkpoint_config=self.checkpoint_config,
-        )
+        self.engine = self.build_engine()
 
         # build dispatch info
         self._register_dispatch_collect_info(
@@ -173,7 +164,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         if getattr(self.model_config, "hf_config", None) is not None:
             self.flops_counter = FlopsCounter(self.model_config.hf_config)
-        elif self.config.model_type in ("diffusion_model", "diffusion_dpo_model", "diffusion_nft_model"):
+        elif self.config.model_type in (
+            "diffusion_model",
+            "diffusion_dpo_model",
+            "diffusion_nft_model",
+            "diffusion_dmd_model",
+        ):
             self.flops_counter = DiffusionFlopsCounter(
                 architecture=getattr(self.model_config, "architecture", None),
                 transformer_config=getattr(self.model_config, "transformer_config", None),
@@ -182,6 +178,19 @@ class TrainingWorker(Worker, DistProfilerExtension):
             self.flops_counter = None
 
         self.loss_fn = None
+
+    def build_engine(self):
+        """Construct the engine while allowing specialized workers to pass typed settings."""
+        from verl.workers.engine import EngineRegistry
+
+        return EngineRegistry.new(
+            model_type=self.config.model_type,
+            backend=self.engine_config.strategy,
+            model_config=self.model_config,
+            engine_config=self.engine_config,
+            optimizer_config=self.optimizer_config,
+            checkpoint_config=self.checkpoint_config,
+        )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device, model=True, optimizer=True, grad=True):

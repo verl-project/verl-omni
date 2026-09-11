@@ -16,13 +16,19 @@ Flow-GRPO / diffusion trainer with a Ray-based single controller.
 This trainer supports model-agnostic model initialization with Hugging Face.
 """
 
+import hashlib
 import json
 import logging
 import os
+import random
+import shutil
 import subprocess
+import tempfile
+import time
 import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from pathlib import Path
 from pprint import pprint
 from typing import Any, Literal, Optional
 
@@ -768,6 +774,10 @@ class BaseRayDiffusionTrainer(ABC):
     def _teacher_wg_name(key: str) -> str:
         return f"teacher_{key.replace('/', '_')}"
 
+    def actor_worker_extra_kwargs(self):
+        """Additional typed settings for an algorithm-specific training worker."""
+        return {}
+
     def _init_colocated_workers(self):
         """Create Ray pools and colocated actor/ref worker groups (online and offline)."""
         self.resource_pool_manager.create_resource_pool()
@@ -788,6 +798,7 @@ class BaseRayDiffusionTrainer(ABC):
                 config=self.config.actor_rollout_ref,
                 distillation_config=self.config.get("distillation"),
                 role=str(actor_role),
+                **self.actor_worker_extra_kwargs(),
             )
             self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
         else:
@@ -1091,7 +1102,7 @@ class BaseRayDiffusionTrainer(ABC):
             actor_output["perf/mfu/actor"] = actor_mfu
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
-    def _start_profiling(self, do_profile: bool) -> None:
+    def _start_profiling(self, do_profile: bool, profile_step: Optional[int] = None) -> None:
         """Start profiling for all worker groups if profiling is enabled."""
         if not do_profile:
             return
@@ -1105,7 +1116,9 @@ class BaseRayDiffusionTrainer(ABC):
                 self._controller_nsys_profile_active = True
                 controller_profile_started = True
 
-            self.actor_rollout_wg.start_profile(role="e2e", profile_step=self.global_steps)
+            self.actor_rollout_wg.start_profile(
+                role="e2e", profile_step=self.global_steps if profile_step is None else profile_step
+            )
             if self.use_reference_policy and not self.ref_in_actor:
                 self.ref_policy_wg.start_profile(profile_step=self.global_steps)
             if self.use_teacher_policy and Role.TeacherModel in self.role_worker_mapping:
@@ -1487,6 +1500,335 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                 if hasattr(self.train_dataset, "on_batch_end"):
                     # The dataset may be changed after each training batch
                     self.train_dataset.on_batch_end(batch=batch)
+
+
+class DistributionMatchingRayTrainer(BaseRayDiffusionTrainer):
+    """Offline DMD2: one student attempt followed by K fake-score attempts."""
+
+    def __init__(self, config, *args, **kwargs):
+        self.validate_config(config)
+        super().__init__(config, *args, **kwargs)
+        self.dmd_config = omega_conf_to_dataclass(config.dmd)
+        self.global_steps = 0
+        self.optimizer_steps = {"student": 0, "fake_score": 0}
+        self.data_epoch = 0
+        self.batch_iterator = None
+        self.failed = False
+        self.use_reference_policy = False
+
+    @staticmethod
+    def validate_config(config):
+        """Reject unsupported/composite execution before worker or teacher allocation."""
+        if config.algorithm.sample_source != "offline":
+            raise ValueError("DMD2 requires algorithm.sample_source=offline.")
+        actor = config.actor_rollout_ref.actor
+        if config.actor_rollout_ref.model.algorithm != "dmd2" or actor.diffusion_loss.loss_mode != "dmd2":
+            raise ValueError(
+                "DMD2 requires model.algorithm=dmd2 and diffusion_loss.loss_mode=dmd2; original dmd is separate."
+            )
+        if config.actor_rollout_ref.model.model_type != "diffusion_dmd_model":
+            raise ValueError("DMD2 requires model.model_type=diffusion_dmd_model.")
+        if (
+            config.distillation.enabled
+            or actor.use_distill_loss
+            or actor.use_kl_loss
+            or config.algorithm.get("use_kl_in_reward", False)
+        ):
+            raise ValueError("DMD2 distribution-only cannot enable OPD or additional KL objectives.")
+        if config.algorithm.paired_preference or config.actor_rollout_ref.get("separate", False):
+            raise ValueError("DMD2 uses unpaired prompts and colocated training, not separate online rollout.")
+        if actor.strategy not in {"fsdp", "fsdp2"} or actor.ppo_epochs != 1:
+            raise ValueError("DMD2 requires FSDP/FSDP2 and exactly one optimizer attempt per actor call.")
+        engine = actor.fsdp_config
+        rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0) or config.actor_rollout_ref.model.get(
+            "lora_rank", 0
+        )
+        if rank <= 0 or (actor.strategy == "fsdp" and not engine.use_orig_params):
+            raise ValueError("DMD2 shared-base LoRA requires positive rank and FSDP1 use_orig_params=true.")
+        if engine.get("use_dynamic_bsz", False):
+            raise ValueError("DMD2 currently uses static microbatches with synchronized forward counts.")
+        world = config.trainer.n_gpus_per_node * config.trainer.nnodes
+        sp = engine.ulysses_sequence_parallel_size
+        if world <= 0 or sp <= 0 or world % sp or config.data.train_batch_size % (world // sp):
+            raise ValueError("DMD2 global batch must divide evenly across data-parallel ranks.")
+        if config.data.get("gen_batch_size") not in (None, config.data.train_batch_size):
+            raise ValueError("DMD2 gen_batch_size must equal train_batch_size.")
+        if config.trainer.default_hdfs_dir is not None or actor.checkpoint.get("async_save", False):
+            raise ValueError("DMD2 uses synchronous atomic checkpoints in a shared local directory.")
+        for contents in (actor.checkpoint.save_contents, actor.checkpoint.load_contents):
+            if not {"model", "optimizer", "extra"}.issubset(contents):
+                raise ValueError("DMD2 checkpoints require saving and loading model, optimizer and extra state.")
+        if config.trainer.get("val_only", False):
+            raise ValueError("DMD2 validation-only serving is not implemented; use the exported student artifact.")
+        omega_conf_to_dataclass(config.dmd)
+
+    def actor_worker_extra_kwargs(self):
+        """Pass standalone DMD settings through the shared worker constructor."""
+        return {"dmd_config": self.config.dmd}
+
+    def _validate(self):
+        """Offline DMD2 exports inference artifacts rather than starting an RL server."""
+        return {"val/offline/skipped": 1.0}
+
+    def next_batch(self):
+        """Reuse the stateful dataloader, including its sampler and resume position."""
+        if self.batch_iterator is None:
+            self.batch_iterator = iter(self.train_dataloader)
+        try:
+            batch = next(self.batch_iterator)
+        except StopIteration:
+            self.data_epoch += 1
+            self.batch_iterator = iter(self.train_dataloader)
+            batch = next(self.batch_iterator)
+        return _to_diffusion_worker_tensordict(DataProto.from_single_dict(batch))
+
+    def update_stage(self, stage, repeat):
+        """Dispatch one attempt and validate its numerical outcome, never retry it."""
+        batch = self.next_batch()
+        tu.assign_non_tensor(batch, dmd_stage=stage)
+        output = self.actor_rollout_wg.update_actor(batch)
+        raw = tu.get(output, "metrics")
+        metrics = {key: float(value) for key, value in reduce_metrics(raw).items()}
+        applied = metrics.get("dmd/update_applied")
+        skipped = metrics.get("dmd/skip_nonfinite")
+        if applied not in (0.0, 1.0) or skipped != 1.0 - applied:
+            raise RuntimeError("Malformed DMD2 optimizer outcome; restore the last complete checkpoint.")
+        self.optimizer_steps[stage] += int(applied)
+        metrics["training/samples"] = self.config.data.train_batch_size
+        return {f"{stage}/{repeat}/{key}": value for key, value in metrics.items()}
+
+    def configuration_fingerprint(self):
+        """Canonicalize the mathematical, optimizer and data settings, not output paths."""
+        payload = {
+            "model": OmegaConf.to_container(self.config.actor_rollout_ref.model, resolve=True),
+            "engine": OmegaConf.to_container(self.config.actor_rollout_ref.actor.fsdp_config, resolve=True),
+            "optimizer": OmegaConf.to_container(self.config.actor_rollout_ref.actor.optim, resolve=True),
+            "dmd": OmegaConf.to_container(self.config.dmd, resolve=True),
+            "data": OmegaConf.to_container(self.config.data, resolve=True),
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    def validate_actor_checkpoint(self, path, step, counts):
+        """Check all rank files and role clocks before publication or model mutation."""
+        world = self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes
+        for rank in range(world):
+            for filename in (
+                f"model_world_size_{world}_rank_{rank}.pt",
+                f"optim_world_size_{world}_rank_{rank}.pt",
+                f"extra_state_world_size_{world}_rank_{rank}.pt",
+                f"dmd_state_rank_{rank}.pt",
+            ):
+                if not (path / "actor" / filename).is_file():
+                    raise ValueError(f"Incomplete DMD2 checkpoint: missing {filename}.")
+            state = torch.load(path / "actor" / f"dmd_state_rank_{rank}.pt", map_location="cpu", weights_only=False)
+            if state.get("version") != 1 or state.get("world_size") != world or state.get("optimizer_steps") != counts:
+                raise ValueError("Worker and trainer DMD2 checkpoint versions or counters do not match.")
+            quotas = {"student": step, "fake_score": step * self.dmd_config.fake_update_ratio}
+            if state.get("skipped_steps") != {role: quota - counts[role] for role, quota in quotas.items()}:
+                raise ValueError("DMD2 checkpoint skipped-update counters do not match completed cycles.")
+            if not {"fake_optimizer", "fake_scheduler", "generators"}.issubset(state):
+                raise ValueError("DMD2 checkpoint is missing optimizer, scheduler or sampling state.")
+
+    def _save_checkpoint(self):
+        """Publish actor shards, both clocks, dataloader and RNG as one complete cycle."""
+        root = Path(self.config.trainer.default_local_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        target = root / f"global_step_{self.global_steps}"
+        if target.exists():
+            raise FileExistsError(f"Refusing to overwrite checkpoint {target}.")
+        temporary = Path(tempfile.mkdtemp(prefix=f".global_step_{self.global_steps}_", dir=root))
+        try:
+            self.actor_rollout_wg.save_checkpoint(str(temporary / "actor"), global_step=self.global_steps)
+            self.validate_actor_checkpoint(temporary, self.global_steps, self.optimizer_steps)
+            torch.save(self.train_dataloader.state_dict(), temporary / "data.pt")
+            torch.save(
+                {
+                    "version": 1,
+                    "global_step": self.global_steps,
+                    "optimizer_steps": self.optimizer_steps,
+                    "data_epoch": self.data_epoch,
+                    "configuration": self.configuration_fingerprint(),
+                    "rng": {
+                        "torch": torch.get_rng_state(),
+                        "numpy": np.random.get_state(),
+                        "python": random.getstate(),
+                    },
+                },
+                temporary / "trainer.pt",
+            )
+            os.replace(temporary, target)
+            tracker = root / f".latest_{uuid.uuid4().hex}"
+            tracker.write_text(str(self.global_steps))
+            os.replace(tracker, root / "latest_checkpointed_iteration.txt")
+        except Exception:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+            raise
+        keep = self.config.trainer.get("max_actor_ckpt_to_keep")
+        if keep is not None and keep > 0:
+            checkpoints = sorted(
+                (
+                    p
+                    for p in root.glob("global_step_*")
+                    if p.is_dir()
+                    and not p.is_symlink()
+                    and p.name.removeprefix("global_step_").isdigit()
+                    and (p / "trainer.pt").is_file()
+                ),
+                key=lambda p: int(p.name.removeprefix("global_step_")),
+            )
+            for old in checkpoints[:-keep]:
+                shutil.rmtree(old)
+
+    def _load_checkpoint(self):
+        """Validate the new format before loading; old prototype checkpoints are not reinterpreted."""
+        mode = self.config.trainer.resume_mode
+        if mode == "disable":
+            return
+        if mode == "auto":
+            path = find_latest_ckpt_path(self.config.trainer.default_local_dir)
+            if path is None:
+                return
+        elif mode == "resume_path":
+            path = self.config.trainer.resume_from_path
+        else:
+            raise ValueError(f"Unknown resume_mode {mode!r}.")
+        path = Path(path)
+        if not (path / "trainer.pt").is_file() or not (path / "data.pt").is_file():
+            raise ValueError("Incomplete/old DMD2 checkpoint: trainer.pt and data.pt are required.")
+        state = torch.load(path / "trainer.pt", map_location="cpu", weights_only=False)
+        if state.get("version") != 1 or state.get("configuration") != self.configuration_fingerprint():
+            raise ValueError(
+                "DMD2 checkpoint format/configuration does not match; prototype migration is not implicit."
+            )
+        counts = state.get("optimizer_steps", {})
+        step = state.get("global_step")
+        if isinstance(step, bool) or not isinstance(step, int) or step < 0 or set(counts) != {"student", "fake_score"}:
+            raise ValueError("Invalid DMD2 checkpoint counters.")
+        for role, maximum in (("student", step), ("fake_score", step * self.dmd_config.fake_update_ratio)):
+            if isinstance(counts[role], bool) or not isinstance(counts[role], int) or not 0 <= counts[role] <= maximum:
+                raise ValueError("DMD2 successful optimizer counts exceed completed attempt quotas.")
+        self.validate_actor_checkpoint(path, step, counts)
+        if (
+            isinstance(state.get("data_epoch"), bool)
+            or not isinstance(state.get("data_epoch"), int)
+            or state["data_epoch"] < 0
+        ):
+            raise ValueError("Invalid DMD2 checkpoint data epoch.")
+        if not {"torch", "numpy", "python"}.issubset(state.get("rng", {})):
+            raise ValueError("Missing DMD2 driver RNG state.")
+        data_state = torch.load(path / "data.pt", weights_only=False)
+        restored = self.actor_rollout_wg.load_checkpoint(str(path / "actor"), del_local_after_load=False)
+        if restored is not None and any(item != counts for item in restored):
+            raise ValueError("Worker and trainer optimizer counters do not match.")
+        self.train_dataloader.load_state_dict(data_state)
+        self.global_steps, self.optimizer_steps, self.data_epoch = step, counts, state["data_epoch"]
+        torch.set_rng_state(state["rng"]["torch"])
+        np.random.set_state(state["rng"]["numpy"])
+        random.setstate(state["rng"]["python"])
+        self.batch_iterator = None
+
+    def export_student(self):
+        """Write one student inference artifact, separately from the resumable checkpoint."""
+        directory = Path(self.config.trainer.default_local_dir) / "inference"
+        metadata = {
+            "algorithm": "dmd2",
+            "role": self.dmd_config.export_role,
+            "global_step": self.global_steps,
+            "student_optimizer_steps": self.optimizer_steps["student"],
+            "base_model": self.config.actor_rollout_ref.model.path,
+            "configuration": self.configuration_fingerprint(),
+            "sampler": "ode_euler",
+            "num_inference_steps": self.config.actor_rollout_ref.model.pipeline.num_inference_steps,
+            "height": self.config.actor_rollout_ref.model.pipeline.height,
+            "width": self.config.actor_rollout_ref.model.pipeline.width,
+            "max_sequence_length": self.config.actor_rollout_ref.model.pipeline.max_sequence_length,
+            "rollout_timestep_shift": self.dmd_config.rollout_timestep_shift,
+            "guidance_scale": 1.0,
+        }
+        provenance = self.actor_rollout_wg.get_model_provenance()
+        if not provenance or any(value != provenance[0] for value in provenance):
+            raise ValueError("DMD2 workers disagree on base checkpoint provenance.")
+        metadata.update(provenance[0])
+        manifest = directory / "inference_manifest.json"
+        if directory.exists():
+            weights = directory / "adapter_model.safetensors"
+            if not manifest.is_file() or not weights.is_file() or not (directory / "adapter_config.json").is_file():
+                raise ValueError("Incomplete inference artifact; choose a new output directory.")
+            with weights.open("rb") as file:
+                metadata["weights_sha256"] = hashlib.file_digest(file, "sha256").hexdigest()
+            if json.loads(manifest.read_text()) != metadata:
+                raise ValueError("Incompatible inference artifact; choose a new output directory.")
+            return
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=".inference_", dir=directory.parent))
+        try:
+            artifact = temporary / "adapter"
+            self.actor_rollout_wg.export_student(str(artifact), role=self.dmd_config.export_role)
+            with (artifact / "adapter_model.safetensors").open("rb") as file:
+                metadata["weights_sha256"] = hashlib.file_digest(file, "sha256").hexdigest()
+            (artifact / "inference_manifest.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
+            os.replace(artifact, directory)
+        finally:
+            shutil.rmtree(temporary)
+
+    def fit(self):
+        """Use shared worker/data/profiling services with a finite explicit 1:K loop."""
+        from verl.utils.tracking import Tracking
+
+        if self.failed:
+            raise RuntimeError("A failed DMD2 trainer must be reconstructed from its last complete checkpoint.")
+        logger = Tracking(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+            default_backend=self.config.trainer.logger,
+            config=OmegaConf.to_container(self.config, resolve=True),
+        )
+        self._load_checkpoint()
+        profile_steps = self.config.global_profiler.steps or []
+        profiling = False
+        progress = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="DMD2 Training")
+        try:
+            while self.global_steps < self.total_training_steps:
+                cycle = self.global_steps + 1
+                if cycle in profile_steps and not profiling:
+                    self._start_profiling(True, profile_step=cycle)
+                    profiling = True
+                start = time.perf_counter()
+                metrics = self.update_stage("student", 0)
+                for repeat in range(self.dmd_config.fake_update_ratio):
+                    metrics.update(self.update_stage("fake_score", repeat))
+                self.global_steps = cycle
+                metrics["perf/cycle_s"] = time.perf_counter() - start
+                metrics["training/global_step"] = cycle
+                metrics["training/data_epoch"] = self.data_epoch
+                for stage, count in self.optimizer_steps.items():
+                    metrics[f"training/{stage}_optimizer_steps"] = count
+                if self.config.trainer.save_freq > 0 and (
+                    cycle % self.config.trainer.save_freq == 0 or cycle == self.total_training_steps
+                ):
+                    start = time.perf_counter()
+                    self._save_checkpoint()
+                    metrics["perf/checkpoint_s"] = time.perf_counter() - start
+                if self.config.trainer.test_freq > 0 and cycle % self.config.trainer.test_freq == 0:
+                    metrics.update(self._validate())
+                logger.log(data=metrics, step=cycle)
+                progress.update(1)
+                if profiling and (
+                    not self.config.global_profiler.profile_continuous_steps or cycle + 1 not in profile_steps
+                ):
+                    self._stop_profiling(True)
+                    profiling = False
+            if not all(self.optimizer_steps.values()):
+                raise RuntimeError("The finite DMD2 attempt budget ended without successful updates for both roles.")
+            self.export_student()
+        except Exception:
+            self.failed = True
+            raise
+        finally:
+            if profiling:
+                self._stop_profiling(True)
+            progress.close()
 
 
 class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):

@@ -678,13 +678,8 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         """
         self.optimizer.zero_grad()
 
-    def optimizer_step(self):
-        """
-        Clip gradients, skip update if non-finite, and step optimizer.
-
-        Returns:
-            grad_norm (float): Norm of gradients before clipping.
-        """
+    def clip_grad_norm(self):
+        """Clip gradients using the active FSDP strategy and return the global norm."""
         assert self.optimizer_config.clip_grad is not None
 
         if isinstance(self.module, FSDP):
@@ -699,7 +694,11 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         if isinstance(grad_norm, DTensor):
             grad_norm = grad_norm.full_tensor()
 
-        # if grad_norm is not finite, skip the update
+        return grad_norm
+
+    def optimizer_step(self):
+        """Clip gradients and step the optimizer only when the norm is finite."""
+        grad_norm = self.clip_grad_norm()
         if not torch.isfinite(grad_norm):
             print(f"WARN: grad_norm is not finite: {grad_norm}")
             self.optimizer.zero_grad()
@@ -811,15 +810,21 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
         if hasattr(peft_model, "peft_config"):  # LoRA
             if not merge_lora:
-                peft_config = peft_model.peft_config.get("default", None)
-                adapter_ctx = self.use_adapter(adapter_name) if adapter_name is not None else nullcontext()
+                resolved_adapter = adapter_name or "default"
+                peft_config = peft_model.peft_config.get(resolved_adapter, None)
+                if peft_config is None:
+                    raise ValueError(
+                        f"Cannot export unknown LoRA adapter {resolved_adapter!r}; "
+                        f"available adapters: {sorted(peft_model.peft_config)}."
+                    )
+                adapter_ctx = self.use_adapter(resolved_adapter)
                 with adapter_ctx:
                     params = collect_lora_params(
                         module=self.module,
                         layered_summon=layered_summon,
                         base_sync_done=base_sync_done,
                         is_diffusers=True,
-                        adapter_name=adapter_name or "default",
+                        adapter_name=resolved_adapter,
                         layer_prefixes=self.model_config.fsdp_layer_prefixes,
                     )
             else:  # merge lora

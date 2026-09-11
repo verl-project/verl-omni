@@ -13,14 +13,34 @@
 # limitations under the License.
 """Reusable PEFT/LoRA adapter lifecycle helpers for training engines."""
 
+import json
 import logging
 from contextlib import contextmanager, nullcontext
+from pathlib import Path
 
 import torch
 from peft import LoraConfig
 from verl.utils.py_functional import convert_to_regular_types
 
 logger = logging.getLogger(__name__)
+
+
+def load_diffusers_lora_adapter(module, path, adapter_name="default"):
+    """Load a native Diffusers LoRA or a PEFT export with its own scaling metadata."""
+    weights_path = Path(path) / "adapter_model.safetensors"
+    metadata_path = Path(path) / "adapter_config.json"
+    if weights_path.is_file() and metadata_path.is_file():
+        from safetensors.torch import load_file
+
+        weights = {
+            key.removeprefix("base_model.model.").removeprefix("transformer."): value
+            for key, value in load_file(weights_path).items()
+        }
+        module.load_lora_adapter(
+            weights, adapter_name=adapter_name, prefix=None, metadata=json.loads(metadata_path.read_text())
+        )
+    else:
+        module.load_lora_adapter(path, adapter_name=adapter_name)
 
 
 class LoRAAdapterMixin:
@@ -38,7 +58,7 @@ class LoRAAdapterMixin:
             local_adapter_path = copy_to_local(lora_adapter_path, use_shm=self.model_config.use_shm)
 
             # diffusers auto-names an unnamed first adapter "default_0"; name it explicitly.
-            module.load_lora_adapter(local_adapter_path, adapter_name=primary_adapter)
+            load_diffusers_lora_adapter(module, local_adapter_path, primary_adapter)
             peft_config = getattr(module, "peft_config", {}).get(primary_adapter, None)
             for adapter_name in extra_adapters:
                 if peft_config is not None and adapter_name not in getattr(module, "peft_config", {}):
@@ -78,6 +98,25 @@ class LoRAAdapterMixin:
 
         return module
 
+    def active_adapter_selection(self):
+        """Read the current named adapter selection for context restoration."""
+        module = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        active = getattr(module, "active_adapters", None)
+        if callable(active):
+            active = active()
+        if active is None:
+            active = getattr(module, "active_adapter", None)
+        if isinstance(active, list | tuple):
+            return active[0] if len(active) == 1 else list(active)
+        return active
+
+    def restore_adapter_selection(self, selection) -> None:
+        """Restore the preceding adapter rather than always selecting default."""
+        if selection:
+            self._set_adapter(selection)
+        else:
+            self._set_adapter("default")
+
     @contextmanager
     def _adapter_state_context(self):
         """Open writable adapter parameter access (FSDP summon when applicable)."""
@@ -89,6 +128,7 @@ class LoRAAdapterMixin:
         is_fsdp_module = fsdp_version(self.module) in (1, 2)
         is_offload_param = getattr(self, "_is_offload_param", False)
         origin_module_device = next(self.module.parameters()).device.type
+        previous_adapter = self.active_adapter_selection()
         if is_fsdp_module and (is_offload_param or origin_module_device == "cpu"):
             load_fsdp_model_to_gpu(self.module)
 
@@ -98,13 +138,13 @@ class LoRAAdapterMixin:
                 try:
                     yield
                 finally:
-                    self._set_adapter("default")
+                    self.restore_adapter_selection(previous_adapter)
         finally:
             if is_offload_param:
                 offload_fsdp_model_to_cpu(self.module)
                 aggressive_empty_cache(force_sync=True)
 
-    def _set_adapter(self, name: str):
+    def _set_adapter(self, name):
         module = getattr(self.module, "_fsdp_wrapped_module", self.module)
         if not hasattr(module, "set_adapter"):
             raise AttributeError(f"Module does not support set_adapter({name!r})")
@@ -117,6 +157,7 @@ class LoRAAdapterMixin:
         ``"reference"`` is a logical policy state (see ``policy_state_adapters``)
         that runs with all LoRA adapters disabled, not a registered PEFT adapter.
         """
+        previous_adapter = self.active_adapter_selection()
         if name == "reference":
             with self.disable_adapter():
                 yield
@@ -125,7 +166,7 @@ class LoRAAdapterMixin:
             try:
                 yield
             finally:
-                self._set_adapter("default")
+                self.restore_adapter_selection(previous_adapter)
 
     def _active_adapter_trainable_params(self, adapter_name: str) -> list[torch.nn.Parameter]:
         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)

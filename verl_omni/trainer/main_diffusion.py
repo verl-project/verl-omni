@@ -130,8 +130,13 @@ def _get_trainer_cls(config):
         return PolicyGradientRayTrainer
     if trainer_type == "direct_preference":
         return DirectPreferenceRayTrainer
+    if trainer_type == "distribution_matching":
+        from verl_omni.trainer.diffusion.ray_diffusion_trainer import DistributionMatchingRayTrainer
+
+        return DistributionMatchingRayTrainer
     raise ValueError(
-        f"Unsupported diffusion trainer_type {trainer_type!r}. Expected one of: 'policy_gradient', 'direct_preference'."
+        f"Unsupported diffusion trainer_type {trainer_type!r}. "
+        "Expected one of: 'policy_gradient', 'direct_preference', 'distribution_matching'."
     )
 
 
@@ -154,6 +159,15 @@ class TaskRunner:
         """Add actor (and optional rollout/ref) workers using the unified model engine."""
         from verl.single_controller.ray import RayWorkerGroup
         from verl.trainer.ppo.ray_trainer import Role
+
+        if config.algorithm.trainer_type == "distribution_matching":
+            from verl_omni.trainer.diffusion.ray_diffusion_trainer import DistributionMatchingRayTrainer
+            from verl_omni.workers.dmd_worker import DMDTrainingWorker
+
+            DistributionMatchingRayTrainer.validate_config(config)
+            self.role_worker_mapping[Role.Actor] = ray.remote(DMDTrainingWorker)
+            self.mapping[Role.Actor] = "global_pool"
+            return DMDTrainingWorker, RayWorkerGroup
 
         from verl_omni.workers.engine_workers import ActorRolloutRefWorker
 

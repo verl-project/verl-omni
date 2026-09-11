@@ -32,6 +32,10 @@ class _ToyModel(torch.nn.Module):
         # Carrying a ``peft_config`` is all ``get_per_tensor_param`` needs to
         # take the LoRA branch.
         self.peft_config = {"default": SimpleNamespace(to_dict=lambda: {"r": 8})}
+        self.active_adapter = "default"
+
+    def set_adapter(self, name):
+        self.active_adapter = name
 
 
 def _make_engine(module, lora_config: dict) -> PPODiffusersFSDPEngine:

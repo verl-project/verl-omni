@@ -12,11 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 import os
+from pathlib import Path
 
 from verl.utils.fs import copy_to_local
 
-__all__ = ["resolve_model_local_dir"]
+__all__ = ["resolve_model_local_dir", "diffusion_model_provenance"]
+
+
+def diffusion_model_provenance(local_path: str) -> dict:
+    """Record a resolved snapshot's revision when available and its transformer config hash."""
+    root = Path(local_path)
+    revision = root.name if root.parent.name == "snapshots" else None
+    metadata = root / ".cache/huggingface/download/model_index.json.metadata"
+    if metadata.is_file():
+        with metadata.open() as file:
+            revision = file.readline().strip()
+    if not revision or len(revision) != 40 or any(char not in "0123456789abcdef" for char in revision):
+        revision = None
+    with (root / "transformer/config.json").open("rb") as file:
+        config_hash = hashlib.file_digest(file, "sha256").hexdigest()
+    return {"base_model_revision": revision, "base_transformer_config_sha256": config_hash}
 
 
 def resolve_model_local_dir(path: str, use_shm: bool = False) -> str:
