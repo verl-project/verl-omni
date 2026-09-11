@@ -75,7 +75,23 @@ alone:
   unrelated refactors, reformatting, and orphaned dead code (unused imports,
   variables, functions left by your own change).
 
-## 4. Report
+## 4. Route reviewers for documentation changes
+
+When the diff changes documentation, identify the responsible people and
+include an explicit mention in the discussion. Do not guess from recent
+contributors; use the repository's ownership sources in this order:
+
+1. Read `docs/community/governance.md`. Its **Path Ownership** table is the
+   source of truth for subsystem boundaries and its **Active Committers** list
+   gives the matching GitHub usernames.
+2. Check `.github/CODEOWNERS` for the operational path-based reviewer route.
+   Apply the last matching rule; a more specific path overrides a broader one.
+3. Deduplicate usernames and tag at most two maintainers. Prefer the owner
+   from the governance path table; add one topic owner only when the document
+   materially covers that subsystem. If the mapping is unclear, use the
+   governance owner rather than inventing a reviewer.
+
+## 5. Report
 
 - **Blocking** — numbered. Each: title → explanation → `file.py:line` → impact.
   Cite the rule, e.g. *Per `.agents/rules/config.md`: regenerate the yaml.*
@@ -108,7 +124,7 @@ be grounded, or explicitly marked as ungrounded:
 - If you could not open a file or run a check, say so plainly rather than
   producing a plausible-sounding finding. An honest gap beats a fabricated one.
 
-## 5. Iterate, then share
+## 6. Iterate, then share
 
 Expect several rounds: the contributor fixes findings, you review again. Keep
 going until the verdict is **READY** — only the *leave for the actual review*
