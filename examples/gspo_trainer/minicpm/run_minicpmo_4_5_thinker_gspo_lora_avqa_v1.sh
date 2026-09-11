@@ -3,7 +3,10 @@
 # Hyperparameters are copied verbatim from the proven Qwen3-Omni AVQA recipe
 # (examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh);
 # only the model-specific lines differ (model path, trust_remote_code, pipeline
-# name, dataset class, LoRA exclusions, HF config overrides).
+# name, dataset class, LoRA exclusions, reward manager, HF config overrides):
+# the omni_naive manager demotes the checkpoint's special <answer> tags on
+# the reward loop's own tokenizer, which never passes through the training
+# adapter's configure_tokenizer.
 #
 # Data preparation (run once, same as the Qwen3-Omni AVQA recipe):
 #   python examples/gspo_trainer/data_process/avqa.py \
@@ -88,7 +91,7 @@ python3 -m verl_omni.trainer.main_omni \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=False \
     reward.reward_manager.source=register \
-    reward.reward_manager.name=naive \
+    reward.reward_manager.name=omni_naive \
     reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py \
     reward.custom_reward_function.name=compute_score \
     trainer.val_before_train=false \

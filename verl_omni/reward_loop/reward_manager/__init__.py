@@ -14,6 +14,7 @@
 
 from .audio import AudioRewardManager
 from .multi import MultiVisualRewardManager
+from .omni_naive import OmniNaiveRewardManager
 from .visual import VisualRewardManager
 
-__all__ = ["AudioRewardManager", "VisualRewardManager", "MultiVisualRewardManager"]
+__all__ = ["AudioRewardManager", "VisualRewardManager", "MultiVisualRewardManager", "OmniNaiveRewardManager"]

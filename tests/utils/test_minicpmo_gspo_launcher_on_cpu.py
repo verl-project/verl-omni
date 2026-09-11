@@ -66,7 +66,10 @@ def test_minicpmo_gspo_launcher_contract():
     assert "data.max_response_length=12288" in settings  # 4096 CLI overrides truncate MiniCPM's think
     assert "actor_rollout_ref.rollout.temperature=0.6" in settings  # checkpoint think default, not Qwen's 1.0
     assert "reward.reward_manager.source=register" in settings
-    assert "reward.reward_manager.name=naive" in settings
+    # The reward loop builds its own tokenizer (never through the adapter's
+    # configure_tokenizer), so the stock naive manager strips the checkpoint's
+    # special <answer> tags and zeroes every score; omni_naive demotes them.
+    assert "reward.reward_manager.name=omni_naive" in settings
     assert "reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py" in settings
     assert "reward.custom_reward_function.name=compute_score" in settings
     assert "data.train_batch_size=128" in settings
