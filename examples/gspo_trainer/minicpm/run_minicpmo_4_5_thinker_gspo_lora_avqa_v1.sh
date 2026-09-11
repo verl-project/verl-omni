@@ -3,7 +3,10 @@
 # Hyperparameters are copied verbatim from the proven Qwen3-Omni AVQA recipe
 # (examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh);
 # only the model-specific lines differ (model path, trust_remote_code, pipeline
-# name, dataset class, LoRA exclusions, HF config overrides).
+# name, dataset class, LoRA exclusions, HF config overrides), plus one
+# MiniCPM-specific deviation: pinned rollout log probs (without
+# calculate_log_probs the engine returns placeholders and every
+# train/rollout parity metric is computed against zeros).
 #
 # Data preparation (run once, same as the Qwen3-Omni AVQA recipe):
 #   python examples/gspo_trainer/data_process/avqa.py \
@@ -71,6 +74,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.prompt_length=4160 \
+    actor_rollout_ref.rollout.calculate_log_probs=true \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=20480 \
     actor_rollout_ref.rollout.enable_prefix_caching=False \

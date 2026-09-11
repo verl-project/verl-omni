@@ -217,7 +217,7 @@ def test_configure_model_strips_generation_modules_and_keeps_outer_forward():
     assert configured.set_input_embeddings.__self__ is configured.llm
     assert configured.prepare_inputs_for_generation.__self__ is configured.llm
     assert configured._no_split_modules == ["Qwen3DecoderLayer", "MiniCPMODecoderLayer"]
-    assert MiniCPMThinkerAdapter.get_fsdp_ignored_module_names(_model_config()) == ["apm"]
+    assert MiniCPMThinkerAdapter.get_fsdp_ignored_module_names(_model_config()) == ["apm", "vpm", "resampler"]
 
 
 class _MiniCPMOWithEncoders(_MiniCPMOStyle):

@@ -73,6 +73,10 @@ def test_minicpmo_gspo_launcher_contract():
     assert "actor_rollout_ref.rollout.n=16" in settings
     assert "trainer.n_gpus_per_node=4" in settings
 
+    # Without this pin the engine returns placeholder log probs and every
+    # train/rollout parity metric is computed against zeros.
+    assert "actor_rollout_ref.rollout.calculate_log_probs=true" in settings
+
 
 def test_minicpmo_gspo_launcher_keeps_flash_attention_default():
     # sdpa breaks train/rollout consistency; the recipe must not override the

@@ -353,7 +353,16 @@ class MiniCPMThinkerAdapter(OmniModelBase):
 
     @classmethod
     def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
-        return ["apm"]
+        # apm/vpm/resampler are frozen under this adapter's LoRA setup (the
+        # exclude regex covers apm/vpm; the resampler matches no
+        # target_modules name), and their forwards are skipped for media-free
+        # micro-batches (patch_minicpm_get_vision/_audio_embedding). FSDP2
+        # issues collectives per managed module, and media presence is not
+        # DP-balanced, so sharded towers whose execution is data-dependent
+        # desync the NCCL collective stream across ranks (one op apart ->
+        # watchdog deadlock). Unsharded, the skips are collective-neutral.
+        # Cost: ~1.2 GB/rank replicated, mitigated by param_offload.
+        return ["apm", "vpm", "resampler"]
 
     @classmethod
     def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
