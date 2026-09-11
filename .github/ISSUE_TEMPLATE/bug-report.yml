@@ -84,7 +84,7 @@ body:
         - Omni PPO-related (e.g., Qwen3-Omni+GSPO): @zhtmike
         - DAPO: @WenzheWang
         - Distillation (e.g., OPD): @cr-gao
-        - Diffusion NFT: @NancyFyong
+        - Diffusion NFT: @NancyFyong @AndyZhou952 
         - DPO: @wtomin
 
         Questions on infrastructure and backend:
