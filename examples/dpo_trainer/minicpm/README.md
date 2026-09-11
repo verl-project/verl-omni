@@ -1,0 +1,59 @@
+# MiniCPM Offline DPO
+
+This example trains MiniCPM multimodal understanding with offline DPO through
+`verl_omni.trainer.main_omni`.  It uses turn-based preference rows and keeps the
+training path simplex: vision/audio understanding modules and the AR language
+model can be trained, while audio generation modules such as talker, codec,
+TTS, audio decoder, and code2wav are excluded by default.
+
+## Supported batch kinds
+
+MiniCPM's remote-code processor supports two training batch types only:
+
+1. **Image-only** batches from `image/*.parquet` rows.
+2. **Audio-only** batches from `audio/*.parquet` rows with standalone `audios`
+   paths and `<audio>` prompt placeholders.
+
+
+## Data
+
+Prepare Omni-Preference parquet files by following
+[`omni_preference_dpo_dataset.md`](../data_process/omni_preference_dpo_dataset.md).
+
+Convert Omni-Preference into the offline MLLM DPO parquet schema:
+
+```bash
+python examples/dpo_trainer/data_process/omni_preference_dpo_multisource.py \
+  --dataset_root "$HOME/Omni-Preference" \
+  --output_dir "$HOME/Omni-Preference/parquet_dpo" \
+  --modalities image audio
+```
+
+The generated parquet schema is model-agnostic. MiniCPM-specific behavior is
+handled later by `data.base_transform=minicpm` in the dataset transform, not by a
+separate Omni-Preference converter.
+
+Parquet prompts should keep compact semantic markers (`<image>`, `<audio>`).
+The MiniCPM transform rewrites them to processor slots (`<image>./</image>`,
+`<audio>./</audio>`) before calling `MiniCPMOProcessor`.
+
+## Training
+
+```bash
+DATASET_ROOT="$HOME/Omni-Preference" \
+DATA_DIR="$DATASET_ROOT/parquet_dpo" \
+MODEL_PATH=openbmb/MiniCPM-o-4_5 \
+bash examples/dpo_trainer/minicpm/run_minicpm_omni_preference_lora.sh
+```
+
+`OmniFSDPEngine._build_module` loads MiniCPM-o through
+`MiniCPMThinkerAdapter.auto_model_class` (`architectures[0]` is `MiniCPMO`). The launch script sets `init_tts=false` through the
+Hugging Face config override so the inference-only TTS module is not initialized
+for training.
+
+Key defaults in the launch script:
+
+- `data.train_files`: image + audio parquet only
+- `ModalityGroupedBatchSampler` weights: `{image, audio}` only
+- `actor_rollout_ref.model.exclude_modules`: skip LoRA on `vpm` / `apm` and
+  generation-only modules.
