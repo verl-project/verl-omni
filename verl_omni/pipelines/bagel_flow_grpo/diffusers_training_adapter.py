@@ -106,17 +106,17 @@ class BagelDiffusion(DiffusionModelBase):
         micro_batch: TensorDict,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Pad BAGEL-native ``prompt_token_ids`` from the data pipeline.
+        """Pad BAGEL-native ``prompts`` token ids from the data pipeline.
 
         Args:
-            micro_batch: Batch containing pre-tokenized ``prompt_token_ids``,
+            micro_batch: Batch containing pre-tokenized ``prompts``,
                 one sequence per sample, already in BAGEL format.
             device: Target device for the padded tensors.
 
         Returns:
             ``(text_token_ids, text_attention_mask)`` with shape ``(B, max_len)``.
         """
-        prompt_token_ids = micro_batch["prompt_token_ids"]
+        prompt_token_ids = micro_batch["prompts"]
         if isinstance(prompt_token_ids, NonTensorStack):
             prompt_token_ids = [
                 tu.unwrap_non_tensor_data(prompt_token_ids[i]) for i in range(micro_batch.batch_size[0])
