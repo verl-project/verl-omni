@@ -30,7 +30,7 @@ from verl.workers.rollout.replica import RolloutMode
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
-MODEL_PATH = Path(os.path.expanduser("~/models/tiny-random/Qwen-Image"))
+MODEL_PATH = Path(os.path.expanduser("${HOME}/.cache/huggingface/hub/models--Qwen--Qwen-Image/snapshots/75e0b4be04f60ec59a75f475837eced720f823b6"))
 
 _MIN_PROMPT_TOKENS = 35
 
@@ -89,6 +89,7 @@ def init_server():
             "enable_sleep_mode": True,
             "free_cache_engine": True,
             "disable_log_stats": True,
+            "rollout_attn_backend": "TORCH_SDPA",
             "n": 2,
             "pipeline": {
                 "_target_": "verl_omni.workers.config.diffusion.rollout.DiffusionPipelineConfig",
@@ -106,6 +107,8 @@ def init_server():
             "tokenizer_path": os.path.join(model_path, "tokenizer"),
             "trust_remote_code": True,
             "load_tokenizer": True,
+            "algorithm": "flow_grpo",
+            "attn_backend": "_native_npu",
         }
     )
     model_cfg.architecture = "QwenImageTransformer2DModel"

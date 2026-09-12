@@ -3,9 +3,9 @@
 set -xeuo pipefail
 
 NUM_NPUS=${NUM_NPUS:-4}
-MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/Qwen-Image}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/huggingface/hub/models--Qwen--Qwen-Image/snapshots/75e0b4be04f60ec59a75f475837eced720f823b6}
 TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_PATH}/tokenizer}
-DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_diffusion}
+DATA_DIR=${DATA_DIR:-${HOME}/data/ocr/qwen_image}
 dummy_train_path=${TRAIN_FILES:-${DATA_DIR}/train.parquet}
 dummy_test_path=${VAL_FILES:-${DATA_DIR}/test.parquet}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-1}
@@ -38,7 +38,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.max_prompt_length=${max_prompt_length} \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.model.tokenizer_path=${TOKENIZER_PATH} \
-    actor_rollout_ref.model.use_shm=True \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \
     actor_rollout_ref.model.target_modules=all-linear \
