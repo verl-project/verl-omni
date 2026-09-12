@@ -50,3 +50,20 @@ def test_lora_probe_propagates_genuine_actor_failure():
 
     with pytest.raises(RuntimeError, match="actor RPC failed"):
         manager._fetch_actor_lora_peft_config()
+
+
+@pytest.mark.parametrize("backend", ["naive", "nccl"])
+def test_update_weights_returns_parent_sync_metrics(monkeypatch, backend):
+    from verl.checkpoint_engine import CheckpointEngineManager
+
+    expected = {"sync/changed_ratio": 0.5}
+
+    async def parent_update_weights(self, global_steps=None):
+        return expected
+
+    monkeypatch.setattr(CheckpointEngineManager, "update_weights", parent_update_weights)
+    manager = _manager_with_actor(object())
+    manager.backend = backend
+    manager.replicas = []
+
+    assert manager.update_weights(global_steps=1) is expected

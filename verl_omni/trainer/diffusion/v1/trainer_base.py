@@ -240,6 +240,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                     with marked_timer("save_checkpoint", self.timing_raw, color="green"):
                         self._save_checkpoint()
                 self.on_step_end()
+                metrics.update(self._consume_sync_metrics())
 
             if self.config.trainer.test_freq > 0 and (
                 is_last_step or self.global_steps % self.config.trainer.test_freq == 0
@@ -285,8 +286,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         )
         sample_batch_size = train_batch_size // self.parameter_sync_step
 
-        with marked_timer("feed", timing_raw):
-            self._add_batch_to_generate()
+        prepare_metrics = self.prepare_step()
 
         metrics_aggregator = MetricsAggregator()
         metrics_aggregator.aggregation_rules["sum"].extend(
@@ -297,6 +297,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 "training/rollout_failure/refill_rounds",
             ]
         )
+        if prepare_metrics:
+            metrics_aggregator.add_step_metrics(prepare_metrics)
         prefetched_batches = None
         if self._should_prefetch_local_batches():
             prefetched_batches = []
@@ -327,6 +329,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         metrics.update(metrics_aggregator.get_aggregated_metrics())
         return KVBatchMeta(partition_id=combined_partition_id, keys=combined_keys, tags=combined_tags)
+
+    def prepare_step(self) -> dict:
+        """Submit this step's prompt batch before any mini-batch is sampled."""
+        with marked_timer("feed", self.timing_raw):
+            self._add_batch_to_generate()
+        return {}
 
     def _step_once(self, metrics: dict, timing_raw: dict, sample_batch_size: int) -> KVBatchMeta:
         """Sample one mini-batch from the replay buffer and run the diffusion PG pipeline."""
@@ -610,10 +618,20 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         """Called at the end of each training step."""
         return
 
+    def _consume_sync_metrics(self) -> dict:
+        """Weight-sync stats stashed by ``on_step_end``, merged into this step's logged metrics."""
+        metrics = getattr(self, "_pending_sync_metrics", None) or {}
+        self._pending_sync_metrics = {}
+        return metrics
+
     @abstractmethod
     def on_sample_end(self):
         """Called after sampling a batch from the replay buffer."""
         return
+
+    def _get_n_gpus_for_throughput(self) -> int:
+        """Return the total number of GPUs used for throughput normalization."""
+        return self.resource_pool_manager.get_n_gpus()
 
     def release_rollout_cache_for_weight_sync(self) -> None:
         """No-op for pure diffusion models (no KV cache)."""
@@ -1502,7 +1520,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
         metrics.update({"training/global_step": global_steps, "training/epoch": epoch})
         metrics.update(compute_data_metrics_diffusion(batch=data))
-        n_gpus = self.resource_pool_manager.get_n_gpus()
+        n_gpus = self._get_n_gpus_for_throughput()
         num_images = (
             data.batch["advantages"].shape[0]
             if "advantages" in data.batch

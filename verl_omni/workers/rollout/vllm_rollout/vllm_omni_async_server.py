@@ -427,27 +427,27 @@ class vLLMOmniHttpServer(vLLMHttpServer):
 
         request_ids = [external_id for _, external_id, _ in in_flight]
 
-        aborted = False
         try:
-            # TODO (mike): multi-stage AR abort is broken upstream — the engine's
-            # abort fallback terminal is stage_id=0 and the consume loop breaks on
-            # finished non-final messages, so generate() exits empty. Single-stage /
-            # thinker-only is correct here; needs a vllm-omni fix + pin bump.
+            # TODO (mike): multi-stage AR abort still needs a vllm-omni fix: its
+            # abort terminal is stage_id=0 and the consumer stops at the first
+            # finished message, so when that terminal lands before the state is
+            # popped generate() exits empty. The final-stage terminal synthesized
+            # below only covers the case where it lands late and is dropped.
             await asyncio.wait_for(
                 engine.abort(request_ids), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
             )
-            aborted = True
             # Pause even with nothing to abort: holds admission until resume_generation.
             await engine.pause_generation(
                 mode="abort", wait_for_inflight_requests=False, clear_cache=reset_prefix_cache
             )
-        except Exception:
-            # Nothing engine-side enqueued terminals — synthesize them so
-            # generate() cannot hang on queue.get.
-            if not aborted:
-                for internal_id, _, state in in_flight:
-                    self._enqueue_abort_output(internal_id, state)
-            raise
+        finally:
+            # The engine drops the request state once the orchestrator acks the
+            # abort, and a diffusion stage emits its abort terminal only after the
+            # running batch finishes, so that terminal is discarded as unknown.
+            # Enqueue one here so generate() cannot hang on queue.get; the consumer
+            # stops at the first terminal, so an engine-side one is never doubled.
+            for internal_id, _, state in in_flight:
+                self._enqueue_abort_output(internal_id, state)
 
         if reset_prefix_cache:
             # pause_generation(clear_cache=True) wiped the engine-side mm cache;
@@ -512,10 +512,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             await asyncio.wait_for(
                 engine.abort(request_id), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
             )
-        except Exception:
+        finally:
             if in_flight_state is not None:
                 self._enqueue_abort_output(in_flight_state.request_id, in_flight_state)
-            raise
 
         logger.info("Aborted request: %s", request_id)
         return {"aborted": True, "request_id": request_id}

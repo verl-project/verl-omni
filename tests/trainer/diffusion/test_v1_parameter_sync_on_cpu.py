@@ -21,10 +21,12 @@ from omegaconf import OmegaConf
 from transfer_queue import KVBatchMeta
 from verl import DataProto
 from verl.experimental.separation.engine_workers import DetachActorWorker
+from verl.trainer.config import HybridRolloutSwitchConfig
 from verl.trainer.ppo.v1.replay_buffer import ReplayBufferAsync
 
 from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
 from verl_omni.trainer.diffusion.v1.trainer_separate_async import (
+    HybridEngineMode,
     PolicyGradientDiffusionTrainerV1SeparateAsync,
 )
 from verl_omni.workers import detach_actor_worker as detach_actor_worker_module
@@ -49,6 +51,7 @@ def _separate_async_config(*, train_batch_size=8, ppo_mini_batch_size=2, paramet
                         "parameter_sync_step": parameter_sync_step,
                         "num_warmup_batches": 0,
                         "sync_compatible": True,
+                        "hybrid_rollout": {"_target_": "verl.trainer.config.HybridRolloutSwitchConfig"},
                     },
                 }
             },
@@ -57,8 +60,13 @@ def _separate_async_config(*, train_batch_size=8, ppo_mini_batch_size=2, paramet
 
 
 def test_separate_async_validates_parameter_sync_batches(monkeypatch):
-    monkeypatch.setattr(PolicyGradientDiffusionTrainerV1, "__init__", lambda self, config: None)
-    PolicyGradientDiffusionTrainerV1SeparateAsync(_separate_async_config())
+    def base_init(self, config):
+        self.config = config
+        self.replay_buffer = None
+
+    monkeypatch.setattr(PolicyGradientDiffusionTrainerV1, "__init__", base_init)
+    trainer = PolicyGradientDiffusionTrainerV1SeparateAsync(_separate_async_config())
+    assert trainer.hybrid_rollout_config.enable_switch is False
 
     invalid_configs = [
         (_separate_async_config(train_batch_size=7), r"parameter_sync_step \* ppo_mini_batch_size"),
@@ -103,6 +111,8 @@ def test_base_step_samples_one_mini_batch_per_local_update():
     trainer.config = OmegaConf.create({"data": {"train_batch_size": 8}})
     trainer.parameter_sync_step = 4
     trainer.sync_compatible = False
+    trainer.timing_raw = {}
+    trainer.current_mode = HybridEngineMode.TRAINER
     sample_sizes = []
     local_steps = []
 
@@ -177,6 +187,8 @@ def test_sync_compatible_prefetches_all_local_batches_before_training():
     trainer.config = OmegaConf.create({"data": {"train_batch_size": 4}})
     trainer.parameter_sync_step = 2
     trainer.sync_compatible = True
+    trainer.timing_raw = {}
+    trainer.current_mode = HybridEngineMode.TRAINER
     events = []
     trainer._add_batch_to_generate = lambda: events.append("feed")
     trainer.on_sample_begin = lambda: events.append("sample_begin")
@@ -253,6 +265,7 @@ def test_on_step_end_syncs_every_outer_step():
     events = []
     trainer.global_steps = 1
     trainer.timing_raw = {}
+    trainer.hybrid_rollout_config = HybridRolloutSwitchConfig(enable_switch=False)
     trainer.standalone_checkpoint_manager = SimpleNamespace(
         update_weights=lambda global_steps: events.append(("sync", global_steps))
     )

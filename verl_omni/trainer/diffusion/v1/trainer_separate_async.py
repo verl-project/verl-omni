@@ -26,6 +26,15 @@ hook semantics, adapted to verl-omni diffusion rollout:
 3. Weight synchronization from actor to standalone rollout uses a non-naive
    checkpoint backend (nccl/nixl/mooncake/...); the colocated rollout still uses
    the naive in-place backend.
+4. Hybrid rollout switching (``separate_async.hybrid_rollout.enable_switch``)
+   lends the colocated replicas to generation at the end of a step when the
+   replay buffer is short for the next one, and reclaims them once enough
+   prompt groups are sampleable. The switch policy is ported method by method
+   from the upstream trainer. Unlike upstream, the lend decision is taken
+   after the standalone weight sync, so a batch that lands during the sync
+   is counted, and colocated replicas join the load balancer only after the
+   naive sync has resumed them, because the vLLM-Omni engine rejects
+   requests while any sleeping tag is set.
 
 Diffusion-specific compute (reward, old/ref log-prob, Flow-GRPO advantage,
 actor update, metrics, dumping) lives in ``PolicyGradientDiffusionTrainerV1``;
@@ -35,6 +44,8 @@ wiring.
 
 import logging
 import os
+import time
+from collections import deque
 from enum import Enum
 
 import ray
@@ -42,6 +53,7 @@ from omegaconf import DictConfig
 from transfer_queue import KVBatchMeta
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
+from verl.trainer.config import HybridRolloutSwitchConfig
 from verl.trainer.ppo.utils import Role
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
@@ -70,19 +82,24 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
 
     Hook behavior:
 
+    - ``_setup``: colocated replicas start in rollout mode and registered with
+      the standalone load balancer, so warmup and validation use both pools.
     - ``on_init_end``: update weights on both the standalone and colocated
       checkpoint managers.
     - ``on_train_begin``: enqueue ``num_warmup_batches`` prompt batches.
-    - ``on_validate_begin``: switch to rollout mode if currently training.
-    - ``on_sample_begin``: switch to rollout mode if training and the switch
-      strategy says so.
-    - ``on_sample_end``: switch to trainer mode (abort + sleep colocated
-      replicas, remove them from the standalone load balancer). When
-      ``sync_compatible`` is True, also pause the standalone rollout.
+    - ``on_step_begin``: reclaim the colocated replicas (abort + sleep, remove
+      from the balancer) when switching is disabled or the replay buffer already
+      holds the switch threshold; otherwise ``prepare_step`` submits this step's
+      prompts and waits for the threshold before reclaiming.
+    - ``on_validate_begin``: switch to rollout mode if currently training; the
+      next ``on_step_begin`` reclaims.
+    - ``on_sample_begin`` / ``on_sample_end``: record replay-buffer shortfall
+      and wait time. When ``sync_compatible`` is True, ``on_sample_end`` also
+      pauses the standalone rollout.
     - ``on_step_end``: after ``parameter_sync_step`` local actor updates, push
-      actor weights into the standalone rollout replicas. Colocated replicas
-      stay slept during training (they share GPUs with the actor) and are only
-      synced at init and when switching to rollout mode. When
+      actor weights into the standalone rollout replicas. With switching
+      enabled, lend the colocated replicas to the next step's generation when
+      the estimated benefit exceeds the recent switch cost. When
       ``sync_compatible`` is True, resume standalone generation after weight
       sync.
     """
@@ -113,11 +130,50 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         ), "sync_compatible=True requires num_warmup_batches=0"
 
         super().__init__(config)
+        self.hybrid_rollout_config: HybridRolloutSwitchConfig = omega_conf_to_dataclass(
+            self.config.trainer.v1.separate_async.hybrid_rollout
+        )
+        if self.hybrid_rollout_config.enable_switch:
+            assert not separate_async_config.get("sync_compatible", False), (
+                "trainer.v1.separate_async.hybrid_rollout.enable_switch requires sync_compatible=false"
+            )
+            rollout_cfg = self.config.get("actor_rollout_ref", {}).get("rollout", {})
+            disaggregation_cfg = rollout_cfg.get("disaggregation", {})
+            if bool(disaggregation_cfg.get("enabled", False)):
+                raise ValueError(
+                    "trainer.v1.separate_async.hybrid_rollout.enable_switch does not support rollout disaggregation"
+                )
+            required_methods = ("wait_for_sampleable", "get_sampleable_count")
+            if any(not hasattr(self.replay_buffer, method) for method in required_methods):
+                raise TypeError(
+                    f"{type(self.replay_buffer).__name__} must implement {required_methods} when "
+                    "trainer.v1.separate_async.hybrid_rollout.enable_switch=True"
+                )
+            self._init_hybrid_rollout_state()
 
     def _init_resource_pool_mgr(self):
         super()._init_resource_pool_mgr()
         role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
         self.role_worker_mapping[role] = ray.remote(DiffusionDetachActorWorker)
+
+    def _init_hybrid_rollout_state(self) -> None:
+        config = self.hybrid_rollout_config
+        self._switch_threshold_ratio = config.switch_threshold_ratio
+        self._idle_steps = 0
+        self._calm_steps = 0
+        self._step_sample_wait_seconds = 0.0
+        self._step_wait_samples = 0
+        self._sample_start = time.perf_counter()
+        self._step_threshold = 0
+        self._wait_seconds = 0.0
+        self._wait_samples = 0
+        self._to_rollout_costs: deque[float] = deque(maxlen=config.switch_cost_window_size)
+        self._to_trainer_costs: deque[float] = deque(maxlen=config.switch_cost_window_size)
+        rollout_cfg = self.config.get("actor_rollout_ref", {}).get("rollout", {})
+        trainer_cfg = self.config.trainer
+        hybrid_gpus = trainer_cfg.nnodes * trainer_cfg.n_gpus_per_node
+        standalone_gpus = rollout_cfg.nnodes * rollout_cfg.n_gpus_per_node
+        self._scaling_factor = (hybrid_gpus + standalone_gpus) / standalone_gpus
 
     def _compute_old_log_prob(self, data: DataProto) -> DataProto:
         """Compute every local update's proximal log-probs with cycle-start weights."""
@@ -205,9 +261,6 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
             replicas=self.standalone_server_manager.get_replicas(),
         )
 
-        self.current_mode = HybridEngineMode.TRAINER
-        self._colocated_slept = False
-
         self.sync_compatible = self.config.trainer.v1.separate_async.get("sync_compatible", False)
         self._standalone_paused = False
         if self.sync_compatible:
@@ -216,17 +269,16 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
                 "generation during actor training (sync-mode parity)."
             )
 
+        # hybrid engine is in rollout mode after initialization
+        self.current_mode = HybridEngineMode.ROLLOUT
+        self.add_replicas_to_balancer()
+
     def get_llm_client(self):
         """Get the diffusion whole-sample-retry client backed by the standalone rollout."""
         return self.standalone_server_manager.get_client(client_cls=DiffusionWholeSampleRetryLLMServerClient)
 
     def on_init_end(self):
         # Push actor weights into both standalone and colocated rollout replicas.
-        logger.warning(
-            "LORA_SYNC_PROOF separate_async on_init_end: sending weights to BOTH "
-            "standalone and colocated checkpoint managers (global_steps=%s)",
-            self.global_steps,
-        )
         self.standalone_checkpoint_manager.update_weights(self.global_steps)
         self.checkpoint_manager.update_weights(self.global_steps)
 
@@ -237,49 +289,172 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         logger.info(f"Added {num_warmup_batches} warmup batches to the agent loop manager")
 
     def on_validate_begin(self):
-        if self.current_mode == HybridEngineMode.TRAINER and self._colocated_slept:
+        if self.current_mode == HybridEngineMode.TRAINER:
             logger.info("Switching hybrid engine to rollout mode for validation")
             self.switch_to_rollout()
-        else:
-            logger.info(
-                "Skipping colocated rollout switch for validation "
-                "(colocated replicas never slept; using standalone replicas only)"
-            )
         if self.sync_compatible and self._standalone_paused:
             # Validation uses the standalone rollout via get_llm_client(), so
             # make sure it is resumed if it was paused for actor training.
             self._resume_standalone_generation()
 
-    def on_validate_end(self):
-        if self.current_mode == HybridEngineMode.ROLLOUT:
-            logger.info("Switching hybrid engine back to trainer mode after validation")
+    def on_step_begin(self):
+        self._step_sample_wait_seconds = 0.0
+        self._step_wait_samples = 0
+        self._step_threshold = 0
+        if self.hybrid_rollout_config.enable_switch:
+            self.timing_raw["switch_wait"] = 0.0
+        if self.current_mode != HybridEngineMode.ROLLOUT:
+            return
+        if not self.hybrid_rollout_config.enable_switch:
+            self._timed_switch_to_trainer()
+            return
+
+        self._step_threshold = self._switch_threshold()
+        sampleable_count = self.replay_buffer.get_sampleable_count(self.global_steps, "train")
+        if sampleable_count >= self._step_threshold:
+            self._timed_switch_to_trainer()
+
+    def _timed_switch_to_trainer(self) -> None:
+        """Switch Hybrid back to training and record the full remove/abort/sleep cost."""
+        switch_start = time.perf_counter()
+        with marked_timer("switch_to_trainer", self.timing_raw, color="cyan"):
             self.switch_to_trainer()
+        if self.hybrid_rollout_config.enable_switch:
+            self._to_trainer_costs.append(time.perf_counter() - switch_start)
 
     def on_sample_begin(self):
-        if self.current_mode == HybridEngineMode.TRAINER and self.should_switch_to_rollout():
-            logger.info("Switching hybrid engine to rollout mode for generation")
-            self.switch_to_rollout()
+        if self.hybrid_rollout_config.enable_switch:
+            sampleable = self.replay_buffer.get_sampleable_count(self.global_steps, "train")
+            mini_batch_size = self.config.data.train_batch_size // self.parameter_sync_step
+            self._step_wait_samples += max(0, mini_batch_size - sampleable)
+        self._sample_start = time.perf_counter()
 
     def on_sample_end(self):
-        if self.current_mode == HybridEngineMode.ROLLOUT:
-            logger.info("Switching hybrid engine to trainer mode for training")
-            self.switch_to_trainer()
+        self._step_sample_wait_seconds += time.perf_counter() - self._sample_start
         if self.sync_compatible and not self._standalone_paused:
             self._pause_standalone_generation()
 
-    def on_step_end(self):
-        with marked_timer("update_weights", self.timing_raw, color="red"):
-            logger.warning(
-                "LORA_SYNC_PROOF separate_async on_step_end: sending weights to "
-                "STANDALONE checkpoint manager (global_steps=%s)",
-                self.global_steps,
+    def prepare_step(self) -> dict:
+        metrics = super().prepare_step()
+        metrics.update(self._wait_for_sampleable_and_switch())
+        return metrics
+
+    def _wait_for_sampleable_and_switch(self) -> dict:
+        if self.current_mode != HybridEngineMode.ROLLOUT:
+            return {}
+
+        logger.info(f"Lending hybrid engine to generation until {self._step_threshold} groups are sampleable")
+        with marked_timer("switch_wait", self.timing_raw, color="yellow"):
+            _, eviction_metrics = self.replay_buffer.wait_for_sampleable(
+                self.global_steps, "train", self._step_threshold
             )
-            self.standalone_checkpoint_manager.update_weights(self.global_steps)
+        self._timed_switch_to_trainer()
+        return eviction_metrics
+
+    def _switch_threshold(self) -> int:
+        """Sampleable prompts before switching to trainer, floored at one mini-batch."""
+        train_batch_size = self.config.data.train_batch_size
+        mini_batch_size = train_batch_size // self.parameter_sync_step
+        target = round(self._switch_threshold_ratio * train_batch_size)
+        return min(max(target, mini_batch_size), train_batch_size)
+
+    def _step_had_idle(self) -> bool:
+        """Whether waiting for sampleable prompts."""
+        poll_interval = getattr(self.replay_buffer, "poll_interval", 2.0)
+        return self._step_sample_wait_seconds > poll_interval
+
+    def _adapt_switch_threshold(self, had_idle: bool) -> None:
+        config = self.hybrid_rollout_config
+        if had_idle:
+            self._calm_steps = 0
+            self._idle_steps = min(self._idle_steps + 1, config.switch_threshold_release_steps)
+            if self._idle_steps < config.switch_threshold_release_steps:
+                return
+            self._switch_threshold_ratio = min(1.0, self._switch_threshold_ratio + config.switch_threshold_step_up)
+            return
+
+        self._idle_steps = 0
+        self._calm_steps = min(self._calm_steps + 1, config.switch_threshold_release_steps)
+        if self._calm_steps < config.switch_threshold_release_steps:
+            return
+        min_ratio = 1.0 / self.parameter_sync_step
+        self._switch_threshold_ratio = max(min_ratio, self._switch_threshold_ratio - config.switch_threshold_step_down)
+
+    def _effective_switch_cost(self) -> float | None:
+        if not self._to_rollout_costs or not self._to_trainer_costs:
+            return None
+        return sum(self._to_rollout_costs) / len(self._to_rollout_costs) + sum(self._to_trainer_costs) / len(
+            self._to_trainer_costs
+        )
+
+    def on_step_end(self):
+        config = self.hybrid_rollout_config
+        with marked_timer("update_weights", self.timing_raw, color="red"):
+            self._pending_sync_metrics = dict(
+                self.standalone_checkpoint_manager.update_weights(self.global_steps) or {}
+            )
             if self.sync_compatible and self._standalone_paused:
                 # Sync-compatible mode: resume standalone generation after the
                 # actor update + weight sync so the next generate phase uses
                 # fresh weights, exactly like sync mode waking colocated replicas.
                 self._resume_standalone_generation()
+
+        if not config.enable_switch:
+            return
+
+        # Decide after the standalone sync: the batch that was in flight at step
+        # end has landed by now, so the inventory count is not a phantom gap.
+        ratio_used = self._switch_threshold_ratio
+        had_idle = self._step_had_idle()
+        if self._step_wait_samples > 0 and self._step_sample_wait_seconds > 0:
+            self._wait_seconds += self._step_sample_wait_seconds
+            self._wait_samples += self._step_wait_samples
+        if config.adaptive_switch_threshold:
+            self._adapt_switch_threshold(had_idle)
+
+        decision_threshold = self._switch_threshold()
+        sampleable_count = self.replay_buffer.get_sampleable_count(self.global_steps + 1, "train")
+        remaining = max(0, decision_threshold - sampleable_count)
+        per_sample_time = self._wait_seconds / self._wait_samples if self._wait_samples > 0 else None
+        effective_switch_cost = self._effective_switch_cost()
+        benefit = (
+            remaining * per_sample_time * (1.0 - 1.0 / self._scaling_factor) if per_sample_time is not None else None
+        )
+        should_switch = (
+            self.global_steps < self.total_training_steps
+            and remaining > 0
+            and (benefit is None or effective_switch_cost is None or benefit > effective_switch_cost)
+        )
+        self._pending_sync_metrics.update(
+            {
+                "separate_async/switch/threshold_ratio": ratio_used,
+                "separate_async/switch/wait_samples": float(self._step_wait_samples),
+                "separate_async/switch/idle": float(had_idle),
+                "separate_async/decision/sampleable_count": float(sampleable_count),
+                "separate_async/decision/remaining": float(remaining),
+                "separate_async/decision/should_switch_to_rollout": float(should_switch),
+            }
+        )
+        if per_sample_time is not None:
+            self._pending_sync_metrics["separate_async/decision/per_sample_time_seconds"] = per_sample_time
+        if effective_switch_cost is not None:
+            self._pending_sync_metrics["separate_async/decision/effective_switch_cost_seconds"] = effective_switch_cost
+
+        if should_switch:
+            switch_start = time.perf_counter()
+            with marked_timer("switch_to_rollout", self.timing_raw, color="cyan"):
+                logger.info("Switching hybrid engine to rollout mode for the next step")
+                self.switch_to_rollout()
+                self.clear_sticky_cache()
+            self._to_rollout_costs.append(time.perf_counter() - switch_start)
+
+    def _get_n_gpus_for_throughput(self) -> int:
+        """Include standalone rollout GPUs in the throughput denominator."""
+        trainer_gpus = self.resource_pool_manager.get_n_gpus()
+        rollout_gpus = (
+            self.config.actor_rollout_ref.rollout.n_gpus_per_node * self.config.actor_rollout_ref.rollout.nnodes
+        )
+        return trainer_gpus + rollout_gpus
 
     def _pause_standalone_generation(self):
         """Stop the standalone rollout from accepting/serving new requests.
@@ -316,21 +491,23 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         self._standalone_paused = False
 
     def switch_to_rollout(self):
-        # Wake colocated replicas (their weights were offloaded by sleep),
-        # sync fresh actor weights, and let them serve generation again.
-        self.checkpoint_manager.wake_up_replicas()
-        self._colocated_slept = False
+        """Install committed weights and make Hybrid replicas available for generation.
+
+        The naive update resumes the slept replicas' weights and cache before
+        installing the actor weights, so no frontend wake-up is needed. The
+        replicas are registered with the balancer only after that, because the
+        engine rejects requests while any sleeping tag is set.
+        """
         self.checkpoint_manager.update_weights(self.global_steps)
         self.checkpoint_manager.resume_generation_replicas()
         self.add_replicas_to_balancer()
         self.current_mode = HybridEngineMode.ROLLOUT
 
     def switch_to_trainer(self):
-        # Remove colocated replicas from the balancer and free their memory for training.
+        """Stop routing to Hybrid, abort partial requests, and return its GPU memory to training."""
         self.remove_replicas_from_balancer()
         self.checkpoint_manager.abort_replicas()
         self.checkpoint_manager.sleep_replicas()
-        self._colocated_slept = True
         self.current_mode = HybridEngineMode.TRAINER
 
     def add_replicas_to_balancer(self):
@@ -344,6 +521,6 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         global_load_balancer = self.standalone_server_manager.global_load_balancer
         ray.get(global_load_balancer.remove_servers.remote(self.llm_server_manager.server_addresses))
 
-    def should_switch_to_rollout(self):
-        # TODO: implement a switch strategy based on replay buffer state / switch overhead.
-        return False
+    def clear_sticky_cache(self) -> dict:
+        global_load_balancer = self.standalone_server_manager.global_load_balancer
+        return ray.get(global_load_balancer.clear_sticky_cache.remote())

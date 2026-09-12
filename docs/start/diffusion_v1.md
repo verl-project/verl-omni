@@ -1,6 +1,6 @@
 # Diffusion V1 training
 
-Last updated: 09/01/2026
+Last updated: 09/10/2026
 
 This guide runs the diffusion V1 trainer in synchronous or separate-asynchronous
 mode using the provided Stable Diffusion 3.5 Medium FlowGRPO OCR recipes.
@@ -150,6 +150,57 @@ bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1_separate_async.s
 requires `num_warmup_batches=0`; set it to `false` to retain rollout/training
 overlap.
 
+### Hybrid rollout switching
+
+The colocated rollout replicas share GPUs with the actor. By default they are
+lent to generation only during warmup and validation: they start in rollout
+mode after initialization, and the first training step reclaims them
+(aborts their in-flight requests, sleeps them, and removes them from the
+load balancer) before any actor update. Validation lends them out again and
+the next step reclaims them.
+
+Enable dynamic switching so the trainer also lends them to the next step's
+generation whenever the replay buffer is short:
+
+```bash
+trainer.v1.separate_async.sync_compatible=false \
+trainer.v1.separate_async.hybrid_rollout.enable_switch=true \
+bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1_separate_async.sh
+```
+
+At the end of a step, the trainer syncs the standalone replicas as usual and
+then estimates how many prompt groups the next step still misses. If the
+expected wait exceeds the recent cost of a switch round trip, it installs the
+new actor weights into the colocated replicas, resumes them, and registers them
+with the standalone load balancer. The next step submits its prompts, waits
+until `switch_threshold_ratio * train_batch_size` groups (at least one
+mini-batch) are sampleable, and reclaims the replicas. Aborted diffusion
+samples are retried as whole samples on the remaining replicas. Switching
+happens at most once per step; `adaptive_switch_threshold` raises the
+threshold after sustained sampling waits and lowers it after calm steps.
+
+`enable_switch=true` requires `sync_compatible=false` and
+`actor_rollout_ref.rollout.disaggregation.enabled=false`. The remaining
+knobs follow the upstream `HybridRolloutSwitchConfig` defaults:
+`switch_threshold_ratio`, `adaptive_switch_threshold`,
+`switch_threshold_step_up`, `switch_threshold_step_down`,
+`switch_threshold_release_steps`, and `switch_cost_window_size`.
+
+Logged metrics: `timing_s/switch_wait`, `timing_s/switch_to_rollout`,
+`timing_s/switch_to_trainer`, `separate_async/switch/*`, and
+`separate_async/decision/*`. Throughput metrics normalize by the total of
+actor and standalone rollout GPUs.
+
+Reclaiming waits for the batch the colocated replicas are executing to
+finish: the diffusion engine runs whole request batches and only then
+processes the abort and the sleep, so `timing_s/switch_to_trainer` includes
+up to one batch of generation. The tiny smoke covers this path:
+
+```bash
+ENABLE_SWITCH=1 NUM_WARMUP_BATCHES=1 \
+bash tests/special_e2e/run_flowgrpo_qwen_image_v1_separate_async.sh
+```
+
 ## Important settings
 
 - `trainer.use_v1=true` selects the V1 trainer instead of the legacy diffusion
@@ -157,6 +208,9 @@ overlap.
 - `trainer.v1.trainer_mode` selects `sync` or `separate_async`.
 - `trainer.v1.separate_async.parameter_sync_step` controls the number of local
   actor updates per rollout-weight synchronization cycle.
+- `trainer.v1.separate_async.hybrid_rollout.enable_switch` lends the colocated
+  rollout replicas to generation between steps when the replay buffer is
+  short.
 - `actor_rollout_ref.rollout.agent.num_workers` controls the rollout worker
   count.
 - `trainer.v1.sampler.drop_incomplete_groups=true` evicts a training prompt

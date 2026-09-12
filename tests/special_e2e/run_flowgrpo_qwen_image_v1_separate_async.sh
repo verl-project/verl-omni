@@ -17,6 +17,8 @@
 #
 # Override via env: NUM_GPUS, NUM_GPUS_ACTOR, NUM_GPUS_STANDALONE, MODEL_PATH,
 #                   DATA_DIR, TOTAL_TRAIN_STEPS, CKPT_BACKEND, ...
+# ENABLE_SWITCH=1 lends the colocated replicas to generation between steps
+# (hybrid rollout switching); it implies SYNC_COMPATIBLE=0.
 set -euo pipefail
 
 NUM_GPUS=${NUM_GPUS:-4}
@@ -44,7 +46,12 @@ NUM_WARMUP_BATCHES=${NUM_WARMUP_BATCHES:-0}
 PARAMETER_SYNC_STEP=${PARAMETER_SYNC_STEP:-2}
 MAX_OFF_POLICY_THRESHOLD=${MAX_OFF_POLICY_THRESHOLD:-1}
 MAX_OFF_POLICY_STRATEGY=${MAX_OFF_POLICY_STRATEGY:-drop}
-SYNC_COMPATIBLE=${SYNC_COMPATIBLE:-1}
+ENABLE_SWITCH=${ENABLE_SWITCH:-0}
+SYNC_COMPATIBLE=${SYNC_COMPATIBLE:-$((1 - ENABLE_SWITCH))}
+enable_switch=false
+if [[ "${ENABLE_SWITCH}" == "1" ]]; then
+    enable_switch=true
+fi
 
 ENGINE=vllm_omni
 max_prompt_length=256
@@ -161,6 +168,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     trainer.v1.separate_async.num_warmup_batches=${NUM_WARMUP_BATCHES} \
     trainer.v1.separate_async.parameter_sync_step=${PARAMETER_SYNC_STEP} \
     trainer.v1.separate_async.sync_compatible=${SYNC_COMPATIBLE} \
+    trainer.v1.separate_async.hybrid_rollout.enable_switch=${enable_switch} \
     trainer.v1.sampler.max_off_policy_threshold=${MAX_OFF_POLICY_THRESHOLD} \
     trainer.v1.sampler.max_off_policy_strategy=${MAX_OFF_POLICY_STRATEGY} \
     "$@"
