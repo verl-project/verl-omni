@@ -1,18 +1,23 @@
 #!/bin/bash
-# Python-stack-first, aligned old_log_prob + update_actor profiling for the
+# Aligned old_log_prob + update_actor + update_weights profiling for the
 # full-weight optimized Qwen-Image OCR recipe.
 #
 # Scope:
 #   - the Ray TaskRunner ("controller"): Python sampling and NVTX;
 #   - ActorRollout rank 0 by default: Python sampling and NVTX;
-#   - all three training steps in one continuous capture window.
+#   - training steps 2 through the configured final step in one continuous
+#     capture window.
 #
-# CUDA API/kernel software tracing, Python GIL events, OS-runtime events, native
-# CPU sampling, and context-switch events stay off. This keeps the diagnostic
-# focused on Python control flow around old_log_prob and update_actor GPU-idle
-# intervals without multiplying millions of software-instrumented events across
-# all actor ranks. Analyze step 2 for steady-state behavior: step 1 contains
-# profiler startup, while step 3 closes the capture.
+# Rank-selected actor workers additionally capture CUDA and OS-runtime events,
+# native CPU samples, context switches, CUDA sync/memory backtraces, and CUDA
+# memory usage. Together with Python sampling, these distinguish Python GC from
+# CUDA synchronization, allocator/IPC cleanup, collectives, and OS waits during
+# update_weights. The controller remains Python-stack-first to limit overhead.
+# Step 1 is an unprofiled model/engine and compile warmup. Step 2 pays profiler
+# startup cost, every intermediate step is a steady-state analysis interval, and
+# the final step pays profiler stop cost. Excluding warmup also reduces report
+# size. At least four steps are required so a steady-state step exists between
+# the profiler start and stop steps.
 #
 # Each target process writes its own .nsys-rep. Open all reports together with
 # Nsight Systems "New multi-report view". TSC is the preferred alignment source
@@ -24,10 +29,11 @@
 # Optional environment controls:
 #   RUN_DIR=<path>           output root; also supplies the default profile run ID
 #   PROFILE_RUN_ID=<id>      report filename ID; supplies RUN_DIR when it is unset
-#   TRAINING_STEPS=3          total run length; every step is captured continuously
+#   TRAINING_STEPS=4          total run length; steps 2 through N are captured
 #   PYTHON_SAMPLE_HZ=20       Python stack samples per second
 #   PROFILE_RANKS="[0]"       "all" or a Hydra list such as "[0,7]"
 #   PROFILE_FINALIZE_TIMEOUT_S=120
+#   TORCH_LOGS=<settings>     defaults to graph_breaks,recompiles
 set -euo pipefail
 set -x
 
@@ -42,7 +48,7 @@ else
     default_profile_run_id="$(date +"%Y%m%d_%H%M%S")_$$"
     RUN_DIR=$WORKSPACE/logs/$default_profile_run_id
 fi
-TRAINING_STEPS=${TRAINING_STEPS:-3}
+TRAINING_STEPS=${TRAINING_STEPS:-4}
 PYTHON_SAMPLE_HZ=${PYTHON_SAMPLE_HZ:-20}
 PROFILE_RANKS=${PROFILE_RANKS:-"[0]"}
 PROFILE_FINALIZE_TIMEOUT_S=${PROFILE_FINALIZE_TIMEOUT_S:-120}
@@ -52,6 +58,10 @@ profile_run_id=${PROFILE_RUN_ID:-$default_profile_run_id}
 
 if ! [[ "$TRAINING_STEPS" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: TRAINING_STEPS must be a positive integer." >&2
+    exit 2
+fi
+if (( TRAINING_STEPS < 4 )); then
+    echo "ERROR: TRAINING_STEPS must be at least 4 for warmup/start/steady-state/stop profiling." >&2
     exit 2
 fi
 if (( NUM_NODES_PROFILE != 1 )); then
@@ -68,9 +78,12 @@ if ! command -v nsys >/dev/null 2>&1; then
     exit 1
 fi
 
+# Continuous profiling starts immediately before step 2 and stops immediately
+# after the configured final step. Steps 3 through N-1 are steady-state
+# intervals, so TRAINING_STEPS=4 provides one such interval.
 profile_steps="["
-for ((profile_step = 1; profile_step <= TRAINING_STEPS; profile_step++)); do
-    if (( profile_step > 1 )); then
+for ((profile_step = 2; profile_step <= TRAINING_STEPS; profile_step++)); do
+    if (( profile_step > 2 )); then
         profile_steps+=","
     fi
     profile_steps+="$profile_step"
@@ -118,9 +131,8 @@ profile_dst="$RUN_DIR/nsight_update_actor"
 mkdir -p "$profile_dst"
 chmod 700 "$profile_dst"
 
-# Keep native CPU sampling and software-instrumented CUDA/GIL/OSRT/scheduling
-# events off. At 20 Hz, aligned Python stacks explain controller and worker
-# control flow around the profiled phases.
+# Keep the controller lightweight. On selected actor ranks, collect the native,
+# CUDA, memory, and scheduling evidence needed to explain update_weights stalls.
 training_status=0
 bash "$base_recipe" \
     trainer.total_training_steps="$TRAINING_STEPS" \
@@ -144,13 +156,18 @@ bash "$base_recipe" \
     +global_profiler.global_tool_config.nsys.controller_nsight_options.python-sampling-frequency="$PYTHON_SAMPLE_HZ" \
     +global_profiler.global_tool_config.nsys.controller_nsight_options.wait=primary \
     +global_profiler.global_tool_config.nsys.controller_nsight_options.o="\"controller_update_actor_${profile_run_id}_%h_pid%p\"" \
-    global_profiler.global_tool_config.nsys.worker_nsight_options.trace='"nvtx"' \
-    global_profiler.global_tool_config.nsys.worker_nsight_options.cuda-memory-usage='"false"' \
+    global_profiler.global_tool_config.nsys.worker_nsight_options.trace='"nvtx,cuda,osrt"' \
+    global_profiler.global_tool_config.nsys.worker_nsight_options.cuda-memory-usage='"true"' \
     global_profiler.global_tool_config.nsys.worker_nsight_options.capture-range=cudaProfilerApi \
     global_profiler.global_tool_config.nsys.worker_nsight_options.capture-range-end='"repeat:1:async"' \
     global_profiler.global_tool_config.nsys.worker_nsight_options.kill=none \
-    +global_profiler.global_tool_config.nsys.worker_nsight_options.sample=none \
-    +global_profiler.global_tool_config.nsys.worker_nsight_options.cpuctxsw=none \
+    +global_profiler.global_tool_config.nsys.worker_nsight_options.sample=process-tree \
+    +global_profiler.global_tool_config.nsys.worker_nsight_options.cpuctxsw=process-tree \
+    +global_profiler.global_tool_config.nsys.worker_nsight_options.backtrace=dwarf \
+    +global_profiler.global_tool_config.nsys.worker_nsight_options.samples-per-backtrace=4 \
+    +global_profiler.global_tool_config.nsys.worker_nsight_options.osrt-threshold=10000 \
+    +global_profiler.global_tool_config.nsys.worker_nsight_options.osrt-backtrace-threshold=80000 \
+    +global_profiler.global_tool_config.nsys.worker_nsight_options.cudabacktrace='"sync:100000,memory:100000"' \
     +global_profiler.global_tool_config.nsys.worker_nsight_options.python-sampling='"true"' \
     +global_profiler.global_tool_config.nsys.worker_nsight_options.python-sampling-frequency="$PYTHON_SAMPLE_HZ" \
     +global_profiler.global_tool_config.nsys.worker_nsight_options.wait=primary \
@@ -165,8 +182,8 @@ nsight_src="${TMPDIR:-/tmp}/ray/session_latest/logs/nsight"
 controller_prefix="controller_update_actor_${profile_run_id}_"
 actor_prefix="actor_update_${profile_run_id}_rank_"
 
-# Controller and actor capture start once before step 1 and stop once after the
-# final step. Result generation then starts asynchronously. Wait until every
+# Controller and actor capture start once before step 2 and stop once after the
+# configured final step. Result generation then starts asynchronously. Wait until every
 # matching report is present and stable before copying it.
 finalize_deadline=$((SECONDS + PROFILE_FINALIZE_TIMEOUT_S))
 last_artifact_size=-1

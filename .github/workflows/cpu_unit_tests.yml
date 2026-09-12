@@ -75,6 +75,12 @@ jobs:
         run: |
           pip install uv
           uv pip install --dry-run --python "$(command -v python)" -e ".[train]"
+      - name: Run CPU torch.compile contract tests
+        env:
+          TORCH_COMPILE_DISABLE: "0"
+          TORCHINDUCTOR_DISABLE: "0"
+        run: |
+          pytest -s -x tests/models/test_flash_attention_3_graph_break_on_cpu.py
       - name: Run CPU unit tests
         run: |
           echo '[pytest]' > pytest.ini
@@ -84,6 +90,7 @@ jobs:
             --cov=verl_omni \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
+            --ignore=tests/models/test_flash_attention_3_graph_break_on_cpu.py \
             tests/ | tee pytest-coverage.txt
       - name: Add coverage summary
         if: always()

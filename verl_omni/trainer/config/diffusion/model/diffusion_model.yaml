@@ -45,6 +45,27 @@ transformer_subfolder: transformer
 # GPU default; NPU recipes override with _native_npu. Falls back to native when FA2/FA3 deps are missing.
 attn_backend: _flash_3_varlen_hub
 
+# Whether to compile repeated diffusion transformer blocks before FSDP2 sharding.
+# Currently requires Ulysses SP=1 because SP collectives inside a full block graph,
+# checkpoint recomputation, and FSDP2 DP collectives need distributed ordering validation.
+use_regional_compile: False
+
+# Keyword arguments forwarded to Diffusers ``compile_repeated_blocks``.
+regional_compile_options:
+
+  # Compiler backend used for regional compilation.
+  backend: inductor
+
+  # Compiler mode; default avoids CUDA graph capture during the first rollout.
+  mode: default
+
+  # Allow intentional eager boundaries around unsupported third-party code.
+  fullgraph: False
+
+  # Text masks, resolutions, and frame counts commonly produce input-dependent shapes.
+  # Workloads that guarantee fixed shapes can override this for stronger specialization.
+  dynamic: True
+
 # Set to positive value to enable LoRA (e.g., 32)
 lora_rank: 0
 

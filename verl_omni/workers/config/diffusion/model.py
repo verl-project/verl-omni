@@ -88,6 +88,17 @@ class DiffusionModelConfig(BaseConfig):
     enable_gradient_checkpointing: bool = True
     attn_backend: str = "_flash_3_varlen_hub"
 
+    # Compile repeated diffusion transformer blocks before FSDP2 sharding.
+    use_regional_compile: bool = False
+    regional_compile_options: dict[str, Any] = field(
+        default_factory=lambda: {
+            "backend": "inductor",
+            "mode": "default",
+            "fullgraph": False,
+            "dynamic": True,
+        }
+    )
+
     lora_rank: int = 0
     lora_alpha: int = 64
     lora_init_weights: str = "gaussian"

@@ -350,6 +350,12 @@ actor_rollout_ref:
     config_path: null
     transformer_subfolder: transformer
     attn_backend: _flash_3_varlen_hub
+    use_regional_compile: false
+    regional_compile_options:
+      backend: inductor
+      mode: default
+      fullgraph: false
+      dynamic: true
     lora_rank: 0
     lora_alpha: 64
     lora_init_weights: gaussian
