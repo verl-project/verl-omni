@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# Qwen-Image-Edit-2511 LoRA RL with PickScore reward.
+# Qwen-Image-Edit-2511 LoRA RL with engine and native PickScore rewards.
 set -x
 
-# Run local PickScore reward workers on Ray-assigned NPU resources.
+# Run the engine and native PickScore models on disjoint NPU subpools.
 export VLLM_ASCEND_ENABLE_NZ=0
 export VERL_DATAPROTO_SERIALIZATION_METHOD=numpy
 model_name=${MODEL_PATH:-Qwen/Qwen-Image-Edit-2511}
-pickscore_model_path=${PICKSCORE_MODEL_PATH:?PICKSCORE_MODEL_PATH must be set}
+pickscore_model_path=${PICKSCORE_MODEL_PATH:-yuvalkirstain/PickScore_v1}
+reward_function_path=${REWARD_FUNCTION_PATH:-pkg://verl_omni.utils.reward_score.pickscore_reward}
+pickscore_processor_path=${PICKSCORE_PROCESSOR_PATH:-$pickscore_model_path}
 
 NUM_GPUS_ACTOR_ROLLOUT_REWARD=${NUM_GPUS_ACTOR_ROLLOUT_REWARD:-16}
 ROLLOUT_TP=${ROLLOUT_TP:-4}
-# Native-pool bundle indices. Each entry loads one complete PickScore model;
-# these are not physical NPU IDs and are not tensor-parallel ranks.
-NATIVE_REWARD_DEVICES=${NATIVE_REWARD_DEVICES:-"[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]"}
+ENGINE_REWARD_NPUS=${ENGINE_REWARD_NPUS:-8}
+# Native-pool bundle indices. These are relative to the native subpool, not
+# physical NPU IDs or tensor-parallel ranks.
+NATIVE_REWARD_DEVICES=${NATIVE_REWARD_DEVICES:-"[0,1,2,3,4,5,6,7]"}
 REWARD_OFFLOAD=${REWARD_OFFLOAD:-true}
+PICKSCORE_LOGIT_SCALE=${PICKSCORE_LOGIT_SCALE:-98.86447}
 IMAGE_RESOLUTION=${IMAGE_RESOLUTION:-512}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 
@@ -86,13 +90,36 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     reward.reward_model.enable=False \
-    +reward.models.pickscore.backend=native \
-    +reward.models.pickscore.offload=$REWARD_OFFLOAD \
-    +reward.models.pickscore.model_path=$pickscore_model_path \
-    +reward.models.pickscore.placement.devices="$NATIVE_REWARD_DEVICES" \
-    +reward.models.pickscore.executor.model=verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeModel \
-    +reward.reward_functions.pickscore.path=pkg://verl_omni.utils.reward_score.pickscore_reward \
-    +reward.reward_functions.pickscore.name=compute_score_pickscore_native \
+    reward.reward_model.enable_resource_pool=False \
+    +reward.models.pickscore_engine.backend=engine \
+    +reward.models.pickscore_engine.offload=$REWARD_OFFLOAD \
+    +reward.models.pickscore_engine.model_path=$pickscore_model_path \
+    +reward.models.pickscore_engine.n_gpus_per_node=$ENGINE_REWARD_NPUS \
+    +reward.models.pickscore_engine.nnodes=1 \
+    +reward.models.pickscore_engine.rollout.name=vllm \
+    +reward.models.pickscore_engine.rollout.dtype=bfloat16 \
+    +reward.models.pickscore_engine.rollout.gpu_memory_utilization=0.1 \
+    +reward.models.pickscore_engine.rollout.tensor_model_parallel_size=1 \
+    +reward.models.pickscore_engine.rollout.data_parallel_size=1 \
+    +reward.models.pickscore_engine.rollout.pipeline_model_parallel_size=1 \
+    +reward.models.pickscore_engine.rollout.max_model_len=77 \
+    +reward.models.pickscore_engine.rollout.max_num_seqs=8 \
+    +reward.models.pickscore_engine.rollout.limit_images=1 \
+    +reward.models.pickscore_engine.rollout.enforce_eager=True \
+    +reward.models.pickscore_engine.rollout.engine_kwargs.vllm.runner=pooling \
+    +reward.models.pickscore_native.backend=native \
+    +reward.models.pickscore_native.offload=$REWARD_OFFLOAD \
+    +reward.models.pickscore_native.model_path=$pickscore_model_path \
+    +reward.models.pickscore_native.placement.devices="$NATIVE_REWARD_DEVICES" \
+    +reward.models.pickscore_native.executor.model=verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeModel \
+    +reward.models.pickscore_native.executor.kwargs.processor_path=$pickscore_processor_path \
+    +reward.reward_functions.pickscore_engine.path=$reward_function_path \
+    +reward.reward_functions.pickscore_engine.name=compute_score_pickscore_engine \
+    +reward.reward_functions.pickscore_engine.logit_scale=$PICKSCORE_LOGIT_SCALE \
+    +reward.reward_functions.pickscore_engine.weight=0.5 \
+    +reward.reward_functions.pickscore_native.path=$reward_function_path \
+    +reward.reward_functions.pickscore_native.name=compute_score_pickscore_native \
+    +reward.reward_functions.pickscore_native.weight=0.5 \
     trainer.logger='["console", "tensorboard"]' \
     trainer.project_name=flow_grpo \
     trainer.experiment_name=qwen_image_edit_lora_pickscore \

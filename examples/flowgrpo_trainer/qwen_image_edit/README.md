@@ -98,9 +98,9 @@ bash examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora.sh \
 
 ### Ascend NPU
 
-The NPU recipe uses the synchronous V1 diffusion trainer and assigns each
-local PickScore reward worker to an accelerator bundle from the actor/rollout
-resource pool:
+The NPU recipe uses the synchronous V1 diffusion trainer and a named native
+PickScore model. Its `placement.devices` list assigns one full PickScore
+model worker to each native-pool bundle:
 
 ```bash
 WORKSPACE=$PWD \
@@ -108,19 +108,13 @@ NUM_GPUS_ACTOR_ROLLOUT_REWARD=16 \
 bash examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora_v1_npu.sh
 ```
 
-The launcher enables accelerator placement for the local reward workers:
-
-```text
-reward.custom_reward_function.use_accelerator=True
-```
-
 Its checked-in resource layout uses 16 NPUs, rollout tensor parallelism 4, and
-16 local reward workers, creating four rollout replicas. Each completed sample
-selects from all configured reward workers at random; rollout tensor
-parallelism does not partition or bind the reward worker set. Adjust
-`ROLLOUT_TP` for the rollout topology and `REWARD_WORKERS` for reward
-parallelism when adapting the recipe. The model, reward function, and parquet
-inputs use the same environment overrides listed below.
+16 native PickScore workers, creating four rollout replicas. The default
+native placement is `[0, ..., 15]`; these are native-subpool bundle indices,
+not physical NPU IDs or tensor-parallel ranks. Adjust `ROLLOUT_TP` for rollout
+topology and set `NATIVE_REWARD_DEVICES` explicitly when changing the number
+of native PickScore replicas. The model and parquet inputs use the same
+environment overrides listed below.
 
 By default, the launcher reads:
 
@@ -144,9 +138,20 @@ Set `TRAIN_FILES` and `VAL_FILES` to use different parquet files.
 | `REWARD_WORKERS` | `4` | Asynchronous reward worker count. |
 | `IMAGE_RESOLUTION` | `512` | Square target output resolution. |
 | `MAX_PROMPT_LENGTH` | `8192` | Token and prompt-embedding length limit. |
-| `REWARD_FUNCTION_PATH` | `pkg://verl_omni.utils.reward_score.pickscore_reward` | Reward module import path. |
+| `PICKSCORE_MODEL_PATH` | `yuvalkirstain/PickScore_v1` | PickScore checkpoint for the native reward model. |
+| `NATIVE_REWARD_DEVICES` | `[0,1,2,3]` (CUDA) / `[0,...,15]` (NPU) | Native-subpool bundle indices; one full PickScore instance per entry. |
+| `REWARD_OFFLOAD` | `true` | `true` wakes/sleeps around scoring; `false` keeps the reward model resident. The meaning is identical for engine and native models. |
 
-The launcher selects `compute_score_pickscore` from the reward module.
+The launcher configures `reward.models.pickscore.backend=native`; the same-name
+`reward.reward_functions.pickscore` entry binds automatically. Native workers
+preserve the PickScore model's local inference queue; they are not TP shards.
+The launcher explicitly configures the PickScore model class through
+`executor.model`; the generic native backend does not select model-specific
+behavior.
+
+See [Named Reward Models](../../../docs/algo/named_reward_models.md)
+for native-only and engine-only configurations, mixed-model resource placement,
+lifecycle settings, and the custom-model extension contract.
 
 Additional Hydra overrides can be appended to the command:
 
@@ -160,7 +165,8 @@ bash examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora.sh \
 
 Keep `actor_rollout_ref.rollout.n` greater than one for group-relative
 advantages. When reducing GPU count, also reduce the training batch size,
-rollout count, micro-batch sizes, and reward worker count to fit memory.
+rollout count, micro-batch sizes, and the explicit native placement list to
+fit memory.
 
 The launcher enables console, TensorBoard, and W&B logging by default. The
 first command overrides this with `trainer.logger=console` so it can run

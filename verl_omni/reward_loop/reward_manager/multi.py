@@ -19,6 +19,7 @@ import logging
 from verl import DataProto
 from verl.utils.import_utils import load_extern_object
 
+from ..reward_model_config import get_reward_model_entries, resolve_reward_model_name
 from .visual import VisualRewardManager, _validate_visual_response
 
 logger = logging.getLogger(__name__)
@@ -52,26 +53,35 @@ class MultiVisualRewardManager(VisualRewardManager):
     Each sub-reward function is called with filtered kwargs (based on its signature),
     and the final reward is a weighted sum of all sub-rewards.
 
-    NOTE: All sub-reward functions that need a reward model share the same
-    reward_router_address (single RM instance). Deploying separate RM instances
-    per reward function is not supported. If a future use case requires multiple
-    distinct reward models, this architecture will need to be extended.
+    A sub-reward may reference a named model. The selected executor supplies
+    inference access, while the configured reward function owns score semantics.
     """
 
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
         # Initialize parent with the placeholder (never actually called)
         super().__init__(config, tokenizer, _multi_reward_placeholder, reward_router_address, reward_model_tokenizer)
 
+        self._engine_reward_executors = {}
+        self._native_reward_executors = {}
+
         reward_functions_cfg = config.reward.reward_functions
+        reward_models_cfg = get_reward_model_entries(config)
         if not reward_functions_cfg:
             raise ValueError("MultiVisualRewardManager requires non-empty reward.reward_functions config")
 
         self._sub_rewards = []
         total_weight = 0.0
-        _reserved_keys = {"path", "name", "weight", "required"}
+        _reserved_keys = {"path", "name", "weight", "required", "model"}
         for key, entry in reward_functions_cfg.items():
-            path = entry["path"]
-            name = entry["name"]
+            model_name = resolve_reward_model_name(key, entry, reward_models_cfg)
+            path = entry.get("path")
+            name = entry.get("name")
+            if (path is None) != (name is None):
+                raise ValueError(f"Reward function {key!r} must set both path and name")
+            if model_name is None and path is None:
+                raise ValueError(f"Reward function {key!r} requires path/name")
+            if model_name is not None and path is None:
+                raise ValueError(f"Model-backed reward function {key!r} requires path/name")
             weight = float(entry.get("weight", 1.0))
             required_value = entry.get("required", False)
             if isinstance(required_value, str):
@@ -85,12 +95,12 @@ class MultiVisualRewardManager(VisualRewardManager):
                 raise TypeError(f"required must be a boolean, got {type(required_value).__name__}")
             total_weight += weight
 
-            # Collect extra config fields (beyond path/name/weight) to pass to compute_score
+            # Collect non-manager fields to pass to compute_score.
             extra_args = {k: v for k, v in entry.items() if k not in _reserved_keys}
 
-            fn = load_extern_object(path, name)
-            sig = inspect.signature(fn)
-            is_async = inspect.iscoroutinefunction(fn)
+            fn = load_extern_object(path, name) if path is not None else None
+            sig = inspect.signature(fn) if fn is not None else None
+            is_async = inspect.iscoroutinefunction(fn) if fn is not None else True
 
             self._sub_rewards.append(
                 {
@@ -101,15 +111,28 @@ class MultiVisualRewardManager(VisualRewardManager):
                     "sig": sig,
                     "is_async": is_async,
                     "extra_args": extra_args,
+                    "model": model_name,
                 }
             )
-            logger.info(f"Loaded sub-reward '{key}': {path}:{name} (weight={weight}, async={is_async})")
+            logger.info(
+                "Loaded sub-reward '%s': %s (weight=%s, required=%s, async=%s)",
+                key,
+                model_name or f"{path}:{name}",
+                weight,
+                required,
+                is_async,
+            )
 
         if total_weight <= 0:
             raise ValueError(
                 f"Total weight of reward functions must be > 0, got {total_weight}. "
                 f"Check reward.reward_functions config."
             )
+
+    def set_reward_executors(self, engine_reward_executors, native_reward_executors) -> None:
+        """Attach per-worker executors for configured engine/native models."""
+        self._engine_reward_executors = engine_reward_executors or {}
+        self._native_reward_executors = native_reward_executors or {}
 
     async def run_single(self, data: DataProto) -> dict:
         assert len(data) == 1, "Only support single data item"
@@ -158,10 +181,22 @@ class MultiVisualRewardManager(VisualRewardManager):
             sig = sub["sig"]
             is_async = sub["is_async"]
             extra_args = sub["extra_args"]
+            model_name = sub["model"]
 
             # Merge per-reward extra config fields into kwargs
             sub_kwargs = {**all_kwargs, **extra_args}
-            filtered_kwargs = _filter_kwargs(sub_kwargs, sig)
+            filtered_kwargs = _filter_kwargs(sub_kwargs, sig) if sig is not None else {}
+
+            if model_name is not None:
+                executor = self._engine_reward_executors.get(model_name)
+                if executor is None:
+                    executor = self._native_reward_executors.get(model_name)
+                if executor is None:
+                    raise RuntimeError(f"Reward model {model_name!r} is not available in this worker")
+                reward_kwargs = getattr(executor, "reward_kwargs", None)
+                if reward_kwargs is None:
+                    raise RuntimeError(f"Reward model {model_name!r} cannot be used with a reward function")
+                filtered_kwargs = _filter_kwargs({**sub_kwargs, **reward_kwargs()}, sig)
 
             try:
                 if is_async:
@@ -177,7 +212,6 @@ class MultiVisualRewardManager(VisualRewardManager):
                         reward_extra_info[f"reward/{key}/{rk}"] = rv
                 else:
                     score = float(result)
-
             except Exception as e:
                 if required:
                     raise RuntimeError(f"Required sub-reward '{key}' failed: {e}") from e

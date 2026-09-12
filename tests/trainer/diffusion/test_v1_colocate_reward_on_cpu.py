@@ -46,7 +46,11 @@ def test_colocate_reward_keeps_trajectory_fields(monkeypatch):
     reward = DataProto.from_tensordict(tu.get_tensordict({"rm_scores": torch.ones(2, 1)}))
     trainer.tokenizer = SimpleNamespace(pad_token_id=0)
     trainer.reward_loop_manager = SimpleNamespace(reward_loop_worker_handles=None)
-    trainer.checkpoint_manager = SimpleNamespace(sleep_replicas=lambda: None, update_weights=lambda step: None)
+    checkpoint_calls = []
+    trainer.checkpoint_manager = SimpleNamespace(
+        sleep_replicas=lambda: checkpoint_calls.append("sleep"),
+        update_weights=lambda step: checkpoint_calls.append(("update_weights", step)),
+    )
     trainer.global_steps = 1
     monkeypatch.setattr(
         "verl_omni.trainer.diffusion.v1.trainer_base.diffusion_tq_batch_to_dataproto",
@@ -66,6 +70,7 @@ def test_colocate_reward_keeps_trajectory_fields(monkeypatch):
 
     assert "all_timesteps" in captured["data"].batch
     assert "rm_scores" in captured["data"].batch
+    assert checkpoint_calls == ["sleep"]
 
 
 def test_colocate_reward_keeps_rollout_asleep_through_actor_update(monkeypatch):

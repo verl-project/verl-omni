@@ -11,26 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""CPU contracts for accelerator-bound reward worker placement."""
 
 from types import SimpleNamespace
 
 import pytest
 
-from verl_omni.reward_loop import local_accelerator_reward_loop as reward_loop_module
+from verl_omni.reward_loop import accelerator_reward_workers as worker_module
 
 
 class _FakeActorClass:
-    def __init__(self):
-        self.calls = []
-
     def options(self, **options):
-        calls = self.calls
-
         class _ConfiguredActor:
             def remote(self, *args):
-                handle = SimpleNamespace(options=options, args=args)
-                calls.append(handle)
-                return handle
+                return SimpleNamespace(options=options, args=args)
 
         return _ConfiguredActor()
 
@@ -47,80 +41,125 @@ class _FakeResourcePool:
         return ["pg0", "pg1"]
 
 
-def _manager(num_workers, resource_pool):
-    manager = object.__new__(reward_loop_module.LocalAcceleratorRewardLoopManager)
-    manager.config = SimpleNamespace(
-        reward=SimpleNamespace(
-            custom_reward_function={"use_accelerator": True},
-            num_workers=num_workers,
-        )
+class _FakeSubResourcePool(_FakeResourcePool):
+    store = [4, 4]
+    start_bundle_index = 2
+    world_size = 3
+
+
+def _config(num_workers):
+    return SimpleNamespace(reward=SimpleNamespace(num_workers=num_workers))
+
+
+def _build_workers(num_workers, resource_pool):
+    return worker_module.build_accelerator_reward_workers(
+        config=_config(num_workers),
+        reward_loop_workers_class=_FakeActorClass(),
+        accelerator_resource_pool=resource_pool,
+        reward_router_address="router",
+        reward_model_specs={"native": "spec"},
     )
-    manager.reward_router_address = "router"
-    manager.reward_loop_workers_class = _FakeActorClass()
-    manager.accelerator_resource_pool = resource_pool
-    return manager
+
+
+def _build_selected_workers(bundle_indices, resource_pool, prefix="native_reward_loop_worker_pickscore"):
+    return worker_module.build_accelerator_reward_workers(
+        config=_config(99),
+        reward_loop_workers_class=_FakeActorClass(),
+        accelerator_resource_pool=resource_pool,
+        reward_router_address="router",
+        reward_model_specs={"pickscore": "spec"},
+        bundle_indices=bundle_indices,
+        worker_name_prefix=prefix,
+    )
 
 
 def test_accelerator_reward_workers_use_distinct_resource_pool_bundles(monkeypatch):
     resource_pool = _FakeResourcePool()
-    manager = _manager(num_workers=3, resource_pool=resource_pool)
-    monkeypatch.setattr(reward_loop_module, "get_device_name", lambda: "npu")
+    monkeypatch.setattr(worker_module, "get_device_name", lambda: "npu")
     monkeypatch.setattr(
-        reward_loop_module,
+        worker_module,
         "get_platform",
         lambda: SimpleNamespace(ray_resource_options=lambda count: {"resources": {"NPU": count}}),
     )
     monkeypatch.setattr(
-        reward_loop_module,
+        worker_module,
         "PlacementGroupSchedulingStrategy",
         lambda placement_group, placement_group_bundle_index: (placement_group, placement_group_bundle_index),
     )
 
-    manager._init_reward_loop_workers()
+    workers = _build_workers(3, resource_pool)
 
     assert resource_pool.device_name == "npu"
-    assert len(manager.reward_loop_workers) == 3
-    assert [worker.options["scheduling_strategy"] for worker in manager.reward_loop_workers] == [
+    assert len(workers) == 3
+    assert [worker.options["scheduling_strategy"] for worker in workers] == [
         ("pg0", 0),
         ("pg1", 0),
         ("pg0", 1),
     ]
-    assert all(worker.options["resources"] == {"NPU": 1 / 3} for worker in manager.reward_loop_workers)
+    assert all(worker.options["resources"] == {"NPU": 1 / 3} for worker in workers)
+    assert all(worker.args[1:] == ("router", {"native": "spec"}) for worker in workers)
 
 
 def test_accelerator_reward_workers_require_enough_bundles():
-    manager = _manager(num_workers=4, resource_pool=_FakeResourcePool())
-
     with pytest.raises(ValueError, match="exceeds accelerator pool size"):
-        manager._init_reward_loop_workers()
+        _build_workers(4, _FakeResourcePool())
 
 
 def test_accelerator_reward_workers_require_colocation_capacity():
     resource_pool = _FakeResourcePool()
     resource_pool.max_colocate_count = 1
-    manager = _manager(num_workers=1, resource_pool=resource_pool)
 
     with pytest.raises(ValueError, match="max_colocate_count >= 2"):
-        manager._init_reward_loop_workers()
+        _build_workers(1, resource_pool)
 
 
-@pytest.mark.parametrize("use_accelerator", [False, True])
-def test_v1_factory_selects_accelerator_manager_only_when_enabled(monkeypatch, use_accelerator):
-    config = SimpleNamespace(
-        reward=SimpleNamespace(
-            custom_reward_function={"use_accelerator": use_accelerator},
-        )
-    )
-    monkeypatch.setattr(reward_loop_module, "OmniRewardLoopManager", lambda **kwargs: ("default", kwargs))
+def test_accelerator_reward_workers_respect_subpool_bundle_offset(monkeypatch):
+    resource_pool = _FakeSubResourcePool()
+    monkeypatch.setattr(worker_module, "get_device_name", lambda: "npu")
     monkeypatch.setattr(
-        reward_loop_module,
-        "LocalAcceleratorRewardLoopManager",
-        lambda config, accelerator_resource_pool: ("accelerator", config, accelerator_resource_pool),
+        worker_module,
+        "get_platform",
+        lambda: SimpleNamespace(ray_resource_options=lambda count: {"resources": {"NPU": count}}),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "PlacementGroupSchedulingStrategy",
+        lambda placement_group, placement_group_bundle_index: (placement_group, placement_group_bundle_index),
     )
 
-    manager = reward_loop_module.create_v1_reward_loop_manager(config, "rm_pool", "accelerator_pool")
+    workers = _build_workers(3, resource_pool)
 
-    if use_accelerator:
-        assert manager == ("accelerator", config, "accelerator_pool")
-    else:
-        assert manager == ("default", {"config": config, "rm_resource_pool": "rm_pool"})
+    assert [worker.options["scheduling_strategy"] for worker in workers] == [
+        ("pg0", 2),
+        ("pg0", 3),
+        ("pg1", 0),
+    ]
+
+
+def test_accelerator_reward_workers_allow_explicit_native_bundle_indices(monkeypatch):
+    resource_pool = _FakeSubResourcePool()
+    monkeypatch.setattr(worker_module, "get_device_name", lambda: "npu")
+    monkeypatch.setattr(
+        worker_module,
+        "get_platform",
+        lambda: SimpleNamespace(ray_resource_options=lambda count: {"resources": {"NPU": count}}),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "PlacementGroupSchedulingStrategy",
+        lambda placement_group, placement_group_bundle_index: (placement_group, placement_group_bundle_index),
+    )
+
+    workers = _build_selected_workers([0, 2], resource_pool)
+
+    assert [worker.options["scheduling_strategy"] for worker in workers] == [("pg0", 2), ("pg1", 0)]
+    assert [worker.options["name"] for worker in workers] == [
+        "native_reward_loop_worker_pickscore_0",
+        "native_reward_loop_worker_pickscore_1",
+    ]
+    assert all(worker.args[1:] == ("router", {"pickscore": "spec"}) for worker in workers)
+
+
+def test_accelerator_reward_workers_reject_invalid_explicit_bundle_indices():
+    with pytest.raises(ValueError, match="bundle index 3 exceeds"):
+        _build_selected_workers([3], _FakeResourcePool())

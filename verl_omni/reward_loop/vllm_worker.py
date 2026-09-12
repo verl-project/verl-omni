@@ -11,13 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .reward_loop import OmniRewardLoopManager  # noqa: F401
-from .reward_manager import MultiVisualRewardManager, VisualRewardManager  # noqa: F401
-from .reward_model import MultiRewardModelManager  # noqa: F401
 
-__all__ = [
-    "OmniRewardLoopManager",
-    "VisualRewardManager",
-    "MultiVisualRewardManager",
-    "MultiRewardModelManager",
-]
+from typing import Optional
+
+from verl.workers.rollout.vllm_rollout.utils import vLLMColocateWorkerExtension
+
+
+class PoolingRewardModelWorkerExtension(vLLMColocateWorkerExtension):
+    """Keep verl's generation-only model patches out of pooling workers."""
+
+    def monkey_patch_model(self, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
+        del vocab_size, banned_token_ids

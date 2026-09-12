@@ -109,6 +109,74 @@ class _FakeInferencer:
         self.batches.append((list(prompts), list(images)))
         return torch.tensor([float(image.getpixel((0, 0))) for image in images])
 
+    def infer(self, prompts, images):
+        self.batches.append((list(prompts), list(images)))
+        values = torch.tensor([float(image.getpixel((0, 0))) for image in images])
+        return {
+            "text_embeddings": torch.stack((values, torch.ones_like(values)), dim=-1),
+            "image_embeddings": torch.stack((torch.ones_like(values), values), dim=-1),
+            "logit_scale": torch.tensor(2.0),
+        }
+
+
+@pytest.mark.asyncio
+async def test_native_model_batches_inference_and_closes_instance_consumer(monkeypatch):
+    inferencer = _FakeInferencer()
+    init_kwargs = {}
+
+    def build_inferencer(**kwargs):
+        init_kwargs.update(kwargs)
+        return inferencer
+
+    monkeypatch.setattr(pickscore_reward, "_PickScoreInferencer", build_inferencer)
+    model = pickscore_reward.PickScoreNativeModel(model_path="/models/pickscore", device="cpu")
+
+    assert init_kwargs["model_path"] == "/models/pickscore"
+    assert init_kwargs["processor_path"] == pickscore_reward._PROCESSOR_PATH
+
+    result_batches = await asyncio.gather(
+        *(model.infer(["shared prompt"], [Image.new("L", (1, 1), index)]) for index in range(4))
+    )
+
+    assert [batch[0]["text_embeddings"].tolist() for batch in result_batches] == [
+        [0.0, 1.0],
+        [1.0, 1.0],
+        [2.0, 1.0],
+        [3.0, 1.0],
+    ]
+    assert len(inferencer.batches) == 1
+    assert inferencer.batches[0][0] == ["shared prompt"] * 4
+
+    await model.close()
+    assert not model._consumer_task
+    assert not hasattr(model, "_inferencer")
+
+
+@pytest.mark.asyncio
+async def test_native_reward_function_computes_score_from_model_output():
+    class _NativeModelHandle:
+        async def infer(self, prompts, images):
+            assert prompts == ["prompt"]
+            assert len(images) == 1
+            return [
+                {
+                    "text_embeddings": torch.tensor([3.0, 4.0]),
+                    "image_embeddings": torch.tensor([0.0, 5.0]),
+                    "logit_scale": torch.tensor(98.0),
+                }
+            ]
+
+    result = await pickscore_reward.compute_score_pickscore_native(
+        data_source="test",
+        solution_image=torch.zeros(3, 2, 2, dtype=torch.uint8),
+        ground_truth="prompt",
+        extra_info={},
+        reward_model=_NativeModelHandle(),
+    )
+
+    expected_score = 98.0 * 0.8 / 26.0
+    assert result == {"score": pytest.approx(expected_score), "pickscore_raw": pytest.approx(expected_score)}
+
 
 @pytest.mark.asyncio
 async def test_consumer_batches_burst_requests_and_preserves_order(monkeypatch):
@@ -188,3 +256,57 @@ async def test_consumer_isolates_invalid_image_from_batch(monkeypatch):
     assert results[2] == 3.0
     assert len(inferencer.batches) == 1
     assert inferencer.batches[0][0] == ["prompt", "prompt"]
+
+
+@pytest.mark.asyncio
+async def test_engine_reward_posts_openai_embedding_payloads(monkeypatch):
+    requests = []
+
+    class _Response:
+        def __init__(self, embedding):
+            self.embedding = embedding
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self):
+            return {"data": [{"embedding": self.embedding}]}
+
+    class _Session:
+        def __init__(self, **kwargs):
+            del kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def post(self, url, json):
+            requests.append((url, json))
+            return _Response([3.0, 4.0] if len(requests) == 1 else [0.0, 5.0])
+
+    monkeypatch.setattr(pickscore_reward.aiohttp, "ClientSession", _Session)
+
+    result = await pickscore_reward.compute_score_pickscore_engine(
+        data_source="test",
+        solution_image=torch.zeros(3, 2, 2, dtype=torch.uint8),
+        ground_truth="prompt",
+        extra_info={},
+        reward_router_address="router:8000",
+        model_name="pickscore",
+        logit_scale=98.0,
+    )
+
+    expected_score = 98.0 * 0.8 / 26.0
+    assert result == {"score": pytest.approx(expected_score), "pickscore_raw": pytest.approx(expected_score)}
+    assert [url for url, _ in requests] == ["http://router:8000/v1/embeddings"] * 2
+    assert requests[0][1] == {"model": "pickscore", "input": "prompt", "encoding_format": "float"}
+    assert requests[1][1]["encoding_format"] == "float"
+    assert requests[1][1]["input"][0]["content"][0]["type"] == "image_url"

@@ -46,6 +46,7 @@ examples/config.md
 :caption: Advanced Features
 
 algo/async_reward.md
+algo/named_reward_models.md
 algo/rollout_correction.md
 algo/separate_async_omni.md
 start/rollout_batching.md

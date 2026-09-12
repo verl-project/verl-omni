@@ -20,13 +20,66 @@ custom_reward_function:
   path: null
   # The name of the reward function within the specified file. Default is 'compute_score'.
   name: compute_score
-  # Whether local custom reward workers should use accelerator resources.
+  # Deprecated alias; use reward.accelerator_workers.enabled instead.
   use_accelerator: false
+
+# Bind legacy custom reward workers to bundles in the trainer-selected
+# accelerator pool. Native named models select this automatically; this switch
+# only preserves an explicit path for existing custom reward functions.
+accelerator_workers:
+  enabled: false
 
 # Multi-reward configuration (dict-based, mutually exclusive with custom_reward_function).
 # Keys are user-chosen names used for metric logging (e.g., "ocr", "jpeg").
 # Each entry: path (str), name (str), weight (float).
 reward_functions: {}
+
+# Named reward models. A reward function uses the same-name model by default or
+# may reference another entry with ``model: <key>``. Backends are ``engine``
+# (vLLM through the existing verl RewardModelManager) and ``native``
+# (verl-omni worker-local model). The trainer selects one
+# parent global_pool or reward_pool through reward_model.enable_resource_pool;
+# MultiRewardModelManager splits that parent pool into disjoint engine and
+# native subpools. Native models share one parent native subpool, but each model
+# must explicitly claim its own native-pool bundle indices.
+# One index creates one full local model instance; this is replication, not TP.
+# The indices are relative to the native subpool (not physical CUDA/NPU IDs),
+# and cannot overlap between native models.
+# Every backend uses the same optional ``offload`` setting: true (default)
+# wakes before scoring and sleeps afterward; false keeps the model resident.
+# Native model example:
+#
+# models:
+#   quality:
+#     backend: native
+#     offload: true
+#     model_path: /models/quality
+#     placement:
+#       devices: [0, 1, 2, 3]
+#     executor:
+#       model: my_package.reward_model:QualityModel
+# Engine model example:
+#   judge:
+#     backend: engine
+#     offload: true
+#     n_gpus_per_node: 1
+#     nnodes: 1
+#     model_path: /models/judge
+#     rollout:
+#       name: vllm
+#       tensor_model_parallel_size: 1
+# reward_functions:
+#   quality:
+#     path: pkg://my_package.reward_score
+#     name: compute_quality_score
+#   judge:
+#     path: pkg://my_package.reward_score
+#     name: compute_judge_score
+# Existing router-based rewards (for example GenRM OCR) may also bind their
+# existing path/name function to a model; it receives that model's
+# ``reward_router_address`` and ``model_name`` instead of the legacy global
+# reward router.
+models: {}
 
 # Aggregation method for multi-reward. Only "weighted_sum" is supported.
 aggregation: weighted_sum
@@ -45,8 +98,9 @@ reward_manager:
 reward_model:
   enable: False
 
-  # Whether to deploy the model to a separate resource pool.
-  # If true, n_gpus_per_node & nnodes will be used to determine the resource node.
+  # Select the parent pool for the existing reward_model and named engine models.
+  # If true, use a dedicated reward_pool; otherwise, use global_pool.
+  # MultiRewardModelManager splits the selected parent pool per named model.
   enable_resource_pool: False
   n_gpus_per_node: 8
   nnodes: 0
