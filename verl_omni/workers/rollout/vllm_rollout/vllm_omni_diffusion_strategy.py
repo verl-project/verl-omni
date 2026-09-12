@@ -14,6 +14,7 @@
 import logging
 from argparse import Namespace
 from collections.abc import Mapping
+from dataclasses import asdict
 from typing import Any, Optional
 
 import numpy as np
@@ -102,6 +103,34 @@ class DiffusionStrategy(OmniStrategyBase):
         return _GPU_WORKER_EXTENSION
 
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
+        # The pinned OmniEngineArgs drops the CLI-only text_encoder_tp_size field.
+        text_encoder_tp = self.server.config.text_encoder_tp_size
+        cli_text_encoder_tp = getattr(args, "text_encoder_tp_size", None)
+        if cli_text_encoder_tp is not None:
+            if text_encoder_tp not in (1, cli_text_encoder_tp):
+                raise ValueError("Conflicting text_encoder_tp_size in rollout config and engine_kwargs.")
+            text_encoder_tp = cli_text_encoder_tp
+
+        parallel_config = engine_args.get("parallel_config")
+        tp_size = self.server.config.tensor_model_parallel_size
+        if parallel_config is not None:
+            parallel_config = dict(parallel_config) if isinstance(parallel_config, Mapping) else asdict(parallel_config)
+            nested_text_encoder_tp = parallel_config.get("text_encoder_tp_size")
+            if nested_text_encoder_tp is not None:
+                if nested_text_encoder_tp != text_encoder_tp and (
+                    cli_text_encoder_tp is not None or text_encoder_tp != 1
+                ):
+                    raise ValueError("Conflicting text_encoder_tp_size in rollout/engine_kwargs and parallel_config.")
+                text_encoder_tp = nested_text_encoder_tp
+            tp_size = parallel_config.get("tensor_parallel_size", tp_size)
+
+        if text_encoder_tp < 1 or text_encoder_tp not in (1, tp_size):
+            raise ValueError(f"text_encoder_tp_size must be 1 or equal to tensor parallel size ({tp_size}).")
+        engine_args["text_encoder_tp_size"] = text_encoder_tp
+        if parallel_config is not None:
+            parallel_config["text_encoder_tp_size"] = text_encoder_tp
+            engine_args["parallel_config"] = parallel_config
+
         import_external_libs(self.server.config.external_lib)
 
         pipeline_path = VllmOmniPipelineBase.get_pipeline_path(

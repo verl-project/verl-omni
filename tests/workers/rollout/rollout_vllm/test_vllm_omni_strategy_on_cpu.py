@@ -725,6 +725,8 @@ def test_diffusion_strategy_preserves_engine_argument_preparation(monkeypatch):
     server = SimpleNamespace(
         config=SimpleNamespace(
             external_lib=["extension"],
+            tensor_model_parallel_size=4,
+            text_encoder_tp_size=1,
             step_execution=False,
             enable_prompt_embed_cache=True,
             prompt_embed_cache_size=16,
@@ -739,6 +741,7 @@ def test_diffusion_strategy_preserves_engine_argument_preparation(monkeypatch):
     assert imported == [["extension"]]
     assert engine_args == {
         "max_num_seqs": 1,
+        "text_encoder_tp_size": 1,
         "enable_dummy_pipeline": True,
         "custom_pipeline_args": {"pipeline_class": "package.Adapter"},
         "enable_prompt_embed_cache": True,

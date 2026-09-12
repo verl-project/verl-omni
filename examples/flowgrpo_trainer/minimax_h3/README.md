@@ -1,6 +1,6 @@
 # MiniMax H3 T2VA, FL2VA, and Ref2VA FlowGRPO
 
-Last updated: 09/02/2026
+Last updated: 09/12/2026
 
 These recipes train `MiniMaxAI/MiniMax-H3` LoRA adapters with FlowGRPO for
 text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
@@ -295,9 +295,20 @@ and Actor micro-batch 1. It enables layerwise rollout offload and FSDP2 Actor
 parameter/optimizer offload because reference presentations can be much longer
 than T2VA prompts.
 
-`NUM_GPUS` must be divisible by `ROLLOUT_TP`. `TEXT_ENCODER_TP` cannot exceed
-`ROLLOUT_TP`; H3 supports text-encoder TP sizes 1, 2, 4, and 8. The recipe uses
-an Actor micro-batch of 1 because samples with different packed
+`NUM_GPUS` must be divisible by `ROLLOUT_TP`. `TEXT_ENCODER_TP` defaults to
+`ROLLOUT_TP` and is forwarded as `actor_rollout_ref.rollout.text_encoder_tp_size`
+(without `+`), using the same diffusion engine path as NFT. With the pinned
+backend, ETP must be 1 or equal to rollout TP; H3 supports ETP 1/2/4/8.
+For example, `ROLLOUT_TP=4 TEXT_ENCODER_TP=4` shards the encoder across all four
+DiT ranks, while `TEXT_ENCODER_TP=1` disables encoder sharding. ETP is independent
+of CPU/layerwise offload. This applies to the GPU, V1 sync, and NPU launchers.
+
+The legacy `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.text_encoder_tp_size`
+override remains supported; conflicting values fail at startup. The fix for
+[#563](https://github.com/verl-project/verl-omni/issues/563) preserves ETP through
+CLI conversion into the fused diffusion engine's parallel config.
+
+The recipe uses an Actor micro-batch of 1 because samples with different packed
 video/audio/text layouts cannot share one H3 forward. A larger micro-batch is
 valid only when every sample has the same packed layout.
 

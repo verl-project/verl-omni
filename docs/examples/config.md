@@ -1,6 +1,6 @@
 # Config Explanation
 
-Last updated: 09/01/2026
+Last updated: 09/12/2026
 
 VeRL-Omni builds on [verl](https://github.com/verl-project/verl) and reuses the
 same Hydra config surface for shared RL trainer fields (`data`, FSDP actor /
@@ -232,6 +232,28 @@ VeOmni engine path (`strategy=veomni`) adds `veomni_config` / VeOmni optimizer f
 ### `actor_rollout_ref.rollout` — `DiffusionRolloutConfig`
 
 Diffusion-specific blocks sit under `pipeline`, `algo`, and `val_kwargs`. Several engine knobs are shared with verl vLLM rollout but have diffusion defaults.
+
+#### Text-encoder tensor parallelism
+
+`actor_rollout_ref.rollout.text_encoder_tp_size` (default `1`) controls encoder
+sharding for supporting diffusion pipelines. Use `1` or
+`actor_rollout_ref.rollout.tensor_model_parallel_size`; intermediate subgroups
+are rejected for the pinned backend. MiniMax-H3 supports ETP 1/2/4/8.
+
+```bash
+actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
+actor_rollout_ref.rollout.text_encoder_tp_size=4
+```
+
+NFT and FlowGRPO share this path. The field reaches the fused engine's
+`OmniDiffusionConfig.parallel_config.text_encoder_tp_size`; it is independent
+of CPU/layerwise offload. H3 launchers default `TEXT_ENCODER_TP` to `ROLLOUT_TP`.
+
+The legacy `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.text_encoder_tp_size`
+override is still accepted and overrides the typed default of `1`. Conflicting
+non-default typed and legacy values raise an error. If an explicit
+`parallel_config` provides ETP, it must agree with any requested override;
+otherwise its value is preserved. Prefer the typed field without `+`.
 
 #### Pipeline — `DiffusionPipelineConfig`
 

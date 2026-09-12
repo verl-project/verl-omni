@@ -9,6 +9,7 @@ MODEL_PATH=${MODEL_PATH:-}
 DATA_DIR=${DATA_DIR:-$WORKSPACE/data/vid_prompt/verl_omni}
 NUM_GPUS=${NUM_GPUS:-8}
 ROLLOUT_TP=${ROLLOUT_TP:-2}
+TEXT_ENCODER_TP=${TEXT_ENCODER_TP:-$ROLLOUT_TP}
 ROLLOUT_N=${ROLLOUT_N:-16}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-1000}
 HEIGHT=${HEIGHT:-256}
@@ -105,6 +106,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.max_num_seqs=1 \
     actor_rollout_ref.rollout.rollout_attn_backend=$ROLLOUT_ATTN_BACKEND \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
+    actor_rollout_ref.rollout.text_encoder_tp_size=$TEXT_ENCODER_TP \
     actor_rollout_ref.rollout.n=$ROLLOUT_N \
     actor_rollout_ref.rollout.seed=42 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS / ROLLOUT_TP)) \

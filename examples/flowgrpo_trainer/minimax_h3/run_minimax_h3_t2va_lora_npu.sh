@@ -89,7 +89,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
     actor_rollout_ref.rollout.max_num_seqs=1 \
     actor_rollout_ref.rollout.layered_summon=True \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.text_encoder_tp_size=$TEXT_ENCODER_TP \
+    actor_rollout_ref.rollout.text_encoder_tp_size=$TEXT_ENCODER_TP \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.seed=42 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS / ROLLOUT_TP)) \

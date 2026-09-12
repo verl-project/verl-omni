@@ -1,6 +1,6 @@
 # MiniMax H3 T2VA, FL2VA, and Ref2VA DiffusionNFT
 
-Last updated: 09/04/2026
+Last updated: 09/12/2026
 
 These recipes train rank-64 MiniMax H3 LoRA adapters with online DiffusionNFT
 for text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
@@ -184,6 +184,23 @@ python3 examples/diffusionnft_trainer/minimax_h3/build_fl2va_jsonl.py \
   training at e.g. 288x464 (same ~1:1.61 aspect) works directly.
 
 ## Launch
+
+### Text-encoder tensor parallelism
+
+All H3 NFT launchers use `TEXT_ENCODER_TP=${TEXT_ENCODER_TP:-$ROLLOUT_TP}`,
+forwarded as `actor_rollout_ref.rollout.text_encoder_tp_size` (without `+`).
+For example, `ROLLOUT_TP=4 TEXT_ENCODER_TP=4` shards the encoder across all four
+DiT ranks; `TEXT_ENCODER_TP=1` keeps it unsharded. With the pinned backend, use
+ETP=1 or ETP=rollout TP, not an intermediate subgroup; H3 supports ETP 1/2/4/8.
+This applies to T2VA, FL2VA, and Ref2VA and is independent of CPU/layerwise offload.
+
+The legacy `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.text_encoder_tp_size`
+override remains supported. Prefer the typed field and do not set conflicting
+values through both paths. The fix for [#563](https://github.com/verl-project/verl-omni/issues/563)
+retains ETP through CLI conversion into the fused diffusion engine's parallel
+config; a CLI argument alone was not evidence that the encoder was sharded.
+
+### T2VA
 
 ```bash
 export MODEL_PATH=/path/to/MiniMax-H3
