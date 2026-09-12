@@ -27,10 +27,10 @@ runs:
         uv pip install --system --break-system-packages --no-deps --reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
         uv pip install --system --break-system-packages TransferQueue==0.1.8
         uv pip install --system --break-system-packages --no-deps -e .
-        # veomni's [gpu] extra pins torch 2.9 and would conflict with the vLLM stack.
+        # veomni's [gpu] extra pins torch 2.11 and would conflict with the vLLM stack.
         # See docs/start/install.md "Optional engine backends".
         # TODO: rm --no-deps when VeOmni supports the vLLM torch pin (torch 2.13 as of vLLM 0.28)
-        uv pip install --system --break-system-packages veomni==0.1.11 --no-deps
+        uv pip install --system --break-system-packages veomni==0.1.12 --no-deps
         uv pip install --system --break-system-packages torchcodec librosa soundfile av audioread
         # The released qwen-tts package targets Transformers 4.57.3. Install the
         # tested upstream Transformers 5 source without changing this repo's stack.
