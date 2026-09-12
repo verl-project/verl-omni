@@ -282,13 +282,13 @@ trainer:
       sampler_kwargs: {}
 
 # Profiler configs (mirrors verl/trainer/config/ppo_trainer.yaml `global_profiler`).
-# verl-omni does not support NPU; only nsys, torch and torch_memory tools are supported.
+# Supported tools are nsys, npu, torch, and torch_memory.
 global_profiler:
 
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.utils.profiler.ProfilerConfig
 
-  # Profiling tool: choose between nsys, torch, torch_memory
+  # Profiling tool: choose between nsys, npu, torch, torch_memory
   tool: null
 
   # Steps at which profiling should be performed (e.g. [1, 2, 5]). null disables profiling.
