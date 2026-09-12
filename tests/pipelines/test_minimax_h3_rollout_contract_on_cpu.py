@@ -93,6 +93,9 @@ class TestH3RolloutOutputContract:
         assert result.extra_fields["audio"] is not None
         assert "audio_sample_rate" in result.extra_fields
         assert result.extra_fields["audio_sample_rate"] == _AUDIO_SR
+        # The real MiniMax H3 adapter declares primary=video, which reaches
+        # downstream consumers so they need not infer the modality from rank.
+        assert result.extra_fields["media_kind"] == "video"
 
     def test_rl_metadata_reaches_extra_fields(self):
         """rl and prompt_embeddings groups flatten into extra_fields."""

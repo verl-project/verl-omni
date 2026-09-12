@@ -61,10 +61,21 @@ class DiffusionIOSpec:
         primary: The main media stream. It is carried on
             ``DiffusionOutput.diffusion_output`` and, when the pipeline emits a
             media tuple, occupies position 0.
-        auxiliary: Additional media streams in tuple order, so ``auxiliary[i]``
-            describes media-tuple position ``i + 1`` (e.g. a single ``audio``
-            entry describes the joint-audio stream at position 1).
+        auxiliary: At most one audio stream, carried at position 1 of a
+            ``(visual, audio)`` tuple. Other auxiliary combinations are not
+            supported by the current rollout transport.
     """
 
     primary: MediaSpec
     auxiliary: tuple[MediaSpec, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.auxiliary and (
+            self.primary.modality not in ("image", "video")
+            or len(self.auxiliary) != 1
+            or self.auxiliary[0].modality != "audio"
+        ):
+            raise ValueError(
+                "DiffusionIOSpec supports image/video primary media with at most one auxiliary audio stream; "
+                f"got primary={self.primary.modality!r}, auxiliary={tuple(s.modality for s in self.auxiliary)!r}"
+            )

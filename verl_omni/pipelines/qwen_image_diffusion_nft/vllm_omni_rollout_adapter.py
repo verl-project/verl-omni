@@ -31,6 +31,7 @@ from verl_omni.pipelines.qwen_image_flow_grpo.common import (
     coalesce_not_none,
 )
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
+from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 
 __all__ = ["QwenImageDiffusionNFTPipeline"]
 
@@ -59,7 +60,7 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         negative_prompt_ids = None
         negative_prompt_mask = None
         if isinstance(prompt, dict):
-            prompt_ids = prompt.get("prompt_token_ids")
+            prompt_ids = prompt_ids_from_payload(prompt)
             prompt_mask = prompt.get("prompt_mask")
             negative_prompt_ids = prompt.get("negative_prompt_ids")
             negative_prompt_mask = prompt.get("negative_prompt_mask")
@@ -100,7 +101,7 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         if prompt_ids is None:
             raise ValueError(
                 f"{self.__class__.__name__}.prepare_encode requires either "
-                "'prompt_token_ids' or a text 'prompt' on state.prompt."
+                "'prompt_ids' or a text 'prompt' on state.prompt."
             )
 
         height = sampling.height or self.default_sample_size * self.vae_scale_factor
@@ -323,7 +324,7 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
 
         custom_prompt = req.prompts[0] if req.prompts else {}
         if isinstance(custom_prompt, dict):
-            prompt_ids = custom_prompt.get("prompt_token_ids", prompt_ids)
+            prompt_ids = prompt_ids_from_payload(custom_prompt, prompt_ids)
             prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
             negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
             negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)

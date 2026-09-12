@@ -43,7 +43,7 @@ from verl_omni.pipelines.request_batch import (
     split_diffusion_output_by_request as _split_diffusion_output_by_request,
 )
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
-from verl_omni.pipelines.rollout_request import condition_images_from_payload
+from verl_omni.pipelines.rollout_request import condition_images_from_payload, prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import (
@@ -218,7 +218,7 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
         if prompts:
             p0 = prompts[0]
             if isinstance(p0, dict):
-                prompt_ids = p0.get("prompt_token_ids", None)
+                prompt_ids = prompt_ids_from_payload(p0)
                 prompt_mask = p0.get("prompt_mask", None)
                 negative_prompt_ids = p0.get("negative_prompt_ids", None)
                 negative_prompt_mask = p0.get("negative_prompt_mask", None)
@@ -240,7 +240,7 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
         """
         prompt_ids, token_lengths = _collate_prompt_rows(
             prompts,
-            ("prompt_token_ids", "prompt_ids"),
+            ("prompt_ids",),
             None,
             device=self.device,
             field_name="prompt_token_ids",

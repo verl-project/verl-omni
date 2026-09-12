@@ -51,6 +51,7 @@ from verl_omni.pipelines.diffusion_rollout_output import (
 )
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
+from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import calculate_shift, normalize_ltx_output_type
@@ -149,9 +150,9 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
     def _inject_precomputed_prompt_embeds(self, req: OmniDiffusionRequest) -> None:
         """Convert verl token-ID request fields into LTX raw text-encoder embeddings."""
         if not isinstance(req.prompt, dict):
-            raise TypeError("LTX-2.3 FlowGRPO expects a dict prompt containing `prompt_token_ids`.")
+            raise TypeError("LTX-2.3 FlowGRPO expects a dict prompt containing `prompt_ids`.")
         payload = dict(req.prompt)
-        prompt_ids = payload.get("prompt_token_ids")
+        prompt_ids = prompt_ids_from_payload(payload)
         if prompt_ids is None:
             return
 

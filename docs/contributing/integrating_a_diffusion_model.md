@@ -104,8 +104,9 @@ expects pre-tokenised input on every request.
 
 ### Single text encoder (Qwen-Image and similar)
 
-One tokenizer, one text encoder. The agent loop sends `prompt_token_ids`; your
-rollout adapter overrides `encode_prompt` to accept `prompt_ids=` (and an
+One tokenizer, one text encoder. The agent loop sends `prompt_ids` to the server;
+the diffusion prompt keeps that canonical spelling. Your rollout adapter overrides
+`encode_prompt` to accept `prompt_ids=` (and an
 optional attention mask) and runs the text encoder directly — see
 [`qwen_image_flow_grpo/common.py`](../../verl_omni/pipelines/qwen_image_flow_grpo/common.py).
 
@@ -137,12 +138,21 @@ t5:   {path: tokenizer_3, max_length: 256}   # feeds T5; align max_length with p
 **Rollout transport**
 
 [`vLLMOmniHttpServer`](../../verl_omni/workers/rollout/vllm_rollout/vllm_omni_async_server.py)
-forwards `extra_prompt_ids` / `negative_extra_prompt_ids` on the diffusion
-custom prompt dict alongside `prompt_token_ids`.
+places `extra_prompt_ids` / `negative_extra_prompt_ids` inside the diffusion
+prompt's `extra_args`, alongside the top-level canonical `prompt_ids`. Media and
+`mm_processor_kwargs` stay at the top level: the pinned MiniMax/Bagel runtime reads
+them there, even though upstream's `OmniCustomPrompt` TypedDict omits those fields.
+The server never duplicates media into `extra_args`.
+
+Multistage rollout whose first stage is AR still needs vLLM's `prompt_token_ids`
+at that entrance. `prompt_ids_from_payload` is the sole shared adapter bridge for
+that spelling and rejects conflicting IDs. The public Ray keyword API and AR
+strategy are unchanged. Historical condition-image aliases are accepted only by
+the conflict-checking compatibility parser, not emitted on the new wire path.
 
 **Rollout adapter behaviour**
 
-Read `req.prompts[0]["extra_prompt_ids"]`, pad each id list to the encoder's
+Read `req.prompts[0]["extra_args"]["extra_prompt_ids"]`, pad each id list to the encoder's
 fixed length using **that tokenizer's** `pad_token_id` (SD3 CLIP-L and CLIP-G
 use different pad tokens even though they share a vocab), run the text
 encoders on `input_ids`, and concatenate embeddings exactly as the upstream
@@ -442,9 +452,10 @@ by 255 again before PIL, JPEG, or HTTP serialization.
 Set a `diffusion_io_spec` class attribute on the registered pipeline so the
 shared `DiffusionStrategy` knows what media your `forward` emits. The strategy
 reads it (via `VllmOmniPipelineBase.get_class(architecture, algorithm)`) when it
-converts the raw pipeline output into the rollout response, so model-specific
-conventions — which tuple position carries audio, what audio sample rate to
-attach — live in the adapter instead of being hardcoded in the shared strategy.
+converts the raw pipeline output into the rollout response. The primary modality
+and default audio sample rate come from the adapter.
+The current transport supports a single primary output or a `(visual, audio)`
+tuple; it does not support arbitrary auxiliary streams.
 
 ```python
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
@@ -457,9 +468,10 @@ class MyModelPipelineWithLogProb(MyModelPipeline):
 
 - **`primary`** — the main media stream (`MediaSpec("image")` or
   `MediaSpec("video")`), carried in `responses`.
-- **`auxiliary`** — additional streams in tuple order: `auxiliary[i]` maps to
-  output tuple position `i + 1` (position `0` is the primary). A `forward` that
-  returns `(video, audio)` declares one auxiliary audio stream:
+- **`auxiliary`** — either empty or one audio stream at tuple position `1`
+  (position `0` is the primary visual output). Other auxiliary declarations and
+  extra tuple elements are rejected, not silently discarded. A `forward` that
+  returns `(video, audio)` declares:
 
 ```python
     diffusion_io_spec = DiffusionIOSpec(
@@ -472,8 +484,10 @@ class MyModelPipelineWithLogProb(MyModelPipeline):
   `forward` attaches a runtime rate through the `rl` rollout metadata, that value
   takes precedence and the strategy only falls back to this default. Declare the
   rate your model actually decodes (MiniMax H3 → `32000`, LTX-2 → `24000`).
-- `MediaSpec.fps` is an optional video default; `Modality` is
-  `image | video | audio`.
+- `MediaSpec.fps` is an optional declaration; current exporters still use
+  `trainer.video_fps`, not this field. `Modality` is `image | video | audio`.
+- The strategy propagates the primary modality as `media_kind`. Runtime metadata
+  may repeat the same value, but a conflicting modality raises an error.
 - Subclasses inherit the attribute, so a pipeline that subclasses another adapter
   (e.g. `qwen_image_dual_grpo` extends `qwen_image_flow_grpo`) reuses its
   `diffusion_io_spec` unless it overrides it.
@@ -655,7 +669,7 @@ third model demands the same code, then unify.
 Before opening the PR, confirm every box:
 
 - [ ] Prompt tokenisation follows [Prompt Tokenisation](#prompt-tokenisation-agent-loop--rollout):
-      single-encoder models use `prompt_token_ids` only; multi-encoder models
+      single-encoder diffusion prompts use `prompt_ids`; multi-encoder models
       configure `extra_tokenizers` and a token-id-native rollout encoder
       (no decode-and-re-encode in the pipeline).
 - [ ] `verl_omni/pipelines/<model>_flow_grpo/` contains `__init__.py`,
