@@ -134,11 +134,33 @@ def test_image_samples_become_wandb_image_and_no_temp_dir(monkeypatch):
     assert captured[0][1] == {"file_type": "jpg"}
 
 
-def test_image_samples_reject_non_uint8_input(monkeypatch):
+def test_image_media_failure_is_reported_without_raising(monkeypatch):
     monkeypatch.setattr(wandb, "Image", lambda *args, **kwargs: pytest.fail("wandb.Image should not be called"))
 
-    with pytest.raises(ValueError, match=r"Expected a uint8 image tensor, got torch\.float32\."):
-        wrap_val_samples_for_wandb([("prompt", torch.rand(3, 16, 16), 1.0)])
+    wrapped, video_tmp_dir, media_to_log = wrap_val_samples_for_wandb([("prompt", torch.rand(3, 16, 16), 1.0)])
+
+    assert wrapped == [
+        ("prompt", "[validation media unavailable: ValueError: Expected a uint8 image tensor, got torch.float32.]", 1.0)
+    ]
+    assert video_tmp_dir is None
+    assert media_to_log == {}
+
+
+def test_declared_image_kind_wins_over_video_rank(monkeypatch):
+    captured = []
+    monkeypatch.setattr(wandb, "Image", lambda output, **kwargs: captured.append(output) or "image")
+    monkeypatch.setattr(wandb, "Video", lambda *args, **kwargs: pytest.fail("wandb.Video should not be called"))
+    output = torch.zeros(1, 3, 8, 8, dtype=torch.uint8)
+
+    wrapped, video_tmp_dir, media_to_log = wrap_val_samples_for_wandb(
+        [("prompt", output, 1.0)],
+        media_kinds=["image"],
+    )
+
+    assert captured == [output]
+    assert wrapped == [("prompt", "image", 1.0)]
+    assert video_tmp_dir is None
+    assert media_to_log == {}
 
 
 def test_uint8_image_is_logged_by_real_wandb_offline_run(monkeypatch, tmp_path):

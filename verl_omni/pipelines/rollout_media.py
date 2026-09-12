@@ -24,11 +24,34 @@ modalities only touches the adapter, not the shared server/strategy code.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal, Optional
 
 #: Media kinds a diffusion pipeline can emit.
 Modality = Literal["image", "video", "audio"]
+
+
+def resolve_is_video(ndim: int, media_kind: str | None) -> bool:
+    """Prefer the declared modality, retaining rank fallback for legacy outputs."""
+    if media_kind is not None:
+        if media_kind not in ("image", "video", "audio"):
+            raise ValueError(f"Unsupported media kind: {media_kind!r}")
+        return media_kind == "video"
+    return ndim == 5
+
+
+def resolve_batch_media_kind(media_kinds: Iterable[str | None]) -> str | None:
+    """Require one declared modality per pipeline batch; ignore absent legacy metadata."""
+    resolved = None
+    for kind in media_kinds:
+        if kind is None:
+            continue
+        resolve_is_video(0, kind)
+        if resolved is not None and resolved != kind:
+            raise ValueError(f"Conflicting media kinds in one rollout batch: {resolved!r} and {kind!r}")
+        resolved = kind
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -61,10 +84,21 @@ class DiffusionIOSpec:
         primary: The main media stream. It is carried on
             ``DiffusionOutput.diffusion_output`` and, when the pipeline emits a
             media tuple, occupies position 0.
-        auxiliary: Additional media streams in tuple order, so ``auxiliary[i]``
-            describes media-tuple position ``i + 1`` (e.g. a single ``audio``
-            entry describes the joint-audio stream at position 1).
+        auxiliary: At most one audio stream, carried at position 1 of a
+            ``(visual, audio)`` tuple. Other auxiliary combinations are not
+            supported by the current rollout transport.
     """
 
     primary: MediaSpec
     auxiliary: tuple[MediaSpec, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.auxiliary and (
+            self.primary.modality not in ("image", "video")
+            or len(self.auxiliary) != 1
+            or self.auxiliary[0].modality != "audio"
+        ):
+            raise ValueError(
+                "DiffusionIOSpec supports image/video primary media with at most one auxiliary audio stream; "
+                f"got primary={self.primary.modality!r}, auxiliary={tuple(s.modality for s in self.auxiliary)!r}"
+            )

@@ -442,9 +442,10 @@ by 255 again before PIL, JPEG, or HTTP serialization.
 Set a `diffusion_io_spec` class attribute on the registered pipeline so the
 shared `DiffusionStrategy` knows what media your `forward` emits. The strategy
 reads it (via `VllmOmniPipelineBase.get_class(architecture, algorithm)`) when it
-converts the raw pipeline output into the rollout response, so model-specific
-conventions — which tuple position carries audio, what audio sample rate to
-attach — live in the adapter instead of being hardcoded in the shared strategy.
+converts the raw pipeline output into the rollout response. The primary modality
+and default audio sample rate come from the adapter.
+The current transport supports a single primary output or a `(visual, audio)`
+tuple; it does not support arbitrary auxiliary streams.
 
 ```python
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
@@ -457,9 +458,10 @@ class MyModelPipelineWithLogProb(MyModelPipeline):
 
 - **`primary`** — the main media stream (`MediaSpec("image")` or
   `MediaSpec("video")`), carried in `responses`.
-- **`auxiliary`** — additional streams in tuple order: `auxiliary[i]` maps to
-  output tuple position `i + 1` (position `0` is the primary). A `forward` that
-  returns `(video, audio)` declares one auxiliary audio stream:
+- **`auxiliary`** — either empty or one audio stream at tuple position `1`
+  (position `0` is the primary visual output). Other auxiliary declarations and
+  extra tuple elements are rejected, not silently discarded. A `forward` that
+  returns `(video, audio)` declares:
 
 ```python
     diffusion_io_spec = DiffusionIOSpec(
@@ -472,8 +474,10 @@ class MyModelPipelineWithLogProb(MyModelPipeline):
   `forward` attaches a runtime rate through the `rl` rollout metadata, that value
   takes precedence and the strategy only falls back to this default. Declare the
   rate your model actually decodes (MiniMax H3 → `32000`, LTX-2 → `24000`).
-- `MediaSpec.fps` is an optional video default; `Modality` is
-  `image | video | audio`.
+- `MediaSpec.fps` is an optional declaration; current exporters still use
+  `trainer.video_fps`, not this field. `Modality` is `image | video | audio`.
+- The strategy propagates the primary modality as `media_kind`. Runtime metadata
+  may repeat the same value, but a conflicting modality raises an error.
 - Subclasses inherit the attribute, so a pipeline that subclasses another adapter
   (e.g. `qwen_image_dual_grpo` extends `qwen_image_flow_grpo`) reuses its
   `diffusion_io_spec` unless it overrides it.

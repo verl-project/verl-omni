@@ -160,6 +160,41 @@ def test_run_single_forwards_reward_router_arguments():
     assert result["reward_score"] == 0.5
 
 
+@pytest.mark.parametrize("field,value", [("audio_sample_rate", 16000), ("audio", np.zeros(8)), ("media_kind", "video")])
+def test_conflicting_media_fails_before_audio_scoring(field, value):
+    data = _data(np.ones(8, dtype=np.float32))
+    data.non_tensor_batch["tool_extra_fields"][0]["media_kind"] = "audio"
+    data.non_tensor_batch[field] = np.array([value], dtype=object)
+    manager = _manager(lambda **kwargs: pytest.fail("Conflicting media reached the scorer"))
+    with pytest.raises(ValueError, match=f"Conflicting rollout media field.*{field}"):
+        manager.loop.run_until_complete(manager.run_single(data))
+
+
+def test_audio_metadata_projection_keeps_copy_and_scalar_mapping_compatibility():
+    data = _data(np.ones(8, dtype=np.float32))
+    original = {"id": "kept", "audio": "conditioning audio"}
+    data.non_tensor_batch["extra_info"][0] = np.array(original, dtype=object)
+    data.non_tensor_batch["tool_extra_fields"][0] = np.array(
+        data.non_tensor_batch["tool_extra_fields"][0], dtype=object
+    )
+    data.non_tensor_batch["media_kind"] = np.array(["audio"], dtype=object)
+    data.non_tensor_batch["__num_turns__"] = np.array([2])
+    data.non_tensor_batch["global_steps"] = np.array([7])
+
+    def scorer(extra_info, **kwargs):
+        assert extra_info["media_kind"] == "audio"
+        assert extra_info["num_turns"] == 2
+        assert extra_info["global_steps"] == 7
+        assert extra_info["id"] == "kept"
+        assert extra_info["audio_sample_rate"] == 24000
+        extra_info["id"] = "changed"
+        return 0.5
+
+    manager = _manager(scorer)
+    manager.loop.run_until_complete(manager.run_single(data))
+    assert original == {"id": "kept", "audio": "conditioning audio"}
+
+
 def test_run_single_reads_finalized_top_level_audio_layout():
     def compute_score(solution_audio, extra_info, **kwargs):
         waveform, sample_rate = solution_audio

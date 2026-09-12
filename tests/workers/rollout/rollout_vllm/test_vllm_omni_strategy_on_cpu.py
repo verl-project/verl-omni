@@ -822,6 +822,59 @@ def test_diffusion_strategy_uses_declared_audio_sample_rate(monkeypatch):
     assert processed.extra_fields["audio_sample_rate"] == 48000
     # process_output unbatches the leading dimension of auxiliary media.
     torch.testing.assert_close(processed.extra_fields["audio"], audio[0])
+    # The declared primary modality rides to downstream consumers so they read
+    # the media kind instead of inferring it from the tensor rank.
+    assert processed.extra_fields["media_kind"] == "video"
+
+
+@pytest.mark.parametrize("runtime_kind", ["image", "depth"])
+def test_diffusion_strategy_rejects_conflicting_media_kind(monkeypatch, runtime_kind):
+    strategy = DiffusionStrategy(SimpleNamespace(global_steps=1))
+    monkeypatch.setattr(
+        strategy,
+        "_diffusion_io_spec",
+        lambda: DiffusionIOSpec(MediaSpec("video"), (MediaSpec("audio", sample_rate=48000),)),
+    )
+    final_res, _ = _joint_video_audio_final_res()
+    final_res.request_id = "request-conflict"
+    final_res.multimodal_output = {"metadata": {"rl": {"media_kind": runtime_kind}}}
+
+    with pytest.raises(ValueError, match="media_kind.*request-conflict.*video"):
+        strategy.process_output(final_res, None, {"output_type": "pt"})
+
+
+def test_diffusion_strategy_accepts_matching_kind_and_runtime_audio_rate(monkeypatch):
+    strategy = DiffusionStrategy(SimpleNamespace(global_steps=1))
+    monkeypatch.setattr(
+        strategy,
+        "_diffusion_io_spec",
+        lambda: DiffusionIOSpec(MediaSpec("video"), (MediaSpec("audio", sample_rate=48000),)),
+    )
+    final_res, _ = _joint_video_audio_final_res()
+    final_res.multimodal_output = {"metadata": {"rl": {"media_kind": "video", "audio_sample_rate": 24000}}}
+
+    result = strategy.process_output(final_res, None, {"output_type": "pt"})
+    assert result.extra_fields["media_kind"] == "video"
+    assert result.extra_fields["audio_sample_rate"] == 24000
+
+
+@pytest.mark.parametrize("declared", [False, True])
+def test_diffusion_strategy_rejects_extra_tuple_streams(monkeypatch, declared):
+    strategy = DiffusionStrategy(SimpleNamespace(global_steps=1))
+    spec = DiffusionIOSpec(MediaSpec("video"), (MediaSpec("audio", sample_rate=48000),)) if declared else None
+    monkeypatch.setattr(strategy, "_diffusion_io_spec", lambda: spec)
+    final_res, audio = _joint_video_audio_final_res()
+    final_res.images[0] += (audio.clone(),)
+    with pytest.raises(ValueError, match="Unsupported diffusion media tuple"):
+        strategy.process_output(final_res, None, {"output_type": "pt"})
+
+
+def test_diffusion_strategy_rejects_undeclared_tuple_audio(monkeypatch):
+    strategy = DiffusionStrategy(SimpleNamespace(global_steps=1))
+    monkeypatch.setattr(strategy, "_diffusion_io_spec", lambda: DiffusionIOSpec(MediaSpec("video")))
+    final_res, _ = _joint_video_audio_final_res()
+    with pytest.raises(ValueError, match="Unsupported diffusion media tuple"):
+        strategy.process_output(final_res, None, {"output_type": "pt"})
 
 
 def test_diffusion_strategy_omits_audio_sample_rate_without_declared_spec(monkeypatch):
@@ -842,6 +895,8 @@ def test_diffusion_strategy_omits_audio_sample_rate_without_declared_spec(monkey
 
     torch.testing.assert_close(processed.extra_fields["audio"], audio[0])
     assert "audio_sample_rate" not in processed.extra_fields
+    # No declared spec => no declared media kind is surfaced either.
+    assert "media_kind" not in processed.extra_fields
 
 
 @pytest.mark.parametrize(
