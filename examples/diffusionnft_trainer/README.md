@@ -1,6 +1,6 @@
 # DiffusionNFT Trainer
 
-Last updated: 09/10/2026
+Last updated: 09/12/2026
 
 This example shows how to post-train `Qwen-Image` with DiffusionNFT on an OCR-style image generation task using `vllm-omni` rollout and a visual generative reward model (`Qwen3-VL-8B-Instruct` in this example).
 
@@ -83,6 +83,35 @@ Launch the example from the repository root:
 bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
+### NVIDIA GPU: V1 sync
+
+The V1 counterpart uses TransferQueue and ReplayBuffer with the synchronous
+trainer. Launch it from the repository root with the same prepared data and
+model dependencies:
+
+```bash
+bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh
+```
+
+It selects `verl_omni.trainer.main_diffusion_v1`, `trainer.use_v1=true`, and
+`trainer.v1.trainer_mode=sync`. Its experiment name is `qwen_image_ocr_lora_v1`.
+The model, reward model, four-GPU layout, optimizer, and NFT settings match the
+V0 recipe: train the `default` adapter, sample with `old`, disable rollout
+log-probabilities, and refresh `old` every two steps using
+`delayed_linear_to_0_999`. This schedule starts with copies and begins EMA
+updates after step 75.
+
+Hydra overrides are forwarded in the same way as in V0. For a configuration
+check without launching training:
+
+```bash
+bash examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh --cfg job --resolve
+```
+
+Keep the V0 entrypoint for matched comparisons. The performance table below
+reports the existing V0 measurements; it does not establish V1 convergence or
+throughput. A tiny-checkpoint smoke also does not reproduce the full OCR setup.
+
 ### NPU
 
 For Huawei Ascend NPUs, use the NPU-optimized script:
@@ -111,7 +140,7 @@ The script runs `python3 -m verl_omni.trainer.main_diffusion` with DiffusionNFT-
 - `actor_rollout_ref.model.policy_state_adapters='["default","old"]'`
 - `actor_rollout_ref.rollout.calculate_log_probs=False`
 - `actor_rollout_ref.rollout.rollout_adapter=old`
-- `actor_rollout_ref.rollout.n=24`
+- `actor_rollout_ref.rollout.n=16`
 - `algorithm.timestep_fraction=1.0`
 - `algorithm.old_policy_decay_schedule=delayed_linear_to_0_999`
 - `algorithm.old_policy_update_interval=2`
