@@ -1,0 +1,16 @@
+{
+  "correctness": {
+    "subject_entities": "Are the requested primary subjects/entities visibly present and recognizable? If the subject is a person, is their gender, age, and ethnicity correct? Is he/she facially recognizable?",
+    "attributes": "Are non-text attributes (color, count, material, identity) correct? When the request specifies any text/typography (headlines, slogans, labels, numbers, logo lettering), OCR the pixels: are the exact requested strings fully legible and spelled correctly — no gibberish, substitutions, missing/extra words, or wrong script? Scene beauty alone does not pass this facet.",
+    "relations_layout": "Are requested actions, spatial relations, and layout/composition constraints correct (including poster hierarchy when requested: e.g. headline at top, main subject center, footer/tagline at bottom)?",
+    "scene_context": "Does the environment, setting, style, and overall scene match the request?",
+    "completeness": "Is the request fully satisfied without missing requested details or contradictory extras? If text was requested, treat missing, truncated, illegible, or wrong strings as incompleteness even when the rest of the scene looks right."
+  },
+  "aesthetics": {
+    "composition": "Is the composition balanced with a clear focal hierarchy and intentional framing?",
+    "lighting": "Are lighting, exposure, contrast, and depth visually effective?",
+    "color": "Are color harmony, saturation, and tonal relationships pleasing and coherent?",
+    "fidelity": "Is the image sharp and spatially coherent, without obvious generation artifacts or distortions?",
+    "appeal": "Does the image have strong overall visual appeal and professional finish?"
+  }
+}

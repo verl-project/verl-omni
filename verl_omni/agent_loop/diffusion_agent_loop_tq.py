@@ -30,7 +30,7 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
     _config_to_sampling_dict,
     _InternalDiffusionAgentLoopOutput,
 )
-from verl_omni.agent_loop.utils import _derive_rollout_seed
+from verl_omni.agent_loop.utils import derive_rollout_seed
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))

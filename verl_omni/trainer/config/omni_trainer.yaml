@@ -11,6 +11,7 @@ hydra:
 defaults:
   - ppo_trainer
   - omni/model@actor_rollout_ref.model: omni_model
+  - agentic/image_gen_tools@agentic_image_gen
   - _self_
 
 # Config for actor, rollout and reference model.

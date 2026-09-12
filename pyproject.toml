@@ -195,6 +195,7 @@ verl_omni = [
   "trainer/config/*.yaml",
   "trainer/config/*/*.yaml",
   "trainer/config/*/*/*.yaml",
+  "utils/agentic/*.json",
 ]
 
 # -------------------------------
