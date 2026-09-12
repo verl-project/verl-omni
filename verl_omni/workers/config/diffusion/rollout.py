@@ -161,7 +161,10 @@ class DiffusionRolloutConfig(BaseConfig):
     val_kwargs: DiffusionSamplingConfig = field(default_factory=DiffusionSamplingConfig)
 
     max_model_len: Optional[int] = None
-    max_num_seqs: int = 1024
+    # Request-level packing cap (and step-wise concurrency). 8 avoids VAE-decode
+    # OOM on large image models; pipelines without request-level support are
+    # clamped to 1 at engine init. Raise per-recipe when the model can take more.
+    max_num_seqs: int = 8
 
     # When True, the vLLM-Omni engine runs the registered pipeline in
     # step-execution mode.

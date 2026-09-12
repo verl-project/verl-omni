@@ -18,6 +18,9 @@ REWARD_TP=4
 
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
+# Request-level packing (mutually exclusive with step-wise continuous batching).
+MAX_NUM_SEQS=${MAX_NUM_SEQS:-8}
+REQUEST_BATCH_MAX_WAIT_MS=${REQUEST_BATCH_MAX_WAIT_MS:-10}
 
 python3 -m verl_omni.trainer.main_diffusion \
     algorithm.trainer_type=direct_preference \
@@ -56,6 +59,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.pipeline.true_cfg_scale=1.0 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=256 \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=50 \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs=${MAX_NUM_SEQS} \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.request_batch_max_wait_ms=${REQUEST_BATCH_MAX_WAIT_MS} \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     reward.num_workers=$((NUM_GPUS_ACTOR_ROLLOUT_REWARD / REWARD_TP)) \
     reward.reward_model.enable=True \

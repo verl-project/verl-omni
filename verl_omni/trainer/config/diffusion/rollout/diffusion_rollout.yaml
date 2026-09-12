@@ -77,8 +77,11 @@ max_num_batched_tokens: 8192
 # max length for rollout
 max_model_len: null
 
-# max length of sequences
-max_num_seqs: 1024
+# Max concurrent sequences in the vLLM-Omni engine. Also the request-level packing
+# cap; 8 avoids VAE-decode OOM on large image models. Pipelines without
+# request-level support are clamped to 1. Raise per-recipe when the model can
+# take more (e.g. SD3.5 request-level 256, step-wise Qwen-Image 32).
+max_num_seqs: 8
 
 # When True, the vLLM-Omni engine runs the registered pipeline in
 # step-execution mode.
@@ -132,7 +135,11 @@ multi_turn:
 engine_kwargs:
 
   # vllm-omni engine config
-  vllm_omni: {}
+  vllm_omni:
+
+    # Admission wait (ms) before the first schedule of a request-level packing wave.
+    # 10 covers typical training bursts; ignored when request-level packing is unused.
+    request_batch_max_wait_ms: 10
 
 # Reuse text-encoder outputs for repeated diffusion prompts.
 enable_prompt_embed_cache: false

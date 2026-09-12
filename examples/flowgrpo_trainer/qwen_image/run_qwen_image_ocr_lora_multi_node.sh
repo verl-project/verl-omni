@@ -26,6 +26,9 @@ REWARD_TP=4
 
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
+# Request-level packing (mutually exclusive with step-wise continuous batching).
+MAX_NUM_SEQS=${MAX_NUM_SEQS:-8}
+REQUEST_BATCH_MAX_WAIT_MS=${REQUEST_BATCH_MAX_WAIT_MS:-10}
 
 # ---- Batch sizing ------------------------------------------------------------
 # Single-node baseline (run_qwen_image_ocr_lora.sh): 4 GPUs, train_batch=32,
@@ -83,6 +86,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.algo.sde_window_range="[0,5]" \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=50 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs=${MAX_NUM_SEQS} \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.request_batch_max_wait_ms=${REQUEST_BATCH_MAX_WAIT_MS} \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     reward.num_workers=$((TOTAL_GPUS / REWARD_TP)) \
     reward.reward_model.enable=True \

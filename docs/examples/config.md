@@ -308,12 +308,12 @@ actor_rollout_ref:
 - `actor_rollout_ref.rollout.seed`: Base seed for deterministic training rollout RNG. Per-step base is `seed + global_step - 1`; `null` disables seeding.
 - `actor_rollout_ref.rollout.rollout_attn_backend`: vLLM-Omni diffusion attention backend. One of `FLASH_ATTN`, `FLASH_ATTN_HUB`, `FLASH_ATTN_3_HUB`, `TORCH_SDPA`. Must match `model.attn_backend` (default `FLASH_ATTN_3_HUB` ↔ `_flash_3_varlen_hub`).
 - `actor_rollout_ref.rollout.step_execution`: When `true`, run the registered pipeline in step-execution (continuous / stepwise batching) mode. See {doc}`../start/rollout_batching`.
-- `actor_rollout_ref.rollout.max_num_seqs`: Max concurrent sequences in the engine; also the request-level batching capacity knob.
+- `actor_rollout_ref.rollout.max_num_seqs`: Max concurrent sequences in the engine; also the request-level batching capacity knob. Default `8` to avoid VAE-decode OOM on large image models; raise per-recipe when the model can take more.
 - `actor_rollout_ref.rollout.gpu_memory_utilization`: Fraction of GPU memory for the vLLM-Omni cache.
 - `actor_rollout_ref.rollout.calculate_log_probs`: Log rollout log-probs for debugging.
 - `actor_rollout_ref.rollout.rollout_adapter`: Named adapter for generation: `default` or `old`.
 - `actor_rollout_ref.rollout.agent.default_agent_loop`: Default `diffusion_single_turn_agent`.
-- `actor_rollout_ref.rollout.engine_kwargs.vllm_omni`: Extra vLLM-Omni engine kwargs (dict).
+- `actor_rollout_ref.rollout.engine_kwargs.vllm_omni`: Extra vLLM-Omni engine kwargs (dict). Default includes `request_batch_max_wait_ms: 10` for request-level packing admission.
 
 ### `trainer` — diffusion-only dump / video knobs
 

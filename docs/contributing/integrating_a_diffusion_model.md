@@ -506,6 +506,10 @@ and
    output with `split_diffusion_output_by_request` when the input was a
    `DiffusionRequestBatch`.
 
+Yaml defaults (`max_num_seqs=8`, `engine_kwargs.vllm_omni.request_batch_max_wait_ms=10`)
+are chosen so a new recipe can omit these knobs without VAE-decode OOM on
+large image models. Raise `max_num_seqs` only when the model can take more.
+
 For launch knobs and measured speedups, see
 [`rollout_batching.md`](../start/rollout_batching.md).
 
