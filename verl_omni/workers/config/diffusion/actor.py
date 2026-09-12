@@ -55,6 +55,7 @@ class DiffusionLossConfig(BaseConfig):
             "grpo_guard",
             "diffusion_nft",
             "dpo",
+            "dmd2",
             "dance_grpo",
             "distill_kl",
             "distill_fm_mse",

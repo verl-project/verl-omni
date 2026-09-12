@@ -499,6 +499,35 @@ distillation:
       world_size: 0
   teacher_key: data_source
   scheduler: inline
+dmd:
+  _target_: verl_omni.workers.config.DiffusionDMDConfig
+  fake_update_ratio: 2
+  student_micro_batch_size_per_gpu: 1
+  fake_score_micro_batch_size_per_gpu: 1
+  fake_score_optim:
+    _target_: verl.workers.config.FSDPOptimizerConfig
+    lr: 2.0e-05
+    weight_decay: 0.001
+    betas:
+    - 0.9
+    - 0.999
+    clip_grad: 1.0
+    lr_scheduler_type: constant
+    lr_warmup_steps: -1
+    lr_warmup_steps_ratio: 0.0
+    total_training_steps: -1
+  teacher_guidance_scale: 4.0
+  cfg_norm: layer_norm
+  negative_prompt: ' '
+  normalization_epsilon: 1.0e-06
+  rollout_timestep_shift: 3.0
+  score_discrete_steps: 1000
+  score_sigma_min: 0.02
+  score_sigma_max: 0.98
+  score_timestep_shift: 3.0
+  ema_decay: 0.999
+  ema_start_step: 0
+  export_role: student
 algorithm:
   _target_: verl_omni.trainer.config.DiffusionAlgoConfig
   trainer_type: policy_gradient

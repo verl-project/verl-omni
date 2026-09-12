@@ -1051,6 +1051,72 @@ class KLLoss(DiffusionLossFn):
         return DiffusionLossResult(loss=kl_loss, metrics=metrics)
 
 
+@register_diffusion_loss("dmd2")
+class DMDLoss(DiffusionLossFn):
+    """DMD2 student surrogate and batch dispatch for fake-score denoising.
+
+    Inputs share an explicit normalized latent layout ``(B, ...)``. The engine
+    supplies detached score predictions and detached fake-stage model inputs;
+    this loss also enforces the target/score stop-gradient boundary.
+    """
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        generated_x0: torch.Tensor,
+        fake_x0: torch.Tensor,
+        teacher_x0: torch.Tensor,
+        normalization_epsilon: float = 1e-6,
+        gradient_mask: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Compute the fp32 distribution-matching surrogate, not paired regression."""
+        from verl_omni.trainer.diffusion.distillation.utils import dmd_gradient, dmd_surrogate_loss
+
+        gradient, normalizer, nonfinite = dmd_gradient(fake_x0, teacher_x0, generated_x0, normalization_epsilon)
+        loss, active = dmd_surrogate_loss(generated_x0, gradient, gradient_mask)
+        return loss, {
+            "dmd/loss": loss.detach(),
+            "dmd/normalizer": normalizer.mean(),
+            "dmd/gradient_norm": gradient.norm(),
+            "dmd/nonfinite": nonfinite,
+            "dmd/active_elements": active,
+        }
+
+    def validate_inputs(self, *, loss_name: str, model_output: dict[str, Any], data: TensorDict) -> None:
+        """Validate the stage-specific tensors without requiring PPO inputs."""
+        stage = tu.get_non_tensor_data(data, "dmd_stage", default="student")
+        if stage == "student":
+            required = ("generated_x0", "fake_x0", "teacher_x0")
+        elif stage == "fake_score":
+            required = ("generated_x0", "noise_pred", "noise")
+        else:
+            raise ValueError(f"Invalid dmd_stage {stage!r}; expected 'student' or 'fake_score'.")
+        missing = [key for key in required if key not in model_output]
+        if missing:
+            raise KeyError(f"Diffusion loss `{loss_name}` is missing model_output keys: {missing}")
+
+    def __call__(self, *, config: DiffusionActorConfig, model_output: dict[str, Any], data: TensorDict):
+        """Adapt the selected engine computation to the existing loss dispatcher."""
+        self.validate_inputs(loss_name="dmd2", model_output=model_output, data=data)
+        stage = tu.get_non_tensor_data(data, "dmd_stage", default="student")
+        if stage == "student":
+            loss, metrics = self.compute_loss(
+                generated_x0=model_output["generated_x0"],
+                fake_x0=model_output["fake_x0"],
+                teacher_x0=model_output["teacher_x0"],
+                normalization_epsilon=tu.get_non_tensor_data(data, "dmd_normalization_epsilon", default=1e-6),
+            )
+        else:
+            from verl_omni.trainer.diffusion.distillation.utils import fake_score_loss
+
+            loss, active = fake_score_loss(
+                model_output["noise_pred"], model_output["noise"], model_output["generated_x0"]
+            )
+            metrics = {"fake_score/loss": loss.detach(), "fake_score/active_elements": active}
+        return DiffusionLossResult(loss=loss, metrics=metrics, add_loss_metric=True)
+
+
 @register_diffusion_loss("distill_kl")
 class DistillKLLoss(DiffusionLossFn):
     """KL divergence between student and teacher reverse-SDE means (online policy distillation)."""
