@@ -42,7 +42,7 @@ fi
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
-python3 -m verl_omni.trainer.main_diffusion \
+python3 -m verl_omni.trainer.main_diffusion_v1 \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
     data.train_batch_size=8 \
@@ -121,4 +121,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.test_freq=20 \
     trainer.total_epochs=15 \
     trainer.total_training_steps=$TOTAL_TRAINING_STEPS \
+    trainer.use_v1=true \
+    trainer.v1.trainer_mode=sync \
     "$@"

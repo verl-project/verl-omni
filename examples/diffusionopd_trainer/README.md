@@ -49,8 +49,8 @@ TEACHER_PATH=/path/to/merged-teacher \
 ```
 
 The multi-teacher recipe (`run_sd35_medium_mopd_distill.sh`) routes each row to
-its task's teacher by `data_source`; `run_sd35_medium_mopd_distill_v1.sh` is
-the same recipe on the v1 sync trainer.
+its task's teacher by `data_source`. Both recipes run on the v1 trainer
+(`main_diffusion_v1`, `sync` mode).
 
 ## What to expect
 
