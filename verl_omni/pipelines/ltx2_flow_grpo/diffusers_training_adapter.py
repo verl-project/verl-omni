@@ -14,19 +14,19 @@
 
 """Diffusers + FSDP2 training adapter for LTX-2.3 FlowGRPO."""
 
+from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import torch
 from diffusers import ModelMixin
 from tensordict import TensorDict
 from verl.utils.device import get_device_name
 
-from verl_omni.pipelines.model_base import DiffusionModelBase
+from verl_omni.pipelines.model_base import DiffusionI2IModelBase, DiffusionModelBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.workers.config import DiffusionModelConfig
 
-from .common import apply_x0_cfg, calculate_shift
+from .common import apply_x0_cfg, set_ltx23_timesteps
 
 __all__ = ["LTX23FlowGRPO"]
 
@@ -39,8 +39,16 @@ def _single_int(value: torch.Tensor, name: str) -> int:
 
 
 @DiffusionModelBase.register("LTX2Pipeline", algorithm="flow_grpo")
-class LTX23FlowGRPO(DiffusionModelBase):
-    """Recompute joint audio-video transition probabilities with diffusers."""
+class LTX23FlowGRPO(DiffusionI2IModelBase):
+    """Recompute text- or first-frame-conditioned audio-video transitions."""
+
+    @classmethod
+    def prepare_processor_files(cls, model_path: str) -> str:
+        """Use the text tokenizer path because LTX transports images outside its prompt encoder."""
+        tokenizer_dir = Path(model_path) / "tokenizer"
+        if not tokenizer_dir.is_dir():
+            raise FileNotFoundError(f"LTX-2.3 tokenizer directory not found: {tokenizer_dir}")
+        return str(tokenizer_dir)
 
     @classmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig) -> FlowMatchSDEDiscreteScheduler:
@@ -56,21 +64,8 @@ class LTX23FlowGRPO(DiffusionModelBase):
         model_config: DiffusionModelConfig,
         device: str,
     ) -> None:
-        """Match the LTX-2.3 diffusers/vLLM-Omni sigma schedule."""
-        num_steps = model_config.pipeline.num_inference_steps
-        sigmas = np.linspace(1.0, 1.0 / num_steps, num_steps)
-        latent_frames = (model_config.pipeline.num_frames - 1) // 8 + 1
-        latent_height = model_config.pipeline.height // 32
-        latent_width = model_config.pipeline.width // 32
-        video_seq_len = latent_frames * latent_height * latent_width
-        mu = calculate_shift(
-            video_seq_len,
-            scheduler.config.get("base_image_seq_len", 1024),
-            scheduler.config.get("max_image_seq_len", 4096),
-            scheduler.config.get("base_shift", 0.95),
-            scheduler.config.get("max_shift", 2.05),
-        )
-        scheduler.set_timesteps(num_steps, device=device, sigmas=sigmas, mu=mu)
+        """Match the LTX-2.3 schedule used by the pinned vLLM-Omni runtime."""
+        set_ltx23_timesteps(scheduler, model_config.pipeline.num_inference_steps, device)
 
     @classmethod
     def prepare_model_inputs(
@@ -106,21 +101,24 @@ class LTX23FlowGRPO(DiffusionModelBase):
         common = {
             "hidden_states": video_latents,
             "audio_hidden_states": audio_latents,
-            "timestep": timestep,
+            "timestep": timestep[:, None].expand(-1, video_latents.shape[1]),
+            "audio_timestep": timestep[:, None].expand(-1, audio_latents.shape[1]),
             "sigma": timestep,
+            "audio_sigma": timestep,
             "num_frames": latent_frames,
             "height": latent_height,
             "width": latent_width,
             "fps": frame_rate,
             "audio_num_frames": audio_latents.shape[1],
             "return_dict": False,
+            "_require_image_condition": getattr(model_config.pipeline, "task", None) == "ti2va",
         }
         model_inputs = {
             **common,
             "encoder_hidden_states": prompt_embeds,
             "audio_encoder_hidden_states": micro_batch["audio_prompt_embeds"],
-            "encoder_attention_mask": prompt_embeds_mask,
-            "audio_encoder_attention_mask": prompt_embeds_mask,
+            "encoder_attention_mask": None,
+            "audio_encoder_attention_mask": None,
         }
 
         guidance_scale = model_config.pipeline.guidance_scale or 1.0
@@ -134,16 +132,73 @@ class LTX23FlowGRPO(DiffusionModelBase):
             **common,
             "encoder_hidden_states": negative_prompt_embeds,
             "audio_encoder_hidden_states": micro_batch["negative_audio_prompt_embeds"],
-            "encoder_attention_mask": negative_prompt_embeds_mask,
-            "audio_encoder_attention_mask": negative_prompt_embeds_mask,
+            "encoder_attention_mask": None,
+            "audio_encoder_attention_mask": None,
         }
+        return model_inputs, negative_model_inputs
+
+    @classmethod
+    def prepare_condition(
+        cls,
+        micro_batch: TensorDict,
+        latents: torch.Tensor,
+        step: int,
+    ) -> dict[str, torch.Tensor] | None:
+        """Read the fixed first-frame latent captured by rollout."""
+        del latents, step
+        image_latents = micro_batch.get("condition_image_latents")
+        if image_latents is None:
+            return None
+        return {"image_latents": image_latents}
+
+    @classmethod
+    def inject_condition(
+        cls,
+        model_inputs: dict,
+        negative_model_inputs: Optional[dict],
+        condition: Optional[dict],
+    ) -> tuple[dict, Optional[dict]]:
+        """Prepend the fixed first-frame rows and assign them timestep zero."""
+        if not condition:
+            return model_inputs, negative_model_inputs
+        image_latents = condition.get("image_latents")
+        if not isinstance(image_latents, torch.Tensor) or image_latents.ndim != 3:
+            raise ValueError("LTX-2.3 condition_image_latents must have shape (batch, rows, width).")
+
+        for inputs in (model_inputs, negative_model_inputs):
+            if inputs is None:
+                continue
+            target = inputs["hidden_states"]
+            if image_latents.shape[0] != target.shape[0] or image_latents.shape[2] != target.shape[2]:
+                raise ValueError("LTX-2.3 condition_image_latents must match the target video batch and width.")
+            condition_rows = image_latents.to(device=target.device, dtype=target.dtype)
+            if inputs.get("_require_image_condition", False) and condition_rows.shape[1] == 0:
+                raise ValueError("LTX-2.3 TI2VA requires condition_image_latents from rollout.")
+            expected_condition_rows = int(inputs["height"]) * int(inputs["width"])
+            if condition_rows.shape[1] not in (0, expected_condition_rows):
+                raise ValueError(
+                    "LTX-2.3 TI2VA requires exactly one first-frame latent; "
+                    f"expected {expected_condition_rows} rows, got {condition_rows.shape[1]}."
+                )
+            expected_video_rows = int(inputs["num_frames"]) * expected_condition_rows
+            if condition_rows.shape[1] + target.shape[1] != expected_video_rows:
+                raise ValueError("LTX-2.3 condition and target rows do not reconstruct the configured video geometry.")
+            inputs["hidden_states"] = torch.cat([condition_rows, target], dim=1)
+            inputs["timestep"] = torch.cat(
+                [inputs["timestep"].new_zeros(target.shape[0], condition_rows.shape[1]), inputs["timestep"]],
+                dim=1,
+            )
+            inputs["_condition_video_seq_len"] = condition_rows.shape[1]
         return model_inputs, negative_model_inputs
 
     @staticmethod
     def _predict(module: ModelMixin, model_inputs: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run the LTX transformer and return float32 video/audio velocities."""
+        """Run the LTX transformer and return target-only float32 velocities."""
+        model_inputs = dict(model_inputs)
+        condition_rows = int(model_inputs.pop("_condition_video_seq_len", 0))
+        model_inputs.pop("_require_image_condition", None)
         video_pred, audio_pred = module(**model_inputs)
-        return video_pred.float(), audio_pred.float()
+        return video_pred[:, condition_rows:].float(), audio_pred.float()
 
     @classmethod
     def forward_and_sample_previous_step(
@@ -160,7 +215,8 @@ class LTX23FlowGRPO(DiffusionModelBase):
         if scheduler_inputs is None:
             raise ValueError("LTX-2.3 FlowGRPO requires rollout scheduler inputs.")
 
-        video_latents = model_inputs["hidden_states"].float()
+        condition_rows = int(model_inputs.get("_condition_video_seq_len", 0))
+        video_latents = model_inputs["hidden_states"][:, condition_rows:].float()
         audio_latents = model_inputs["audio_hidden_states"].float()
         video_pred, audio_pred = cls._predict(module, model_inputs)
 
@@ -169,7 +225,7 @@ class LTX23FlowGRPO(DiffusionModelBase):
             if negative_model_inputs is None:
                 raise ValueError("LTX-2.3 CFG requires negative model inputs.")
             negative_video_pred, negative_audio_pred = cls._predict(module, negative_model_inputs)
-            sigma = (model_inputs["timestep"].float() / 1000.0).view(-1, 1, 1)
+            sigma = (model_inputs["sigma"].float() / 1000.0).view(-1, 1, 1)
             video_pred = apply_x0_cfg(video_latents, video_pred, negative_video_pred, sigma, guidance_scale)
             audio_pred = apply_x0_cfg(audio_latents, audio_pred, negative_audio_pred, sigma, guidance_scale)
 

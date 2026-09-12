@@ -14,6 +14,9 @@
 
 """Shared LTX-2.3 FlowGRPO constants and numerical helpers."""
 
+import math
+from typing import Any
+
 import torch
 
 LTX2_LORA_TARGET_MODULES = [
@@ -64,6 +67,39 @@ def calculate_shift(
     slope = (max_shift - base_shift) / (max_image_seq_len - base_image_seq_len)
     intercept = base_shift - slope * base_image_seq_len
     return image_seq_len * slope + intercept
+
+
+def set_ltx23_timesteps(scheduler: Any, num_inference_steps: int, device: str | torch.device) -> None:
+    """Match vLLM-Omni's official LTX-2.3 one-stage sigma schedule."""
+    if num_inference_steps <= 0:
+        raise ValueError(f"num_inference_steps must be positive, got {num_inference_steps}.")
+
+    config = scheduler.config
+    base_anchor = config.get("base_image_seq_len", 1024)
+    max_anchor = config.get("max_image_seq_len", 4096)
+    sigma_shift = calculate_shift(
+        max_anchor,
+        base_anchor,
+        max_anchor,
+        config.get("base_shift", 0.95),
+        config.get("max_shift", 2.05),
+    )
+    sigmas = torch.linspace(1.0, 0.0, num_inference_steps + 1, dtype=torch.float32)
+    exp_shift = math.exp(sigma_shift)
+    sigmas = torch.where(sigmas != 0, exp_shift / (exp_shift + (1 / sigmas - 1)), 0)
+
+    terminal = config.get("shift_terminal")
+    if terminal is not None:
+        non_zero = sigmas != 0
+        one_minus_sigmas = 1.0 - sigmas[non_zero]
+        scale = one_minus_sigmas[-1] / (1.0 - terminal)
+        sigmas[non_zero] = 1.0 - one_minus_sigmas / scale
+
+    scheduler.sigmas = sigmas.to(device=device)
+    scheduler.timesteps = scheduler.sigmas[:-1] * config.get("num_train_timesteps", 1000)
+    scheduler.num_inference_steps = num_inference_steps
+    scheduler._step_index = None
+    scheduler._begin_index = None
 
 
 def apply_x0_cfg(

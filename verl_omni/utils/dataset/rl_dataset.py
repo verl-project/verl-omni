@@ -13,6 +13,7 @@
 # limitations under the License.
 """RLHF Dataset for diffusion model training."""
 
+import copy
 import logging
 
 from omegaconf import DictConfig
@@ -48,6 +49,27 @@ class RLHFDataset(_UpstreamRLHFDataset):
         super().__init__(*args, config=config, **kwargs)
         # For diffusion model training only.
         self.negative_prompt_key = config.get("negative_prompt_key", "negative_prompt")
+
+    def _build_messages(self, example: dict, key: str):
+        """Transport media for text-only encoders without requiring a HF processor."""
+        if self.processor is not None:
+            return super()._build_messages(example, key)
+
+        # Text-only negative prompts share the positive prompt's condition media.
+        if key == self.negative_prompt_key and all(
+            isinstance(message["content"], str)
+            and not any(token in message["content"] for token in ("<image>", "<video>", "<audio>"))
+            for message in example[key]
+        ):
+            example = {key: example[key]}
+        if not any(example.get(media_key) for media_key in (self.image_key, self.video_key, self.audio_key)):
+            return super()._build_messages(example, key)
+
+        # Upstream only checks processor presence here. A shallow view reuses its
+        # parsing/validation without changing the real processor used for filtering.
+        transport_dataset = copy.copy(self)
+        transport_dataset.processor = object()
+        return _UpstreamRLHFDataset._build_messages(transport_dataset, example, key)
 
     def __getitem__(self, item):
         """For rollout, apply_chat_template has been moved to AgentLoop, so we only return raw_prompt here."""

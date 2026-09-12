@@ -57,6 +57,19 @@ class LTX2DiffusionSingleTurnAgentLoop(DiffusionSingleTurnAgentLoop):
         self.system_prompt = []
         self.loop = get_event_loop()
 
+    async def process_multi_modal_info(self, messages: list[dict]) -> dict[str, Any]:
+        """Extract VAE conditions independently of the text encoder's processor."""
+        if self.processor is not None:
+            return await super().process_multi_modal_info(messages)
+        media = await self.dataset_cls.process_multi_modal_info(messages, image_patch_size=14, config=self.data_config)
+        return {
+            key: value for key, value in zip(("images", "videos", "audios"), media, strict=True) if value is not None
+        }
+
+    def _assert_mm_supported(self, has_multi_modal: bool) -> None:
+        """Allow separately transported LTX first-frame images."""
+        del has_multi_modal
+
     async def ct_build_initial_tokens(
         self,
         messages: list[dict],
@@ -66,7 +79,11 @@ class LTX2DiffusionSingleTurnAgentLoop(DiffusionSingleTurnAgentLoop):
         audios: list[Any] | None = None,
     ) -> list[int]:
         """Encode raw text with special tokens and right-side truncation."""
-        del tools, images, videos, audios
+        del tools
+        if videos or audios:
+            raise ValueError("LTX-2.3 TI2VA accepts one image but no reference video or audio.")
+        if images is not None and len(images) != 1:
+            raise ValueError(f"LTX-2.3 TI2VA expects exactly one image, got {len(images)}.")
         text = _messages_to_text(messages)
         prompt_length = self.rollout_config.prompt_length
         tokenized = await self.loop.run_in_executor(

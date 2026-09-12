@@ -16,29 +16,15 @@
 
 from __future__ import annotations
 
-import copy
-import os
+import math
 from typing import Any
 
-import numpy as np
 import torch
-from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import retrieve_timesteps
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.models.ltx2 import pipeline_ltx2
 from vllm_omni.diffusion.models.ltx2.ltx2_conditioning import LTXPromptContext
-from vllm_omni.diffusion.models.ltx2.ltx2_denoise import (
-    LTXDenoiseContext,
-    LTXDenoiseExecutor,
-    LTXForwardContext,
-    LTXPhaseResult,
-    LTXVideoAudioStepAdapter,
-    prepare_rope_coords_stage,
-)
-from vllm_omni.diffusion.models.ltx2.ltx2_latents import (
-    LTXAVState,
-    unpack_audio_latents,
-    unpad_audio_latents,
-)
+from vllm_omni.diffusion.models.ltx2.ltx2_denoise import LTXDenoiseContext, LTXForwardContext, LTXPhaseResult
+from vllm_omni.diffusion.models.ltx2.ltx2_latents import LTXAVState, clear_audio_padding
 from vllm_omni.diffusion.models.ltx2.ltx2_recipes import LTXPhaseRecipe
 from vllm_omni.diffusion.models.ltx2.ltx2_request import LTXRequestInputs
 from vllm_omni.diffusion.models.ltx2.pipeline_ltx2 import LTX2Pipeline
@@ -53,7 +39,7 @@ from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
-from .common import calculate_shift, normalize_ltx_output_type
+from .common import normalize_ltx_output_type
 
 __all__ = ["LTX23PipelineWithLogProb"]
 
@@ -86,11 +72,7 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:
         super().__init__(od_config=od_config, prefix=prefix)
         self.set_progress_bar_config(disable=True)
-        self.scheduler = FlowMatchSDEDiscreteScheduler.from_pretrained(
-            od_config.model,
-            subfolder="scheduler",
-            local_files_only=os.path.exists(od_config.model),
-        )
+        self.scheduler = FlowMatchSDEDiscreteScheduler.from_config(self.scheduler.config)
         self._flow_grpo_noise_level = 0.8
         self._flow_grpo_sde_type = "cps"
         self._flow_grpo_window_size: int | None = None
@@ -98,6 +80,7 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
         self._flow_grpo_sde_contiguous = True
         self._flow_grpo_logprobs = True
         self._flow_grpo_seed = 42
+        self._flow_grpo_task: str | None = None
         self._flow_grpo_prompt_context: LTXPromptContext | None = None
         self._flow_grpo_trajectory: dict[str, torch.Tensor | None] = {}
         self._selected_sde_steps: set[int] = set()
@@ -105,6 +88,8 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
         self._next_latents: list[torch.Tensor] = []
         self._selected_timesteps: list[torch.Tensor] = []
         self._log_probs: list[torch.Tensor] = []
+        self._flow_grpo_video_seq_len = 0
+        self._flow_grpo_condition_image_latents: torch.Tensor | None = None
 
     def _encode_token_ids(
         self,
@@ -177,13 +162,35 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
 
     def _configure_flow_grpo(self, req: OmniDiffusionRequest) -> None:
         req.sampling_params.output_type = normalize_ltx_output_type(req.sampling_params.output_type)
-        extra_args = req.sampling_params.extra_args or {}
+        extra_args = dict(req.sampling_params.extra_args or {})
+        guidance_scale = float(getattr(req.sampling_params, "guidance_scale", None) or 1.0)
+        for key in ("video_cfg_scale", "audio_cfg_scale"):
+            configured = float(extra_args.get(key, guidance_scale))
+            if not math.isclose(configured, guidance_scale):
+                raise NotImplementedError(
+                    f"LTX-2.3 FlowGRPO requires {key} to match guidance_scale={guidance_scale}, got {configured}."
+                )
+            extra_args[key] = guidance_scale
+        for key, expected in {
+            "video_stg_scale": 0.0,
+            "audio_stg_scale": 0.0,
+            "video_modality_scale": 1.0,
+            "audio_modality_scale": 1.0,
+            "video_rescale_scale": 0.0,
+            "audio_rescale_scale": 0.0,
+        }.items():
+            configured = float(extra_args.get(key, expected))
+            if not math.isclose(configured, expected):
+                raise NotImplementedError(f"LTX-2.3 FlowGRPO does not support {key}={configured}; expected {expected}.")
+            extra_args[key] = expected
+        req.sampling_params.extra_args = extra_args
         self._flow_grpo_noise_level = float(extra_args.get("noise_level", 0.8))
         self._flow_grpo_sde_type = extra_args.get("sde_type", "cps")
         self._flow_grpo_window_size = extra_args.get("sde_window_size")
         self._flow_grpo_window_range = extra_args.get("sde_window_range")
         self._flow_grpo_sde_contiguous = bool(extra_args.get("sde_contiguous", True))
         self._flow_grpo_logprobs = bool(extra_args.get("logprobs", True))
+        self._flow_grpo_task = extra_args.get("task")
         scheduler_seed = int(extra_args.get("sde_window_seed", 42))
         global_step = int(extra_args.get("global_steps", 1))
         self._flow_grpo_seed = scheduler_seed + max(global_step - 1, 0)
@@ -227,131 +234,43 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
         image: Any | None = None,
         prompt_context: LTXPromptContext | None = None,
     ) -> LTXPhaseResult:
-        """Prepare and execute one phase with FlowGRPO SDE transitions."""
-        del phase_recipe
-        self._check_forward_inputs(request_inputs, image=image)
-        guidance_parallel_ready = self._setup_forward_runtime(req, request_inputs, attention_kwargs)
-        device = self.device
-        if prompt_context is None:
-            prompt_context = self._prepare_prompt_context(
-                prompt=request_inputs.prompt,
-                negative_prompt=request_inputs.negative_prompt,
-                prompt_embeds=request_inputs.prompt_embeds,
-                negative_prompt_embeds=request_inputs.negative_prompt_embeds,
-                prompt_attention_mask=request_inputs.prompt_attention_mask,
-                negative_prompt_attention_mask=request_inputs.negative_prompt_attention_mask,
-                num_videos_per_prompt=request_inputs.num_videos_per_prompt,
-                max_sequence_length=request_inputs.max_sequence_length,
-            )
+        """Execute one full-model phase while recording policy transitions."""
+        if phase_recipe.sampler != "euler" or phase_recipe.adapter_slot is not None:
+            raise NotImplementedError("LTX-2.3 FlowGRPO supports only the regular one-stage checkpoint.")
+        if getattr(self, "_flow_grpo_task", None) == "ti2va" and image is None:
+            raise ValueError("LTX-2.3 TI2VA requires exactly one first-frame image.")
 
-        latent_num_frames, latent_height, latent_width = self._resolve_video_latent_dimensions(request_inputs)
-        latents, conditioning_mask = self._prepare_video_latents_stage(
-            request_inputs,
-            prompt_context,
-            device=device,
-            noise_scale=noise_scale,
-            image=image,
-        )
-        audio_latents, original_audio_num_frames, padded_audio_num_frames, latent_mel_bins = (
-            self._prepare_audio_latents_stage(
-                request_inputs,
-                prompt_context,
-                device=device,
-                noise_scale=noise_scale,
-            )
-        )
-
-        sigmas = (
-            np.linspace(1.0, 1.0 / request_inputs.num_inference_steps, request_inputs.num_inference_steps)
-            if sigmas is None
-            else sigmas
-        )
-        video_seq_len = latent_num_frames * latent_height * latent_width
-        mu = calculate_shift(
-            video_seq_len,
-            self.scheduler.config.get("base_image_seq_len", 1024),
-            self.scheduler.config.get("max_image_seq_len", 4096),
-            self.scheduler.config.get("base_shift", 0.95),
-            self.scheduler.config.get("max_shift", 2.05),
-        )
-        audio_scheduler = copy.deepcopy(self.scheduler)
-        video_audio_step_adapter = LTXVideoAudioStepAdapter(
-            self,
-            audio_scheduler,
-            latent_num_frames,
-            latent_height,
-            latent_width,
-            image_conditioned=conditioning_mask is not None,
-        )
-        _ = retrieve_timesteps(
-            audio_scheduler,
-            request_inputs.num_inference_steps,
-            device,
-            timesteps,
-            sigmas=sigmas,
-            mu=mu,
-        )
-        timesteps_tensor, _ = retrieve_timesteps(
-            self.scheduler,
-            request_inputs.num_inference_steps,
-            device,
-            timesteps,
-            sigmas=sigmas,
-            mu=mu,
-        )
-        forward_ctx = LTXForwardContext(
-            req=req,
-            request_inputs=request_inputs,
-            prompt_context=prompt_context,
-            device=device,
-            guidance_parallel_ready=guidance_parallel_ready,
-            attention_kwargs=attention_kwargs,
-            latent_num_frames=latent_num_frames,
-            latent_height=latent_height,
-            latent_width=latent_width,
-            latent_mel_bins=latent_mel_bins,
-            original_audio_num_frames=original_audio_num_frames,
-            padded_audio_num_frames=padded_audio_num_frames,
-            timesteps=timesteps_tensor,
-            audio_scheduler=audio_scheduler,
-            video_audio_step_adapter=video_audio_step_adapter,
-        )
-        video_coords, audio_coords = prepare_rope_coords_stage(self, forward_ctx, latents, audio_latents)
-        denoise_ctx = LTXDenoiseContext(
-            latents=latents,
-            audio_latents=audio_latents,
-            video_coords=video_coords,
-            audio_coords=audio_coords,
-            conditioning_mask=conditioning_mask,
-        )
-        denoise_ctx = self._prepare_denoise_context_for_guidance(forward_ctx, denoise_ctx)
-
-        self.scheduler.set_begin_index(0)
-        selected_steps = set(self._select_sde_steps(len(forward_ctx.timesteps), device))
-        self._selected_sde_steps = selected_steps
+        if sigmas is not None:
+            num_steps = len(sigmas) - int(bool(sigmas) and float(sigmas[-1]) == 0.0)
+        elif timesteps is not None:
+            num_steps = len(timesteps)
+        else:
+            num_steps = request_inputs.num_inference_steps
+        self._selected_sde_steps = set(self._select_sde_steps(num_steps, self.device))
         self._current_latents = []
         self._next_latents = []
         self._selected_timesteps = []
         self._log_probs = []
+        self._flow_grpo_video_seq_len = 0
+        self._flow_grpo_condition_image_latents = None
 
-        state = LTXDenoiseExecutor.run(
-            self,
-            LTXAVState(video=denoise_ctx.latents, audio=denoise_ctx.audio_latents),
-            forward_ctx.timesteps,
-            lambda index, timestep, current_state: self._denoise_step(
-                index,
-                timestep,
-                current_state,
-                forward_ctx,
-                denoise_ctx,
-            ),
+        result = super().run_phase(
+            req,
+            request_inputs,
+            noise_scale=noise_scale,
+            sigmas=sigmas,
+            timesteps=timesteps,
+            attention_kwargs=attention_kwargs,
+            phase_recipe=phase_recipe,
+            image=image,
+            prompt_context=prompt_context,
         )
-        denoise_ctx.latents = state.video
-        denoise_ctx.audio_latents = state.audio
-
         if not self._current_latents:
             raise RuntimeError("LTX-2.3 rollout selected no SDE transitions.")
-        batch_size = denoise_ctx.latents.shape[0]
+        if self._flow_grpo_condition_image_latents is None:
+            raise RuntimeError("LTX-2.3 rollout did not capture the video condition state.")
+
+        batch_size = self._current_latents[0].shape[0]
         self._flow_grpo_trajectory = {
             "all_latents": torch.stack(self._current_latents, dim=1),
             "all_next_latents": torch.stack(self._next_latents, dim=1),
@@ -359,26 +278,25 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
             "all_log_probs": torch.stack(self._log_probs, dim=1) if self._log_probs else None,
             "video_seq_len": torch.full(
                 (batch_size,),
-                video_seq_len,
-                device=denoise_ctx.latents.device,
+                self._flow_grpo_video_seq_len,
+                device=self._current_latents[0].device,
                 dtype=torch.long,
             ),
+            "condition_image_latents": self._flow_grpo_condition_image_latents,
         }
-        unpacked_latents, unpacked_audio = self._unpack_and_denormalize_stage(
-            forward_ctx,
-            state.video,
-            state.audio,
-        )
-        normalized_audio = unpack_audio_latents(
-            unpad_audio_latents(state.audio, forward_ctx.original_audio_num_frames),
-            num_mel_bins=forward_ctx.latent_mel_bins,
-        )
-        return LTXPhaseResult(
-            forward_context=forward_ctx,
-            video=unpacked_latents,
-            audio=unpacked_audio,
-            audio_for_next_phase=normalized_audio,
-        )
+        return result
+
+    @staticmethod
+    def _video_policy_mask(state: LTXAVState, denoise_ctx: LTXDenoiseContext) -> torch.Tensor:
+        condition_mask = denoise_ctx.conditioning_mask
+        if condition_mask is None:
+            return torch.ones(state.video.shape[1], device=state.video.device, dtype=torch.bool)
+        if condition_mask.shape != state.video.shape[:2]:
+            raise ValueError("LTX-2.3 conditioning mask must match the packed video batch and sequence dimensions.")
+        condition_mask = condition_mask.to(device=state.video.device, dtype=torch.bool)
+        if not torch.equal(condition_mask, condition_mask[:1].expand_as(condition_mask)):
+            raise ValueError("LTX-2.3 FlowGRPO requires one shared conditioning layout per request batch.")
+        return ~condition_mask[0]
 
     def _denoise_step(
         self,
@@ -397,9 +315,31 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
             forward_ctx,
             denoise_ctx,
         )
-        video_seq_len = state.video.shape[1]
-        unified_sample = torch.cat([state.video, state.audio], dim=1).float()
-        unified_pred = torch.cat([noise_pred_video, noise_pred_audio], dim=1).float()
+        video_policy_mask = self._video_policy_mask(state, denoise_ctx)
+        condition_count = int((~video_policy_mask).sum().item())
+        if state.video.shape[1] % int(forward_ctx.latent_num_frames):
+            raise ValueError("LTX-2.3 packed video rows do not divide into latent frames.")
+        rows_per_frame = state.video.shape[1] // int(forward_ctx.latent_num_frames)
+        if condition_count not in (0, rows_per_frame) or (
+            condition_count and video_policy_mask[:condition_count].any()
+        ):
+            raise ValueError("LTX-2.3 TI2VA supports exactly one fixed first latent frame.")
+        audio_length = int(forward_ctx.original_audio_num_frames)
+        if not 0 < audio_length <= state.audio.shape[1]:
+            raise ValueError(
+                f"LTX-2.3 logical audio length must be in [1, {state.audio.shape[1]}], got {audio_length}."
+            )
+
+        current_video = state.video[:, video_policy_mask]
+        current_audio = state.audio[:, :audio_length]
+        unified_sample = torch.cat([current_video, current_audio], dim=1).float()
+        unified_pred = torch.cat(
+            [noise_pred_video[:, video_policy_mask], noise_pred_audio[:, :audio_length]],
+            dim=1,
+        ).float()
+        self._flow_grpo_video_seq_len = current_video.shape[1]
+        if self._flow_grpo_condition_image_latents is None:
+            self._flow_grpo_condition_image_latents = state.video[:, ~video_policy_mask].float()
         is_selected = index in self._selected_sde_steps
 
         stepped, log_prob, _, _ = self.scheduler.step(
@@ -412,12 +352,19 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
             return_logprobs=self._flow_grpo_logprobs and is_selected,
             return_dict=False,
         )
-        next_video = stepped[:, :video_seq_len]
-        next_audio = stepped[:, video_seq_len:]
+        next_video = state.video.clone()
+        next_video[:, video_policy_mask] = stepped[:, : current_video.shape[1]].to(next_video.dtype)
+        next_audio = state.audio.clone()
+        next_audio[:, :audio_length] = stepped[:, current_video.shape[1] :].to(next_audio.dtype)
+        next_audio = clear_audio_padding(next_audio, audio_length)
+        next_sample = torch.cat(
+            [next_video[:, video_policy_mask], next_audio[:, :audio_length]],
+            dim=1,
+        ).float()
 
         if is_selected:
             self._current_latents.append(unified_sample)
-            self._next_latents.append(stepped.float())
+            self._next_latents.append(next_sample)
             self._selected_timesteps.append(timestep)
             if log_prob is not None:
                 self._log_probs.append(log_prob)
@@ -472,6 +419,7 @@ class LTX23PipelineWithLogProb(LTX2Pipeline):
             rl={
                 "all_next_latents": self._flow_grpo_trajectory.get("all_next_latents"),
                 "video_seq_len": self._flow_grpo_trajectory.get("video_seq_len"),
+                "condition_image_latents": self._flow_grpo_trajectory.get("condition_image_latents"),
                 "audio": audio,
                 "audio_sample_rate": audio_sample_rate,
             },
