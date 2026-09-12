@@ -26,19 +26,31 @@ import asyncio
 import random
 from typing import Any, Optional
 
+import hydra
 import numpy as np
 import ray
 import torch
-import torch.nn.functional as F
 from omegaconf import DictConfig
-from pydantic import ConfigDict
+from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from verl.base_config import BaseConfig
+from verl.experimental.agent_loop.agent_loop import (
+    AgentLoopManager,
+    AgentLoopMetrics,
+    DictConfigWrap,
+    _agent_loop_registry,
+    auto_await,
+)
 from verl.protocol import DataProto
 from verl.utils.profiler import simple_timer
+from verl.utils.skip import SkipManager
 from verl.workers.rollout.llm_server import LLMServerClient
 
-from verl_omni.agent_loop.diffusion_agent_loop import DiffusionAgentLoopOutput, DiffusionAgentLoopWorker
+from verl_omni.agent_loop.diffusion_agent_loop import (
+    DiffusionAgentLoopOutput,
+    DiffusionAgentLoopWorker,
+    _InternalDiffusionAgentLoopOutput,
+)
 from verl_omni.agent_loop.utils import maybe_per_rollout_seeds
 
 
@@ -48,39 +60,32 @@ def _config_to_sampling_dict(config: Optional[BaseConfig]) -> dict:
     return {k: v for k, v in config.items() if not k.startswith("_")}
 
 
-def _pad_llm_generation_outputs(
-    response_ids: torch.Tensor,
-    log_probs: torch.Tensor | None,
-    max_new_tokens: int,
-    pad_token_id: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Right-pad per-request AR generation tensors to ``max_new_tokens``.
+class ARAgentLoopOutput(BaseModel):
+    """Agent loop output."""
 
-    Per-request ``generate`` stops at EOS, so samples reach ``_postprocess``
-    with different lengths while it batches them with ``torch.cat``.
-    """
-    gen_len = int(response_ids.shape[-1])
-    if gen_len > max_new_tokens:
-        raise ValueError(f"llm_response_ids length {gen_len} exceeds rollout.max_new_tokens={max_new_tokens}")
-    attention_mask = torch.zeros(*response_ids.shape[:-1], max_new_tokens, dtype=torch.long, device=response_ids.device)
-    attention_mask[..., :gen_len] = 1
-    padded_ids = F.pad(response_ids, (0, max_new_tokens - gen_len), value=pad_token_id)
-    padded_log_probs = None
-    if log_probs is not None:
-        padded_log_probs = F.pad(log_probs, (0, 0, 0, max_new_tokens - log_probs.shape[-2]), value=0.0)
-    return padded_ids, attention_mask, padded_log_probs
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-
-class CompositeAgentLoopOutput(DiffusionAgentLoopOutput):
-    """Agent loop output. Supplement additional fields for AR part."""
-
-    llm_response_logprobs: Optional[Any] = None
+    prompt_ids: list[int]
+    """Input ids of raw input prompt"""
+    response_ids: list[int]
+    """Full response AR tokens output (torch.Tensor)."""
+    response_mask: list[int]
+    """Attention mask for padded response tokens (torch.Tensor)."""
+    refined_prompt: Any
+    """Refined rewritten prompt in chat-message form for diffusion."""
+    ar_response_logprobs: Optional[Any] = None
     """Log probabilities for the response tokens."""
-    llm_reward_score: Optional[float] = None
+    ar_reward_score: Optional[float] = None
     """Reward score for the semantic reward."""
+    num_turns: int = 0
+    """Number of chat turns, including user, assistant, tool."""
+    metrics: AgentLoopMetrics
+    """Auxiliary performance metrics"""
+    extra_fields: dict[str, Any] = {}
+    """Extra fields for dynamic addition."""
 
 
-class _InternalCompositeAgentLoopOutput(CompositeAgentLoopOutput):
+class _InternalARAgentLoopOutput(ARAgentLoopOutput):
     """Internal agent loop output with padded sequences.
     Supplement additional fields for AR part.
     """
@@ -89,14 +94,18 @@ class _InternalCompositeAgentLoopOutput(CompositeAgentLoopOutput):
 
     prompt_ids: torch.Tensor
     """Padded prompt token ids."""
-    response_diffusion_output: torch.Tensor
-    """Response diffusion output: image (NCHW format) / video (NTCHW format)."""
-    llm_response_logprobs: Optional[torch.Tensor] = None
-    """Log probabilities for the response tokens."""
-    response_logprobs: Optional[torch.Tensor] = None
-    """Log probabilities over denoising timesteps."""
-    extra_fields: dict[str, Any] = {}
-    """Extra fields for dynamic addition."""
+    response_ids: torch.Tensor
+    """Padded AR response token ids."""
+    input_ids: torch.Tensor
+    """Padded input ids(prompt_ids + response_ids)."""
+    position_ids: torch.Tensor
+    """Padded position ids."""
+    response_mask: torch.Tensor
+    """Padded response mask."""
+    attention_mask: torch.Tensor
+    """Padded attention mask."""
+    ar_response_logprobs: Optional[torch.Tensor] = None
+    """Padded log probabilities for the response tokens."""
 
 
 class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
@@ -132,24 +141,32 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
 
         super().__init__(config, llm_client, teacher_client, reward_loop_worker_handles)
 
-    async def generate_sequences(self, batch: DataProto) -> DataProto:
+    async def generate_sequences(self, batch: DataProto) -> tuple[DataProto, DataProto]:
         """Generate sequences from agent loop.
 
         Args:
             batch (DataProto): Input batch.
 
         Returns:
-            DataProto: Output batch with the following fields.
+            tuple[DataProto, DataProto]: AR and diffusion outputs separately, since they
+            may have different batch sizes (``n`` vs ``n * m``).
 
-            - ``prompts``: ``[bsz, prompt_length]`` original prompt token ids from dataset.
-            - ``responses``: diffusion output, typically ``[bsz, C, H, W]`` (image)
-              or ``[bsz, T, C, H, W]`` (video).
-            - ``rm_scores`` (optional): ``[bsz, 2]`` reward model scores for ar and dit part.
-            - ``text_encoder_responses``: ``List[str]``, refined prompts with CoT.
-            - ``meta_info``:
-              - ``metrics``: ``List[dict]``, per-sample agent loop metrics.
-              - ``reward_extra_keys`` (optional): ``List[str]``, keys for reward
-                extra info for logging/validation.
+            AR ``DataProto`` batch fields (optional keys omitted when disabled):
+
+            - ``prompts``: ``[ar_bsz, prompt_length]`` original prompt token ids.
+            - ``responses``: ``[ar_bsz, ar_response_length]`` padded generated AR tokens.
+            - ``response_mask``: ``[ar_bsz, ar_response_length]`` attention mask for padded response tokens.
+            - ``input_ids``: ``[ar_bsz, prompt_length + ar_response_length]`` padded full response tokens.
+            - ``attention_mask`: ``[ar_bsz, prompt_length + ar_response_length]`` attention mask for input_ids.
+            - ``position_ids``: ``[ar_bsz, 4, prompt_length + ar_response_length]`` M-RoPE 3D position ids for input_ids.
+            - ``rollout_ar_log_probs`` (optional): AR token log-probs.
+            - ``rm_scores`` (optional): ``[ar_bsz, 1]`` AR reward scores.
+
+            Diffusion ``DataProto`` batch fields match :class:`DiffusionAgentLoopWorker`.
+
+            - ``prompts``: ``[dit_bsz, prompt_length]`` refined prompt token ids.
+            - ``responses``: ``[dit_bsz, C, H, W]`` or ``[dit_bsz, T, C, H, W]``.
+            - ``rm_scores`` (optional): ``[dit_bsz, 1]`` diffusion reward scores.
         """
         config = self.rollout_config
 
@@ -157,13 +174,9 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
         sampling_params = {
             **_config_to_sampling_dict(config.pipeline),
             **_config_to_sampling_dict(config.algo),
+            **_config_to_sampling_dict(config.ar),
             "logprobs": config.calculate_log_probs,
-            "temperature": config.temperature,
-            "top_p": config.top_p,
-            "top_k": config.top_k,
-            "repetition_penalty": config.repetition_penalty,
-            "llm_logprobs": config.llm_calculate_log_probs,
-            "max_new_tokens": config.max_new_tokens,
+            "ar_logprobs": config.ar_calculate_log_probs,
         }
 
         is_validate = batch.meta_info.get("validate", False)
@@ -178,7 +191,7 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
             sampling_params["top_p"] = config.val_kwargs.top_p
             sampling_params["top_k"] = config.val_kwargs.top_k
             sampling_params["temperature"] = config.val_kwargs.temperature
-            sampling_params["llm_logprobs"] = False
+            sampling_params["ar_logprobs"] = False
         else:
             sampling_params["global_steps"] = batch.meta_info["global_steps"]
             # Prefer trainer-assigned global indices so chunked workers derive the
@@ -192,170 +205,368 @@ class CompositeAgentLoopWorker(DiffusionAgentLoopWorker):
             default_agent_loop = config.agent.default_agent_loop
             batch.non_tensor_batch["agent_name"] = np.array([default_agent_loop] * len(batch), dtype=object)
 
+        # two-stage generation: one batch row -> one AR output -> diffusion_n images
+        diffusion_n = config.n
         tasks = []
         for i in range(len(batch)):
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
-            task_sampling_params = sampling_params.copy()
+            kwargs["diffusion_n"] = diffusion_n
             if per_rollout_seeds is not None:
-                task_sampling_params["seed"] = per_rollout_seeds[i]
-            tasks.append(asyncio.create_task(self._run_agent_loop(task_sampling_params, **kwargs)))
+                kwargs["per_rollout_seeds"] = per_rollout_seeds[i * diffusion_n : (i + 1) * diffusion_n]
+            else:
+                kwargs["per_rollout_seeds"] = None
+            task_sampling_params = sampling_params.copy()
+            tasks.append(
+                asyncio.create_task(self._run_agent_loop(task_sampling_params, validate=is_validate, **kwargs))
+            )
         outputs = await asyncio.gather(*tasks)
 
-        output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
+        ar_inputs: list[_InternalARAgentLoopOutput] = []
+        diffusion_inputs: list[_InternalDiffusionAgentLoopOutput] = []
+        for ar_output, diffusion_outputs in outputs:
+            ar_inputs.append(ar_output)
+            diffusion_inputs.extend(diffusion_outputs)
 
-        return output
+        ar_non_tensor_batch = None
+        if batch.non_tensor_batch:
+            ar_non_tensor_batch = {k: v[: len(ar_inputs)] for k, v in batch.non_tensor_batch.items()}
+
+        ar_output = self._postprocess_ar(ar_inputs, input_non_tensor_batch=ar_non_tensor_batch)
+        diffusion_output = super()._postprocess(diffusion_inputs)
+
+        return ar_output, diffusion_output
+
+    async def _run_agent_loop(
+        self,
+        sampling_params: dict[str, Any],
+        *,
+        agent_name: str,
+        validate: bool = False,
+        **kwargs,
+    ) -> tuple[_InternalARAgentLoopOutput, list[_InternalDiffusionAgentLoopOutput]]:
+        assert agent_name in _agent_loop_registry, (
+            f"Agent loop {agent_name} not registered, registered agent loops: {_agent_loop_registry.keys()}"
+        )
+
+        agent_loop_config = _agent_loop_registry[agent_name]
+        agent_loop = hydra.utils.instantiate(
+            config=agent_loop_config,
+            trainer_config=DictConfigWrap(config=self.config),
+            server_manager=self.server_manager,
+            tokenizer=self.tokenizer,
+            processor=self.processor,
+            dataset_cls=self.dataset_cls,
+            data_config=DictConfigWrap(self.config.data),
+            extra_tokenizer_map=self.model_config.extra_tokenizer_map,
+        )
+        output: tuple[ARAgentLoopOutput, list[DiffusionAgentLoopOutput]] = await agent_loop.run(
+            sampling_params, **kwargs
+        )
+        return await self._agent_loop_postprocess(output, validate=validate, **kwargs)
+
+    # copy from verl.experimental.agent_loop.agent_loop.AgentLoopWorker
+    def _pad_token_ids(
+        self,
+        tokens: list[int],
+        *,
+        max_length: int,
+        padding_side: str,
+        return_attention_mask: bool,
+    ) -> dict[str, torch.Tensor]:
+        """Right/left pad a flat list of token ids to a ``(1, max_length)`` tensor."""
+        # tokenizer.pad() with empty input returns dict with list values
+        # instead of tensors, which breaks downstream .dim() calls.
+        if not tokens:
+            pad_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
+            result = {"input_ids": torch.full((1, max_length), pad_id, dtype=torch.long)}
+            if return_attention_mask:
+                result["attention_mask"] = torch.zeros((1, max_length), dtype=torch.long)
+            return result
+        self.tokenizer.padding_side = padding_side
+        padded = self.tokenizer.pad(
+            {"input_ids": tokens},
+            padding="max_length",
+            max_length=max_length,
+            return_tensors="pt",
+            return_attention_mask=return_attention_mask,
+        )
+        if padded["input_ids"].dim() == 1:
+            padded["input_ids"] = padded["input_ids"].unsqueeze(0)
+            if return_attention_mask:
+                padded["attention_mask"] = padded["attention_mask"].unsqueeze(0)
+        return padded
 
     async def _agent_loop_postprocess(
-        self, output: DiffusionAgentLoopOutput, **kwargs
-    ) -> _InternalCompositeAgentLoopOutput:
+        self,
+        output: tuple[ARAgentLoopOutput, list[DiffusionAgentLoopOutput]],
+        validate: bool = False,
+        **kwargs,
+    ) -> tuple[_InternalARAgentLoopOutput, list[_InternalDiffusionAgentLoopOutput]]:
         """Perform post-processing operations on the output of each individual agent loop."""
-        output = CompositeAgentLoopOutput(**dict(output))
+        ar_output, diffusion_outputs = output
 
-        llm_response_ids = output.extra_fields.get("llm_response_ids")
-        llm_log_probs = output.extra_fields.get("llm_all_log_probs")
-        llm_response_mask: torch.Tensor | None = None
-        if isinstance(llm_response_ids, torch.Tensor):
-            pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
-            llm_response_ids, llm_response_mask, llm_log_probs = _pad_llm_generation_outputs(
-                llm_response_ids,
-                llm_log_probs if isinstance(llm_log_probs, torch.Tensor) else None,
-                self.rollout_config.max_new_tokens,
-                pad_token_id,
+        # AR part post-processing
+        ar_internal = await self._agent_loop_ar_postprocess(ar_output, diffusion_outputs, validate=validate, **kwargs)
+
+        # Diffusion part post-processing
+        diffusion_internals: list[_InternalDiffusionAgentLoopOutput] = []
+        for diffusion_output in diffusion_outputs:
+            diffusion_output.prompt_ids = ar_output.prompt_ids  # use original prompt for reward
+            diffusion_internal = await super()._agent_loop_postprocess(
+                diffusion_output,
+                validate=validate,
+                **kwargs,
             )
+            diffusion_internals.append(diffusion_internal)
 
-        # Pad extra tensor outputs from vllm-omni (e.g. prompt embeddings).
-        extra_fields = {}
-        for k, v in output.extra_fields.items():
-            if isinstance(v, torch.Tensor):
-                if k in ["prompt_embeds", "negative_prompt_embeds"]:
-                    pad_tuple = (0, 0, 0, self.max_prompt_embed_length - v.shape[0])
-                    v = F.pad(v, pad_tuple, value=0)
-                elif k in ["prompt_embeds_mask", "negative_prompt_embeds_mask"]:
-                    pad_tuple = (0, self.max_prompt_embed_length - v.shape[0])
-                    v = F.pad(v, pad_tuple, value=0)
-                elif k == "llm_response_ids" and llm_response_ids is not None:
-                    v = llm_response_ids
-                elif k == "llm_all_log_probs" and llm_log_probs is not None:
-                    v = llm_log_probs
-                extra_fields[k] = v.unsqueeze(0)
-            else:
-                extra_fields[k] = v
-        if llm_response_mask is not None:
-            extra_fields["llm_response_attention_mask"] = llm_response_mask.unsqueeze(0)
+        return ar_internal, diffusion_internals
 
-        extra_fields["raw_prompt"] = kwargs["raw_prompt"]
+    async def _agent_loop_ar_postprocess(
+        self,
+        output: ARAgentLoopOutput,
+        diffusion_outputs: list[DiffusionAgentLoopOutput],
+        validate: bool = False,
+        **kwargs,
+    ) -> _InternalARAgentLoopOutput:
+        """Post-process a single AR agent-loop output."""
 
-        # It is not used in training for now, but we keep it for future use.
-        # For example, we can compose common LLM and T2I models for this rollout pipeline and training,
-        # where LLM generated refined pompts used for T2I model image generation.
-        extra_fields["text_encoder_responses"] = output.extra_fields["text_encoder_responses"]
+        # padding for general use
+        # you can pad results during rollout generation
+        # or pad them here for post-processing, depending on your preference
+        # compute input ids (i.e., prompt+response), attention mask, position ids.
 
-        prompt_output = self.tokenizer.pad(
-            {"input_ids": output.prompt_ids},
-            padding="max_length",
+        prompt_output = self._pad_token_ids(
+            output.prompt_ids,
             max_length=self.rollout_config.prompt_length,
-            return_tensors="pt",
+            padding_side="left",
             return_attention_mask=True,
         )
-        if prompt_output["input_ids"].dim() == 1:
-            prompt_output["input_ids"] = prompt_output["input_ids"].unsqueeze(0)
-            prompt_output["attention_mask"] = prompt_output["attention_mask"].unsqueeze(0)
 
-        response_diffusion_output = output.response_diffusion_output.unsqueeze(0)
-
-        response_logprobs = None
-        if output.response_logprobs is not None:
-            response_logprobs = output.response_logprobs.unsqueeze(0)
-        llm_response_logprobs = None
-        if llm_log_probs is not None:
-            llm_response_logprobs = llm_log_probs.unsqueeze(0)
-
-        prompt_ids = prompt_output["input_ids"]
-        extra_fields["attention_mask"] = prompt_output["attention_mask"]
-
-        await self._compute_score(
-            output,
-            prompts=prompt_ids,
-            responses=response_diffusion_output,
-            kwargs=kwargs,
+        response_output = self._pad_token_ids(
+            output.response_ids,
+            max_length=self.rollout_config.ar.response_length,
+            padding_side="right",
+            return_attention_mask=True,
         )
 
+        response_mask_output = self._pad_token_ids(
+            output.response_mask,
+            max_length=self.rollout_config.ar.response_length,
+            padding_side="right",
+            return_attention_mask=False,
+        )
+
+        response_mask = response_mask_output["input_ids"] * response_output["attention_mask"]
+
+        # token ids and attention mask forprompt + response
+        attention_mask = torch.cat([prompt_output["attention_mask"], response_output["attention_mask"]], dim=1)
+        input_ids = torch.cat([prompt_output["input_ids"], response_output["input_ids"]], dim=1)
+
+        # Currently support text-only position ids as 3D position ids.
+        # TODO: (susan) extend to multi-modal 3D position ids for M-RoPE
+        valid_mask = attention_mask[0].bool()
+        text_position_ids = torch.ones((1, len(input_ids[0])), dtype=torch.long)
+        text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
+        # M-RoPE layout expected by ``left_right_2_no_padding``: B x 4 x seq_len.
+        position_ids = text_position_ids.unsqueeze(1).expand(-1, 4, -1)
+
+        ar_response_logprobs = None
+        if output.ar_response_logprobs is not None:
+            ar_response_logprobs = output.ar_response_logprobs
+            if isinstance(ar_response_logprobs, list):
+                pad_size = self.rollout_config.ar.response_length - len(output.ar_response_logprobs)
+                ar_response_logprobs = torch.tensor(ar_response_logprobs + [0.0] * pad_size).unsqueeze(0)
+            if ar_response_logprobs.dim() == 2:
+                ar_response_logprobs = ar_response_logprobs.unsqueeze(0)
+
+        prompt_ids = prompt_output["input_ids"]  # padded prompt ids
+        await self._compute_ar_score(
+            output,
+            prompt_ids,
+            diffusion_outputs,
+            kwargs=kwargs,
+            validate=validate,
+        )
+
+        extra_fields = dict(output.extra_fields)
+        extra_fields["raw_prompt"] = kwargs["raw_prompt"]
+        if "text_encoder_responses" not in extra_fields:
+            extra_fields["text_encoder_responses"] = output.refined_prompt
         if "reward_extra_info" in output.extra_fields:
             extra_fields["reward_extra_info"] = output.extra_fields["reward_extra_info"]
 
-        return _InternalCompositeAgentLoopOutput(
+        return _InternalARAgentLoopOutput(
             prompt_ids=prompt_ids,
-            response_diffusion_output=response_diffusion_output,
-            response_logprobs=response_logprobs,
-            llm_response_logprobs=llm_response_logprobs,
-            reward_score=output.reward_score,
-            llm_reward_score=output.llm_reward_score,
+            response_ids=response_output["input_ids"],
+            response_mask=response_mask,
+            refined_prompt=output.refined_prompt,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            ar_response_logprobs=ar_response_logprobs,
+            ar_reward_score=output.ar_reward_score,
             num_turns=output.num_turns,
             metrics=output.metrics,
-            extra_fields=extra_fields,
+            extra_fields=output.extra_fields,
         )
 
-    async def _compute_score(self, output, prompts, responses, kwargs):
-        """Compute dual reward scores for single sample.
-        Note that either AR or DiT part computes image-grounded rewards
+    async def _compute_ar_score(
+        self,
+        output: ARAgentLoopOutput,
+        prompts: torch.Tensor,
+        diffusion_outputs: list[DiffusionAgentLoopOutput],
+        kwargs,
+        validate: bool = False,
+    ):
+        """Compute image-grounded AR reward scores using diffusion prompts and images.
+
+        AR and DiT rewards share the same inputs: padded input ``prompts`` and
+        ``response_diffusion_output``. When multiple diffusion samples exist per AR
+        rollout, scores are averaged into one AR reward.
         """
-
-        enable_async_reward = self.reward_loop_worker_handles is not None
         ar_enable_async_reward = self.ar_reward_loop_worker_handles is not None
+        if output.ar_reward_score is not None or not ar_enable_async_reward or not diffusion_outputs:
+            return
 
-        if (output.reward_score is None and enable_async_reward) or (
-            output.llm_reward_score is None and ar_enable_async_reward
-        ):
-            timing = {}
-            with simple_timer("compute_score", timing):
+        timing = {}
+        ar_reward_scores: list[float] = []
+        with simple_timer("compute_score", timing):
+            for diffusion_output in diffusion_outputs:
                 batch = TensorDict(
                     {
-                        "prompts": prompts,  # [1, prompt_length]
-                        "responses": responses,  # [1, C, H, W] or [1, T, C, H, W]
+                        "prompts": prompts,  # [1, prompt_length], padded input raw prompt ids
+                        "responses": diffusion_output.response_diffusion_output.unsqueeze(
+                            0
+                        ),  # [1, C, H, W] or [1, T, C, H, W]
                     },
                     batch_size=1,
                 )
                 non_tensor_batch = {
                     **{k: np.array([v]) for k, v in kwargs.items()},
                     "__num_turns__": np.array([output.num_turns]),
-                    "tool_extra_fields": np.array([output.extra_fields], dtype=object),
+                    "tool_extra_fields": np.array([diffusion_output.extra_fields], dtype=object),
                 }
 
                 data = DataProto(
                     batch=batch,
                     non_tensor_batch=non_tensor_batch,
+                    meta_info={"validate": validate},
                 )
-                if output.reward_score is None and enable_async_reward:
-                    selected_reward_loop_worker_handle = random.choice(self.reward_loop_worker_handles)
-                    result = await selected_reward_loop_worker_handle.compute_score.remote(data)
-                    output.reward_score = result["reward_score"]
+                selected_ar_reward_loop_worker_handle = random.choice(self.ar_reward_loop_worker_handles)
+                result = await selected_ar_reward_loop_worker_handle.compute_score.remote(data)
+                ar_reward_scores.append(result["reward_score"])
+                if output.extra_fields.get("reward_extra_info") is not None:
+                    output.extra_fields["reward_extra_info"].update(result["reward_extra_info"])
+                else:
                     output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
-                if output.llm_reward_score is None and ar_enable_async_reward:
-                    selected_ar_reward_loop_worker_handle = random.choice(self.ar_reward_loop_worker_handles)
-                    result = await selected_ar_reward_loop_worker_handle.compute_score.remote(data)
-                    output.llm_reward_score = result["reward_score"]
-                    if output.extra_fields["reward_extra_info"] is not None:
-                        output.extra_fields["reward_extra_info"].update(result["reward_extra_info"])
-                    else:
-                        output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
 
-            output.metrics.compute_score = timing["compute_score"]
+        output.ar_reward_score = float(np.mean(ar_reward_scores))  # average score per prompt
+        if "reward_extra_info" in output.extra_fields:
+            output.extra_fields["reward_extra_info"] = output.extra_fields["reward_extra_info"]
+        output.metrics.compute_score = timing["compute_score"]
 
-    def _postprocess(
+    def _postprocess_ar(
         self,
-        inputs: list[_InternalCompositeAgentLoopOutput],
+        inputs: list[_InternalARAgentLoopOutput],
         input_non_tensor_batch: dict | None = None,
     ) -> DataProto:
-        # pack other outputs
-        outputs = super()._postprocess(inputs, input_non_tensor_batch)
+        """Process padded AR outputs and combine them into a batch.
+        Returns:
+            Tensors include prompts, responses, response_mask, input_ids, attention_mask,
+            position_ids, rollout_ar_log_probs, rm_scores
+        """
+        prompt_ids = torch.cat([input.prompt_ids for input in inputs], dim=0)
+        position_ids = torch.cat([input.position_ids for input in inputs], dim=0)
+        response_ids = torch.cat([input.response_ids for input in inputs], dim=0)
+        response_mask = torch.cat([input.response_mask for input in inputs], dim=0)
+        input_ids = torch.cat([input.input_ids for input in inputs], dim=0)
+        attention_mask = torch.cat([input.attention_mask for input in inputs], dim=0)
 
-        # LLM log-probs and scores
-        if inputs[0].llm_response_logprobs is not None:
-            outputs.batch["rollout_llm_log_probs"] = torch.cat([input.llm_response_logprobs for input in inputs], dim=0)
+        batch_dict: dict[str, torch.Tensor] = {
+            "prompts": prompt_ids,
+            "responses": response_ids,
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "response_mask": response_mask,
+            "attention_mask": attention_mask,
+        }
+        if inputs[0].ar_response_logprobs is not None:
+            batch_dict["rollout_ar_log_probs"] = torch.cat([input.ar_response_logprobs for input in inputs], dim=0)
 
-        llm_scores = [input.llm_reward_score for input in inputs]
-        if all(score is not None for score in llm_scores):
-            rm_scores = torch.tensor(llm_scores, dtype=torch.float32).unsqueeze(-1)
-            outputs.batch["llm_rm_scores"] = rm_scores
+        ar_scores = [input.ar_reward_score for input in inputs]
+        if all(score is not None for score in ar_scores):
+            batch_dict["rm_scores"] = torch.tensor(ar_scores, dtype=torch.float32).unsqueeze(-1)
 
-        return outputs
+        non_tensor_batch = {
+            "__num_turns__": np.array([input.num_turns for input in inputs], dtype=np.int32),
+        }
+        if input_non_tensor_batch:
+            non_tensor_batch.update(input_non_tensor_batch)
+
+        reward_extra_infos = [input.extra_fields.get("reward_extra_info", {}) for input in inputs]
+        reward_extra_keys = sorted(set.intersection(*(set(info) for info in reward_extra_infos)))
+        for key in reward_extra_keys:
+            non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
+
+        text_encoder_responses = np.empty(len(inputs), dtype=object)
+        text_encoder_responses[:] = [input.extra_fields.get("text_encoder_responses") for input in inputs]
+        non_tensor_batch["text_encoder_responses"] = text_encoder_responses
+
+        metrics = [input.metrics.model_dump() for input in inputs]
+        if "rm_scores" in batch_dict:
+            meta_info = {"metrics": metrics, "reward_extra_keys": reward_extra_keys}
+        else:
+            meta_info = {"metrics": metrics}
+
+        return DataProto(
+            batch=TensorDict(batch_dict, batch_size=len(inputs)),
+            non_tensor_batch=non_tensor_batch,
+            meta_info=meta_info,
+        )
+
+
+class CompositeAgentLoopManager(AgentLoopManager):
+    def __init__(
+        self,
+        config: DictConfig,
+        llm_client: LLMServerClient,
+        teacher_client: dict[str, LLMServerClient] | None = None,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] | None = None,
+    ):
+        self.agent_loop_workers_class = ray.remote(CompositeAgentLoopWorker)
+        super().__init__(config, llm_client, teacher_client, reward_loop_worker_handles)
+
+    @auto_await
+    @SkipManager.annotate(role="rollout")
+    async def generate_sequences(self, prompts: DataProto) -> tuple[DataProto, DataProto]:
+        """Gather ``(ar_batch, diffusion_batch)`` tuples from composite workers."""
+
+        chunks = prompts.chunk(len(self.agent_loop_workers))
+        outputs = await asyncio.gather(
+            *[
+                worker.generate_sequences.remote(chunk)
+                for worker, chunk in zip(self.agent_loop_workers, chunks, strict=True)
+            ]
+        )
+
+        # concatenate outputs
+        ar_outputs = [output[0] for output in outputs]
+        diffusion_outputs = [output[1] for output in outputs]
+
+        ar_batch = DataProto.concat(ar_outputs)
+        diffusion_batch = DataProto.concat(diffusion_outputs)
+
+        # calculate performance metrics
+        metrics = [output.meta_info.pop("metrics") for output in ar_outputs]
+        ar_timing = self._performance_metrics(metrics, ar_batch)
+        old_keys = list(ar_timing.keys())
+        for key in old_keys:
+            new_key = key.replace("agent_loop/", "agent_loop/ar/")
+            ar_timing[new_key] = ar_timing.pop(key)
+        ar_batch.meta_info = {"timing": ar_timing, **ar_outputs[0].meta_info}
+
+        metrics = [output.meta_info.pop("metrics") for output in diffusion_outputs]
+        diffusion_timing = self._performance_metrics(metrics, diffusion_batch)
+        diffusion_batch.meta_info = {"timing": diffusion_timing, **diffusion_outputs[0].meta_info}
+
+        return ar_batch, diffusion_batch

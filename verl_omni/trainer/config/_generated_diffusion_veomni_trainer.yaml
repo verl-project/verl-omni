@@ -247,6 +247,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: null
     disable_log_stats: true
     'n': 1
+    m: 1
     seed: 42
     full_determinism: false
     multi_turn:
@@ -282,6 +283,13 @@ actor_rollout_ref:
         sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
         sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
         sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
+      ar:
+        _target_: verl_omni.workers.config.diffusion.DiffusionARConfig
+        temperature: ${oc.select:actor_rollout_ref.rollout.ar.temperature,1.0}
+        top_k: ${oc.select:actor_rollout_ref.rollout.ar.top_k,0}
+        top_p: ${oc.select:actor_rollout_ref.rollout.ar.top_p,1.0}
+        repetition_penalty: ${oc.select:actor_rollout_ref.rollout.ar.repetition_penalty,1.0}
+        response_length: ${oc.select:actor_rollout_ref.rollout.ar.response_length,1024}
     algo:
       _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
       noise_level: 1.0
@@ -307,13 +315,15 @@ actor_rollout_ref:
       task: null
       frame_indices: null
       aspect_ratio: null
+    ar:
+      _target_: verl_omni.workers.config.diffusion.DiffusionARConfig
+      temperature: 1.0
+      top_k: 0
+      top_p: 1.0
+      repetition_penalty: 1.0
+      response_length: 1024
     calculate_log_probs: false
-    llm_calculate_log_probs: false
-    temperature: 1.0
-    top_k: 0
-    top_p: 1.0
-    repetition_penalty: 1.0
-    max_new_tokens: 256
+    ar_calculate_log_probs: false
     rollout_adapter: default
     agent:
       _target_: verl.workers.config.AgentLoopConfig
@@ -348,6 +358,7 @@ actor_rollout_ref:
     external_lib: null
     enable_gradient_checkpointing: true
     config_path: null
+    text_encoder_subfolder: text_encoder
     transformer_subfolder: transformer
     attn_backend: _flash_3_varlen_hub
     lora_rank: 0
@@ -364,6 +375,7 @@ actor_rollout_ref:
     lora_dtype: null
     fsdp_layer_prefixes:
     - transformer_blocks.
+    use_remove_padding: false
     mtp:
       _target_: verl.workers.config.MtpConfig
       enable: false
@@ -388,6 +400,18 @@ actor_rollout_ref:
       sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
       sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
       sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
+    ar:
+      _target_: verl_omni.workers.config.diffusion.DiffusionModelARConfig
+      use_shm: false
+      trust_remote_code: false
+      enable_gradient_checkpointing: true
+      lora_rank: 0
+      lora_alpha: 64
+      target_modules: all-linear
+      target_parameters: null
+      exclude_modules: null
+      lora_adapter_path: null
+      override_config: {}
     model_type: diffusion_model
   separate: false
   hybrid_engine: true
