@@ -136,6 +136,7 @@ def test_qwen_tts_registers_and_runs_without_a_transformers_compatibility_layer(
         tts_bos_token_id=61,
         tts_eos_token_id=62,
     )
+    config.speaker_encoder_config.dtype = torch.float32
     model = Qwen3TTSForConditionalGeneration(config)
     output = model.talker(
         inputs_embeds=torch.randn(2, 5, 8),
@@ -183,3 +184,4 @@ def test_qwen_tts_registers_and_runs_without_a_transformers_compatibility_layer(
     assert all(name.startswith(("talker.model.", "talker.codec_head.")) for name in trainable_names)
     assert any(not parameter.requires_grad for parameter in configured.parameters())
     assert configured.get_input_embeddings() is configured.talker.model.codec_embedding
+    configured.config.save_pretrained(tmp_path / "checkpoint_config")

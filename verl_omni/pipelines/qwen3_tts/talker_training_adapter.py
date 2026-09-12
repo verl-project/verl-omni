@@ -99,6 +99,11 @@ class Qwen3TTSTalkerAdapter(OmniModelBase):
         if getattr(model_config, "use_remove_padding", False):
             raise ValueError("Qwen3-TTS Talker training requires actor_rollout_ref.model.use_remove_padding=false.")
         module = super().configure_model(module, model_config)
+        speaker_config = module.config.speaker_encoder_config
+        if "dtype" in vars(speaker_config):
+            # Transformers injects this runtime field, but the pinned speaker
+            # config omits it from its defaults and cannot serialize its diff.
+            delattr(speaker_config, "dtype")
         module.config.tts_spk_embed_path = model_config.override_config.get("tts_spk_embed_path")
         module.config.tts_language = require_auto_language(model_config.override_config.get("tts_language"))
         if not module.config.tts_spk_embed_path:
