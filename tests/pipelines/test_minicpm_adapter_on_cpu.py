@@ -262,6 +262,7 @@ def test_cloned_vllm_embedding_scatter_supports_backward():
         {
             "input_ids": input_ids,
             "pixel_values": [[torch.zeros(3, 2, 2)]],
+            "tgt_sizes": [torch.tensor([[1, 1]], dtype=torch.int32)],
             "image_bound": [torch.tensor([[0, 2]])],
         }
     )
@@ -364,3 +365,24 @@ def test_configure_model_applies_omni_embedding_splice_patch():
     module = _WithOmniEmbedding()
     configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
     assert getattr(configured, "_verl_omni_get_omni_embedding_patched", False)
+
+
+def test_merge_packed_media_stashes_per_example_slice_counts():
+    data = {
+        "pixel_values": [[torch.zeros(3, 2, 2)] * 2, [], [torch.zeros(3, 2, 2)] * 3],
+        "tgt_sizes": [
+            torch.tensor([[1, 1]] * 2, dtype=torch.int32),
+            torch.zeros(0, 2, dtype=torch.int32),
+            torch.tensor([[1, 1]] * 3, dtype=torch.int32),
+        ],
+        "audio_feature_lens": [[], [], []],
+        "image_bound": [[[0, 2]], [], [[2, 5]]],
+        "audio_bounds": [[], [], []],
+    }
+    from verl_omni.pipelines.minicpm.thinker_training_adapter import _merge_packed_media
+
+    _merge_packed_media(data)
+
+    assert data["packed_vision_slices"] == [2, 0, 3]
+    assert len(data["pixel_values"]) == 1  # folded into one pseudo-row
+    assert len(data["pixel_values"][0]) == 5

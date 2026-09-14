@@ -283,6 +283,11 @@ def _merge_packed_media(data: dict[str, Any]) -> None:
     every slice/span (sample-major, media order within, matching the id scan),
     not flattened past the row dimension.
     """
+    # Per-example slice counts so the patched vision tower can re-split the
+    # packed pseudo-row and run each example's group alone (bs==1-canonical
+    # tower compute; batched kernels flip bf16 reduction order). Computed
+    # before the fold below flattens the per-example structure away.
+    data["packed_vision_slices"] = [len(sample) for sample in data["pixel_values"]]
     data["pixel_values"] = [[slice_ for sample in data["pixel_values"] for slice_ in sample]]
     tgt_sizes = [sample for sample in data["tgt_sizes"] if int(sample.numel()) > 0]
     data["tgt_sizes"] = [torch.cat(tgt_sizes, dim=0)] if tgt_sizes else [torch.zeros(0, 2, dtype=torch.int32)]

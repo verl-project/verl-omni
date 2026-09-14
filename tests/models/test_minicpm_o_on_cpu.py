@@ -330,18 +330,24 @@ def test_patch_get_audio_embedding_returns_zero_token_for_empty_training_batch()
     assert module.original_calls == []
 
 
-def test_patch_get_audio_embedding_delegates_for_real_audio_or_eval():
+def test_patch_get_audio_embedding_runs_each_clip_alone():
     from verl_omni.models.transformers import minicpm_o
 
     module = _fresh_audio_module()
     module.train()
     minicpm_o.patch_minicpm_get_audio_embedding(module)
-    module.get_audio_embedding({"audio_features": torch.zeros(1, 80, 10)}, chunk_length=1.0)
-    assert len(module.original_calls) == 1  # real audio: original Whisper path
+    result = module.get_audio_embedding(
+        {"audio_features": torch.zeros(2, 80, 10), "audio_feature_lens": [[10], [6]]}, chunk_length=1.0
+    )
+    # One exact-length [1, 80, len] clip per original call.
+    assert [call[0]["audio_features"].shape for call in module.original_calls] == [(1, 80, 10), (1, 80, 6)]
+    assert [call[0]["audio_feature_lens"] for call in module.original_calls] == [[[10]], [[6]]]
+    assert len(result) == 2  # regrouped per row
 
     module.eval()
     module.get_audio_embedding({"audio_features": []}, chunk_length=1.0)
-    assert len(module.original_calls) == 2  # eval: remote's own no-dummy branch
+    # 2 per-clip calls + the eval-empty delegation to the remote's own branch.
+    assert len(module.original_calls) == 3
 
 
 def test_patch_get_audio_embedding_noop_without_apm_or_llm():
@@ -471,3 +477,79 @@ def test_patch_get_omni_embedding_noop_without_the_method():
     bare = torch.nn.Linear(4, 4)
     minicpm_o.patch_minicpm_get_omni_embedding(bare)
     assert not hasattr(bare, "_verl_omni_get_omni_embedding_patched")
+
+
+class _VisionTowerModule(torch.nn.Module):
+    """Remote-shaped get_vision_embedding recording every tower invocation."""
+
+    def __init__(self):
+        super().__init__()
+        self.tower_calls = []
+
+    def get_vision_embedding(self, data):
+        self.tower_calls.append((data["pixel_values"], data["tgt_sizes"]))
+        rows = []
+        for values in data["pixel_values"]:
+            if not values:
+                rows.append([])
+                continue
+            # One marker token per slice so concatenation order is checkable.
+            rows.append(torch.stack([torch.full((1, 4), float(values[i][0, 0, 0].item())) for i in range(len(values))]))
+        return rows
+
+
+def test_patch_get_vision_embedding_runs_each_sample_alone():
+    from verl_omni.models.transformers import minicpm_o
+
+    module = _VisionTowerModule()
+    minicpm_o.patch_minicpm_get_vision_embedding(module)
+    slices = [
+        [torch.full((3, 2, 2), 1.0), torch.full((3, 2, 2), 1.0)],  # row 0: two slices
+        [],  # row 1: empty — no tower call
+        [torch.full((3, 2, 2), 3.0)],  # row 2: one slice
+    ]
+    tgt = [
+        torch.tensor([[1, 2]], dtype=torch.int32),
+        torch.zeros(0, 2, dtype=torch.int32),
+        torch.tensor([[2, 1]], dtype=torch.int32),
+    ]
+    result = module.get_vision_embedding({"pixel_values": slices, "tgt_sizes": tgt})
+
+    assert len(module.tower_calls) == 2  # one per non-empty sample, none for the empty row
+    assert module.tower_calls[0][0] == [slices[0]]  # exactly that row's slices
+    assert module.tower_calls[1][0] == [slices[2]]
+    assert torch.equal(result[0][:, 0, 0], torch.tensor([1.0, 1.0]))
+    assert result[1] == []
+    assert torch.equal(result[2][:, 0, 0], torch.tensor([3.0]))
+
+
+def test_patch_get_vision_embedding_resplits_the_packed_pseudo_row():
+    from verl_omni.models.transformers import minicpm_o
+
+    module = _VisionTowerModule()
+    minicpm_o.patch_minicpm_get_vision_embedding(module)
+    flat = [torch.full((3, 2, 2), float(i)) for i in range(5)]  # 5 slices, flat span order
+    data = {
+        "pixel_values": [flat],  # one packed pseudo-row
+        "tgt_sizes": [torch.tensor([[1, 1]] * 5, dtype=torch.int32)],
+        "packed_vision_slices": [2, 0, 3],  # three examples: 2 + 0 + 3 slices
+    }
+    result = module.get_vision_embedding(data)
+
+    assert len(module.tower_calls) == 2  # per example, empty example skipped
+    assert module.tower_calls[0][0] == [[flat[0], flat[1]]]
+    assert module.tower_calls[1][0] == [[flat[2], flat[3], flat[4]]]
+    assert isinstance(result, list) and len(result) == 1  # back to one pseudo-row
+    assert torch.equal(result[0][:, 0, 0], torch.arange(5.0))  # flat span order preserved
+
+
+def test_patch_get_audio_embedding_rejects_clip_len_disagreement():
+    from verl_omni.models.transformers import minicpm_o
+
+    module = _fresh_audio_module()
+    module.train()
+    minicpm_o.patch_minicpm_get_audio_embedding(module)
+    with pytest.raises(ValueError, match="disagree"):
+        module.get_audio_embedding(
+            {"audio_features": torch.zeros(2, 80, 10), "audio_feature_lens": [[10]]}, chunk_length=1.0
+        )
