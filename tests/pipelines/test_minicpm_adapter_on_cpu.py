@@ -354,3 +354,13 @@ def test_rollout_adapter_registers_thinker_only_text_pipeline():
     assert MiniCPMORolloutAdapter.get_engine_hf_overrides("thinker_only") == {}
     with pytest.raises(ValueError, match="thinker_only only"):
         MiniCPMORolloutAdapter.build_stage_configs("full")
+
+
+def test_configure_model_applies_omni_embedding_splice_patch():
+    class _WithOmniEmbedding(_MiniCPMOStyle):
+        def get_omni_embedding(self, data, input_embeddings, chunk_length=-1, stream_input=False):
+            return input_embeddings
+
+    module = _WithOmniEmbedding()
+    configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
+    assert getattr(configured, "_verl_omni_get_omni_embedding_patched", False)

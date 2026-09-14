@@ -398,6 +398,66 @@ def patch_minicpm_get_audio_embedding(module) -> None:
     setattr(module, _AUDIO_DUMMY_PATCH_ATTR, True)
 
 
+_OMNI_EMB_PATCH_ATTR = "_verl_omni_get_omni_embedding_patched"
+
+
+def patch_minicpm_get_omni_embedding(module) -> None:
+    """Splice audio embeddings per row in the non-streaming omni path.
+
+    Why (remote non-streaming branch writes only the last row):
+        The remote ``get_omni_embedding`` dedents the audio splice out of
+        its ``for i in range(bs)`` loop — the loop only rebinds
+        ``audio_embs``/``bounds`` and the splice block below it references
+        the leaked ``i`` — so for any bs>1 batch only the LAST row's audio
+        spans are written; earlier rows silently keep placeholder-token
+        embeddings. Packed training (bs==1) is inert, but the unpacked
+        actor path computes every row but the last wrong. The patched path
+        re-implements the splice per row (one-to-one and flat layouts, the
+        remote's length-mismatch check, clone-before-write); streaming
+        and audio-free batches delegate to the original.
+    """
+    original = getattr(module, "get_omni_embedding", None)
+    if original is None or getattr(module, _OMNI_EMB_PATCH_ATTR, False):
+        return
+
+    def get_omni_embedding(self, data, input_embeddings, chunk_length=-1, stream_input=False, **kwargs):
+        config_stream = bool(getattr(getattr(self, "config", None), "stream_input", False))
+        features = data.get("audio_features", [])
+        if stream_input or config_stream or len(features) == 0:
+            return original(data, input_embeddings, chunk_length=chunk_length, stream_input=stream_input, **kwargs)
+
+        audio_embeddings = self.get_audio_embedding(data, chunk_length)
+        import torch
+
+        if len(audio_embeddings) != len(input_embeddings):
+            raise ValueError(
+                f"Audio embeddings cover {len(audio_embeddings)} rows but the batch has {len(input_embeddings)}."
+            )
+        audio_bounds = data["audio_bounds"]
+        result = input_embeddings.clone()
+        for row, (audio_embs, bounds) in enumerate(zip(audio_embeddings, audio_bounds, strict=False)):
+            one_to_one_match = len(audio_embs) == len(bounds) and all(
+                embs.shape[0] == int(bound[1] - bound[0]) for embs, bound in zip(audio_embs, bounds, strict=False)
+            )
+            if one_to_one_match:
+                for embs, bound in zip(audio_embs, bounds, strict=False):
+                    result[row, int(bound[0]) : int(bound[1])] = embs.to(device=result.device, dtype=result.dtype)
+                continue
+            flat_audio_embs = torch.cat(audio_embs, dim=0).to(device=result.device, dtype=result.dtype)
+            total_bound_len = sum(int(bound[1] - bound[0]) for bound in bounds)
+            if flat_audio_embs.shape[0] != total_bound_len:
+                raise ValueError(f"Audio total length mismatch: {flat_audio_embs.shape[0]} != {total_bound_len}")
+            offset = 0
+            for bound in bounds:
+                audio_len = int(bound[1] - bound[0])
+                result[row, int(bound[0]) : int(bound[1])] = flat_audio_embs[offset : offset + audio_len]
+                offset += audio_len
+        return result
+
+    module.get_omni_embedding = types.MethodType(get_omni_embedding, module)
+    setattr(module, _OMNI_EMB_PATCH_ATTR, True)
+
+
 _ANSWER_TAG_TOKENS = ("<answer>", "</answer>")
 
 

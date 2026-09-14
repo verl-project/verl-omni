@@ -307,6 +307,7 @@ class MiniCPMThinkerAdapter(OmniModelBase):
     def configure_model(cls, module, model_config):
         from verl_omni.models.transformers.minicpm_o import (
             patch_minicpm_get_audio_embedding,
+            patch_minicpm_get_omni_embedding,
             patch_minicpm_get_vision_embedding,
             patch_minicpm_get_vllm_embedding,
             patch_remote_whisper_self_attn,
@@ -323,6 +324,7 @@ class MiniCPMThinkerAdapter(OmniModelBase):
         patch_minicpm_get_vision_embedding(module)
         patch_minicpm_get_vllm_embedding(module)
         patch_minicpm_get_audio_embedding(module)
+        patch_minicpm_get_omni_embedding(module)
 
         # Keep MiniCPMO.forward so vpm/resampler/apm still produce multimodal
         # embeddings; wrap it so verl's `module(**hf_kwargs)` becomes
