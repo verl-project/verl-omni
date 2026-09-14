@@ -213,6 +213,7 @@ async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(mo
         extra_fields={
             "condition_image_latents": torch.zeros(1, 4096, 64),
             "img_shapes": img_shapes,
+            "audio_sample_rate": 24000,
             "unrelated_metadata": "do-not-forward",
         },
     )
@@ -235,6 +236,9 @@ async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(mo
     field = captured["fields"][0]
     assert field["extra_fields"]["img_shapes"] == img_shapes
     assert "unrelated_metadata" not in field["extra_fields"]
+    assert "unrelated_metadata" not in field
+    assert "img_shapes" not in field
+    assert field["audio_sample_rate"] == 24000
     assert field["condition_image_latents"].shape == (4096, 64)
 
 

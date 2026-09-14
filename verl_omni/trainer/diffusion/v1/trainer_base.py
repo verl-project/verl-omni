@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import os
+import subprocess
 import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
@@ -84,6 +85,7 @@ from verl_omni.trainer.diffusion.v1.tq_utils import (
     put_dataproto_fields_to_tq,
     sort_diffusion_tq_keys,
 )
+from verl_omni.utils.tracking import _export_video, batch_items, log_wandb_media, wrap_val_samples_for_wandb
 from verl_omni.workers.engine_workers import ActorRolloutRefWorker, resolve_teacher_infer_micro_batch_size
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
@@ -218,6 +220,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             if self.config.trainer.get("val_only", False):
                 self._shutdown_dump_executor()
                 self._shutdown_dataloaders()
+                if hasattr(self, "logger") and self.logger is not None:
+                    self.logger.finish()
                 return
 
         current_epoch = self.global_steps // self.steps_per_epoch
@@ -270,11 +274,15 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 pprint(f"Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
                 self._shutdown_dataloaders()
+                if hasattr(self, "logger") and self.logger is not None:
+                    self.logger.finish()
                 return
 
         self.on_train_end()
         self._shutdown_dump_executor()
         self._shutdown_dataloaders()
+        if hasattr(self, "logger") and self.logger is not None:
+            self.logger.finish()
 
     def step(self, metrics: dict, timing_raw: dict) -> KVBatchMeta:
         """Feed one train batch and run ``parameter_sync_step`` local updates."""
@@ -1249,6 +1257,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         sample_scores: list[float] = []
         sample_turns: list = []
         sample_uids: list = []
+        sample_audios: list = []
+        sample_audio_sample_rates: list = []
         data_sources: list = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -1306,6 +1316,20 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             )
             sample_inputs.extend(input_texts)
             sample_outputs.append(output_images)
+            batch_size = len(output_images)
+            sample_audios.extend(batch_items(data.batch.get("audio"), batch_size, "audio"))
+            audio_rates = (
+                data.non_tensor_batch.get("audio_sample_rate")
+                if "audio_sample_rate" in data.non_tensor_batch
+                else data.batch.get("audio_sample_rate")
+            )
+            sample_audio_sample_rates.extend(
+                batch_items(
+                    audio_rates,
+                    batch_size,
+                    "audio_sample_rate",
+                )
+            )
             uids = data.non_tensor_batch.get("uid")
             sample_uids.extend(list(uids) if uids is not None else [None] * len(data))
 
@@ -1332,7 +1356,13 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             tq.kv_clear(keys=batch_meta.keys, partition_id=batch_meta.partition_id)
 
         sample_outputs = torch.cat(sample_outputs, dim=0) if sample_outputs else torch.empty(0)
-        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+        self._maybe_log_val_generations(
+            inputs=sample_inputs,
+            outputs=sample_outputs,
+            scores=sample_scores,
+            audios=sample_audios,
+            audio_sample_rates=sample_audio_sample_rates,
+        )
 
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir and len(sample_outputs) > 0:
@@ -1343,31 +1373,65 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 scores=sample_scores,
                 reward_extra_infos_dict=reward_extra_infos_dict,
                 dump_path=val_data_dir,
+                max_samples=self.config.trainer.get("validation_data_max_samples", None),
+                fps=int(self.config.trainer.get("video_fps", 24)),
+                audios=sample_audios,
+                audio_sample_rates=sample_audio_sample_rates,
             )
 
         data_sources_arr = np.concatenate(data_sources, axis=0) if data_sources else np.array([])
         return self._val_metrics_update(data_sources_arr, sample_uids, reward_extra_infos_dict, sample_turns)
 
-    def _maybe_log_val_generations(self, inputs, outputs, scores):
+    def _maybe_log_val_generations(self, inputs, outputs, scores, audios=None, audio_sample_rates=None):
         generations_to_log = self.config.trainer.log_val_generations
-        if generations_to_log == 0:
+        if generations_to_log == 0 or len(inputs) == 0:
             return
-        if "wandb" in self.config.trainer.logger:
-            for image in outputs:
-                if not isinstance(image, torch.Tensor) or image.dtype != torch.uint8:
-                    raise ValueError(f"Expected a uint8 image tensor, got {getattr(image, 'dtype', type(image))}.")
-            import wandb
 
-            outputs = [wandb.Image(image, file_type="jpg") for image in outputs]
-        samples = list(zip(inputs, outputs, scores, strict=True))
+        import shutil
+
+        audios = batch_items(audios, len(inputs), "audio")
+        audio_sample_rates = batch_items(audio_sample_rates, len(inputs), "audio_sample_rate")
+        samples = list(zip(inputs, list(outputs), scores, audios, audio_sample_rates, strict=True))
         samples.sort(key=lambda x: x[0])
         rng = np.random.RandomState(42)
         rng.shuffle(samples)
         samples = samples[:generations_to_log]
-        self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
-    def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
-        """Dump validation/rollout samples as images + JSONL (runs in background)."""
+        video_tmp_dir = None
+        wandb_media = {}
+        if "wandb" in self.config.trainer.logger:
+            validation_data_dir = self.config.trainer.get("validation_data_dir", None)
+            default_local_dir = self.config.trainer.get("default_local_dir", None)
+            wandb_video_dir = validation_data_dir or default_local_dir
+            if wandb_video_dir:
+                wandb_video_dir = os.path.join(wandb_video_dir, "wandb_val_media", f"global_step_{self.global_steps}")
+            samples, video_tmp_dir, wandb_media = wrap_val_samples_for_wandb(
+                samples, fps=int(self.config.trainer.get("video_fps", 24)), output_dir=wandb_video_dir
+            )
+        else:
+            samples = [(input_, output, score) for input_, output, score, _, _ in samples]
+
+        try:
+            log_wandb_media(wandb_media, self.global_steps)
+            self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
+        finally:
+            if video_tmp_dir is not None:
+                shutil.rmtree(video_tmp_dir, ignore_errors=True)
+
+    def _dump_generations(
+        self,
+        inputs,
+        outputs,
+        gts,
+        scores,
+        reward_extra_infos_dict,
+        dump_path,
+        max_samples=None,
+        fps=24,
+        audios=None,
+        audio_sample_rates=None,
+    ):
+        """Dump validation/rollout samples as images/videos + JSONL (runs in background)."""
         if not isinstance(outputs, torch.Tensor) or outputs.dtype != torch.uint8:
             dtype = getattr(outputs, "dtype", type(outputs))
             raise ValueError(f"Expected generation outputs to be a uint8 tensor, got {dtype}.")
@@ -1381,6 +1445,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             reward_extra_infos_dict,
             dump_path,
             self.global_steps,
+            max_samples,
+            fps,
+            audios,
+            audio_sample_rates,
         )
         self._dump_futures.append(future)
         still_pending = []
@@ -1392,35 +1460,96 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self._dump_futures = still_pending
 
     @staticmethod
-    def _write_generations(inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path, global_steps):
+    def _write_generations(
+        inputs,
+        outputs,
+        gts,
+        scores,
+        reward_extra_infos_dict,
+        dump_path,
+        global_steps,
+        max_samples=None,
+        fps=24,
+        audios=None,
+        audio_sample_rates=None,
+    ):
         os.makedirs(dump_path, exist_ok=True)
         visual_folder = os.path.join(dump_path, f"{global_steps}")
         os.makedirs(visual_folder, exist_ok=True)
 
+        n_full = outputs.shape[0]
+        n = n_full if max_samples is None else min(max_samples, n_full)
+        if outputs.ndim == 6:
+            outputs = outputs.squeeze(1)
+        is_video = outputs.ndim == 5
+
         output_paths = []
-        images_pil = outputs.cpu()
-        # images: [N, C, H, W] -> [N, H, W, C]
-        if images_pil.dim() == 4:
-            images_pil = images_pil.permute(0, 2, 3, 1).numpy()
+        output_fallback_paths = [None] * n
+        video_export_errors = [None] * n
+        if is_video:
+            audios = batch_items(audios, n_full, "audio")
+            audio_sample_rates = batch_items(audio_sample_rates, n_full, "audio_sample_rate")
+            for i in range(n):
+                video_path = os.path.join(visual_folder, f"{i}.mp4")
+                try:
+                    _export_video(
+                        outputs[i],
+                        video_path,
+                        fps=fps,
+                        audio=audios[i],
+                        audio_sample_rate=audio_sample_rates[i],
+                    )
+                except (OSError, subprocess.SubprocessError, ValueError) as error:
+                    error_message = f"{type(error).__name__}: {error}"
+                    fallback_path = os.path.join(visual_folder, f"{i}.pt")
+                    fallback_audio = audios[i]
+                    if isinstance(fallback_audio, torch.Tensor):
+                        fallback_audio = fallback_audio.detach().cpu()
+                    fallback = {
+                        "video": outputs[i].detach().cpu(),
+                        "audio": fallback_audio,
+                        "audio_sample_rate": audio_sample_rates[i],
+                    }
+                    try:
+                        torch.save(fallback, fallback_path)
+                    except Exception as fallback_error:
+                        fallback_path = None
+                        error_message = (
+                            f"{error_message}; fallback save failed: {type(fallback_error).__name__}: {fallback_error}"
+                        )
+                    else:
+                        output_fallback_paths[i] = fallback_path
+                    video_export_errors[i] = error_message
+                    logger.warning(
+                        "Failed to export video at step %s sample %s: %s",
+                        global_steps,
+                        i,
+                        error_message,
+                    )
+                    output_paths.append(None)
+                else:
+                    output_paths.append(video_path)
         else:
-            images_pil = images_pil.numpy()
-        for i, image in enumerate(images_pil):
-            image_path = os.path.join(visual_folder, f"{i}.jpg")
-            Image.fromarray(image).save(image_path)
-            output_paths.append(image_path)
+            images_pil = outputs[:n].cpu().permute(0, 2, 3, 1).numpy()
+            for i, image in enumerate(images_pil):
+                image_path = os.path.join(visual_folder, f"{i}.jpg")
+                Image.fromarray(image).save(image_path)
+                output_paths.append(image_path)
 
         filename = os.path.join(dump_path, f"{global_steps}.jsonl")
-        n = len(inputs)
         base_data = {
-            "input": inputs,
+            "input": list(inputs)[:n],
             "output": output_paths,
-            "gts": gts,
-            "score": scores,
+            "gts": list(gts)[:n],
+            "score": list(scores)[:n],
             "step": [global_steps] * n,
         }
         for k, v in reward_extra_infos_dict.items():
-            if len(v) == n:
-                base_data[k] = v
+            if len(v) == n_full:
+                base_data[k] = list(v)[:n]
+        if any(video_export_errors):
+            base_data["output_fallback"] = output_fallback_paths
+            base_data["video_export_error"] = video_export_errors
 
         def json_encode_default(obj):
             if isinstance(obj, np.integer):
@@ -1433,7 +1562,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 return obj.tolist()
             raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
-        with open(filename, "w") as f:
+        with open(filename, "w", encoding="utf-8") as f:
             for i in range(n):
                 entry = {k: v[i] for k, v in base_data.items()}
                 f.write(json.dumps(entry, ensure_ascii=False, default=json_encode_default) + "\n")
@@ -1465,6 +1594,29 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             gts = [gts[i] for i in sort_idx]
             scores = [scores[i] for i in sort_idx]
             reward_extra_infos_dict = {"uid": [batch_meta.keys[i] for i in sort_idx]}
+
+            audios = data.batch.get("audio", data.non_tensor_batch.get("audio"))
+            if audios is not None:
+                if isinstance(audios, torch.Tensor):
+                    audios = audios[torch.tensor(sort_idx)]
+                elif isinstance(audios, list | np.ndarray):
+                    audios = [audios[i] for i in sort_idx]
+
+            raw_rates = (
+                data.non_tensor_batch.get("audio_sample_rate")
+                if "audio_sample_rate" in data.non_tensor_batch
+                else data.batch.get("audio_sample_rate")
+            )
+            if raw_rates is not None:
+                if isinstance(raw_rates, torch.Tensor):
+                    audio_sample_rates = raw_rates[torch.tensor(sort_idx)]
+                elif isinstance(raw_rates, list | np.ndarray):
+                    audio_sample_rates = [raw_rates[i] for i in sort_idx]
+                else:
+                    audio_sample_rates = raw_rates
+            else:
+                audio_sample_rates = None
+
             self._dump_generations(
                 inputs=inputs,
                 outputs=outputs,
@@ -1472,6 +1624,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 scores=scores,
                 reward_extra_infos_dict=reward_extra_infos_dict,
                 dump_path=rollout_data_dir,
+                max_samples=self.config.trainer.get("rollout_data_max_samples", None),
+                fps=int(self.config.trainer.get("video_fps", 24)),
+                audios=audios,
+                audio_sample_rates=audio_sample_rates,
             )
 
     def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns) -> dict:

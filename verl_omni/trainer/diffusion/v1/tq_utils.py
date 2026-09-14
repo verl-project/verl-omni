@@ -103,7 +103,8 @@ def diffusion_tq_batch_to_dataproto(
         responses, rollout_log_probs, rm_scores, embeds, ...) and whose
         ``non_tensor_batch`` carries uid/reward_model/data_source/extra_fields.
     """
-    keys = list(batch_meta.keys)
+    sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
+    keys = [batch_meta.keys[i] for i in sort_idx]
     partition_id = batch_meta.partition_id
 
     data = tq.kv_batch_get(
@@ -163,8 +164,10 @@ def put_dataproto_fields_to_tq(
         output[field] = data.batch[field]
     if not output:
         return
+    sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
+    sorted_keys = [batch_meta.keys[i] for i in sort_idx]
     tq.kv_batch_put(
-        keys=list(batch_meta.keys),
+        keys=sorted_keys,
         partition_id=batch_meta.partition_id,
         fields=tu.get_tensordict(output),
     )
