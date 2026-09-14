@@ -3,9 +3,9 @@
 set -xeuo pipefail
 
 NUM_NPUS=${NUM_NPUS:-4}
-MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/Qwen-Image}
+MODEL_PATH=${MODEL_PATH:-${HOME}/.cache/huggingface/hub/models--Qwen--Qwen-Image}
 TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_PATH}/tokenizer}
-DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_diffusion}
+DATA_DIR=${DATA_DIR:-${HOME}/.cache/datasets/ocr/}
 dummy_train_path=${TRAIN_FILES:-${DATA_DIR}/train.parquet}
 dummy_test_path=${VAL_FILES:-${DATA_DIR}/test.parquet}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-1}
