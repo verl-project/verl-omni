@@ -14,6 +14,7 @@
 
 import inspect
 
+import numpy as np
 import torch
 from verl import DataProto
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
@@ -34,6 +35,29 @@ def _validate_visual_response(response_visual, config, *, is_validate: bool) -> 
     elif not isinstance(response_visual, torch.Tensor) or response_visual.dtype != torch.uint8:
         dtype = getattr(response_visual, "dtype", type(response_visual))
         raise ValueError(f"Expected uint8 pixel responses for output_type={output_type!r}, got {dtype}.")
+
+
+def _reward_extra_info(data_item) -> dict:
+    """Project generated media from ordinary/TQ batches into scorer metadata."""
+    extra_info = data_item.non_tensor_batch.get("extra_info", {})
+    tool_extra_fields = data_item.non_tensor_batch.get("tool_extra_fields") or {}
+    extra_info.update(tool_extra_fields)
+    for key in ("audio", "audio_sample_rate", "media_kind"):
+        value = data_item.batch.get(key)
+        if value is None:
+            value = data_item.non_tensor_batch.get(key)
+        if value is None:
+            continue
+        tool_value = tool_extra_fields.get(key)
+        if tool_value is not None and tool_value is not value:
+            if isinstance(value, torch.Tensor) and isinstance(tool_value, torch.Tensor):
+                matches = value.device == tool_value.device and torch.equal(value, tool_value)
+            else:
+                matches = np.array_equal(value, tool_value)
+            if not matches:
+                raise ValueError(f"Conflicting rollout media field {key!r} in batch and tool_extra_fields")
+        extra_info[key] = value
+    return extra_info
 
 
 class VisualRewardManager(RewardManagerBase):
@@ -63,10 +87,7 @@ class VisualRewardManager(RewardManagerBase):
         _validate_visual_response(response_visual, self.config, is_validate=data_item.meta_info.get("validate", False))
         data_source = data_item.non_tensor_batch["data_source"]
         ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
-        extra_info = data_item.non_tensor_batch.get("extra_info", {})
-        tool_extra_fields = data_item.non_tensor_batch.get("tool_extra_fields", None)
-        if tool_extra_fields is not None:
-            extra_info.update(tool_extra_fields.items())
+        extra_info = _reward_extra_info(data_item)
 
         num_turns = data_item.non_tensor_batch.get("__num_turns__", None)
         rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})

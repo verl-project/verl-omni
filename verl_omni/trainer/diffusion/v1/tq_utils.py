@@ -136,7 +136,7 @@ def diffusion_tq_batch_to_dataproto(
                 continue
             for k, v in extra.items():
                 if k not in non_tensor_batch:
-                    non_tensor_batch[k] = np.empty(len(extra_fields_arr), dtype=object)
+                    non_tensor_batch[k] = np.full(len(extra_fields_arr), None, dtype=object)
                 non_tensor_batch[k][i] = v
 
     batch = TensorDict(batch_dict, batch_size=len(keys))

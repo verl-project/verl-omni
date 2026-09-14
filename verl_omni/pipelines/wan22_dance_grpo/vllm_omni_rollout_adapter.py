@@ -43,6 +43,7 @@ from verl_omni.pipelines.diffusion_rollout_output import (
 )
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
+from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import sd3_time_shift, seed_from_prompt_ids
@@ -410,16 +411,12 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         # --- Extract parameters from request ---
         custom_prompt = req.prompt if isinstance(req.prompt, dict) else {}
         if isinstance(custom_prompt, dict):
-            prompt_ids = custom_prompt.get("prompt_token_ids", prompt_ids)
+            prompt_ids = prompt_ids_from_payload(custom_prompt, prompt_ids)
             prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
             negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
             negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)
             if image is None:
-                # Check both top-level and extra_args for multi_modal_data
-                multi_modal_data = custom_prompt.get("multi_modal_data", None)
-                if multi_modal_data is None:
-                    extra_args = custom_prompt.get("extra_args", {})
-                    multi_modal_data = extra_args.get("multi_modal_data", {}) if isinstance(extra_args, dict) else {}
+                multi_modal_data = custom_prompt.get("multi_modal_data")
                 raw_image = multi_modal_data.get("image", None) if multi_modal_data else None
                 image = raw_image if raw_image is not None else image
 

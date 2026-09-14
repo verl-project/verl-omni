@@ -41,7 +41,10 @@ def _request_output(diffusion_output, multimodal_output=None):
 
 
 def test_diffusion_prompt_preserves_multimodal_processor_kwargs(diffusion_strategy):
-    diffusion_strategy.server.engine = SimpleNamespace(default_sampling_params_list=[object()])
+    diffusion_strategy.server.engine = SimpleNamespace(
+        default_sampling_params_list=[object()],
+        engine=SimpleNamespace(get_stage_metadata=lambda stage_id: SimpleNamespace(stage_type="diffusion")),
+    )
     multi_modal_data = {"image": ["image"], "audio": ["audio"]}
     mm_processor_kwargs = {"fps": 24, "sampling_rate": 32000}
 
