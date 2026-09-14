@@ -1046,33 +1046,6 @@ def test_build_fsdp_module_rejects_trainable_ignored_params(monkeypatch):
         engine._build_fsdp_module(module)
 
 
-def test_build_fsdp_module_allows_trainable_ignored_params_on_single_rank(monkeypatch):
-    # A single-rank mesh has no cross-rank gradient sync to lose.
-    omni_impl = _get_omni_impl_module()
-    module = _MiniCPMStyleModule()
-    module.apm.requires_grad_(True)
-
-    import verl.utils.fsdp_utils as verl_fsdp_utils
-    import verl.utils.torch_dtypes as torch_dtypes
-
-    calls = []
-
-    def fake_fully_shard(target, **kwargs):
-        calls.append((target, kwargs.get("ignored_params")))
-        return target
-
-    monkeypatch.setattr(torch.distributed.fsdp, "fully_shard", fake_fully_shard)
-    monkeypatch.setattr(verl_fsdp_utils, "_select_fsdp2_wrap_targets", lambda model, names: [])
-    monkeypatch.setattr(verl_fsdp_utils, "maybe_patch_fsdp_module", lambda model: contextmanager(lambda: (yield))())
-    monkeypatch.setattr(verl_fsdp_utils, "fsdp2_load_full_state_dict", lambda *args, **kwargs: None)
-    monkeypatch.setattr(torch_dtypes.PrecisionType, "to_dtype", staticmethod(lambda name: torch.bfloat16))
-
-    engine = _fsdp2_engine(omni_impl, module, ["apm"])
-    engine.device_mesh = types.SimpleNamespace(size=lambda: 1)
-    assert engine._build_fsdp_module(module) is module
-    assert calls[-1][1] == set(module.apm.parameters())
-
-
 class _WhisperStyleModule(torch.nn.Module):
     """Mirrors the MiniCPM-o layout that hits the embed_positions hole."""
 

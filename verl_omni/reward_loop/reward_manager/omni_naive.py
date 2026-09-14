@@ -58,20 +58,17 @@ class OmniNaiveRewardManager(NaiveRewardManager):
             reward_router_address=reward_router_address,
             reward_model_tokenizer=reward_model_tokenizer,
         )
-        adapter_cls = self._resolve_adapter_cls(config)
-        adapter_cls.prepare_reward_decode_tokenizer(self.tokenizer, self._model_config_group(config))
+        model_cfg = self._model_config_group(config)
+        self._resolve_adapter_cls(model_cfg).prepare_reward_decode_tokenizer(self.tokenizer, model_cfg)
 
     @staticmethod
     def _model_config_group(config):
-        if not OmegaConf.is_config(config):
-            config = OmegaConf.create(config or {})
         return OmegaConf.select(config, "actor_rollout_ref.model") or OmegaConf.create({})
 
-    @classmethod
-    def _resolve_adapter_cls(cls, config):
+    @staticmethod
+    def _resolve_adapter_cls(model_cfg):
         from verl_omni.pipelines.model_base import OmniModelBase
 
-        model_cfg = cls._model_config_group(config)
         architecture = model_cfg.get("architecture")
         if not architecture:
             # Mirror OmniModelConfig's documented auto-detection.
