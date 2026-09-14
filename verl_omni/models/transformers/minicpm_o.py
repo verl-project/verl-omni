@@ -267,15 +267,22 @@ def _has_pixel_slices(pixel_values) -> bool:
 
 
 def patch_minicpm_get_vision_embedding(module) -> None:
-    """Skip dummy vpm forwards and stop vision embeddings from entering autograd.
+    """Run the vision tower per sample; skip dummies and autograd.
 
-    Why (remote dummy image vs LoRA-excluded ``vpm``):
-        Remote ``get_vision_embedding`` still forwards a dummy image during
-        training so unused encoder parameters stay in the autograd graph.
-        LoRA ``exclude_modules`` leaves ``vpm`` without adapters, so that dummy
-        is wasted compute and would put vision tensors on the backward path.
-        Empty ``pixel_values`` skip the encoder; real images still go through
-        the original method under ``torch.no_grad()``.
+    Why (batched tower kernels vs the packed actor's canonical compute):
+        Remote ``get_vision_embedding`` flattens every sample's slices
+        into one padded batch through ``vpm`` + ``resampler``; the batched
+        bf16 kernels flip their reduction order at small batch sizes, and
+        the 36-layer LLM amplifies the ulp difference into ~0.1-nat
+        interior logprob deviations — a per-sequence parity leak that
+        tracks media presence, not the model. Running the remote method
+        once per sample (and, for the packed pseudo-row, once per example
+        via the ``packed_vision_slices`` stash from
+        ``_merge_packed_media``) makes each group's compute identical to
+        the bs==1 realization, with outputs concatenated in flat span
+        order. Frozen under LoRA, the tower also stays under
+        ``torch.no_grad()`` and empty rows skip the encoder instead of
+        forwarding the remote's training dummy.
     """
     original = getattr(module, "get_vision_embedding", None)
     if original is None or getattr(module, _VISION_EMB_PATCH_ATTR, False):
@@ -290,8 +297,34 @@ def patch_minicpm_get_vision_embedding(module) -> None:
             return [[] for _ in (pixel_values or [])]
         import torch
 
+        def _row(values, tgt_size):
+            row_data = dict(data)
+            row_data["pixel_values"] = [values]
+            row_data["tgt_sizes"] = [tgt_size]
+            return _original(row_data)
+
         with torch.no_grad():
-            return _original(data)
+            packed_counts = data.get("packed_vision_slices") if isinstance(data, dict) else None
+            if packed_counts is not None:
+                # Packed pseudo-row: re-split per example so each example's
+                # group runs the tower alone; outputs concatenate in flat
+                # span order (sample-major, matching the id scan).
+                flat_slices = pixel_values[0]
+                tgt_sizes = data["tgt_sizes"][0]
+                outputs = []
+                offset = 0
+                for count in packed_counts:
+                    if count:
+                        outputs.append(
+                            _row(flat_slices[offset : offset + count], tgt_sizes[offset : offset + count])[0]
+                        )
+                    offset += count
+                stacked = [out for out in outputs if isinstance(out, torch.Tensor) and out.numel()]
+                return [torch.cat(stacked, dim=0) if stacked else torch.zeros(0, 1, 1)]
+            rows = []
+            for values, tgt_size in zip(pixel_values, data["tgt_sizes"], strict=False):
+                rows.append(_row(values, tgt_size)[0] if values else [])
+            return rows
 
     module.get_vision_embedding = types.MethodType(get_vision_embedding, module)
     setattr(module, _VISION_EMB_PATCH_ATTR, True)
@@ -357,21 +390,22 @@ def patch_minicpm_get_vllm_embedding(module) -> None:
 
 
 def patch_minicpm_get_audio_embedding(module) -> None:
-    """Skip the dummy Whisper forward for audio-free batches in training.
+    """Run the Whisper tower per clip; skip the dummy for audio-free batches.
 
-    Why (remote dummy wav vs frozen, FSDP2-ignored ``apm``):
-        Remote ``get_audio_embedding`` forwards a dummy ``(1, 80, 100)`` wav
-        when training with empty ``audio_features``, solely to keep unused
-        encoder parameters in the autograd graph. Here ``apm`` is frozen
-        (LoRA-excluded and adapter-ignored under FSDP2), so that is pure
-        wasted compute — and the dummy path reads
-        ``self.embed_positions.weight`` directly, assuming the subtree is not
-        FSDP-managed. Returning ``[]`` instead would break the remote
-        ``get_omni_embedding`` contract (``audio_embeddings[0].mean() * 0``
-        for the training no-audio branch), so the patched path returns one
-        zero tensor shaped like a single pooled audio token: no Whisper
-        forward, contract preserved. Non-empty audio batches delegate to the
-        original method unchanged.
+    Why (batched clips vs the bs==1 tower realization):
+        Remote ``get_audio_embedding`` pads all clips of the batch to one
+        ``max_frames`` and masks with mel-frame lengths compared against
+        post-conv2 positions — the padding mask under-masks by ~2x, so
+        padded frames of shorter clips leak into attention; equal-length
+        batched clips still deviate from single-clip tower outputs.
+        Running the remote method once per clip on its exact-length
+        ``[1, 80, len]`` slice leaves no padded frames (the broken mask is
+        inert at exact length) and reproduces the bs==1 realization per
+        clip, regrouped into the remote's per-row list-of-clips layout.
+        For audio-free training batches the frozen tower is skipped
+        entirely — one zero tensor shaped like a single pooled audio token
+        preserves ``get_omni_embedding``'s ``audio_embeddings[0].mean() * 0``
+        anchor contract without running Whisper on a dummy wav.
     """
     apm = getattr(module, "apm", None)
     llm = getattr(module, "llm", None)
@@ -392,7 +426,29 @@ def patch_minicpm_get_audio_embedding(module) -> None:
             weight = self.apm.conv1.weight
             hidden = getattr(getattr(self.llm, "config", None), "hidden_size", 1)
             return [torch.zeros(1, hidden, 1, device=weight.device, dtype=weight.dtype)]
-        return original(data, chunk_length=chunk_length, dummy=dummy, **kwargs)
+        if len(features) == 0:
+            return original(data, chunk_length=chunk_length, dummy=dummy, **kwargs)
+
+        import torch
+
+        lens_raw = data.get("audio_feature_lens") or []
+        flat_lens = [int(length) for row in lens_raw for length in torch.as_tensor(row).reshape(-1).tolist()]
+        if len(flat_lens) != len(features):
+            raise ValueError(f"Audio clips ({len(features)}) and audio_feature_lens ({len(flat_lens)}) disagree.")
+        with torch.no_grad():
+            clip_embeddings = []
+            for index, length in enumerate(flat_lens):
+                clip_data = dict(data)
+                clip_data["audio_features"] = features[index : index + 1, :, :length]
+                clip_data["audio_feature_lens"] = [[length]]
+                clip_embeddings.append(original(clip_data, chunk_length=chunk_length, dummy=dummy, **kwargs)[0][0])
+        grouped = []
+        offset = 0
+        for row in lens_raw:
+            count = len(torch.as_tensor(row).reshape(-1).tolist())
+            grouped.append(clip_embeddings[offset : offset + count])
+            offset += count
+        return grouped
 
     module.get_audio_embedding = types.MethodType(get_audio_embedding, module)
     setattr(module, _AUDIO_DUMMY_PATCH_ATTR, True)
