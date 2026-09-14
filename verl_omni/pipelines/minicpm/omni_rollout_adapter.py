@@ -91,6 +91,30 @@ class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
         return {}
 
     @classmethod
+    def policy_logit_bias(cls, tokenizer) -> dict[int, float] | None:
+        """Ban talker/codec tokens from thinker-only sampling.
+
+        MiniCPM-o 4.5 packs the Talker/Code2Wav vocabularies as added tokens
+        ABOVE the chat-control anchors (everything after ``<|im_end|>``); the
+        thinker occasionally samples them mid-response and corrupts the RL
+        training signal. Every added id above the anchor is banned except the
+        two answer tags the choice reward decodes.
+        """
+        added_vocab = tokenizer.get_added_vocab()
+        anchor = tokenizer.convert_tokens_to_ids("<|im_end|>")
+        # convert_tokens_to_ids falls back to the unk id for unknown tokens,
+        # so membership — not just a plausible id — must gate the anchor.
+        if "<|im_end|>" not in added_vocab or anchor is None or anchor < 0:
+            raise ValueError(
+                "MiniCPMO 4.5 logit bias needs the <|im_end|> anchor token to bound the "
+                f"talker/codec block; got anchor={anchor!r}, in added vocab: "
+                f"{'<|im_end|>' in added_vocab}."
+            )
+        keep = {"<answer>", "</answer>"}
+        blocked = {token_id for token, token_id in added_vocab.items() if token_id > anchor and token not in keep}
+        return {token_id: float("-inf") for token_id in sorted(blocked)} or None
+
+    @classmethod
     def get_stage_engine_extras(cls, stage_id: int, pipeline_mode: str = "thinker_only") -> dict:
         """Pin stage 0 to the plain vLLM LLM class, on the sync scheduler.
 
