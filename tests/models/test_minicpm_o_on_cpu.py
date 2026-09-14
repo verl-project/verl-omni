@@ -350,3 +350,124 @@ def test_patch_get_audio_embedding_noop_without_apm_or_llm():
     bare = torch.nn.Linear(4, 4)
     minicpm_o.patch_minicpm_get_audio_embedding(bare)
     assert not hasattr(bare, "_verl_omni_get_audio_embedding_patched")
+
+
+class _RemoteBuggyOmniModule(torch.nn.Module):
+    """Remote get_omni_embedding with the dedented splice: only the last row is written."""
+
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(stream_input=False)
+        self.original_calls = []
+
+    def get_audio_embedding(self, data, chunk_length=-1, dummy=True):
+        return data["audio_embeddings_stub"]
+
+    def get_omni_embedding(self, data, input_embeddings, chunk_length=-1, stream_input=False):
+        self.original_calls.append(dict(data))
+        if len(data.get("audio_features", [])) == 0:
+            return input_embeddings  # the remote's audio-free branch
+        # The remote bug, verbatim in structure: the loop only rebinds, the
+        # splice below uses the leaked row index.
+        audio_embeddings = data["audio_embeddings_stub"]
+        audio_bounds = data["audio_bounds"]
+        i = None
+        for i in range(len(input_embeddings)):
+            audio_embs = audio_embeddings[i]
+            bounds = audio_bounds[i]
+        one_to_one_match = len(audio_embs) == len(bounds) and all(
+            embs.shape[0] == int(bound[1] - bound[0]) for embs, bound in zip(audio_embs, bounds, strict=False)
+        )
+        if one_to_one_match:
+            for embs, bound in zip(audio_embs, bounds, strict=False):
+                input_embeddings[i, int(bound[0]) : int(bound[1])] = embs
+        else:
+            flat = torch.cat(audio_embs, dim=0)
+            offset = 0
+            for bound in bounds:
+                n = int(bound[1] - bound[0])
+                input_embeddings[i, int(bound[0]) : int(bound[1])] = flat[offset : offset + n]
+                offset += n
+        return input_embeddings
+
+
+def _omni_splice_data():
+    # Three rows, one audio span each, distinct marker values per row.
+    embeddings = [torch.full((3, 4), float(row + 1)) for row in range(3)]
+    data = {
+        "audio_features": torch.zeros(3, 80, 10),  # non-empty signals the audio path
+        "audio_embeddings_stub": [[emb] for emb in embeddings],
+        "audio_bounds": [[[2, 5]], [[1, 4]], [[0, 3]]],
+    }
+    return data, embeddings
+
+
+def test_patch_get_omni_embedding_splices_every_row():
+    from verl_omni.models.transformers import minicpm_o
+
+    module = _RemoteBuggyOmniModule()
+    data, embeddings = _omni_splice_data()
+    base = torch.zeros(3, 6, 4)
+
+    # Unpatched: only the last row is written (the remote bug).
+    buggy = module.get_omni_embedding(data, base.clone())
+    assert buggy[0].abs().sum() == 0 and buggy[1].abs().sum() == 0
+    assert torch.equal(buggy[2, 0:3], embeddings[2])
+
+    minicpm_o.patch_minicpm_get_omni_embedding(module)
+    patched = module.get_omni_embedding(data, base.clone())
+
+    assert torch.equal(patched[0, 2:5], embeddings[0])
+    assert torch.equal(patched[1, 1:4], embeddings[1])
+    assert torch.equal(patched[2, 0:3], embeddings[2])
+    # The input tensor is never mutated in place (clone-before-write).
+    assert base.abs().sum() == 0
+
+
+def test_patch_get_omni_embedding_flat_layout_and_mismatch_check():
+    from verl_omni.models.transformers import minicpm_o
+
+    module = _RemoteBuggyOmniModule()
+    minicpm_o.patch_minicpm_get_omni_embedding(module)
+
+    # Flat layout: one clip group covering two spans (one-to-one fails).
+    clips = [torch.arange(5, dtype=torch.float).unsqueeze(1).repeat(1, 4)]
+    data = {
+        "audio_features": torch.zeros(1, 80, 10),
+        "audio_embeddings_stub": [clips],
+        "audio_bounds": [[[0, 2], [3, 6]]],
+    }
+    patched = module.get_omni_embedding(data, torch.zeros(1, 6, 4))
+    assert torch.equal(patched[0, 0:2], clips[0][0:2])
+    assert torch.equal(patched[0, 3:6], clips[0][2:5])
+
+    data["audio_bounds"] = [[[0, 2], [4, 9]]]  # 5 embeddings vs 7 bound tokens
+    with pytest.raises(ValueError, match="Audio total length mismatch"):
+        module.get_omni_embedding(data, torch.zeros(1, 6, 4))
+
+
+def test_patch_get_omni_embedding_delegates_streaming_and_audio_free():
+    from verl_omni.models.transformers import minicpm_o
+
+    module = _RemoteBuggyOmniModule()
+    minicpm_o.patch_minicpm_get_omni_embedding(module)
+
+    data, _ = _omni_splice_data()
+    module.get_omni_embedding(data, torch.zeros(3, 6, 4), stream_input=True)
+    assert len(module.original_calls) == 1  # streaming delegates
+
+    module.config = SimpleNamespace(stream_input=True)
+    module.get_omni_embedding(data, torch.zeros(3, 6, 4))
+    assert len(module.original_calls) == 2  # config-level streaming delegates too
+
+    module.config = SimpleNamespace(stream_input=False)
+    module.get_omni_embedding({"audio_features": []}, torch.zeros(3, 6, 4))
+    assert len(module.original_calls) == 3  # audio-free delegates (training anchor)
+
+
+def test_patch_get_omni_embedding_noop_without_the_method():
+    from verl_omni.models.transformers import minicpm_o
+
+    bare = torch.nn.Linear(4, 4)
+    minicpm_o.patch_minicpm_get_omni_embedding(bare)
+    assert not hasattr(bare, "_verl_omni_get_omni_embedding_patched")
