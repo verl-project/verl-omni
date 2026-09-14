@@ -553,6 +553,35 @@ class OmniModelBase(ABC):
             ) from None
 
     @classmethod
+    def setup_veomni(cls, model_config, engine_config) -> None:
+        """Opt into VeOmni before model loading; validate settings and install integrations.
+
+        Override in the existing (architecture, stage) adapter. Keep optional
+        VeOmni imports inside the hook so FSDP users do not need that package.
+        The default rejects unported adapters instead of silently selecting an
+        incompatible model implementation.
+        """
+        raise NotImplementedError(f"{cls.__name__} does not support the VeOmni backend.")
+
+    @classmethod
+    def prepare_veomni_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
+        """Adapt packed inputs after verl's VeOmni transforms, before LM loss inputs.
+
+        This hook may modify the input dictionary or return a replacement.
+        The shared ``prepare_model_inputs`` replay hook still runs afterwards.
+        """
+        return model_inputs
+
+    @classmethod
+    def configure_veomni_trainable_params(cls, module: torch.nn.Module, model_config) -> None:
+        """Set requires_grad after VeOmni parallelization, before optimizer creation.
+
+        Do not replace modules here: VeOmni already owns their distributed
+        layout. This hook is not called for forward-only reference engines.
+        """
+        return
+
+    @classmethod
     def register_auto_classes(cls) -> None:
         """Register optional model-package classes with Transformers auto APIs."""
         return

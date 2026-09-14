@@ -87,16 +87,16 @@ The omni trainer's actor is a transformers LLM; following verl's practice for LL
 
 ## Optional engine backends
 
-VeRL-Omni defaults to **FSDP2** as the training engine for the policy and reference models. The diffusion trainer can alternatively be switched to [**VeOmni**](https://github.com/ByteDance-Seed/VeOmni). The engine is selected at the Hydra command line — see [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete recipe.
+VeRL-Omni defaults to **FSDP2** as the training engine for the policy and reference models. The diffusion trainer and Qwen3-Omni Thinker can alternatively use [**VeOmni**](https://github.com/ByteDance-Seed/VeOmni). The engine is selected at the Hydra command line — see [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete recipe.
 
 ### Installing VeOmni alongside vLLM 0.28.0
 
-VeOmni 0.1.11's `gpu` extra pins `torch==2.9.1+cu129`, which conflicts with the `torch==2.13.0` pulled in by `vllm==0.28.0`. A plain `uv pip install veomni[gpu,dit]==0.1.11` therefore fails dependency resolution.
+VeOmni 0.1.12's `gpu` extra pins `torch==2.11.0+cu130`, which conflicts with the `torch==2.13.0` pulled in by `vllm==0.28.0`. A plain `uv pip install veomni[gpu]==0.1.12` therefore fails dependency resolution.
 
 Install it without dependency resolution so the existing torch/vllm stack is preserved, and add the small set of runtime extras that the verl-omni VeOmni engine actually needs (this is the same recipe CI uses):
 
 ```bash
-uv pip install veomni==0.1.11 --no-deps
+uv pip install veomni==0.1.12 --no-deps
 uv pip install torchcodec librosa soundfile av audioread
 ```
 
@@ -107,7 +107,7 @@ python -c "import veomni; print('veomni', veomni.__version__)"
 python -c "from veomni.distributed.offloading import load_model_to_gpu, load_optimizer, offload_model_to_cpu, offload_optimizer; print('VeOmni offloading helpers OK')"
 ```
 
-VeOmni's torch pin has not been validated against torch 2.13 yet — the `--no-deps` install above is expected to work for import/offloading, but a full VeOmni-engine training run on the vLLM 0.28 stack is still pending GPU validation. If you want VeOmni's full `[gpu,dit]` extras (flash-attn variants, liger-kernel, cuda-python, etc.), install them in a separate environment not pinned to vllm 0.28.0; verl-omni does not need them.
+VeOmni's torch pin has not been validated against torch 2.13 yet — the `--no-deps` install above is expected to work for import/offloading, but a full VeOmni-engine training run on the vLLM 0.28 stack is still pending GPU validation. If you want VeOmni's full `[gpu]` extras (flash-attn variants, liger-kernel, cuda-python, etc.), install them in a separate environment not pinned to vllm 0.28.0; verl-omni does not need them.
 
 ## Post-Installation Verification
 
