@@ -1,6 +1,6 @@
 # CI/CD Layers
 
-Last updated: 08/04/2026.
+Last updated: 09/14/2026.
 
 VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or convergence validation can evolve independently.
 
@@ -9,10 +9,11 @@ VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or co
 | L1 CPU API tests | Validate CPU-only APIs, configs, data utilities, adapters, rewards, and unit behavior | Pull requests with `ready-for-ci`, pushes to `main` and release branches | CPU | Required before merge | Pass/fail and coverage artifacts |
 | L2 GPU smoke tests | Validate tiny-random GPU end-to-end training paths | Pull requests with `ready-for-ci`, usually after L1 is green | GPU | Required before merge for GPU-touching changes | Smoke logs and summaries |
 | L3 nightly regression | Detect numerical drift and performance regressions | Scheduled or manual | Fixed GPU runners | Nightly regression signal | Metrics and baseline comparisons |
-| L4 convergence tests | Validate real recipe convergence | Weekly, release candidate, or manual | Production GPU cluster | Release readiness gate | Reward/loss curves and convergence reports |
+| L4 convergence tests | Real-recipe precision: train-infer gap, finite grad, 100-step val reward floor | Manual on a production GPU node; weekly / RC workflow is not wired yet | 8-GPU node with real weights and datasets | Release-readiness signal, not a PR merge gate | `report.json` (gates + recorded perf), `metrics.json` (per-step loss + val every `test_freq`), `metrics.jsonl`, console logs |
 
 L3 has one runnable scheduled workflow for the Qwen-Image FlowGRPO
-single-sample regression. L4 remains a planned layer.
+single-sample regression. L4 has one runnable local/cluster script for the
+Qwen-Image OCR LoRA v1 recipe; it is not yet a GitHub Actions workflow.
 
 ## L1 CPU API Tests
 
@@ -73,9 +74,52 @@ should be treated as a regression signal rather than a required merge gate.
 
 ## L4 Convergence Tests
 
-L4 validates production-like recipes with real weights and real datasets. These checks are release-focused and should compare convergence curves against reviewed baselines.
+L4 validates production-like recipes with real weights and real datasets. It
+is release-focused and is **not** a replacement for L1 or L2.
 
-L4 is not a replacement for L1 or L2. A recipe can converge while an API regression still exists, and a unit test can pass while a long-running recipe no longer converges.
+L4 does **not** compare against a stored baseline and does **not** fail on
+throughput or step time. Those numbers are recorded for humans to inspect.
+
+### Current runnable case
+
+`tests/convergence/qwen_image_ocr_lora_v1/` wraps
+`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh` for an
+8-GPU, 100-step v1 sync LoRA OCR job. It enables
+`actor_rollout_ref.rollout.calculate_log_probs=true` and keeps rollout-correction
+bypass mode off so the actor recomputes `old_log_probs`. Validation runs every
+20 steps (`trainer.test_freq=20`) and on the last step.
+
+```bash
+bash tests/convergence/qwen_image_ocr_lora_v1/run_qwen_image_ocr_lora_v1.sh
+```
+
+Defaults:
+
+- Policy: `$WORKSPACE/models/Qwen-Image` (`MODEL_PATH`)
+- Reward: `$WORKSPACE/models/Qwen3-VL-8B-Instruct` (`REWARD_MODEL_PATH`)
+- Data: `$WORKSPACE/data/ocr/qwen_image/{train,test}.parquet`
+- `WORKSPACE` defaults to `$HOME`. `NUM_GPUS` defaults to `8`.
+
+Gate logic lives in `collect_report.py`. The collector's own tests are L1
+(`tests/convergence/test_collect_report_on_cpu.py`).
+
+### What is gated
+
+| Gate | Metric | Fail when |
+| --- | --- | --- |
+| Train-infer consistency | `training/rollout_probs_diff_mean` if present, else `rollout_corr/logprob_abs_diff_mean` | missing, non-finite, or any post-warmup step **> 0.01** |
+| Grad | `actor/grad_norm` | NaN / Inf |
+| Val reward at step 100 | `val-core/*/reward/mean@*` | missing, or any source **< `VAL_REWARD_MIN`** (default **0.9**) |
+
+`perf/time_per_step` and related `timing_s/*` keys are copied into
+`report.json` under `"perf"` with no pass/fail.
+
+`metrics.json` records per-step training loss (`actor/loss/mean` or `actor/loss`)
+and `val-core/*/reward/mean@*` at each `test_freq` step. `metrics.jsonl` is the
+raw trainer log dump used to build both files.
+
+There is no `.github/workflows/l4_*.yml` yet. Keep L4 off the default
+pull-request merge path.
 
 ## Contributor Expectations
 

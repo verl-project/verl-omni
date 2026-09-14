@@ -1,6 +1,6 @@
 # Testing Guide
 
-Last updated: 07/14/2026.
+Last updated: 09/14/2026.
 
 This guide explains the test hierarchy for `verl_omni`, starting with L1 CPU tests and leaving room for higher layers such as L2 GPU smoke tests.
 
@@ -15,7 +15,7 @@ This guide explains the test hierarchy for `verl_omni`, starting with L1 CPU tes
   - [Coverage](#coverage)
   - [Local Commands](#local-commands)
   - [Adding a New L1 Test](#adding-a-new-l1-test)
-- [Future Layers](#future-layers)
+- [Higher Layers](#higher-layers)
 
 ## Test Hierarchy
 
@@ -73,7 +73,10 @@ Place tests under the top-level module they cover. For example:
 - `verl_omni/pipelines/...` -> `tests/pipelines/...`
 - `verl_omni/reward_loop/...` -> `tests/reward_loop/...`
 
-Special workflow folders such as `tests/special_e2e/` and `tests/special_sanity/` are reserved for non-L1 checks.
+Special workflow folders such as `tests/special_e2e/`, `tests/special_sanity/`,
+`tests/nightly/` (L3), and `tests/convergence/` (L4 runners) are reserved for
+non-L1 jobs. Gate helpers under those trees may still have `*_on_cpu.py`
+coverage next to them; the CPU workflow will pick those files up.
 
 ### Coverage
 
@@ -115,13 +118,20 @@ Delete the temporary `pytest.ini` if it is not part of your intended change.
 
 ## Higher Layers
 
-This guide currently defines L1 in detail because L1 is the main pull-request
-test layer. L2 and L3 checks may exist as GPU smoke or nightly regression jobs,
-but they should stay outside the fast PR loop until their ownership, trigger
-rules, baseline policy, runner capacity, and artifact retention are stable.
+This guide defines L1 in detail because L1 is the main pull-request test layer.
+L2–L4 stay outside the fast PR loop until ownership, trigger rules, baseline
+policy, runner capacity, and artifact retention are stable.
 
-For the current CI layer overview and the runnable L3 nightly case, see
-`ci_cd.md`.
+| Layer | Placement | What it proves |
+| --- | --- | --- |
+| L2 | `tests/special_e2e/`, `tests/gpu_smoke/` | Tiny-random GPU paths complete without crash/OOM |
+| L3 | `tests/nightly/` | Fixed-seed short-window dump + perf vs a reviewed baseline |
+| L4 | `tests/convergence/` | Real weights + real data; train-infer gap ≤ 0.01, finite grad, val-reward floor (perf recorded, not gated) |
+
+Do not put real-checkpoint 100-step recipes in L2, and do not use L3 tensor
+`atol` dumps as the L4 pass/fail signal.
+
+For triggers, hardware, and run commands, see `ci_cd.md`.
 
 When adding a new layer section, include:
 
