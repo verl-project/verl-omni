@@ -415,20 +415,15 @@ def _safe_convert_to_tensors(self, tensor_type=None):
     def convert(value):
         if is_tensor(value):
             return value
-        if isinstance(value, list):
+        if isinstance(value, list | tuple):
             if _scalar_tree(value):
                 try:
                     return as_tensor(value)
                 except Exception:
                     pass  # ragged scalars: descend, do not raise
+            if isinstance(value, tuple):
+                return tuple(convert(item) for item in value)
             return [convert(item) for item in value]
-        if isinstance(value, tuple):
-            if _scalar_tree(value):
-                try:
-                    return as_tensor(value)
-                except Exception:
-                    pass
-            return tuple(convert(item) for item in value)
         if isinstance(value, dict):
             return {key: convert(item) for key, item in value.items()}
         try:

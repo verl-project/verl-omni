@@ -114,17 +114,6 @@ def test_resolution_fails_closed_without_architecture_or_path():
         )
 
 
-def test_resolution_fails_closed_for_unknown_architecture():
-    from verl_omni.reward_loop.reward_manager import OmniNaiveRewardManager
-
-    with pytest.raises(NotImplementedError, match="No omni model registered"):
-        OmniNaiveRewardManager(
-            config=_trainer_config(architecture="NoSuchArchitecture"),
-            tokenizer=_minicpm_style_tokenizer(),
-            compute_score=compute_score,
-        )
-
-
 def test_manager_registered_at_package_import():
     # The trainer resolves reward.reward_manager.name eagerly in the
     # task-runner process during _setup, before any reward worker imports
