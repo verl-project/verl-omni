@@ -64,7 +64,6 @@ def test_minicpmo_gspo_launcher_contract():
 
     # AVQA reward and proven hyperparameters from the Qwen3-Omni recipe.
     assert "data.max_response_length=12288" in settings  # 4096 CLI overrides truncate MiniCPM's think
-    assert "actor_rollout_ref.rollout.temperature=0.6" in settings  # checkpoint think default, not Qwen's 1.0
     assert "reward.reward_manager.source=register" in settings
     # The reward loop builds its own tokenizer (never through the adapter's
     # configure_tokenizer), so the stock naive manager strips the checkpoint's
@@ -83,3 +82,19 @@ def test_minicpmo_gspo_launcher_keeps_flash_attention_default():
     active_lines = [line for line in _SCRIPT.read_text().splitlines() if not line.lstrip().startswith("#")]
     assert not any("attn_implementation" in line for line in active_lines)
     assert not any("sdpa" in line for line in active_lines)
+
+
+def test_minicpmo_gspo_launcher_keeps_upstream_sampling_default():
+    # verl's training-side logprob path divides logits by the temperature in
+    # bf16 while the rollout engine casts to fp32 first; at T != 1.0 that
+    # mismatch alone drops the engine<->actor parity pearson below the 0.99
+    # gate (0.971 at T=0.6 vs 0.992 at T=1.0 on this recipe's validation
+    # runs). Inheriting verl's T=1.0 / top_p=1.0 / top_k=-1 rollout defaults
+    # — the same sampling block the Qwen3-Omni reference runs — keeps the
+    # division bit-exact. val_kwargs sampling stays free to differ.
+    active_lines = [line for line in _SCRIPT.read_text().splitlines() if not line.lstrip().startswith("#")]
+    assert not any(
+        "rollout.temperature=" in line or "rollout.top_p=" in line or "rollout.top_k=" in line
+        for line in active_lines
+        if "val_kwargs" not in line
+    )
