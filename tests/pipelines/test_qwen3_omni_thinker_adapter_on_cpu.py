@@ -41,7 +41,8 @@ def _has_lora(module: nn.Module) -> bool:
     return hasattr(module, "lora_A") and hasattr(module, "lora_B")
 
 
-def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):
+@pytest.mark.parametrize("token_prefix", ["", "custom_"])
+def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch, token_prefix):
     """The V1 processor path must collapse image, video, and audio pad runs."""
     pytest.importorskip("transformers")
     _require_version("transformers", "5.0.0")
@@ -52,16 +53,25 @@ def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):
         "<|image_pad|>": 101,
         "<|video_pad|>": 102,
         "<|audio_pad|>": 103,
+        "<|vision_start|>": 104,
+        "<|audio_start|>": 105,
+        "<|audio_end|>": 106,
+        "<|vision_end|>": 107,
     }
+    token_ids = {token_prefix + token: tid for token, tid in token_ids.items()}
     tokenizer = SimpleNamespace(
         unk_token_id=0,
         convert_tokens_to_ids=lambda token: token_ids.get(token, 0),
     )
     processor = SimpleNamespace(
         tokenizer=tokenizer,
-        image_token="<|image_pad|>",
-        video_token="<|video_pad|>",
-        audio_token="<|audio_pad|>",
+        image_token=token_prefix + "<|image_pad|>",
+        video_token=token_prefix + "<|video_pad|>",
+        audio_token=token_prefix + "<|audio_pad|>",
+        vision_bos_token=token_prefix + "<|vision_start|>",
+        audio_bos_token=token_prefix + "<|audio_start|>",
+        audio_eos_token=token_prefix + "<|audio_end|>",
+        vision_eos_token=token_prefix + "<|vision_end|>",
     )
     config = SimpleNamespace(
         thinker_config=SimpleNamespace(vision_config=SimpleNamespace(spatial_merge_size=2)),
@@ -89,6 +99,17 @@ def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):
         7,
         7,
     ]
+
+    # Exercise the bound production entry point, not only the collapse helper.
+    # Image/audio runs outside the span must still undergo ordinary run-dedup.
+    span = [104, 105, 102, 102, 103, 103, 102, 103, 106, 107]
+    raw = [104, 102, 107]
+    original = [7, 7, 101, 101] + span + [8] + span + [103, 103, 9, 9]
+    saved = original.copy()
+    expected = [7, 7, 101] + raw + [8] + raw + [103, 9, 9]
+    assert configured.dedup_pad_tokens(original) == expected
+    assert configured.dedup_pad_tokens(expected) == expected
+    assert original == saved
 
 
 def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch):
