@@ -97,6 +97,9 @@ body:
         - Rollout or trainer: @zhtmike @knlnguyen1802 @ZihaoW123
         - Reward: @chenyingshu @ruihanglix
 
+        Questions on pipelines:
+        - Pipelines and model adaptation: @chenyingshu @NancyFyong
+
         Questions on CI, Docker, or documentation:
         - CI, Docker, or documentation: @wtomin
       placeholder: "@Username ..."
