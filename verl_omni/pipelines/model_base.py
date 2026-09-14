@@ -853,6 +853,18 @@ class OmniRolloutPipelineBase:
         return None
 
     @classmethod
+    def policy_logit_bias(cls, tokenizer) -> dict[int, float] | None:
+        """Token ids the policy stage must never sample (id -> logit bias).
+
+        Multi-modal checkpoints register generation-side special tokens
+        (talker/codec vocabularies) that a thinker-only policy must not emit;
+        returning them with ``-inf`` bans them from sampling. The rollout
+        strategy applies the mapping to the policy stage's SamplingParams.
+        Default: no bias.
+        """
+        return None
+
+    @classmethod
     def combine_engine_outputs(cls, outputs: list, prompt: dict) -> tuple[Any, dict[str, Any]]:
         """Select the policy output and collect architecture-specific fields.
 

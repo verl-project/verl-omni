@@ -66,6 +66,42 @@ class ARStrategy(OmniStrategyBase):
         self._rollout_fields_by_request_id: dict[str, dict[str, Any]] = {}
         self._policy_stage_index = 0
         self._policy_sampling_constraints: dict[str, Any] = {}
+        self._policy_logit_bias_cache: dict[int, float] | None = None
+
+    def _resolve_rollout_tokenizer(self):
+        """Load the policy-stage tokenizer from wherever the server keeps it.
+
+        ``model_config.tokenizer`` is either an already-loaded tokenizer
+        object (this vLLM resolves it during engine init) or a repo id /
+        path; treating a loaded object's repr as a repo id silently loads
+        nothing, so both forms are handled explicitly.
+        """
+        candidate = getattr(self.server.model_config, "tokenizer", None)
+        if candidate is None:
+            return None
+        if hasattr(candidate, "get_added_vocab"):
+            return candidate
+        from transformers import AutoTokenizer
+
+        return AutoTokenizer.from_pretrained(str(candidate), trust_remote_code=True)
+
+    def _policy_logit_bias(self) -> dict[int, float] | None:
+        """Adapter-declared sampling bans, resolved once per strategy."""
+        adapter = self._rollout_adapter
+        if adapter is None:
+            return None
+        hook = getattr(adapter, "policy_logit_bias", None)
+        if hook is None or hook.__func__ is OmniRolloutPipelineBase.policy_logit_bias.__func__:
+            return None  # the adapter declares no bans; no tokenizer needed
+        if self._policy_logit_bias_cache is None:
+            tokenizer = self._resolve_rollout_tokenizer()
+            if tokenizer is None:
+                raise RuntimeError(
+                    "The rollout adapter declares policy_logit_bias but no tokenizer could be "
+                    "resolved from the engine's model config."
+                )
+            self._policy_logit_bias_cache = adapter.policy_logit_bias(tokenizer)
+        return self._policy_logit_bias_cache
 
     def validate_configs(self) -> None:
         if self.server.config.max_model_len is None:
@@ -305,6 +341,11 @@ class ARStrategy(OmniStrategyBase):
         else:
             sampling_params["logprobs"] = None
         sampling_params.setdefault("repetition_penalty", getattr(self.server.config, "repetition_penalty", 1.0))
+        logit_bias = self._policy_logit_bias()
+        if logit_bias:
+            # Adapter bans (e.g. talker/codec tokens) are a correctness
+            # requirement, so they win over any user-configured bias entry.
+            sampling_params["logit_bias"] = {**sampling_params.get("logit_bias", {}), **logit_bias}
         policy_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         if self._rollout_output_modalities is not None:
             default_stage_sampling_params = self.server.engine.default_sampling_params_list
