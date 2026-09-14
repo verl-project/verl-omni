@@ -318,6 +318,38 @@ preserves its `RLHFDataset` base class, sets rollout NPU memory utilization to
 `0.6`, uses deterministic validation, and wires
 [`choice_reward.py`](../../verl_omni/utils/reward_score/choice_reward.py).
 
+## Training with MiniCPM-o 4.5 (AVQA)
+
+The MiniCPM-o recipe trains the thinker (`llm` = dense Qwen3-8B) on the same
+AVQA-R1-6K parquet as the Qwen3-Omni recipe above — same data prep command,
+same reward — through `MiniCPMORLHFDataset`
+([`omni_rl_datasets.py`](../../verl_omni/utils/dataset/omni_rl_datasets.py)),
+which loads the media blocks verl builds from the `<image>`/`<audio>` markers
+without any Qwen dependency and hop-pads audio to the Whisper mel stride.
+
+Hyperparameters are copied verbatim from the proven Qwen3-Omni AVQA recipe;
+only the model-specific lines differ (checkpoint path, `trust_remote_code`,
+`pipeline_name="minicpmo_4_5"`, the MiniCPM LoRA exclusion list, and HF config
+overrides `init_tts=false` / `use_cache=false` / `stream_input=false` — the
+last one keeps the HF audio placeholder expansion aligned with vLLM-Omni's
+unchunked form). `use_remove_padding` stays on: the training adapter folds
+packed samples into MiniCPMO's single-row scatter and runs the inner
+`Qwen3ForCausalLM` with position-id-based flash-attention varlen.
+
+```bash
+bash examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh
+```
+
+Keep `flash_attention_2` (the default) — switching the model to sdpa broke
+train/rollout consistency in Qwen3-Omni experiments. Vision/audio towers
+(`vpm`/`apm`) stay present but frozen via the LoRA exclusion list, and the FSDP2
+wrap ignores `apm` parameters. The vLLM-Omni rollout runs a runtime-registered
+one-stage thinker-only pipeline (`minicpmo_4_5_thinker_only`, text output) with
+`model_arch=MiniCPMO45OmniLLMForConditionalGeneration` for logprob support and
+`lora.merge=true` weight sync. See
+[`docs/contributing/integrating_an_omni_model.md`](../../docs/contributing/integrating_an_omni_model.md)
+for the rollout memory-sizing knobs the script already sets.
+
 ## Performance
 
 All GPU results measured on a single node of **4 × H800 80GB**, actor and
@@ -369,5 +401,7 @@ examples/gspo_trainer/
 ├── data_process/
 │   ├── mmk12.py                                      ← MMK12 → verl RL parquet converter
 │   └── avqa.py                                       ← AVQA → verl RL parquet converter
+├── minicpm/
+│   └── run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh ← V1 launch script (MiniCPM-o 4.5, LoRA r=32, audio + image)
 └── README.md                                         ← (this file)
 ```

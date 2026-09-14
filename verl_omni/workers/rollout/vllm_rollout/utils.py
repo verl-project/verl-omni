@@ -27,6 +27,20 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _moe_weight_loader_patch_applies(model) -> bool:
+    """Whether verl's MoE weight-loader patch can run on this engine model.
+
+    verl's ``patch_vllm_moe_model_weight_loader`` resolves the inner model via
+    ``.model`` / ``.language_model`` *before* its MoE-relevance check, and
+    raises ``ValueError`` for engines that nest their LLM differently
+    (MiniCPM-o's engine class uses ``.llm``). The patch is a no-op for dense
+    models anyway, so models without a resolvable inner model simply skip it.
+    """
+    if getattr(model, "runnable", None) is not None:  # ACLGraph unwrap, same as verl
+        model = model.runnable
+    return getattr(model, "model", None) is not None or getattr(model, "language_model", None) is not None
+
+
 def _split_visible_devices(value: str) -> list[str]:
     """Split a visible-devices env value into stripped, non-empty entries."""
     return [entry.strip() for entry in value.split(",") if entry.strip()]
@@ -199,10 +213,13 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 # Re-attach weight_loader on Ascend FusedMoE params via verl's
                 # built-in patch (handles ACLGraph unwrap + SUPPORTED_MOE_MODELS
                 # whitelist, which Qwen3-Omni is registered into via
-                # patch_register_vllm_moe_model_weight_loader).
-                from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
+                # patch_register_vllm_moe_model_weight_loader). Skipped for
+                # engines whose inner model does not resolve (e.g. MiniCPM-o's
+                # .llm nesting) — a no-op there, but verl's patch would raise.
+                if _moe_weight_loader_patch_applies(model):
+                    from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 
-                patch_vllm_moe_model_weight_loader(model)
+                    patch_vllm_moe_model_weight_loader(model)
 
                 # On Ascend, process_weights_after_loading transposes w13/w2 for
                 # fused-MoE compute; revert it so load_weights sees checkpoint-shape

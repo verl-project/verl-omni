@@ -39,6 +39,32 @@ from verl_omni.workers.config import OmniModelConfig
 logger = logging.getLogger(__name__)
 
 
+def _filter_ignored_wrap_targets(wrap_targets, root, ignored_names):
+    """Drop wrap targets nested under adapter-ignored subtrees.
+
+    verl's ``_select_fsdp2_wrap_targets`` blanket-wraps every ``nn.Embedding``.
+    A target inside an ignored subtree — MiniCPM-o's Whisper
+    ``apm.embed_positions`` — would be claimed by its nested ``fully_shard``
+    call BEFORE the root call, and the root's ``ignored_params`` cannot
+    retroactively unmanage already-claimed params: the unit stays sharded
+    while the remote encoder reads ``self.embed_positions.weight`` directly
+    (never a module call), mixing plain tensors with DTensors in forward.
+    Dropping such targets leaves their params unclaimed so the root's ignored
+    set takes them.
+    """
+    if not ignored_names:
+        return wrap_targets
+    names_by_id = {id(submodule): name for name, submodule in root.named_modules()}
+    kept = []
+    for target in wrap_targets:
+        name = names_by_id.get(id(target))
+        if name is not None and any(part in ignored_names for part in name.split(".")):
+            logger.debug("Skipping FSDP2 wrap target %s: inside an ignored subtree.", name)
+            continue
+        kept.append(target)
+    return kept
+
+
 @EngineRegistry.register(model_type="omni_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class OmniFSDPEngine(FSDPEngineWithLMHead):
     """FSDP engine for omni models"""
@@ -245,5 +271,134 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             for submodule in module.modules():
                 if isinstance(submodule, BaseTunerLayer):
                     submodule.cast_input_dtype_enabled = False
+
+        return module
+
+    def _build_fsdp_module(self, module):
+        """FSDP2 build that keeps adapter-declared frozen towers unsharded.
+
+        Copied from verl@fefb0802 ``FSDPEngine._build_fsdp_module`` (fsdp2
+        branch) plus the wrap-target loop of ``verl.utils.fsdp_utils.apply_fsdp2``,
+        so the root ``fully_shard`` call can pass torch's formal
+        ``ignored_params`` for submodules that must not be FSDP-managed at all
+        (MiniCPM-o's frozen apm/vpm/resampler towers). Adapters declare them
+        via a ``get_fsdp_ignored_module_names`` classmethod; every adapter
+        without that method keeps verl's untouched behavior via ``super()``.
+
+        Maintenance note: re-diff this override against the verl pin at every
+        bump (upstream actively edits the copied code), and delete it once verl
+        ships an FSDP2 ignore config key — being coordinated with wtomin in
+        verl-omni#550. fsdp1-with-ignored-names fails closed; the FSDP1
+        state-dict tail of the parent method is fsdp1-only and intentionally
+        not copied.
+        """
+        ignored_names: list[str] = []
+        adapter_cls = getattr(self, "model_adapter_cls", None)
+        ignored_fn = getattr(adapter_cls, "get_fsdp_ignored_module_names", None)
+        if callable(ignored_fn):
+            ignored_names = list(ignored_fn(self.model_config))
+        if not ignored_names:
+            return super()._build_fsdp_module(module)
+        if self.engine_config.strategy != "fsdp2":
+            raise NotImplementedError(
+                f"{type(self).__name__}: FSDP2-ignored module names require strategy=fsdp2, "
+                f"got {self.engine_config.strategy!r}."
+            )
+
+        from torch.distributed.fsdp import FSDPModule, fully_shard
+        from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
+        from verl.utils.activation_offload import enable_activation_offloading
+        from verl.utils.fsdp_utils import (
+            CPUOffloadPolicy,
+            MixedPrecisionPolicy,
+            _select_fsdp2_wrap_targets,
+            fsdp2_load_full_state_dict,
+            maybe_patch_fsdp_module,
+        )
+        from verl.utils.torch_dtypes import PrecisionType
+
+        mixed_precision_config = self.engine_config.mixed_precision
+        if mixed_precision_config is not None:
+            param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
+            reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.get("reduce_dtype", "fp32"))
+        else:
+            param_dtype = torch.bfloat16
+            reduce_dtype = torch.float32
+        self._autocast_dtype = param_dtype
+        if param_dtype == torch.float16:
+            self.scaler = ShardedGradScaler(growth_interval=400)
+        else:
+            self.scaler = None
+
+        mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True)
+        offload_policy = None
+        if self.engine_config.offload_policy or self.engine_config.forward_only:
+            self._is_offload_param = False
+            self._is_offload_optimizer = False
+            offload_policy = CPUOffloadPolicy(pin_memory=True)
+            self._uses_fsdp2_cpu_offload_policy = True
+        fsdp_kwargs = {
+            "mesh": self.device_mesh,
+            "mp_policy": mp_policy,
+            "offload_policy": offload_policy,
+            "reshard_after_forward": self.engine_config.reshard_after_forward,
+        }
+
+        # ``ignored_names`` must also cover PEFT-prefixed paths like
+        # base_model.model.apm.
+        ignored_params = set()
+        trainable_ignored: list[str] = []
+        for name, param in module.named_parameters():
+            if any(part in ignored_names for part in name.split(".")):
+                ignored_params.add(param)
+                if param.requires_grad:
+                    trainable_ignored.append(name)
+        # FSDP2 never communicates gradients for ignored params, so a trainable
+        # one would silently diverge across ranks — frozen-only is the contract
+        # the adapter ignore list relies on. Single-rank meshes have nothing to
+        # desync.
+        if trainable_ignored and (self.device_mesh is None or self.device_mesh.size() > 1):
+            raise ValueError(
+                f"{type(self).__name__}: FSDP2-ignored parameters must be frozen, but these require "
+                f"gradients: {trainable_ignored}. Either remove them from the adapter's "
+                "get_fsdp_ignored_module_names or exclude them from training (LoRA target/exclude "
+                "modules) — ignored params get no gradient synchronization."
+            )
+
+        transformer_cls_names = self.engine_config.get("wrap_policy", {}).get(
+            "transformer_layer_cls_to_wrap", getattr(module, "_no_split_modules", None)
+        )
+        if isinstance(transformer_cls_names, str):
+            transformer_cls_names = [transformer_cls_names]
+        if isinstance(transformer_cls_names, set):
+            transformer_cls_names = list(transformer_cls_names)
+        assert transformer_cls_names, (
+            "FSDP2 wrapping found no transformer_layer_cls_to_wrap (checked wrap_policy and module._no_split_modules)."
+        )
+
+        full_state = module.state_dict()
+        # Nested fully_shard calls must NOT carry the root's ignored set (torch
+        # rejects params a nested call does not own); only the root call below
+        # passes ignored_params.
+        wrap_targets = _filter_ignored_wrap_targets(
+            _select_fsdp2_wrap_targets(module, transformer_cls_names), module, ignored_names
+        )
+        for target in wrap_targets:
+            with maybe_patch_fsdp_module(target):
+                fully_shard(target, **fsdp_kwargs)
+        with maybe_patch_fsdp_module(module):
+            fully_shard(module, ignored_params=ignored_params, **fsdp_kwargs)
+        fsdp2_load_full_state_dict(module, full_state, self.device_mesh, offload_policy)
+
+        if self.engine_config.get("forward_prefetch", False):
+            fsdp_modules = [m for m in wrap_targets if isinstance(m, FSDPModule)]
+            for i, fsdp_module in enumerate(fsdp_modules):
+                next_targets = fsdp_modules[i + 1 : i + 2]
+                if next_targets and hasattr(fsdp_module, "set_modules_to_forward_prefetch"):
+                    fsdp_module.set_modules_to_forward_prefetch(next_targets)
+
+        if self.model_config.enable_activation_offload:
+            enable_gradient_checkpointing = self.model_config.enable_gradient_checkpointing
+            enable_activation_offloading(module, self.engine_config.strategy, enable_gradient_checkpointing)
 
         return module
