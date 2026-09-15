@@ -2,7 +2,7 @@
 
 Last updated: 09/09/2026
 
-For NVIDIA GPU, see the {doc}`GPU installation guide <install>`.
+For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`.
 
 ## Requirements
 
