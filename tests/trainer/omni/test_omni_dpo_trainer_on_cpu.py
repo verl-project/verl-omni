@@ -13,7 +13,7 @@
 # limitations under the License.
 """CPU tests for OmniDirectPreferenceRayTrainer guardrails and helpers."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -104,6 +104,34 @@ class TestOmniDirectPreferenceRayTrainerInit:
 
 
 class TestOmniDirectPreferenceRayTrainerHelpers:
+    def test_worker_group_receives_master_port_range(self):
+        from verl.trainer.ppo.utils import Role
+
+        config = _make_config(trainer={"ray_master_port_range": [21000, 22000]})
+        trainer = OmniDirectPreferenceRayTrainer.__new__(OmniDirectPreferenceRayTrainer)
+        trainer.config = config
+        trainer.hybrid_engine = True
+        trainer.role_worker_mapping = {Role.Actor: object}
+        trainer.use_reference_policy = False
+        trainer.ref_in_actor = True
+        trainer.resource_pool_manager = MagicMock()
+        trainer.device_name = "cpu"
+        pool = object()
+        trainer.resource_pool_manager.resource_pool_dict = {"global_pool": pool}
+        trainer.resource_pool_manager.get_resource_pool.return_value = pool
+        actor_worker_group = MagicMock()
+        actor_worker_group.spawn.return_value = {str(Role.Actor): actor_worker_group}
+        ray_worker_group = MagicMock(return_value=actor_worker_group)
+        trainer.ray_worker_group_cls = ray_worker_group
+
+        with patch(
+            "verl_omni.trainer.omni.ray_omni_trainer.create_colocated_worker_cls",
+            return_value=MagicMock(),
+        ):
+            trainer._init_colocated_workers()
+
+        assert ray_worker_group.call_args.kwargs["master_port_range"] == [21000, 22000]
+
     def test_infer_reference_policy_maps_row_level_logps(self):
         config = _make_config()
         trainer = _make_trainer(config)
