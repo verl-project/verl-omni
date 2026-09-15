@@ -13,6 +13,7 @@
 # limitations under the License.
 from .diffusers_impl import (  # noqa: F401
     DiffusersFSDPEngine,
+    DMDDiffusersFSDPEngine,
     DPODiffusersFSDPEngine,
     NFTDiffusersFSDPEngine,
     PPODiffusersFSDPEngine,
@@ -23,6 +24,7 @@ from .omni_impl import OmniFSDPEngine  # noqa: F401
 __all__ = [
     "PPODiffusersFSDPEngine",
     "DPODiffusersFSDPEngine",
+    "DMDDiffusersFSDPEngine",
     "NFTDiffusersFSDPEngine",
     "DiffusersFSDPEngine",
     "OmniFSDPEngine",
