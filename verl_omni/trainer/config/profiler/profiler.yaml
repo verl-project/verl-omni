@@ -5,13 +5,13 @@
 # 4. Indentation level is respected for nested fields.
 #
 # Per-role profiler config, mirroring `verl/trainer/config/profiler/profiler.yaml`
-# from upstream verl, with the NPU tool removed (verl-omni does not support NPU).
+# from upstream verl, including NPU support for Ascend profiling.
 
 # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
 _target_: verl.utils.profiler.ProfilerConfig
 
 # profiler tool, default same as profiler.tool in global config.
-# Supported values in verl-omni: nsys, torch, torch_memory.
+# Supported values in verl-omni: nsys, npu, torch, torch_memory.
 tool: torch
 
 # whether to enable profiling for this role
@@ -28,6 +28,33 @@ save_path: ${oc.select:global_profiler.save_path,outputs/profile}
 
 # Tool-specific configuration. The active block is selected by `tool` above.
 tool_config:
+  npu:
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.utils.profiler.config.NPUToolConfig
+
+    # Contents to profile, can be empty
+    # options: npu, cpu, memory, shapes, module, stack
+    contents: [ ]
+
+    # Collection level, optional values: level_none, level0, level1, level2.
+    level: "level0"
+
+    # Whether to automatically parse the data.
+    analysis: True
+
+    # True for each task has its own database, False for all tasks in one training step share one database.
+    discrete: False
+
+    # Start collecting profiler data from this response-token index.
+    # null means collect from the first response token (full collection start).
+    profile_token_start: null
+
+    # Stop collecting profiler data at this response-token index (exclusive).
+    # null means collect until the end (full collection).
+    profile_token_end: null
+
+    name: npu
+
 
   # NVIDIA Nsight Systems
   nsys:

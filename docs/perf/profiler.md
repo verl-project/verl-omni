@@ -1,19 +1,18 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 08/07/2026.
+Last updated: 09/14/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
-the same configuration surface for the diffusion trainer. Three profiling tools
+the same configuration surface for the diffusion trainer. Four profiling tools
 are supported:
 
 | Tool          | Backend                                    | Use case                                  |
 |---------------|--------------------------------------------|-------------------------------------------|
 | `nsys`        | NVIDIA Nsight Systems                      | End-to-end CUDA / kernel timeline tracing |
+| `npu`        | Ascend NPU profiler                       | NPU / CPU operator and memory profiling  |
 | `torch`       | `torch.profiler`                           | PyTorch-level CPU / CUDA / op profiling   |
 | `torch_memory`| `torch.cuda.memory._dump_snapshot`         | CUDA memory allocation snapshots          |
-
-> supported by the diffusion trainer at this time.
 
 ## Configuration overview
 
@@ -38,7 +37,7 @@ begins and `stop_profile` after validation, so as long as the global
 ```yaml
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
-  tool: null                     # one of: nsys, torch, torch_memory (null disables)
+  tool: null                     # one of: nsys, npu, torch, torch_memory (null disables)
   steps: null                    # e.g. [1, 2, 5]
   profile_continuous_steps: False
   save_path: outputs/profile
@@ -53,11 +52,18 @@ global_profiler:
 actor_rollout_ref:
   actor:
     profiler:
-      tool: torch                # nsys, torch, torch_memory
+      tool: torch                # nsys, npu, torch, torch_memory
       enable: False
       all_ranks: False
       ranks: []
       tool_config:
+        npu:
+          contents: []           # npu, cpu, memory, shapes, module, stack
+          level: level0
+          analysis: True
+          discrete: False
+          profile_token_start: null
+          profile_token_end: null
         nsys: { discrete: ... }
         torch:
           contents: []           # cuda, cpu, memory, shapes, stack
@@ -78,7 +84,7 @@ already at ...".
 
 ## Quick recipes
 
-The following recipes add CLI overrides on top of
+The following GPU recipes add CLI overrides on top of
 `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh`.
 
 ### 1. PyTorch profiler — end-to-end
@@ -291,6 +297,61 @@ score: the generation phase when reward computation streams with the rollout
 colocate mode. Each profiled replica writes to
 `{save_path}/reward_model/agent_loop_rollout_replica_{rank}`, keeping reward
 traces apart from the actor rollout ones.
+
+### 7. Ascend NPU profiling (`npu`)
+
+Ascend runs can select the upstream verl NPU profiler through the built-in
+[profiler configuration](https://github.com/verl-project/verl-omni/blob/main/verl_omni/trainer/config/profiler/profiler.yaml), without
+adding a local config file. After setting up the NPU environment and training data,
+profile actor rank 0 at training steps 1 and 2 with:
+
+```bash
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_npu.sh \
+    global_profiler.tool=npu \
+    global_profiler.steps='[1,2]' \
+    global_profiler.save_path=./outputs/profile \
+    actor_rollout_ref.actor.profiler.enable=True \
+    actor_rollout_ref.actor.profiler.tool=npu \
+    actor_rollout_ref.actor.profiler.ranks='[0]' \
+    actor_rollout_ref.actor.profiler.tool_config.npu.contents='[npu,cpu]' \
+    actor_rollout_ref.actor.profiler.tool_config.npu.level=level0 \
+    actor_rollout_ref.actor.profiler.tool_config.npu.analysis=True \
+    actor_rollout_ref.actor.profiler.tool_config.npu.discrete=False
+```
+
+The example saves profiling output under `./outputs/profile`. Set
+`actor_rollout_ref.actor.profiler.all_ranks=True` to collect from all actor ranks.
+Profiling is disabled by default; select the global steps and explicitly enable
+the role to collect traces. These fields already exist, so use plain `key=value`
+overrides without a `+` prefix.
+
+This example uses the legacy `main_diffusion` entrypoint. The
+`main_diffusion_v1` trainer does not yet implement the step-based profiling
+lifecycle, so these overrides alone do not enable NPU collection there.
+
+The example profiles the actor worker. Rollout and reward-model servers have
+separate profiler settings (recipes 5 and 6); their upstream vLLM profiling
+controller requires `discrete=True` to start engine-side collection. Do not
+reuse the actor's `discrete=False` setting for those servers.
+
+The per-role `tool_config.npu` block also exposes the following options:
+
+| Option | Values / behavior | Default |
+| --- | --- | --- |
+| `contents` | Collection options: `npu`, `cpu`, `memory`, `shapes`, `module`, `stack` | `[]` |
+| `level` | `level_none`, `level0`, `level1`, `level2` | `level0` |
+| `analysis` | Automatically parse the collected data | `True` |
+| `discrete` | Separate databases per task when `True`; tasks in one training step share a database when `False` | `False` |
+| `profile_token_start` / `profile_token_end` | Response-token collection bounds (end exclusive), for token-level profiling where supported | `null` / `null` (full collection) |
+
+Response-token bounds apply to compatible rollout engines, not to the actor's
+forward/backward passes. They do not select diffusion denoising timesteps.
+
+Diffusion actor, ref, rollout, and reward-model roles inherit the shared config
+above. Omni actor/ref/rollout configs inherit from upstream verl, while the
+reward-model role uses VeRL-Omni's shared config. The defaults in the table
+describe the shared config; inspect the composed Omni config before applying
+the same overrides to its upstream roles.
 
 ## Lightweight profiling recipe
 
