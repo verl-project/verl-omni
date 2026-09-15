@@ -26,6 +26,7 @@ from verl.workers.config.optimizer import OptimizerConfig
 from .model import DiffusionModelConfig
 
 __all__ = [
+    "DiffusionFSDPEngineConfig",
     "DiffusionLossConfig",
     "VeOmniDiffusionEngineConfig",
     "VeOmniDiffusionOptimizerConfig",
@@ -33,6 +34,14 @@ __all__ = [
     "FSDPDiffusionActorConfig",
     "VeOmniDiffusionActorConfig",
 ]
+
+
+@dataclass
+class DiffusionFSDPEngineConfig(FSDPEngineConfig):
+    _mutable_fields = FSDPEngineConfig._mutable_fields | {"gc_diagnostics"}
+
+    # Runtime copy of the global GC diagnostics switch; not a separate user setting.
+    gc_diagnostics: bool = False
 
 
 @dataclass
@@ -186,7 +195,7 @@ class FSDPDiffusionActorConfig(DiffusionActorConfig):
     # Training strategy: fsdp or fsdp2
     strategy: str = "fsdp"
     grad_clip: float = 1.0
-    fsdp_config: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
+    fsdp_config: DiffusionFSDPEngineConfig = field(default_factory=DiffusionFSDPEngineConfig)
     # Stage training inputs from CPU one timestep at a time.
     enable_timestep_staging: bool = False
 

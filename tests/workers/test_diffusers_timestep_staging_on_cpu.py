@@ -26,12 +26,11 @@ from omegaconf import OmegaConf
 from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
-from verl.workers.config import FSDPEngineConfig
 
 import verl_omni
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.utils.config import validate_config
-from verl_omni.workers.config import FSDPDiffusionActorConfig
+from verl_omni.workers.config import DiffusionFSDPEngineConfig, FSDPDiffusionActorConfig
 from verl_omni.workers.engine.fsdp import diffusers_impl
 from verl_omni.workers.engine_workers import ActorRolloutRefWorker
 
@@ -297,7 +296,7 @@ def test_hydra_actor_forwards_timestep_staging(strategy, enabled):
         )
     actor = omega_conf_to_dataclass(cfg)
     assert isinstance(actor, FSDPDiffusionActorConfig)
-    assert type(actor.engine) is FSDPEngineConfig
+    assert isinstance(actor.engine, DiffusionFSDPEngineConfig)
     assert actor.engine is actor.fsdp_config
     assert actor.enable_timestep_staging is enabled
     assert not hasattr(actor.engine, "enable_timestep_staging")
@@ -315,10 +314,10 @@ def test_public_trainer_override_reaches_actor_worker(enabled):
     validate_config(cfg)
     actor = omega_conf_to_dataclass(cfg.actor_rollout_ref.actor)
     assert actor.enable_timestep_staging is enabled
-    assert type(actor.engine) is FSDPEngineConfig
+    assert isinstance(actor.engine, DiffusionFSDPEngineConfig)
     ref = omega_conf_to_dataclass(cfg.actor_rollout_ref.ref)
     assert not ref.enable_timestep_staging
-    assert type(ref.engine) is FSDPEngineConfig
+    assert isinstance(ref.engine, DiffusionFSDPEngineConfig)
 
     received = []
 

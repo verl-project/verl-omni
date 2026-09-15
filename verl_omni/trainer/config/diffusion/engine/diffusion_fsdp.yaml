@@ -1,5 +1,5 @@
 # Target class for this configuration
-_target_: verl.workers.config.FSDPEngineConfig
+_target_: verl_omni.workers.config.diffusion.DiffusionFSDPEngineConfig
 
 # policy for wrapping the model
 wrap_policy:
