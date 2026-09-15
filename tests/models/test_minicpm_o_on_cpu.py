@@ -305,7 +305,14 @@ class _AudioModule(torch.nn.Module):
 
     def get_audio_embedding(self, data, chunk_length=-1, dummy=True):
         self.original_calls.append((data, chunk_length, dummy))
-        return [torch.zeros(1, 8, 1)]
+        if len(data.get("audio_features", [])) == 0:
+            return []  # the remote's empty branch never touches the lens
+        # The real remote's first statement inside the audio branch:
+        # torch.hstack over per-sample 1-D tensors. A nested-list lens
+        # contract violation raises here — the line the per-clip
+        # regression slipped past.
+        audio_feature_lens = torch.hstack(data["audio_feature_lens"])
+        return [[torch.zeros(int(length), 8)] for length in audio_feature_lens.tolist()]
 
 
 def _fresh_audio_module():
@@ -337,11 +344,19 @@ def test_patch_get_audio_embedding_runs_each_clip_alone():
     module.train()
     minicpm_o.patch_minicpm_get_audio_embedding(module)
     result = module.get_audio_embedding(
-        {"audio_features": torch.zeros(2, 80, 10), "audio_feature_lens": [[10], [6]]}, chunk_length=1.0
+        {"audio_features": torch.zeros(2, 80, 10), "audio_feature_lens": [torch.tensor([10]), torch.tensor([6])]},
+        chunk_length=1.0,
     )
-    # One exact-length [1, 80, len] clip per original call.
+    # One exact-length, contiguous [1, 80, len] clip per original call, with
+    # per-sample 1-D tensor lens (hstack-able, on the features' device).
     assert [call[0]["audio_features"].shape for call in module.original_calls] == [(1, 80, 10), (1, 80, 6)]
-    assert [call[0]["audio_feature_lens"] for call in module.original_calls] == [[[10]], [[6]]]
+    assert [call[0]["audio_features"].is_contiguous() for call in module.original_calls] == [True, True]
+    assert [torch.hstack(call[0]["audio_feature_lens"]).tolist() for call in module.original_calls] == [[10], [6]]
+    assert all(
+        isinstance(row, torch.Tensor) and row.device == torch.device("cpu")
+        for call in module.original_calls
+        for row in call[0]["audio_feature_lens"]
+    )
     assert len(result) == 2  # regrouped per row
 
     module.eval()
@@ -543,6 +558,25 @@ def test_patch_get_vision_embedding_resplits_the_packed_pseudo_row():
     assert torch.equal(result[0][:, 0, 0], torch.arange(5.0))  # flat span order preserved
 
 
+def test_patch_get_audio_embedding_delegates_non_tensor_features(caplog):
+    from verl_omni.models.transformers import minicpm_o
+
+    module = _fresh_audio_module()
+    module.train()
+    minicpm_o.patch_minicpm_get_audio_embedding(module)
+    features = ["clip-a", "clip-b"]  # not the stacked tensor form
+
+    with caplog.at_level("WARNING", logger="verl_omni.models.transformers.minicpm_o"):
+        module.get_audio_embedding(
+            {"audio_features": features, "audio_feature_lens": [torch.tensor([3]), torch.tensor([5])]},
+            chunk_length=1.0,
+        )
+
+    assert len(module.original_calls) == 1  # whole-batch delegation, no per-clip calls
+    assert module.original_calls[0][0]["audio_features"] == features
+    assert "delegating" in caplog.text
+
+
 def test_patch_get_audio_embedding_rejects_clip_len_disagreement():
     from verl_omni.models.transformers import minicpm_o
 
@@ -551,5 +585,6 @@ def test_patch_get_audio_embedding_rejects_clip_len_disagreement():
     minicpm_o.patch_minicpm_get_audio_embedding(module)
     with pytest.raises(ValueError, match="disagree"):
         module.get_audio_embedding(
-            {"audio_features": torch.zeros(2, 80, 10), "audio_feature_lens": [[10]]}, chunk_length=1.0
+            {"audio_features": torch.zeros(2, 80, 10), "audio_feature_lens": [torch.tensor([10])]},
+            chunk_length=1.0,
         )
