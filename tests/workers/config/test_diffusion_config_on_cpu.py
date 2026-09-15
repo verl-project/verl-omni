@@ -209,6 +209,10 @@ class TestDiffusionRolloutConfig:
         cfg = DiffusionRolloutConfig(name="vllm_omni")
         assert cfg.text_encoder_tp_size == 1
 
+    def test_request_level_packing_defaults(self):
+        cfg = DiffusionRolloutConfig(name="vllm_omni")
+        assert cfg.max_num_seqs == 8
+
     def test_text_encoder_tp_size_equal_to_tp_is_allowed(self):
         cfg = DiffusionRolloutConfig(name="vllm_omni", tensor_model_parallel_size=4, text_encoder_tp_size=4)
         assert cfg.text_encoder_tp_size == 4
