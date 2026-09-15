@@ -61,6 +61,22 @@ The NPU script requires the CANN software stack. Before running, set the `ASCEND
 bash examples/mixgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_mixgrpo_npu.sh
 ```
 
+**GPU, V1 trainer (sync mode, 4 GPUs):**
+
+A V1 counterpart is also provided, using `verl_omni.trainer.main_diffusion_v1`
+(TransferQueue + ReplayBuffer, `trainer.v1.trainer_mode=sync`). The MixGRPO
+sliding-window scheduler reads `global_steps` off the rollout sampling
+params; the V1 agent loop worker forwards it the same way the legacy V0
+rollout strategy does, so `sample_strategy=random` / `progressive` behave
+identically to the V0 recipe above. See
+{doc}`Diffusion V1 training <../../docs/start/diffusion_v1>` for setup
+(TransferQueue install, dataset prerequisites) shared with the FlowGRPO V1
+recipes.
+
+```bash
+bash examples/mixgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_mixgrpo_v1.sh
+```
+
 ### MixGRPO Tuning
 
 The default script uses the recommended "reference recipe" (10-step trajectory, 2-step SDE window, random strategy). To tune MixGRPO (e.g. for longer trajectories), adjust these variables in the script:
