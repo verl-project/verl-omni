@@ -1,0 +1,34 @@
+{
+  "global_step": 100,
+  "world_size": 2,
+  "files": [
+    {
+      "path": "data.pt",
+      "bytes": 7124
+    },
+    {
+      "path": "actor/model_world_size_2_rank_0.pt",
+      "bytes": 21282897653
+    },
+    {
+      "path": "actor/model_world_size_2_rank_1.pt",
+      "bytes": 21282897653
+    },
+    {
+      "path": "actor/optim_world_size_2_rank_0.pt",
+      "bytes": 846216450
+    },
+    {
+      "path": "actor/optim_world_size_2_rank_1.pt",
+      "bytes": 846216450
+    },
+    {
+      "path": "actor/extra_state_world_size_2_rank_0.pt",
+      "bytes": 15141
+    },
+    {
+      "path": "actor/extra_state_world_size_2_rank_1.pt",
+      "bytes": 15141
+    }
+  ]
+}

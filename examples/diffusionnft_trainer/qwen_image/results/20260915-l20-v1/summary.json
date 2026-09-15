@@ -1,0 +1,37 @@
+{
+  "run": "ocr-v1-100-12",
+  "initial_step": 23,
+  "final_step": 100,
+  "completed_training_steps_in_this_process": 77,
+  "training_images_in_this_process": 1232,
+  "validation": [
+    {
+      "step": 23,
+      "validation_reward_mean": 0.4986821790225804
+    },
+    {
+      "step": 40,
+      "validation_reward_mean": 0.5800898185698316
+    },
+    {
+      "step": 60,
+      "validation_reward_mean": 0.8906557611189783
+    },
+    {
+      "step": 80,
+      "validation_reward_mean": 0.8364970255643129
+    },
+    {
+      "step": 100,
+      "validation_reward_mean": 0.924743615090847
+    }
+  ],
+  "step_seconds_p50": 1352.8464275749866,
+  "step_seconds_p95": 2683.092906838376,
+  "steps_95_100_seconds_p50": 2777.765146126505,
+  "final_validation_seconds": 3085.6400575690204,
+  "all_logged_losses_finite": true,
+  "all_logged_grad_norms_finite_and_positive": true,
+  "process_exit_code": 0,
+  "completed_at_utc": "2026-09-15T13:08:59.100610+00:00"
+}
