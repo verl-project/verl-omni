@@ -17,11 +17,13 @@ import pytest
 
 from verl_omni.trainer.config.algorithm import DiffusionAlgoConfig
 from verl_omni.workers.config.diffusion.actor import (
+    DiffusionActorARConfig,
     DiffusionLossConfig,
     FSDPDiffusionActorConfig,
 )
-from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
+from verl_omni.workers.config.diffusion.model import DiffusionModelARConfig, DiffusionModelConfig
 from verl_omni.workers.config.diffusion.rollout import (
+    DiffusionARConfig,
     DiffusionPipelineConfig,
     DiffusionRolloutAlgoConfig,
     DiffusionRolloutConfig,
@@ -85,6 +87,66 @@ class TestDiffusionLossConfig:
     def test_dance_grpo_loss_mode(self):
         cfg = DiffusionLossConfig(loss_mode="dance_grpo")
         assert cfg.loss_mode == "dance_grpo"
+
+
+# ---------------------------------------------------------------------------
+# DiffusionARConfig / DiffusionModelARConfig / DiffusionActorARConfig
+# ---------------------------------------------------------------------------
+
+
+class TestDiffusionARConfig:
+    def test_defaults(self):
+        cfg = DiffusionARConfig()
+        assert cfg.temperature == pytest.approx(1.0)
+        assert cfg.top_k == 0
+        assert cfg.top_p == pytest.approx(1.0)
+        assert cfg.repetition_penalty == pytest.approx(1.0)
+        assert cfg.response_length == 1024
+
+    def test_custom_values(self):
+        cfg = DiffusionARConfig(
+            temperature=0.7,
+            top_k=50,
+            top_p=0.9,
+            repetition_penalty=1.05,
+            response_length=256,
+        )
+        assert cfg.temperature == pytest.approx(0.7)
+        assert cfg.top_k == 50
+        assert cfg.top_p == pytest.approx(0.9)
+        assert cfg.repetition_penalty == pytest.approx(1.05)
+        assert cfg.response_length == 256
+
+
+class TestDiffusionModelARConfig:
+    def test_defaults(self):
+        cfg = DiffusionModelARConfig()
+        assert cfg.use_shm is False
+        assert cfg.enable_gradient_checkpointing is True
+        assert cfg.lora_rank == 0
+        assert cfg.lora_alpha == 16
+        assert cfg.target_modules == "all-linear"
+        assert cfg.override_config == {}
+
+    def test_override_config(self):
+        cfg = DiffusionModelARConfig(
+            lora_rank=8,
+            override_config={"attn_implementation": "flash_attention_2"},
+        )
+        assert cfg.lora_rank == 8
+        assert cfg.override_config["attn_implementation"] == "flash_attention_2"
+
+
+class TestDiffusionActorARConfig:
+    def test_defaults(self):
+        cfg = DiffusionActorARConfig()
+        assert cfg.entropy_coeff == pytest.approx(0.0)
+        assert cfg.calculate_entropy is False
+
+    def test_custom_values(self):
+        cfg = DiffusionActorARConfig(entropy_coeff=0.01, calculate_entropy=True)
+        assert cfg.entropy_coeff == pytest.approx(0.01)
+        assert cfg.calculate_entropy is True
 
 
 # ---------------------------------------------------------------------------
@@ -166,10 +228,33 @@ class TestDiffusionSamplingConfig:
         cfg = DiffusionSamplingConfig()
         assert cfg.pipeline.num_inference_steps == 10
         assert cfg.seed == 42
+        assert cfg.m == 1
         assert isinstance(cfg.algo, DiffusionRolloutAlgoConfig)
+        assert isinstance(cfg.ar, DiffusionARConfig)
+        assert cfg.ar.response_length == 1024
 
 
 class TestDiffusionRolloutConfig:
+    def test_ar_rollout_defaults(self):
+        cfg = DiffusionRolloutConfig(name="vllm_omni")
+        assert cfg.m == 1
+        assert cfg.ar_calculate_log_probs is False
+        assert isinstance(cfg.ar, DiffusionARConfig)
+        assert isinstance(cfg.val_kwargs.ar, DiffusionARConfig)
+
+    def test_ar_rollout_overrides(self):
+        ar = DiffusionARConfig(temperature=0.5, response_length=128)
+        cfg = DiffusionRolloutConfig(
+            name="vllm_omni",
+            m=2,
+            ar_calculate_log_probs=True,
+            ar=ar,
+        )
+        assert cfg.m == 2
+        assert cfg.ar_calculate_log_probs is True
+        assert cfg.ar.temperature == pytest.approx(0.5)
+        assert cfg.ar.response_length == 128
+
     def test_prompt_embed_length_is_independent_from_encoder_length(self):
         pipeline = DiffusionPipelineConfig(max_sequence_length=256)
         cfg = DiffusionRolloutConfig(
@@ -254,6 +339,40 @@ class TestDiffusionModelConfigPolicyAdapters:
             model_cfg: DiffusionModelConfig = omega_conf_to_dataclass(cfg)
         assert tuple(model_cfg.policy_state_adapters) == ("default", "old")
 
+    def test_model_ar_config_via_hydra(self, tmp_path):
+        import json
+        import os
+        from unittest.mock import patch
+
+        from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
+
+        import verl_omni
+
+        model_dir = tmp_path / "dummy-model"
+        model_dir.mkdir()
+        (model_dir / "model_index.json").write_text(json.dumps({"_class_name": "QwenImagePipeline"}))
+
+        config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/diffusion/model")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            cfg = compose(
+                config_name="diffusion_model",
+                overrides=[
+                    f"path={model_dir}",
+                    f"tokenizer_path={model_dir}",
+                    "+load_tokenizer=false",
+                    "attn_backend=native",
+                    "algorithm=dual_grpo",
+                    "ar.lora_rank=8",
+                    "+ar.override_config.attn_implementation=flash_attention_2",
+                ],
+            )
+        with patch("verl_omni.workers.config.diffusion.model.resolve_model_local_dir", return_value=str(model_dir)):
+            model_cfg: DiffusionModelConfig = omega_conf_to_dataclass(cfg)
+        assert isinstance(model_cfg.ar, DiffusionModelARConfig)
+        assert model_cfg.ar.lora_rank == 8
+        assert model_cfg.ar.override_config["attn_implementation"] == "flash_attention_2"
+
     def test_h3_rejects_all_linear_lora_before_rollout_sync(self, tmp_path):
         import json
         import os
@@ -288,6 +407,37 @@ class TestDiffusionModelConfigPolicyAdapters:
                 omega_conf_to_dataclass(cfg)
 
 
+class TestDiffusionRolloutConfigHydra:
+    def test_rollout_ar_fields_via_hydra(self):
+        import os
+
+        from hydra import compose, initialize_config_dir
+        from verl.utils.config import omega_conf_to_dataclass
+
+        import verl_omni
+
+        config_dir = os.path.join(os.path.dirname(verl_omni.__file__), "trainer/config/diffusion/rollout")
+        with initialize_config_dir(config_dir=config_dir, version_base=None):
+            cfg = compose(
+                config_name="diffusion_rollout",
+                overrides=[
+                    "name=vllm_omni",
+                    "m=2",
+                    "ar_calculate_log_probs=true",
+                    "ar.temperature=0.7",
+                    "ar.response_length=512",
+                    "val_kwargs.ar.top_p=0.9",
+                ],
+            )
+        rollout_cfg: DiffusionRolloutConfig = omega_conf_to_dataclass(cfg)
+        assert rollout_cfg.m == 2
+        assert rollout_cfg.ar_calculate_log_probs is True
+        assert rollout_cfg.ar.temperature == pytest.approx(0.7)
+        assert rollout_cfg.ar.response_length == 512
+        assert rollout_cfg.val_kwargs.ar.top_p == pytest.approx(0.9)
+        assert rollout_cfg.val_kwargs.m == 2
+
+
 # ---------------------------------------------------------------------------
 # FSDPDiffusionActorConfig (instantiation via Hydra / omega_conf)
 # ---------------------------------------------------------------------------
@@ -316,6 +466,8 @@ class TestFSDPDiffusionActorConfig:
         assert actor_cfg.strategy == "fsdp"
         assert actor_cfg.ppo_micro_batch_size_per_gpu == 4
         assert isinstance(actor_cfg.diffusion_loss, DiffusionLossConfig)
+        assert isinstance(actor_cfg.ar, DiffusionActorARConfig)
+        assert actor_cfg.ar.calculate_entropy is False
 
     def test_engine_strategy_synced(self):
         """After __post_init__, engine.strategy must mirror actor.strategy."""
