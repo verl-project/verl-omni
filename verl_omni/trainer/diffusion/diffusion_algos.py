@@ -329,7 +329,7 @@ class FlowGRPOLoss(DiffusionLossFn):
             pg_clipfrac_higher = torch.mean((ratio - 1.0 > loss_cfg.clip_ratio).float())
             pg_clipfrac_lower = torch.mean((1.0 - ratio > loss_cfg.clip_ratio).float())
             ratio_mean = ratio.mean()
-            ratio_std = ratio.std()
+            ratio_std = ratio.std(unbiased=False)
 
         pg_metrics = {
             "actor/ppo_kl": ppo_kl.detach().item(),
