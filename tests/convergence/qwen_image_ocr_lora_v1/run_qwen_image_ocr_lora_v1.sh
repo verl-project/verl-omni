@@ -10,6 +10,7 @@
 # Perf (time_per_step, etc.) is recorded in report.json only — not a gate.
 # Val reward is logged every TEST_FREQ steps; per-step actor loss is in metrics.json.
 #
+# Attention: pin native / TORCH_SDPA (not product-default FA3).
 # Reference recipe:
 #   examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh
 set -xeuo pipefail
@@ -123,6 +124,7 @@ python3 "${SCRIPT_DIR}/run.py" \
     data.seed=42 \
     actor_rollout_ref.model.algorithm=flow_grpo \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
+    actor_rollout_ref.model.attn_backend=native \
     actor_rollout_ref.model.lora_rank=64 \
     actor_rollout_ref.model.lora_alpha=128 \
     actor_rollout_ref.model.target_modules="['to_q','to_k','to_v','to_out.0','add_q_proj','add_k_proj','add_v_proj','to_add_out','img_mlp.net.0.proj','img_mlp.net.2','txt_mlp.net.0.proj','txt_mlp.net.2']" \
@@ -141,6 +143,7 @@ python3 "${SCRIPT_DIR}/run.py" \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="${LOG_PROB_MICRO_BATCH_SIZE}" \
     actor_rollout_ref.rollout.tensor_model_parallel_size="${ROLLOUT_TP}" \
     actor_rollout_ref.rollout.name="${ENGINE}" \
+    actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA \
     actor_rollout_ref.rollout.n=16 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS / ROLLOUT_TP)) \
     actor_rollout_ref.rollout.load_format=safetensors \

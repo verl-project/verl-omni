@@ -4,6 +4,9 @@ Runs the production LoRA OCR recipe on **real** Qwen-Image / Qwen3-VL weights
 and the real OCR parquet for 100 steps on 8 GPUs. There is **no baseline**
 compare. Timing is written into the report only.
 
+Attention is pinned to ordinary PyTorch SDPA (`attn_backend=native`,
+`rollout_attn_backend=TORCH_SDPA`), not Flash Attention.
+
 ## Gates
 
 | Check | Metric | Fail when |
