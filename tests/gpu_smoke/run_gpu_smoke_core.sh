@@ -43,4 +43,8 @@ run_test 7 "diffusers ulysses sp" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
     torchrun --nproc_per_node="${NUM_GPUS}" --local-ranks-filter=0 tests/workers/test_diffusers_ulysses.py
 
+run_test 8 "FA3 fake backward contract" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    python3 -m pytest -s tests/workers/test_flash_attention_3_fake_backward.py
+
 gpu_smoke_summary
