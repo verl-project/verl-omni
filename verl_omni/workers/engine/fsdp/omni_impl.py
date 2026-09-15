@@ -42,15 +42,12 @@ logger = logging.getLogger(__name__)
 def _filter_ignored_wrap_targets(wrap_targets, root, ignored_names):
     """Drop wrap targets nested under adapter-ignored subtrees.
 
-    verl's ``_select_fsdp2_wrap_targets`` blanket-wraps every ``nn.Embedding``.
-    A target inside an ignored subtree — MiniCPM-o's Whisper
-    ``apm.embed_positions`` — would be claimed by its nested ``fully_shard``
-    call BEFORE the root call, and the root's ``ignored_params`` cannot
-    retroactively unmanage already-claimed params: the unit stays sharded
-    while the remote encoder reads ``self.embed_positions.weight`` directly
-    (never a module call), mixing plain tensors with DTensors in forward.
-    Dropping such targets leaves their params unclaimed so the root's ignored
-    set takes them.
+    verl blanket-wraps every ``nn.Embedding``; one inside an ignored subtree
+    (MiniCPM-o's Whisper ``apm.embed_positions``) would be claimed by a
+    nested ``fully_shard`` call before the root's ``ignored_params`` can
+    take it — the unit stays sharded while the remote encoder reads
+    ``self.embed_positions.weight`` directly, mixing plain tensors with
+    DTensors in forward.
     """
     if not ignored_names:
         return wrap_targets
@@ -277,20 +274,17 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
     def _build_fsdp_module(self, module):
         """FSDP2 build that keeps adapter-declared frozen towers unsharded.
 
-        Copied from verl@fefb0802 ``FSDPEngine._build_fsdp_module`` (fsdp2
-        branch) plus the wrap-target loop of ``verl.utils.fsdp_utils.apply_fsdp2``,
-        so the root ``fully_shard`` call can pass torch's formal
-        ``ignored_params`` for submodules that must not be FSDP-managed at all
-        (MiniCPM-o's frozen apm/vpm/resampler towers). Adapters declare them
-        via a ``get_fsdp_ignored_module_names`` classmethod; every adapter
-        without that method keeps verl's untouched behavior via ``super()``.
+        Copied from verl@fefb0802 ``FSDPEngine._build_fsdp_module`` plus the
+        wrap-target loop of ``apply_fsdp2``, so the root ``fully_shard`` can
+        pass torch's ``ignored_params`` (MiniCPM-o's frozen
+        apm/vpm/resampler towers). Adapters declare them via
+        ``get_fsdp_ignored_module_names``; adapters without the method keep
+        verl's behavior via ``super()``.
 
-        Maintenance note: re-diff this override against the verl pin at every
-        bump (upstream actively edits the copied code), and delete it once verl
-        ships an FSDP2 ignore config key — being coordinated with wtomin in
-        verl-omni#550. fsdp1-with-ignored-names fails closed; the FSDP1
-        state-dict tail of the parent method is fsdp1-only and intentionally
-        not copied.
+        Maintenance: re-diff against the verl pin at every bump, and delete
+        once verl ships an FSDP2 ignore config key (coordinated with wtomin
+        in #550). fsdp1-with-ignored-names fails closed; the parent's fsdp1
+        state-dict tail is intentionally not copied.
         """
         ignored_names: list[str] = []
         adapter_cls = getattr(self, "model_adapter_cls", None)
@@ -353,9 +347,8 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
                 ignored_params.add(param)
                 if param.requires_grad:
                     trainable_ignored.append(name)
-        # FSDP2 never communicates gradients for ignored params, so a trainable
-        # one would silently diverge across ranks — frozen-only is the contract
-        # the adapter ignore list relies on. Single-rank meshes have nothing to
+        # FSDP2 never communicates gradients for ignored params — a trainable
+        # one would silently diverge across ranks. Single-rank has nothing to
         # desync.
         if trainable_ignored and (self.device_mesh is None or self.device_mesh.size() > 1):
             raise ValueError(

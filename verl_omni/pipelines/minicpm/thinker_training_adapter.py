@@ -13,10 +13,9 @@
 # limitations under the License.
 """MiniCPM thinker training adapter.
 
-MiniCPM-V/o checkpoints are loaded through their Hugging Face remote-code
-``AutoModel`` entrypoint.  For offline DPO we keep only the multimodal
-understanding path and remove inference-only audio generation modules before
-FSDP wrapping.
+Loads MiniCPM-o through its HF remote-code ``AutoModel`` entrypoint and
+keeps the multimodal understanding path; inference-only audio generation
+modules are stripped before FSDP wrapping.
 """
 
 from __future__ import annotations
@@ -30,11 +29,8 @@ from verl_omni.pipelines.model_base import OmniModelBase
 
 _MINICPM_NO_SPLIT_MODULES = ["Qwen3DecoderLayer", "MiniCPMODecoderLayer"]
 # Keys routed into MiniCPMO's ``data`` dict instead of ``self.llm(**kwargs)``.
-# Most are consumed by MiniCPMO.forward / get_vllm_embedding /
-# get_omni_embedding; ``image_sizes`` is processor-emitted metadata no
-# MiniCPM-o forward consumes (the remote chat() likewise pops it) — it is
-# classified here so it can never reach the Qwen3 decoder, which rejects
-# unknown kwargs.
+# ``image_sizes`` is processor metadata no forward consumes; classifying it
+# here keeps it off the Qwen3 decoder, which rejects unknown kwargs.
 _MINICPM_DATA_KEYS = (
     "input_ids",
     "position_ids",
@@ -56,8 +52,7 @@ _MINICPM_REQUIRED_DATA_KEYS = (
     "image_bound",
     "audio_bounds",
 )
-# MiniCPMO.forward binds these before ``self.llm(..., **kwargs)``. The adapter wrap
-# must not forward engine copies or the LLM call raises TypeError.
+# MiniCPMO.forward binds these on the LLM call; forwarding engine copies raises.
 _MINICPM_LLM_BOUND_KEYS = ("input_ids", "position_ids", "inputs_embeds")
 
 
@@ -211,10 +206,8 @@ def _apply_media_bounds(data: dict[str, Any], model_config) -> None:
     Text-only batches keep the empty defaults from the split.
     """
     if not _media_in_data(data):
-        # Fail closed: expanded media spans in the ids with no surviving media
-        # features means the forward would run text-only over media positions
-        # (the exact silent failure of the remote convert_to_tensors nulling
-        # tensor leaves) while the rollout stayed multimodal.
+        # Fail closed: expanded media spans in the ids with no surviving
+        # features would silently train text-only over media positions.
         processor = getattr(model_config, "processor", None)
         if processor is not None:
             from verl_omni.pipelines.minicpm.prompt_parity import resolve_media_tokens
@@ -274,19 +267,13 @@ def _apply_media_bounds(data: dict[str, Any], model_config) -> None:
 def _merge_packed_media(data: dict[str, Any]) -> None:
     """Fold per-sample media into one pseudo-sample for the flattened batch.
 
-    The remote embedders keep the batch-row dimension: ``get_vision_embedding``
-    iterates ``data["pixel_values"]`` per row (each row a list of that row's
-    slices), and ``get_vllm_embedding`` / ``get_omni_embedding`` index
-    ``data["image_bound"][i]`` / ``data["audio_bounds"][i]`` per row. With the
-    packed layout ``bs == 1`` and that single row is the concatenation of all
-    samples — so pixel_values and the bounds must be ONE pseudo-row holding
-    every slice/span (sample-major, media order within, matching the id scan),
-    not flattened past the row dimension.
+    The remote embedders keep the batch-row dimension, and the packed
+    layout has ``bs == 1`` — so pixel_values and the bounds become ONE
+    pseudo-row holding every slice/span, sample-major to match the id
+    scan.
     """
-    # Per-example slice counts so the patched vision tower can re-split the
-    # packed pseudo-row and run each example's group alone (bs==1-canonical
-    # tower compute; batched kernels flip bf16 reduction order). Computed
-    # before the fold below flattens the per-example structure away.
+    # Per-example slice counts for the patched vision tower's re-split;
+    # must be taken before the fold flattens the structure away.
     data["packed_vision_slices"] = [len(sample) for sample in data["pixel_values"]]
     data["pixel_values"] = [[slice_ for sample in data["pixel_values"] for slice_ in sample]]
     tgt_sizes = [sample for sample in data["tgt_sizes"] if int(sample.numel()) > 0]
@@ -360,31 +347,23 @@ class MiniCPMThinkerAdapter(OmniModelBase):
 
     @classmethod
     def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
-        # apm/vpm/resampler are frozen under this adapter's LoRA setup (the
-        # exclude regex covers apm/vpm; the resampler matches no
-        # target_modules name), and their forwards are skipped for media-free
-        # micro-batches (patch_minicpm_get_vision/_audio_embedding). FSDP2
-        # issues collectives per managed module, and media presence is not
-        # DP-balanced, so sharded towers whose execution is data-dependent
-        # desync the NCCL collective stream across ranks (one op apart ->
-        # watchdog deadlock). Unsharded, the skips are collective-neutral.
-        # Cost: ~1.2 GB/rank replicated, mitigated by param_offload.
+        # All three towers are frozen (LoRA exclude / no target_modules match)
+        # and skipped for media-free micro-batches; media presence is not
+        # DP-balanced, so sharded data-dependent towers desync the FSDP2
+        # collective stream. Unsharded, the skips are collective-neutral
+        # (~1.2 GB/rank replicated, mitigated by param_offload).
         return ["apm", "vpm", "resampler"]
 
     @classmethod
     def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
         del micro_batch
         model_inputs = dict(model_inputs)
-        # The processor emits image_bound/audio_bounds in its own per-sample
-        # batch layout; verl's rmpad flattening invalidates those coordinates
-        # (and they trip the packed-batch tripwire in the split below). Bounds
-        # are re-derived from the actual training ids in _apply_media_bounds —
-        # the ids are the single source of truth — so the stale copies are
-        # dropped instead of trusted.
+        # rmpad flattening invalidates the processor's per-sample bounds
+        # coordinates; _apply_media_bounds re-derives them from the ids, so
+        # the stale copies are dropped instead of trusted.
         model_inputs.pop("image_bound", None)
         model_inputs.pop("audio_bounds", None)
-        # image_sizes is processor-emitted metadata that neither MiniCPMO.forward
-        # nor the LLM consumes; the remote chat() pops it before generate too.
+        # Processor metadata no forward consumes (the remote chat() pops it too).
         model_inputs.pop("image_sizes", None)
         data, llm_kwargs = split_minicpm_forward_kwargs(model_inputs)
         _apply_media_bounds(data, model_config)

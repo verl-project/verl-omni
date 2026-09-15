@@ -52,12 +52,9 @@ class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
     """Thinker-only rollout topology for MiniCPM-o 4.5 (image+audio in, text out).
 
     Registered under ``model_type="minicpmo_4_5"`` (the recipe's
-    ``pipeline_name``). ``thinker_only`` is the only implemented mode; the
-    Talker / Code2Wav stages are out of scope for RL training.
-
-    AVQA training keeps both encoders live: ``get_engine_hf_overrides``
-    returns no ``init_audio=False`` (the apm Whisper tower must build), and
-    the image multimodal limit stays above zero so vpm/resampler build.
+    ``pipeline_name``); ``thinker_only`` is the only mode — Talker/Code2Wav
+    are out of scope for RL. Both encoders stay live: AVQA prompts carry
+    image and audio.
     """
 
     @classmethod
@@ -94,11 +91,9 @@ class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
     def policy_logit_bias(cls, tokenizer) -> dict[int, float] | None:
         """Ban talker/codec tokens from thinker-only sampling.
 
-        MiniCPM-o 4.5 packs the Talker/Code2Wav vocabularies as added tokens
-        ABOVE the chat-control anchors (everything after ``<|im_end|>``); the
-        thinker occasionally samples them mid-response and corrupts the RL
-        training signal. Every added id above the anchor is banned except the
-        two answer tags the choice reward decodes.
+        The Talker/Code2Wav vocabularies sit above ``<|im_end|>`` and are
+        occasionally sampled mid-response, corrupting the RL signal; every
+        added id above the anchor is banned except the two answer tags.
         """
         added_vocab = tokenizer.get_added_vocab()
         anchor = tokenizer.convert_tokens_to_ids("<|im_end|>")
@@ -119,18 +114,15 @@ class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
         """Pin stage 0 to the plain vLLM LLM class, on the sync scheduler.
 
         ``MiniCPMO45OmniLLMForConditionalGeneration`` is a standard vLLM LLM
-        class: normal logprob support (the omni wrapper hardcodes
-        ``logprobs_tensors=None``) and thinker-LLM-only weights, which the
-        merged-LoRA sync path (`llm.` → `thinker.` remap) targets.
+        class: logprob support (the omni wrapper hardcodes
+        ``logprobs_tensors=None``) and the thinker-LLM-only weights the
+        merged-LoRA sync targets.
 
-        ``async_scheduling=False`` mirrors the upstream MiniCPM-o deploy
-        profiles: vllm-omni's AR async scheduler never forwards ``is_stale``
-        to the base scheduler, and frames that escape its drain predicates
-        after a zeroing event decrement an already-zero
-        ``num_output_placeholders`` (assert in vllm's async_scheduler.py) —
-        hit minutes into an RL rollout once KV-cache pressure starts
-        preempting. This key is engine-owned and flows from engine_extras
-        into the stage SchedulerConfig.
+        ``async_scheduling=False`` mirrors the upstream deploy profiles:
+        vllm-omni's AR async scheduler never forwards ``is_stale``, and
+        frames escaping its drain predicates after a zeroing event trip an
+        assert in vllm's async_scheduler.py once KV-cache pressure starts
+        preempting.
         """
         if pipeline_mode == "thinker_only" and stage_id == 0:
             return {

@@ -378,12 +378,10 @@ def _parity_call(self, text=None, images=None, audio=None, audios=None, **kwargs
 def _scalar_tree(value: Any) -> bool:
     """True when every recursive leaf of a container is a scalar.
 
-    Stacking scalars into one tensor is unambiguous (the stock contract:
-    ``input_ids`` / ``raw_lens``), but stacking non-scalar leaves changes
-    per-item semantics — a sample whose S same-shape slices stack into one
-    tensor counts as one slice downstream, tripping the media parity check
-    only for images whose slices are all identical (data-dependent, hours
-    to spot). Only pure-scalar containers may convert wholesale.
+    Stacking scalars is unambiguous (the stock contract: ``input_ids`` /
+    ``raw_lens``), but stacking same-shape tensor leaves collapses a
+    sample's slice list into one tensor — only pure-scalar containers may
+    convert wholesale.
     """
     if isinstance(value, list | tuple):
         return bool(value) and all(_scalar_tree(item) for item in value)
@@ -391,22 +389,13 @@ def _scalar_tree(value: Any) -> bool:
 
 
 def _safe_convert_to_tensors(self, tensor_type=None):
-    # Three remote/stock defects to survive:
-    # 1. The remote MiniCPMOBatchFeature override drops the `return value`
-    #    for already-tensor leaves, so a single convert_to_tensors("pt")
-    #    nulls every tensor feature — tensors therefore always pass through
-    #    unchanged.
-    # 2. The stock converter stacks every array-like leaf and raises on
-    #    ragged structures (its own docstring says so); MiniCPM's
-    #    pixel_values is a per-sample list of patch tensors with varying
-    #    shapes/counts, and verl converts the whole batch output at once —
-    #    so a leaf whose conversion raises keeps its container structure
-    #    and only its convertible parts tensorize.
-    # 3. transformers' ``as_tensor`` wrapper stacks a list of same-shape
-    #    tensors (plain ``torch.as_tensor`` refuses), so any container
-    #    holding tensor leaves must descend instead of converting — see
-    #    ``_scalar_tree``. Uniform scalar structures still convert exactly
-    #    as the stock contract promises.
+    # Survives three converter defects: (1) the remote BatchFeature override
+    # nulls already-tensor leaves — tensors always pass through; (2) the stock
+    # converter raises on ragged structures — MiniCPM's pixel_values is a
+    # per-sample list of patch tensors, so unconvertible containers keep
+    # their structure; (3) transformers' ``as_tensor`` wrapper stacks
+    # same-shape tensor lists — containers holding tensor leaves descend
+    # (see ``_scalar_tree``) instead of converting.
     if tensor_type is None:
         return self
 
@@ -439,15 +428,12 @@ def _safe_convert_to_tensors(self, tensor_type=None):
 def _upgrade_batch_feature(feature: Any) -> Any:
     """Fix the remote BatchFeature's tensor-nulling convert_to_tensors in place.
 
-    verl stores processor output via ``dict(feature.convert_to_tensors("pt"))``;
-    with the remote bug every already-tensor leaf maps to None, silently
-    wiping all media features so every training forward runs text-only while
-    the rollout stays multimodal. The same in-place class upgrade as the
-    processor itself: ``convert_to_tensors`` is re-pointed at a converter
-    that keeps the stock contract (tensors pass through, uniform structures
-    tensorize) and additionally survives the ragged media structures the
-    stock converter refuses. Non-BatchFeature results and classes that no
-    longer override the method pass through untouched.
+    The remote override maps already-tensor leaves to None, silently
+    wiping all media features — every training forward would run text-only
+    while the rollout stays multimodal. ``convert_to_tensors`` is
+    re-pointed at ``_safe_convert_to_tensors`` via an in-place class
+    upgrade; non-BatchFeature results and classes that no longer override
+    the method pass through untouched.
     """
     from transformers.feature_extraction_utils import BatchFeature
 
@@ -467,12 +453,9 @@ def bind_minicpm_processor(processor: Any) -> Any:
     """Upgrade a MiniCPM-o processor in place with the RL parity behaviors.
 
     A runtime subclass of the processor's own class (assigned via
-    ``__class__``) rather than a wrapping proxy: attribute access stays
-    native — inherited methods, properties, isinstance checks, and pickle/dill
-    probes behave exactly as the wrapped processor's do, with no
-    ``__getattr__`` delegation to guard or maintain. The overrides are
-    module-level functions so the dynamic class stays reference-picklable
-    for datasets/dill worker shipping.
+    ``__class__``) rather than a proxy: attribute access, isinstance, and
+    pickle/dill probes stay native, and module-level overrides keep the
+    dynamic class reference-picklable for dataset workers.
 
     - ``__call__``: adapts verl's ``audio=`` kwarg to the remote ``audios=``,
       normalizes empty media to None, collapses expanded spans found in text,

@@ -623,14 +623,12 @@ class OmniModelBase(ABC):
     def prepare_reward_decode_tokenizer(cls, tokenizer, model_config=None) -> None:
         """Apply decode-relevant tokenizer preparation on the reward side.
 
-        verl's reward loop builds its own tokenizer (``hf_tokenizer`` on the
-        model path) that never passes through ``configure_tokenizer``, so any
-        adapter-side fix the *decoded string* depends on — e.g. demoting
-        tokens that ``skip_special_tokens=True`` would strip — must be
-        re-applied on that instance. Override this hook when
-        ``configure_tokenizer`` mutates decode behavior; the omni_naive
-        reward manager calls it on the tokenizer it is about to decode with.
-        Default: no-op.
+        verl's reward loop builds its own tokenizer that never passes
+        through ``configure_tokenizer``, so decode-relevant fixes — e.g.
+        demoting tokens ``skip_special_tokens=True`` would strip — must be
+        re-applied on that instance. Override when ``configure_tokenizer``
+        mutates decode behavior; the omni_naive reward manager calls this
+        hook on the tokenizer it decodes with. Default: no-op.
 
         Args:
             tokenizer: The reward loop's tokenizer instance (mutated in place).
@@ -856,9 +854,8 @@ class OmniRolloutPipelineBase:
     def policy_logit_bias(cls, tokenizer) -> dict[int, float] | None:
         """Token ids the policy stage must never sample (id -> logit bias).
 
-        Multi-modal checkpoints register generation-side special tokens
-        (talker/codec vocabularies) that a thinker-only policy must not emit;
-        returning them with ``-inf`` bans them from sampling. The rollout
+        Generation-side special vocabularies (talker/codec) a thinker-only
+        policy must not emit; ``-inf`` bans them from sampling. The rollout
         strategy applies the mapping to the policy stage's SamplingParams.
         Default: no bias.
         """
