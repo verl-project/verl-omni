@@ -256,6 +256,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 "status": "success",
                 "prompt_len": prompt_len,
                 "response_len": 1,
+                "response_shape": tuple(int(dim) for dim in field["responses"].shape),
                 "seq_len": prompt_len + 1,
                 "global_steps": step,
                 "min_global_steps": step,

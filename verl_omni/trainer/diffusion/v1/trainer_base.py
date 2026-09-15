@@ -20,6 +20,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from numbers import Integral
 from pprint import pprint
 
 import numpy as np
@@ -80,6 +81,8 @@ from verl_omni.trainer.diffusion.rollout_correction import (
 )
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
 from verl_omni.trainer.diffusion.v1.tq_utils import (
+    diffusion_metric_tq_fields,
+    diffusion_persisted_tq_fields,
     diffusion_tq_batch_to_dataproto,
     put_dataproto_fields_to_tq,
     sort_diffusion_tq_keys,
@@ -472,7 +475,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         put_dataproto_fields_to_tq(
             batch_meta,
             data_for_tq,
-            fields=["old_log_probs", "advantages", "returns", "sample_level_scores", "sample_level_rewards"],
+            fields=diffusion_persisted_tq_fields("policy_gradient"),
         )
         return batch_meta
 
@@ -571,7 +574,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             put_dataproto_fields_to_tq(
                 batch_meta,
                 data_for_tq,
-                fields=["sample_level_scores", "sample_level_rewards"],
+                fields=diffusion_persisted_tq_fields("direct_preference"),
             )
             data = self._prepare_actor_batch(data, reward_tensor)
             data.batch["sample_level_rewards"] = data.batch["sample_level_scores"]
@@ -1533,7 +1536,13 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         return metric_dict
 
     def _compute_metrics(self, batch_meta: KVBatchMeta, metrics, timing_raw, global_steps, epoch):
-        data = diffusion_tq_batch_to_dataproto(batch_meta, pad_token_id=self.tokenizer.pad_token_id or 0)
+        data = diffusion_tq_batch_to_dataproto(
+            batch_meta,
+            pad_token_id=self.tokenizer.pad_token_id or 0,
+            select_fields=diffusion_metric_tq_fields(
+                "direct_preference" if self._is_direct_preference else "policy_gradient"
+            ),
+        )
         metrics.update({"training/global_step": global_steps, "training/epoch": epoch})
         metrics.update(compute_data_metrics_diffusion(batch=data))
         n_gpus = self._get_n_gpus_for_throughput()
@@ -1542,16 +1551,43 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             if "advantages" in data.batch
             else data.batch["sample_level_scores"].shape[0]
         )
-        responses = data.batch.get("responses")
-        real_images = 0
-        if isinstance(responses, torch.Tensor) and responses.numel() > 0 and responses.dim() >= 4:
-            real_images = int(responses.shape[0])
+        response_shape_tags = [tag for tag in batch_meta.tags if not tag.get("is_padding", False)]
+        response_shapes = []
+        for tag in response_shape_tags:
+            shape = tag.get("response_shape") if isinstance(tag, dict) else None
+            if (
+                not isinstance(shape, list | tuple)
+                or not shape
+                or any(isinstance(dim, bool) or not isinstance(dim, Integral) or dim <= 0 for dim in shape)
+            ):
+                response_shapes = []
+                break
+            response_shapes.append(tuple(int(dim) for dim in shape))
+        if (
+            response_shapes
+            and len(response_shapes) == len(response_shape_tags)
+            and len({len(s) for s in response_shapes}) == 1
+        ):
+            responses_shape = (
+                len(response_shapes),
+                *(max(dims) for dims in zip(*response_shapes, strict=True)),
+            )
+        else:
+            # Shape is observability metadata, not a training input. Historical
+            # and custom TQ writers may omit it; never re-read large responses.
+            responses_shape = None
+            logger.warning(
+                "Train step=%d: response_shape telemetry is unavailable; continuing without image-shape logging.",
+                global_steps,
+            )
+        metrics["training/tq_response_shape_unavailable"] = float(responses_shape is None)
+        real_images = responses_shape[0] if responses_shape is not None and len(responses_shape) >= 4 else "unknown"
         logger.info(
-            "Train step=%d: %d trajectories, %d real images, responses shape=%s",
+            "Train step=%d: %d trajectories, %s real images, responses shape=%s",
             global_steps,
             len(data),
             real_images,
-            tuple(responses.shape) if isinstance(responses, torch.Tensor) else None,
+            responses_shape,
         )
         metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw, num_images=num_images))
         metrics.update(compute_throughput_metrics_diffusion(batch=data, timing_raw=timing_raw, n_gpus=n_gpus))
