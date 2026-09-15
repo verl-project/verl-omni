@@ -17,7 +17,14 @@ Registered under the ``vllm.general_plugins`` entry point group (see
 pyproject.toml). vLLM calls each plugin at startup in every process,
 including freshly spawned engine cores — the only hook that reliably
 crosses process boundaries.
+
+Both fixes this plugin carries have landed upstream: the
+``embed_multimodal`` alias in vllm-omni#7384 and the bare-tensor forward
+return in vllm-omni#7517.
 """
+
+# TODO (mike): drop this file and its ``vllm.general_plugins`` entry point in
+# pyproject.toml at the next vllm-omni pin update — any pin past #7517 covers both.
 
 from __future__ import annotations
 
@@ -44,7 +51,7 @@ def register() -> None:
     working, and a MiniCPM-o run against an incompatible vllm-omni fails with
     its own error rather than breaking every engine. It also normalizes the
     class's forward return to hidden states (see _normalize_forward_return).
-    Upstream both fixes to vLLM-Omni and delete this plugin.
+    Landed upstream in vllm-omni#7384.
     """
     try:
         from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_llm import (
@@ -91,6 +98,8 @@ def _normalize_forward_return(model_cls) -> None:
         a plain tensor return (what a fixed upstream forward produces)
         passes through untouched. Only this LLM class is wrapped — the
         3-stage wrapper class keeps its tuple for the Talker bridge.
+
+    Landed upstream in vllm-omni#7517 (fixes #7497).
     """
     if getattr(model_cls, _FORWARD_NORM_ATTR, False):
         return
