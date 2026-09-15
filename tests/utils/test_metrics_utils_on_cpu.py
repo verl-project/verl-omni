@@ -11,36 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU tests for trainer metric aggregation helpers."""
+"""CPU tests for ``verl_omni.utils.metrics_utils``."""
 
 from __future__ import annotations
-
-import importlib.util
-import sys
-from pathlib import Path
 
 import pytest
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = REPO_ROOT / "verl_omni" / "utils" / "metrics_utils.py"
-
-
-def _load_metrics_utils():
-    spec = importlib.util.spec_from_file_location("verl_omni.utils.metrics_utils", MODULE_PATH)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load metrics utils from {MODULE_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-metrics_utils = _load_metrics_utils()
+from verl_omni.utils.metrics_utils import AgenticRewardMetrics, GroupedMetricMean
 
 
 def test_grouped_metric_mean_without_attribute_returns_overall_weighted_mean():
-    aggregator = metrics_utils.GroupedMetricMean(
+    aggregator = GroupedMetricMean(
         metric_keys=("reward_accuracy", "reward_margin"),
         group_attribute=None,
     )
@@ -56,7 +38,7 @@ def test_grouped_metric_mean_without_attribute_returns_overall_weighted_mean():
 
 
 def test_grouped_metric_mean_groups_by_attribute_and_keeps_overall():
-    aggregator = metrics_utils.GroupedMetricMean(
+    aggregator = GroupedMetricMean(
         metric_keys=("reward_accuracy", "reward_margin"),
         group_attribute="modality",
     )
@@ -86,7 +68,22 @@ def test_grouped_metric_mean_groups_by_attribute_and_keeps_overall():
 
 
 def test_grouped_metric_mean_requires_grouping_attribute_when_configured():
-    aggregator = metrics_utils.GroupedMetricMean(metric_keys=("loss",), group_attribute="modality")
+    aggregator = GroupedMetricMean(metric_keys=("loss",), group_attribute="modality")
 
     with pytest.raises(KeyError, match="Missing grouping attribute"):
         aggregator.update({"loss": 1.0}, weight=1)
+
+
+def test_agentic_reward_metrics_aggregate_mix_keys_only():
+    metrics = AgenticRewardMetrics.aggregate(
+        {
+            "reward_tool_call": torch.tensor([1.0, 1.0]),
+            "reward_correctness": torch.tensor([0.8, 0.6]),
+            "reward_done": torch.tensor([]),
+            "reward_plan": torch.tensor([0.4]),
+        }
+    )
+    assert metrics["agentic_reward/tool_call/mean"] == pytest.approx(1.0)
+    assert metrics["agentic_reward/correctness/min"] == pytest.approx(0.6)
+    assert "agentic_reward/done/mean" not in metrics
+    assert "agentic_reward/plan/mean" not in metrics
