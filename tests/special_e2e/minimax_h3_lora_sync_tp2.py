@@ -14,7 +14,10 @@
 
 from __future__ import annotations
 
+import argparse
 import os
+from contextlib import contextmanager
+from tempfile import TemporaryDirectory
 
 import torch
 import torch.nn as nn
@@ -138,19 +141,222 @@ def _check_text_encoder_tp(rank: int, tp_size: int, device: torch.device) -> Non
     print(f"rank={rank}: text_encoder_tp={tp_size} group={list(group.ranks)}, broadcast OK", flush=True)
 
 
+@contextmanager
+def _packed_matmul_context():
+    """Keep LoRA GEMM reductions comparable across serial and packed batch shapes."""
+    previous_backend = torch.backends.cuda.preferred_blas_library()
+    previous_reduction = (
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction,
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction_split_k,
+    )
+    try:
+        torch.backends.cuda.preferred_blas_library("cublaslt")
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (False, False)
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = previous_reduction
+        torch.backends.cuda.preferred_blas_library(previous_backend)
+
+
+def _check_packed_lora_matmul(device):
+    """Cover the real H3 projection dimensions that tiny models do not exercise."""
+    generator = torch.Generator(device=device).manual_seed(33)
+    lengths = [384, 384, 768, 768, 1152, 1152, 1536, 1536]
+    inputs = torch.randn(sum(lengths), 5376, device=device, dtype=torch.bfloat16, generator=generator)
+    a = torch.randn(64, 5376, device=device, dtype=torch.bfloat16, generator=generator) * 0.008
+    b = torch.randn(7168, 64, device=device, dtype=torch.bfloat16, generator=generator) * 0.0001
+
+    def project(value):
+        return torch.nn.functional.linear(torch.nn.functional.linear(value, a), b)
+
+    expected = torch.cat([project(sample) for sample in inputs.split(lengths)])
+    torch.testing.assert_close(project(inputs), expected, rtol=0, atol=0)
+    print(f"rank={torch.distributed.get_rank()}: H3 rank-64 variable-length LoRA GEMM parity: PASS", flush=True)
+
+
+def _setup_packed_models(device, mesh, sharded, backend):
+    from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy
+    from verl.utils.fsdp_utils import apply_fsdp2
+
+    from tests.pipelines.test_minimax_h3_packed_forward_on_cpu import _models
+    from verl_omni.pipelines.minimax_h3_diffusion_nft.diffusers_training_adapter import enable_packed_forward
+
+    serial, packed = _models(lora=True, checkpointing=True, install_packed=False)
+    for model in (serial, packed):
+        for name, parameter in model.named_parameters():
+            if not any(part in name for part in model._keep_in_fp32_modules):
+                parameter.data = parameter.data.to(torch.bfloat16)
+        model.to(device)
+        model.set_adapter("default")
+    if backend == "_flash_3_varlen_hub":
+        serial.set_attention_backend(backend)
+    packed.set_attention_backend(backend)
+    if sharded:
+        for model in (serial, packed):
+            base = model.base_model.model
+            kwargs = dict(mesh=mesh, mp_policy=MixedPrecisionPolicy(param_dtype=None, reduce_dtype=torch.float32))
+            apply_fsdp2(
+                model,
+                kwargs,
+                {
+                    "wrap_policy": {
+                        "transformer_layer_cls_to_wrap": [
+                            "MiniMaxH3TransformerBlock",
+                            "MiniMaxH3TokenRefinerBlock",
+                        ]
+                    }
+                },
+            )
+            assert all(
+                isinstance(block, FSDPModule)
+                for block in [*base.token_refiner.refiner_blocks, *base.transformer_blocks]
+            )
+    enable_packed_forward(packed)
+    return serial, packed
+
+
+def _check_packed_nft(device, mesh, sharded, backend):
+    from tests.pipelines.test_minimax_h3_packed_forward_on_cpu import _forward, _inputs, _loss
+
+    serial, packed = _setup_packed_models(device, mesh, sharded, backend)
+    inputs = {
+        key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in _inputs(serial).items()
+    }
+    optimizers = [
+        torch.optim.SGD((p for p in model.parameters() if p.requires_grad), lr=0.01) for model in (serial, packed)
+    ]
+    for step in range(2):
+        previous, reference = [], []
+        for model, enabled in ((serial, False), (packed, True)):
+            with torch.no_grad():
+                model.set_adapter("old")
+                previous.append(_forward(model, inputs, enabled))
+                with model.disable_adapter():
+                    reference.append(_forward(model, inputs, enabled))
+            model.set_adapter("default")
+        outputs = [_forward(serial, inputs, False), _forward(packed, inputs, True)]
+        for pair in (previous, reference, outputs):
+            torch.testing.assert_close(pair[0], pair[1], rtol=2e-2, atol=1e-2)
+        with torch.no_grad():
+            changed = {
+                key: value.clone() if isinstance(value, torch.Tensor) else value for key, value in inputs.items()
+            }
+            changed["video_rows"][1] += 9
+            isolated = _forward(packed, changed, True)
+            torch.testing.assert_close(isolated[[0, 2]], outputs[1][[0, 2]], rtol=2e-2, atol=1e-2)
+            assert not torch.allclose(isolated[1], outputs[1][1])
+        losses = [_loss(output, old, ref) for output, old, ref in zip(outputs, previous, reference, strict=True)]
+        torch.testing.assert_close(losses[0], losses[1], rtol=2e-2, atol=1e-2)
+        for loss in losses:
+            loss.backward()
+        serial_params = dict(serial.named_parameters())
+        compared = 0
+        for name, parameter in packed.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            expected, actual = serial_params[name].grad, parameter.grad
+            assert expected is not None and actual is not None, name
+            if sharded:
+                expected, actual = expected.full_tensor(), actual.full_tensor()
+            torch.testing.assert_close(expected.float(), actual.float(), rtol=5e-2, atol=1e-3, msg=name)
+            compared += 1
+        assert compared > 0
+        for optimizer in optimizers:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+        print(
+            f"rank={torch.distributed.get_rank()} backend={backend} fsdp2={sharded} step={step + 1} "
+            f"lora_gradients={compared}: PASS",
+            flush=True,
+        )
+
+
+def _check_packed_flow_grpo(device, mesh, sharded, backend, task):
+    from types import SimpleNamespace
+
+    from tests.pipelines.test_minimax_h3_packed_forward_on_cpu import _flow_batch, _run, _schedulers, _serial
+    from verl_omni.trainer.diffusion.diffusion_algos import FlowGRPOLoss
+    from verl_omni.workers.config.diffusion.actor import DiffusionLossConfig
+
+    serial, packed = _setup_packed_models(device, mesh, sharded, backend)
+    data = _flow_batch(serial, task).to(device)
+    schedulers = _schedulers(device)
+    optimizers = [
+        torch.optim.SGD((p for p in model.parameters() if p.requires_grad), lr=0.01) for model in (serial, packed)
+    ]
+    config = SimpleNamespace(diffusion_loss=DiffusionLossConfig(loss_mode="flow_grpo", clip_ratio=0.2))
+    for step in range(2):
+        with torch.no_grad():
+            serial.set_adapter("old")
+            old = _serial(serial, data, schedulers)[0]
+            serial.set_adapter("default")
+        outputs = [_serial(serial, data, schedulers), _run(packed, data, True, schedulers)]
+        for a, b in zip(*outputs, strict=True):
+            torch.testing.assert_close(a, b, rtol=2e-2, atol=1e-3)
+        with torch.no_grad():
+            changed = data.clone()
+            changed["prompt_embeds"][1] += 10
+            isolated = _run(packed, changed, True, schedulers)
+            for a, b in zip(isolated, outputs[1], strict=True):
+                torch.testing.assert_close(a[[0, 2]], b[[0, 2]], rtol=2e-2, atol=1e-3)
+        losses = [
+            FlowGRPOLoss.compute_loss(
+                old_log_prob=old,
+                log_prob=output[0],
+                advantages=torch.tensor([0.6, -0.8, 0.3], device=device),
+                config=config,
+            )[0]
+            for output in outputs
+        ]
+        torch.testing.assert_close(*losses, rtol=2e-2, atol=1e-3)
+        for loss in losses:
+            loss.backward()
+        expected_params = dict(serial.named_parameters())
+        expected_grads, actual_grads = [], []
+        for name, parameter in packed.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            a, b = expected_params[name].grad, parameter.grad
+            assert a is not None and b is not None, name
+            if sharded:
+                a, b = a.full_tensor(), b.full_tensor()
+            expected_grads.append(a.float().flatten())
+            actual_grads.append(b.float().flatten())
+        a, b = torch.cat(expected_grads), torch.cat(actual_grads)
+        assert a.norm() > 0 and torch.isfinite(b).all()
+        relative_error = ((a - b).norm() / a.norm()).item()
+        assert relative_error < 0.05, relative_error
+        for optimizer in optimizers:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+        print(
+            f"rank={torch.distributed.get_rank()} FlowGRPO task={task} fsdp2={sharded} step={step + 1} "
+            f"LoRA relative gradient error={relative_error:.6f}: PASS",
+            flush=True,
+        )
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Tiny H3 LoRA sync and optional packed-forward numerical checks.")
+    parser.add_argument(
+        "--check-packed-forward", action="store_true", help="Also check NFT/FlowGRPO backward and FSDP2."
+    )
+    parser.add_argument(
+        "--attn-backend", choices=["_flash_3_varlen_hub", "torch_varlen", "native"], default="_flash_3_varlen_hub"
+    )
+    args = parser.parse_args()
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
     tp_size = int(os.environ["WORLD_SIZE"])
     torch.cuda.set_device(local_rank)
 
-    with set_current_vllm_config(VllmConfig()):
+    with TemporaryDirectory(prefix="tiny-minimax-h3-") as model_dir, set_current_vllm_config(VllmConfig()):
         init_distributed_environment(local_rank=local_rank)
         initialize_model_parallel(tensor_model_parallel_size=tp_size)
         try:
             device = torch.device(f"cuda:{local_rank}")
             od_config = OmniDiffusionConfig(
-                model="tiny-minimax-h3-lora-regression",
+                model=model_dir,
                 tf_model_config=_vllm_transformer_config(),
                 dtype=torch.float32,
                 parallel_config=DiffusionParallelConfig(tensor_parallel_size=tp_size),
@@ -280,6 +486,19 @@ def main() -> None:
                 flush=True,
             )
             _check_text_encoder_tp(rank, tp_size, device)
+            if args.check_packed_forward:
+                from torch.distributed.device_mesh import init_device_mesh
+
+                mesh = init_device_mesh("cuda", (tp_size,))
+                with _packed_matmul_context():
+                    _check_packed_lora_matmul(device)
+                    for sharded in (False, True):
+                        _check_packed_nft(device, mesh, sharded, args.attn_backend)
+                        for task in ("t2va", "fl2va", "ref2va"):
+                            _check_packed_flow_grpo(device, mesh, sharded, args.attn_backend, task)
+                torch.distributed.barrier()
+                if rank == 0:
+                    print("MiniMax H3 packed forward + varlen backward + FSDP2: PASS", flush=True)
             torch.distributed.barrier()
             if rank == 0:
                 print(f"MiniMax H3 LoRA TP={tp_size} actor-to-rollout regression: PASS", flush=True)

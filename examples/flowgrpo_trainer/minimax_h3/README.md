@@ -296,10 +296,9 @@ parameter/optimizer offload because reference presentations can be much longer
 than T2VA prompts.
 
 `NUM_GPUS` must be divisible by `ROLLOUT_TP`. `TEXT_ENCODER_TP` cannot exceed
-`ROLLOUT_TP`; H3 supports text-encoder TP sizes 1, 2, 4, and 8. The recipe uses
-an Actor micro-batch of 1 because samples with different packed
-video/audio/text layouts cannot share one H3 forward. A larger micro-batch is
-valid only when every sample has the same packed layout.
+`ROLLOUT_TP`; H3 supports text-encoder TP sizes 1, 2, 4, and 8. The recipe uses an Actor micro-batch of 1 by default. The packed Actor forward
+also supports larger micro-batches with different prompt lengths or reference
+layouts, subject to the limits below.
 
 MiniMax H3 requires a named `ASPECT_RATIO`, one of `21:9`, `16:9`, `4:3`,
 `1:1`, `3:4`, or `9:16`. The explicit height and width select the generated
@@ -335,6 +334,49 @@ Common environment overrides are:
 | `TOTAL_TRAINING_STEPS` | Number of trainer steps |
 
 Extra Hydra overrides may be appended to either launcher command.
+
+## Experimental packed Actor forward
+
+The T2VA, FL2VA, and Ref2VA adapters use the shared checkpoint-compatible H3
+forward installed by the existing DiffusionNFT training adapter, together with
+DiffusionNFT. No extra config class or enable switch is required. For FA3, use:
+
+```bash
+actor_rollout_ref.model.attn_backend=_flash_3_varlen_hub \
+actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
+actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
+actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2
+```
+
+Each micro-batch makes one transformer call. FA3 uses separate per-sample
+boundaries for the text refiner and main DiT, preserving each sample's positions,
+modality tags, and timesteps. Reference layouts and prompt lengths may differ;
+target video/audio row counts must match. Target rows are gathered and scheduler
+replay is batched by original scheduler step, then restored to sample order.
+Video/audio schedules, fixed reference rows, target-only log-probabilities, and
+FlowGRPO loss are unchanged. The same path also serves old-policy log-probability
+recomputation.
+
+The standard model configuration is unchanged; the former dense forward is
+retained only as a numerical/performance-test baseline.
+`native` provides a padded SDPA numerical reference (paired with rollout `TORCH_SDPA`).
+PyTorch `torch_varlen` is available only in the standalone H3 numerical test.
+FA3 requires a compatible
+training kernel, provisioned ahead of time on offline hosts (see the
+[shared H3 packed-forward notes](../../diffusionnft_trainer/minimax_h3/README.md#experimental-packed-actor-forward)).
+Sequence parallelism and VeOmni are unsupported. This does not enable dynamic
+batching, change DP scheduling, or batch rollout requests; normal micro-batch
+size divisibility rules still apply.
+
+For same-layout inputs, compare performance against the existing **dense batch**,
+not an artificial serial loop. Different-layout correctness uses per-sample replay
+as the reference. NFT speedups do not establish FlowGRPO speedups.
+
+```bash
+python -m pytest -q tests/pipelines/test_minimax_h3_packed_forward_on_cpu.py
+NUM_GPUS=2 bash tests/special_e2e/run_minimax_h3_lora_sync_tp2.sh \
+  --check-packed-forward --attn-backend _flash_3_varlen_hub
+```
 
 ## Current limitations
 

@@ -84,10 +84,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     def _post_init(self, cuda_visible_devices: str) -> None:
         """Run strategy post-init and preserve the replica device list."""
         if getattr(self.config, "full_determinism", False):
-            from verl.workers.engine.utils import enable_full_determinism
+            from verl_omni.workers.rollout.vllm_rollout.utils import enable_rollout_determinism
 
             rollout_seed = getattr(self.config, "seed", 42)
-            enable_full_determinism(seed=rollout_seed)
+            enable_rollout_determinism(seed=rollout_seed)
             os.environ["VERL_SEED"] = str(rollout_seed)
             os.environ["VLLM_BATCH_INVARIANT"] = "1"
         # Set before vllm-omni narrows per-stage visible devices; stage workers

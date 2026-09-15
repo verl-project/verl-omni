@@ -18,4 +18,4 @@ if not hasattr(diffusers, "MiniMaxH3Transformer3DModel"):
 PY
 
 python3 -m torch.distributed.run --standalone --nproc_per_node="${NUM_GPUS}" \
-    tests/special_e2e/minimax_h3_lora_sync_tp2.py
+    tests/special_e2e/minimax_h3_lora_sync_tp2.py "$@"
