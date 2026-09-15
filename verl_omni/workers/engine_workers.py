@@ -745,7 +745,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # Diffusion distillation lives inside diffusion_loss; distillation_ppo_loss is token-level only.
             if is_diffusion:
                 self.loss_fn = partial(diffusion_loss, config=actor_config)
-            elif actor_model_type == "omni_model" and actor_config.trainer_type == "direct_preference":
+            elif (
+                actor_model_type == "omni_model"
+                and getattr(actor_config, "trainer_type", "policy_gradient") == "direct_preference"
+            ):
                 self.loss_fn = partial(omni_loss, config=actor_config)
             elif self.distillation_enabled:
                 self.loss_fn = partial(
