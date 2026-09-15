@@ -21,6 +21,8 @@ from verl.utils.reward_score import default_compute_score as _upstream_default_c
 
 from verl_omni.utils.reward_score import default_compute_score_image
 
+from .media import _reward_extra_info
+
 
 def _validate_visual_response(response_visual, config, *, is_validate: bool) -> None:
     rollout_config = config.actor_rollout_ref.rollout
@@ -63,10 +65,7 @@ class VisualRewardManager(RewardManagerBase):
         _validate_visual_response(response_visual, self.config, is_validate=data_item.meta_info.get("validate", False))
         data_source = data_item.non_tensor_batch["data_source"]
         ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
-        extra_info = data_item.non_tensor_batch.get("extra_info", {})
-        tool_extra_fields = data_item.non_tensor_batch.get("tool_extra_fields", None)
-        if tool_extra_fields is not None:
-            extra_info.update(tool_extra_fields.items())
+        extra_info = _reward_extra_info(data_item)
 
         num_turns = data_item.non_tensor_batch.get("__num_turns__", None)
         rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})

@@ -212,6 +212,9 @@ async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(mo
         num_turns=2,
         extra_fields={
             "condition_image_latents": torch.zeros(1, 4096, 64),
+            "audio": torch.zeros(1, 1, 16),
+            "audio_sample_rate": 32_000,
+            "media_kind": "video",
             "img_shapes": img_shapes,
             "unrelated_metadata": "do-not-forward",
         },
@@ -233,9 +236,16 @@ async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(mo
     )
 
     field = captured["fields"][0]
-    assert field["extra_fields"]["img_shapes"] == img_shapes
+    assert field["extra_fields"] == {
+        "img_shapes": img_shapes,
+        "media_kind": "video",
+        "audio_sample_rate": 32_000,
+        "min_global_steps": 3,
+        "max_global_steps": 3,
+    }
     assert "unrelated_metadata" not in field["extra_fields"]
     assert field["condition_image_latents"].shape == (4096, 64)
+    assert field["audio"].shape == (1, 16)
 
 
 def test_tq_batch_restores_non_tensor_trajectory_metadata(monkeypatch):
@@ -249,7 +259,10 @@ def test_tq_batch_restores_non_tensor_trajectory_metadata(monkeypatch):
         "kv_batch_get",
         lambda **kwargs: {
             "all_latents": torch.zeros(2, 4, 1024, 64),
-            "extra_fields": [{"img_shapes": value} for value in img_shapes],
+            "extra_fields": [
+                {"img_shapes": img_shapes[0], "media_kind": "video", "audio_sample_rate": 32_000},
+                {"img_shapes": img_shapes[1]},
+            ],
         },
     )
 
@@ -258,6 +271,8 @@ def test_tq_batch_restores_non_tensor_trajectory_metadata(monkeypatch):
     )
 
     assert data.non_tensor_batch["img_shapes"].tolist() == img_shapes
+    assert data.non_tensor_batch["media_kind"].tolist() == ["video", None]
+    assert data.non_tensor_batch["audio_sample_rate"].tolist() == [32_000, None]
     assert tu.get(data.to_tensordict(), "img_shapes") == img_shapes
 
 
