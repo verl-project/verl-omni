@@ -476,6 +476,10 @@ class OmniModelBase(ABC):
     The registry key is ``(architecture, stage)`` where *architecture*
     matches the HF config ``architectures[0]`` and *stage* is
     ``thinker``, ``talker``, or ``all``.
+
+    Set ``auto_model_class`` to a Transformers auto/model class with
+    ``from_pretrained``. Leave it ``None`` to keep the default
+    ``AutoModelForMultimodalLM`` path.
     """
 
     _registry: dict[tuple[str, str], type["OmniModelBase"]] = {}
@@ -620,6 +624,16 @@ class OmniModelBase(ABC):
         pass
 
     @classmethod
+    def build_module(cls, model_config, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
+        """Optionally load the trainable module for this omni architecture.
+
+        Return ``None`` to use ``AutoModelForMultimodalLM``. This method is
+        skipped when ``auto_model_class`` is set; the engine loads through
+        that class instead.
+        """
+        return None
+
+    @classmethod
     def configure_model(cls, module, model_config):
         """Configure the model after loading and before FSDP wrapping.
 
@@ -643,6 +657,15 @@ class OmniModelBase(ABC):
                 delattr(module, submod_name)
 
         return module
+
+    @classmethod
+    def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
+        """Submodule names that must not be ``fully_shard``'d (FSDP2 leftover params).
+
+        Names match a path component, so ``apm`` also covers ``base_model.model.apm``.
+        """
+        del model_config
+        return []
 
     @classmethod
     def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
