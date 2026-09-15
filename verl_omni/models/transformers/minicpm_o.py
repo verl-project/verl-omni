@@ -431,6 +431,17 @@ def patch_minicpm_get_audio_embedding(module) -> None:
 
         import torch
 
+        # Per-clip execution needs the stacked (n_clips, 80, frames) tensor
+        # the split normalization produces; any other container falls back
+        # to the remote batched path with a warning instead of guessing.
+        if not isinstance(features, torch.Tensor):
+            logger.warning(
+                "MiniCPM per-clip audio path received %s audio_features; delegating the whole "
+                "batch to the remote batched path.",
+                type(features).__name__,
+            )
+            return original(data, chunk_length=chunk_length, dummy=dummy, **kwargs)
+
         lens_raw = data.get("audio_feature_lens") or []
         flat_lens = [int(length) for row in lens_raw for length in torch.as_tensor(row).reshape(-1).tolist()]
         if len(flat_lens) != len(features):
@@ -439,8 +450,10 @@ def patch_minicpm_get_audio_embedding(module) -> None:
             clip_embeddings = []
             for index, length in enumerate(flat_lens):
                 clip_data = dict(data)
-                clip_data["audio_features"] = features[index : index + 1, :, :length]
-                clip_data["audio_feature_lens"] = [[length]]
+                clip_data["audio_features"] = features[index : index + 1, :, :length].contiguous()
+                # The remote hstacks per-sample 1-D tensors; nested python
+                # lists raise TypeError inside get_audio_embedding.
+                clip_data["audio_feature_lens"] = [torch.tensor([length], dtype=torch.long, device=features.device)]
                 clip_embeddings.append(original(clip_data, chunk_length=chunk_length, dummy=dummy, **kwargs)[0][0])
         grouped = []
         offset = 0
