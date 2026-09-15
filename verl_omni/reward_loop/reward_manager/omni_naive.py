@@ -26,28 +26,19 @@ from verl.utils.fs import copy_to_local
 class OmniNaiveRewardManager(NaiveRewardManager):
     """Naive reward manager with the model adapter's reward-decode preparation.
 
-    Why (reward loop's second tokenizer vs the adapter's):
-        verl's reward loop builds its own tokenizer (``hf_tokenizer`` on the
-        model path) that never passes through the model adapter's
-        ``configure_tokenizer``, so any adapter-side fix the decoded string
-        depends on is missing in the reward worker — e.g. MiniCPM-o 4.5
-        registers ``<answer>``/``</answer>`` as special tokens and the
-        manager's ``skip_special_tokens=True`` decode strips them, zeroing
-        every choice-reward score while the answers are correct. This manager
-        resolves the model adapter from ``actor_rollout_ref.model`` (same
-        architecture key ``OmniModelConfig`` uses) and applies its
-        ``prepare_reward_decode_tokenizer`` hook on the exact tokenizer it
-        decodes with. The hook defaults to a no-op, so recipes whose decodes
-        are already correct (e.g. Qwen3-Omni) can keep the stock ``naive``
-        manager, and models gain reward-decode fixes in their adapter instead
-        of a per-model manager class.
+    verl's reward loop builds its own tokenizer that never passes through
+    the adapter's ``configure_tokenizer``, so adapter-side decode fixes are
+    missing there — e.g. MiniCPM-o 4.5's special ``<answer>`` tags are
+    stripped by ``skip_special_tokens=True`` decode and every choice-reward
+    score is 0. This manager resolves the adapter from
+    ``actor_rollout_ref.model`` and applies its
+    ``prepare_reward_decode_tokenizer`` hook (default no-op; correctly
+    decoding models keep stock ``naive``).
 
-    Registration must fire at ``verl_omni`` package-import time (this
-    package's ``__init__``, imported by ``verl_omni/__init__``): the trainer
+    Registration must fire at ``verl_omni`` package import: the trainer
     resolves ``reward.reward_manager.name`` eagerly in the task-runner
-    process (``RewardLoopManager.__init__`` during ``_setup``), before any
-    reward worker imports the custom reward function — registering from the
-    reward-fn module dies at launch with ``Unknown reward manager``.
+    during ``_setup``, before any reward worker imports the custom reward
+    function — registering from the reward-fn module dies at launch.
     """
 
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):

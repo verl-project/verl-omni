@@ -72,9 +72,8 @@ class ARStrategy(OmniStrategyBase):
         """Load the policy-stage tokenizer from wherever the server keeps it.
 
         ``model_config.tokenizer`` is either an already-loaded tokenizer
-        object (this vLLM resolves it during engine init) or a repo id /
-        path; treating a loaded object's repr as a repo id silently loads
-        nothing, so both forms are handled explicitly.
+        object or a repo id/path; treating a loaded object's repr as a repo
+        id silently loads nothing, so both forms are handled explicitly.
         """
         candidate = getattr(self.server.model_config, "tokenizer", None)
         if candidate is None:
@@ -345,8 +344,7 @@ class ARStrategy(OmniStrategyBase):
             sampling_params.setdefault("seed", getattr(self.server.config, "seed", 42))
         logit_bias = self._policy_logit_bias()
         if logit_bias:
-            # Adapter bans (e.g. talker/codec tokens) are a correctness
-            # requirement, so they win over any user-configured bias entry.
+            # Adapter bans are a correctness requirement; user bias entries survive.
             sampling_params["logit_bias"] = {**sampling_params.get("logit_bias", {}), **logit_bias}
         policy_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         if self._rollout_output_modalities is not None:

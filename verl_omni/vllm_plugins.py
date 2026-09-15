@@ -36,22 +36,14 @@ logger = logging.getLogger(__name__)
 def register() -> None:
     """Alias the new-style ``embed_multimodal`` onto MiniCPM-o's engine class.
 
-    Why (vllm-omni's MiniCPM-o 4.5 class vs vLLM >= 0.28):
-        ``MiniCPMO45OmniLLMForConditionalGeneration`` implements the old-style
-        ``get_multimodal_embeddings``; vLLM 0.28's encoder-cache profiling and
-        runtime encoder paths call ``embed_multimodal`` directly, and the
-        ``SupportsMultiModal`` default is an abstract stub returning ``None`` —
-        every MiniCPM-o engine process died there. The old-style method already
-        satisfies the new API's contract, so the alias points the new name at
-        it. An in-process alias does not survive engine-core spawns, hence this
-        plugin.
-
-    The plugin runs in every vLLM process of the environment, so a missing or
-    reshaped minicpmo_4_5 module is logged and skipped — unrelated models keep
-    working, and a MiniCPM-o run against an incompatible vllm-omni fails with
-    its own error rather than breaking every engine. It also normalizes the
-    class's forward return to hidden states (see _normalize_forward_return).
-    Landed upstream in vllm-omni#7384.
+    The class implements the old-style ``get_multimodal_embeddings``; vLLM
+    0.28's encoder paths call ``embed_multimodal`` directly and the
+    ``SupportsMultiModal`` default is a stub returning ``None`` — every
+    MiniCPM-o engine process died there. The old-style method already
+    satisfies the new contract, so the alias points the new name at it; an
+    in-process alias does not survive engine-core spawns, hence this plugin.
+    A missing or reshaped minicpmo_4_5 module is logged and skipped so
+    unrelated models keep working. Landed upstream in vllm-omni#7384.
     """
     try:
         from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_llm import (
@@ -83,21 +75,14 @@ _FORWARD_NORM_ATTR = "_verl_omni_forward_normalized"
 def _normalize_forward_return(model_cls) -> None:
     """Return hidden states from the LLM engine class's forward.
 
-    Why (vllm-omni forward tuple vs the AR runner's consumption):
-        ``MiniCPMO45OmniLLMForConditionalGeneration.forward`` returns
-        ``(text_inputs_embeds, hidden_states)`` — the raw input EMBEDDINGS
-        first (minicpmo_4_5_omni_llm.py: "return text_inputs_embeds,
-        hidden_states.unsqueeze(0) ..."). The AR runner's
-        ``extract_multimodal_outputs`` takes tuple element [0] as the hidden
-        states, so logits were computed by applying the LM head to raw input
-        embeddings; an input embedding strongly predicts its own token, and
-        every rollout degenerated into confident self-repetition loops
-        truncated at the response cap — the zero-reward signature of the
-        whole bring-up. The wrapper returns only the hidden-states element,
-        squeezed to the ``[num_tokens, hidden]`` layout the runner expects;
-        a plain tensor return (what a fixed upstream forward produces)
-        passes through untouched. Only this LLM class is wrapped — the
-        3-stage wrapper class keeps its tuple for the Talker bridge.
+    The class's forward returns ``(text_inputs_embeds, hidden_states)``
+    — embeddings first — while the AR runner's ``extract_multimodal_outputs``
+    consumes tuple element [0] as the hidden states: logits were computed
+    from raw input embeddings and every rollout degenerated into
+    self-repetition. The wrapper returns only the hidden-states element
+    squeezed to ``[num_tokens, hidden]``; a plain tensor return passes
+    through untouched. Only this LLM class is wrapped — the 3-stage
+    wrapper keeps its tuple for the Talker bridge.
 
     Landed upstream in vllm-omni#7517 (fixes #7497).
     """

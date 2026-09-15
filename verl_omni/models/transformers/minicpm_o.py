@@ -13,43 +13,9 @@
 # limitations under the License.
 """Runtime shims for MiniCPM-o Hugging Face remote-code models.
 
-Keep MiniCPM-o remote-code patches in this file. Call sites should import
-helpers from here rather than reimplementing them.
-
-Transformers version (remote code ~4.10 vs transformers >= 5)
--------------------------------------------------------------
-1. ``post_init()`` / ``all_tied_weights_keys``
-   Transformers 5 requires every ``PreTrainedModel.__init__`` to call ``post_init()``,
-   which sets ``all_tied_weights_keys`` before weight loading. MiniCPM-o remote
-   ``MiniCPMO`` only declares ``_tied_weights_keys`` and skips ``post_init()``, so
-   ``from_pretrained`` fails. ``patch_remote_auto_model_init`` wraps the dynamic
-   class so ``__init__`` ends with ``post_init()`` when the attribute is missing.
-   Apply this *before* ``from_pretrained``. No-op on transformers < 5.
-
-2. WhisperAttention return value and cache kwarg
-   MiniCPM-o's remote ``MiniCPMWhisperEncoderLayer`` still does::
-
-       hidden_states, attn_weights, past_key_values = self.self_attn(..., past_key_value=...)
-
-   Current ``WhisperAttention.forward`` returns ``(hidden_states, attn_weights)``
-   and takes ``past_key_values`` (plural). Training still runs the audio encoder
-   (including dummy wavs), so the unpack crashes. ``patch_remote_whisper_self_attn``
-   wraps each ``apm`` layer's ``self_attn`` after load: pad a 2-tuple to a 3-tuple
-   and rename the cache kwarg. Apply this *after* ``from_pretrained``.
-
-3. ``get_vision_embedding``
-   Remote MiniCPM-o still forwards a dummy image when ``pixel_values`` is empty so
-   unused encoder parameters stay in the autograd graph. LoRA ``exclude_modules``
-   already skips adapters on ``vpm``, so that dummy is wasted compute and would
-   put vision tensors on the backward path. Empty ``pixel_values`` skip the
-   encoder; real images still go through the original method under
-   ``torch.no_grad()``.
-
-4. ``get_vllm_embedding``
-   Remote ``get_vllm_embedding`` does ``vllm_embedding[i].scatter_(...)``. PEFT
-   ``enable_input_require_grads`` makes the embed_tokens output a leaf, so that
-   view in-place op fails. Clone each row, use out-of-place ``scatter``, then
-   ``stack``.
+Keep MiniCPM-o remote-code patches in this file; each patch documents its
+own trigger. The ``patch_remote_*`` entry points run before
+``from_pretrained``, the rest after the model is loaded.
 """
 
 from __future__ import annotations
@@ -89,13 +55,9 @@ def patch_remote_auto_model_init(
 ) -> None:
     """Wrap a remote auto-model class so ``post_init()`` runs when missing.
 
-    Why (transformers 4.x remote code vs transformers >= 5):
-        Transformers 5 expects every ``PreTrainedModel`` to call ``post_init()`` at
-        the end of ``__init__``, which sets ``all_tied_weights_keys``. Remote MiniCPM-o
-        (written for ~4.10) only declares ``_tied_weights_keys`` and omits
-        ``post_init()``, so ``from_pretrained`` fails during weight loading.
-
-    Call this before ``AutoModel.from_pretrained``.
+    The remote code (transformers ~4.10) omits ``post_init()``, which
+    transformers >= 5 requires to set ``all_tied_weights_keys``.
+    Call before ``AutoModel.from_pretrained``.
     """
     if not _needs_transformers5_compat() or not trust_remote_code:
         return
@@ -142,35 +104,18 @@ def wrap_model_init_with_post_init(model_cls: type) -> None:
 def patch_remote_siglip_flash_attn_support(model_path: str, *, trust_remote_code: bool, config: Any = None) -> None:
     """Alias the remote SigLIP's transformers-4.x FA2 flag to the >= 5 name.
 
-    Why (remote code written for 4.x vs transformers >= 5 dispatch):
-        The remote ``modeling_navit_siglip.py`` declares
-        ``_supports_flash_attn_2 = True`` (the 4.x class flag) on
-        ``SiglipVisionTransformer`` and implements ``SiglipFlashAttention2``
-        natively — the per-layer choice is driven by
-        ``config._attn_implementation``, which transformers 5 still honors.
-        Transformers 5 renamed the class flag to ``_supports_flash_attn`` and
-        its init-time dispatch hard-rejects ``flash_attention_2`` when only
-        the old flag is present, crashing ``MiniCPMO``'s vision-tower
-        construction before any weights load. The alias copies the remote's
-        own declaration only — it never enables support the remote did not
-        claim.
+    The remote ``modeling_navit_siglip.py`` implements FA2 natively but
+    declares the 4.x flag ``_supports_flash_attn_2``; transformers 5's
+    init-time dispatch hard-rejects ``flash_attention_2`` without the
+    renamed flag. The alias copies the remote's own declaration only.
 
-    Why resolve via auto_map (local-path cache-hash divergence):
-        For local model paths, transformers derives the dynamic-module cache
-        directory from the file-set closure of the *requested* module.
-        Requesting ``modeling_navit_siglip`` directly hashes only the siglip
-        file set, while ``AutoModel.from_pretrained`` loads
-        ``modeling_minicpmo`` whose closure spans the full remote file set —
-        two cache dirs, two distinct ``SiglipVisionTransformer`` class
-        objects, and the alias landed on the orphan while init-time dispatch
-        rejected FA2 on the class the model actually imports. Resolving the
-        auto_map ``AutoModel`` entry — the same entry the loader uses —
-        lands in the loader's namespace; the scan then covers that main
-        modeling module and the home module of every ``PreTrainedModel``
-        subclass bound there. Hub-hosted checkpoints share one commit-hash
-        namespace and never diverge.
+    The class is resolved through the auto_map ``AutoModel`` entry — the
+    entry the loader itself uses. For local model paths, requesting the
+    siglip module directly lands in a different dynamic-module cache dir
+    than ``from_pretrained``, and the alias would sit on an orphaned class
+    copy the model never imports.
 
-    Call this before ``AutoModel.from_pretrained``. No-op on transformers < 5.
+    Call before ``AutoModel.from_pretrained``. No-op on transformers < 5.
     """
     if not _needs_transformers5_compat() or not trust_remote_code:
         return
@@ -223,11 +168,9 @@ def _pad_whisper_self_attn_output(output, past_key_values=None):
 def wrap_whisper_self_attn_forward(attn_module) -> None:
     """Make ``self_attn`` always return ``(hidden_states, attn_weights, past_key_values)``.
 
-    Why (transformers 4.x remote code vs current WhisperAttention):
-        MiniCPM-o's remote ``MiniCPMWhisperEncoderLayer`` still unpacks three values
-        and passes ``past_key_value`` (singular). Newer WhisperAttention returns
-        ``(hidden_states, attn_weights)`` and takes ``past_key_values``. Training
-        still runs the audio encoder, so the unpack fails even without real audio.
+    The remote ``MiniCPMWhisperEncoderLayer`` (4.x era) unpacks three values
+    and passes ``past_key_value`` (singular); current WhisperAttention
+    returns two and takes ``past_key_values``.
     """
     if attn_module is None or getattr(attn_module, _WHISPER_ATTN_PATCHED_ATTR, False):
         return
@@ -267,22 +210,16 @@ def _has_pixel_slices(pixel_values) -> bool:
 
 
 def patch_minicpm_get_vision_embedding(module) -> None:
-    """Run the vision tower per sample; skip dummies and autograd.
+    """Run the vision tower once per sample, under no_grad.
 
-    Why (batched tower kernels vs the packed actor's canonical compute):
-        Remote ``get_vision_embedding`` flattens every sample's slices
-        into one padded batch through ``vpm`` + ``resampler``; the batched
-        bf16 kernels flip their reduction order at small batch sizes, and
-        the 36-layer LLM amplifies the ulp difference into ~0.1-nat
-        interior logprob deviations — a per-sequence parity leak that
-        tracks media presence, not the model. Running the remote method
-        once per sample (and, for the packed pseudo-row, once per example
-        via the ``packed_vision_slices`` stash from
-        ``_merge_packed_media``) makes each group's compute identical to
-        the bs==1 realization, with outputs concatenated in flat span
-        order. Frozen under LoRA, the tower also stays under
-        ``torch.no_grad()`` and empty rows skip the encoder instead of
-        forwarding the remote's training dummy.
+    The remote method batches every sample's slices through ``vpm`` +
+    ``resampler``; batched bf16 kernels flip their reduction order at
+    small batch sizes, and the LLM amplifies the ulp difference into
+    interior logprob deviations. Each sample's slice group — re-split per
+    example for the packed pseudo-row via the ``packed_vision_slices``
+    stash — runs the tower alone (the bs==1 realization), outputs
+    concatenated in flat span order. The tower is frozen under LoRA, so
+    it stays out of autograd and empty rows skip the encoder.
     """
     original = getattr(module, "get_vision_embedding", None)
     if original is None or getattr(module, _VISION_EMB_PATCH_ATTR, False):
@@ -339,13 +276,12 @@ def _embed_tokens_module(module):
 
 
 def patch_minicpm_get_vllm_embedding(module) -> None:
-    """Clone text embeddings before vision scatter so LoRA backward is legal.
+    """Clone text embeddings before the vision scatter.
 
-    Why (remote MiniCPM-o ``scatter_`` vs PEFT input grads):
-        Remote ``get_vllm_embedding`` does ``vllm_embedding[i].scatter_(...)``.
-        PEFT ``enable_input_require_grads`` makes the embed_tokens output a leaf,
-        so that view in-place op fails. Clone each row, use out-of-place
-        ``scatter``, then ``stack``.
+    The remote ``get_vllm_embedding`` scatters in place on the
+    embed_tokens output, which PEFT's ``enable_input_require_grads``
+    turns into a leaf — the in-place view op fails. Out-of-place
+    ``scatter`` on cloned rows instead.
     """
     if getattr(module, _VLLM_EMB_PATCH_ATTR, False):
         return
@@ -390,22 +326,16 @@ def patch_minicpm_get_vllm_embedding(module) -> None:
 
 
 def patch_minicpm_get_audio_embedding(module) -> None:
-    """Run the Whisper tower per clip; skip the dummy for audio-free batches.
+    """Run the Whisper tower once per clip on its exact-length slice.
 
-    Why (batched clips vs the bs==1 tower realization):
-        Remote ``get_audio_embedding`` pads all clips of the batch to one
-        ``max_frames`` and masks with mel-frame lengths compared against
-        post-conv2 positions — the padding mask under-masks by ~2x, so
-        padded frames of shorter clips leak into attention; equal-length
-        batched clips still deviate from single-clip tower outputs.
-        Running the remote method once per clip on its exact-length
-        ``[1, 80, len]`` slice leaves no padded frames (the broken mask is
-        inert at exact length) and reproduces the bs==1 realization per
-        clip, regrouped into the remote's per-row list-of-clips layout.
-        For audio-free training batches the frozen tower is skipped
-        entirely — one zero tensor shaped like a single pooled audio token
-        preserves ``get_omni_embedding``'s ``audio_embeddings[0].mean() * 0``
-        anchor contract without running Whisper on a dummy wav.
+    The remote method pads all clips to one ``max_frames`` and masks with
+    mel-frame lengths compared against post-conv2 positions — the mask
+    under-masks by ~2x, and even equal-length batched clips deviate from
+    single-clip outputs. One exact-length ``[1, 80, len]`` clip per call
+    leaves no padded frames and reproduces the bs==1 realization,
+    regrouped into the remote's per-row layout. Audio-free training
+    batches skip the frozen tower and return one zero token, preserving
+    ``get_omni_embedding``'s ``audio_embeddings[0].mean() * 0`` anchor.
     """
     apm = getattr(module, "apm", None)
     llm = getattr(module, "llm", None)
@@ -473,17 +403,12 @@ _OMNI_EMB_PATCH_ATTR = "_verl_omni_get_omni_embedding_patched"
 def patch_minicpm_get_omni_embedding(module) -> None:
     """Splice audio embeddings per row in the non-streaming omni path.
 
-    Why (remote non-streaming branch writes only the last row):
-        The remote ``get_omni_embedding`` dedents the audio splice out of
-        its ``for i in range(bs)`` loop — the loop only rebinds
-        ``audio_embs``/``bounds`` and the splice block below it references
-        the leaked ``i`` — so for any bs>1 batch only the LAST row's audio
-        spans are written; earlier rows silently keep placeholder-token
-        embeddings. Packed training (bs==1) is inert, but the unpacked
-        actor path computes every row but the last wrong. The patched path
-        re-implements the splice per row (one-to-one and flat layouts, the
-        remote's length-mismatch check, clone-before-write); streaming
-        and audio-free batches delegate to the original.
+    The remote ``get_omni_embedding`` dedents its audio splice out of the
+    ``for i in range(bs)`` loop — only the LAST row of a bs>1 batch is
+    ever written; earlier rows keep placeholder embeddings. Inert on the
+    packed bs==1 path the recipe ships. The patched path re-implements
+    the splice per row (both remote layouts, the length-mismatch check,
+    clone-before-write); streaming and audio-free batches delegate.
     """
     original = getattr(module, "get_omni_embedding", None)
     if original is None or getattr(module, _OMNI_EMB_PATCH_ATTR, False):
@@ -533,24 +458,14 @@ _ANSWER_TAG_TOKENS = ("<answer>", "</answer>")
 def keep_answer_tags_when_decoding(tokenizer) -> bool:
     """Demote ``<answer>`` / ``</answer>`` from special to plain added tokens.
 
-    Why (MiniCPM-o 4.5 special flags vs verl's reward decode):
-        The checkpoint registers the answer tags as ``special: true`` while
-        ``<think>`` / ``</think>`` are plain. verl's reward manager decodes
-        responses with ``skip_special_tokens=True``, which strips exactly the
-        answer tags — ``choice_reward`` then never sees an ``<answer>`` payload
-        and scores every response 0 (the bring-up zero-reward symptom). Only
-        the decode skip filter consults the special flag: token ids, atomic
-        encoding, and generation are unchanged, and the tags now survive the
-        scored string exactly as the prompt shows them.
-
-        The flag lives in the Rust backend's added-token registry; Python-side
-        mutation (``added_tokens_decoder[id].special = False``) is cosmetic
-        and re-adding the token does not flip the backend. The fix rebuilds
-        the backend from its own serialization with the two flags flipped —
-        no disk roundtrip, ids stable. Returns whether anything was demoted;
-        tokens already non-special (e.g. fixed upstream) are a no-op. A
-        special-but-unfixable tokenizer raises rather than silently zeroing
-        rewards again.
+    The checkpoint registers them ``special: true``; verl's reward decode
+    uses ``skip_special_tokens=True`` and strips exactly the two tags,
+    zeroing every choice-reward score. Only the decode skip filter
+    consults the flag — ids, atomic encoding, and generation are
+    unchanged. The flag lives in the Rust backend's registry, so the fix
+    rebuilds it with the two flags flipped. Returns whether anything was
+    demoted; already-plain tags are a no-op, an unfixable tokenizer
+    raises rather than silently zeroing rewards.
     """
     decoder = getattr(tokenizer, "added_tokens_decoder", None) or {}
     needs_demotion = any(
