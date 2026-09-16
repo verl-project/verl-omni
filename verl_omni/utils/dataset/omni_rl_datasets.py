@@ -21,16 +21,77 @@ import numpy as np
 from omegaconf import DictConfig
 from verl.utils.dataset.rl_dataset import RLHFDataset
 
-# Whisper mel-frame stride at 16kHz; keep in sync with the feature extractor's
-# hop_length so actor recompute and vllm-omni rollout frame audio identically.
-DEFAULT_AUDIO_HOP_LENGTH = 160
+__all__ = [
+    "MiniCPMORLHFDataset",
+    "QwenOmniRLHFDataset",
+    "pad_audio_to_hop_multiple",
+]
 
-# MiniCPM-o's Whisper feature extractor runs at 16kHz mono float32.
-DEFAULT_SAMPLING_RATE = 16000
+
+class QwenOmniRLHFDataset(RLHFDataset):
+    """Adapt Qwen's multimodal media loader to verl's RL dataset interface.
+
+    verl turns parquet media columns into structured messages. Qwen's
+    ``process_mm_info`` then resolves image/audio/video paths into the media
+    objects expected by the Qwen3-Omni processor and vLLM-Omni rollout.
+    """
+
+    @classmethod
+    def _process_multi_modal_info(
+        cls,
+        messages: list[dict],
+        image_patch_size: int,
+        config: DictConfig | dict | None,
+    ) -> tuple[list[Any] | None, list[Any] | None, list[Any] | None]:
+        from qwen_omni_utils import process_mm_info
+
+        # Qwen returns (audios, images, videos); verl expects
+        # (images, videos, audios). AVQA uses a standalone audio track rather
+        # than extracting audio from a video.
+        audios, images, videos = process_mm_info(messages, use_audio_in_video=False)
+        # vllm-omni pads audio to a hop multiple before feature extraction while
+        # the HF side drops the tail frame; pad first so both sides expand the
+        # prompt to the same audio token count.
+        if audios is not None:
+            audios = [pad_audio_to_hop_multiple(a) for a in audios]
+        return images, videos, audios
 
 
-def pad_audio_to_hop_multiple(audio: np.ndarray, hop_length: int = DEFAULT_AUDIO_HOP_LENGTH) -> np.ndarray:
-    """Zero-pad audio to a multiple of hop_length (no-op when already aligned)."""
+class MiniCPMORLHFDataset(RLHFDataset):
+    """MiniCPM-o media loader for verl's RL dataset interface.
+
+    Walks the same structured content blocks verl builds from ``<image>`` /
+    ``<audio>`` parquet markers (no Qwen dependency) and loads RGB images plus
+    16kHz mono waveforms — the formats MiniCPMO's processor and vLLM-Omni's
+    MiniCPM input mapper accept.
+    """
+
+    @classmethod
+    def _process_multi_modal_info(
+        cls,
+        messages: list[dict],
+        image_patch_size: int,
+        config: DictConfig | dict | None,
+    ) -> tuple[list[Any] | None, list[Any] | None, list[Any] | None]:
+        mm_kwargs = dict(config or {}).get("mm_processor_kwargs") or {}
+        sampling_rate = mm_kwargs.get("sampling_rate")
+        # 16000 Hz is MiniCPM-o's Whisper rate; decoding at another rate would
+        # desync the waveform from the mel frames the processor expects.
+        sampling_rate = 16000 if sampling_rate is None else int(sampling_rate)
+        images, audios = _load_minicpm_media(messages, sampling_rate)
+        # vllm-omni pads audio to a hop multiple before feature extraction while
+        # the HF side drops the tail frame; pad first so both sides expand the
+        # prompt to the same audio token count.
+        return images, None, [pad_audio_to_hop_multiple(a) for a in audios]
+
+
+def pad_audio_to_hop_multiple(audio: np.ndarray, hop_length: int = 160) -> np.ndarray:
+    """Zero-pad audio to a multiple of ``hop_length`` (no-op when already aligned).
+
+    160 is Whisper's mel-frame stride at 16kHz; keep it in sync with the feature
+    extractor's hop_length so actor recompute and vllm-omni rollout frame audio
+    identically.
+    """
     pad_length = -audio.shape[-1] % hop_length
     if pad_length:
         return np.pad(audio, (0, pad_length))
@@ -83,56 +144,3 @@ def _load_minicpm_media(messages: list[dict], sampling_rate: int) -> tuple[list[
             elif kind == "video":
                 raise ValueError("MiniCPMORLHFDataset does not support video rows; AVQA training is image+audio only.")
     return images, audios
-
-
-class QwenOmniRLHFDataset(RLHFDataset):
-    """Adapt Qwen's multimodal media loader to verl's RL dataset interface.
-
-    verl turns parquet media columns into structured messages. Qwen's
-    ``process_mm_info`` then resolves image/audio/video paths into the media
-    objects expected by the Qwen3-Omni processor and vLLM-Omni rollout.
-    """
-
-    @classmethod
-    def _process_multi_modal_info(
-        cls,
-        messages: list[dict],
-        image_patch_size: int,
-        config: DictConfig | dict | None,
-    ) -> tuple[list[Any] | None, list[Any] | None, list[Any] | None]:
-        from qwen_omni_utils import process_mm_info
-
-        # qwen_omni_utils returns (audios, images, videos). AVQA uses a
-        # standalone audio track rather than extracting audio from a video.
-        audios, images, videos = process_mm_info(messages, use_audio_in_video=False)
-        if audios is not None:
-            audios = [pad_audio_to_hop_multiple(a) for a in audios]
-        return images, videos, audios
-
-
-class MiniCPMORLHFDataset(RLHFDataset):
-    """MiniCPM-o media loader for verl's RL dataset interface.
-
-    Walks the same structured content blocks verl builds from ``<image>`` /
-    ``<audio>`` parquet markers (no Qwen dependency) and loads RGB images plus
-    16kHz mono waveforms — the formats MiniCPMO's processor and vLLM-Omni's
-    MiniCPM input mapper accept.
-    """
-
-    @classmethod
-    def _process_multi_modal_info(
-        cls,
-        messages: list[dict],
-        image_patch_size: int,
-        config: DictConfig | dict | None,
-    ) -> tuple[list[Any] | None, list[Any] | None, list[Any] | None]:
-        mm_kwargs = dict(config or {}).get("mm_processor_kwargs") or {}
-        # The processor's own rate: decoding at a different one would desync the
-        # waveform from the mel frames the processor expects.
-        sampling_rate = mm_kwargs.get("sampling_rate")
-        sampling_rate = DEFAULT_SAMPLING_RATE if sampling_rate is None else int(sampling_rate)
-        images, audios = _load_minicpm_media(messages, sampling_rate)
-        # vllm-omni pads audio to a hop multiple before feature extraction while
-        # the HF side drops the tail frame; pad first so both sides expand the
-        # prompt to the same audio token count.
-        return images, None, [pad_audio_to_hop_multiple(a) for a in audios]
