@@ -17,6 +17,7 @@ import time
 
 import torch
 from verl.utils.device import get_visible_devices_keyword
+from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 from verl.workers.rollout.vllm_rollout.utils import VLLM_LORA_INT_ID, VLLM_LORA_NAME, VLLM_LORA_PATH, set_death_signal
 from vllm_omni.diffusion.worker.diffusion_worker import CustomPipelineWorkerExtension
 
@@ -26,23 +27,21 @@ from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_han
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+# AR engine classes needing the MoE weight-loader patch; add new MoE omni models here.
+SUPPORTED_MOE_MODELS: list[type] = []
+try:
+    from vllm_omni.model_executor.models.qwen3_omni.qwen3_omni import Qwen3OmniMoeForConditionalGeneration
 
-def _apply_moe_weight_loader_patch(model) -> None:
-    """Apply verl's MoE weight-loader patch, tolerating unresolvable engines.
+    SUPPORTED_MOE_MODELS.append(Qwen3OmniMoeForConditionalGeneration)
+except ImportError:
+    pass
 
-    verl resolves the inner model (``.model`` / ``.language_model``) before
-    its MoE-relevance check and raises ``ValueError`` for engines that nest
-    their LLM differently (MiniCPM-o's engine class uses ``.llm``); the
-    patch is a no-op for dense models anyway, so exactly that error is
-    swallowed.
-    """
-    from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 
-    try:
-        patch_vllm_moe_model_weight_loader(model)
-    except ValueError as exc:
-        if "valid 'model' or 'language_model' attribute" not in str(exc):
-            raise
+def _is_moe_engine(model) -> bool:
+    """True when the (possibly ACLGraph-wrapped) engine class is whitelisted."""
+    if hasattr(model, "runnable") and "ACLGraphWrapper" in str(type(model)):
+        model = model.runnable
+    return isinstance(model, tuple(SUPPORTED_MOE_MODELS))
 
 
 def _split_visible_devices(value: str) -> list[str]:
@@ -111,6 +110,12 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         if model is not None and model_config is not None and hasattr(model, "load_weights"):
             return model, model_config
         return None
+
+    def monkey_patch_model(self) -> None:
+        # startup MoE weight-loader patch; re-attached per sync in update_weights_from_ipc
+        standard = self._get_standard_weight_model_and_config()
+        if standard is not None and _is_moe_engine(standard[0]):
+            patch_vllm_moe_model_weight_loader(standard[0])
 
     def update_weights_from_ipc(
         self,
@@ -214,11 +219,9 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 # model.load_weights (no per-bucket finalize), then run the single
                 # post-load processing pass once all buckets are received.
                 model, model_config = standard
-                # Re-attach weight_loader on Ascend FusedMoE params via verl's
-                # built-in patch (handles ACLGraph unwrap + SUPPORTED_MOE_MODELS
-                # whitelist, which Qwen3-Omni is registered into via
-                # patch_register_vllm_moe_model_weight_loader).
-                _apply_moe_weight_loader_patch(model)
+                # re-attach the MoE weight loader
+                if _is_moe_engine(model):
+                    patch_vllm_moe_model_weight_loader(model)
 
                 # On Ascend, process_weights_after_loading transposes w13/w2 for
                 # fused-MoE compute; revert it so load_weights sees checkpoint-shape

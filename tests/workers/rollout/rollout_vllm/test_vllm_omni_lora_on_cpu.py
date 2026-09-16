@@ -36,26 +36,89 @@ def test_diffusion_lora_stacks_follow_the_worker_device():
     assert layer.lora_b_stacked[0].device.type == "meta"
 
 
-def test_moe_weight_loader_patch_value_error_is_swallowed(monkeypatch):
-    # verl raises for engines whose inner model does not resolve (MiniCPM-o
-    # nests its LLM as .llm); the shared call site swallows exactly that.
+class _FakeMoeEngine:
+    """Stands in for a SUPPORTED_MOE_MODELS entry; the gate only isinstance-checks."""
+
+
+class _ACLGraphWrapper:
+    """Mirrors the Ascend wrapper: holds the real model under ``runnable``."""
+
+    def __init__(self, runnable):
+        self.runnable = runnable
+
+
+def _patch_calls(monkeypatch):
+    """Point the rollout utils at a recording patch fn and a 1-class whitelist."""
     import verl_omni.workers.rollout.vllm_rollout.utils as rollout_utils
 
-    def raising_patch(model):
-        raise ValueError("The provided model does not have a valid 'model' or 'language_model' attribute.")
+    calls = []
 
-    monkeypatch.setattr("verl.utils.vllm.patch.patch_vllm_moe_model_weight_loader", raising_patch)
-    rollout_utils._apply_moe_weight_loader_patch(object())  # must not raise
+    def recording_patch(model):
+        calls.append(model)
+
+    monkeypatch.setattr(rollout_utils, "patch_vllm_moe_model_weight_loader", recording_patch)
+    monkeypatch.setattr(rollout_utils, "SUPPORTED_MOE_MODELS", [_FakeMoeEngine])
+    return rollout_utils, calls
 
 
-def test_moe_weight_loader_patch_other_errors_propagate(monkeypatch):
+def test_is_moe_engine_whitelists_by_outer_class(monkeypatch):
+    # Outer-class membership only — a nested MoE inner model does not count
+    # (the inner-model probe is exactly the verl behavior we avoid).
+    rollout_utils, _ = _patch_calls(monkeypatch)
+    assert rollout_utils._is_moe_engine(_FakeMoeEngine())
+    assert not rollout_utils._is_moe_engine(object())  # MiniCPM-style: no resolvable inner model
+    assert not rollout_utils._is_moe_engine(SimpleNamespace(model=_FakeMoeEngine()))
+
+
+def test_is_moe_engine_unwraps_acl_graph(monkeypatch):
+    rollout_utils, _ = _patch_calls(monkeypatch)
+    assert rollout_utils._is_moe_engine(_ACLGraphWrapper(_FakeMoeEngine()))
+    assert not rollout_utils._is_moe_engine(_ACLGraphWrapper(object()))
+
+
+def test_supported_moe_models_registers_qwen3_omni_but_not_minicpm():
+    # The production whitelist is keyed on the real engine classes: the
+    # Qwen3-Omni thinker must be covered, the dense MiniCPM-o thinker must not.
     import pytest
 
     import verl_omni.workers.rollout.vllm_rollout.utils as rollout_utils
 
-    def raising_patch(model):
-        raise ValueError("some unrelated patch failure")
+    qwen3_omni = pytest.importorskip(
+        "vllm_omni.model_executor.models.qwen3_omni.qwen3_omni",
+        reason="vllm-omni build without the qwen3_omni module",
+    )
+    minicpm = pytest.importorskip(
+        "vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_llm",
+        reason="vllm-omni build without the minicpmo_4_5 module",
+    )
+    assert qwen3_omni.Qwen3OmniMoeForConditionalGeneration in rollout_utils.SUPPORTED_MOE_MODELS
+    assert minicpm.MiniCPMO45OmniLLMForConditionalGeneration not in rollout_utils.SUPPORTED_MOE_MODELS
 
-    monkeypatch.setattr("verl.utils.vllm.patch.patch_vllm_moe_model_weight_loader", raising_patch)
-    with pytest.raises(ValueError, match="unrelated"):
-        rollout_utils._apply_moe_weight_loader_patch(object())
+
+def test_moe_weight_loader_patch_errors_propagate_for_whitelisted_engines(monkeypatch):
+    import pytest
+
+    rollout_utils, _ = _patch_calls(monkeypatch)
+
+    def raising_patch(model):
+        raise ValueError("some patch failure")
+
+    monkeypatch.setattr(rollout_utils, "patch_vllm_moe_model_weight_loader", raising_patch)
+    ar_worker = SimpleNamespace(_get_standard_weight_model_and_config=lambda: (_FakeMoeEngine(), object()))
+    with pytest.raises(ValueError, match="patch failure"):
+        vLLMOmniColocateWorkerExtension.monkey_patch_model(ar_worker)
+
+
+def test_monkey_patch_model_applies_to_the_whitelisted_ar_model(monkeypatch):
+    rollout_utils, calls = _patch_calls(monkeypatch)
+    moe_engine = _FakeMoeEngine()
+    ar_worker = SimpleNamespace(_get_standard_weight_model_and_config=lambda: (moe_engine, object()))
+    vLLMOmniColocateWorkerExtension.monkey_patch_model(ar_worker)
+    assert calls == [moe_engine]
+
+    # Dense engines and diffusion-style workers (no standard model): no-op.
+    dense_worker = SimpleNamespace(_get_standard_weight_model_and_config=lambda: (object(), object()))
+    vLLMOmniColocateWorkerExtension.monkey_patch_model(dense_worker)
+    diffusion_worker = SimpleNamespace(_get_standard_weight_model_and_config=lambda: None)
+    vLLMOmniColocateWorkerExtension.monkey_patch_model(diffusion_worker)
+    assert calls == [moe_engine]
