@@ -8,7 +8,7 @@
 #   - non-finite actor/grad_norm
 #   - step-100 val-core reward/mean below VAL_REWARD_MIN
 # Perf (time_per_step, etc.) is recorded in report.json only — not a gate.
-# Val reward is logged every TEST_FREQ steps; per-step actor loss is in metrics.json.
+# Val reward is logged every TEST_FREQ steps; all trainer metrics are in metrics.jsonl.
 #
 # Attention: pin native / TORCH_SDPA (not product-default FA3).
 # Reference recipe:
@@ -40,13 +40,12 @@ PPO_MICRO_BATCH_SIZE=${PPO_MICRO_BATCH_SIZE:-16}
 LOG_PROB_MICRO_BATCH_SIZE=${LOG_PROB_MICRO_BATCH_SIZE:-32}
 
 L4_TEST_CASE=${L4_TEST_CASE:-qwen_image_ocr_lora_v1}
-OUTPUT_ROOT=${OUTPUT_ROOT:-${REPO_ROOT}/outputs/l4_convergence}
-CURRENT_DIR=${CURRENT_DIR:-${OUTPUT_ROOT}/current/${L4_TEST_CASE}}
+OUTPUT_ROOT=${OUTPUT_ROOT:-${SCRIPT_DIR}/../outputs/l4_convergence}
+CASE_DIR=${CASE_DIR:-${OUTPUT_ROOT}/${L4_TEST_CASE}}
 LOG_DIR=${LOG_DIR:-${OUTPUT_ROOT}/logs/${L4_TEST_CASE}}
 CONSOLE_LOG=${CONSOLE_LOG:-${LOG_DIR}/qwen_image_ocr_lora_v1.log}
-L4_METRICS_JSONL=${L4_METRICS_JSONL:-${CURRENT_DIR}/metrics.jsonl}
-L4_METRICS_JSON=${L4_METRICS_JSON:-${CURRENT_DIR}/metrics.json}
-CURRENT_REPORT_JSON=${CURRENT_REPORT_JSON:-${CURRENT_DIR}/report.json}
+L4_METRICS_JSONL=${L4_METRICS_JSONL:-${CASE_DIR}/metrics.jsonl}
+L4_REPORT_JSON=${L4_REPORT_JSON:-${CASE_DIR}/report.json}
 
 SKIP_STEPS=${SKIP_STEPS:-2}
 MIN_TRAIN_STEPS=${MIN_TRAIN_STEPS:-${TOTAL_TRAIN_STEPS}}
@@ -112,8 +111,8 @@ export GENRM_OCR_MAX_TOKENS=${GENRM_OCR_MAX_TOKENS:-32}
 export GENRM_OCR_SEED=${GENRM_OCR_SEED:-42}
 export L4_METRICS_JSONL
 
-rm -rf "${CURRENT_DIR}"
-mkdir -p "${CURRENT_DIR}" "${LOG_DIR}"
+rm -rf "${CASE_DIR}"
+mkdir -p "${CASE_DIR}" "${LOG_DIR}"
 
 python3 "${SCRIPT_DIR}/run.py" \
     data.train_files="${TRAIN_FILES}" \
@@ -185,12 +184,10 @@ python3 "${SCRIPT_DIR}/run.py" \
 
 python3 "${SCRIPT_DIR}/collect_report.py" \
     --metrics-jsonl "${L4_METRICS_JSONL}" \
-    --metrics-json "${L4_METRICS_JSON}" \
     --log-file "${CONSOLE_LOG}" \
-    --output "${CURRENT_REPORT_JSON}" \
+    --output "${L4_REPORT_JSON}" \
     --skip-steps "${SKIP_STEPS}" \
     --min-train-steps "${MIN_TRAIN_STEPS}" \
-    --test-freq "${TEST_FREQ}" \
     --rollout-prob-diff-mean-max "${ROLLOUT_PROB_DIFF_MEAN_MAX}" \
     --val-reward-min "${VAL_REWARD_MIN}"
 

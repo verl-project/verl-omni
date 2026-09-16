@@ -30,9 +30,9 @@ VAL_REWARD_MIN=0.85 bash tests/convergence/qwen_image_ocr_lora_v1/run_qwen_image
 `perf/time_per_step`, `timing_s/{step,gen,old_log_prob,reward,update_actor}`,
 `perf/throughput` — summarized in `report.json` under `"perf"`.
 
-Per-step `actor/loss` (or `actor/loss/mean`) and validation reward at every
-`TEST_FREQ` step (default **20**) are written to `metrics.json`. The gate still
-uses the step-100 val floor only.
+Per-step trainer metrics (including `actor/loss/mean` and validation reward at
+every `TEST_FREQ` step) are written to `metrics.jsonl`. The gate still uses the
+step-100 val floor only.
 
 ## Requirements
 
@@ -55,9 +55,8 @@ Hydra overrides can be appended after the script. Validation runs every
 ## Outputs
 
 ```text
-outputs/l4_convergence/
-|-- current/qwen_image_ocr_lora_v1/metrics.jsonl
-|-- current/qwen_image_ocr_lora_v1/metrics.json
-|-- current/qwen_image_ocr_lora_v1/report.json
+tests/convergence/outputs/l4_convergence/
+|-- qwen_image_ocr_lora_v1/metrics.jsonl
+|-- qwen_image_ocr_lora_v1/report.json
 `-- logs/qwen_image_ocr_lora_v1/qwen_image_ocr_lora_v1.log
 ```

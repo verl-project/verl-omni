@@ -40,13 +40,6 @@ ROLLOUT_PROB_DIFF_MEAN_KEYS = (
     "rollout_corr/logprob_abs_diff_mean",
 )
 GRAD_NORM_KEY = "actor/grad_norm"
-# v1 Metric aggregation logs ``actor/loss/mean``; older paths may log ``actor/loss``.
-TRAIN_LOSS_KEYS = (
-    "actor/loss/mean",
-    "actor/loss",
-    "actor/pg_loss",
-    "actor/total_loss",
-)
 PERF_RECORD_KEYS = (
     "perf/time_per_step",
     "timing_s/step",
@@ -59,7 +52,6 @@ PERF_RECORD_KEYS = (
 
 DEFAULT_SKIP_STEPS = 2
 DEFAULT_MIN_TRAIN_STEPS = 100
-DEFAULT_TEST_FREQ = 20
 DEFAULT_ROLLOUT_PROB_DIFF_MEAN_MAX = 0.01
 DEFAULT_VAL_REWARD_MIN = 0.9
 
@@ -177,50 +169,6 @@ def train_records(records: list[dict], skip_steps: int) -> list[dict]:
         if GRAD_NORM_KEY in data or any(key in data for key in ROLLOUT_PROB_DIFF_MEAN_KEYS):
             selected.append(record)
     return selected
-
-
-def resolve_train_loss_key(records: list[dict]) -> str:
-    for key in TRAIN_LOSS_KEYS:
-        if any(key in record["data"] for record in records):
-            return key
-    return TRAIN_LOSS_KEYS[0]
-
-
-def expected_val_steps(test_freq: int, total_steps: int) -> list[int]:
-    if test_freq <= 0 or total_steps <= 0:
-        return []
-    steps = list(range(test_freq, total_steps + 1, test_freq))
-    if not steps or steps[-1] != total_steps:
-        steps.append(total_steps)
-    return steps
-
-
-def collect_curve_metrics(
-    records: list[dict],
-    *,
-    test_freq: int,
-    total_steps: int,
-) -> dict[str, Any]:
-    """Per-step train loss and val reward at each ``test_freq`` (and last step)."""
-    loss_key = resolve_train_loss_key(records)
-    train_loss = []
-    val_reward = []
-    for record in records:
-        step = int(record["step"])
-        data = record["data"]
-        if loss_key in data:
-            train_loss.append({"step": step, "value": data[loss_key]})
-        items = val_reward_items(data)
-        if items:
-            val_reward.append({"step": step, "values": items})
-    return {
-        "test_freq": test_freq,
-        "total_steps": total_steps,
-        "train_loss_key": loss_key,
-        "train_loss": train_loss,
-        "val_reward": val_reward,
-        "expected_val_steps": expected_val_steps(test_freq, total_steps),
-    }
 
 
 def resolve_rollout_prob_diff_key(records: list[dict]) -> str:
@@ -396,7 +344,7 @@ def evaluate_gates(
     return passed, report
 
 
-def collect(args: argparse.Namespace) -> tuple[bool, dict, dict]:
+def collect(args: argparse.Namespace) -> tuple[bool, dict]:
     thresholds = PrecisionThresholds(
         skip_steps=args.skip_steps,
         min_train_steps=args.min_train_steps,
@@ -425,12 +373,7 @@ def collect(args: argparse.Namespace) -> tuple[bool, dict, dict]:
         "perf": collect_perf_report(selected),
         "passed": passed,
     }
-    curves = collect_curve_metrics(
-        records,
-        test_freq=int(getattr(args, "test_freq", DEFAULT_TEST_FREQ)),
-        total_steps=thresholds.min_train_steps,
-    )
-    return passed, output, curves
+    return passed, output
 
 
 def _print_conclusion(passed: bool, output: dict, report_path: Path) -> None:
@@ -452,30 +395,20 @@ def _print_conclusion(passed: bool, output: dict, report_path: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Collect L4 report.json gates and metrics.json curves")
+    parser = argparse.ArgumentParser(description="Collect L4 report.json gates from metrics JSONL or console log")
     parser.add_argument("--metrics-jsonl", type=Path)
     parser.add_argument("--log-file", type=Path)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument(
-        "--metrics-json",
-        type=Path,
-        help="Write per-step train loss and per-test_freq val reward here",
-    )
     parser.add_argument("--skip-steps", type=int, default=DEFAULT_SKIP_STEPS)
     parser.add_argument("--min-train-steps", type=int, default=DEFAULT_MIN_TRAIN_STEPS)
-    parser.add_argument("--test-freq", type=int, default=DEFAULT_TEST_FREQ)
     parser.add_argument("--rollout-prob-diff-mean-max", type=float, default=DEFAULT_ROLLOUT_PROB_DIFF_MEAN_MAX)
     parser.add_argument("--val-reward-min", type=float, default=DEFAULT_VAL_REWARD_MIN)
     args = parser.parse_args()
 
-    passed, output, curves = collect(args)
+    passed, output = collect(args)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as file:
         json.dump(output, file, indent=2, sort_keys=True)
-    if args.metrics_json:
-        args.metrics_json.parent.mkdir(parents=True, exist_ok=True)
-        with args.metrics_json.open("w", encoding="utf-8") as file:
-            json.dump(curves, file, indent=2, sort_keys=True)
 
     _print_conclusion(passed, output, args.output)
     if not passed:
