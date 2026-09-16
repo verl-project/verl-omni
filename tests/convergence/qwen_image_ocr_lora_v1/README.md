@@ -52,6 +52,16 @@ bash tests/convergence/qwen_image_ocr_lora_v1/run_qwen_image_ocr_lora_v1.sh
 Hydra overrides can be appended after the script. Validation runs every
 `TEST_FREQ` steps (default 20) and always on the last step.
 
+## CI
+
+GitHub Actions workflow: `.github/workflows/l4_convergence.yml`
+
+- Manual: **Actions → l4_convergence → Run workflow** → choose this case or `all`.
+- Pull request: apply the `L4-weekly-ci` label (diff-selected on an `L20x8`
+  runner).
+
+Artifacts: `tests/convergence/outputs/l4_convergence/**/*.jsonl` and `**/*.json`.
+
 ## Outputs
 
 ```text

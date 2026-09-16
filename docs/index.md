@@ -202,7 +202,7 @@ Pick the most relevant workflow from [`.github/workflows/`](https://github.com/v
 | `gpu_smoke.yml` | GPU-requiring tests for trainer, worker, rollout, or agent-loop changes |
 | `sanity.yml` | Static / import-level checks under `tests/special_sanity/` |
 | `l3_nightly.yml` | Tiny-random numerical / perf nightly (see {doc}`contributing/ci_cd`) |
-| L4 `tests/convergence/` | Real-weight recipe precision job; run the script on an 8-GPU node. No GitHub workflow yet |
+| `l4_convergence.yml` | Real-weight recipe precision job on an 8-GPU node (`workflow_dispatch` or PR label `L4-weekly-ci`) |
 
 Steps:
 

@@ -1,0 +1,212 @@
+name: l4_convergence
+
+on:
+  workflow_dispatch:
+    inputs:
+      case:
+        description: "L4 convergence case(s) to run"
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - sd35_medium_ocr_lora_v1
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    types: [labeled]
+    paths:
+      - "verl_omni/**"
+      - "tests/convergence/**"
+      - "examples/flowgrpo_trainer/**"
+      - "pyproject.toml"
+      - .github/workflows/l4_convergence.yml
+      - .github/qwen_tts_pin.txt
+      - .github/vllm_omni_pin.txt
+      - .github/verl_pin.txt
+      - .github/actions/gpu-smoke-prepare/**
+      - .github/actions/l4-convergence-upload-artifacts/**
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
+  DYNAMIC_RUNNER_ENDPOINT: "https://sd7upeujs1b9g1a958pn0.apigateway-cn-beijing.volceapi.com/runner"
+  L4_REQUIRED_GPUS: "8"
+  L4_RUNNER_SIZE: "L20x8"
+
+jobs:
+  setup_runner:
+    # Pull request label mapping:
+    #   L4-weekly-ci -> diff-selected L4 cases on one 8-GPU runner (sequential)
+    # workflow_dispatch -> explicit case selection from the workflow input
+    if: github.repository_owner == 'verl-project'
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.resolve-mode.outputs.mode }}
+      cases-json: ${{ steps.resolve-cases.outputs.cases-json }}
+      case-count: ${{ steps.resolve-cases.outputs.case-count }}
+      runner-size: ${{ steps.resolve-cases.outputs.runner-size }}
+      runner-label: ${{ steps.create-runner.outputs.runner-label }}
+      mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
+    steps:
+      - id: resolve-mode
+        run: |
+          mode="none"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            mode="dispatch"
+          elif [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.label.name }}" == "L4-weekly-ci" ]]; then
+            mode="pr"
+          fi
+          echo "mode=${mode}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: steps.resolve-mode.outputs.mode != 'none'
+
+      - id: resolve-cases
+        if: steps.resolve-mode.outputs.mode != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mode="${{ steps.resolve-mode.outputs.mode }}"
+
+          if [[ "${mode}" == "dispatch" ]]; then
+            selected_case="${{ github.event.inputs.case }}"
+            if [[ "${selected_case}" == "all" ]]; then
+              plan_json="$(python3 tests/convergence/select_l4_convergence_cases.py --all)"
+            else
+              plan_json="$(python3 tests/convergence/select_l4_convergence_cases.py --cases "${selected_case}")"
+            fi
+          else
+            gh api \
+              "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+              --paginate \
+              --jq '.[].filename' > changed_files.txt
+            plan_json="$(python3 tests/convergence/select_l4_convergence_cases.py --changed-files-file changed_files.txt)"
+          fi
+
+          echo "Resolved L4 convergence plan: ${plan_json}"
+          echo "cases-json=${plan_json}" >> "$GITHUB_OUTPUT"
+          PLAN_JSON="${plan_json}" python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          plan = json.loads(os.environ["PLAN_JSON"])
+          print(f"case-count={plan['case_count']}")
+          print(f"runner-size={plan['runner_size']}")
+          if plan["required_gpus"] != 8:
+              raise SystemExit(f"L4 convergence requires an 8-GPU runner, got required_gpus={plan['required_gpus']}")
+          PY
+
+      - id: create-runner
+        if: steps.resolve-mode.outputs.mode != 'none'
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "create"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-image: "${{ env.IMAGE }}"
+
+  l4_convergence:
+    needs: setup_runner
+    if: needs.setup_runner.outputs.mode != 'none'
+    runs-on: ["${{ needs.setup_runner.outputs.runner-label || needs.setup_runner.outputs.runner-size || 'L20x8' }}"]
+    timeout-minutes: 720
+    env:
+      HTTP_PROXY: "http://100.68.174.87:3128"
+      HTTPS_PROXY: "http://100.68.174.87:3128"
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      UV_LINK_MODE: copy
+      UV_SYSTEM_PYTHON: "1"
+      UV_BREAK_SYSTEM_PACKAGES: "1"
+      PIP_BREAK_SYSTEM_PACKAGES: "1"
+      FLASHINFER_DISABLE_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Keep the uv cache on the runner's persistent HOME
+        run: |
+          echo "HOME=${HOME} (uv cache baked into the image: ${UV_CACHE_DIR})"
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" | tee -a "${GITHUB_ENV}"
+
+      - name: Verify 8-GPU runner
+        run: |
+          set -euo pipefail
+          if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+            csv="${CUDA_VISIBLE_DEVICES// /}"
+            IFS=',' read -r -a ids <<< "${csv}"
+            visible="${#ids[@]}"
+          else
+            visible="$(nvidia-smi --query-gpu=index --format=csv,noheader | grep -c .)"
+          fi
+          echo "Visible GPUs: ${visible}"
+          if [[ "${visible}" -ne "${L4_REQUIRED_GPUS}" ]]; then
+            echo "L4 convergence requires exactly ${L4_REQUIRED_GPUS} GPUs (visible=${visible})." >&2
+            exit 1
+          fi
+
+      - uses: ./.github/actions/gpu-smoke-prepare
+
+      - name: Run selected L4 convergence cases
+        env:
+          L4_CASES_JSON: ${{ needs.setup_runner.outputs.cases-json }}
+        run: |
+          set -euo pipefail
+          ray stop --force || true
+          mkdir -p tests/convergence/outputs/l4_convergence
+
+          python3 - <<'PY' > /tmp/l4_convergence_cases.tsv
+          import json
+          import os
+
+          plan = json.loads(os.environ["L4_CASES_JSON"])
+          for case in plan["cases"]:
+              print(f"{case['name']}\t{case['script']}\t{case['required_gpus']}")
+          PY
+
+          if [[ ! -s /tmp/l4_convergence_cases.tsv ]]; then
+            echo "No L4 convergence cases selected."
+            exit 1
+          fi
+
+          failed=0
+          while IFS=$'\t' read -r name script required_gpus; do
+            echo "===== Starting L4 case ${name} (requires ${required_gpus} GPUs) ====="
+            if bash "${script}"; then
+              echo "[PASS] ${name}"
+            else
+              echo "[FAIL] ${name}"
+              failed=1
+            fi
+          done < /tmp/l4_convergence_cases.tsv
+
+          ray stop --force || true
+          exit "${failed}"
+
+      - if: always()
+        uses: ./.github/actions/l4-convergence-upload-artifacts
+
+  cleanup:
+    runs-on: ubuntu-latest
+    needs:
+      - setup_runner
+      - l4_convergence
+    if: always()
+    steps:
+      - id: destroy-runner
+        if: needs.setup_runner.outputs.mlp-task-id != ''
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "destroy"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-task-id: "${{ needs.setup_runner.outputs.mlp-task-id }}"

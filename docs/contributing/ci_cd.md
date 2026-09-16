@@ -9,11 +9,12 @@ VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or co
 | L1 CPU API tests | Validate CPU-only APIs, configs, data utilities, adapters, rewards, and unit behavior | Pull requests with `ready-for-ci`, pushes to `main` and release branches | CPU | Required before merge | Pass/fail and coverage artifacts |
 | L2 GPU smoke tests | Validate tiny-random GPU end-to-end training paths | Pull requests with `ready-for-ci`, usually after L1 is green | GPU | Required before merge for GPU-touching changes | Smoke logs and summaries |
 | L3 nightly regression | Detect numerical drift and performance regressions | Scheduled or manual | Fixed GPU runners | Nightly regression signal | Metrics and baseline comparisons |
-| L4 convergence tests | Real-recipe precision: train-infer gap, finite grad, 100-step val reward floor | Manual on a production GPU node; weekly / RC workflow is not wired yet | 8-GPU node with real weights and datasets | Release-readiness signal, not a PR merge gate | `report.json` (gates + recorded perf), `metrics.json` (per-step loss + val every `test_freq`), `metrics.jsonl`, console logs |
+| L4 convergence tests | Real-recipe precision: train-infer gap, finite grad, 100-step val reward floor | `workflow_dispatch` or PR label `L4-weekly-ci` | Fixed 8-GPU runners (`L20x8`) | Release-readiness signal, not a PR merge gate | `report.json` (gates + recorded perf), `metrics.jsonl`, console logs |
 
 L3 has one runnable scheduled workflow for the Qwen-Image FlowGRPO
-single-sample regression. L4 has runnable local/cluster scripts for the
-Qwen-Image and SD3.5 OCR LoRA v1 recipes; none are wired to GitHub Actions yet.
+single-sample regression. L4 has runnable local/cluster scripts and a GitHub
+Actions workflow (`.github/workflows/l4_convergence.yml`) for the Qwen-Image and
+SD3.5 OCR LoRA v1 recipes.
 
 ## L1 CPU API Tests
 
@@ -141,8 +142,26 @@ Gate logic lives in `collect_report.py`. The collector's own tests are L1
 and `val-core/*/reward/mean@*` at each `test_freq` step. `metrics.jsonl` is the
 raw trainer log dump used to build both files.
 
-There is no `.github/workflows/l4_*.yml` yet. Keep L4 off the default
-pull-request merge path.
+### Run in CI
+
+The workflow is `.github/workflows/l4_convergence.yml`. Trigger it in either
+way:
+
+- **Manual:** GitHub Actions → `l4_convergence` → **Run workflow** → choose
+  `all`, `qwen_image_ocr_lora_v1`, or `sd35_medium_ocr_lora_v1`.
+- **Pull request:** apply the `L4-weekly-ci` label. The workflow selects the
+  smallest case set that covers the PR diff; shared trainer or unknown paths run
+  all cases sequentially on one `L20x8` runner.
+
+Each case requires **8 GPUs**. When multiple cases are selected, they run
+sequentially on the same 8-GPU machine.
+
+After every run (pass or fail), the workflow uploads
+`tests/convergence/outputs/l4_convergence/**/*.jsonl` and `**/*.json` as a
+workflow artifact (`l4-convergence-outputs-<run_id>`).
+
+Keep L4 off the default pull-request merge path unless a maintainer explicitly
+requests `L4-weekly-ci`.
 
 ## Contributor Expectations
 
