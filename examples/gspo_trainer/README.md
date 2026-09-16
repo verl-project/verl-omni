@@ -595,7 +595,7 @@ bash examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh
 Keep `flash_attention_2` (the default) — switching the model to sdpa broke
 train/rollout consistency in Qwen3-Omni experiments. Vision/audio towers
 (`vpm`/`apm`) stay present but frozen via the LoRA exclusion list, and the FSDP2
-wrap ignores `apm` parameters. The vLLM-Omni rollout runs a runtime-registered
+wrap keeps the frozen towers (`apm`/`vpm`/`resampler`) unsharded. The vLLM-Omni rollout runs a runtime-registered
 one-stage thinker-only pipeline (`minicpmo_4_5_thinker_only`, text output) with
 `model_arch=MiniCPMO45OmniLLMForConditionalGeneration` for logprob support and
 `lora.merge=true` weight sync. See

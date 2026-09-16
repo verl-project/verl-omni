@@ -34,15 +34,12 @@ into — mirroring the remote ``get_inputs_ids`` scan.
 
 from __future__ import annotations
 
-import logging
 import numbers
 import re
 from functools import lru_cache
 from typing import Any
 
 import torch
-
-logger = logging.getLogger(__name__)
 
 # Slot forms. The HF processor splits on the bare forms; vLLM-Omni's token-id
 # prompt updates search the parenthesized forms.

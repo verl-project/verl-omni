@@ -93,12 +93,14 @@ ocr = [
     "Levenshtein",
 ]
 
-# -------------------------------
-# tool.ruff - Linting configuration
-# -------------------------------
+# vLLM loads every `vllm.general_plugins` entry point at startup in each
+# engine process; see verl_omni/pipelines/minicpm/vllm_plugin.py.
 [project.entry-points."vllm.general_plugins"]
 verl_omni_minicpmo_embed_multimodal = "verl_omni.pipelines.minicpm.vllm_plugin:register"
 
+# -------------------------------
+# tool.ruff - Linting configuration
+# -------------------------------
 [tool.ruff]
 # Note: While the formatter will attempt to format lines such that they remain within the line-length,
 # it isn't a hard upper bound, and formatted lines may exceed the line-length.
