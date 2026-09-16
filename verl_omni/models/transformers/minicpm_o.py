@@ -20,6 +20,7 @@ own trigger. The ``patch_remote_*`` entry points run before
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import types
@@ -473,8 +474,6 @@ def keep_answer_tags_when_decoding(tokenizer) -> bool:
     if not needs_demotion:
         return False
 
-    import json
-
     from tokenizers import Tokenizer
 
     backend = getattr(tokenizer, "backend_tokenizer", None) or getattr(tokenizer, "_tokenizer", None)
@@ -494,3 +493,39 @@ def keep_answer_tags_when_decoding(tokenizer) -> bool:
         return False
     tokenizer._tokenizer = Tokenizer.from_str(json.dumps(data))
     return demoted
+
+
+def _actor_architecture(config) -> str | None:
+    """HF ``architectures[0]`` of the configured actor, or None when unreadable."""
+    import os
+
+    model_cfg = getattr(getattr(config, "actor_rollout_ref", None), "model", None)
+    model_path = getattr(model_cfg, "path", None)
+    if not model_path:
+        return None
+    try:
+        with open(os.path.join(model_path, "config.json")) as f:
+            architectures = json.load(f).get("architectures") or []
+    except (OSError, json.JSONDecodeError):
+        return None
+    return architectures[0] if architectures else None
+
+
+def actor_registers_special_answer_tags(config) -> bool:
+    """True unless the configured actor is a *different* registered omni model.
+
+    MiniCPM-o registers ``<answer>`` as a special token, while the reward decode skips
+    specials, so the reward worker demotes the tags on its own tokenizer. An unknown
+    architecture counts as yes: the demotion no-ops unless those tags are special, so
+    applying it is safer than skipping a MiniCPM checkpoint whose architecture name is
+    not registered.
+    """
+    architecture = _actor_architecture(config)
+    if architecture is None:
+        return True
+    # Lazy: this is a leaf module, while the adapters below import it.
+    from verl_omni.pipelines.minicpm.thinker_training_adapter import MiniCPMThinkerAdapter
+    from verl_omni.pipelines.model_base import OmniModelBase
+
+    adapter_cls = OmniModelBase.peek_class(architecture, "thinker")
+    return adapter_cls is None or adapter_cls is MiniCPMThinkerAdapter

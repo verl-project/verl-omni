@@ -29,14 +29,12 @@ import torch
 from verl_omni.pipelines.model_base import OmniModelBase
 
 # Keys routed into MiniCPMO's ``data`` dict instead of ``self.llm(**kwargs)``.
-# ``image_sizes`` is processor metadata no forward consumes; classifying it
-# here keeps it off the Qwen3 decoder, which rejects unknown kwargs.
 _MINICPM_DATA_KEYS = (
     "input_ids",
     "position_ids",
     "pixel_values",
     "tgt_sizes",
-    "image_sizes",
+    "image_sizes",  # processor metadata no MiniCPM-o forward consumes
     "image_bound",
     "audio_features",
     "audio_feature_lens",
@@ -44,16 +42,6 @@ _MINICPM_DATA_KEYS = (
     "spk_bounds",
     "vision_hidden_states",
 )
-_MINICPM_REQUIRED_DATA_KEYS = (
-    "input_ids",
-    "position_ids",
-    "pixel_values",
-    "tgt_sizes",
-    "image_bound",
-    "audio_bounds",
-)
-# MiniCPMO.forward binds these on the LLM call; forwarding engine copies raises.
-_MINICPM_LLM_BOUND_KEYS = ("input_ids", "position_ids", "inputs_embeds")
 
 
 class MiniCPMO:
@@ -289,12 +277,8 @@ def split_minicpm_forward_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any]
     _fill_missing_media_defaults(data)
     _normalize_media_containers(data)
 
-    missing = [key for key in _MINICPM_REQUIRED_DATA_KEYS if key not in data]
-    if missing:
-        raise TypeError(f"MiniCPMO.forward data dict is missing required keys: {missing}.")
-    # The remote forward binds these itself; forwarding engine copies raises TypeError.
-    for key in _MINICPM_LLM_BOUND_KEYS:
-        llm_kwargs.pop(key, None)
+    # The remote forward binds inputs_embeds itself; a forwarded copy would collide.
+    llm_kwargs.pop("inputs_embeds", None)
     return data, llm_kwargs
 
 
