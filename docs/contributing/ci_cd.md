@@ -12,8 +12,8 @@ VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or co
 | L4 convergence tests | Real-recipe precision: train-infer gap, finite grad, 100-step val reward floor | Manual on a production GPU node; weekly / RC workflow is not wired yet | 8-GPU node with real weights and datasets | Release-readiness signal, not a PR merge gate | `report.json` (gates + recorded perf), `metrics.json` (per-step loss + val every `test_freq`), `metrics.jsonl`, console logs |
 
 L3 has one runnable scheduled workflow for the Qwen-Image FlowGRPO
-single-sample regression. L4 has one runnable local/cluster script for the
-Qwen-Image OCR LoRA v1 recipe; it is not yet a GitHub Actions workflow.
+single-sample regression. L4 has runnable local/cluster scripts for the
+Qwen-Image and SD3.5 OCR LoRA v1 recipes; none are wired to GitHub Actions yet.
 
 ## L1 CPU API Tests
 
@@ -80,7 +80,9 @@ is release-focused and is **not** a replacement for L1 or L2.
 L4 does **not** compare against a stored baseline and does **not** fail on
 throughput or step time. Those numbers are recorded for humans to inspect.
 
-### Current runnable case
+### Current runnable cases
+
+#### Qwen-Image OCR LoRA v1
 
 `tests/convergence/qwen_image_ocr_lora_v1/` wraps
 `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh` for an
@@ -99,6 +101,27 @@ Defaults:
 - Reward: `$WORKSPACE/models/Qwen3-VL-8B-Instruct` (`REWARD_MODEL_PATH`)
 - Data: `$WORKSPACE/data/ocr/qwen_image/{train,test}.parquet`
 - `WORKSPACE` defaults to `$HOME`. `NUM_GPUS` defaults to `8`.
+- `VAL_REWARD_MIN` defaults to `0.9`.
+
+#### SD3.5 OCR LoRA v1
+
+`tests/convergence/sd35_medium_ocr_lora_v1/` wraps
+`examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh` for an 8-GPU
+(6 actor+rollout, 2 reward) Route-A sync LoRA OCR job: TP-sharded rollout/reward,
+FSDP offload, `train_batch_size=16`, `rollout.n=16`, and the same train-infer
+and grad gates. Validation runs every 20 steps and on the last step.
+
+```bash
+bash tests/convergence/sd35_medium_ocr_lora_v1/run_sd35_medium_ocr_lora_v1.sh
+```
+
+Defaults:
+
+- Policy: `stabilityai/stable-diffusion-3.5-medium` (`MODEL_PATH`)
+- Reward: `Qwen/Qwen2.5-VL-3B-Instruct` (`REWARD_MODEL_PATH`)
+- Data: `$WORKSPACE/data/ocr/sd3/{train,test}.parquet`
+- `WORKSPACE` defaults to `$HOME`.
+- `VAL_REWARD_MIN` defaults to `0.6` (placeholder until calibrated on cluster).
 
 Gate logic lives in `collect_report.py`. The collector's own tests are L1
 (`tests/convergence/test_collect_report_on_cpu.py`).
