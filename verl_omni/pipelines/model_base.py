@@ -645,6 +645,18 @@ class OmniModelBase(ABC):
         return module
 
     @classmethod
+    def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
+        """Submodule name components to leave unsharded under FSDP2 (default: none).
+
+        FSDP2 only — under ``strategy=fsdp`` the engine raises when a
+        non-empty list is declared. Declare a subtree whose forward is
+        skipped for some micro-batches: unsharded forwards emit no
+        collectives, so the skip cannot desync ranks. Ignored parameters
+        must stay frozen — FSDP2 does not synchronize their gradients.
+        """
+        return []
+
+    @classmethod
     def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
         """Add model-native rollout data to an actor replay forward call.
 

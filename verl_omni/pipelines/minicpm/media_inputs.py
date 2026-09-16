@@ -176,15 +176,14 @@ def sample_pixel_slices(pixel_values: Any) -> list[torch.Tensor]:
     return [_as_tensor(pixel_values).contiguous()]
 
 
-def sample_tgt_sizes(tgt_sizes: Any, *, n_slices: int, device: torch.device) -> torch.Tensor:
-    del n_slices  # kept for signature parity with the #550 helpers
+def sample_tgt_sizes(tgt_sizes: Any, *, device: torch.device) -> torch.Tensor:
     tgt_sizes = _unwrap_collated(tgt_sizes)
     if tgt_sizes is None or (isinstance(tgt_sizes, (list | tuple)) and not tgt_sizes):
         return torch.zeros(0, 2, dtype=torch.int32, device=device)
     if isinstance(tgt_sizes, list | tuple) and len(tgt_sizes) == 1 and not isinstance(tgt_sizes[0], int | float):
         inner = tgt_sizes[0]
         if isinstance(inner, (list | tuple | np.ndarray | torch.Tensor)):
-            return sample_tgt_sizes(inner, n_slices=0, device=device)
+            return sample_tgt_sizes(inner, device=device)
     sizes = torch.as_tensor(tgt_sizes, dtype=torch.int32, device=device)
     if sizes.numel() == 0:
         return torch.zeros(0, 2, dtype=torch.int32, device=device)

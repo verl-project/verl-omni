@@ -130,10 +130,7 @@ def split_minicpm_forward_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any]
         data["pixel_values"] = [sample_pixel_slices(pixel_values)]
     tgt_sizes = data["tgt_sizes"]
     if isinstance(tgt_sizes, (list | tuple)):
-        data["tgt_sizes"] = [
-            sample_tgt_sizes(sample, n_slices=len(slices), device=data["input_ids"].device)
-            for sample, slices in zip(tgt_sizes, data["pixel_values"], strict=False)
-        ]
+        data["tgt_sizes"] = [sample_tgt_sizes(sample, device=data["input_ids"].device) for sample in tgt_sizes]
     data["audio_features"] = normalize_audio_features(data.get("audio_features"))
     if data["audio_features"] == []:
         # NOTE: an empty-features/nonnull-lens inconsistency is laundered into
@@ -356,16 +353,11 @@ class MiniCPMThinkerAdapter(OmniModelBase):
 
     @classmethod
     def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
-        # All three towers are frozen (LoRA exclude / no target_modules match)
-        # and skipped for media-free micro-batches; media presence is not
-        # DP-balanced, so sharded data-dependent towers desync the FSDP2
-        # collective stream. Unsharded, the skips are collective-neutral
-        # (~1.2 GB/rank replicated, mitigated by param_offload).
+        # MiniCPM-o's frozen encoder towers: Whisper audio (apm), vision (vpm), and its resampler
         return ["apm", "vpm", "resampler"]
 
     @classmethod
     def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
-        del micro_batch
         model_inputs = dict(model_inputs)
         # rmpad flattening invalidates the processor's per-sample bounds
         # coordinates; _apply_media_bounds re-derives them from the ids, so

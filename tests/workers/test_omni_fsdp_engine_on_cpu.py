@@ -933,17 +933,14 @@ class TestAdapterNameForwarding:
 
 
 def _fsdp2_engine(omni_impl, module, ignored_names, strategy="fsdp2"):
-    """A bare engine whose adapter declares ``ignored_names`` for _build_fsdp_module."""
+    """A bare engine whose adapter returns ``ignored_names`` from the model-base hook."""
     engine = object.__new__(omni_impl.OmniFSDPEngine)
     engine.model_config = _make_mock_model_config()
     engine.model_config.enable_activation_offload = False
     engine.model_config.enable_gradient_checkpointing = False
     engine.device_mesh = None
     adapter_cls = MagicMock()
-    if ignored_names is None:
-        del adapter_cls.get_fsdp_ignored_module_names
-    else:
-        adapter_cls.get_fsdp_ignored_module_names.return_value = ignored_names
+    adapter_cls.get_fsdp_ignored_module_names.return_value = ignored_names or []
     engine.model_adapter_cls = adapter_cls
     engine.engine_config = types.SimpleNamespace(
         strategy=strategy,

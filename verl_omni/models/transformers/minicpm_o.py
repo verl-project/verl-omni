@@ -226,7 +226,6 @@ def patch_minicpm_get_vision_embedding(module) -> None:
         return
 
     def get_vision_embedding(self, data, _original=original):
-        del self
         if isinstance(data, dict) and "vision_hidden_states" in data:
             return _original(data)
         pixel_values = data.get("pixel_values") if isinstance(data, dict) else None

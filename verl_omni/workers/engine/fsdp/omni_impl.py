@@ -264,11 +264,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         from verl.utils.torch_dtypes import PrecisionType
 
         # DIFF vs upstream: adapters declare frozen subtrees to leave unsharded (fsdp2 only)
-        ignored_names: list[str] = []
-        adapter_cls = getattr(self, "model_adapter_cls", None)
-        ignored_fn = getattr(adapter_cls, "get_fsdp_ignored_module_names", None)
-        if callable(ignored_fn):
-            ignored_names = list(ignored_fn(self.model_config))
+        ignored_names = list(self.model_adapter_cls.get_fsdp_ignored_module_names(self.model_config))
         if ignored_names and self.engine_config.strategy != "fsdp2":
             raise NotImplementedError(
                 f"{type(self).__name__}: FSDP2-ignored module names require strategy=fsdp2, "

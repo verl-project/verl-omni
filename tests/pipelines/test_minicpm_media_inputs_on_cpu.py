@@ -57,7 +57,7 @@ def test_sample_pixel_slices_accepts_collated_pack_with_none_padding():
 
 def test_sample_tgt_sizes_accepts_collated_pack_with_none_padding():
     packed = _collated([np.array([2, 3], dtype=np.int64), None])
-    sizes = sample_tgt_sizes(packed, n_slices=0, device=torch.device("cpu"))
+    sizes = sample_tgt_sizes(packed, device=torch.device("cpu"))
     assert sizes.shape == (1, 2)
     assert sizes.tolist() == [[2, 3]]
 
