@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU tests for the MiniCPM-o RL dataset media resolver."""
+"""CPU tests for the MiniCPM-o RL dataset media loader."""
 
 from __future__ import annotations
 
@@ -24,8 +24,9 @@ pytest.importorskip("PIL")
 
 from verl_omni.utils.dataset.omni_rl_datasets import (  # noqa: E402
     MiniCPMORLHFDataset,
-    OmniAudioRLHFDataset,
     QwenOmniRLHFDataset,
+    _load_minicpm_audio,
+    pad_audio_to_hop_multiple,
 )
 
 
@@ -57,7 +58,7 @@ def _avqa_messages(image_path: str, audio_path: str) -> list[dict]:
     ]
 
 
-def test_minicpm_resolver_loads_image_and_hop_pads_audio(tmp_path):
+def test_minicpm_loader_reads_image_and_hop_pads_audio(tmp_path):
     image_path, audio_path = _media_files(tmp_path)
     images, videos, audios = MiniCPMORLHFDataset._process_multi_modal_info(
         _avqa_messages(image_path, audio_path),
@@ -72,41 +73,40 @@ def test_minicpm_resolver_loads_image_and_hop_pads_audio(tmp_path):
     assert audios[0].dtype == np.float32
 
 
-def test_minicpm_resolver_rejects_video_blocks(tmp_path):
+def test_minicpm_loader_rejects_video_blocks():
     messages = [{"role": "user", "content": [{"type": "video", "video": "/tmp/clip.mp4"}]}]
     with pytest.raises(ValueError, match="does not support video rows"):
-        MiniCPMORLHFDataset._resolve_media_from_messages(messages, None)
+        MiniCPMORLHFDataset._process_multi_modal_info(messages, image_patch_size=14, config=None)
 
 
-def test_minicpm_resolver_sampling_rate_from_config(tmp_path):
-    from verl_omni.utils.dataset.omni_rl_datasets import _load_minicpm_audio
+def test_minicpm_loader_rejects_media_blocks_without_a_path():
+    messages = [{"role": "user", "content": [{"type": "audio", "audio": None}]}]
+    with pytest.raises(ValueError, match="audio block has no path"):
+        MiniCPMORLHFDataset._process_multi_modal_info(messages, image_patch_size=14, config=None)
 
-    _, audio_path = _media_files(tmp_path)
-    # 8kHz target resamples the 16kHz/161-sample clip down to ~80 samples.
-    resampled = _load_minicpm_audio(audio_path, 8000)
-    assert len(resampled) <= 90
-    # The dataset plumbing picks the rate from mm_processor_kwargs (default 16k).
-    assert (
-        MiniCPMORLHFDataset._sampling_rate_from_config(
-            OmegaConf.create({"mm_processor_kwargs": {"sampling_rate": 8000}})
-        )
-        == 8000
+
+def test_minicpm_loader_resamples_to_the_configured_rate(tmp_path):
+    image_path, audio_path = _media_files(tmp_path)
+    _, _, audios = MiniCPMORLHFDataset._process_multi_modal_info(
+        _avqa_messages(image_path, audio_path),
+        image_patch_size=14,
+        config=OmegaConf.create({"mm_processor_kwargs": {"sampling_rate": 8000}}),
     )
-
-
-def test_shared_base_requires_resolver_override():
-    with pytest.raises(NotImplementedError):
-        OmniAudioRLHFDataset._resolve_media_from_messages([], None)
+    # The config rate reaches the decoder: the 16kHz clip comes back as the
+    # 8kHz-resampled, hop-padded waveform. Decoding at the wrong rate would
+    # desync the waveform from the mel frames the processor expects.
+    expected = pad_audio_to_hop_multiple(_load_minicpm_audio(audio_path, 8000))
+    assert np.array_equal(audios[0], expected)
 
 
 def test_qwen_dataset_keeps_qwen_resolution_order():
     # QwenOmniRLHFDataset still delegates to qwen_omni_utils (skipped when the
-    # extra is absent); its resolver must stay the only Qwen-specific piece.
+    # extra is absent); its patch lives in that method, not in a shared base.
     try:
         import qwen_omni_utils  # noqa: F401
     except ImportError:
         pytest.skip("qwen-omni-utils not installed")
     messages = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
-    images, videos, audios = QwenOmniRLHFDataset._resolve_media_from_messages(messages, None)
+    images, videos, audios = QwenOmniRLHFDataset._process_multi_modal_info(messages, image_patch_size=14, config=None)
     # Newer qwen_omni_utils returns None instead of [] for absent modalities.
     assert images in ([], None) and videos in ([], None) and audios in ([], None)

@@ -37,58 +37,14 @@ def pad_audio_to_hop_multiple(audio: np.ndarray, hop_length: int = DEFAULT_AUDIO
     return audio
 
 
-class OmniAudioRLHFDataset(RLHFDataset):
-    """Shared audio-aware RL dataset: resolve media, then hop-pad audio.
-
-    Subclasses implement ``_resolve_media_from_messages`` returning verl's
-    ``(images, videos, audios)`` order.
-    """
-
-    @classmethod
-    def _resolve_media_from_messages(
-        cls,
-        messages: list[dict],
-        config: DictConfig | dict | None,
-    ) -> tuple[list[Any] | None, list[Any] | None, list[Any] | None]:
-        """Return ``(images, videos, audios)`` loaded from message content blocks."""
-        raise NotImplementedError("OmniAudioRLHFDataset subclasses must implement _resolve_media_from_messages")
-
-    @classmethod
-    def _process_multi_modal_info(
-        cls,
-        messages: list[dict],
-        image_patch_size: int,
-        config: DictConfig | dict | None,
-    ) -> tuple[list[Any] | None, list[Any] | None, list[Any] | None]:
-        images, videos, audios = cls._resolve_media_from_messages(messages, config)
-        # vllm-omni pads audio to a hop multiple before feature extraction while
-        # the HF side drops the tail frame; pad first so both sides expand the
-        # prompt to the same audio token count.
-        if audios is not None:
-            audios = [pad_audio_to_hop_multiple(a) for a in audios]
-        return images, videos, audios
-
-
-class QwenOmniRLHFDataset(OmniAudioRLHFDataset):
-    """Adapt Qwen's multimodal media loader to verl's RL dataset interface.
-
-    verl turns parquet media columns into structured messages. Qwen's
-    ``process_mm_info`` then resolves image/audio/video paths into the media
-    objects expected by the Qwen3-Omni processor and vLLM-Omni rollout.
-    """
-
-    @classmethod
-    def _resolve_media_from_messages(
-        cls,
-        messages: list[dict],
-        config: DictConfig | dict | None,
-    ) -> tuple[list[Any] | None, list[Any] | None, list[Any] | None]:
-        from qwen_omni_utils import process_mm_info
-
-        # qwen_omni_utils returns (audios, images, videos). AVQA uses a
-        # standalone audio track rather than extracting audio from a video.
-        audios, images, videos = process_mm_info(messages, use_audio_in_video=False)
-        return images, videos, audios
+def _media_ref(block: dict, kind: str) -> str:
+    """Path/URL inside one media content block; fails closed when it carries none."""
+    ref = block.get(kind) or block.get(f"{kind}_url")
+    if isinstance(ref, dict):  # verl's image blocks may nest the path under "url"
+        ref = ref.get("url")
+    if ref is None:
+        raise ValueError(f"MiniCPM {kind} block has no path: {block!r}")
+    return ref
 
 
 def _load_minicpm_audio(path: str, sampling_rate: int) -> np.ndarray:
@@ -105,7 +61,56 @@ def _load_minicpm_audio(path: str, sampling_rate: int) -> np.ndarray:
     return np.ascontiguousarray(wav, dtype=np.float32)
 
 
-class MiniCPMORLHFDataset(OmniAudioRLHFDataset):
+def _load_minicpm_media(messages: list[dict], sampling_rate: int) -> tuple[list[Any], list[Any]]:
+    """Load one sample's images and waveforms from verl's content blocks."""
+    from PIL import Image
+
+    images: list[Any] = []
+    audios: list[Any] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "image":
+                with Image.open(_media_ref(block, "image")) as image:  # convert() returns a new image; close the handle
+                    images.append(image.convert("RGB"))
+            elif kind == "audio":
+                audios.append(_load_minicpm_audio(_media_ref(block, "audio"), sampling_rate))
+            elif kind == "video":
+                raise ValueError("MiniCPMORLHFDataset does not support video rows; AVQA training is image+audio only.")
+    return images, audios
+
+
+class QwenOmniRLHFDataset(RLHFDataset):
+    """Adapt Qwen's multimodal media loader to verl's RL dataset interface.
+
+    verl turns parquet media columns into structured messages. Qwen's
+    ``process_mm_info`` then resolves image/audio/video paths into the media
+    objects expected by the Qwen3-Omni processor and vLLM-Omni rollout.
+    """
+
+    @classmethod
+    def _process_multi_modal_info(
+        cls,
+        messages: list[dict],
+        image_patch_size: int,
+        config: DictConfig | dict | None,
+    ) -> tuple[list[Any] | None, list[Any] | None, list[Any] | None]:
+        from qwen_omni_utils import process_mm_info
+
+        # qwen_omni_utils returns (audios, images, videos). AVQA uses a
+        # standalone audio track rather than extracting audio from a video.
+        audios, images, videos = process_mm_info(messages, use_audio_in_video=False)
+        if audios is not None:
+            audios = [pad_audio_to_hop_multiple(a) for a in audios]
+        return images, videos, audios
+
+
+class MiniCPMORLHFDataset(RLHFDataset):
     """MiniCPM-o media loader for verl's RL dataset interface.
 
     Walks the same structured content blocks verl builds from ``<image>`` /
@@ -115,46 +120,19 @@ class MiniCPMORLHFDataset(OmniAudioRLHFDataset):
     """
 
     @classmethod
-    def _sampling_rate_from_config(cls, config: DictConfig | dict | None) -> int:
-        mm_kwargs = dict(config or {}).get("mm_processor_kwargs") or {}
-        if mm_kwargs.get("sampling_rate") is not None:
-            return int(mm_kwargs["sampling_rate"])
-        return DEFAULT_SAMPLING_RATE
-
-    @classmethod
-    def _resolve_media_from_messages(
+    def _process_multi_modal_info(
         cls,
         messages: list[dict],
+        image_patch_size: int,
         config: DictConfig | dict | None,
     ) -> tuple[list[Any] | None, list[Any] | None, list[Any] | None]:
-        from PIL import Image
-
-        sampling_rate = cls._sampling_rate_from_config(config)
-        images: list[Any] = []
-        audios: list[Any] = []
-        for message in messages:
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                block_type = block.get("type")
-                if block_type == "image":
-                    image_ref = block.get("image") or block.get("image_url")
-                    if isinstance(image_ref, dict):
-                        image_ref = image_ref.get("url")
-                    if image_ref is None:
-                        raise ValueError(f"MiniCPM image block has no path: {block!r}")
-                    with Image.open(image_ref) as image:  # convert() returns a new image; close the handle
-                        images.append(image.convert("RGB"))
-                elif block_type == "audio":
-                    audio_ref = block.get("audio") or block.get("audio_url")
-                    if audio_ref is None:
-                        raise ValueError(f"MiniCPM audio block has no path: {block!r}")
-                    audios.append(_load_minicpm_audio(audio_ref, sampling_rate))
-                elif block_type == "video":
-                    raise ValueError(
-                        "MiniCPMORLHFDataset does not support video rows; AVQA training is image+audio only."
-                    )
-        return images, None, audios
+        mm_kwargs = dict(config or {}).get("mm_processor_kwargs") or {}
+        # The processor's own rate: decoding at a different one would desync the
+        # waveform from the mel frames the processor expects.
+        sampling_rate = mm_kwargs.get("sampling_rate")
+        sampling_rate = DEFAULT_SAMPLING_RATE if sampling_rate is None else int(sampling_rate)
+        images, audios = _load_minicpm_media(messages, sampling_rate)
+        # vllm-omni pads audio to a hop multiple before feature extraction while
+        # the HF side drops the tail frame; pad first so both sides expand the
+        # prompt to the same audio token count.
+        return images, None, [pad_audio_to_hop_multiple(a) for a in audios]
