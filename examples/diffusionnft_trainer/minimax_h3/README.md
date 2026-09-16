@@ -1,6 +1,6 @@
 # MiniMax H3 T2VA, FL2VA, and Ref2VA DiffusionNFT
 
-Last updated: 09/04/2026
+Last updated: 09/12/2026
 
 These recipes train rank-64 MiniMax H3 LoRA adapters with online DiffusionNFT
 for text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
@@ -365,6 +365,87 @@ The initial recipe reuses CLAP and ImageBind to validate joint audio-video
 training. These rewards do not measure similarity to the reference image, so
 a separate reference-aware reward is required before evaluating reference
 fidelity.
+
+## Experimental packed actor forward
+
+The Diffusers FSDP/FSDP2 actor can execute a fixed micro-batch with one packed
+transformer forward instead of one forward per sample. This is the default H3
+Actor path, shared with FlowGRPO through the existing DiffusionNFT training adapter.
+There is no extra config class or enable switch. For FA3, use:
+
+```bash
+actor_rollout_ref.model.attn_backend=_flash_3_varlen_hub \
+actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN_3_HUB \
+actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2
+```
+
+`_flash_3_varlen_hub` calls the autograd-enabled FA3 `flash_attn_varlen_func`
+directly with separate DiT/text-refiner sequence boundaries, using the same
+`kernels-community/flash-attn3` v1 kernel as the serial diffusers backend. A
+compatible kernel build must be available; it never silently falls back.
+For an offline run, provision the kernel first or use the `kernels` package's
+`LOCAL_KERNELS` setting to select a downloaded kernel repository.
+
+`native` selects padded batched SDPA for numerical comparison and pairs with
+rollout `TORCH_SDPA`. PyTorch `torch_varlen` remains a standalone H3 numerical-test
+option, not a trainer configuration backend.
+
+The standard model configuration is unchanged. The former per-sample forward
+is retained only as a numerical-test baseline.
+
+For opt-in deterministic CUDA execution, the Actor and reference engines accept
+the existing flags:
+
+```bash
+actor_rollout_ref.actor.fsdp_config.full_determinism=true \
+actor_rollout_ref.ref.fsdp_config.full_determinism=true
+```
+
+Deterministic execution also makes BF16 GEMM reductions batch-shape invariant, so
+packed and per-sample execution agree; verl's determinism helper provides this
+through its cuBLAS workspace configuration. The flags further enable the existing
+seed, NCCL and cuDNN determinism controls, so they are not a GEMM-only switch.
+Defaults remain unchanged, and this does not guarantee bitwise-identical policies
+across the different Actor and rollout implementations.
+
+Do not enable `actor_rollout_ref.rollout.full_determinism` on this path yet.
+Deterministic algorithms also fill uninitialized memory with NaN, which poisons
+the scratch buffers holding the rollout latent trajectory, so the Actor receives
+NaN replay tensors and reports a non-finite gradient norm. The packed numerical
+checks below therefore enable determinism inside the test process only.
+
+The packer preserves sample-local positions, noise timesteps, reference rows and
+per-sample loss weighting. Both the main DiT and text token-refiner have independent
+sample boundaries. It changes neither rollout nor batch scheduling; micro-batch
+sizes must still satisfy the trainer's existing divisibility requirements.
+
+This first stage targets T2VA NFT. FL2VA uses the same layout-driven implementation,
+but requires shared keyframe anchors within a micro-batch; target latent layouts
+must be shared in all tasks. Production FL2VA/Ref2VA convergence and throughput
+remain to be validated. Sequence parallelism and the VeOmni backend are not yet
+supported and are rejected explicitly. Checkpoint names and LoRA sync mappings are
+unchanged; gradient checkpointing remains available.
+
+Numerical regressions (no model downloads; the GPU test requires the FA3 kernel):
+
+```bash
+python -m pytest -q tests/pipelines/test_minimax_h3_packed_forward_on_cpu.py
+NUM_GPUS=2 bash tests/special_e2e/run_minimax_h3_lora_sync_tp2.sh \
+  --check-packed-forward --attn-backend _flash_3_varlen_hub
+```
+
+The optional checks extend the existing LoRA sync regression with NFT/FlowGRPO
+loss, LoRA gradients, sample isolation, gradient checkpointing and FSDP2 comparisons
+between the original and packed forwards on a tiny transformer. They also check
+rank-64 LoRA GEMMs at the real H3 projection dimensions. The optional comparisons
+enable deterministic execution for the test process, which is what makes BF16 GEMM
+reductions batch-shape invariant; matching FA3 alone is insufficient, because
+shape-dependent LoRA GEMM reductions introduce small differences that the refiner
+and DiT amplify. Recipes are unaffected: use the explicit flags above when the same
+determinism is required for training.
+It is not a rollout/trainer e2e or a production
+speed benchmark. Measure actor time, total step time and peak memory before using
+larger micro-batches; batching does not reduce the model's mathematical FLOPs.
 
 ## T2VA performance reference
 
