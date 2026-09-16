@@ -63,6 +63,8 @@ class VeOmniDiffusionEngine(BaseEngine):
         optimizer_config: VeOmniDiffusionOptimizerConfig,
         checkpoint_config: CheckpointConfig,
     ):
+        if model_config.use_remove_padding:
+            raise NotImplementedError("Diffusion use_remove_padding currently requires the fsdp/fsdp2 engine.")
         if model_config.lora_rank > 0 or model_config.lora_adapter_path is not None:
             raise NotImplementedError(
                 "VeOmni diffusion backend does not support LoRA training yet. "

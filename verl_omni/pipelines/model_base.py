@@ -47,6 +47,31 @@ class DiffusionModelBase(ABC):
 
     _registry: dict[tuple[str, str], type["DiffusionModelBase"]] = {}
 
+    # Opt in only when input packing, sample isolation and output restoration are implemented.
+    supports_remove_padding: bool = False
+
+    @classmethod
+    def validate_remove_padding(cls, model_config: DiffusionModelConfig, engine_config) -> None:
+        """Reject unsupported packed execution before loading model weights."""
+        if not model_config.use_remove_padding:
+            return
+        if not cls.supports_remove_padding:
+            raise NotImplementedError(f"{cls.__name__} does not support use_remove_padding=True.")
+        if engine_config.strategy not in {"fsdp", "fsdp2"}:
+            raise NotImplementedError("Diffusion use_remove_padding currently requires the fsdp/fsdp2 engine.")
+        if engine_config.ulysses_sequence_parallel_size != 1:
+            raise NotImplementedError("Diffusion use_remove_padding does not yet support sequence parallelism.")
+
+    @classmethod
+    def apply_remove_padding(cls, module: torch.nn.Module, model_config: DiffusionModelConfig) -> None:
+        """Install packed execution before LoRA/FSDP wrapping, without renaming parameters.
+
+        The engine calls this only when ``use_remove_padding`` is enabled.
+        Adapters must also pack inputs and restore per-sample outputs in their
+        existing prepare/forward methods; this hook does not change batching or losses.
+        """
+        raise NotImplementedError(f"{cls.__name__} has no use_remove_padding implementation.")
+
     @classmethod
     def register(cls, architecture: str, algorithm: str):
         """Class decorator that registers a subclass for ``(architecture, algorithm)``."""

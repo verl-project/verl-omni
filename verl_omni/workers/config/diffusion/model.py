@@ -88,6 +88,9 @@ class DiffusionModelConfig(BaseConfig):
     enable_gradient_checkpointing: bool = True
     attn_backend: str = "_flash_3_varlen_hub"
 
+    # Verl-style switch for adapter-specific valid-row packing across diffusion samples.
+    use_remove_padding: bool = False
+
     lora_rank: int = 0
     lora_alpha: int = 64
     lora_init_weights: str = "gaussian"

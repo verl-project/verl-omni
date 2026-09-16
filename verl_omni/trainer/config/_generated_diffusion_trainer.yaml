@@ -307,6 +307,7 @@ actor_rollout_ref:
     custom_chat_template: null
     external_lib: null
     enable_gradient_checkpointing: true
+    use_remove_padding: false
     config_path: null
     transformer_subfolder: transformer
     attn_backend: _flash_3_varlen_hub

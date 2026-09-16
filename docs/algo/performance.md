@@ -1,9 +1,67 @@
 (performance)=
 # Performance Reference
 
-Last updated: 09/10/2026
+Last updated: 09/16/2026
 
 Below are reference benchmark results for VeRL-Omni training runs.
+
+## Diffusion remove-padding integration
+
+Diffusion exposes verl's configuration name for adapter-specific valid-row
+extraction and cross-sample packed execution within an Actor micro-batch:
+
+```bash
+actor_rollout_ref.model.use_remove_padding=true
+```
+
+**This is an opt-in interface, not automatic model support.** It defaults to
+`false`; no built-in diffusion adapter enables it yet. Setting it to `true`
+with an unsupported adapter fails before loading weights. Model-specific
+implementations are separate changes; existing recipes keep their current path.
+The initial engine contract permits FSDP/FSDP2 with sequence-parallel size 1;
+VeOmni and SP execution are rejected rather than silently ignoring the option.
+
+### Adapter contract
+
+The pinned verl transformer path uses `HFModelConfig.use_remove_padding` to
+install model patches, flatten valid tokens and restore per-sample outputs.
+Diffusion follows the same layering, not its LLM token/logit implementation:
+
+- `DiffusionModelConfig.use_remove_padding` is the single configuration source.
+  Existing workers propagate it to engine config and batch metadata. Diffusion
+  engines and adapters read the model config for training and forward-only calls.
+- `DiffusersFSDPEngine` resolves the `(architecture, algorithm)` adapter and calls
+  `validate_remove_padding` before loading weights. When enabled, it calls
+  `apply_remove_padding` after AutoModel or custom loading, before LoRA/FSDP wrapping.
+- An adapter declares `supports_remove_padding=True` only after implementing the
+  startup hook and packed/non-packed input and output paths. It must preserve
+  sample-local positions, noise timesteps, conditioning and sample loss weights,
+  including old-policy and reference-policy evaluation. Do not rename parameters.
+- Valid text, video, audio and reference rows come from masks and layout/count
+  metadata, not whether a latent value is zero. An arbitrary tokenizer mask
+  cannot determine which multimodal rows are removable.
+- Restore per-sample target predictions and transition statistics, not next-token
+  logits. Do not introduce fake `input_ids`, token shifting or causal attention.
+
+### Shared self-attention primitive
+
+`verl_omni.utils.diffusion_packing.PackedSequenceLayout` constructs `cu_seqlens`
+and sample-isolated attention for Q/K/V shaped `[1, total_rows, heads, head_dim]`.
+Q/K/V must share sample boundaries; unequal-length cross-attention is outside
+this contract. Multimodal ordering, positions, timestep expansion and target-row
+selection stay with each adapter.
+
+`_flash_3_varlen_hub` uses the autograd-enabled FA3 v1 kernel without padded rows.
+`native` pads within attention as a numerical reference, not a speedup claim.
+`torch_varlen` is a standalone utility/test path, not a public diffusion model
+attention-backend option. Kernel-load failures are not silently downgraded.
+
+`use_dynamic_bsz` remains independent and disabled in diffusion engines. This
+interface does not change micro-batch grouping, DP scheduling, rollout batching,
+loss weighting or divisibility constraints. Enabling it does not establish
+rollout/Actor bitwise parity or improve throughput without a compatible adapter.
+CPU tests cover configuration, loader dispatch and shared attention contracts;
+GPU and model-specific end-to-end validation belongs with each implementation.
 
 ## Diffusion actor output retention
 

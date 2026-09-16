@@ -273,6 +273,8 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         from diffusers import AutoModel
         from verl.utils.torch_dtypes import PrecisionType
 
+        model_cls = DiffusionModelBase.get_class(self.model_config)
+        model_cls.validate_remove_padding(self.model_config, self.engine_config)
         torch_dtype = self.engine_config.model_dtype
 
         if torch_dtype is None:
@@ -283,6 +285,8 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         module = self._build_module_from_registry(torch_dtype)
         if module is not None:
+            if self.model_config.use_remove_padding:
+                model_cls.apply_remove_padding(module, self.model_config)
             return module
 
         # Default path: load via diffusers AutoModel
@@ -308,7 +312,6 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
             # Keep architecture-declared fp32 islands unless the adapter marks
             # them as incompatible with its FSDP wrapping units.
-            model_cls = DiffusionModelBase.get_class(self.model_config)
             _cast_loaded_diffusers_module(
                 module,
                 torch_dtype,
@@ -327,6 +330,8 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             module.can_generate = lambda: False
             module.config.save_pretrained = save_config.__get__(module.config)
 
+        if self.model_config.use_remove_padding:
+            model_cls.apply_remove_padding(module, self.model_config)
         return module
 
     def _build_fsdp_module(self, module):

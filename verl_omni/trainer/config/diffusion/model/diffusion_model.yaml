@@ -34,6 +34,9 @@ external_lib: null
 # whether to enable gradient checkpointing.
 enable_gradient_checkpointing: True
 
+# Remove padding and pack valid diffusion rows across samples; requires a compatible adapter and engine.
+use_remove_padding: False
+
 # Optional model config path. If null, backends use <path>/<transformer_subfolder>.
 config_path: null
 
