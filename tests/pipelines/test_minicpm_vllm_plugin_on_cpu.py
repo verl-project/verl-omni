@@ -19,7 +19,7 @@ import sys
 
 import torch
 
-from verl_omni.vllm_plugins import register
+from verl_omni.pipelines.minicpm.vllm_plugin import register
 
 _MODULE = "vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_llm"
 
@@ -97,7 +97,7 @@ def _fresh(cls):
 
 
 def test_normalize_forward_return_unwraps_embeddings_first_tuple():
-    from verl_omni.vllm_plugins import _normalize_forward_return
+    from verl_omni.pipelines.minicpm.vllm_plugin import _normalize_forward_return
 
     class _Engine(_TupleForwardEngine):
         pass
@@ -111,7 +111,7 @@ def test_normalize_forward_return_unwraps_embeddings_first_tuple():
 
 
 def test_normalize_forward_return_passes_plain_tensor_through():
-    from verl_omni.vllm_plugins import _normalize_forward_return
+    from verl_omni.pipelines.minicpm.vllm_plugin import _normalize_forward_return
 
     payload = torch.arange(40.0).reshape(5, 8)
 
@@ -125,7 +125,7 @@ def test_normalize_forward_return_passes_plain_tensor_through():
 
 
 def test_normalize_forward_return_is_idempotent():
-    from verl_omni.vllm_plugins import _normalize_forward_return
+    from verl_omni.pipelines.minicpm.vllm_plugin import _normalize_forward_return
 
     class _Engine(_TupleForwardEngine):
         pass

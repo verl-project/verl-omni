@@ -36,24 +36,26 @@ def test_diffusion_lora_stacks_follow_the_worker_device():
     assert layer.lora_b_stacked[0].device.type == "meta"
 
 
-class _QwenStyleEngine:
-    def __init__(self):
-        self.model = object()
+def test_moe_weight_loader_patch_value_error_is_swallowed(monkeypatch):
+    # verl raises for engines whose inner model does not resolve (MiniCPM-o
+    # nests its LLM as .llm); the shared call site swallows exactly that.
+    import verl_omni.workers.rollout.vllm_rollout.utils as rollout_utils
+
+    def raising_patch(model):
+        raise ValueError("The provided model does not have a valid 'model' or 'language_model' attribute.")
+
+    monkeypatch.setattr("verl.utils.vllm.patch.patch_vllm_moe_model_weight_loader", raising_patch)
+    rollout_utils._apply_moe_weight_loader_patch(object())  # must not raise
 
 
-class _MiniCPMStyleEngine:
-    def __init__(self):
-        self.llm = object()  # MiniCPM-o nests its LLM as .llm
+def test_moe_weight_loader_patch_other_errors_propagate(monkeypatch):
+    import pytest
 
+    import verl_omni.workers.rollout.vllm_rollout.utils as rollout_utils
 
-class _ACLGraphWrapped:
-    def __init__(self):
-        self.runnable = _QwenStyleEngine()
+    def raising_patch(model):
+        raise ValueError("some unrelated patch failure")
 
-
-def test_moe_weight_loader_patch_applies_gate():
-    from verl_omni.workers.rollout.vllm_rollout.utils import _moe_weight_loader_patch_applies
-
-    assert _moe_weight_loader_patch_applies(_QwenStyleEngine())  # .model resolves -> patch runs
-    assert _moe_weight_loader_patch_applies(_ACLGraphWrapped())  # ACLGraph unwrap, same as verl
-    assert not _moe_weight_loader_patch_applies(_MiniCPMStyleEngine())  # .llm only -> skip, no ValueError
+    monkeypatch.setattr("verl.utils.vllm.patch.patch_vllm_moe_model_weight_loader", raising_patch)
+    with pytest.raises(ValueError, match="unrelated"):
+        rollout_utils._apply_moe_weight_loader_patch(object())

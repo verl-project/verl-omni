@@ -167,15 +167,24 @@ class MiniCPMO:
         )
 
         trust_remote_code = kwargs.get("trust_remote_code", False)
+        config = kwargs.get("config")
+        # Training-path invariants, applied before the remote __init__ runs:
+        # TTS stages are stripped after load anyway (their remote construction
+        # crashes under transformers 5.x); the training forward runs without
+        # cache; the patched embedders implement the non-streaming audio path.
+        if config is not None:
+            config.init_tts = False
+            config.use_cache = False
+            config.stream_input = False
         patch_remote_auto_model_init(
             pretrained_model_name_or_path,
             trust_remote_code=trust_remote_code,
-            config=kwargs.get("config"),
+            config=config,
         )
         patch_remote_siglip_flash_attn_support(
             pretrained_model_name_or_path,
             trust_remote_code=trust_remote_code,
-            config=kwargs.get("config"),
+            config=config,
         )
         return AutoModel.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
 
@@ -403,12 +412,3 @@ class MiniCPMThinkerAdapter(OmniModelBase):
         # choice reward is identically zero.
         keep_answer_tags_when_decoding(tokenizer)
         return tokenizer
-
-    @classmethod
-    def prepare_reward_decode_tokenizer(cls, tokenizer, model_config=None) -> None:
-        # Same demotion as configure_tokenizer: the reward loop builds its own
-        # tokenizer that never passes through the adapter, so decode-relevant
-        # preparation must be re-applied there (see OmniModelBase hook).
-        from verl_omni.models.transformers.minicpm_o import keep_answer_tags_when_decoding
-
-        keep_answer_tags_when_decoding(tokenizer)

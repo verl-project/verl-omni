@@ -386,3 +386,29 @@ def test_merge_packed_media_stashes_per_example_slice_counts():
     assert data["packed_vision_slices"] == [2, 0, 3]
     assert len(data["pixel_values"]) == 1  # folded into one pseudo-row
     assert len(data["pixel_values"][0]) == 5
+
+
+def test_from_pretrained_applies_training_config_invariants(monkeypatch):
+    from transformers import AutoModel
+
+    from verl_omni.pipelines.minicpm.thinker_training_adapter import MiniCPMO
+
+    loaded = object()
+    captured = {}
+
+    def fake_from_pretrained(path, *args, **kwargs):
+        captured.update(kwargs)
+        return loaded
+
+    monkeypatch.setattr(AutoModel, "from_pretrained", staticmethod(fake_from_pretrained))
+    monkeypatch.setattr("verl_omni.models.transformers.minicpm_o.patch_remote_auto_model_init", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "verl_omni.models.transformers.minicpm_o.patch_remote_siglip_flash_attn_support", lambda *a, **k: None
+    )
+
+    config = SimpleNamespace(init_tts=True, use_cache=True, stream_input=True)
+    result = MiniCPMO.from_pretrained("/fake/model", config=config, trust_remote_code=True)
+
+    assert result is loaded
+    assert captured["config"] is config
+    assert (config.init_tts, config.use_cache, config.stream_input) == (False, False, False)

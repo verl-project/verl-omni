@@ -20,11 +20,13 @@ crosses process boundaries.
 
 Both fixes this plugin carries have landed upstream: the
 ``embed_multimodal`` alias in vllm-omni#7384 and the bare-tensor forward
-return in vllm-omni#7517.
+return in vllm-omni#7517 — but the pinned vllm-omni commit predates both.
 """
 
 # TODO (mike): drop this file and its ``vllm.general_plugins`` entry point in
-# pyproject.toml at the next vllm-omni pin update — any pin past #7517 covers both.
+# pyproject.toml once .github/vllm_omni_pin.txt includes vllm-omni#7517 —
+# landing on main is NOT enough; a pin bumped past only #7384 would still
+# need the forward-return half.
 
 from __future__ import annotations
 

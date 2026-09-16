@@ -54,9 +54,9 @@ def test_minicpmo_gspo_launcher_contract():
     # OpenBMB's supported render mode: the template pre-fills an empty think
     # block instead of making the model close its own.
     assert "+data.apply_chat_template_kwargs.enable_thinking=false" in settings
-    assert "+actor_rollout_ref.model.override_config.init_tts=false" in settings
-    assert "+actor_rollout_ref.model.override_config.use_cache=false" in settings
-    assert "+actor_rollout_ref.model.override_config.stream_input=false" in settings
+    # The training-path config invariants (init_tts/use_cache/stream_input)
+    # are applied by the adapter's from_pretrained, not recipe overrides.
+    assert not any("override_config" in line for line in settings)
     assert any(
         line.startswith("actor_rollout_ref.model.exclude_modules=") and ".*vpm.*" in line and ".*apm.*" in line
         for line in settings
@@ -65,10 +65,7 @@ def test_minicpmo_gspo_launcher_contract():
     # AVQA reward and proven hyperparameters from the Qwen3-Omni recipe.
     assert "data.max_response_length=12288" in settings  # 4096 CLI overrides truncate MiniCPM's think
     assert "reward.reward_manager.source=register" in settings
-    # The reward loop builds its own tokenizer (never through the adapter's
-    # configure_tokenizer), so the stock naive manager strips the checkpoint's
-    # special <answer> tags and zeroes every score; omni_naive demotes them.
-    assert "reward.reward_manager.name=omni_naive" in settings
+    assert "reward.reward_manager.name=naive" in settings
     assert "reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py" in settings
     assert "reward.custom_reward_function.name=compute_score" in settings
     assert "data.train_batch_size=128" in settings

@@ -620,23 +620,6 @@ class OmniModelBase(ABC):
         pass
 
     @classmethod
-    def prepare_reward_decode_tokenizer(cls, tokenizer, model_config=None) -> None:
-        """Apply decode-relevant tokenizer preparation on the reward side.
-
-        verl's reward loop builds its own tokenizer that never passes
-        through ``configure_tokenizer``, so decode-relevant fixes — e.g.
-        demoting tokens ``skip_special_tokens=True`` would strip — must be
-        re-applied on that instance. Override when ``configure_tokenizer``
-        mutates decode behavior; the omni_naive reward manager calls this
-        hook on the tokenizer it decodes with. Default: no-op.
-
-        Args:
-            tokenizer: The reward loop's tokenizer instance (mutated in place).
-            model_config: The raw ``actor_rollout_ref.model`` config group.
-        """
-        return None
-
-    @classmethod
     def configure_model(cls, module, model_config):
         """Configure the model after loading and before FSDP wrapping.
 

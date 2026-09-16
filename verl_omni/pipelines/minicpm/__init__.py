@@ -13,6 +13,7 @@
 # limitations under the License.
 """MiniCPM omni pipeline adapters."""
 
+from . import reward_decode  # noqa: F401  # installs the answer-tag decode patch at import
 from .omni_rollout_adapter import MiniCPMORolloutAdapter
 from .thinker_training_adapter import MiniCPMThinkerAdapter
 
