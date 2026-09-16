@@ -951,9 +951,21 @@ def _fsdp2_engine(omni_impl, module, ignored_names, strategy="fsdp2"):
         offload_policy=False,
         forward_only=False,
         reshard_after_forward=True,
+        forward_prefetch=False,
+        use_orig_params=True,
+        wrap_policy={},
         get=lambda key, default=None: {},
     )
     return engine
+
+
+def _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl):
+    """Stub the module-level pieces that need a process group / real device on CPU."""
+    monkeypatch.setattr(omni_impl, "get_sharding_strategy", lambda mesh, zero3_enable: None)
+    monkeypatch.setattr(omni_impl, "get_fsdp_wrap_policy", lambda **kwargs: None)
+    monkeypatch.setattr(omni_impl, "fsdp2_load_full_state_dict", lambda *args, **kwargs: None)
+    monkeypatch.setattr(omni_impl, "get_device_id", lambda: 0)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
 
 
 class _MiniCPMStyleModule(torch.nn.Module):
@@ -988,8 +1000,8 @@ def test_build_fsdp_module_injects_ignored_params_on_root_only(monkeypatch):
     monkeypatch.setattr(torch.distributed.fsdp, "fully_shard", fake_fully_shard)
     monkeypatch.setattr(verl_fsdp_utils, "_select_fsdp2_wrap_targets", lambda model, names: [wrap_target])
     monkeypatch.setattr(verl_fsdp_utils, "maybe_patch_fsdp_module", lambda model: contextmanager(lambda: (yield))())
-    monkeypatch.setattr(verl_fsdp_utils, "fsdp2_load_full_state_dict", lambda *args, **kwargs: None)
     monkeypatch.setattr(torch_dtypes.PrecisionType, "to_dtype", staticmethod(lambda name: torch.bfloat16))
+    _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl)
 
     engine = _fsdp2_engine(omni_impl, module, ["apm"])
     result = engine._build_fsdp_module(module)
@@ -1003,17 +1015,53 @@ def test_build_fsdp_module_injects_ignored_params_on_root_only(monkeypatch):
     assert calls[1][1] == set(module.apm.parameters())
 
 
-def test_build_fsdp_module_delegates_to_verl_without_ignored_names(monkeypatch):
+def test_build_fsdp_module_builds_itself_without_ignored_names(monkeypatch):
+    # No adapter-declared subtrees: the override still runs the copied build
+    # rather than delegating, so both paths share one code path.
     omni_impl = _get_omni_impl_module()
     module = _MiniCPMStyleModule()
     delegated = []
+    calls = []
 
     monkeypatch.setattr(
         omni_impl.OmniFSDPEngine.__bases__[0], "_build_fsdp_module", lambda self, m: delegated.append(m)
     )
+    monkeypatch.setattr(torch.distributed.fsdp, "fully_shard", lambda target, **kwargs: calls.append(kwargs))
+    import verl.utils.fsdp_utils as verl_fsdp_utils
+
+    monkeypatch.setattr(verl_fsdp_utils, "_select_fsdp2_wrap_targets", lambda model, names: [])
+    monkeypatch.setattr(verl_fsdp_utils, "maybe_patch_fsdp_module", lambda model: contextmanager(lambda: (yield))())
+    _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl)
+
     engine = _fsdp2_engine(omni_impl, module, None)
     engine._build_fsdp_module(module)
-    assert delegated == [module]
+
+    assert delegated == []
+    assert calls[-1]["ignored_params"] == set()
+
+
+def test_build_fsdp_module_supports_fsdp1_without_ignored_names(monkeypatch):
+    # The fsdp1 branch stays available (and byte-identical to upstream) for
+    # adapters that declare no ignored subtrees.
+    omni_impl = _get_omni_impl_module()
+    module = _MiniCPMStyleModule()
+    captured = {}
+
+    def fake_fsdp(model, **kwargs):
+        captured.update(kwargs)
+        return model
+
+    monkeypatch.setattr(omni_impl, "FSDP", fake_fsdp)
+    monkeypatch.setattr(omni_impl, "init_fn", lambda *args, **kwargs: None)
+    _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl)
+
+    engine = _fsdp2_engine(omni_impl, module, None, strategy="fsdp")
+    result = engine._build_fsdp_module(module)
+
+    assert result is module
+    assert captured["use_orig_params"] is True
+    assert captured["mixed_precision"].buffer_dtype == torch.float32  # upstream's default
+    assert captured["cpu_offload"] is None  # forward_only=False
 
 
 def test_build_fsdp_module_rejects_fsdp1_with_ignored_names():
@@ -1037,8 +1085,8 @@ def test_build_fsdp_module_rejects_trainable_ignored_params(monkeypatch):
     monkeypatch.setattr(torch.distributed.fsdp, "fully_shard", lambda target, **kwargs: target)
     monkeypatch.setattr(verl_fsdp_utils, "_select_fsdp2_wrap_targets", lambda model, names: [])
     monkeypatch.setattr(verl_fsdp_utils, "maybe_patch_fsdp_module", lambda model: contextmanager(lambda: (yield))())
-    monkeypatch.setattr(verl_fsdp_utils, "fsdp2_load_full_state_dict", lambda *args, **kwargs: None)
     monkeypatch.setattr(torch_dtypes.PrecisionType, "to_dtype", staticmethod(lambda name: torch.bfloat16))
+    _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl)
 
     engine = _fsdp2_engine(omni_impl, module, ["apm"])
     engine.device_mesh = types.SimpleNamespace(size=lambda: 2)
@@ -1084,8 +1132,8 @@ def test_build_fsdp_module_skips_wrap_targets_under_ignored_subtrees(monkeypatch
     )
     monkeypatch.setattr(torch.distributed.fsdp, "fully_shard", fake_fully_shard)
     monkeypatch.setattr(verl_fsdp_utils, "maybe_patch_fsdp_module", lambda model: contextmanager(lambda: (yield))())
-    monkeypatch.setattr(verl_fsdp_utils, "fsdp2_load_full_state_dict", lambda *args, **kwargs: None)
     monkeypatch.setattr(torch_dtypes.PrecisionType, "to_dtype", staticmethod(lambda name: torch.bfloat16))
+    _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl)
 
     engine = _fsdp2_engine(omni_impl, module, ["apm"])
     engine._build_fsdp_module(module)
@@ -1102,7 +1150,8 @@ def test_build_fsdp_module_skips_wrap_targets_under_ignored_subtrees(monkeypatch
 
 
 def test_filter_ignored_wrap_targets_identity_without_ignored_names():
-    omni_impl = _get_omni_impl_module()
+    from verl_omni.utils.fsdp_utils import _filter_ignored_wrap_targets
+
     module = _WhisperStyleModule()
     targets = [module.llm.layer, module.apm.embed_positions]
-    assert omni_impl._filter_ignored_wrap_targets(targets, module, []) == targets
+    assert _filter_ignored_wrap_targets(targets, module, []) == targets
