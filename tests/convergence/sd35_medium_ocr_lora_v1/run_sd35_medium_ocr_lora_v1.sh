@@ -16,7 +16,7 @@
 # Reference recipe:
 #   examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh
 set -xeuo pipefail
-
+export FLASHINFER_DISABLE_VERSION_CHECK=1
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/../../.." && pwd)
 
