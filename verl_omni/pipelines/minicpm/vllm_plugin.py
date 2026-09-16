@@ -13,20 +13,13 @@
 # limitations under the License.
 """vLLM general plugins, loaded in every engine process.
 
-Registered under the ``vllm.general_plugins`` entry point group (see
-pyproject.toml). vLLM calls each plugin at startup in every process,
-including freshly spawned engine cores — the only hook that reliably
-crosses process boundaries.
-
-Both fixes this plugin carries have landed upstream: the
-``embed_multimodal`` alias in vllm-omni#7384 and the bare-tensor forward
-return in vllm-omni#7517 — but the pinned vllm-omni commit predates both.
+Registered as a ``vllm.general_plugins`` entry point (pyproject.toml): vLLM
+runs these at startup in every process, spawned engine cores included — the
+only hook that reliably crosses process boundaries.
 """
 
-# TODO (mike): drop this file and its ``vllm.general_plugins`` entry point in
-# pyproject.toml once .github/vllm_omni_pin.txt includes vllm-omni#7517 —
-# landing on main is NOT enough; a pin bumped past only #7384 would still
-# need the forward-return half.
+# TODO (mike): both fixes have landed upstream (vllm-omni#7384, #7517); drop this
+# file and its pyproject entry point once the pin includes them.
 
 from __future__ import annotations
 
@@ -38,14 +31,10 @@ logger = logging.getLogger(__name__)
 def register() -> None:
     """Alias the new-style ``embed_multimodal`` onto MiniCPM-o's engine class.
 
-    The class implements the old-style ``get_multimodal_embeddings``; vLLM
-    0.28's encoder paths call ``embed_multimodal`` directly and the
-    ``SupportsMultiModal`` default is a stub returning ``None`` — every
-    MiniCPM-o engine process died there. The old-style method already
-    satisfies the new contract, so the alias points the new name at it; an
-    in-process alias does not survive engine-core spawns, hence this plugin.
-    A missing or reshaped minicpmo_4_5 module is logged and skipped so
-    unrelated models keep working. Landed upstream in vllm-omni#7384.
+    The class implements the old-style ``get_multimodal_embeddings``, while
+    vLLM's encoder paths call ``embed_multimodal`` and its default stub returns
+    ``None``. An in-process alias does not survive engine-core spawns, hence a
+    plugin; a missing minicpmo_4_5 module is skipped so other models still run.
     """
     try:
         from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_llm import (
@@ -75,18 +64,14 @@ _FORWARD_NORM_ATTR = "_verl_omni_forward_normalized"
 
 
 def _normalize_forward_return(model_cls) -> None:
-    """Return hidden states from the LLM engine class's forward.
+    """Return this class's hidden states instead of its embeddings-first tuple.
 
-    The class's forward returns ``(text_inputs_embeds, hidden_states)``
-    — embeddings first — while the AR runner's ``extract_multimodal_outputs``
-    consumes tuple element [0] as the hidden states: logits were computed
+    The AR runner consumes tuple element [0] as the hidden states, but this
+    forward returns ``(text_inputs_embeds, hidden_states)``, so logits came
     from raw input embeddings and every rollout degenerated into
-    self-repetition. The wrapper returns only the hidden-states element
-    squeezed to ``[num_tokens, hidden]``; a plain tensor return passes
-    through untouched. Only this LLM class is wrapped — the 3-stage
-    wrapper keeps its tuple for the Talker bridge.
-
-    Landed upstream in vllm-omni#7517 (fixes #7497).
+    self-repetition. A plain tensor return passes through untouched; only this
+    LLM class is wrapped, since the 3-stage wrapper keeps its tuple for the
+    Talker bridge.
     """
     if getattr(model_cls, _FORWARD_NORM_ATTR, False):
         return

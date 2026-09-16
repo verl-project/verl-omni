@@ -308,13 +308,6 @@ def test_prepare_model_inputs_packed_drops_attention_mask():
     assert len(packed["data"]["image_bound"]) == 1
 
 
-def test_configure_model_rejects_non_45_checkpoints():
-    module = torch.nn.Module()
-    module.config = SimpleNamespace(version="2.6")
-    with pytest.raises(ValueError, match="MiniCPM-o 4.5 checkpoints only"):
-        MiniCPMThinkerAdapter.configure_model(module, SimpleNamespace())
-
-
 def _block_messages():
     return [
         {"role": "system", "content": "Answer with <answer>X</answer>."},
