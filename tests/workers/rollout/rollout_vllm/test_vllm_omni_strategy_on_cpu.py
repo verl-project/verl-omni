@@ -128,7 +128,6 @@ def test_optional_rollout_hooks_preserve_existing_ar_defaults(adapter_cls):
     assert adapter_cls.weight_sync_stage_ids("full") is None
     assert adapter_cls.policy_stage_id("full") == 0
     assert adapter_cls.prepare_engine_prompt([], None, {}) is None
-    assert adapter_cls.policy_logit_bias(None) is None  # default: no sampling bans
     assert adapter_cls.combine_engine_outputs([final], {}) == (final, {})
     with pytest.raises(NotImplementedError, match="multiple final outputs"):
         adapter_cls.combine_engine_outputs([first, final], {})
@@ -879,74 +878,3 @@ async def test_strategy_preserves_mode_specific_engine_call(strategy_cls, priori
     assert engine.kwargs["request_id"] == "request-1"
     assert engine.kwargs["sampling_params_list"] == ["params"]
     assert set(engine.kwargs) - {"prompt", "request_id", "sampling_params_list"} == expected_extra_keys
-
-
-class _LoadedTokenizer:
-    """Minimal loaded-tokenizer stand-in (object form on model_config)."""
-
-    def get_added_vocab(self):
-        return {"<|im_end|>": 5}
-
-
-def test_ar_strategy_resolves_both_tokenizer_forms(monkeypatch):
-    loaded = _LoadedTokenizer()
-    strategy = ARStrategy(SimpleNamespace(model_config=SimpleNamespace(tokenizer=loaded)))
-    assert strategy._resolve_rollout_tokenizer() is loaded
-
-    from transformers import AutoTokenizer
-
-    monkeypatch.setattr(AutoTokenizer, "from_pretrained", classmethod(lambda cls, *a, **k: ("loaded-from", a[0])))
-    strategy = ARStrategy(SimpleNamespace(model_config=SimpleNamespace(tokenizer="org/repo")))
-    assert strategy._resolve_rollout_tokenizer() == ("loaded-from", "org/repo")
-
-    strategy = ARStrategy(SimpleNamespace(model_config=SimpleNamespace(tokenizer=None)))
-    assert strategy._resolve_rollout_tokenizer() is None
-
-
-def test_ar_strategy_policy_logit_bias_requires_adapter_and_tokenizer():
-    strategy = ARStrategy(SimpleNamespace(model_config=SimpleNamespace(tokenizer=None)))
-    assert strategy._policy_logit_bias() is None  # no adapter -> no bias
-
-    class _Adapter:
-        @classmethod
-        def policy_logit_bias(cls, tokenizer):
-            return {99: float("-inf")}
-
-    strategy._rollout_adapter = _Adapter
-    with pytest.raises(RuntimeError, match="no tokenizer could be resolved"):
-        strategy._policy_logit_bias()
-
-    strategy.server = SimpleNamespace(model_config=SimpleNamespace(tokenizer=_LoadedTokenizer()))
-    assert strategy._policy_logit_bias() == {99: float("-inf")}
-
-    # Cached: an adapter that would raise proves the original result is reused.
-    class _ExplodingAdapter:
-        @classmethod
-        def policy_logit_bias(cls, tokenizer):
-            raise AssertionError("policy_logit_bias must be consulted once")
-
-    strategy._rollout_adapter = _ExplodingAdapter
-    assert strategy._policy_logit_bias() == {99: float("-inf")}
-
-
-def test_ar_strategy_applies_adapter_logit_bias_to_policy_sampling():
-    class _Adapter:
-        @classmethod
-        def prepare_engine_prompt(cls, prompt_ids, model_config, multi_modal_data, mm_processor_kwargs=None):
-            return None
-
-        @classmethod
-        def policy_logit_bias(cls, tokenizer):
-            return {99: float("-inf")}
-
-    server = SimpleNamespace(
-        config=SimpleNamespace(max_model_len=16, prompt_length=8, response_length=8),
-        model_config=SimpleNamespace(processor=None, tokenizer=_LoadedTokenizer()),
-    )
-    strategy = ARStrategy(server)
-    strategy._rollout_adapter = _Adapter
-    request = OmniRolloutRequest.from_generate_kwargs(prompt_ids=[1, 2, 3])
-
-    _, params = strategy.preprocess_input(request, {"max_new_tokens": 4, "logit_bias": {7: 5.0}}, None)
-
-    assert params.logit_bias == {7: 5.0, 99: float("-inf")}  # adapter bans win, user bias kept
