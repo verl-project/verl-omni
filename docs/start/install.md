@@ -93,7 +93,7 @@ VeRL-Omni defaults to **FSDP2** as the training engine for the policy and refere
 
 VeOmni 0.1.11's `gpu` extra pins `torch==2.9.1+cu129`, which conflicts with the `torch==2.13.0` pulled in by `vllm==0.28.0`. A plain `uv pip install veomni[gpu,dit]==0.1.11` therefore fails dependency resolution.
 
-Install it without dependency resolution so the existing torch/vllm stack is preserved, and add the small set of runtime extras that the verl-omni VeOmni engine actually needs (this is the same recipe CI uses):
+Install it without dependency resolution so the existing torch/vllm stack is preserved, and add the small set of runtime extras that the verl-omni VeOmni engine actually needs (CI runs the image-only VeOmni smoke and pulls `librosa`/`soundfile`/`av`/`audioread` from the `[audio]`/`[omni]` extras; `torchcodec` is only needed when the VeOmni engine decodes video):
 
 ```bash
 uv pip install veomni==0.1.11 --no-deps
