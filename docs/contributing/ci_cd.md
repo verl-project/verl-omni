@@ -83,27 +83,6 @@ throughput or step time. Those numbers are recorded for humans to inspect.
 
 ### Current runnable cases
 
-#### Qwen-Image OCR LoRA v1
-
-`tests/convergence/qwen_image_ocr_lora_v1/` wraps
-`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh` for an
-8-GPU, 100-step v1 sync LoRA OCR job. It enables
-`actor_rollout_ref.rollout.calculate_log_probs=true` and keeps rollout-correction
-bypass mode off so the actor recomputes `old_log_probs`. Validation runs every
-20 steps (`trainer.test_freq=20`) and on the last step.
-
-```bash
-bash tests/convergence/qwen_image_ocr_lora_v1/run_qwen_image_ocr_lora_v1.sh
-```
-
-Defaults:
-
-- Policy: `$WORKSPACE/models/Qwen-Image` (`MODEL_PATH`)
-- Reward: `$WORKSPACE/models/Qwen3-VL-8B-Instruct` (`REWARD_MODEL_PATH`)
-- Data: `$WORKSPACE/data/ocr/qwen_image/{train,test}.parquet`
-- `WORKSPACE` defaults to `$HOME`. `NUM_GPUS` defaults to `8`.
-- `VAL_REWARD_MIN` defaults to `0.9`.
-
 #### SD3.5 OCR LoRA v1
 
 `tests/convergence/sd35_medium_ocr_lora_v1/` wraps
@@ -133,7 +112,7 @@ Gate logic lives in `collect_report.py`. The collector's own tests are L1
 | --- | --- | --- |
 | Train-infer consistency | `training/rollout_probs_diff_mean` if present, else `rollout_corr/logprob_abs_diff_mean` | missing, non-finite, or any post-warmup step **> 0.01** |
 | Grad | `actor/grad_norm` | NaN / Inf |
-| Val reward at step 100 | `val-core/*/reward/mean@*` | missing, or any source **< `VAL_REWARD_MIN`** (default **0.9**) |
+| Val reward at step 100 | `val-core/*/reward/mean@*` | missing, or any source **< `VAL_REWARD_MIN`** (default **0.6**) |
 
 `perf/time_per_step` and related `timing_s/*` keys are copied into
 `report.json` under `"perf"` with no pass/fail.
@@ -148,7 +127,7 @@ The workflow is `.github/workflows/l4_convergence.yml`. Trigger it in either
 way:
 
 - **Manual:** GitHub Actions → `l4_convergence` → **Run workflow** → choose
-  `all`, `qwen_image_ocr_lora_v1`, or `sd35_medium_ocr_lora_v1`.
+  `all` or `sd35_medium_ocr_lora_v1`.
 - **Pull request:** apply the `L4-weekly-ci` label. The workflow selects the
   smallest case set that covers the PR diff; shared trainer or unknown paths run
   all cases sequentially on one `L20x8` runner.

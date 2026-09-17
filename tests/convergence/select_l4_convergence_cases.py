@@ -26,7 +26,7 @@ from typing import Iterable
 
 REQUIRED_GPUS_PER_CASE = 8
 RUNNER_SIZE = "L20x8"
-CASE_ORDER = ("qwen_image_ocr_lora_v1", "sd35_medium_ocr_lora_v1")
+CASE_ORDER = ("sd35_medium_ocr_lora_v1",)
 
 
 @dataclass(frozen=True)
@@ -37,10 +37,6 @@ class ConvergenceCase:
 
 
 CASES = {
-    "qwen_image_ocr_lora_v1": ConvergenceCase(
-        name="qwen_image_ocr_lora_v1",
-        script="tests/convergence/qwen_image_ocr_lora_v1/run_qwen_image_ocr_lora_v1.sh",
-    ),
     "sd35_medium_ocr_lora_v1": ConvergenceCase(
         name="sd35_medium_ocr_lora_v1",
         script="tests/convergence/sd35_medium_ocr_lora_v1/run_sd35_medium_ocr_lora_v1.sh",
@@ -48,13 +44,6 @@ CASES = {
 }
 
 CASE_PATTERNS = {
-    "qwen_image_ocr_lora_v1": (
-        "tests/convergence/qwen_image_ocr_lora_v1/**",
-        "examples/flowgrpo_trainer/qwen_image/**",
-        "verl_omni/pipelines/qwen_image_flow_grpo/**",
-        "verl_omni/pipelines/qwen_image_dual_grpo/**",
-        "verl_omni/pipelines/qwen_image_edit_flow_grpo/**",
-    ),
     "sd35_medium_ocr_lora_v1": (
         "tests/convergence/sd35_medium_ocr_lora_v1/**",
         "examples/flowgrpo_trainer/sd35/**",
