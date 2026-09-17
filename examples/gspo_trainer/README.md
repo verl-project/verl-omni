@@ -572,35 +572,23 @@ Logging uses console and TensorBoard; the launcher also writes
 
 ## Training with MiniCPM-o 4.5 (AVQA)
 
-The MiniCPM-o recipe trains the thinker (`llm` = dense Qwen3-8B) on the same
-AVQA-R1-6K parquet as the Qwen3-Omni recipe above — same data prep command,
-same reward — through `MiniCPMORLHFDataset`
-([`omni_rl_datasets.py`](../../verl_omni/utils/dataset/omni_rl_datasets.py)),
-which loads the media blocks verl builds from the `<image>`/`<audio>` markers
-without any Qwen dependency and hop-pads audio to the Whisper mel stride.
-
-Hyperparameters are copied verbatim from the proven Qwen3-Omni AVQA recipe;
-only the model-specific lines differ (checkpoint path, `trust_remote_code`,
-`pipeline_name="minicpmo_4_5"`, the MiniCPM LoRA exclusion list, and HF config
-overrides `init_tts=false` / `use_cache=false` / `stream_input=false` — the
-last one keeps the HF audio placeholder expansion aligned with vLLM-Omni's
-unchunked form). `use_remove_padding` stays on: the training adapter folds
-packed samples into MiniCPMO's single-row scatter and runs the inner
-`Qwen3ForCausalLM` with position-id-based flash-attention varlen.
+Same AVQA-R1-6K data, same reward, and the same recipe as Qwen3-Omni above,
+with four model-specific changes: the checkpoint path,
+`trust_remote_code=True`, `pipeline_name="minicpmo_4_5"`, and
+[`MiniCPMORLHFDataset`](../../verl_omni/utils/dataset/omni_rl_datasets.py),
+which reads the image and audio blocks without a Qwen dependency.
 
 ```bash
 bash examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh
 ```
 
-Keep `flash_attention_2` (the default) — switching the model to sdpa broke
-train/rollout consistency in Qwen3-Omni experiments. Vision/audio towers
-(`vpm`/`apm`) stay present but frozen via the LoRA exclusion list, and the FSDP2
-wrap keeps the frozen towers (`apm`/`vpm`/`resampler`) unsharded. The vLLM-Omni rollout runs a runtime-registered
-one-stage thinker-only pipeline (`minicpmo_4_5_thinker_only`, text output) with
-`model_arch=MiniCPMO45OmniLLMForConditionalGeneration` for logprob support and
-`lora.merge=true` weight sync. See
-[`docs/contributing/integrating_an_omni_model.md`](../../docs/contributing/integrating_an_omni_model.md)
-for the rollout memory-sizing knobs the script already sets.
+The recipe trains the thinker (`llm` = dense Qwen3-8B). The vision and audio
+towers (`vpm`/`apm`) stay frozen and unsharded under FSDP2, and the rollout
+serves a one-stage thinker-only pipeline (text output) with
+`model_arch=MiniCPMO45OmniLLMForConditionalGeneration` for logprob support.
+Keep `flash_attention_2`: sdpa breaks train/rollout consistency. See the
+[integrating guide](../../docs/contributing/integrating_an_omni_model.md) for
+the rollout memory-sizing knobs the script sets.
 
 ## Performance
 
