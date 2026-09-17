@@ -6,7 +6,7 @@
 # micro-batches, and a larger train batch + rollout.n for faster convergence.
 #
 # Fail closed on:
-#   - visible GPU count != 8 (NUM_GPUS_ACTOR_ROLLOUT + NUM_GPUS_REWARD)
+#   - visible GPU count < REQUIRED_GPUS (NUM_GPUS_ACTOR_ROLLOUT + NUM_GPUS_REWARD)
 #   - rollout_prob_diff_mean > ROLLOUT_PROB_DIFF_MEAN_MAX (default 0.01)
 #   - non-finite actor/grad_norm
 #   - step-100 val-core reward/mean below VAL_REWARD_MIN
@@ -21,7 +21,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/../../.." && pwd)
 
 WORKSPACE=${OCR_WORKSPACE:-${WORKSPACE:-$HOME}}
-NUM_GPUS_ACTOR_ROLLOUT=${NUM_GPUS_ACTOR_ROLLOUT:-6}
+NUM_GPUS_ACTOR_ROLLOUT=${NUM_GPUS_ACTOR_ROLLOUT:-4}
 NUM_GPUS_REWARD=${NUM_GPUS_REWARD:-2}
 REQUIRED_GPUS=${REQUIRED_GPUS:-$((NUM_GPUS_ACTOR_ROLLOUT + NUM_GPUS_REWARD))}
 ROLLOUT_TP=${ROLLOUT_TP:-2}
@@ -87,7 +87,7 @@ count_visible_gpus() {
 print_l4_thresholds() {
     cat <<EOF
 ================================================================================
-[L4] sd35_medium_ocr_lora_v1 precision gates (Route A: 8-GPU sync)
+[L4] sd35_medium_ocr_lora_v1 precision gates
 ================================================================================
   GPUs required           : ${REQUIRED_GPUS} (${NUM_GPUS_ACTOR_ROLLOUT} actor+rollout + ${NUM_GPUS_REWARD} reward)
   Rollout TP / Reward TP  : ${ROLLOUT_TP} / ${REWARD_TP}
@@ -114,8 +114,8 @@ if [ "${TRAIN_BATCH_SIZE}" -lt "${PPO_MINI_BATCH_SIZE}" ] || [ $((TRAIN_BATCH_SI
 fi
 
 VISIBLE_GPUS=$(count_visible_gpus)
-if [[ "${REQUIRED_GPUS}" -ne "${VISIBLE_GPUS}" ]]; then
-    echo "L4 SD3.5 OCR LoRA v1 requires exactly ${REQUIRED_GPUS} GPUs (visible=${VISIBLE_GPUS})." >&2
+if [[ "${VISIBLE_GPUS}" -lt "${REQUIRED_GPUS}" ]]; then
+    echo "L4 SD3.5 OCR LoRA v1 requires at least ${REQUIRED_GPUS} GPUs (visible=${VISIBLE_GPUS})." >&2
     exit 1
 fi
 
