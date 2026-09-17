@@ -11,13 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Normalize media tensors into the shapes MiniCPMO.forward expects.
+"""Reshape collated media into the container shapes MiniCPMO.forward expects.
 
-Vendored from the ``minicpm_transform`` helpers of the MiniCPM-o offline DPO
-draft (verl-project/verl-omni#550) so the RL training adapter does not depend
-on the offline-DPO dataset transform. Bodies are copied from #550 with only
-the leading underscore dropped; reconcile the module location first if #550
-lands with a different home for these helpers.
+Splits what the collator batched together back into the per-sample slices, mel
+stack, and clip lengths the remote towers index into.
 """
 
 from __future__ import annotations
@@ -35,66 +32,16 @@ __all__ = [
 ]
 
 
-def _unwrap_collated(value: Any) -> Any:
-    """Normalize DataProto's ragged-collation artifacts to plain containers.
-
-    Ragged media (per-slice pixel arrays, variable-length clip lists) is
-    collated into object-dtype ndarrays, and short slots are padded with
-    ``None``; ``torch.as_tensor`` can convert neither directly. Recurse
-    through nested containers and object arrays, drop the ``None`` padding,
-    and keep everything else — structure and order preserved.
-    """
-    if isinstance(value, np.ndarray) and value.dtype == object:
-        return _unwrap_collated(value.tolist())
-    if isinstance(value, list | tuple):
-        return [item for item in (_unwrap_collated(member) for member in value) if item is not None]
-    return value
-
-
-def _as_tensor(value: Any) -> torch.Tensor:
-    if isinstance(value, torch.Tensor):
-        return value
-    if isinstance(value, np.ndarray) and value.dtype == object:
-        return _as_tensor(_unwrap_collated(value))
-    return torch.as_tensor(np.asarray(value))
-
-
-def _is_empty_audio_features(value: Any) -> bool:
-    """True when there are no mel frames, including collated empty placeholders.
-
-    MiniCPMO uses ``len(data['audio_features']) > 0`` to decide whether a batch
-    has audio. A collated image-only batch is often ``[[], [], ...]``, which has
-    length equal to the text batch size even though no clip exists.
-    """
-    if value is None:
-        return True
-    if isinstance(value, torch.Tensor):
-        return value.numel() == 0
-    if isinstance(value, np.ndarray):
-        return value.size == 0
-    if isinstance(value, list | tuple):
-        return len(value) == 0 or all(_is_empty_audio_features(item) for item in value)
-    return False
-
-
-def _one_sample_audio_feature_lens(sample: Any, device: torch.device) -> torch.Tensor:
-    if sample is None or (isinstance(sample, list | tuple) and not sample):
-        return torch.zeros(0, dtype=torch.long, device=device)
-    if isinstance(sample, torch.Tensor):
-        return sample.to(device=device, dtype=torch.long).reshape(-1).contiguous()
-    if isinstance(sample, np.ndarray):
-        return torch.as_tensor(sample, dtype=torch.long, device=device).reshape(-1).contiguous()
-    if isinstance(sample, list | tuple):
-        if len(sample) == 1 and isinstance(sample[0], list | tuple | torch.Tensor | np.ndarray):
-            return _one_sample_audio_feature_lens(sample[0], device)
-        if sample and not isinstance(sample[0], int | float | np.integer | np.floating):
-            return torch.cat([_one_sample_audio_feature_lens(item, device) for item in sample], dim=0)
-        return torch.as_tensor(sample, dtype=torch.long, device=device).reshape(-1).contiguous()
-    return torch.as_tensor(sample, dtype=torch.long, device=device).reshape(-1).contiguous()
-
-
 def batch_audio_feature_lens(value: Any, device: torch.device) -> list[torch.Tensor]:
-    """List of 1D tensors so ``torch.hstack(audio_feature_lens_raw)`` succeeds."""
+    """Return one 1-D length tensor per clip, as ``hstack`` in the remote towers requires.
+
+    Args:
+        value: Per-sample feature lengths, possibly collated.
+        device: Device for the returned tensors.
+
+    Returns:
+        List of 1-D ``torch.long`` tensors; empty for an audio-free batch.
+    """
     value = _unwrap_collated(value)
     if _is_empty_audio_features(value):
         return []
@@ -106,7 +53,15 @@ def batch_audio_feature_lens(value: Any, device: torch.device) -> list[torch.Ten
 
 
 def normalize_audio_features(value: Any) -> torch.Tensor | list:
-    """Empty batches become ``[]``; real clips become ``(n_clips, 80, frames)``."""
+    """Stack the clips into ``(n_clips, 80, frames)``, zero-padding to the longest.
+
+    Args:
+        value: Mel features, possibly collated and/or nested per sample.
+
+    Returns:
+        ``[]`` for an audio-free batch, otherwise a padded ``(n_clips, n_mels, frames)``
+        tensor.
+    """
     value = _unwrap_collated(value)
     if _is_empty_audio_features(value):
         return []
@@ -144,11 +99,14 @@ def normalize_audio_features(value: Any) -> torch.Tensor | list:
 
 
 def sample_pixel_slices(pixel_values: Any) -> list[torch.Tensor]:
-    """Per-sample slices for MiniCPMO.get_vision_embedding.
+    """Return this sample's patch slices as a flat list of tensors.
 
-    The processor returns a batch list ``[[slice, slice, ...]]``.  Remote code
-    then does ``i.flatten(end_dim=1)`` on each slice, so each ``i`` must be a
-    tensor, not another list.
+    Args:
+        pixel_values: One sample's pixel values, possibly collated or nested
+            per slice.
+
+    Returns:
+        Flat list of slice tensors; empty when the sample has no images.
     """
     pixel_values = _unwrap_collated(pixel_values)
     if pixel_values is None:
@@ -177,6 +135,15 @@ def sample_pixel_slices(pixel_values: Any) -> list[torch.Tensor]:
 
 
 def sample_tgt_sizes(tgt_sizes: Any, *, device: torch.device) -> torch.Tensor:
+    """Return this sample's ``(n_slices, 2)`` target sizes.
+
+    Args:
+        tgt_sizes: One sample's target sizes, possibly collated or nested.
+        device: Device for the returned tensor.
+
+    Returns:
+        ``int32`` tensor of shape ``(n_slices, 2)``, or ``(0, 2)`` when absent.
+    """
     tgt_sizes = _unwrap_collated(tgt_sizes)
     if tgt_sizes is None or (isinstance(tgt_sizes, (list | tuple)) and not tgt_sizes):
         return torch.zeros(0, 2, dtype=torch.int32, device=device)
@@ -190,3 +157,62 @@ def sample_tgt_sizes(tgt_sizes: Any, *, device: torch.device) -> torch.Tensor:
     if sizes.ndim == 1:
         sizes = sizes.unsqueeze(0)
     return sizes.reshape(-1, 2).contiguous()
+
+
+def _unwrap_collated(value: Any) -> Any:
+    """Normalize DataProto's ragged-collation artifacts to plain containers.
+
+    Ragged media (per-slice pixel arrays, variable-length clip lists) is collated
+    into object-dtype ndarrays and short slots are padded with ``None``, neither of
+    which ``torch.as_tensor`` accepts. Recurses through nested containers, drops the
+    ``None`` padding, and keeps everything else in order.
+    """
+    if isinstance(value, np.ndarray) and value.dtype == object:
+        return _unwrap_collated(value.tolist())
+    if isinstance(value, list | tuple):
+        return [item for item in (_unwrap_collated(member) for member in value) if item is not None]
+    return value
+
+
+def _as_tensor(value: Any) -> torch.Tensor:
+    """Tensor for ``value``, unwrapping a collated object array first."""
+    if isinstance(value, torch.Tensor):
+        return value
+    if isinstance(value, np.ndarray) and value.dtype == object:
+        return _as_tensor(_unwrap_collated(value))
+    return torch.as_tensor(np.asarray(value))
+
+
+def _is_empty_audio_features(value: Any) -> bool:
+    """True when there are no mel frames, including collated empty placeholders.
+
+    MiniCPMO decides "has audio" with ``len(data['audio_features']) > 0``, but a
+    collated image-only batch is often ``[[], [], ...]`` — length equal to the text
+    batch size with no clip in it.
+    """
+    if value is None:
+        return True
+    if isinstance(value, torch.Tensor):
+        return value.numel() == 0
+    if isinstance(value, np.ndarray):
+        return value.size == 0
+    if isinstance(value, list | tuple):
+        return len(value) == 0 or all(_is_empty_audio_features(item) for item in value)
+    return False
+
+
+def _one_sample_audio_feature_lens(sample: Any, device: torch.device) -> torch.Tensor:
+    """Flatten one sample's per-clip lengths into a single 1-D ``torch.long`` tensor."""
+    if sample is None or (isinstance(sample, list | tuple) and not sample):
+        return torch.zeros(0, dtype=torch.long, device=device)
+    if isinstance(sample, torch.Tensor):
+        return sample.to(device=device, dtype=torch.long).reshape(-1).contiguous()
+    if isinstance(sample, np.ndarray):
+        return torch.as_tensor(sample, dtype=torch.long, device=device).reshape(-1).contiguous()
+    if isinstance(sample, list | tuple):
+        if len(sample) == 1 and isinstance(sample[0], list | tuple | torch.Tensor | np.ndarray):
+            return _one_sample_audio_feature_lens(sample[0], device)
+        if sample and not isinstance(sample[0], int | float | np.integer | np.floating):
+            return torch.cat([_one_sample_audio_feature_lens(item, device) for item in sample], dim=0)
+        return torch.as_tensor(sample, dtype=torch.long, device=device).reshape(-1).contiguous()
+    return torch.as_tensor(sample, dtype=torch.long, device=device).reshape(-1).contiguous()

@@ -13,12 +13,10 @@
 # limitations under the License.
 """Keep the three renderings of a MiniCPM-o prompt consistent.
 
-One RL prompt has to exist as agent-loop ids (media expanded in place by the
-remote processor), as vLLM-Omni's engine prompt (compact parenthesized slots it
-expands itself), and as the actor's recompute (ids decoded and re-fed to the
-processor). This module collapses expanded spans back to slots, normalizes the
-text the processor receives, and derives the ``image_bound`` / ``audio_bounds``
-spans ``MiniCPMO.forward`` scatters into.
+An RL prompt reaches the trainer as agent-loop ids, the engine as its own prompt,
+and the actor as text re-fed to the processor — each wanting the media in a
+different form. ``bind_minicpm_processor`` rewrites between them and
+``resolve_media_tokens`` exposes the marker vocabulary they are written in.
 """
 
 from __future__ import annotations
