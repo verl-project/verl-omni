@@ -63,29 +63,26 @@ class MiniCPMO:
         from transformers import AutoModel
 
         from verl_omni.models.transformers.minicpm_o import (
-            patch_remote_auto_model_init,
-            patch_remote_siglip_flash_attn_support,
+            patch_minicpm_auto_model_init,
+            patch_minicpm_siglip_flash_attn_support,
         )
 
         trust_remote_code = kwargs.get("trust_remote_code", False)
         config = kwargs.get("config")
+        if not trust_remote_code:
+            raise ValueError(
+                "MiniCPM-o checkpoints define their classes in remote code, so "
+                "actor_rollout_ref.model.trust_remote_code must be True."
+            )
         # Training-path invariants, set before the remote __init__ reads them.
         if config is not None:
             config.init_tts = False
             config.use_cache = False
             config.stream_input = False
-        # Remote code omits post_init(), which transformers >= 5 calls before from_pretrained returns.
-        patch_remote_auto_model_init(
-            pretrained_model_name_or_path,
-            trust_remote_code=trust_remote_code,
-            config=config,
-        )
-        # The remote vision tower declares only the 4.x FA2 support flag, which transformers >= 5 rejects.
-        patch_remote_siglip_flash_attn_support(
-            pretrained_model_name_or_path,
-            trust_remote_code=trust_remote_code,
-            config=config,
-        )
+        # Remote code omits post_init(), which transformers 5 calls before from_pretrained returns.
+        patch_minicpm_auto_model_init(pretrained_model_name_or_path, config=config)
+        # The remote vision tower declares only the pre-5 FA2 support flag.
+        patch_minicpm_siglip_flash_attn_support(pretrained_model_name_or_path, config=config)
         return AutoModel.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
 
 
@@ -173,12 +170,12 @@ class MiniCPMThinkerAdapter(OmniModelBase):
         """
         from transformers import AutoTokenizer
 
-        from verl_omni.models.transformers.minicpm_o import keep_answer_tags_when_decoding
+        from verl_omni.models.transformers.minicpm_o import patch_minicpm_answer_tags
 
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=model_config.trust_remote_code)
         # The reward manager decodes with skip_special_tokens=True, which would strip
         # the checkpoint's special <answer> tags and zero every choice-reward score.
-        keep_answer_tags_when_decoding(tokenizer)
+        patch_minicpm_answer_tags(tokenizer)
         return tokenizer
 
     @classmethod
@@ -225,11 +222,11 @@ def _apply_remote_code_patches(module) -> None:
         patch_minicpm_get_omni_embedding,
         patch_minicpm_get_vision_embedding,
         patch_minicpm_get_vllm_embedding,
-        patch_remote_whisper_self_attn,
+        patch_minicpm_whisper_self_attn,
     )
 
     # Remote Whisper self-attn returns a 2-tuple the remote encoder layer unpacks as 3.
-    patch_remote_whisper_self_attn(module)
+    patch_minicpm_whisper_self_attn(module)
     # Batched vision/resampler bf16 kernels deviate from the bs==1 realization.
     patch_minicpm_get_vision_embedding(module)
     # The remote in-place scatter fails once PEFT makes the embeddings a leaf.

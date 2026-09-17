@@ -66,7 +66,7 @@ def test_reward_worker_demotes_on_the_manager_it_constructed(monkeypatch, tmp_pa
     # and the manager already holds the object it will decode with.
     seen = []
     monkeypatch.setattr(
-        "verl_omni.models.transformers.minicpm_o.keep_answer_tags_when_decoding",
+        "verl_omni.models.transformers.minicpm_o.patch_minicpm_answer_tags",
         lambda tokenizer: seen.append(tokenizer),
     )
     tokenizer = _minicpm_style_tokenizer()
@@ -89,7 +89,7 @@ def test_reward_worker_demotes_on_the_manager_it_constructed(monkeypatch, tmp_pa
 def test_reward_worker_skips_the_demotion_for_other_models(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(
-        "verl_omni.models.transformers.minicpm_o.keep_answer_tags_when_decoding",
+        "verl_omni.models.transformers.minicpm_o.patch_minicpm_answer_tags",
         lambda tokenizer: seen.append(tokenizer),
     )
     monkeypatch.setattr(

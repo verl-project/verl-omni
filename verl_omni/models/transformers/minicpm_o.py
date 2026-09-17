@@ -13,9 +13,10 @@
 # limitations under the License.
 """Runtime shims for MiniCPM-o Hugging Face remote-code models.
 
-Keep MiniCPM-o remote-code patches in this file; each patch documents its
-own trigger. The ``patch_remote_*`` entry points run before
-``from_pretrained``, the rest after the model is loaded.
+Each patch documents its own trigger. Two fix class-level problems and run before
+``from_pretrained`` (the auto-model init, which routes through the private
+``_wrap_init_with_post_init``, and SigLIP's FA flag); the rest patch a method on
+the loaded module.
 """
 
 from __future__ import annotations
@@ -28,114 +29,69 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_POST_INIT_PATCHED_ATTR = "_verl_omni_post_init_patched"
-_WHISPER_ATTN_PATCHED_ATTR = "_verl_omni_whisper_attn_return3"
-_VISION_EMB_PATCH_ATTR = "_verl_omni_get_vision_embedding_patched"
-_VLLM_EMB_PATCH_ATTR = "_verl_omni_get_vllm_embedding_patched"
-_SIGLIP_FA2_PATCHED_ATTR = "_verl_omni_siglip_fa2_aliased"
-_AUDIO_DUMMY_PATCH_ATTR = "_verl_omni_get_audio_embedding_patched"
-# Back-compat alias for tests that reset the post_init wrap.
-_PATCHED_ATTR = _POST_INIT_PATCHED_ATTR
+__all__ = [
+    "actor_registers_special_answer_tags",
+    "patch_minicpm_answer_tags",
+    "patch_minicpm_auto_model_init",
+    "patch_minicpm_get_audio_embedding",
+    "patch_minicpm_get_omni_embedding",
+    "patch_minicpm_get_vision_embedding",
+    "patch_minicpm_get_vllm_embedding",
+    "patch_minicpm_siglip_flash_attn_support",
+    "patch_minicpm_whisper_self_attn",
+]
 
 
-def _needs_transformers5_compat() -> bool:
-    try:
-        import transformers
-
-        return int(transformers.__version__.split(".", 1)[0]) >= 5
-    except Exception:
-        return False
-
-
-def patch_remote_auto_model_init(
-    model_path: str,
-    *,
-    trust_remote_code: bool,
-    config: Any = None,
-    auto_class_name: str = "AutoModel",
-) -> None:
+def patch_minicpm_auto_model_init(model_path: str, config: Any = None) -> None:
     """Wrap a remote auto-model class so ``post_init()`` runs when missing.
 
-    The remote code (transformers ~4.10) omits ``post_init()``, which
-    transformers >= 5 requires to set ``all_tied_weights_keys``.
-    Call before ``AutoModel.from_pretrained``.
-    """
-    if not _needs_transformers5_compat() or not trust_remote_code:
-        return
+    The remote code predates ``post_init()``, which transformers 5 reads before
+    ``from_pretrained`` returns; without the wrap the load raises on the missing
+    ``all_tied_weights_keys``.
 
+    Args:
+        model_path: Local path to the model checkpoint.
+        config: Pre-resolved config, or None to load it here.
+    """
     from transformers import AutoConfig
     from transformers.models.auto.auto_factory import get_class_from_dynamic_module
 
     resolved_config = config
     if resolved_config is None:
-        resolved_config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
-
-    auto_map = getattr(resolved_config, "auto_map", None)
-    if not auto_map or auto_class_name not in auto_map:
-        return
+        resolved_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
     model_cls = get_class_from_dynamic_module(
-        auto_map[auto_class_name],
+        resolved_config.auto_map["AutoModel"],
         model_path,
-        trust_remote_code=trust_remote_code,
+        trust_remote_code=True,  # the checkpoint defines its classes in remote code
     )
-    wrap_model_init_with_post_init(model_cls)
+    _wrap_init_with_post_init(model_cls)
 
 
-def wrap_model_init_with_post_init(model_cls: type) -> None:
-    """Ensure ``model_cls.__init__`` ends with ``post_init()`` when needed."""
-    if getattr(model_cls, _POST_INIT_PATCHED_ATTR, False):
-        return
+def patch_minicpm_siglip_flash_attn_support(model_path: str, config: Any = None) -> None:
+    """Alias the remote SigLIP's FA2 support flag to the name transformers 5 reads.
 
-    original_init = model_cls.__init__
+    The remote ``modeling_navit_siglip.py`` implements FA2 natively but declares only
+    the pre-5 flag name, which transformers 5's init-time dispatch rejects, so the
+    vision tower cannot be constructed with the pinned ``flash_attention_2``.
 
-    def patched_init(self, *args, **kwargs):
-        original_init(self, *args, **kwargs)
-        if not hasattr(self, "all_tied_weights_keys") and hasattr(self, "post_init"):
-            self.post_init()
-
-    model_cls.__init__ = patched_init
-    setattr(model_cls, _POST_INIT_PATCHED_ATTR, True)
-    logger.debug(
-        "Patched %s.__init__ to call post_init() for transformers >= 5 compatibility.",
-        model_cls.__name__,
-    )
-
-
-def patch_remote_siglip_flash_attn_support(model_path: str, *, trust_remote_code: bool, config: Any = None) -> None:
-    """Alias the remote SigLIP's transformers-4.x FA2 flag to the >= 5 name.
-
-    The remote ``modeling_navit_siglip.py`` implements FA2 natively but
-    declares the 4.x flag ``_supports_flash_attn_2``; transformers 5's
-    init-time dispatch hard-rejects ``flash_attention_2`` without the
-    renamed flag. The alias copies the remote's own declaration only.
-
-    The class is resolved through the auto_map ``AutoModel`` entry — the
-    entry the loader itself uses. For local model paths, requesting the
-    siglip module directly lands in a different dynamic-module cache dir
-    than ``from_pretrained``, and the alias would sit on an orphaned class
-    copy the model never imports.
-
-    Call before ``AutoModel.from_pretrained``. No-op on transformers < 5.
+    Args:
+        model_path: Local path to the model checkpoint.
+        config: Pre-resolved config, or None to load it here.
     """
-    if not _needs_transformers5_compat() or not trust_remote_code:
-        return
-
     from transformers import AutoConfig, PreTrainedModel
     from transformers.models.auto.auto_factory import get_class_from_dynamic_module
 
+    marker = "_verl_omni_siglip_fa2_aliased"
     resolved_config = config
     if resolved_config is None:
-        resolved_config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
-    auto_map = getattr(resolved_config, "auto_map", None) or {}
-    main_class_ref = auto_map.get("AutoModel") or auto_map.get("AutoModelForCausalLM")
-    if main_class_ref is None:
-        return
-
-    model_cls = get_class_from_dynamic_module(main_class_ref, model_path, trust_remote_code=trust_remote_code)
-    main_module = sys.modules.get(model_cls.__module__)
-    if main_module is None:
-        return
+        resolved_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    model_cls = get_class_from_dynamic_module(
+        resolved_config.auto_map["AutoModel"],
+        model_path,
+        trust_remote_code=True,  # the checkpoint defines its classes in remote code
+    )
+    main_module = sys.modules[model_cls.__module__]
 
     # The main modeling module binds SiglipVisionTransformer via its remote
     # import, so its namespace holds the exact class object the model
@@ -146,85 +102,33 @@ def patch_remote_siglip_flash_attn_support(model_path: str, *, trust_remote_code
             and issubclass(value, PreTrainedModel)
             and getattr(value, "_supports_flash_attn_2", False)
             and "_supports_flash_attn" not in value.__dict__
-            and not getattr(value, _SIGLIP_FA2_PATCHED_ATTR, False)
+            and not getattr(value, marker, False)
         ):
             value._supports_flash_attn = True
-            setattr(value, _SIGLIP_FA2_PATCHED_ATTR, True)
+            setattr(value, marker, True)
             logger.debug(
-                "Aliased %s._supports_flash_attn_2 to the transformers>=5 _supports_flash_attn name.",
+                "Aliased %s._supports_flash_attn_2 to the _supports_flash_attn name transformers 5 reads.",
                 value.__name__,
             )
 
 
-def _pad_whisper_self_attn_output(output, past_key_values=None):
-    """Normalize WhisperAttention output to the 3-tuple MiniCPM remote code unpacks."""
-    if not isinstance(output, tuple):
-        return output, None, past_key_values
-    if len(output) == 2:
-        hidden_states, attn_weights = output
-        return hidden_states, attn_weights, past_key_values
-    return output
-
-
-def wrap_whisper_self_attn_forward(attn_module) -> None:
-    """Make ``self_attn`` always return ``(hidden_states, attn_weights, past_key_values)``.
-
-    The remote ``MiniCPMWhisperEncoderLayer`` (4.x era) unpacks three values
-    and passes ``past_key_value`` (singular); current WhisperAttention
-    returns two and takes ``past_key_values``.
-    """
-    if attn_module is None or getattr(attn_module, _WHISPER_ATTN_PATCHED_ATTR, False):
-        return
-
-    original_forward = attn_module.forward
-
-    def _forward(*args, _original=original_forward, **kwargs):
-        past_key_values = kwargs.get("past_key_values", kwargs.get("past_key_value"))
-        if "past_key_value" in kwargs and "past_key_values" not in kwargs:
-            kwargs["past_key_values"] = kwargs.pop("past_key_value")
-        return _pad_whisper_self_attn_output(_original(*args, **kwargs), past_key_values)
-
-    attn_module.forward = _forward
-    setattr(attn_module, _WHISPER_ATTN_PATCHED_ATTR, True)
-
-
-def patch_remote_whisper_self_attn(module) -> None:
-    """Patch MiniCPM-o ``apm`` Whisper self-attn after remote-code ``from_pretrained``.
-
-    Walks ``module.apm.layers[*].self_attn``. No-op when ``apm`` is missing.
-    Call this after the model is loaded.
-    """
-    apm = getattr(module, "apm", None)
-    layers = getattr(apm, "layers", None) if apm is not None else None
-    if not layers:
-        return
-    for layer in layers:
-        wrap_whisper_self_attn_forward(getattr(layer, "self_attn", None))
-
-
-def _has_pixel_slices(pixel_values) -> bool:
-    if pixel_values is None or pixel_values == []:
-        return False
-    if isinstance(pixel_values, (list | tuple)):
-        return any(_has_pixel_slices(sample) for sample in pixel_values)
-    return True
+def patch_minicpm_whisper_self_attn(module) -> None:
+    """Patch MiniCPM-o ``apm`` Whisper self-attn after remote-code ``from_pretrained``."""
+    for layer in module.apm.layers:
+        _wrap_whisper_attn_forward(layer.self_attn)
 
 
 def patch_minicpm_get_vision_embedding(module) -> None:
-    """Run the vision tower once per sample, under no_grad.
+    """Run the vision tower one sample (or one packed example) at a time.
 
-    The remote method batches every sample's slices through ``vpm`` +
-    ``resampler``; batched bf16 kernels flip their reduction order at
-    small batch sizes, and the LLM amplifies the ulp difference into
-    interior logprob deviations. Each sample's slice group — re-split per
-    example for the packed pseudo-row via the ``packed_vision_slices``
-    stash — runs the tower alone (the bs==1 realization), outputs
-    concatenated in flat span order. The tower is frozen under LoRA, so
-    it stays out of autograd and empty rows skip the encoder.
+    Batched bf16 kernels flip reduction order at small batch sizes, which the LLM
+    amplifies into interior logprob deviations, so each sample's slice group runs
+    the tower alone. The tower is frozen, so no_grad is free.
     """
-    original = getattr(module, "get_vision_embedding", None)
-    if original is None or getattr(module, _VISION_EMB_PATCH_ATTR, False):
+    marker = "_verl_omni_get_vision_embedding_patched"
+    if getattr(module, marker, False):
         return
+    original = module.get_vision_embedding
 
     def get_vision_embedding(self, data, _original=original):
         if isinstance(data, dict) and "vision_hidden_states" in data:
@@ -264,15 +168,7 @@ def patch_minicpm_get_vision_embedding(module) -> None:
             return rows
 
     module.get_vision_embedding = types.MethodType(get_vision_embedding, module)
-    setattr(module, _VISION_EMB_PATCH_ATTR, True)
-
-
-def _embed_tokens_module(module):
-    llm = getattr(module, "llm", None)
-    if llm is None:
-        return None
-    model = getattr(llm, "model", llm)
-    return getattr(model, "embed_tokens", None)
+    setattr(module, marker, True)
 
 
 def patch_minicpm_get_vllm_embedding(module) -> None:
@@ -283,16 +179,15 @@ def patch_minicpm_get_vllm_embedding(module) -> None:
     turns into a leaf — the in-place view op fails. Out-of-place
     ``scatter`` on cloned rows instead.
     """
-    if getattr(module, _VLLM_EMB_PATCH_ATTR, False):
-        return
-    if _embed_tokens_module(module) is None or not hasattr(module, "get_vision_embedding"):
+    marker = "_verl_omni_get_vllm_embedding_patched"
+    if getattr(module, marker, False):
         return
 
     def get_vllm_embedding(self, data):
         import torch
 
         vision_hidden_states = self.get_vision_embedding(data)
-        vllm_embedding = _embed_tokens_module(self)(data["input_ids"])
+        vllm_embedding = self.llm.model.embed_tokens(data["input_ids"])
         llm_config = getattr(self.llm, "config", None)
         if llm_config is not None and hasattr(llm_config, "scale_emb"):
             vllm_embedding = vllm_embedding * llm_config.scale_emb
@@ -322,26 +217,21 @@ def patch_minicpm_get_vllm_embedding(module) -> None:
         return torch.stack(rows, dim=0), vision_hidden_states
 
     module.get_vllm_embedding = types.MethodType(get_vllm_embedding, module)
-    setattr(module, _VLLM_EMB_PATCH_ATTR, True)
+    setattr(module, marker, True)
 
 
 def patch_minicpm_get_audio_embedding(module) -> None:
-    """Run the Whisper tower once per clip on its exact-length slice.
+    """Run the Whisper tower one exact-length clip at a time.
 
-    The remote method pads all clips to one ``max_frames`` and masks with
-    mel-frame lengths compared against post-conv2 positions — the mask
-    under-masks by ~2x, and even equal-length batched clips deviate from
-    single-clip outputs. One exact-length ``[1, 80, len]`` clip per call
-    leaves no padded frames and reproduces the bs==1 realization,
-    regrouped into the remote's per-row layout. Audio-free training
-    batches skip the frozen tower and return one zero token, preserving
-    ``get_omni_embedding``'s ``audio_embeddings[0].mean() * 0`` anchor.
+    The remote method pads every clip to one ``max_frames`` and masks with
+    mel-frame lengths against post-conv2 positions (under-masking by ~2x), so
+    batched clips deviate from the single-clip output. Audio-free training
+    batches skip the frozen tower and return one zero token.
     """
-    apm = getattr(module, "apm", None)
-    llm = getattr(module, "llm", None)
-    original = getattr(module, "get_audio_embedding", None)
-    if apm is None or llm is None or original is None or getattr(module, _AUDIO_DUMMY_PATCH_ATTR, False):
+    marker = "_verl_omni_get_audio_embedding_patched"
+    if getattr(module, marker, False):
         return
+    original = module.get_audio_embedding
 
     def get_audio_embedding(self, data, chunk_length=-1, dummy=True, **kwargs):
         # Mirrors the remote get_omni_embedding emptiness test (post-split
@@ -394,10 +284,7 @@ def patch_minicpm_get_audio_embedding(module) -> None:
         return grouped
 
     module.get_audio_embedding = types.MethodType(get_audio_embedding, module)
-    setattr(module, _AUDIO_DUMMY_PATCH_ATTR, True)
-
-
-_OMNI_EMB_PATCH_ATTR = "_verl_omni_get_omni_embedding_patched"
+    setattr(module, marker, True)
 
 
 def patch_minicpm_get_omni_embedding(module) -> None:
@@ -410,9 +297,10 @@ def patch_minicpm_get_omni_embedding(module) -> None:
     the splice per row (both remote layouts, the length-mismatch check,
     clone-before-write); streaming and audio-free batches delegate.
     """
-    original = getattr(module, "get_omni_embedding", None)
-    if original is None or getattr(module, _OMNI_EMB_PATCH_ATTR, False):
+    marker = "_verl_omni_get_omni_embedding_patched"
+    if getattr(module, marker, False):
         return
+    original = module.get_omni_embedding
 
     def get_omni_embedding(self, data, input_embeddings, chunk_length=-1, stream_input=False, **kwargs):
         config_stream = bool(getattr(getattr(self, "config", None), "stream_input", False))
@@ -449,27 +337,27 @@ def patch_minicpm_get_omni_embedding(module) -> None:
         return result
 
     module.get_omni_embedding = types.MethodType(get_omni_embedding, module)
-    setattr(module, _OMNI_EMB_PATCH_ATTR, True)
+    setattr(module, marker, True)
 
 
-_ANSWER_TAG_TOKENS = ("<answer>", "</answer>")
-
-
-def keep_answer_tags_when_decoding(tokenizer) -> bool:
+def patch_minicpm_answer_tags(tokenizer) -> bool:
     """Demote ``<answer>`` / ``</answer>`` from special to plain added tokens.
 
-    The checkpoint registers them ``special: true``; verl's reward decode
-    uses ``skip_special_tokens=True`` and strips exactly the two tags,
-    zeroing every choice-reward score. Only the decode skip filter
-    consults the flag — ids, atomic encoding, and generation are
-    unchanged. The flag lives in the Rust backend's registry, so the fix
-    rebuilds it with the two flags flipped. Returns whether anything was
-    demoted; already-plain tags are a no-op, an unfixable tokenizer
-    raises rather than silently zeroing rewards.
+    The checkpoint registers them ``special: true``, and verl's reward decode skips
+    special tokens, so the two tags are stripped and every choice-reward score is
+    zeroed. Only the decode skip filter consults the flag — ids, atomic encoding, and
+    generation are unchanged.
+
+    Args:
+        tokenizer: The tokenizer whose decode must keep the tags.
+
+    Returns:
+        True when the tags were demoted; False when they were already plain.
     """
+    answer_tags = ("<answer>", "</answer>")
     decoder = getattr(tokenizer, "added_tokens_decoder", None) or {}
     needs_demotion = any(
-        getattr(decoder.get(tokenizer.convert_tokens_to_ids(token)), "special", False) for token in _ANSWER_TAG_TOKENS
+        getattr(decoder.get(tokenizer.convert_tokens_to_ids(token)), "special", False) for token in answer_tags
     )
     if not needs_demotion:
         return False
@@ -486,13 +374,96 @@ def keep_answer_tags_when_decoding(tokenizer) -> bool:
     data = json.loads(backend.to_str())
     demoted = False
     for entry in data.get("added_tokens", []):
-        if entry.get("content") in _ANSWER_TAG_TOKENS and entry.get("special", False):
+        if entry.get("content") in answer_tags and entry.get("special", False):
             entry["special"] = False
             demoted = True
     if not demoted:
         return False
     tokenizer._tokenizer = Tokenizer.from_str(json.dumps(data))
     return demoted
+
+
+def actor_registers_special_answer_tags(config) -> bool:
+    """Whether the configured actor needs the answer-tag demotion.
+
+    True unless the actor is a *different* registered omni model.
+
+    Args:
+        config: The trainer config holding ``actor_rollout_ref.model.path``.
+
+    Returns:
+        True for MiniCPM-o and for an unreadable or unregistered architecture, since
+        the demotion no-ops unless the tags are special — a false negative would
+        silently zero the reward, which is worse than a wasted tokenizer scan.
+    """
+    architecture = _actor_architecture(config)
+    if architecture is None:
+        return True
+    # Lazy: this is a leaf module, while the adapters below import it.
+    from verl_omni.pipelines.minicpm.thinker_training_adapter import MiniCPMThinkerAdapter
+    from verl_omni.pipelines.model_base import OmniModelBase
+
+    adapter_cls = OmniModelBase.peek_class(architecture, "thinker")
+    return adapter_cls is None or adapter_cls is MiniCPMThinkerAdapter
+
+
+def _wrap_init_with_post_init(model_cls: type) -> None:
+    """Ensure ``model_cls.__init__`` ends with ``post_init()`` when needed."""
+    marker = "_verl_omni_post_init_patched"
+    if getattr(model_cls, marker, False):
+        return
+
+    original_init = model_cls.__init__
+
+    def patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        if not hasattr(self, "all_tied_weights_keys") and hasattr(self, "post_init"):
+            self.post_init()
+
+    model_cls.__init__ = patched_init
+    setattr(model_cls, marker, True)
+    logger.debug(
+        "Patched %s.__init__ to call post_init() after the remote __init__.",
+        model_cls.__name__,
+    )
+
+
+def _pad_whisper_self_attn_output(output, past_key_values=None):
+    """Normalize WhisperAttention output to the 3-tuple MiniCPM remote code unpacks."""
+    if not isinstance(output, tuple):
+        return output, None, past_key_values
+    if len(output) == 2:
+        hidden_states, attn_weights = output
+        return hidden_states, attn_weights, past_key_values
+    return output
+
+
+def _wrap_whisper_attn_forward(attn_module) -> None:
+    """Pad WhisperAttention's 2-tuple to the 3-tuple the remote encoder layer unpacks."""
+    marker = "_verl_omni_whisper_attn_return3"
+    if getattr(attn_module, marker, False):
+        return
+
+    original_forward = attn_module.forward
+
+    def _forward(*args, _original=original_forward, **kwargs):
+        # The remote layer passes ``past_key_value`` (singular); current
+        # WhisperAttention takes the plural, and returns two values not three.
+        past_key_values = kwargs.get("past_key_values", kwargs.get("past_key_value"))
+        if "past_key_value" in kwargs and "past_key_values" not in kwargs:
+            kwargs["past_key_values"] = kwargs.pop("past_key_value")
+        return _pad_whisper_self_attn_output(_original(*args, **kwargs), past_key_values)
+
+    attn_module.forward = _forward
+    setattr(attn_module, marker, True)
+
+
+def _has_pixel_slices(pixel_values) -> bool:
+    if pixel_values is None or pixel_values == []:
+        return False
+    if isinstance(pixel_values, (list | tuple)):
+        return any(_has_pixel_slices(sample) for sample in pixel_values)
+    return True
 
 
 def _actor_architecture(config) -> str | None:
@@ -509,23 +480,3 @@ def _actor_architecture(config) -> str | None:
     except (OSError, json.JSONDecodeError):
         return None
     return architectures[0] if architectures else None
-
-
-def actor_registers_special_answer_tags(config) -> bool:
-    """True unless the configured actor is a *different* registered omni model.
-
-    MiniCPM-o registers ``<answer>`` as a special token, while the reward decode skips
-    specials, so the reward worker demotes the tags on its own tokenizer. An unknown
-    architecture counts as yes: the demotion no-ops unless those tags are special, so
-    applying it is safer than skipping a MiniCPM checkpoint whose architecture name is
-    not registered.
-    """
-    architecture = _actor_architecture(config)
-    if architecture is None:
-        return True
-    # Lazy: this is a leaf module, while the adapters below import it.
-    from verl_omni.pipelines.minicpm.thinker_training_adapter import MiniCPMThinkerAdapter
-    from verl_omni.pipelines.model_base import OmniModelBase
-
-    adapter_cls = OmniModelBase.peek_class(architecture, "thinker")
-    return adapter_cls is None or adapter_cls is MiniCPMThinkerAdapter

@@ -78,11 +78,11 @@ class OmniRewardLoopWorker(RewardLoopWorker):
         # manager's tokenizer; the demotion belongs with the checkpoint's tokenizer setup.
         from verl_omni.models.transformers.minicpm_o import (
             actor_registers_special_answer_tags,
-            keep_answer_tags_when_decoding,
+            patch_minicpm_answer_tags,
         )
 
         if actor_registers_special_answer_tags(self.config):
-            keep_answer_tags_when_decoding(self.reward_manager.tokenizer)
+            patch_minicpm_answer_tags(self.reward_manager.tokenizer)
         if hasattr(self.reward_manager, "set_reward_executors"):
             self.reward_manager.set_reward_executors(
                 self.engine_reward_executors,

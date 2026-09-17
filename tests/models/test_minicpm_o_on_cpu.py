@@ -26,58 +26,52 @@ class _FakeConfig(SimpleNamespace):
     model_type = "fake_remote"
 
 
-class _RemoteModelWithoutPostInit(nn.Module):
-    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
+def _remote_model_without_post_init():
+    """A fresh remote-shape class per call; the patches mark the class itself."""
 
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.linear = nn.Linear(4, 4)
-        self.post_init_calls = 0
+    class RemoteModelWithoutPostInit(nn.Module):
+        _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
-    def get_expanded_tied_weights_keys(self, all_submodels=False):
-        del all_submodels
-        return dict(self._tied_weights_keys)
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+            self.linear = nn.Linear(4, 4)
+            self.post_init_calls = 0
 
-    def post_init(self):
-        self.post_init_calls += 1
-        self.all_tied_weights_keys = self.get_expanded_tied_weights_keys(all_submodels=False)
+        def get_expanded_tied_weights_keys(self, all_submodels=False):
+            del all_submodels
+            return dict(self._tied_weights_keys)
 
-    def init_weights(self):
-        return
+        def post_init(self):
+            self.post_init_calls += 1
+            self.all_tied_weights_keys = self.get_expanded_tied_weights_keys(all_submodels=False)
+
+        def init_weights(self):
+            return
+
+    return RemoteModelWithoutPostInit
 
 
-def test_wrap_model_init_with_post_init_runs_once():
-    model_cls = _RemoteModelWithoutPostInit
-    if hasattr(model_cls, minicpm_o._PATCHED_ATTR):
-        delattr(model_cls, minicpm_o._PATCHED_ATTR)
-
-    # Wrapping twice must not double-call post_init.
-    minicpm_o.wrap_model_init_with_post_init(model_cls)
-    minicpm_o.wrap_model_init_with_post_init(model_cls)
+def test_wrap_init_with_post_init_runs_once():
+    # Wrapping twice must not double-call post_init (the wrap is idempotent).
+    model_cls = _remote_model_without_post_init()
+    minicpm_o._wrap_init_with_post_init(model_cls)
+    minicpm_o._wrap_init_with_post_init(model_cls)
     model = model_cls(_FakeConfig())
 
     assert model.post_init_calls == 1
     assert model.all_tied_weights_keys == {"lm_head.weight": "model.embed_tokens.weight"}
 
 
-def test_patch_remote_auto_model_init_wraps_dynamic_class(monkeypatch):
+def test_patch_minicpm_auto_model_init_wraps_dynamic_class(monkeypatch):
     config = SimpleNamespace(auto_map={"AutoModel": "modeling_fake.FakeModel"})
-    model_cls = _RemoteModelWithoutPostInit
-    if hasattr(model_cls, minicpm_o._PATCHED_ATTR):
-        delattr(model_cls, minicpm_o._PATCHED_ATTR)
-
-    monkeypatch.setattr(minicpm_o, "_needs_transformers5_compat", lambda: True)
+    model_cls = _remote_model_without_post_init()
 
     import transformers.models.auto.auto_factory as auto_factory
 
     monkeypatch.setattr(auto_factory, "get_class_from_dynamic_module", lambda *args, **kwargs: model_cls)
 
-    minicpm_o.patch_remote_auto_model_init(
-        "/fake/minicpm",
-        trust_remote_code=True,
-        config=config,
-    )
+    minicpm_o.patch_minicpm_auto_model_init("/fake/minicpm", config=config)
 
     model = model_cls(_FakeConfig())
     assert model.post_init_calls == 1
@@ -127,9 +121,9 @@ class _ModuleWithAPM(nn.Module):
         self.apm.layers = nn.ModuleList([_MiniCPMWhisperEncoderLayerStub()])
 
 
-def test_patch_remote_whisper_self_attn_pads_to_three_tuple():
+def test_patch_minicpm_whisper_self_attn_pads_to_three_tuple():
     module = _ModuleWithAPM()
-    minicpm_o.patch_remote_whisper_self_attn(module)
+    minicpm_o.patch_minicpm_whisper_self_attn(module)
     hidden = torch.ones(1, 2, 4)
 
     # The remote layer's 3-way unpack succeeds, and the singular past_key_value
@@ -138,13 +132,12 @@ def test_patch_remote_whisper_self_attn_pads_to_three_tuple():
     assert torch.equal(out, hidden)
     assert past == "cache"
 
-    # Idempotent, and a no-op on a module without apm.
+    # Wrapping twice must not re-wrap the same module.
     first_forward = module.apm.layers[0].self_attn.forward
-    minicpm_o.patch_remote_whisper_self_attn(module)
+    minicpm_o.patch_minicpm_whisper_self_attn(module)
     assert module.apm.layers[0].self_attn.forward is first_forward
     out, _ = module.apm.layers[0](hidden)
     assert torch.equal(out, hidden)
-    minicpm_o.patch_remote_whisper_self_attn(nn.Linear(4, 4))
 
 
 def _wire_main_model_module(monkeypatch, *bound_classes):
@@ -182,7 +175,7 @@ def _wire_main_model_module(monkeypatch, *bound_classes):
     return SimpleNamespace(auto_map={"AutoModel": "modeling_minicpmo.MiniCPMO"})
 
 
-def test_patch_remote_siglip_flash_attn_support_aliases_old_flag(monkeypatch):
+def test_patch_minicpm_siglip_flash_attn_support_aliases_old_flag(monkeypatch):
     from transformers import PreTrainedModel
 
     from verl_omni.models.transformers import minicpm_o
@@ -191,7 +184,7 @@ def test_patch_remote_siglip_flash_attn_support_aliases_old_flag(monkeypatch):
         _supports_flash_attn_2 = True
 
     config = _wire_main_model_module(monkeypatch, _RemoteSiglip)
-    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True, config=config)
+    minicpm_o.patch_minicpm_siglip_flash_attn_support("/fake/minicpm", config=config)
 
     assert _RemoteSiglip.__dict__["_supports_flash_attn"] is True
     assert _RemoteSiglip._supports_flash_attn_2 is True  # remote declaration untouched
@@ -199,11 +192,11 @@ def test_patch_remote_siglip_flash_attn_support_aliases_old_flag(monkeypatch):
     # A second call must not re-alias an already-aliased class.
     marker = object()
     _RemoteSiglip._supports_flash_attn = marker
-    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True, config=config)
+    minicpm_o.patch_minicpm_siglip_flash_attn_support("/fake/minicpm", config=config)
     assert _RemoteSiglip._supports_flash_attn is marker
 
 
-def test_patch_remote_siglip_never_fabricates_support(monkeypatch):
+def test_patch_minicpm_siglip_never_fabricates_support(monkeypatch):
     from transformers import PreTrainedModel
 
     from verl_omni.models.transformers import minicpm_o
@@ -216,12 +209,12 @@ def test_patch_remote_siglip_never_fabricates_support(monkeypatch):
         _supports_flash_attn = False
 
     config = _wire_main_model_module(monkeypatch, _NoFlashAttn, _AlreadyRenamed)
-    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True, config=config)
+    minicpm_o.patch_minicpm_siglip_flash_attn_support("/fake/minicpm", config=config)
     assert "_supports_flash_attn" not in _NoFlashAttn.__dict__  # old flag False: no alias
     assert "_verl_omni_siglip_fa2_aliased" not in _AlreadyRenamed.__dict__  # new name declared: untouched
 
 
-def test_patch_remote_siglip_aliases_the_class_the_model_module_uses(monkeypatch):
+def test_patch_minicpm_siglip_aliases_the_class_the_model_module_uses(monkeypatch):
     # Local-path cache-hash divergence: two distinct SiglipVisionTransformer
     # class objects; only the one bound into the auto_map-resolved main
     # modeling module is the class the model imports — the alias must land
@@ -237,28 +230,10 @@ def test_patch_remote_siglip_aliases_the_class_the_model_module_uses(monkeypatch
         _supports_flash_attn_2 = True
 
     config = _wire_main_model_module(monkeypatch, _UsedCopy)  # the orphan is never bound into main
-    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True, config=config)
+    minicpm_o.patch_minicpm_siglip_flash_attn_support("/fake/minicpm", config=config)
 
     assert _UsedCopy.__dict__.get("_supports_flash_attn") is True
     assert "_supports_flash_attn" not in _OrphanCopy.__dict__  # orphan untouched
-
-
-def test_patch_remote_siglip_skips_without_trust_or_transformers4(monkeypatch):
-    import transformers.models.auto.auto_factory as auto_factory
-
-    from verl_omni.models.transformers import minicpm_o
-
-    calls = []
-    monkeypatch.setattr(
-        auto_factory,
-        "get_class_from_dynamic_module",
-        lambda *args, **kwargs: calls.append(args),
-    )
-    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=False)
-    assert calls == []  # never resolves remote code without trust_remote_code
-    monkeypatch.setattr(minicpm_o, "_needs_transformers5_compat", lambda: False)
-    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True)
-    assert calls == []  # no-op on transformers < 5
 
 
 class _AudioModule(torch.nn.Module):
@@ -443,16 +418,6 @@ def test_patch_get_omni_embedding_delegates_streaming_and_audio_free():
     module.config = SimpleNamespace(stream_input=False)
     module.get_omni_embedding({"audio_features": []}, torch.zeros(3, 6, 4))
     assert len(module.original_calls) == 3  # audio-free delegates (training anchor)
-
-
-def test_patches_noop_on_a_bare_module():
-    # Each patch early-returns when its remote method/attributes are absent, so a
-    # non-MiniCPM module is never marked as patched.
-    bare = torch.nn.Linear(4, 4)
-    minicpm_o.patch_minicpm_get_audio_embedding(bare)
-    minicpm_o.patch_minicpm_get_omni_embedding(bare)
-    assert not hasattr(bare, "_verl_omni_get_audio_embedding_patched")
-    assert not hasattr(bare, "_verl_omni_get_omni_embedding_patched")
 
 
 class _VisionTowerModule(torch.nn.Module):

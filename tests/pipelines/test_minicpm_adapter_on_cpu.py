@@ -48,14 +48,43 @@ class _LLM(nn.Module):
         self.embed = embeddings
 
 
+class _WhisperAttnStub(nn.Module):
+    """WhisperAttention before the 3-tuple patch: returns (hidden, attn_weights)."""
+
+    def forward(self, hidden_states, **kwargs):
+        del kwargs
+        return hidden_states, None
+
+
+class _WhisperLayerStub(nn.Module):
+    """MiniCPMWhisperEncoderLayer: unpacks three values from its self-attn."""
+
+    def __init__(self):
+        super().__init__()
+        self.self_attn = _WhisperAttnStub()
+
+    def forward(self, hidden_states, **kwargs):
+        hidden_states, _, _ = self.self_attn(hidden_states, **kwargs)
+        return hidden_states
+
+
 class _MiniCPMOStyle(nn.Module):
-    """Mirrors remote MiniCPMO.forward(self, data, **kwargs)."""
+    """The remote MiniCPMO's shape: towers, the inner LLM, and its four embedders."""
 
     def __init__(self):
         super().__init__()
         self.config = SimpleNamespace(version="4.5")
         self.llm = _LLM()
+        self.llm.model = nn.Module()
+        self.llm.model.embed_tokens = self.llm.embed
+        self.llm.config = SimpleNamespace()
         self.llm.prepare_inputs_for_generation = MethodType(_prepare_inputs_for_generation, self.llm)
+        # apm carries both the Whisper conv stack and its encoder layers.
+        self.apm = nn.Module()
+        self.apm.conv1 = nn.Linear(4, 4)
+        self.apm.layers = nn.ModuleList([_WhisperLayerStub()])
+        self.vpm = nn.Linear(4, 4)
+        self.resampler = nn.Linear(4, 4)
         self.tts = nn.Linear(4, 4)
         self.last_data = None
         self.last_llm_kwargs = None
@@ -64,6 +93,21 @@ class _MiniCPMOStyle(nn.Module):
         self.last_data = data
         self.last_llm_kwargs = kwargs
         return self.llm(input_ids=data["input_ids"], **kwargs)
+
+    def get_vision_embedding(self, data):
+        del data
+        return []
+
+    def get_vllm_embedding(self, data):
+        return self.llm.model.embed_tokens(data["input_ids"]), []
+
+    def get_audio_embedding(self, data, chunk_length=-1, dummy=True, **kwargs):
+        del data, chunk_length, dummy, kwargs
+        return []
+
+    def get_omni_embedding(self, data, input_embeddings, chunk_length=-1, stream_input=False, **kwargs):
+        del data, chunk_length, stream_input, kwargs
+        return input_embeddings
 
 
 def test_configure_model_packs_hf_kwargs_into_minicpmo_data():
@@ -221,10 +265,10 @@ def test_configure_model_strips_generation_modules_and_keeps_outer_forward():
 
 
 class _MiniCPMOWithEncoders(_MiniCPMOStyle):
+    """Counts tower invocations to prove the empty rows skip the encoder."""
+
     def __init__(self):
         super().__init__()
-        self.vpm = nn.Linear(4, 4)
-        self.apm = nn.Linear(4, 4)
         self.vision_calls = 0
 
     def get_vision_embedding(self, data):
@@ -253,9 +297,6 @@ def test_patched_get_vision_embedding_skips_dummy_encoder_when_no_images():
 
 def test_cloned_vllm_embedding_scatter_supports_backward():
     module = _MiniCPMOWithEncoders()
-    module.llm.model = nn.Module()
-    module.llm.model.embed_tokens = module.llm.embed
-    module.llm.config = SimpleNamespace()
     configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
     input_ids = torch.tensor([[1, 2, 3, 4]])
     embeddings, _ = configured.get_vllm_embedding(
@@ -291,11 +332,11 @@ def test_minicpmo_from_pretrained_patches_then_loads_auto_model(monkeypatch):
 
     monkeypatch.setattr(AutoModel, "from_pretrained", fake_from_pretrained)
     monkeypatch.setattr(
-        "verl_omni.models.transformers.minicpm_o.patch_remote_auto_model_init",
+        "verl_omni.models.transformers.minicpm_o.patch_minicpm_auto_model_init",
         fake_patch,
     )
     monkeypatch.setattr(
-        "verl_omni.models.transformers.minicpm_o.patch_remote_siglip_flash_attn_support",
+        "verl_omni.models.transformers.minicpm_o.patch_minicpm_siglip_flash_attn_support",
         fake_siglip_patch,
     )
     config = _model_config()
@@ -308,25 +349,29 @@ def test_minicpmo_from_pretrained_patches_then_loads_auto_model(monkeypatch):
     )
 
     assert module is loaded
-    assert patch_calls == [
-        (
-            ("/fake/minicpm",),
-            {"trust_remote_code": True, "config": config.hf_config},
-        )
-    ]
+    assert patch_calls == [(("/fake/minicpm",), {"config": config.hf_config})]
     assert calls[0][0] == ("/fake/minicpm",)
     assert calls[0][1]["torch_dtype"] is torch.bfloat16
     assert calls[0][1]["trust_remote_code"] is True
     assert calls[0][1]["config"] is config.hf_config
     assert "init_tts" not in calls[0][1]
-    assert siglip_calls == [(("/fake/minicpm",), {"trust_remote_code": True, "config": config.hf_config})]
+    assert siglip_calls == [(("/fake/minicpm",), {"config": config.hf_config})]
+
+
+def test_minicpmo_from_pretrained_requires_trust_remote_code():
+    # The checkpoint defines its classes in remote code, and the patches resolve
+    # them through it, so a False value must fail here rather than confuse the load.
+    import pytest
+
+    with pytest.raises(ValueError, match="trust_remote_code must be True"):
+        MiniCPMO.from_pretrained("/fake/minicpm", config=None, trust_remote_code=False)
 
 
 def test_configure_model_applies_remote_whisper_compat(monkeypatch):
     from verl_omni.models.transformers import minicpm_o
 
     seen = []
-    monkeypatch.setattr(minicpm_o, "patch_remote_whisper_self_attn", lambda module: seen.append(module))
+    monkeypatch.setattr(minicpm_o, "patch_minicpm_whisper_self_attn", lambda module: seen.append(module))
     module = _MiniCPMOStyle()
     MiniCPMThinkerAdapter.configure_model(module, _model_config())
     assert seen == [module]
@@ -401,9 +446,9 @@ def test_from_pretrained_applies_training_config_invariants(monkeypatch):
         return loaded
 
     monkeypatch.setattr(AutoModel, "from_pretrained", staticmethod(fake_from_pretrained))
-    monkeypatch.setattr("verl_omni.models.transformers.minicpm_o.patch_remote_auto_model_init", lambda *a, **k: None)
+    monkeypatch.setattr("verl_omni.models.transformers.minicpm_o.patch_minicpm_auto_model_init", lambda *a, **k: None)
     monkeypatch.setattr(
-        "verl_omni.models.transformers.minicpm_o.patch_remote_siglip_flash_attn_support", lambda *a, **k: None
+        "verl_omni.models.transformers.minicpm_o.patch_minicpm_siglip_flash_attn_support", lambda *a, **k: None
     )
 
     config = SimpleNamespace(init_tts=True, use_cache=True, stream_input=True)
