@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 08/21/2026.
+Last updated: 09/17/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -377,6 +377,15 @@ so a bad ``target_modules`` fails fast at startup instead of at the first
 weight sync.  The default is a no-op.  MiniMax H3 overrides it to reject
 ``all-linear`` and keep LoRA on the transformer/refiner blocks its sync path
 can map.
+
+### 3.6 (Optional) `get_fsdp_ignored_module_names`
+
+Override this hook to declare frozen submodule name components to leave
+unsharded under FSDP2; the default is `[]`. Declare a tower whose forward is
+skipped for some micro-batches — an unsharded forward emits no collectives,
+so the skip cannot desync the ranks. Ignored parameters must stay frozen
+(FSDP2 does not synchronize their gradients), and a non-empty list requires
+`strategy=fsdp2`; the engine raises otherwise.
 
 ---
 
