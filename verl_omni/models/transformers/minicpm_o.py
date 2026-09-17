@@ -231,6 +231,30 @@ def _embed_tokens_module(module):
     return getattr(model, "embed_tokens", None)
 
 
+def _per_sample_image_bounds(image_bound: Any, batch_size: int) -> list:
+    """Normalize ``data['image_bound']`` without tensor truthiness checks.
+
+    ``data.get('image_bound') or [[]]`` raises when collation yields a non-empty
+    2-D tensor because ``bool(tensor)`` is ambiguous.
+    """
+    import torch
+
+    if image_bound is None:
+        return [[] for _ in range(batch_size)]
+    if isinstance(image_bound, (list | tuple)):
+        if len(image_bound) == 0:
+            return [[] for _ in range(batch_size)]
+        return list(image_bound)
+    if isinstance(image_bound, torch.Tensor):
+        if image_bound.numel() == 0:
+            return [[] for _ in range(batch_size)]
+        if image_bound.ndim == 2 and image_bound.shape == (batch_size, 2):
+            return [image_bound[i : i + 1] for i in range(batch_size)]
+        if batch_size == 1:
+            return [image_bound]
+    return [[] for _ in range(batch_size)]
+
+
 def patch_minicpm_get_vllm_embedding(module) -> None:
     """Clone text embeddings before vision scatter so LoRA backward is legal.
 
@@ -260,7 +284,7 @@ def patch_minicpm_get_vllm_embedding(module) -> None:
 
         rows = []
         batch_size = len(data["input_ids"])
-        image_bound = data.get("image_bound") or [[] for _ in range(batch_size)]
+        image_bound = _per_sample_image_bounds(data.get("image_bound"), batch_size)
         for i in range(batch_size):
             row = vllm_embedding[i].clone()
             cur_vs_hs = vision_hidden_states[i] if i < len(vision_hidden_states) else []

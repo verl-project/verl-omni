@@ -280,6 +280,23 @@ def test_cloned_vllm_embedding_scatter_supports_backward():
     assert configured.llm.embed.weight.grad is not None
 
 
+def test_cloned_vllm_embedding_accepts_collated_image_bound_tensor():
+    module = _MiniCPMOWithEncoders()
+    module.llm.model = nn.Module()
+    module.llm.model.embed_tokens = module.llm.embed
+    module.llm.config = SimpleNamespace()
+    configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
+    input_ids = torch.tensor([[1, 2, 3, 4]])
+    embeddings, _ = configured.get_vllm_embedding(
+        {
+            "input_ids": input_ids,
+            "pixel_values": [[torch.zeros(3, 2, 2)]],
+            "image_bound": torch.tensor([[0, 2]]),
+        }
+    )
+    assert embeddings.shape == (1, 4, 4)
+
+
 def test_minicpmo_from_pretrained_patches_then_loads_auto_model(monkeypatch):
     from transformers import AutoModel
 
