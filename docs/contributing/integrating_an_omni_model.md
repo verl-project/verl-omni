@@ -1,6 +1,6 @@
 # How to Add a New Omni Model
 
-Last updated: 08/31/2026.
+Last updated: 09/17/2026.
 
 This guide walks through adding a new omni (multimodal autoregressive) model to
 the verl-omni training framework. It uses the Qwen3-Omni Thinker adapter as a
@@ -20,7 +20,9 @@ Decide which **training stage** you want to train and how the model decomposes:
 - **Encoder-frozen**: Vision/audio encoders are typically frozen during RL
   training (`freeze_vision_tower=True`). The training adapter's
   `get_strip_modules` excludes them from the trainable set if they are separate
-  submodules.
+  submodules. If they stay in the module graph and are *conditionally skipped*
+  rather than removed, keep them sharded-safe with
+  `get_fsdp_ignored_module_names` instead — see §2 and §6.
 - **Discrete-token**: Unlike diffusion models, omni models produce discrete
   text tokens. RL algorithms (GSPO, GRPO, RLOO) are selected through standard
   verl config fields (`actor.policy_loss.loss_mode`,
@@ -59,6 +61,15 @@ adapt each implementation to your model's architecture:
   `module.thinker.forward`, swaps the embedding accessors, and sets
   `module._no_split_modules` to the correct decoder layer class for FSDP.
   This method runs before FSDP wrapping and LoRA injection.
+
+- **`get_fsdp_ignored_module_names(model_config)`** (optional): Return
+  submodule name components to leave unsharded under FSDP2; default `[]`.
+  Declare the frozen encoders when they *stay in the module graph* but their
+  forward is skipped for some micro-batches — an unsharded forward emits no
+  collectives, so skipping it cannot desync the ranks (e.g. the MiniCPM-o
+  adapter in #572 returns `["apm", "vpm", "resampler"]`). Ignored parameters
+  must stay frozen: FSDP2 does not synchronize their gradients. FSDP2 only —
+  under `strategy=fsdp` the engine raises when the list is non-empty.
 
 - **`register_auto_classes()`** (optional): Register classes supplied by an
   optional model package with the appropriate Transformers Auto APIs. The model
@@ -235,7 +246,7 @@ Reference:
 
 ## 6. Common pitfalls
 
-These pitfalls are drawn from the Qwen3-Omni adapter. Some are
+These pitfalls are drawn from the Qwen3-Omni and MiniCPM-o adapters. Some are
 model-specific — verify each against your own model's architecture.
 
 - **`_no_split_modules`**: Must be set to the correct decoder layer class
@@ -260,6 +271,15 @@ model-specific — verify each against your own model's architecture.
   in `configure_tokenizer` and assign it to `tokenizer.chat_template`.
   verl's dataset loader calls `tokenizer.apply_chat_template()` and will
   fail without a template.
+
+- **Conditionally skipped encoders under FSDP2**: FSDP2 shards down to
+  individual `nn.Embedding` and `nn.Linear` leaves, so a *sharded* tower that
+  some micro-batches skip desyncs NCCL — the ranks that enter its collectives
+  and the ranks that skip it disagree on the collective order, and the failure
+  surfaces much later as a hang or a garbage gradient. Declare the subtree in
+  `get_fsdp_ignored_module_names`. The skip must be genuine too: if media
+  presence is not DP-balanced (verl balances token counts only), every rank
+  still has to reach the same number of collectives.
 
 - **Actor/rollout probability consistency**: Autoregressive codec policies may
   combine several codebook embeddings before predicting the selected token.

@@ -37,7 +37,6 @@ from verl.utils.fsdp_utils import (
     CPUOffloadPolicy,
     FSDPModule,
     MixedPrecisionPolicy,
-    apply_fsdp2,
     fsdp2_clip_grad_norm_,
     fsdp2_load_full_state_dict,
     fsdp_version,
@@ -67,7 +66,7 @@ from verl_omni.pipelines.utils import (
     prepare_model_inputs,
     prepare_noisy_latents,
 )
-from verl_omni.utils.fsdp_utils import collect_lora_params
+from verl_omni.utils.fsdp_utils import apply_fsdp2, collect_lora_params
 from verl_omni.workers.config import DiffusionModelConfig
 from verl_omni.workers.engine.lora_adapter_mixin import LoRAAdapterMixin
 
