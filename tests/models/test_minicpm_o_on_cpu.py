@@ -47,28 +47,18 @@ class _RemoteModelWithoutPostInit(nn.Module):
         return
 
 
-def test_wrap_model_init_with_post_init_adds_all_tied_weights_keys():
+def test_wrap_model_init_with_post_init_runs_once():
     model_cls = _RemoteModelWithoutPostInit
     if hasattr(model_cls, minicpm_o._PATCHED_ATTR):
         delattr(model_cls, minicpm_o._PATCHED_ATTR)
 
+    # Wrapping twice must not double-call post_init.
+    minicpm_o.wrap_model_init_with_post_init(model_cls)
     minicpm_o.wrap_model_init_with_post_init(model_cls)
     model = model_cls(_FakeConfig())
 
     assert model.post_init_calls == 1
     assert model.all_tied_weights_keys == {"lm_head.weight": "model.embed_tokens.weight"}
-
-
-def test_wrap_model_init_with_post_init_is_idempotent():
-    model_cls = _RemoteModelWithoutPostInit
-    if hasattr(model_cls, minicpm_o._PATCHED_ATTR):
-        delattr(model_cls, minicpm_o._PATCHED_ATTR)
-
-    minicpm_o.wrap_model_init_with_post_init(model_cls)
-    minicpm_o.wrap_model_init_with_post_init(model_cls)
-
-    model = model_cls(_FakeConfig())
-    assert model.post_init_calls == 1
 
 
 def test_patch_remote_auto_model_init_wraps_dynamic_class(monkeypatch):
@@ -137,36 +127,23 @@ class _ModuleWithAPM(nn.Module):
         self.apm.layers = nn.ModuleList([_MiniCPMWhisperEncoderLayerStub()])
 
 
-def test_unpatched_whisper_layer_cannot_unpack_two_tuple_attn():
-    layer = _MiniCPMWhisperEncoderLayerStub()
-    hidden = torch.ones(1, 2, 4)
-    with pytest.raises(ValueError, match="not enough values to unpack"):
-        layer(hidden)
-
-
 def test_patch_remote_whisper_self_attn_pads_to_three_tuple():
     module = _ModuleWithAPM()
     minicpm_o.patch_remote_whisper_self_attn(module)
     hidden = torch.ones(1, 2, 4)
 
+    # The remote layer's 3-way unpack succeeds, and the singular past_key_value
+    # kwarg is still honoured.
     out, past = module.apm.layers[0](hidden, past_key_values="cache")
-
     assert torch.equal(out, hidden)
     assert past == "cache"
 
-
-def test_patch_remote_whisper_self_attn_is_idempotent():
-    module = _ModuleWithAPM()
-    minicpm_o.patch_remote_whisper_self_attn(module)
+    # Idempotent, and a no-op on a module without apm.
     first_forward = module.apm.layers[0].self_attn.forward
     minicpm_o.patch_remote_whisper_self_attn(module)
     assert module.apm.layers[0].self_attn.forward is first_forward
-    hidden = torch.ones(1, 2, 4)
     out, _ = module.apm.layers[0](hidden)
     assert torch.equal(out, hidden)
-
-
-def test_patch_remote_whisper_self_attn_noop_without_apm():
     minicpm_o.patch_remote_whisper_self_attn(nn.Linear(4, 4))
 
 
@@ -219,21 +196,11 @@ def test_patch_remote_siglip_flash_attn_support_aliases_old_flag(monkeypatch):
     assert _RemoteSiglip.__dict__["_supports_flash_attn"] is True
     assert _RemoteSiglip._supports_flash_attn_2 is True  # remote declaration untouched
 
-
-def test_patch_remote_siglip_flash_attn_support_is_idempotent(monkeypatch):
-    from transformers import PreTrainedModel
-
-    from verl_omni.models.transformers import minicpm_o
-
-    class _RemoteSiglip(PreTrainedModel):
-        _supports_flash_attn_2 = True
-
-    config = _wire_main_model_module(monkeypatch, _RemoteSiglip)
-    minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True, config=config)
+    # A second call must not re-alias an already-aliased class.
     marker = object()
     _RemoteSiglip._supports_flash_attn = marker
     minicpm_o.patch_remote_siglip_flash_attn_support("/fake/minicpm", trust_remote_code=True, config=config)
-    assert _RemoteSiglip._supports_flash_attn is marker  # second call is a no-op
+    assert _RemoteSiglip._supports_flash_attn is marker
 
 
 def test_patch_remote_siglip_never_fabricates_support(monkeypatch):

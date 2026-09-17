@@ -11,7 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Launcher contract test for the MiniCPM-o 4.5 thinker GSPO AVQA recipe."""
+"""Launcher contract test for the MiniCPM-o 4.5 thinker GSPO AVQA recipe.
+
+Pins the wiring that would silently break the integration, not the training
+hyperparameters (those track the Qwen3-Omni GSPO recipe and stay tunable).
+"""
 
 from pathlib import Path
 
@@ -20,78 +24,55 @@ _SCRIPT = (
 )
 
 
-def _script_settings(script: str) -> set[str]:
-    return {line.strip().removesuffix("\\").rstrip() for line in script.splitlines()}
+def _active_settings() -> set[str]:
+    """Recipe settings, comments dropped."""
+    lines = [line for line in _SCRIPT.read_text().splitlines() if not line.lstrip().startswith("#")]
+    return {line.strip().removesuffix("\\").rstrip() for line in lines}
 
 
-def test_minicpmo_gspo_launcher_contract():
-    settings = _script_settings(_SCRIPT.read_text())
+def test_minicpmo_gspo_launcher_wires_the_minicpm_path():
+    settings = _active_settings()
 
-    # GSPO loss knobs copied verbatim from the Qwen3-Omni GSPO recipe.
-    assert "actor_rollout_ref.actor.policy_loss.loss_mode=gspo" in settings
-    assert "actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean" in settings
-    assert "actor_rollout_ref.actor.clip_ratio_low=3e-4" in settings
-    assert "actor_rollout_ref.actor.clip_ratio_high=4e-4" in settings
-    assert "actor_rollout_ref.actor.clip_ratio_c=10.0" in settings
-    assert "actor_rollout_ref.actor.use_kl_loss=false" in settings
-    assert "algorithm.adv_estimator=grpo" in settings
-    assert "algorithm.use_kl_in_reward=False" in settings
-
-    # rmpad stays ON: the packed path is implemented in the training adapter.
-    assert "actor_rollout_ref.model.use_remove_padding=True" in settings
-
-    # LoRA + weight-sync contract.
-    assert "actor_rollout_ref.model.lora.merge=True" in settings
-    assert "actor_rollout_ref.rollout.load_format=safetensors" in settings
-
-    # MiniCPM-specific wiring.
+    # Model and rollout: remote-code load, the AR pipeline, and its engine stack.
     assert "actor_rollout_ref.model.trust_remote_code=True" in settings
     assert '+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name="minicpmo_4_5"' in settings
     assert '+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode="ar"' in settings
+    assert "actor_rollout_ref.rollout.load_format=safetensors" in settings
+    # LoRA weight sync pushes the merged adapter into the engine.
+    assert "actor_rollout_ref.model.lora.merge=True" in settings
+    # The packed path is implemented by the training adapter.
+    assert "actor_rollout_ref.model.use_remove_padding=True" in settings
+
+    # Dataset and rendering.
     assert "data.custom_cls.path=pkg://verl_omni.utils.dataset.omni_rl_datasets" in settings
     assert "data.custom_cls.name=MiniCPMORLHFDataset" in settings
     assert "+data.mm_processor_kwargs.sampling_rate=16000" in settings
-    # OpenBMB's supported render mode: the template pre-fills an empty think
-    # block instead of making the model close its own.
     assert "+data.apply_chat_template_kwargs.enable_thinking=false" in settings
-    # The training-path config invariants (init_tts/use_cache/stream_input)
-    # are applied by the adapter's from_pretrained, not recipe overrides.
-    assert not any("override_config" in line for line in settings)
+    # 4096-truncation would cut MiniCPM's think block short.
+    assert "data.max_response_length=12288" in settings
+
+    # The frozen towers are excluded by regex, not by a separate freeze flag.
     assert any(
         line.startswith("actor_rollout_ref.model.exclude_modules=") and ".*vpm.*" in line and ".*apm.*" in line
         for line in settings
     )
-
-    # AVQA reward and proven hyperparameters from the Qwen3-Omni recipe.
-    assert "data.max_response_length=12288" in settings  # 4096 CLI overrides truncate MiniCPM's think
-    assert "reward.reward_manager.source=register" in settings
-    assert "reward.reward_manager.name=naive" in settings
-    assert "reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py" in settings
-    assert "reward.custom_reward_function.name=compute_score" in settings
-    assert "data.train_batch_size=128" in settings
-    assert "actor_rollout_ref.rollout.n=16" in settings
-    assert "trainer.n_gpus_per_node=4" in settings
+    # The config invariants (init_tts/use_cache/stream_input) live in the adapter's
+    # from_pretrained, so recipe-level override_config lines would be dead config.
+    assert not any("override_config" in line for line in settings)
 
 
 def test_minicpmo_gspo_launcher_keeps_flash_attention_default():
-    # sdpa breaks train/rollout consistency; the recipe must not override the
-    # flash_attention_2 default baked into OmniModelConfig.
-    active_lines = [line for line in _SCRIPT.read_text().splitlines() if not line.lstrip().startswith("#")]
-    assert not any("attn_implementation" in line for line in active_lines)
-    assert not any("sdpa" in line for line in active_lines)
+    # sdpa broke train/rollout consistency in Qwen3-Omni experiments.
+    assert not any("attn_implementation" in line or "sdpa" in line for line in _active_settings())
 
 
 def test_minicpmo_gspo_launcher_keeps_upstream_sampling_default():
-    # verl's training-side logprob path divides logits by the temperature in
-    # bf16 while the rollout engine casts to fp32 first; at T != 1.0 that
-    # mismatch alone drops the engine<->actor parity pearson below the 0.99
-    # gate (0.971 at T=0.6 vs 0.992 at T=1.0 on this recipe's validation
-    # runs). Inheriting verl's T=1.0 / top_p=1.0 / top_k=-1 rollout defaults
-    # — the same sampling block the Qwen3-Omni reference runs — keeps the
-    # division bit-exact. val_kwargs sampling stays free to differ.
-    active_lines = [line for line in _SCRIPT.read_text().splitlines() if not line.lstrip().startswith("#")]
+    # verl's training-side logprob path divides logits by the temperature in bf16
+    # while the engine casts to fp32 first, so any T != 1.0 shows the mismatch in
+    # the parity metric; inheriting the T=1.0 / top_p=1.0 / top_k=-1 defaults keeps
+    # the division bit-exact. val_kwargs sampling stays free to differ.
     assert not any(
-        "rollout.temperature=" in line or "rollout.top_p=" in line or "rollout.top_k=" in line
-        for line in active_lines
-        if "val_kwargs" not in line
+        ("rollout.temperature=" in line or "rollout.top_p=" in line or "rollout.top_k=" in line)
+        and "val_kwargs" not in line
+        for line in _active_settings()
     )

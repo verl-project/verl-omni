@@ -476,6 +476,7 @@ def test_build_module_calls_adapter_selected_auto_model_loader():
 
     with (
         patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=adapter_cls),
+        patch.object(omni_impl.AutoModelForMultimodalLM, "from_pretrained") as mock_default,
         patch.object(omni_impl, "get_init_weight_context_manager", return_value=MagicMock()),
         patch.object(omni_impl.warnings, "catch_warnings", return_value=MagicMock()),
         patch("verl.utils.torch_dtypes.PrecisionType") as precision_type,
@@ -497,6 +498,7 @@ def test_build_module_calls_adapter_selected_auto_model_loader():
     )
     adapter_cls.configure_model.assert_called_once_with(loaded_module, model_config)
     assert result is configured_module
+    mock_default.assert_not_called()  # an adapter-selected loader wins over AutoModelForMultimodalLM
 
 
 def test_build_module_rejects_mixed_frozen_parameters_without_fsdp1_orig_params():
@@ -527,56 +529,6 @@ def test_build_module_rejects_mixed_frozen_parameters_without_fsdp1_orig_params(
 
         with pytest.raises(ValueError, match="use_orig_params=true"):
             engine._build_module()
-
-
-def test_build_module_uses_adapter_auto_model_class():
-    """When ``auto_model_class`` is set, load through it instead of AutoModelForMultimodalLM."""
-    omni_impl = _get_omni_impl_module()
-    model_config = _make_mock_model_config(architecture="MiniCPMO")
-
-    fake_loaded_module = MagicMock(spec=torch.nn.Module)
-    fake_configured_module = MagicMock(spec=torch.nn.Module)
-    fake_configured_module.named_parameters.return_value = [("weight", torch.nn.Parameter(torch.randn(2, 2)))]
-
-    class _AutoModel:
-        @staticmethod
-        def from_pretrained(**kwargs):
-            _AutoModel.kwargs = kwargs
-            return fake_loaded_module
-
-    class _Adapter:
-        auto_model_class = _AutoModel
-
-        @staticmethod
-        def configure_model(module, model_config):
-            del model_config
-            return fake_configured_module if module is fake_loaded_module else module
-
-    model_base_mod = sys.modules["verl_omni.pipelines.model_base"]
-
-    with (
-        patch.object(omni_impl.AutoModelForMultimodalLM, "from_pretrained") as mock_default,
-        patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=_Adapter),
-        patch.object(omni_impl, "get_init_weight_context_manager", return_value=MagicMock()),
-        patch.object(omni_impl.warnings, "catch_warnings", return_value=MagicMock()),
-        patch("verl.utils.torch_dtypes.PrecisionType") as mock_precision,
-    ):
-        mock_precision.to_dtype.return_value = torch.bfloat16
-        engine = object.__new__(omni_impl.OmniFSDPEngine)
-        engine.model_config = model_config
-        engine.engine_config = MagicMock()
-        engine.engine_config.model_dtype = None
-        engine.engine_config.forward_only = True
-        engine.device_mesh = None
-
-        result = engine._build_module()
-
-    mock_default.assert_not_called()
-    assert _AutoModel.kwargs["pretrained_model_name_or_path"] == model_config.local_path
-    assert _AutoModel.kwargs["trust_remote_code"] == model_config.trust_remote_code
-    assert _AutoModel.kwargs["config"] is model_config.hf_config
-    assert _AutoModel.kwargs["torch_dtype"] is torch.bfloat16
-    assert result is fake_configured_module
 
 
 @pytest.mark.parametrize("option", ["use_liger", "use_fused_kernels"])
@@ -1011,35 +963,21 @@ def test_build_fsdp_module_injects_ignored_params_on_root_only(monkeypatch):
     assert calls[1][0] is module
     assert calls[1][1] == set(module.apm.parameters())
 
-
-def test_build_fsdp_module_builds_itself_without_ignored_names(monkeypatch):
-    # No adapter-declared subtrees: the override still runs the copied build
-    # rather than delegating, so both paths share one code path.
-    omni_impl = _get_omni_impl_module()
-    module = _MiniCPMStyleModule()
+    # No adapter-declared subtrees: the override still runs the fsdp2 build rather
+    # than delegating, with an empty ignored set.
     delegated = []
-    calls = []
-
     monkeypatch.setattr(
         omni_impl.OmniFSDPEngine.__bases__[0], "_build_fsdp_module", lambda self, m: delegated.append(m)
     )
-    monkeypatch.setattr(torch.distributed.fsdp, "fully_shard", lambda target, **kwargs: calls.append(kwargs))
-    import verl.utils.fsdp_utils as verl_fsdp_utils
-
-    monkeypatch.setattr(verl_fsdp_utils, "_select_fsdp2_wrap_targets", lambda model, names: [])
-    monkeypatch.setattr(verl_fsdp_utils, "maybe_patch_fsdp_module", lambda model: contextmanager(lambda: (yield))())
-    _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl)
-
     engine = _fsdp2_engine(omni_impl, module, None)
     engine._build_fsdp_module(module)
-
     assert delegated == []
-    assert calls[-1]["ignored_params"] == set()
+    assert calls[-1][1] == set()
 
 
-def test_build_fsdp_module_supports_fsdp1_without_ignored_names(monkeypatch):
-    # The fsdp1 branch stays available (and byte-identical to upstream) for
-    # adapters that declare no ignored subtrees.
+def test_build_fsdp_module_fsdp1_branch(monkeypatch):
+    # fsdp1 stays available for adapters declaring no ignored subtrees, and
+    # fails closed when they do (this override only implements the fsdp2 wrap).
     omni_impl = _get_omni_impl_module()
     module = _MiniCPMStyleModule()
     captured = {}
@@ -1053,17 +991,11 @@ def test_build_fsdp_module_supports_fsdp1_without_ignored_names(monkeypatch):
     _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl)
 
     engine = _fsdp2_engine(omni_impl, module, None, strategy="fsdp")
-    result = engine._build_fsdp_module(module)
-
-    assert result is module
+    assert engine._build_fsdp_module(module) is module
     assert captured["use_orig_params"] is True
     assert captured["mixed_precision"].buffer_dtype == torch.float32  # upstream's default
     assert captured["cpu_offload"] is None  # forward_only=False
 
-
-def test_build_fsdp_module_rejects_fsdp1_with_ignored_names():
-    omni_impl = _get_omni_impl_module()
-    module = _MiniCPMStyleModule()
     engine = _fsdp2_engine(omni_impl, module, ["apm"], strategy="fsdp")
     with pytest.raises(NotImplementedError, match="strategy=fsdp2"):
         engine._build_fsdp_module(module)
@@ -1145,10 +1077,8 @@ def test_build_fsdp_module_skips_wrap_targets_under_ignored_subtrees(monkeypatch
     assert module.apm.embed_positions.weight in root_ignored
     assert module.apm.conv1.weight in root_ignored
 
-
-def test_filter_ignored_wrap_targets_identity_without_ignored_names():
+    # Identity when nothing is ignored, so non-MiniCPM adapters wrap every target.
     from verl_omni.utils.fsdp_utils import _filter_ignored_wrap_targets
 
-    module = _WhisperStyleModule()
     targets = [module.llm.layer, module.apm.embed_positions]
     assert _filter_ignored_wrap_targets(targets, module, []) == targets
