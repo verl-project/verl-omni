@@ -85,14 +85,9 @@ def _normalize_audio(audio, source_rate: int) -> torch.Tensor:
     import torchaudio.functional as audio_functional
 
     waveform = torch.as_tensor(audio).detach().float().cpu()
-    while waveform.ndim > 2 and waveform.shape[0] == 1:
-        waveform = waveform[0]
-    if waveform.ndim == 1:
-        waveform = waveform.unsqueeze(0)
-    elif waveform.ndim == 2 and waveform.shape[0] > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)
     if waveform.ndim != 2:
-        raise ValueError(f"Expected audio shape (T,) or (C,T), got {tuple(waveform.shape)}.")
+        raise ValueError(f"Expected canonical CT audio, got {tuple(waveform.shape)}.")
+    waveform = waveform.mean(dim=0, keepdim=True)
     if source_rate != _AUDIO_SAMPLE_RATE:
         waveform = audio_functional.resample(waveform, source_rate, _AUDIO_SAMPLE_RATE)
     return waveform
@@ -137,23 +132,18 @@ def _preprocess_audio(audio, source_rate: int, device: str) -> torch.Tensor:
 
 
 def _to_tchw(video) -> torch.Tensor:
-    video = torch.as_tensor(video)
-    if video.dtype != torch.uint8:
-        raise ValueError(f"Expected uint8 video input, got {video.dtype}.")
-    video = video.detach().float().cpu() / 255.0
-    while video.ndim > 4 and video.shape[0] == 1:
-        video = video[0]
-    if video.ndim != 4:
-        raise ValueError(f"Expected a four-dimensional video, got {tuple(video.shape)}.")
-    if video.shape[1] in (1, 3):
-        pass
-    elif video.shape[-1] in (1, 3):
-        video = video.permute(0, 3, 1, 2)
-    elif video.shape[0] in (1, 3):
-        video = video.permute(1, 0, 2, 3)
-    else:
-        raise ValueError(f"Could not infer video channel dimension from {tuple(video.shape)}.")
-    return video
+    from verl_omni.pipelines.rollout_artifacts import MediaArtifact
+
+    if isinstance(video, MediaArtifact):
+        if (video.spec.modality, video.spec.representation) != ("video", "decoded"):
+            raise ValueError(f"ImageBind requires decoded video, got {video.spec}")
+        video.validate(context="ImageBind", name="video")
+        if video.spec.layout != "TCHW":
+            raise ValueError(f"ImageBind requires canonical TCHW, got {video.spec.layout}")
+        video = video.data
+    from verl_omni.utils.reward_score.reward_utils import normalize_video_tensor
+
+    return normalize_video_tensor(video).detach().float().cpu() / 255.0
 
 
 def _preprocess_video(video, device: str) -> torch.Tensor:
@@ -247,19 +237,20 @@ def compute_score(
     need_audio = mode in {"audio_video", "text_audio", "all"}
     need_video = mode in {"audio_video", "text_video", "all"}
 
+    from verl_omni.pipelines.rollout_artifacts import select_artifact
+
+    artifacts = extra_info.get("media_artifacts", {})
+    if need_video:
+        solution_image = select_artifact(artifacts, name="video_preview", modality="video", representation="decoded")
+    if need_audio:
+        audio_artifact = select_artifact(artifacts, name="audio", modality="audio", representation="decoded")
+        if audio_artifact.spec.layout != "CT":
+            raise ValueError(f"ImageBind requires canonical CT audio, got {audio_artifact.spec.layout}")
     inputs = {}
     if need_text:
         inputs[ModalityType.TEXT] = _preprocess_text(ground_truth or "", device)
     if need_audio:
-        audio = extra_info.get("audio")
-        if audio is None:
-            raise KeyError("ImageBind reward requires decoded audio in extra_info['audio'].")
-        sample_rate = extra_info.get("audio_sample_rate", _AUDIO_SAMPLE_RATE)
-        if isinstance(sample_rate, torch.Tensor):
-            sample_rate = sample_rate.item()
-        if sample_rate is None:
-            raise KeyError("ImageBind reward requires extra_info['audio_sample_rate'].")
-        inputs[ModalityType.AUDIO] = _preprocess_audio(audio, int(sample_rate), device)
+        inputs[ModalityType.AUDIO] = _preprocess_audio(audio_artifact.data, audio_artifact.spec.sample_rate, device)
     if need_video:
         if solution_image is None:
             raise ValueError("ImageBind reward requires video in solution_image.")

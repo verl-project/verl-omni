@@ -40,10 +40,17 @@ def _warm_clip(t=8, h=32, w=32):
     return clip
 
 
-def test_channels_first_video_is_normalized_to_rgb24_frames():
-    video = _warm_clip(t=5, h=8, w=12).permute(1, 0, 2, 3)
+def test_adapter_declared_video_is_exported_without_axis_guessing():
+    from verl_omni.pipelines.rollout_artifacts import MediaArtifact
+    from verl_omni.pipelines.rollout_media import MediaSpec
 
-    frames, width, height = _video_tensor_to_rgb24(video)
+    video = _warm_clip(t=5, h=8, w=12).permute(1, 0, 2, 3)
+    with pytest.raises(ValueError, match="T, 3, H, W"):
+        _video_tensor_to_rgb24(video)
+    preview = MediaArtifact(MediaSpec("video", "decoded", "CTHW", fps=24), video).normalized(
+        context="adapter", name="video_preview"
+    )
+    frames, width, height = _video_tensor_to_rgb24(preview)
 
     assert frames.shape == (5, 8, 12, 3)
     assert (width, height) == (12, 8)
@@ -70,7 +77,9 @@ def test_video_samples_become_wandb_video_with_a_real_mp4_in_output_dir(monkeypa
 
     output_dir = tmp_path / "wandb_val_media" / "global_step_3"
     samples = [(f"prompt {i}", _warm_clip(), float(i)) for i in range(2)]
-    wrapped, video_tmp_dir, media_to_log = wrap_val_samples_for_wandb(samples, fps=8, output_dir=str(output_dir))
+    wrapped, video_tmp_dir, media_to_log = wrap_val_samples_for_wandb(
+        samples, fps=8, output_dir=str(output_dir), media_kinds=["video"] * 2
+    )
 
     assert video_tmp_dir is None
     assert len(wrapped) == 2
@@ -98,7 +107,7 @@ def test_video_samples_without_output_dir_return_cleanup_temp_dir(monkeypatch):
     monkeypatch.setattr(wandb, "Video", _FakeVideo)
 
     samples = [("prompt", _warm_clip(), 1.0)]
-    wrapped, video_tmp_dir, media_to_log = wrap_val_samples_for_wandb(samples, fps=8)
+    wrapped, video_tmp_dir, media_to_log = wrap_val_samples_for_wandb(samples, fps=8, media_kinds=["video"])
 
     try:
         assert video_tmp_dir is not None
@@ -125,7 +134,7 @@ def test_image_samples_become_wandb_image_and_no_temp_dir(monkeypatch):
     monkeypatch.setattr(wandb, "Image", _fake_image)
 
     samples = [("prompt", torch.randint(256, (3, 16, 16), dtype=torch.uint8), 1.0)]
-    wrapped, video_tmp_dir, media_to_log = wrap_val_samples_for_wandb(samples)
+    wrapped, video_tmp_dir, media_to_log = wrap_val_samples_for_wandb(samples, media_kinds=["image"])
 
     assert video_tmp_dir is None
     assert media_to_log == {}
@@ -134,11 +143,28 @@ def test_image_samples_become_wandb_image_and_no_temp_dir(monkeypatch):
     assert captured[0][1] == {"file_type": "jpg"}
 
 
-def test_image_samples_reject_non_uint8_input(monkeypatch):
-    monkeypatch.setattr(wandb, "Image", lambda *args, **kwargs: pytest.fail("wandb.Image should not be called"))
+def test_image_media_failure_is_reported_without_raising(monkeypatch):
+    def fail(*args, **kwargs):
+        raise OSError("simulated image writer failure")
 
-    with pytest.raises(ValueError, match=r"Expected a uint8 image tensor, got torch\.float32\."):
-        wrap_val_samples_for_wandb([("prompt", torch.rand(3, 16, 16), 1.0)])
+    monkeypatch.setattr(wandb, "Image", fail)
+    wrapped, video_tmp_dir, media_to_log = wrap_val_samples_for_wandb(
+        [("prompt", torch.zeros(3, 16, 16, dtype=torch.uint8), 1.0)], media_kinds=["image"]
+    )
+    assert wrapped == [("prompt", "[validation media unavailable: OSError: simulated image writer failure]", 1.0)]
+    assert video_tmp_dir is None
+    assert media_to_log == {}
+
+
+def test_declared_image_rejects_extra_batch_axis(monkeypatch):
+    captured = []
+    monkeypatch.setattr(wandb, "Image", lambda output, **kwargs: captured.append(output) or "image")
+    monkeypatch.setattr(wandb, "Video", lambda *args, **kwargs: pytest.fail("wandb.Video should not be called"))
+    output = torch.zeros(1, 3, 8, 8, dtype=torch.uint8)
+
+    with pytest.raises(ValueError, match="expected layout=CHW"):
+        wrap_val_samples_for_wandb([("prompt", output, 1.0)], media_kinds=["image"])
+    assert captured == []
 
 
 def test_uint8_image_is_logged_by_real_wandb_offline_run(monkeypatch, tmp_path):
@@ -164,7 +190,9 @@ def test_uint8_image_is_logged_by_real_wandb_offline_run(monkeypatch, tmp_path):
     assert run.offline
     run_dir = Path(run.dir)
     try:
-        wrapped, video_tmp_dir, media_to_log = wrap_val_samples_for_wandb([("synthetic", image, 1.0)])
+        wrapped, video_tmp_dir, media_to_log = wrap_val_samples_for_wandb(
+            [("synthetic", image, 1.0)], media_kinds=["image"]
+        )
         assert video_tmp_dir is None
         assert media_to_log == {}
         wandb.log({"verification/image": wrapped[0][1]}, step=1)

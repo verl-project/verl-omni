@@ -19,8 +19,10 @@ import logging
 from verl import DataProto
 from verl.utils.import_utils import load_extern_object
 
+from verl_omni.pipelines.rollout_artifacts import ArtifactContractError
 from verl_omni.workers.config.reward import get_reward_model_entries, resolve_reward_model_name
 
+from .media import _reward_extra_info
 from .visual import VisualRewardManager, _validate_visual_response
 
 logger = logging.getLogger(__name__)
@@ -139,13 +141,15 @@ class MultiVisualRewardManager(VisualRewardManager):
         assert len(data) == 1, "Only support single data item"
         data_item = data[0]
         response_visual = data_item.batch["responses"]
-        _validate_visual_response(response_visual, self.config, is_validate=data_item.meta_info.get("validate", False))
         data_source = data_item.non_tensor_batch["data_source"]
         ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
-        extra_info = data_item.non_tensor_batch.get("extra_info", {})
-        tool_extra_fields = data_item.non_tensor_batch.get("tool_extra_fields", None)
-        if tool_extra_fields is not None:
-            extra_info.update(tool_extra_fields.items())
+        extra_info = _reward_extra_info(data_item)
+        _validate_visual_response(
+            response_visual,
+            self.config,
+            is_validate=data_item.meta_info.get("validate", False),
+            extra_info=extra_info,
+        )
 
         num_turns = data_item.non_tensor_batch.get("__num_turns__", None)
         rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
@@ -213,6 +217,8 @@ class MultiVisualRewardManager(VisualRewardManager):
                         reward_extra_info[f"reward/{key}/{rk}"] = rv
                 else:
                     score = float(result)
+            except ArtifactContractError:
+                raise
             except Exception as e:
                 if required:
                     raise RuntimeError(f"Required sub-reward '{key}' failed: {e}") from e

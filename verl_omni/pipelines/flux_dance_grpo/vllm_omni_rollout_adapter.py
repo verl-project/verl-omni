@@ -29,10 +29,15 @@ from vllm_omni.diffusion.models.flux.pipeline_flux import FluxPipeline
 from vllm_omni.diffusion.request import DUMMY_DIFFUSION_REQUEST_ID, OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
-from verl_omni.pipelines.diffusion_rollout_output import rollout_output, wrap_rollout_postprocessor
+from verl_omni.pipelines.diffusion_rollout_output import (
+    rollout_output,
+    with_visual_artifacts,
+    wrap_rollout_postprocessor,
+)
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
-from verl_omni.pipelines.request_batch import split_diffusion_output_by_request
+from verl_omni.pipelines.request_batch import requested_outputs_for_batch, split_diffusion_output_by_request
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
+from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.pipelines.wan22_dance_grpo.common import seed_from_prompt_ids
 
@@ -75,9 +80,14 @@ def _extract_extra_prompt_ids(prompts: list[Any]) -> dict[str, list[list[int]]] 
         return None
     per_prompt: list[dict[str, Any]] = []
     for prompt in prompts:
-        if not isinstance(prompt, dict) or not prompt.get("extra_prompt_ids"):
+        if not isinstance(prompt, dict):
             return None
-        per_prompt.append(prompt["extra_prompt_ids"])
+        if prompt.get("extra_prompt_ids") is not None:
+            raise ValueError("FLUX extra_prompt_ids must be nested under extra_args, not at the prompt top level")
+        extra = (prompt.get("extra_args") or {}).get("extra_prompt_ids")
+        if not extra:
+            return None
+        per_prompt.append(extra)
 
     for index, extra in enumerate(per_prompt):
         missing = [key for key in FLUX_ENCODER_TOKEN_KEYS if key not in extra]
@@ -157,7 +167,12 @@ class FluxDanceGRPOPipelineWithLogProb(FluxPipeline):
     """FLUX.1-dev generation plus aligned DanceGRPO transition capture."""
 
     supports_request_batch = True
-    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
+    diffusion_io_spec = DiffusionIOSpec(
+        artifacts={
+            "image_preview": MediaSpec("image", "decoded", "CHW"),
+            "image_latent": MediaSpec("image", "latent", "LC"),
+        }
+    )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
@@ -362,11 +377,11 @@ class FluxDanceGRPOPipelineWithLogProb(FluxPipeline):
             if any(
                 request.request_id != DUMMY_DIFFUSION_REQUEST_ID
                 and isinstance(prompt, dict)
-                and prompt.get("prompt_token_ids") is not None
+                and prompt_ids_from_payload(prompt) is not None
                 for request, prompt in zip(request_batch.requests, prompts, strict=False)
             ):
                 raise ValueError(
-                    "FLUX received only the generic prompt_token_ids. Configure "
+                    "FLUX received only the generic prompt_ids. Configure "
                     "actor_rollout_ref.model.extra_tokenizers.clip={path: tokenizer, max_length: 77} "
                     "and .t5={path: tokenizer_2, max_length: 512}."
                 )
@@ -384,6 +399,8 @@ class FluxDanceGRPOPipelineWithLogProb(FluxPipeline):
         output_type = sampling.output_type or extra_args.get("output_type") or output_type
         if output_type not in ("image", "latent"):
             raise ValueError(f"FLUX DanceGRPO output_type must be 'image' or 'latent', got {output_type!r}")
+        requested_outputs = requested_outputs_for_batch(request_batch)
+        decode = output_type != "latent" or "image_preview" in requested_outputs
         num_outputs = sampling.num_outputs_per_prompt if sampling.num_outputs_per_prompt > 0 else 1
         self._guidance_scale = guidance_scale
         self._interrupt = False
@@ -483,9 +500,8 @@ class FluxDanceGRPOPipelineWithLogProb(FluxPipeline):
         )
 
         self._current_timestep = None
-        if output_type == "latent":
-            output = pred_original
-        else:
+        output = None
+        if decode:
             clean = self._unpack_latents(pred_original, height, width, self.vae_scale_factor)
             clean = (clean / self.vae.config.scaling_factor) + self.vae.config.shift_factor
             output = self.vae.decode(clean.to(self.vae.dtype), return_dict=False)[0]
@@ -505,6 +521,15 @@ class FluxDanceGRPOPipelineWithLogProb(FluxPipeline):
             },
             rl={"all_next_latents": next_latents},
             to_cpu=True,
+        )
+        result = with_visual_artifacts(
+            result,
+            decoded=output,
+            latents=pred_original,
+            latent_layout="LC",
+            output_type=output_type,
+            context=f"pipeline={type(self).__name__}, request_id={request_batch.request_ids}",
+            requested=requested_outputs,
         )
         outputs = split_diffusion_output_by_request(
             result,

@@ -36,7 +36,7 @@ pil_image_to_base64 = _MODULE.pil_image_to_base64
 
 
 @pytest.mark.parametrize("layout", ["tchw", "cthw", "thwc"])
-def test_normalize_video_tensor_accepts_supported_rgb_layouts(layout):
+def test_video_consumers_accept_only_canonical_layout(layout):
     canonical = torch.arange(2 * 3 * 4 * 5, dtype=torch.uint8).reshape(2, 3, 4, 5)
     video = {
         "tchw": canonical,
@@ -44,7 +44,11 @@ def test_normalize_video_tensor_accepts_supported_rgb_layouts(layout):
         "thwc": canonical.permute(0, 2, 3, 1),
     }[layout]
 
-    torch.testing.assert_close(normalize_video_tensor(video), canonical)
+    if layout != "tchw":
+        with pytest.raises(ValueError, match="T, 3, H, W"):
+            normalize_video_tensor(video)
+    else:
+        torch.testing.assert_close(normalize_video_tensor(video), canonical)
 
 
 def test_video_tensor_to_pil_frames_preserves_uint8_pixels():
@@ -67,7 +71,7 @@ def test_video_tensor_to_pil_frames_rejects_non_uint8(dtype):
 
 @pytest.mark.parametrize("shape", [(3, 4, 5), (2, 4, 4, 5), (2, 3, 4, 5, 1)])
 def test_video_tensor_to_pil_frames_rejects_non_tchw_rgb(shape):
-    with pytest.raises(ValueError, match="Expected an RGB video tensor"):
+    with pytest.raises(ValueError, match="T, 3, H, W"):
         video_tensor_to_pil_frames(torch.zeros(shape, dtype=torch.uint8))
 
 

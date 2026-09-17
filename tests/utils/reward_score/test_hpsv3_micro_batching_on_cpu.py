@@ -90,7 +90,7 @@ def _request(future, value=1):
     return hpsv3_reward._ScoreRequest(
         prompt="prompt",
         solution_image=_image(value),
-        extra_info={},
+        extra_info={"media_kind": "image"},
         checkpoint_path="fake-checkpoint",
         device="cpu",
         max_batch_size=4,
@@ -113,7 +113,7 @@ def _score(
         data_source="test",
         solution_image=solution_image,
         ground_truth=prompt,
-        extra_info=extra_info or {},
+        extra_info={"media_kind": "image"} if extra_info is None else extra_info,
         model_name=model_name,
         device=device,
         max_batch_size=max_batch_size,
@@ -157,16 +157,24 @@ async def test_single_video_is_split_by_total_frame_cap_and_averaged(monkeypatch
     if channels_last:
         video = video.permute(0, 2, 3, 1)
 
-    result = await _score(
-        video,
-        max_batch_size=2,
-        reward_scale=0.5,
-        extra_info={"frame_interval": 1},
-    )
+    if channels_last:
+        with pytest.raises(ValueError, match="expected 1/3/4 image channels"):
+            await _score(
+                video,
+                max_batch_size=2,
+                reward_scale=0.5,
+                extra_info={"frame_interval": 1, "media_kind": "video", "fps": 24},
+            )
+    else:
+        result = await _score(
+            video,
+            max_batch_size=2,
+            reward_scale=0.5,
+            extra_info={"frame_interval": 1, "media_kind": "video", "fps": 24},
+        )
+        assert [len(images) for images, _ in inferencer.batches] == [2, 2, 1]
+        assert result == {"score": pytest.approx(1.5), "hpsv3_raw": pytest.approx(3.0)}
     await _stop_consumer(state)
-
-    assert [len(images) for images, _ in inferencer.batches] == [2, 2, 1]
-    assert result == {"score": pytest.approx(1.5), "hpsv3_raw": pytest.approx(3.0)}
 
 
 @pytest.mark.parametrize("channels_last", [False, True])
@@ -175,26 +183,28 @@ def test_extract_frames_samples_the_time_axis(channels_last):
     if channels_last:
         video = video.permute(0, 2, 3, 1)
 
-    frames = hpsv3_reward._extract_frames(video, frame_interval=2)
-
-    assert [frame.getpixel((0, 0))[0] for frame in frames] == [1, 3, 5]
+    if channels_last:
+        with pytest.raises(ValueError, match="expected 1/3/4 image channels"):
+            hpsv3_reward._extract_frames(video, frame_interval=2, extra_info={"media_kind": "video", "fps": 24})
+    else:
+        frames = hpsv3_reward._extract_frames(video, frame_interval=2, extra_info={"media_kind": "video", "fps": 24})
+        assert [frame.getpixel((0, 0))[0] for frame in frames] == [1, 3, 5]
 
 
 def test_extract_frames_prefers_tchw_when_width_is_channel_sized():
     video = torch.stack([torch.full((3, 2, 3), value, dtype=torch.uint8) for value in [1, 2, 3]])
 
-    frames = hpsv3_reward._extract_frames(video)
+    frames = hpsv3_reward._extract_frames(video, extra_info={"media_kind": "video", "fps": 24})
 
     assert [frame.size for frame in frames] == [(3, 2)] * 3
     assert [frame.getpixel((0, 0))[0] for frame in frames] == [1, 2, 3]
 
 
-def test_extract_frames_preserves_legacy_cthw_direct_calls():
+def test_extract_frames_rejects_legacy_cthw_direct_calls():
     video = _video([1, 2, 3, 4, 5]).permute(1, 0, 2, 3)
 
-    frames = hpsv3_reward._extract_frames(video, frame_interval=2)
-
-    assert [frame.getpixel((0, 0))[0] for frame in frames] == [1, 3, 5]
+    with pytest.raises(ValueError, match="expected 1/3/4 image channels"):
+        hpsv3_reward._extract_frames(video, frame_interval=2, extra_info={"media_kind": "video", "fps": 24})
 
 
 @pytest.mark.asyncio
@@ -206,7 +216,7 @@ async def test_invalid_request_is_isolated_from_valid_batch(monkeypatch):
     await _stop_consumer(state)
 
     assert results[0] == {"score": pytest.approx(0.7), "hpsv3_raw": pytest.approx(7.0)}
-    assert isinstance(results[1], AttributeError)
+    assert isinstance(results[1], ValueError)
     assert results[2] == {"score": pytest.approx(0.9), "hpsv3_raw": pytest.approx(9.0)}
     assert [len(images) for images, _ in inferencer.batches] == [2]
 

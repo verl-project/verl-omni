@@ -18,10 +18,13 @@ the produced modality from the adapter-declared ``DiffusionIOSpec`` instead of
 inferring it from tensor rank, so a missing declaration is a bug.
 """
 
+from dataclasses import asdict
+
 import pytest
 
 pytest.importorskip("verl_omni.pipelines.model_base")
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec
 
 # (adapter module, architecture, algorithm, primary modality)
 _PRIMARY_MODALITY = [
@@ -50,6 +53,7 @@ _PRIMARY_MODALITY = [
         "image",
     ),
     ("verl_omni.pipelines.sd3_flow_grpo.vllm_omni_rollout_adapter", "StableDiffusion3Pipeline", "flow_grpo", "image"),
+    ("verl_omni.pipelines.flux_dance_grpo.vllm_omni_rollout_adapter", "FluxPipeline", "dance_grpo", "image"),
     ("verl_omni.pipelines.wan22_dance_grpo.vllm_omni_rollout_adapter", "WanPipeline", "dance_grpo", "video"),
     ("verl_omni.pipelines.ltx2_flow_grpo.vllm_omni_rollout_adapter", "LTX2Pipeline", "flow_grpo", "video"),
     ("verl_omni.pipelines.minimax_h3_flow_grpo.vllm_omni_rollout_adapter", "MiniMaxH3Pipeline", "flow_grpo", "video"),
@@ -74,6 +78,28 @@ _JOINT_AUDIO_SAMPLE_RATE = [
 ]
 
 
+def test_media_spec_keeps_public_import_and_serialized_fields():
+    from verl_omni.pipelines.rollout_media import MediaSpec
+
+    fields = {
+        "modality": "video",
+        "representation": "decoded",
+        "layout": "TCHW",
+        "sample_rate": None,
+        "fps": 29.97,
+    }
+    spec = MediaSpec(**fields)
+    assert asdict(spec) == fields
+    assert MediaSpec(**asdict(spec)) == spec
+    assert DiffusionIOSpec(artifacts={"video_preview": spec}).artifacts["video_preview"] is spec
+
+
+@pytest.mark.parametrize("artifacts", [{}, (), {"image_preview": object()}])
+def test_invalid_named_declarations_are_rejected(artifacts):
+    with pytest.raises((TypeError, ValueError), match="DiffusionIOSpec requires"):
+        DiffusionIOSpec(artifacts=artifacts)
+
+
 @pytest.mark.parametrize(("module", "architecture", "algorithm", "modality"), _PRIMARY_MODALITY)
 def test_registered_pipeline_declares_primary_modality(module, architecture, algorithm, modality):
     pytest.importorskip(module)
@@ -81,7 +107,10 @@ def test_registered_pipeline_declares_primary_modality(module, architecture, alg
     assert cls is not None, f"{architecture}/{algorithm} is not registered"
     spec = getattr(cls, "diffusion_io_spec", None)
     assert spec is not None, f"{architecture}/{algorithm} must declare diffusion_io_spec"
-    assert spec.primary.modality == modality
+    assert isinstance(spec, DiffusionIOSpec)
+    assert spec.artifacts[f"{modality}_preview"].modality == modality
+    assert spec.artifacts[f"{modality}_preview"].representation == "decoded"
+    assert spec.artifacts[f"{modality}_latent"].representation == "latent"
 
 
 @pytest.mark.parametrize(("module", "architecture", "algorithm", "sample_rate"), _JOINT_AUDIO_SAMPLE_RATE)
@@ -90,6 +119,7 @@ def test_joint_pipeline_declares_audio_stream(module, architecture, algorithm, s
     cls = VllmOmniPipelineBase.get_class(architecture, algorithm)
     spec = getattr(cls, "diffusion_io_spec", None)
     assert spec is not None
-    audio = next((stream for stream in spec.auxiliary if stream.modality == "audio"), None)
-    assert audio is not None, f"{architecture}/{algorithm} must declare an auxiliary audio stream"
-    assert audio.sample_rate == sample_rate
+    audio = spec.artifacts["audio"]
+    assert audio.modality == "audio" and audio.representation == "decoded"
+    assert audio.layout == "CT"
+    assert audio.sample_rate == (None if architecture.startswith("LTX") else sample_rate)

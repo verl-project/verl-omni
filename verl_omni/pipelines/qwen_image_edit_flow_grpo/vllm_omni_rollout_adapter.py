@@ -30,6 +30,8 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 
 from verl_omni.pipelines.diffusion_rollout_output import (
     rollout_output,
+    wants_decoded_preview,
+    with_visual_artifacts,
     wrap_rollout_postprocessor,
 )
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
@@ -39,7 +41,7 @@ from verl_omni.pipelines.qwen_image_flow_grpo.common import (
     coalesce_not_none,
 )
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
-from verl_omni.pipelines.rollout_request import condition_images_from_payload
+from verl_omni.pipelines.rollout_request import condition_images_from_payload, prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 __all__ = ["QwenImageEditPlusPipelineWithLogProb"]
@@ -129,7 +131,12 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
 
     #: Declares the primary rollout media stream so downstream consumers read
     #: the modality from the adapter instead of inferring it from tensor rank.
-    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
+    diffusion_io_spec = DiffusionIOSpec(
+        artifacts={
+            "image_preview": MediaSpec("image", "decoded", "CHW"),
+            "image_latent": MediaSpec("image", "latent", "LC"),
+        }
+    )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
@@ -383,10 +390,10 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
             _condition_images_for_prompt_encoding(custom_prompt) if isinstance(custom_prompt, dict) else None
         )
         if not condition_images:
-            raise ValueError("Qwen-Image-Edit requires at least one condition image")
+            raise ValueError("Qwen-Image-Edit requires raw multi_modal_data.image")
 
         if isinstance(custom_prompt, dict):
-            prompt_ids = custom_prompt.get("prompt_token_ids", prompt_ids)
+            prompt_ids = prompt_ids_from_payload(custom_prompt, prompt_ids)
             prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
             negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
             negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)
@@ -398,6 +405,7 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
             vae_image_sizes = None
 
         sampling_params = req.sampling_params
+        output_type = sampling_params.output_type or output_type or "pil"
         height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
         _validate_condition_image_sizes(condition_images, vae_image_sizes, target_size=(height, width))
@@ -538,8 +546,9 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
         )
 
         self._current_timestep = None
-        if output_type == "latent":
-            image = latents
+        native_latents = latents
+        if not wants_decoded_preview(output_type, sampling_params):
+            image = None
         else:
             latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
             latents = latents.to(self.vae.dtype)
@@ -554,7 +563,7 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
             latents = latents / latents_std + latents_mean
             image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
 
-        return rollout_output(
+        result = rollout_output(
             media=_maybe_to_cpu(image),
             trajectory_latents=_maybe_to_cpu(all_latents),
             trajectory_log_probs=_maybe_to_cpu(all_log_probs),
@@ -570,4 +579,13 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
                 "img_shapes": img_shapes,
             },
             to_cpu=False,
+        )
+        return with_visual_artifacts(
+            result,
+            decoded=_maybe_to_cpu(image),
+            latents=_maybe_to_cpu(native_latents),
+            latent_layout="LC",
+            output_type=output_type,
+            context=f"pipeline={type(self).__name__}, request_id={req.request_id}",
+            requested=(sampling_params.extra_args or {}).get("requested_outputs"),
         )

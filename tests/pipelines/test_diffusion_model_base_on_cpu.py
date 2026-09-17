@@ -131,7 +131,17 @@ class TestVllmOmniPipelineBaseRegistry:
         postprocess = vllm_omni_rollout_adapter.get_latent_post_process_func(od_config=None)
         latent = torch.zeros(1, 16, 2, 2)
         image = torch.zeros(1, 3, 2, 2)
-        assert postprocess(latent) is latent
+        from verl_omni.pipelines.diffusion_rollout_output import rollout_output, with_visual_artifacts
+
+        named = with_visual_artifacts(
+            rollout_output(media=latent),
+            decoded=None,
+            latents=latent,
+            latent_layout="CHW",
+            output_type="latent",
+            context="SD3 test",
+        ).output
+        assert postprocess(named) is named
         assert postprocess(image) == "decoded"
         assert len(image_outputs) == 1
         assert image_outputs[0] is image

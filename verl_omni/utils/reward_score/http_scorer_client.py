@@ -33,10 +33,9 @@ from PIL import Image
 
 def _tensor_to_pil(image: torch.Tensor) -> Image.Image:
     """Convert a CHW uint8 tensor to an RGB PIL image."""
-    if image.ndim == 4:
-        image = image[0]
-    image = image.permute(1, 2, 0).cpu().numpy()
-    return Image.fromarray(image)
+    from verl_omni.utils.reward_score.reward_utils import image_tensor_to_pil
+
+    return image_tensor_to_pil(image)
 
 
 def _serialize_image(pil_image: Image.Image) -> bytes:
@@ -93,8 +92,13 @@ async def compute_score(
     if retry_backoff < 0:
         raise ValueError(f"retry_backoff must be non-negative, got {retry_backoff}")
 
+    from verl_omni.utils.reward_score.reward_utils import visual_reward_frames
+
+    frames = visual_reward_frames(solution_image, kwargs.get("extra_info") or {"media_kind": "image"})
+    if len(frames) != 1:
+        raise ValueError("HTTP image scorer requires one decoded image")
     loop = asyncio.get_running_loop()
-    image_bytes = await loop.run_in_executor(None, _prepare_image_bytes, solution_image)
+    image_bytes = await loop.run_in_executor(None, _prepare_image_bytes, frames[0])
 
     payload = pickle.dumps(
         {
