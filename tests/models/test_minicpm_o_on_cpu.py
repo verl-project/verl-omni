@@ -332,14 +332,6 @@ def test_patch_get_audio_embedding_runs_each_clip_alone():
     assert len(module.original_calls) == 3
 
 
-def test_patch_get_audio_embedding_noop_without_apm_or_llm():
-    from verl_omni.models.transformers import minicpm_o
-
-    bare = torch.nn.Linear(4, 4)
-    minicpm_o.patch_minicpm_get_audio_embedding(bare)
-    assert not hasattr(bare, "_verl_omni_get_audio_embedding_patched")
-
-
 class _RemoteBuggyOmniModule(torch.nn.Module):
     """Remote get_omni_embedding with the dedented splice: only the last row is written."""
 
@@ -453,11 +445,13 @@ def test_patch_get_omni_embedding_delegates_streaming_and_audio_free():
     assert len(module.original_calls) == 3  # audio-free delegates (training anchor)
 
 
-def test_patch_get_omni_embedding_noop_without_the_method():
-    from verl_omni.models.transformers import minicpm_o
-
+def test_patches_noop_on_a_bare_module():
+    # Each patch early-returns when its remote method/attributes are absent, so a
+    # non-MiniCPM module is never marked as patched.
     bare = torch.nn.Linear(4, 4)
+    minicpm_o.patch_minicpm_get_audio_embedding(bare)
     minicpm_o.patch_minicpm_get_omni_embedding(bare)
+    assert not hasattr(bare, "_verl_omni_get_audio_embedding_patched")
     assert not hasattr(bare, "_verl_omni_get_omni_embedding_patched")
 
 

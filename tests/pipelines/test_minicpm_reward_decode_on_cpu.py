@@ -11,13 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU tests for the MiniCPM answer-tag reward-decode demotion.
+"""CPU tests for the reward-worker side of the answer-tag demotion.
 
-The reward worker builds its own tokenizer for the reward loop and decodes with
-``skip_special_tokens=True``, which strips the checkpoint's special ``<answer>``
-tags and zeroes every choice-reward score. ``OmniRewardLoopWorker._init_reward_fn``
-demotes the two tags on the tokenizer its manager decodes with, so the fix lands on
-that exact object in the process that scores — with no global reward-manager patch.
+The demotion itself (the tokenizer flags, the decode, the choice-reward score) is
+covered by ``tests/models/test_minicpm_answer_tags_on_cpu.py``. What matters here
+is the wiring: no import-time global patch, the worker demotes on the tokenizer
+its own manager decodes with, and the actor gate applies or skips.
 """
 
 from __future__ import annotations
@@ -31,7 +30,6 @@ from verl.experimental.reward_loop.reward_manager.naive import NaiveRewardManage
 
 from verl_omni.models.transformers.minicpm_o import (
     actor_registers_special_answer_tags,
-    keep_answer_tags_when_decoding,
 )
 from verl_omni.reward_loop.reward_loop import OmniRewardLoopWorker
 from verl_omni.utils.reward_score.choice_reward import compute_score
@@ -63,51 +61,9 @@ def test_no_global_reward_manager_patch_is_installed():
     assert not getattr(NaiveRewardManager, "_minicpm_keeps_answer_tags", False)
 
 
-def test_stock_naive_manager_strips_answer_tags_without_the_demotion():
-    tokenizer = _minicpm_style_tokenizer()
-    ids = tokenizer.encode("a b c <answer>A</answer>", add_special_tokens=False)
-    assert "<answer>" not in tokenizer.decode(ids, skip_special_tokens=True)  # the bug
-
-    # A stock manager (the demotion not applied) scores 0 on a correct answer.
-    manager = NaiveRewardManager(config={}, tokenizer=tokenizer, compute_score=compute_score)
-    response_str = manager.tokenizer.decode(ids, skip_special_tokens=True)
-    assert compute_score(data_source="avqa_r1_6k", solution_str=response_str, ground_truth="<answer>A</answer>") == {
-        "score": 0.0,
-        "accuracy": 0.0,
-    }
-
-
-def test_demotion_on_the_manager_tokenizer_restores_the_choice_reward():
-    tokenizer = _minicpm_style_tokenizer()
-    manager = NaiveRewardManager(config={}, tokenizer=tokenizer, compute_score=compute_score)
-    ids = tokenizer.encode("a b c <answer>A</answer>", add_special_tokens=False)
-
-    assert keep_answer_tags_when_decoding(manager.tokenizer) is True
-
-    assert manager.tokenizer is tokenizer  # demoted in place on the manager's own tokenizer
-    assert tokenizer.added_tokens_decoder[tokenizer.convert_tokens_to_ids("<answer>")].special is False
-    response_str = tokenizer.decode(ids, skip_special_tokens=True)  # verl's decode path
-    assert "<answer>" in response_str and "<" + "/answer>" in response_str
-    assert compute_score(data_source="avqa_r1_6k", solution_str=response_str, ground_truth="<answer>A</answer>") == {
-        "score": 1.0,
-        "accuracy": 1.0,
-    }
-
-
-def test_demotion_is_a_noop_for_tagless_tokenizers():
-    tok = Tokenizer(models.WordLevel(vocab={"a": 0, "[unk]": 1}, unk_token="[unk]"))
-    plain = PreTrainedTokenizerFast(tokenizer_object=tok)
-    plain.add_tokens(["<answer>", "</answer>"], special_tokens=False)
-
-    manager = NaiveRewardManager(config={}, tokenizer=plain, compute_score=compute_score)
-
-    assert keep_answer_tags_when_decoding(manager.tokenizer) is False
-    assert manager.tokenizer is plain  # constructed unchanged, no raise
-
-
 def test_reward_worker_demotes_on_the_manager_it_constructed(monkeypatch, tmp_path):
-    # _init_reward_fn is the install point: same process that built the tokenizer, and
-    # the manager is already constructed when it returns.
+    # _init_reward_fn is the install point: same process that built the tokenizer,
+    # and the manager already holds the object it will decode with.
     seen = []
     monkeypatch.setattr(
         "verl_omni.models.transformers.minicpm_o.keep_answer_tags_when_decoding",
@@ -116,12 +72,9 @@ def test_reward_worker_demotes_on_the_manager_it_constructed(monkeypatch, tmp_pa
     tokenizer = _minicpm_style_tokenizer()
     manager = NaiveRewardManager(config={}, tokenizer=tokenizer, compute_score=compute_score)
 
-    def fake_super_init(self):
-        self.reward_manager = manager
-
     monkeypatch.setattr(
         "verl.experimental.reward_loop.reward_loop.RewardLoopWorker._init_reward_fn",
-        fake_super_init,
+        lambda self: setattr(self, "reward_manager", manager),
     )
     worker = object.__new__(OmniRewardLoopWorker)
     worker.config = _actor_config("MiniCPMO", str(tmp_path))
@@ -131,29 +84,6 @@ def test_reward_worker_demotes_on_the_manager_it_constructed(monkeypatch, tmp_pa
     OmniRewardLoopWorker._init_reward_fn(worker)
 
     assert seen == [tokenizer]
-
-
-def test_actor_gate_applies_for_minicpm_and_unknown_architectures(tmp_path):
-    # Unknown counts as yes (the demotion no-ops unless the tags are special), so a
-    # MiniCPM checkpoint under an unregistered architecture name still gets the fix.
-    import verl_omni.pipelines  # noqa: F401  # register the adapters
-
-    minicpm = _actor_config("MiniCPMO", str(tmp_path))
-    assert actor_registers_special_answer_tags(minicpm) is True
-    assert actor_registers_special_answer_tags(_actor_config("SomeFutureOmni", str(tmp_path))) is True
-    assert actor_registers_special_answer_tags(_actor_config(None, str(tmp_path))) is True  # no config.json
-    assert actor_registers_special_answer_tags(None) is True  # no config at all
-
-
-def test_actor_gate_skips_other_registered_omni_models(tmp_path):
-    # A different registered omni model never registers the answer tags, so the worker
-    # must not touch its tokenizer.
-    import verl_omni.pipelines  # noqa: F401  # register the adapters
-
-    assert (
-        actor_registers_special_answer_tags(_actor_config("Qwen3OmniMoeForConditionalGeneration", str(tmp_path)))
-        is False
-    )
 
 
 def test_reward_worker_skips_the_demotion_for_other_models(monkeypatch, tmp_path):
@@ -177,13 +107,23 @@ def test_reward_worker_skips_the_demotion_for_other_models(monkeypatch, tmp_path
     assert seen == []
 
 
-def test_demotion_leaves_ids_and_encoding_untouched():
-    tokenizer = _minicpm_style_tokenizer()
-    answer_id = tokenizer.convert_tokens_to_ids("<answer>")
-    close_id = tokenizer.convert_tokens_to_ids("</answer>")
-    b_id = tokenizer.convert_tokens_to_ids("B")
-    before = tokenizer.encode("<answer>B</answer>", add_special_tokens=False)
+def test_actor_gate_applies_for_minicpm_and_unknown_architectures(tmp_path):
+    # Unknown counts as yes (the demotion no-ops unless the tags are special), so a
+    # MiniCPM checkpoint under an unregistered architecture name still gets the fix.
+    import verl_omni.pipelines  # noqa: F401  # register the adapters
 
-    keep_answer_tags_when_decoding(tokenizer)
+    assert actor_registers_special_answer_tags(_actor_config("MiniCPMO", str(tmp_path))) is True
+    assert actor_registers_special_answer_tags(_actor_config("SomeFutureOmni", str(tmp_path))) is True
+    assert actor_registers_special_answer_tags(_actor_config(None, str(tmp_path))) is True  # no config.json
+    assert actor_registers_special_answer_tags(None) is True  # no config at all
 
-    assert tokenizer.encode("<answer>B</answer>", add_special_tokens=False) == before == [answer_id, b_id, close_id]
+
+def test_actor_gate_skips_other_registered_omni_models(tmp_path):
+    # A different registered omni model never registers the answer tags, so the worker
+    # must not touch its tokenizer.
+    import verl_omni.pipelines  # noqa: F401  # register the adapters
+
+    assert (
+        actor_registers_special_answer_tags(_actor_config("Qwen3OmniMoeForConditionalGeneration", str(tmp_path)))
+        is False
+    )

@@ -356,11 +356,8 @@ def test_wrapper_apply_chat_template_flattens_and_delegates():
         "<user>" + MINICPM_IMAGE_SLOT + MINICPM_AUDIO_SLOT + "Which song is playing?</user>"
     )
 
-
-def test_wrapper_apply_chat_template_string_content_untouched():
-    processor = bind_minicpm_processor(_StubProcessor())
-    messages = [{"role": "user", "content": "plain question"}]
-    processor.apply_chat_template(messages)
+    # String content needs no flattening.
+    processor.apply_chat_template([{"role": "user", "content": "plain question"}])
     assert processor.template_calls[-1]["messages"][0]["content"] == "plain question"
 
 
@@ -415,7 +412,18 @@ def test_prepare_model_inputs_padded_batch_also_rederives_bounds():
     assert prepared["data"]["image_bound"] == [[[2, 4]], [[2, 4]]]
 
 
-def test_split_classifies_image_sizes_as_data_not_llm_kwargs():
+def test_prepare_model_inputs_drops_image_sizes_entirely():
+    data, _ = _packed_data()
+    model_inputs = {key: value for key, value in data.items() if key not in ("image_bound", "audio_bounds")}
+    model_inputs["image_sizes"] = [[(8, 8)], [(8, 8)]]
+    prepared = MiniCPMThinkerAdapter.prepare_model_inputs(
+        model_inputs, micro_batch=None, model_config=SimpleNamespace(processor=_StubProcessor())
+    )
+    assert "image_sizes" not in prepared
+    assert "image_sizes" not in prepared["data"]
+
+    # The split classifies it as MiniCPMO data, not inner-LLM kwargs, for paths that
+    # bypass prepare_model_inputs.
     data, llm_kwargs = split_minicpm_forward_kwargs(
         {
             "input_ids": torch.ones(1, 4, dtype=torch.long),
@@ -428,27 +436,15 @@ def test_split_classifies_image_sizes_as_data_not_llm_kwargs():
     assert "image_sizes" not in llm_kwargs
 
 
-def test_prepare_model_inputs_drops_image_sizes_entirely():
-    data, _ = _packed_data()
-    model_inputs = {key: value for key, value in data.items() if key not in ("image_bound", "audio_bounds")}
-    model_inputs["image_sizes"] = [[(8, 8)], [(8, 8)]]
-    prepared = MiniCPMThinkerAdapter.prepare_model_inputs(
-        model_inputs, micro_batch=None, model_config=SimpleNamespace(processor=_StubProcessor())
-    )
-    assert "image_sizes" not in prepared
-    assert "image_sizes" not in prepared["data"]
-
-
-def test_processor_call_normalizes_empty_media_to_none():
+def test_processor_call_media_passthrough():
+    # Empty containers become None (the remote processor branches on `is not None`),
+    # and non-empty media passes through untouched.
     processor = bind_minicpm_processor(_StubProcessor())
     processor(text=["text-only prompt"], images=[], audio=[])
     call = processor.calls[-1]
     assert call["images"] is None and call["audios"] is None
     assert call["text"] == ["text-only prompt"]  # no slots appended for empty media
 
-
-def test_processor_call_keeps_nonempty_media():
-    processor = bind_minicpm_processor(_StubProcessor())
     processor(text=["<image>./</image> listen"], images=["img.png"], audio=[b"wav"])
     call = processor.calls[-1]
     assert call["images"] == ["img.png"] and call["audios"] == [b"wav"]
@@ -572,13 +568,6 @@ def test_apply_chat_template_renders_via_tokenizer_when_processor_has_none():
     # dataset through filter_overlong_prompts).
     assert f"<user>{MINICPM_IMAGE_SLOT}{MINICPM_AUDIO_SLOT}Which song is playing?</user>" in rendered
     assert "<system>Answer with <answer>X</answer>.</system>" in rendered
-
-
-def test_apply_chat_template_delegates_when_processor_class_overrides():
-    processor = bind_minicpm_processor(_StubProcessor())
-    processor.apply_chat_template(_block_messages())
-    sent = processor.template_calls[-1]["messages"]
-    assert sent[1]["content"] == MINICPM_IMAGE_SLOT + MINICPM_AUDIO_SLOT + "Which song is playing?"
 
 
 def test_apply_chat_template_raises_loudly_when_nothing_can_render():
