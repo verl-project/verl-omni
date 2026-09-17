@@ -96,10 +96,11 @@ class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
     def ensure_pipeline_registered(cls, pipeline_mode: str = "thinker_only") -> None:
         """Register the runtime-cloned thinker-only pipeline in vLLM-Omni.
 
-        Also asserts the engine-process plugin entry point is current: this runs
-        before the engine cores spawn, so a stale entry point is reported here
-        rather than as a downstream ``embed_multimodal`` assertion.
+        The entry-point assertion runs first, before the engine cores spawn, so a
+        stale plugin install is reported here rather than downstream.
         """
+        # TODO (mike): drop with the vllm_plugin module at the pin bump — the guard
+        # fails once the plugin entry point is legitimately gone.
         assert_entry_point_installed()
         register_pipeline(MINICPMO_4_5_THINKER_ONLY_PIPELINE)
 
@@ -125,10 +126,10 @@ class MiniCPMORolloutAdapter(OmniRolloutPipelineBase):
                 # logprobs_tensors=None) and the thinker-LLM-only weight names the
                 # merged-LoRA sync targets.
                 "model_arch": "MiniCPMO45OmniLLMForConditionalGeneration",
-                # Mirrors the upstream deploy profiles: vllm-omni's AR async scheduler
-                # never forwards is_stale, and frames escaping its drain predicates
-                # after a zeroing event trip an assert in vllm's async_scheduler.py
-                # once KV-cache pressure starts preempting.
+                # TODO (mike): drop once vllm-omni's AR async scheduler forwards is_stale.
+                # It drops the flag, so frames escaping its drain predicates after a
+                # zeroing event trip an assert in vllm's async_scheduler.py once KV-cache
+                # pressure starts preempting; upstream MiniCPM-o deploy profiles pin this too.
                 "async_scheduling": False,
             }
         return {}

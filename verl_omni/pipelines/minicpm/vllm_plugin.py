@@ -18,10 +18,9 @@ runs these at startup in every process, spawned engine cores included — the
 only hook that reliably crosses process boundaries.
 """
 
-# TODO (mike): both fixes have landed upstream (vllm-omni#7384, #7517); once the pin
-# includes them, drop this file, its pyproject entry point, and the
-# assert_entry_point_installed() call in MiniCPMORolloutAdapter.ensure_pipeline_registered
-# — the guard fails once the entry point is legitimately gone.
+# TODO (mike): drop at the next vllm-omni pin update — any pin past #7517 covers both
+# upstream fixes (vllm-omni#7384, #7517). Two deletions: this file and its
+# ``vllm.general_plugins`` entry point in pyproject.toml.
 
 from __future__ import annotations
 
@@ -29,8 +28,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# vLLM resolves the target from installed metadata, not from this file, so the name
-# has to match pyproject.toml; see ``assert_entry_point_installed``.
+# must match pyproject.toml; vLLM resolves entry points from installed metadata
 _ENTRY_POINT_NAME = "verl_omni_minicpmo_embed_multimodal"
 _ENTRY_POINT_GROUP = "vllm.general_plugins"
 
@@ -38,17 +36,11 @@ _ENTRY_POINT_GROUP = "vllm.general_plugins"
 def assert_entry_point_installed() -> None:
     """Fail fast when this module's entry point is missing or points elsewhere.
 
-    Editable installs bake entry points into ``dist-info`` at install time, so
-    pulling a commit that moves this module leaves vLLM loading the dead path.
-    vLLM logs that as a non-fatal ERROR, ``embed_multimodal`` keeps the
-    ``SupportsMultiModal`` stub returning ``None``, and the engine core dies
-    minutes later on an assertion that blames the model, not the plugin. The
-    check is cheap metadata, so the MiniCPM rollout path runs it before the
-    engine cores spawn.
+    vLLM resolves the target from installed metadata, which an editable install
+    does not refresh when the module moves.
 
     Raises:
-        RuntimeError: When the entry point is absent, or resolves to a module
-            other than this one.
+        RuntimeError: When the entry point is absent or resolves elsewhere.
     """
     from importlib.metadata import entry_points
 
@@ -59,11 +51,10 @@ def assert_entry_point_installed() -> None:
         return
     found = f"points at {actual!r}" if actual is not None else "is not installed"
     raise RuntimeError(
-        f"The vLLM general plugin entry point {_ENTRY_POINT_NAME!r} {found}, but this module "
-        f"is {expected!r}. vLLM resolves that target from installed metadata, which an editable "
-        "install does not refresh when the module moves; without the plugin the MiniCPM-o "
-        "engine's embed_multimodal returns None and the engine core aborts on an unrelated "
-        "assertion. Refresh the metadata with: "
+        f"The vLLM general plugin entry point {_ENTRY_POINT_NAME!r} {found}, but this module is "
+        f"{expected!r}. vLLM loads that target from installed metadata, which an editable install "
+        "does not refresh when the module moves, so the MiniCPM-o engine's embed_multimodal "
+        "returns None and the engine core aborts on an unrelated assertion. Fix with: "
         'uv pip install --python "$CONDA_PREFIX/bin/python" -e . --no-deps'
     )
 
