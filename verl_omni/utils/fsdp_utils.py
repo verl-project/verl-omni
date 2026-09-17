@@ -275,7 +275,10 @@ def export_fsdp_lora_adapter(
 
 
 def _peft_lora_params_to_cpu(peft_model, adapter_name: str) -> OrderedDict:
-    lora_params = get_peft_model_state_dict(peft_model, adapter_name=adapter_name)
+    # Nested FSDP leaf wrap: ``state_dict()`` can hit non-root FSDP hooks.
+    # ``named_parameters()`` is the mapping verl's layered walker already uses.
+    state_dict = {name: param for name, param in peft_model.named_parameters()}
+    lora_params = get_peft_model_state_dict(peft_model, state_dict=state_dict, adapter_name=adapter_name)
     return OrderedDict((name, _param_to_cpu(param)) for name, param in lora_params.items())
 
 
@@ -319,29 +322,26 @@ def _collect_lora_params_non_layered(module, peft_model, adapter_name: str, base
     if version == 1:
         with FSDP.summon_full_params(module, writeback=False):
             if base_sync_done:
-                lora_params = _peft_lora_params_to_cpu(peft_model, adapter_name)
+                lora_params = _peft_or_named_lora(peft_model, adapter_name)
             else:
                 lora_params = _collect_base_weights_to_cpu(peft_model)
         get_torch_device().empty_cache()
         return lora_params
 
+    # FSDP2 DTensor params all-gather via full_tensor() (same as verl). Do not
+    # pass a child unit's short-key state_dict into get_peft_model_state_dict:
+    # PEFT matches full-model tuner prefixes and returns {}.
+    if base_sync_done:
+        return _peft_or_named_lora(peft_model, adapter_name)
+
     lora_params = OrderedDict()
     for name, submodule in _iter_fsdp2_submodules(module):
         with FSDP.summon_full_params(submodule, writeback=False):
-            if base_sync_done:
-                sub_lora_params = get_peft_model_state_dict(
-                    peft_model, state_dict=submodule.state_dict(), adapter_name=adapter_name
-                )
-                block_prefix = name.replace("_fsdp_wrapped_module.", "")
-                for param_name, param in sub_lora_params.items():
-                    full_name = f"{block_prefix}.{param_name}" if block_prefix else param_name
-                    lora_params[full_name] = _param_to_cpu(param)
-            else:
-                block_prefix = name.replace("_fsdp_wrapped_module.", "")
-                sub_base_params = _collect_base_weights_from_state_dict(submodule.state_dict())
-                for param_name, param in sub_base_params.items():
-                    full_name = f"{block_prefix}.{param_name}" if block_prefix else param_name
-                    lora_params[full_name] = param
+            block_prefix = name.replace("_fsdp_wrapped_module.", "")
+            sub_base_params = _collect_base_weights_from_state_dict(submodule.state_dict())
+            for param_name, param in sub_base_params.items():
+                full_name = f"{block_prefix}.{param_name}" if block_prefix else param_name
+                lora_params[full_name] = param
     get_torch_device().empty_cache()
     return lora_params
 
@@ -419,6 +419,37 @@ def _layered_summon_lora_params_diffusers(
     return lora_params
 
 
+def _lora_checkpoint_key(name: str, adapter_name: str) -> str | None:
+    """PEFT checkpoint key: ``lora_A.default.weight`` -> ``lora_A.weight``. None if another adapter."""
+    name = name.replace("_fsdp_wrapped_module.", "")
+    if "lora_" not in name or "_flat_param" in name:
+        return None
+    parts = name.split(".")
+    lora_i = next((i for i, part in enumerate(parts) if part.startswith("lora_")), None)
+    if lora_i is None:
+        return None
+    rest = parts[lora_i + 1 :]
+    if rest and rest[0] not in ("weight", "bias", adapter_name):
+        return None
+    if rest and rest[0] == adapter_name:
+        return ".".join(parts[: lora_i + 1] + rest[1:])
+    return name
+
+
+def _lora_params_by_name(module, adapter_name: str) -> OrderedDict:
+    """Selected-adapter LoRA tensors from ``named_parameters`` when PEFT prefix matching misses."""
+    params = OrderedDict()
+    for name, param in module.named_parameters():
+        key = _lora_checkpoint_key(name, adapter_name)
+        if key is not None:
+            params[key] = _param_to_cpu(param)
+    return params
+
+
+def _peft_or_named_lora(peft_model, adapter_name: str) -> OrderedDict:
+    return _peft_lora_params_to_cpu(peft_model, adapter_name) or _lora_params_by_name(peft_model, adapter_name)
+
+
 def collect_lora_params(
     module,
     layered_summon: bool,
@@ -457,10 +488,30 @@ def collect_lora_params(
         adapter_name=adapter_name,
         layered_summon_fn=layered_summon_fn,
     )
+    # Prefix walker only visits ``transformer_blocks.<i>``. Same fallback as
+    # verl (full summon + PEFT dump); name-scan if tuner prefixes still miss.
+    if not lora_params and layered_summon and base_sync_done:
+        import logging
+
+        logging.getLogger(__name__).warning("layered_summon returned empty, falling back to full LoRA collect")
+        peft_model = getattr(module, "_fsdp_wrapped_module", module)
+        if fsdp_version(module) == 1:
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+            from verl.utils.device import get_torch_device
+
+            with FSDP.summon_full_params(module, writeback=False, offload_to_cpu=True):
+                lora_params = _peft_or_named_lora(peft_model, adapter_name)
+            get_torch_device().empty_cache()
+        else:
+            lora_params = _peft_or_named_lora(peft_model, adapter_name)
     if not lora_params:
-        raise RuntimeError(
-            f"collect_lora_params collected 0 parameters with prefixes={layer_prefixes}. "
-            "Check ``fsdp_layer_prefixes`` in the model config matches the model's "
-            "FSDP layer naming (e.g. ``['transformer_blocks.']`` for DiT models)."
-        )
+        if layered_summon:
+            detail = (
+                f"with prefixes={layer_prefixes}. Check ``fsdp_layer_prefixes`` in the "
+                "model config matches the model's FSDP layer naming "
+                "(e.g. ``['transformer_blocks.']`` for DiT models)."
+            )
+        else:
+            detail = "(FSDP LoRA collection returned no tensors)."
+        raise RuntimeError(f"collect_lora_params collected 0 parameters {detail}")
     return lora_params

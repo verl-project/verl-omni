@@ -237,8 +237,7 @@ def _hydra_overrides(
         "actor_rollout_ref.rollout.val_kwargs.pipeline.true_cfg_scale=1.0",
         "+actor_rollout_ref.rollout.val_kwargs.pipeline.output_type=pt",
         "actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0",
-        # vLLM-Omni engine kwargs: the field is top-level, not parallel_config.
-        f"+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.text_encoder_tp_size={text_encoder_tp}",
+        f"actor_rollout_ref.rollout.text_encoder_tp_size={text_encoder_tp}",
         f"actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu={micro_bsz_per_gpu}",
         # reward: local stub only; no CLAP, ImageBind, or reward-model weights.
         "reward.num_workers=1",

@@ -79,7 +79,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.name=vllm_omni \
     actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN_3_HUB \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.text_encoder_tp_size=$TEXT_ENCODER_TP \
+    actor_rollout_ref.rollout.text_encoder_tp_size=$TEXT_ENCODER_TP \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.seed=42 \
     actor_rollout_ref.rollout.agent.num_workers=$((NUM_GPUS / ROLLOUT_TP)) \

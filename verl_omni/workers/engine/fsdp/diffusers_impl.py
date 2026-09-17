@@ -734,7 +734,6 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                 load_fsdp_model_to_gpu(self.module)
             if optimizer and self.optimizer is not None:
                 load_fsdp_optimizer(self.optimizer, device)
-            gc.collect()
         elif device == "cpu":
             if model:
                 offload_fsdp_model_to_cpu(self.module)

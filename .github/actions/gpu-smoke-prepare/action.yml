@@ -39,6 +39,9 @@ runs:
         # NCCL checkpoint engine (diffusion v1 separate_async weight sync).
         uv pip install --system --break-system-packages pyzmq
         uv pip install --system --break-system-packages cupy-cuda12x || uv pip install --system --break-system-packages cupy-cuda13x
+        # Image/cache can keep an old `datasets` after `--no-deps -e .`. Arrow 21
+        # dropped PyExtensionType; datasets 2.19- still subclasses it.
+        uv pip install --system --break-system-packages "datasets>=2.20.0" "pyarrow>=19.0.0,<25.0.0"
         # uv.cu130 ships python3 only; Ray/scripts may still invoke `python`.
         if ! command -v python >/dev/null 2>&1; then
           ln -sfn "$(command -v python3)" /usr/local/bin/python
