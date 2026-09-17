@@ -402,6 +402,18 @@ def test_rollout_adapter_registers_thinker_only_text_pipeline():
         MiniCPMORolloutAdapter.build_stage_configs("full")
 
 
+def test_ensure_pipeline_registered_checks_the_plugin_entry_point_first(monkeypatch):
+    """A stale plugin entry point must surface before the engine cores spawn."""
+    from verl_omni.pipelines.minicpm import omni_rollout_adapter
+
+    calls: list[str] = []
+    monkeypatch.setattr(omni_rollout_adapter, "assert_entry_point_installed", lambda: calls.append("assert"))
+    monkeypatch.setattr(omni_rollout_adapter, "register_pipeline", lambda pipeline: calls.append("register"))
+
+    omni_rollout_adapter.MiniCPMORolloutAdapter.ensure_pipeline_registered()
+    assert calls == ["assert", "register"]
+
+
 def test_configure_model_applies_omni_embedding_splice_patch():
     class _WithOmniEmbedding(_MiniCPMOStyle):
         def get_omni_embedding(self, data, input_embeddings, chunk_length=-1, stream_input=False):

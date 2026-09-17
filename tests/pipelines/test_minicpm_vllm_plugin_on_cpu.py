@@ -16,12 +16,22 @@
 from __future__ import annotations
 
 import sys
+from importlib.metadata import EntryPoint
 
+import pytest
 import torch
 
-from verl_omni.pipelines.minicpm.vllm_plugin import register
+from verl_omni.pipelines.minicpm.vllm_plugin import assert_entry_point_installed, register
 
 _MODULE = "vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_llm"
+_ENTRY_POINT = "verl_omni_minicpmo_embed_multimodal"
+_CURRENT = "verl_omni.pipelines.minicpm.vllm_plugin:register"
+
+
+def _install_entry_points(monkeypatch, entries: list[tuple[str, str]]) -> None:
+    """Serve a fake `vllm.general_plugins` metadata group."""
+    fake = [EntryPoint(name=name, value=value, group="vllm.general_plugins") for name, value in entries]
+    monkeypatch.setattr("importlib.metadata.entry_points", lambda **kwargs: fake)
 
 
 def _engine_cls():
@@ -140,3 +150,22 @@ def test_register_wires_forward_normalizer_onto_engine_class():
     register()
     model_cls = _engine_cls()
     assert getattr(model_cls, "_verl_omni_forward_normalized", False) is True
+
+
+def test_entry_point_check_passes_when_metadata_is_current(monkeypatch):
+    _install_entry_points(monkeypatch, [(_ENTRY_POINT, _CURRENT), ("unrelated", "some.module:register")])
+    assert_entry_point_installed()  # must not raise
+
+
+def test_entry_point_check_rejects_the_stale_pre_refactor_path(monkeypatch):
+    # The reported regression: editable-install metadata still names the module
+    # that 9299bebe renamed, so vLLM imports a dead path.
+    _install_entry_points(monkeypatch, [(_ENTRY_POINT, "verl_omni.vllm_plugins:register")])
+    with pytest.raises(RuntimeError, match="verl_omni.vllm_plugins:register"):
+        assert_entry_point_installed()
+
+
+def test_entry_point_check_rejects_a_missing_entry_point(monkeypatch):
+    _install_entry_points(monkeypatch, [])
+    with pytest.raises(RuntimeError, match="is not installed"):
+        assert_entry_point_installed()
