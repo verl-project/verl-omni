@@ -1,6 +1,6 @@
 # Diffusion V1 training
 
-Last updated: 09/15/2026
+Last updated: 09/17/2026
 
 This guide runs the diffusion V1 trainer in synchronous or separate-asynchronous
 mode using the provided Stable Diffusion 3.5 Medium FlowGRPO OCR recipes.
@@ -187,6 +187,26 @@ knobs follow the upstream `HybridRolloutSwitchConfig` defaults:
 Logged metrics: `timing_s/switch_wait`, `timing_s/switch_to_rollout`,
 `timing_s/switch_to_trainer`, `separate_async/switch/*`, and
 `separate_async/decision/*`.
+
+This is the v1 analog of verl's fully_async_policy
+`DynamicResourceController` (verl#6556). That controller is not wired on
+`main_diffusion_v1`; setting `async_training.use_dynamic_resource_scheduling=true`
+raises at startup.
+
+### Checkpoint recovery
+
+Separate-async checkpoints save TransferQueue next to the actor and
+dataloader (`global_step_N/transfer_queue/`). Resume with
+`trainer.resume_mode=auto` (or `resume_path`) restores queued prompt groups,
+re-issues pending and running groups, and tops warmup up to
+`num_warmup_batches * train_batch_size` instead of enqueueing that many new
+batches. Requires TransferQueue 0.1.9. Sync mode does not write a queue
+snapshot. Old checkpoints without `transfer_queue/` warn and start the queue
+empty.
+
+Streaming refill already uses `data.gen_batch_size=1` in `separate_async`
+(and whenever exact incomplete-group refill is on). Do not set a larger
+`gen_batch_size` expecting it to stick; the trainer overrides it.
 
 Throughput metrics of every `separate_async` run, with switching on or off, now
 also count the standalone rollout GPUs in the denominator, so they read lower
