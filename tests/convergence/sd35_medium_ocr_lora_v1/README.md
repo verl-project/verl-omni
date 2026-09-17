@@ -20,7 +20,7 @@ Reference example:
 
 | Check | Metric | Fail when |
 | --- | --- | --- |
-| Train-infer gap | `training/rollout_probs_diff_mean` if logged, else `rollout_corr/logprob_abs_diff_mean` | any post-warmup step **> 0.01**, missing, or non-finite |
+| Train-infer gap | `training/rollout_probs_diff_mean` if logged, else `rollout_corr/logprob_abs_diff_mean` | any post-warmup step **> 1e-4**, missing, or non-finite |
 | Grad | `actor/grad_norm` | NaN / Inf |
 | Val reward at step 100 | `val-core/*/reward/mean@*` | missing, or any source **< `VAL_REWARD_MIN`** |
 
@@ -34,14 +34,14 @@ Default thresholds (printed at job start and stored in `report.json` under
 | --- | --- | --- |
 | `SKIP_STEPS` | `2` | Warmup steps excluded from train-infer / grad gates |
 | `MIN_TRAIN_STEPS` | `100` | Minimum logged actor steps |
-| `ROLLOUT_PROB_DIFF_MEAN_MAX` | `0.01` | Max allowed train-infer log-prob gap per step |
-| `VAL_REWARD_MIN` | `0.6` | Floor for step-100 validation OCR reward (placeholder until calibrated) |
+| `ROLLOUT_PROB_DIFF_MEAN_MAX` | `1e-4` | Max allowed train-infer log-prob gap per step |
+| `VAL_REWARD_MIN` | `0.8` | Floor for step-100 validation OCR reward |
 
-`VAL_REWARD_MIN` defaults to **0.6** as an initial placeholder. Tighten after
-reviewing a full 100-step run on your cluster:
+`VAL_REWARD_MIN` defaults to **0.8**. Override it if a recipe needs a different
+floor:
 
 ```bash
-VAL_REWARD_MIN=0.65 bash tests/convergence/sd35_medium_ocr_lora_v1/run_sd35_medium_ocr_lora_v1.sh
+VAL_REWARD_MIN=0.85 bash tests/convergence/sd35_medium_ocr_lora_v1/run_sd35_medium_ocr_lora_v1.sh
 ```
 
 ## Route A training defaults

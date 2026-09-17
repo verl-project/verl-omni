@@ -52,8 +52,8 @@ PERF_RECORD_KEYS = (
 
 DEFAULT_SKIP_STEPS = 2
 DEFAULT_MIN_TRAIN_STEPS = 100
-DEFAULT_ROLLOUT_PROB_DIFF_MEAN_MAX = 0.01
-DEFAULT_VAL_REWARD_MIN = 0.9
+DEFAULT_ROLLOUT_PROB_DIFF_MEAN_MAX = 1e-4
+DEFAULT_VAL_REWARD_MIN = 0.8
 
 
 @dataclass(frozen=True)
@@ -269,7 +269,7 @@ def evaluate_gates(
 
     diff_values = _series(actor_records, diff_key)
     diff_summary = _summarize(diff_values)
-    # "cannot exceed 0.01": every post-warmup step, not only the mean.
+    # "cannot exceed the cap": every post-warmup step, not only the mean.
     diff_ok = (
         diff_summary.get("finite_count", 0) > 0
         and diff_summary.get("non_finite_count", 1) == 0

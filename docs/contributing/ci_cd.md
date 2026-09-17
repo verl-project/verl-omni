@@ -101,7 +101,7 @@ Defaults:
 - Reward: `Qwen/Qwen2.5-VL-3B-Instruct` (`REWARD_MODEL_PATH`)
 - Data: `$WORKSPACE/data/ocr/sd3/{train,test}.parquet`
 - `WORKSPACE` defaults to `$HOME`.
-- `VAL_REWARD_MIN` defaults to `0.6` (placeholder until calibrated on cluster).
+- `VAL_REWARD_MIN` defaults to `0.8`.
 
 Gate logic lives in `collect_report.py`. The collector's own tests are L1
 (`tests/convergence/test_collect_report_on_cpu.py`).
@@ -110,9 +110,9 @@ Gate logic lives in `collect_report.py`. The collector's own tests are L1
 
 | Gate | Metric | Fail when |
 | --- | --- | --- |
-| Train-infer consistency | `training/rollout_probs_diff_mean` if present, else `rollout_corr/logprob_abs_diff_mean` | missing, non-finite, or any post-warmup step **> 0.01** |
+| Train-infer consistency | `training/rollout_probs_diff_mean` if present, else `rollout_corr/logprob_abs_diff_mean` | missing, non-finite, or any post-warmup step **> 1e-4** |
 | Grad | `actor/grad_norm` | NaN / Inf |
-| Val reward at step 100 | `val-core/*/reward/mean@*` | missing, or any source **< `VAL_REWARD_MIN`** (default **0.6**) |
+| Val reward at step 100 | `val-core/*/reward/mean@*` | missing, or any source **< `VAL_REWARD_MIN`** (default **0.8**) |
 
 `perf/time_per_step` and related `timing_s/*` keys are copied into
 `report.json` under `"perf"` with no pass/fail.

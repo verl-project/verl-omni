@@ -126,7 +126,7 @@ policy, runner capacity, and artifact retention are stable.
 | --- | --- | --- |
 | L2 | `tests/special_e2e/`, `tests/gpu_smoke/` | Tiny-random GPU paths complete without crash/OOM |
 | L3 | `tests/nightly/` | Fixed-seed short-window dump + perf vs a reviewed baseline |
-| L4 | `tests/convergence/` | Real weights + real data; train-infer gap ≤ 0.01, finite grad, val-reward floor (perf recorded, not gated) |
+| L4 | `tests/convergence/` | Real weights + real data; train-infer gap ≤ 1e-4, finite grad, val-reward floor (perf recorded, not gated) |
 
 Do not put real-checkpoint 100-step recipes in L2, and do not use L3 tensor
 `atol` dumps as the L4 pass/fail signal.

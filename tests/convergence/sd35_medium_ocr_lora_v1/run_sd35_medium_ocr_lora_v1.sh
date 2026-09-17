@@ -7,7 +7,7 @@
 #
 # Fail closed on:
 #   - visible GPU count < REQUIRED_GPUS (NUM_GPUS_ACTOR_ROLLOUT + NUM_GPUS_REWARD)
-#   - rollout_prob_diff_mean > ROLLOUT_PROB_DIFF_MEAN_MAX (default 0.01)
+#   - rollout_prob_diff_mean > ROLLOUT_PROB_DIFF_MEAN_MAX (default 1e-4)
 #   - non-finite actor/grad_norm
 #   - step-100 val-core reward/mean below VAL_REWARD_MIN
 # Perf (time_per_step, etc.) is recorded in report.json only — not a gate.
@@ -59,9 +59,9 @@ L4_REPORT_JSON=${L4_REPORT_JSON:-${CASE_DIR}/report.json}
 
 SKIP_STEPS=${SKIP_STEPS:-2}
 MIN_TRAIN_STEPS=${MIN_TRAIN_STEPS:-${TOTAL_TRAIN_STEPS}}
-ROLLOUT_PROB_DIFF_MEAN_MAX=${ROLLOUT_PROB_DIFF_MEAN_MAX:-0.01}
+ROLLOUT_PROB_DIFF_MEAN_MAX=${ROLLOUT_PROB_DIFF_MEAN_MAX:-1e-4}
 # Floor for val-core/*/reward/mean@* at step TOTAL_TRAIN_STEPS.
-VAL_REWARD_MIN=${VAL_REWARD_MIN:-0.6}
+VAL_REWARD_MIN=${VAL_REWARD_MIN:-0.8}
 
 count_visible_gpus() {
     if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
