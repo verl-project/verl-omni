@@ -168,3 +168,16 @@ def test_patch_remote_whisper_self_attn_is_idempotent():
 
 def test_patch_remote_whisper_self_attn_noop_without_apm():
     minicpm_o.patch_remote_whisper_self_attn(nn.Linear(4, 4))
+
+
+def test_per_sample_image_bounds_avoids_tensor_truthiness():
+    bounds = minicpm_o._per_sample_image_bounds(torch.tensor([[0, 2], [1, 3]]), batch_size=2)
+    assert len(bounds) == 2
+    assert torch.equal(bounds[0], torch.tensor([[0, 2]]))
+    assert torch.equal(bounds[1], torch.tensor([[1, 3]]))
+
+    empty = minicpm_o._per_sample_image_bounds(torch.zeros(0, 2, dtype=torch.long), batch_size=2)
+    assert empty == [[], []]
+
+    defaults = minicpm_o._per_sample_image_bounds(None, batch_size=3)
+    assert defaults == [[], [], []]
