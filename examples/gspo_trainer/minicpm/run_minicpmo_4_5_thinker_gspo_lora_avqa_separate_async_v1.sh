@@ -4,9 +4,7 @@
 # rollout (two TP=1 replicas). Generation runs one batch ahead of training; merged
 # LoRA weights (lora.merge=True, same as the colocated recipe) sync to the
 # standalone replicas every trainer.v1.separate_async.parameter_sync_step inner
-# steps (128 = 8 x 16). Flip to lora.merge=False later to ship adapter deltas
-# instead (~100 MB vs ~19 GB per sync); the key alignment is pinned by
-# tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py.
+# steps (128 = 8 x 16).
 #
 # Hyperparameters are copied verbatim from the proven colocated MiniCPM-o AVQA
 # recipe (examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh);

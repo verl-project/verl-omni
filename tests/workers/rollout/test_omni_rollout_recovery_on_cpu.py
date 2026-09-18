@@ -95,10 +95,7 @@ async def test_continuation_resends_media_merges_tokens_and_shrinks_budget():
 
 
 async def test_avqa_continuation_resubmits_both_media_with_processor_kwargs():
-    """MiniCPM-o AVQA shape: the 16 kHz sampling kwarg and both the image and
-    audio payloads must ride every resubmission across a weight-sync abort —
-    a continuation that drops either re-renders the prompt under the wrong
-    media expansion and splices mismatched ids."""
+    """MiniCPM-o AVQA shape: image + audio payloads and the sampling-rate kwarg ride every resubmission."""
     outputs = [
         SimpleNamespace(
             token_ids=[4],
@@ -138,7 +135,6 @@ async def test_avqa_continuation_resubmits_both_media_with_processor_kwargs():
 
     assert mock_gen.call_count == 2
     first, second = mock_gen.call_args_list
-    # The continuation prompt is prompt + tokens generated before the abort.
     assert second.kwargs["prompt_ids"] == [1, 2, 3, 4]
     for call in (first, second):
         assert call.kwargs["image_data"] == ["img"]
