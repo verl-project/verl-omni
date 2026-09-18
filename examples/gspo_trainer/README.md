@@ -617,12 +617,10 @@ colocated script; only the disaggregation lines differ:
 LoRA sync note: this recipe ships `lora.merge=True` — merged full weights over
 the NCCL engine, the same semantics as the colocated recipe — so the first
 separate-async run stays directly comparable with the colocated reference. The
-performance flip, `lora.merge=False` (adapter deltas via `add_lora`, ~100 MB
-vs ~19 GB per sync), is config-only: the actor's adapters live under `llm.*`
-(the `MiniCPMO.llm` Qwen3 backbone) and the rollout-side
-`MiniCPMO45OmniLLMForConditionalGeneration` registers the same backbone under
-the `llm.` prefix, so the adapter-delta send resolves without any key remap
-(pinned by `tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py`; see
+performance flip, `lora.merge=False` (adapter deltas via `add_lora`, ~100 MB vs
+~19 GB per sync), is config-only: the actor's `llm.*` adapter keys align with
+the rollout class's `llm.`-prefixed backbone (pinned by
+`tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py`; see
 [separate-async omni](../../docs/algo/separate_async_omni.md)).
 
 If the two-replica shape misbehaves (generation stalls around weight syncs),
