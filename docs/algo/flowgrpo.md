@@ -279,7 +279,7 @@ bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr.sh
 
 ### Sequence parallelism (Ulysses SP)
 
-Ulysses SP is supported for diffusion model training and requires `diffusers` >= 0.38.0.
+Ulysses SP is supported for diffusion model training and requires `diffusers` >= 0.40.0.
 It shards the sequence dimension across GPUs within a SP group,
 reducing per-GPU memory for long-sequence and high-resolution training.
 

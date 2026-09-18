@@ -49,12 +49,11 @@ async def _chat_complete(router_address: str, chat_complete_request: dict) -> Ch
 
 
 def _to_pil(image) -> Image.Image:
-    """Normalize a tensor / array / PIL image to a uint8 RGB PIL image."""
+    """Convert a uint8 tensor / array / PIL image to an RGB PIL image."""
     if isinstance(image, torch.Tensor):
-        image = image.float().permute(1, 2, 0).cpu().numpy()
+        image = image.permute(1, 2, 0).cpu().numpy()
     if isinstance(image, np.ndarray):
         assert image.shape[-1] == 3, "must be in HWC format"
-        image = (image * 255).round().clip(0, 255).astype(np.uint8)
         image = Image.fromarray(image)
     assert isinstance(image, Image.Image)
     return image
@@ -102,6 +101,7 @@ async def compute_score_ocr(
     reward_router_address: str,
     reward_model_tokenizer: PreTrainedTokenizer = None,
     model_name: Optional[str] = None,
+    sampling_params: dict = None,
 ):
     """Compute an image OCR score via a generative reward model (GRM).
 
@@ -121,6 +121,9 @@ async def compute_score_ocr(
             for interface consistency.
         model_name: Name or path of the GRM. Defaults to
             ``DEFAULT_GRM_MODEL_PATH``.
+        sampling_params: Override the defaults from :func:`_sampling_params`.
+            An explicit ``seed`` opts in to reproducible sampling; without one
+            any env-inherited seed is dropped.
 
     Returns:
         dict: ``{"score": float, "genrm_response": str}``.
@@ -183,11 +186,15 @@ async def compute_score_ocr(
                 ],
             },
         ]
-        # TODO: make sampling params configurable
+        params = _sampling_params()
+        if sampling_params is not None:
+            params.update(sampling_params)
+            if "seed" not in sampling_params:
+                params.pop("seed", None)
         chat_complete_request = {
             "messages": messages,
             "model": model_name,
-            **_sampling_params(),
+            **params,
         }
         result = await _chat_complete(
             router_address=reward_router_address,

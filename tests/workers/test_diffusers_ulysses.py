@@ -29,9 +29,8 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
 
-from verl_omni.models.diffusers.qwen_image import apply_qwen_image_ulysses_mask_fix
-
-apply_qwen_image_ulysses_mask_fix()
+# Hub FA kernels don't fetch on the torch-2.13 CI stack (no flash-attn2 build; hf-mirror breaks flash-attn3).
+_ulysses_backends = ["native"]
 
 
 def get_device_name() -> str:
@@ -92,7 +91,7 @@ def _load_config_for_sp(sp_size: int) -> dict:
 
 
 @pytest.mark.parametrize("sp_size", [2, 4])
-@pytest.mark.parametrize("backend", ["native"])
+@pytest.mark.parametrize("backend", _ulysses_backends)
 def test_diffusers_ulysses_fwd(sp_size, backend):
     """
     Ulysses SP forward must produce numerically equivalent output to a plain
@@ -206,7 +205,7 @@ def _diffusers_ulysses_fwd(sp_size: int, dp_size: int, backend: str):
 
 
 @pytest.mark.parametrize("sp_size", [2, 4])
-@pytest.mark.parametrize("backend", ["native"])
+@pytest.mark.parametrize("backend", _ulysses_backends)
 def test_diffusers_ulysses_fwd_bwd(sp_size, backend):
     """
     Ulysses SP backward pass must produce equivalent gradients to a plain
@@ -340,7 +339,7 @@ def _diffusers_ulysses_fwd_bwd(sp_size: int, dp_size: int, backend: str):
 
 
 @pytest.mark.parametrize("sp_size", [2, 4])
-@pytest.mark.parametrize("backend", ["native"])
+@pytest.mark.parametrize("backend", _ulysses_backends)
 def test_diffusers_ulysses_fwd_bwd_fsdp(sp_size, backend):
     """
     FSDP-wrapped Ulysses SP backward must produce equivalent gradients to a

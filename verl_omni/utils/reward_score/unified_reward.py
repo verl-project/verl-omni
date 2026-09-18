@@ -54,12 +54,11 @@ async def _chat_complete(
 
 
 def _to_pil(image) -> Image.Image:
-    """Normalize a tensor / array / PIL image to a uint8 RGB PIL image."""
+    """Convert a uint8 tensor / array / PIL image to an RGB PIL image."""
     if isinstance(image, torch.Tensor):
-        image = image.float().permute(1, 2, 0).cpu().numpy()
+        image = image.permute(1, 2, 0).cpu().numpy()
     if isinstance(image, np.ndarray):
         assert image.shape[-1] == 3, "must be in HWC format"
-        image = (image * 255).round().clip(0, 255).astype(np.uint8)
         image = Image.fromarray(image)
     assert isinstance(image, Image.Image)
     return image
@@ -102,19 +101,12 @@ def _parse_unified_reward_scores(model_output: str) -> dict[str, float]:
     for match in UNIFIED_REWARD_SCORE_PATTERN.finditer(model_output):
         name = match.group(1).lower()
         scores[name] = float(match.group(2))
-
-    if scores:
-        return scores
-
-    # Fallback for slightly malformed responses that still contain the three values.
-    numbers = re.findall(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?", model_output)
-    if len(numbers) >= 3:
-        return {
-            "alignment": float(numbers[0]),
-            "coherence": float(numbers[1]),
-            "style": float(numbers[2]),
-        }
-    return {}
+    required_axes = {"alignment", "coherence", "style"}
+    if set(scores) != required_axes:
+        return {}
+    if any(not np.isfinite(value) or not 1.0 <= value <= 5.0 for value in scores.values()):
+        return {}
+    return scores
 
 
 def _aggregate_unified_reward_scores(scores: dict[str, float]) -> tuple[float, float]:
@@ -161,6 +153,8 @@ async def _score_single_image(
     )
     unified_reward_response = result.choices[0].message.content or ""
     axis_scores = _parse_unified_reward_scores(unified_reward_response)
+    if not axis_scores:
+        return None
     normalized_score, raw_score = _aggregate_unified_reward_scores(axis_scores)
     return normalized_score, raw_score, unified_reward_response
 
@@ -208,10 +202,27 @@ async def compute_score_unified_reward(
             ]
         )
 
-    normalized_scores = [result[0] for result in frame_results]
-    raw_scores = [result[1] for result in frame_results]
-    unified_reward_response = frame_results[-1][2]
+    valid_results = [result for result in frame_results if result is not None]
+    malformed_frames = len(frame_results) - len(valid_results)
+    reward_extra_info = {}
+    if malformed_frames:
+        reward_extra_info["malformed_frames"] = malformed_frames
+        extra_info["unified_reward/malformed_frames"] = malformed_frames
+    if not valid_results:
+        raise ValueError(
+            "UnifiedReward returned malformed output for every frame; expected all three labeled axes "
+            "(Alignment, Coherence, Style) with scores in [1, 5]."
+        )
+
+    normalized_scores = [result[0] for result in valid_results]
+    raw_scores = [result[1] for result in valid_results]
+    unified_reward_response = valid_results[-1][2]
 
     score = sum(normalized_scores) / len(normalized_scores)
     raw_score = sum(raw_scores) / len(raw_scores)
-    return {"score": score, "raw_score": raw_score, "response": unified_reward_response}
+    return {
+        "score": score,
+        "raw_score": raw_score,
+        "response": unified_reward_response,
+        "reward_extra_info": reward_extra_info,
+    }

@@ -1,11 +1,11 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 07/20/2026.
+Last updated: 08/21/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
 algorithm. The contracts described below (registry hooks, adapter
-classmethods, scheduler choice, custom-output field names) are specific to
+classmethods, scheduler choice, rollout output field names) are specific to
 the FlowGRPO trainer; other RL algorithms may impose different requirements.
 Use
 [`integrating_a_new_policy_gradient_algorithm_for_diffusion_model.md`](integrating_a_new_policy_gradient_algorithm_for_diffusion_model.md)
@@ -344,6 +344,13 @@ inputs. The typical steps are:
    **negative** input dict (same latent + timestep, negative text
    features).
 
+The usual rollout contract stores a contiguous trajectory in
+`all_latents`, so the next state for slot `step` is
+`all_latents[:, step + 1]`. If a model samples non-contiguous SDE
+transitions, return an aligned `all_next_latents` tensor instead and consume
+`all_next_latents[:, step]` here. This prevents two unrelated sparse
+transitions from being treated as adjacent states.
+
 The dict keys must match the kwargs of the diffusers transformer
 class verbatim — the FSDP engine calls `module(**model_inputs)`.
 
@@ -359,6 +366,17 @@ consumes.
 > **Tip.** If your transformer returns a list (one element per sample),
 > wrap the call in a small helper that re-stacks to `(B, C, H, W)` so
 > the rest of the pipeline keeps a single tensor convention.
+
+### 3.5 (Optional) `validate_lora_config`
+
+Override this hook when the actor→rollout LoRA weight sync can only
+transport a subset of target modules — e.g. a fused-DiT layout where
+FSDP layered-summon does not carry top-level LoRAs.  ``DiffusionModelConfig``
+calls it at config-build time (dispatched via ``DiffusionModelBase.peek_class``)
+so a bad ``target_modules`` fails fast at startup instead of at the first
+weight sync.  The default is a no-op.  MiniMax H3 overrides it to reject
+``all-linear`` and keep LoRA on the transformer/refiner blocks its sync path
+can map.
 
 ---
 
@@ -392,14 +410,80 @@ Your subclass must do four things:
 4. **Override `forward(req, ...)`** so that:
    - Sampling parameters come from `req.sampling_params` (use
      `extra_args` for SDE-specific knobs).
+   - Trajectory and metadata fields are returned via `rollout_output(...)`
+     from [`verl_omni.pipelines.diffusion_rollout_output`](../../verl_omni/pipelines/diffusion_rollout_output.py).
    - `prompt_embeds`, `prompt_embeds_mask`, `negative_prompt_embeds`,
-     and `negative_prompt_embeds_mask` are placed in the returned
-     `DiffusionOutput.custom_output`. The diffusion agent loop
+     and `negative_prompt_embeds_mask` are placed in `prompt_embeddings`. The diffusion agent loop
      ([`diffusion_agent_loop.py`](../../verl_omni/agent_loop/diffusion_agent_loop.py))
      reads these field names verbatim — **do not rename them**.
 
+### 4.1 Rollout response contract
+
+The rollout server normalizes the representation transported in `responses`:
+
+- Pixel-valued outputs are quantized once to `torch.uint8` in `[0, 255]`.
+  Images reach a single-sample reward scorer as `(C, H, W)` and videos as
+  `(T, C, H, W)`.
+- `output_type=latent` keeps `responses` in floating point. With
+  `output_type=both`, the pixel response is uint8 and the clean latent remains a
+  separate floating-point field in `extra_info`.
+- Generated audio is transported separately and is not quantized to uint8.
+
+Reward managers validate `responses` against the active training or validation
+`output_type` and then forward it without dtype conversion. A pixel scorer that
+needs normalized model input must convert locally with
+`solution_image.float() / 255.0`; this normalizes the quantized pixels but cannot
+restore precision discarded at the rollout boundary. Do not multiply uint8 pixels
+by 255 again before PIL, JPEG, or HTTP serialization.
+
+(diffusion-io-spec)=
+### 4.2 Declare the media output contract (`diffusion_io_spec`)
+
+Set a `diffusion_io_spec` class attribute on the registered pipeline so the
+shared `DiffusionStrategy` knows what media your `forward` emits. The strategy
+reads it (via `VllmOmniPipelineBase.get_class(architecture, algorithm)`) when it
+converts the raw pipeline output into the rollout response, so model-specific
+conventions — which tuple position carries audio, what audio sample rate to
+attach — live in the adapter instead of being hardcoded in the shared strategy.
+
+```python
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
+
+@VllmOmniPipelineBase.register("MyModelPipeline", algorithm="flow_grpo")
+class MyModelPipelineWithLogProb(MyModelPipeline):
+    # Image-only pipeline:
+    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
+```
+
+- **`primary`** — the main media stream (`MediaSpec("image")` or
+  `MediaSpec("video")`), carried in `responses`.
+- **`auxiliary`** — additional streams in tuple order: `auxiliary[i]` maps to
+  output tuple position `i + 1` (position `0` is the primary). A `forward` that
+  returns `(video, audio)` declares one auxiliary audio stream:
+
+```python
+    diffusion_io_spec = DiffusionIOSpec(
+        primary=MediaSpec("video"),
+        auxiliary=(MediaSpec("audio", sample_rate=32000),),
+    )
+```
+
+- **`MediaSpec.sample_rate`** is the *default* audio sample rate in Hz. If your
+  `forward` attaches a runtime rate through the `rl` rollout metadata, that value
+  takes precedence and the strategy only falls back to this default. Declare the
+  rate your model actually decodes (MiniMax H3 → `32000`, LTX-2 → `24000`).
+- `MediaSpec.fps` is an optional video default; `Modality` is
+  `image | video | audio`.
+- Subclasses inherit the attribute, so a pipeline that subclasses another adapter
+  (e.g. `qwen_image_dual_grpo` extends `qwen_image_flow_grpo`) reuses its
+  `diffusion_io_spec` unless it overrides it.
+
+Every registered diffusion adapter declares one; see
+[`rollout_media.py`](../../verl_omni/pipelines/rollout_media.py) and the
+`test_diffusion_io_spec_on_cpu.py` completeness test.
+
 (request-level-batching)=
-### 4.1 Request-level batching (optional)
+### 4.3 Request-level batching (optional)
 
 To let vLLM-Omni pack multiple requests into one transformer forward
 (`max_num_seqs > 1`), extend the rollout adapter as follows. Reference
@@ -582,6 +666,10 @@ Before opening the PR, confirm every box:
       `model_index.json::_class_name`; the `algorithm=` keyword matches
       the algorithm you are integrating against (e.g. `"flow_grpo"` for
       FlowGRPO).
+- [ ] The registered pipeline declares a `diffusion_io_spec`
+      ([`DiffusionIOSpec`](../../verl_omni/pipelines/rollout_media.py)) whose
+      `primary` modality matches what `forward` emits, plus an `auxiliary`
+      audio stream (with its `sample_rate`) for joint audio/video models.
 - [ ] Scheduler returns latents in fp32 (no `model_output.dtype` cast in `step()`),
       `diffuse()` casts to model dtype before transformer forward and casts
       noise_pred to float32 before `scheduler.step()`

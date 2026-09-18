@@ -51,7 +51,8 @@ in range for a synthetic tensor; mock the transport for an `async` scorer
 
 ```python
 def test_score_is_finite_on_cpu():
-    out = <name>.compute_score(solution_image=torch.rand(2, 3, 64, 64))
+    image = torch.randint(256, (3, 64, 64), dtype=torch.uint8)
+    out = <name>.compute_score(solution_image=image)
     assert 0.0 <= out["score"]
 ```
 

@@ -43,11 +43,29 @@ logger = logging.getLogger(__name__)
 class OmniFSDPEngine(FSDPEngineWithLMHead):
     """FSDP engine for omni models"""
 
+    @staticmethod
+    def _cast_dtensor_weight_for_sync(tensor: torch.Tensor) -> torch.Tensor:
+        if tensor.is_floating_point() and tensor.dtype != torch.bfloat16:
+            return tensor.to(dtype=torch.bfloat16, non_blocking=True)
+        return tensor
+
+    def prepare_model_inputs(self, micro_batch):
+        """Prepare standard LM inputs, then add model-native replay fields."""
+        model_inputs, output_args = super().prepare_model_inputs(micro_batch)
+        if not hasattr(self, "model_adapter_cls"):
+            raise RuntimeError("Omni model inputs cannot be prepared before the model adapter is initialized.")
+        model_inputs = self.model_adapter_cls.prepare_model_inputs(model_inputs, micro_batch, self.model_config)
+        if not isinstance(model_inputs, dict):
+            raise TypeError(
+                f"OmniModelBase.prepare_model_inputs must return a dict, got {type(model_inputs).__name__}."
+            )
+        return model_inputs, output_args
+
     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
 
         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
-        # leaves the module half-moved and crashes state_dict() below (#5995). The
+        # leaves the module half-moved and crashes state_dict() below (verl#5995). The
         # per-DTensor .to(device).full_tensor() below still produces GPU tensors.
         if not self._uses_fsdp2_cpu_offload_policy:
             load_fsdp_model_to_gpu(self.module)
@@ -60,12 +78,14 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
         if hasattr(peft_model, "peft_config"):  # LoRA
             if not merge_lora:
-                peft_config = peft_model.peft_config.get("default", None)
+                adapter_name = kwargs.get("adapter_name", "default")
+                peft_config = peft_model.peft_config.get(adapter_name, None)
                 # DIFF vs upstream: use verl_omni's fixed collect_lora_params
                 params = collect_lora_params(
                     module=self.module,
                     layered_summon=layered_summon,
                     base_sync_done=base_sync_done,
+                    adapter_name=adapter_name,
                 )
                 if not base_sync_done:
                     params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
@@ -85,11 +105,10 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             per_tensor_param = params.items()
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-            # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
             per_tensor_param = (
                 (
                     name,
-                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                    self._cast_dtensor_weight_for_sync(param.to(device, non_blocking=True).full_tensor())
                     if isinstance(param, DTensor)
                     else param,
                 )
@@ -132,7 +151,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
                 for name, param in params.items():
                     yield (
                         name,
-                        param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                        self._cast_dtensor_weight_for_sync(param.to(device, non_blocking=True).full_tensor())
                         if isinstance(param, DTensor)
                         else param.detach().clone(),
                     )
@@ -143,12 +162,28 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
     def _build_module(self):
+        unsupported_options = [
+            option for option in ("use_liger", "use_fused_kernels") if getattr(self.model_config, option, False)
+        ]
+        if unsupported_options:
+            enabled_options = ", ".join(f"{option}=True" for option in unsupported_options)
+            raise ValueError(
+                f"Omni models do not support these enabled optimizations: {enabled_options}. "
+                "Set them to false before starting the worker."
+            )
+
         from verl.utils.torch_dtypes import PrecisionType
 
         from verl_omni.pipelines.model_base import OmniModelBase
 
         self.model_config: OmniModelConfig
         architecture = self.model_config.architecture
+        adapter_cls = OmniModelBase.get_class_by_name(
+            architecture,
+            self.model_config.model_stage,
+            self.model_config.get("external_lib"),
+        )
+        self.model_adapter_cls = adapter_cls
 
         torch_dtype = self.engine_config.model_dtype
 
@@ -170,24 +205,21 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            if getattr(self.model_config, "use_liger", False):
-                logger.warning("use_liger is set but not applied for omni models; this is a no-op.")
-            if getattr(self.model_config, "use_fused_kernels", False):
-                logger.warning("use_fused_kernels is set but not applied for omni models; this is a no-op.")
-
-            module = AutoModelForMultimodalLM.from_pretrained(
+            auto_model_cls = getattr(adapter_cls, "auto_model_class", None) or AutoModelForMultimodalLM
+            module = auto_model_cls.from_pretrained(
                 pretrained_model_name_or_path=self.model_config.local_path,
                 torch_dtype=torch_dtype,
                 config=self.model_config.hf_config,
                 trust_remote_code=self.model_config.trust_remote_code,
             )
-
-            adapter_cls = OmniModelBase.get_class_by_name(
-                architecture,
-                self.model_config.model_stage,
-                self.model_config.get("external_lib"),
-            )
             module = adapter_cls.configure_model(module, self.model_config)
+
+            if self.engine_config.strategy == "fsdp" and not self.engine_config.use_orig_params:
+                trainability = {parameter.requires_grad for parameter in module.parameters()}
+                if len(trainability) > 1:
+                    raise ValueError(
+                        "FSDP1 requires use_orig_params=true when a model adapter freezes only part of the model."
+                    )
 
             module.to(torch_dtype)
 

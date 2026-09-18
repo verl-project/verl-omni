@@ -29,6 +29,12 @@ defaults:
   # Reward config.
   - reward@reward: reward
 
+  # Distillation config for diffusion on-policy distillation.
+  - diffusion/distillation@distillation: diffusion_distillation
+
+  # DMD2 distribution matching, separate from OPD.
+  - diffusion/dmd@dmd: diffusion_dmd
+
   # load the reference default config, then apply the fields in the current yaml
   # self config override anything above
   - _self_
@@ -36,7 +42,10 @@ defaults:
 # config for actor, rollout and reference model
 actor_rollout_ref:
 
-  # Whether it's a hybrid engine, currently only supports hybrid engine
+  # Run rollout servers on resources separate from the trainer
+  separate: false
+
+  # Whether to colocate actor and rollout in a hybrid engine
   hybrid_engine: true
 
   # Timeout for operations executed against the process group
@@ -207,8 +216,9 @@ trainer:
   # Timeout (in seconds) for Ray worker to wait for registration
   ray_wait_register_center_timeout: 300
 
-  # Stable port range used by RayWorkerGroup for torch distributed rendezvous.
-  ray_master_port_range: [20000, 30000]
+  # Port range for torch distributed rendezvous, sliced per worker group. Leave null for ephemeral
+  # ports; set it only to isolate concurrent training jobs on one machine.
+  ray_master_port_range: null
 
   # Device to run training on (e.g., "cuda", "cpu")
   device: cuda
@@ -246,6 +256,33 @@ trainer:
       # Pause standalone rollout during actor update, resume after weight sync.
       sync_compatible: false
 
+      # Lend idle hybrid trainer GPUs to rollout. Requires sync_compatible=false.
+      hybrid_rollout:
+
+        # Target dataclass for this configuration
+        _target_: verl.trainer.config.HybridRolloutSwitchConfig
+
+        # Global toggle to allow the trainer to switch to rollout mode to reduce idle.
+        enable_switch: false
+
+        # Fraction of train_batch_size that must be sampleable before the rollout replicas are reclaimed.
+        switch_threshold_ratio: 0.4
+
+        # Automatically adapt the threshold to reduce trainer starvation when enable_switch is True.
+        adaptive_switch_threshold: true
+
+        # Fraction added to switch_threshold_ratio after sustained trainer idle.
+        switch_threshold_step_up: 0.05
+
+        # Fraction subtracted from switch_threshold_ratio after a sustained calm period.
+        switch_threshold_step_down: 0.03
+
+        # Consecutive idle/calm steps required before ratio adjusts in that direction.
+        switch_threshold_release_steps: 2
+
+        # Window size for calculating average switch cost.
+        switch_cost_window_size: 3
+
     # Replay buffer sampling strategy.
     sampler:
 
@@ -255,6 +292,12 @@ trainer:
       # How to handle trajectories that exceed the maximum number of model versions.
       # drop: drop the trajectory; wait: dropless, wait for trajectories that reach the threshold.
       max_off_policy_strategy: drop
+
+      # In sync mode, drop a prompt group when any rollout session fails and submit exact replacement prompts.
+      drop_incomplete_groups: false
+
+      # Maximum replacement rounds for incomplete groups within one training sample call.
+      max_incomplete_group_refill_rounds: 3
 
       # Custom sampler config.
       custom_sampler:

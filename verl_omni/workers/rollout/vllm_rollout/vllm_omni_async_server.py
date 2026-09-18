@@ -13,26 +13,17 @@
 # limitations under the License.
 import argparse
 import asyncio
-import json
 import logging
 import os
-import tempfile
 from dataclasses import asdict
 from typing import Any, Optional
 
-import numpy as np
 import ray
 import torch
-import torchvision.transforms as T
 import vllm_omni.entrypoints.cli.serve
-import yaml
-from verl.utils.config import omega_conf_to_dataclass
-from verl.utils.device import get_visible_devices_keyword
-from verl.utils.import_utils import import_external_libs
-from verl.utils.net_utils import get_free_port
-from verl.utils.tokenizer import normalize_token_ids
+from verl.utils.tracking import RLInsightLogger
 from verl.workers.config import RolloutConfig
-from verl.workers.rollout.replica import CONTROL_METHOD_CONCURRENCY, TokenOutput
+from verl.workers.rollout.replica import RolloutMode, TokenOutput
 from verl.workers.rollout.utils import run_uvicorn
 from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_INT_ID,
@@ -40,29 +31,23 @@ from verl.workers.rollout.vllm_rollout.utils import (
     VLLM_LORA_PATH,
 )
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
-from vllm import SamplingParams
 from vllm.entrypoints.openai.api_server import build_app
-from vllm_omni.engine.arg_utils import OmniEngineArgs
+from vllm_omni.engine.arg_utils import OmniEngineArgs, orchestrator_field_names
 from vllm_omni.entrypoints import AsyncOmni
 from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
-from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
-from vllm_omni.outputs import OmniRequestOutput
 
-from verl_omni.pipelines.model_base import OmniRolloutPipelineBase, VllmOmniPipelineBase
+from verl_omni.utils.net_utils import get_non_ephemeral_free_port
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig, OmniModelConfig
 from verl_omni.workers.rollout.replica import DiffusionOutput
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_ar_strategy import ARStrategy
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import DiffusionStrategy
 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 # Sentinel: ``None`` is a valid cached value (LoRA not loaded).
 _LORA_REQUEST_CACHE_MISS = object()
-_CONTROL_CONCURRENCY_GROUP = "control"
-
-
-def _strip_none(d: dict) -> dict:
-    return {k: _strip_none(v) if isinstance(v, dict) else v for k, v in d.items() if v is not None}
 
 
 class vLLMOmniHttpServer(vLLMHttpServer):
@@ -76,33 +61,39 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # Initialisation hooks
     # -----------------------------------------------------------------------
 
-    def _init_model_config(self, model_config):
-        """AR mode uses OmniModelConfig; diffusion uses DiffusionModelConfig.
-
-        Mode is selected by ``engine_kwargs.vllm_omni.output_mode`` ("ar" vs the
-        default "diffusion").
-        """
-        engine_kwargs = getattr(self.config, "engine_kwargs", None) or {}
+    def _init_config(self, config):
+        """Select one mode strategy before initializing its rollout config."""
+        engine_kwargs = getattr(config, "engine_kwargs", None) or {}
         omni_kwargs = engine_kwargs.get("vllm_omni", {}) or {}
         # TODO (mike): drop this once the legacy omni training script is removed.
-        # It should be automatically inferred from the model config
-        self._ar_mode = omni_kwargs.get("output_mode", "diffusion") == "ar"
+        # It should be automatically inferred from the model config.
+        strategy_cls = ARStrategy if omni_kwargs.get("output_mode", "diffusion") == "ar" else DiffusionStrategy
+        self._generate_strategy = strategy_cls(self)
         self._rollout_flags: dict[int, dict] = {}
+        rollout_config = self._generate_strategy.init_config(config)
+        if getattr(rollout_config, "seed", None) is None:
+            rollout_config.seed = 42
+        return rollout_config
 
-        if self._ar_mode:
-            return omega_conf_to_dataclass(model_config, dataclass_type=OmniModelConfig)
-        return omega_conf_to_dataclass(model_config, dataclass_type=DiffusionModelConfig)
+    def _init_model_config(self, model_config):
+        return self._generate_strategy.init_model_config(model_config)
 
     def _validate_configs(self) -> None:
-        """AR mode: derive max_model_len. Diffusion: no max_position_embeddings."""
-        if self._ar_mode:
-            if self.config.max_model_len is None:
-                self.config.max_model_len = self.config.prompt_length + self.config.response_length
+        self._generate_strategy.validate_configs()
 
     def _post_init(self, cuda_visible_devices: str) -> None:
-        """Diffusion needs a PIL→tensor converter; AR does not."""
-        if not self._ar_mode:
-            self._to_tensor = T.PILToTensor()
+        """Run strategy post-init and preserve the replica device list."""
+        if getattr(self.config, "full_determinism", False):
+            from verl.workers.engine.utils import enable_full_determinism
+
+            rollout_seed = getattr(self.config, "seed", 42)
+            enable_full_determinism(seed=rollout_seed)
+            os.environ["VERL_SEED"] = str(rollout_seed)
+            os.environ["VLLM_BATCH_INVARIANT"] = "1"
+        # Set before vllm-omni narrows per-stage visible devices; stage workers
+        # remap their ZMQ ranks through this replica-level list.
+        os.environ["VERL_ZMQ_BASE_VISIBLE_DEVICES"] = cuda_visible_devices
+        self._generate_strategy.post_init(cuda_visible_devices)
         self._lora_request_cache: LoRARequest | None | object = _LORA_REQUEST_CACHE_MISS
         self._lora_resolve_lock = asyncio.Lock()
         super()._post_init(cuda_visible_devices)
@@ -111,11 +102,11 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # launch_server hooks
     # -----------------------------------------------------------------------
 
+    def _apply_quantization(self) -> tuple[str | None, dict]:
+        return self._generate_strategy.apply_quantization()
+
     def _get_override_generation_config(self) -> dict:
-        """AR mode uses the parent's LLM sampling config; diffusion has none."""
-        if self._ar_mode:
-            return vLLMHttpServer._get_override_generation_config(self)
-        return {}
+        return self._generate_strategy.override_generation_config()
 
     def _get_engine_kwargs_key(self) -> str:
         return "vllm_omni"
@@ -129,14 +120,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         except Exception:
             pass
 
-        # vLLMOmniColocateWorkerExtension supports LoRA + weight updates for GPU.
-        # vLLMOmniNPUColocateWorkerExtension additionally mixes in NPUColocateWorkerMixin
-        # for NPU memory pool, sleep, and wake_up.
-        # ar_mode uses vllm-ascend which already handles NPU natively, so the base extension suffices.
-        if device_type != "npu" or self._ar_mode:
-            return "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniColocateWorkerExtension"
-        else:
-            return "verl_omni.workers.rollout.vllm_rollout.npu_utils.vLLMOmniNPUColocateWorkerExtension"
+        return self._generate_strategy.worker_extension_cls(device_type)
 
     def _get_cli_modules(self) -> list:
         return [vllm_omni.entrypoints.cli.serve]
@@ -145,134 +129,49 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         return "vLLM-Omni CLI"
 
     def _preprocess_engine_kwargs(self, engine_kwargs: dict) -> None:
-        """Strip the mode selector; in AR mode also drop diffusion-only kwargs and
-        normalize underscore keys vLLM-Omni expects with dashes."""
-        engine_kwargs.pop("output_mode", None)
-        if self._ar_mode:
-            engine_kwargs.pop("custom_pipeline", None)
-            # TODO (mike): drop this later
-            # It should be automatically inferred from the model config
-            pipeline_name = engine_kwargs.pop("pipeline_name", None)
-            pipeline_mode = engine_kwargs.pop("pipeline_mode", "thinker_only")
-
-            adapter_cls = OmniRolloutPipelineBase.get_class(pipeline_name)
-            if adapter_cls is not None:
-                # Generate deploy config using the adapter's stage topology.
-                self._write_deploy_config(engine_kwargs, pipeline_name, adapter_cls, pipeline_mode)
-                # Store per-stage rollout flags for downstream use.
-                self._rollout_flags = adapter_cls.rollout_flags(pipeline_mode=pipeline_mode)
-                # Merge pipeline-specific HF config overrides.
-                adapter_overrides = adapter_cls.get_engine_hf_overrides(pipeline_mode=pipeline_mode)
-                if adapter_overrides:
-                    hf_overrides = engine_kwargs.get("hf_overrides", {})
-                    if isinstance(hf_overrides, str):
-                        hf_overrides = json.loads(hf_overrides)
-                    hf_overrides.update(adapter_overrides)
-                    engine_kwargs["hf_overrides"] = hf_overrides
-
-            for underscore_key in ("stage_configs_path", "deploy_config", "stage_overrides", "async_chunk"):
-                if underscore_key in engine_kwargs:
-                    engine_kwargs[underscore_key.replace("_", "-")] = engine_kwargs.pop(underscore_key)
-
-    def _write_deploy_config(self, engine_kwargs: dict, pipeline_name: str, adapter_cls, pipeline_mode: str) -> None:
-        """Write a deploy config YAML from the adapter's stage topology."""
-        adapter_cls.ensure_pipeline_registered(pipeline_mode)
-        stages = adapter_cls.build_stage_configs(pipeline_mode=pipeline_mode)
-        pipeline_id = adapter_cls.get_pipeline_id(pipeline_mode)
-
-        device_control_env = get_visible_devices_keyword()
-        devices = os.environ.get(device_control_env, "")
-        tp_size = self.config.tensor_model_parallel_size
-
-        deploy_dict: dict[str, object] = {"pipeline": pipeline_id}
-
-        if devices:
-            stage_ids = [s.stage_id for s in stages]
-            deploy_dict["stages"] = [
-                {
-                    "stage_id": sid,
-                    "devices": devices,
-                    "tensor_parallel_size": tp_size,
-                    "engine_extras": adapter_cls.get_stage_engine_extras(sid, pipeline_mode=pipeline_mode),
-                }
-                for sid in stage_ids
-            ]
-        else:
-            raise RuntimeError(
-                f"Environment variable `{device_control_env}` is not set, cannot generate deploy config."
-            )
-
-        yaml_str = yaml.dump(deploy_dict).strip()
-        logger.info("Generated deploy config:\n%s", yaml_str)
-        self._temp_deploy_ctx = tempfile.TemporaryDirectory(prefix="verl_omni_deploy_")
-        deploy_path = os.path.join(self._temp_deploy_ctx.name, f"{pipeline_name}.yaml")
-        try:
-            with open(deploy_path, "w") as f:
-                f.write(yaml_str)
-        except OSError as e:
-            self._temp_deploy_ctx.cleanup()
-            self._temp_deploy_ctx = None
-            raise RuntimeError(f"Failed to write deploy config to {deploy_path}: {e}") from e
-        engine_kwargs["deploy_config"] = deploy_path
+        self._generate_strategy.preprocess_engine_kwargs(engine_kwargs)
 
     # -----------------------------------------------------------------------
     # Server lifecycle
     # -----------------------------------------------------------------------
 
-    async def launch_server(self, *args, **kwargs):
-        self._server_loop = asyncio.get_running_loop()
-        return await super().launch_server(*args, **kwargs)
-
-    async def _run_on_server_loop(self, coro):
-        """Run engine operations on the event loop that owns AsyncOmni."""
-        server_loop = getattr(self, "_server_loop", None)
-        if server_loop is None or server_loop is asyncio.get_running_loop():
-            return await coro
-        future = asyncio.run_coroutine_threadsafe(coro, server_loop)
-        return await asyncio.wrap_future(future)
-
-    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
-    async def collective_rpc(
-        self,
-        method,
-        timeout: float | None = None,
-        args: tuple = (),
-        kwargs: dict[str, Any] | None = None,
-    ):
-        return await self._run_on_server_loop(
-            super().collective_rpc(method=method, timeout=timeout, args=args, kwargs=kwargs)
-        )
-
     async def run_server(self, args: argparse.Namespace):
         engine_args = OmniEngineArgs.from_cli_args(args)
         engine_args = asdict(engine_args)
+        engine_args["log_stats"] = not self.config.disable_log_stats
+
+        # TODO (mike): drop this patch once vllm-omni strips the serialized default
+        # fault_tolerance_config at its kwargs boundary, or vLLM defaults it to None —
+        # any dict is read as an explicit --fault-tolerance-config and auto-enabled,
+        # failing without an external load balancer.
+        if not engine_args.get("enable_fault_tolerance"):
+            engine_args.pop("fault_tolerance_config", None)
+
+        # ``from_cli_args`` only retains OmniEngineArgs fields. Restore the
+        # OrchestratorArgs fields forwarded by verl before creating AsyncOmni.
+        for key in orchestrator_field_names() - engine_args.keys():
+            value = getattr(args, key, None)
+            if value is not None:
+                engine_args[key] = value
 
         deploy_config = getattr(args, "deploy_config", None)
         if deploy_config:
             engine_args["deploy_config"] = deploy_config
 
-        if self._ar_mode:
-            # AR mode: no diffusion pipeline. Drop None entries from
-            # compilation_config that OmniEngineArgs may leave behind.
-            if isinstance(engine_args.get("compilation_config"), dict):
-                engine_args["compilation_config"] = _strip_none(engine_args["compilation_config"])
-        else:
-            import_external_libs(self.config.external_lib)
-
-            pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
-                architecture=self.model_config.architecture,
-                algorithm=self.model_config.algorithm,
-            )
-            # TODO (mike): read custom_pipeline from engine_args
-            if pipeline_path is not None:
-                engine_args["enable_dummy_pipeline"] = True
-                engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
+        self._generate_strategy.prepare_engine_args(engine_args, args)
 
         if getattr(self.config, "step_execution", False):
             engine_args["step_execution"] = True
 
-        diffusion_master_port, diffusion_master_sock = get_free_port("127.0.0.1", with_alive_sock=True)
-        diffusion_master_sock.close()
+        if engine_args.get("seed") is None:
+            engine_args.pop("seed", None)
+
+        # The port stays unbound until vllm-omni's rank-0 DiffusionWorker
+        # listens on it; see get_non_ephemeral_free_port for why it must not
+        # come from the ephemeral range.
+        # TODO (mike): drop once vllm-omni passes a FileStore-backed
+        # distributed_init_method to its workers instead of env:// MASTER_PORT.
+        diffusion_master_port = get_non_ephemeral_free_port("127.0.0.1")
 
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = str(diffusion_master_port)
@@ -281,8 +180,12 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # rollout_attn_backend only exists on the diffusion rollout config, not AR text rollouts.
         attn_backend = getattr(self.config, "rollout_attn_backend", None)
         if attn_backend is not None:
-            engine_args["diffusion_attention_backend"] = attn_backend
-            logger.info("Setting diffusion_attention_backend=%s from rollout config", attn_backend)
+            engine_args.pop("diffusion_attention_backend", None)
+            engine_args["diffusion_attention_config"] = self.config.to_vllm_omni_attention_config()
+            logger.info(
+                "Setting diffusion_attention_config.default.backend=%s from rollout config",
+                attn_backend,
+            )
 
         engine_client = AsyncOmni(**engine_args)
         app = build_app(args)
@@ -301,72 +204,132 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # TODO (mike): support multi node
         raise NotImplementedError("vLLM-Omni headless mode is not implemented yet.")
 
+    async def collective_rpc(
+        self,
+        method: Any,
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict[str, Any] | None = None,
+    ):
+        """Dispatch a shared RPC to the stages selected by the active strategy."""
+        await self.engine.collective_rpc(
+            method=method,
+            timeout=timeout,
+            args=args,
+            kwargs=kwargs,
+            stage_ids=self._generate_strategy.collective_rpc_stage_ids(method),
+        )
+
     # -----------------------------------------------------------------------
-    # wake_up hook: Omni does not restore KV cache on wake-up
+    # wake_up hook: full wake must include kv_cache
     # -----------------------------------------------------------------------
 
     def _get_wake_up_tags(self) -> list[str]:
+        # AsyncOmni.generate() rejects leftover sleeping tags. Weights-only left
+        # kv_cache asleep and every generate() failed.
         return ["kv_cache", "weights"]
 
-    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
-    async def wake_up(self, tags: list[str] | None = None):
-        return await self._run_on_server_loop(self._wake_up(tags))
+    def _resolve_sleep_level(self) -> int:
+        """Level 1 is the correct phase-separation level for vllm-omni diffusion.
 
-    async def _wake_up(self, tags: list[str] | None = None):
-        """Wake AR engine stages through the EngineCore via AsyncOmni.wake_up().
-
-        Previously overridden to use collective_rpc("wake_up") to avoid CUDA
-        initialisation in the HTTP server process.  Now that AsyncOmni.wake_up()
-        routes AR stages through EngineCore (ZMQ-based, no GPU init), we call it
-        directly so that AsyncOmni._sleeping_tags is properly cleared and
-        generate() is not rejected.
+        Unlike upstream vLLM (whose LLM level-1 keeps weights resident and only
+        drops KV cache), vllm-omni's diffusion-worker level-1 sleep offloads the
+        whole "weights" pool — transformer + text encoder + VAE — to pinned host
+        memory and unmaps the GPU pages, and ``wake_up(tags=["weights"])``
+        restores them via DMA. Level 2 additionally discards the CPU copy but
+        ``AsyncOmni.wake_up`` deliberately raises NotImplementedError after a
+        level-2 sleep, and the trainer would have to re-upload the full
+        pipeline each cycle. Keep 1 until both change.
         """
+        return 1
+
+    async def wake_up(self, tags: list[str] | None = None):
         if self.node_rank != 0:
             return
-        await self.engine.wake_up(
-            tags=tags if tags is not None else self._get_wake_up_tags(),
-        )
-        self._invalidate_lora_request_cache()
+        if self.rollout_mode == RolloutMode.STANDALONE:
+            logger.info("skip wake_up in standalone mode")
+            return
+        resolved_tags = tags if tags is not None else self._get_wake_up_tags()
+        with RLInsightLogger.trace_state(
+            f"vllm_wake_up[{','.join(resolved_tags)}]", state_lane_id=f"replica_{self.replica_rank}"
+        ):
+            acks = await self.engine.wake_up(tags=resolved_tags)
+            self._validate_acks("wake_up", acks)
+            await self.engine.resume_generation()
+            self._invalidate_lora_request_cache()
 
-    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
     async def set_global_steps(self, global_steps: int):
-        return await self._run_on_server_loop(self._set_global_steps(global_steps))
-
-    async def _set_global_steps(self, global_steps: int):
         if global_steps != self.global_steps:
             self._invalidate_lora_request_cache()
         await super().set_global_steps(global_steps)
 
-    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
+    async def _reset_frontend_mm_cache(self) -> None:
+        """Clear the frontend multimodal cache; EngineCore.sleep wipes only the engine-side copy."""
+        # Diffusion-only engines build no InputProcessor, so renderer is None.
+        # TODO (mike): drop after vllm-omni fixes AsyncOmni.reset_mm_cache.
+        renderer = self.engine.renderer
+        if renderer is not None:
+            await renderer.clear_mm_cache_async()
+
     async def sleep(self):
-        return await self._run_on_server_loop(super().sleep())
+        if self.node_rank != 0 or not self.config.free_cache_engine:
+            return
+        if self.rollout_mode == RolloutMode.STANDALONE:
+            logger.info("skip sleep in standalone mode")
+            return
+        with RLInsightLogger.trace_state("vllm_sleep", state_lane_id=f"replica_{self.replica_rank}"):
+            acks = await self.engine.sleep(level=self._resolve_sleep_level())
+            self._validate_acks("sleep", acks)
+            await self._reset_frontend_mm_cache()
+            self._invalidate_lora_request_cache()
 
-    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
-    async def clear_kv_cache(self):
-        return await self._run_on_server_loop(super().clear_kv_cache())
+    async def release_kv_cache(self):
+        """Free cache around a weight sync without discarding Omni weights.
 
-    async def _sleep_hybrid(self):
-        """Preserve non-actor pipeline weights during hybrid training sleep.
-
-        vLLM-Omni diffusion pipelines include components such as the text
-        encoder and VAE that are loaded by the rollout server, but are not part
-        of the trainable actor and therefore are not included in full-model
-        weight syncs. Use level-1 sleep so those weights are offloaded and can
-        be restored on wake-up instead of discarded by level-2 sleep.
-
-        Routes through ``AsyncOmni.sleep()``, which for AR stages uses
-        ``EngineCore.sleep()`` to atomically pause the scheduler, abort
-        in-flight requests, and only then sleep the executor.
+        Sleeps both tags then wakes weights only so NCCL can write into the
+        existing buffers. Do not resume generation here: kv_cache is still
+        asleep and AsyncOmni.generate() rejects that state. resume_kv_cache()
+        restores the cache and re-opens admission after the sync.
         """
-        # TODO (andy): use `sleep_level=2` in the future when the
-        #  trainer side incorporates the whole components of the model.
-        self._invalidate_lora_request_cache()
-        await self.engine.sleep(level=1)
-        await self.engine.reset_encoder_cache()
+        if self.node_rank != 0 or not self.config.free_cache_engine:
+            return
+        if self.rollout_mode == RolloutMode.COLOCATED:
+            return
+        with RLInsightLogger.trace_state("vllm_release_kv_cache", state_lane_id=f"replica_{self.replica_rank}"):
+            acks = await self.engine.sleep(level=self._resolve_sleep_level())
+            self._validate_acks("sleep", acks)
+            await self._reset_frontend_mm_cache()
+            self._invalidate_lora_request_cache()
+            acks = await self.engine.wake_up(tags=["weights"])
+            self._validate_acks("wake_up", acks)
+            self._invalidate_lora_request_cache()
+
+    async def resume_kv_cache(self):
+        """Restore kv_cache after a weight sync and re-open generate admission."""
+        if self.node_rank != 0 or not self.config.free_cache_engine:
+            return
+        if self.rollout_mode == RolloutMode.COLOCATED:
+            return
+        with RLInsightLogger.trace_state("vllm_resume_kv_cache", state_lane_id=f"replica_{self.replica_rank}"):
+            acks = await self.engine.wake_up(tags=["kv_cache"])
+            self._validate_acks("wake_up", acks)
+            await self.engine.resume_generation()
+            self._invalidate_lora_request_cache()
+
+    async def resume_generation(self):
+        if self.node_rank == 0:
+            await self.engine.resume_generation()
+
+    def _validate_acks(self, method: str, acks: Any) -> None:
+        """Fail closed on any non-success sleep/wake handshake."""
+        for ack in acks or []:
+            if isinstance(ack, dict):
+                raise RuntimeError(f"{method} failed on a stage: {ack.get('error', ack)}")
+            elif ack.status != "SUCCESS":
+                raise RuntimeError(f"{method} failed on a stage: {getattr(ack, 'error_msg', None) or ack!r}")
 
     # -----------------------------------------------------------------------
-    # generate: shared pipeline; mode-specific steps branch on self._ar_mode
-    # (_preprocess_input / _run_generation / _process_output).
+    # Generation delegates mode-specific behavior to the selected strategy.
     # -----------------------------------------------------------------------
 
     async def generate(
@@ -384,42 +347,24 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         negative_extra_prompt_ids: Optional[dict[str, list[int]]] = None,
         priority: int = 0,
     ) -> DiffusionOutput | TokenOutput:
-        prompt_ids = normalize_token_ids(prompt_ids)
-        multi_modal_data = self._build_multi_modal_data(image_data, video_data, audio_data)
-        lora_request = await self._resolve_lora_request()
-        prompt, params = self._preprocess_input(
-            prompt_ids,
-            sampling_params,
-            multi_modal_data,
-            lora_request,
-            negative_prompt_ids,
-            prompt_mask,
-            mm_processor_kwargs,
-            extra_prompt_ids,
-            negative_extra_prompt_ids,
+        return await self._generate_strategy.generate(
+            prompt_ids=prompt_ids,
+            sampling_params=sampling_params,
+            request_id=request_id,
+            image_data=image_data,
+            video_data=video_data,
+            audio_data=audio_data,
+            mm_processor_kwargs=mm_processor_kwargs,
+            negative_prompt_ids=negative_prompt_ids,
+            prompt_mask=prompt_mask,
+            extra_prompt_ids=extra_prompt_ids,
+            negative_extra_prompt_ids=negative_extra_prompt_ids,
+            priority=priority,
         )
-        final_res = await self._run_generation(prompt, params, request_id, lora_request, priority)
-        return self._process_output(final_res, params, sampling_params)
 
     # -----------------------------------------------------------------------
-    # Shared helpers for the AR and diffusion generate paths
+    # Shared LoRA state
     # -----------------------------------------------------------------------
-
-    @staticmethod
-    def _build_multi_modal_data(
-        image_data: Optional[list[Any]],
-        video_data: Optional[list[Any]],
-        audio_data: Optional[list[Any]] = None,
-    ) -> dict[str, Any]:
-        """Assemble the vLLM multi_modal_data dict from optional image/video/audio inputs."""
-        multi_modal_data: dict[str, Any] = {}
-        if image_data is not None:
-            multi_modal_data["image"] = image_data
-        if video_data is not None:
-            multi_modal_data["video"] = video_data
-        if audio_data is not None:
-            multi_modal_data["audio"] = audio_data
-        return multi_modal_data
 
     def _invalidate_lora_request_cache(self) -> None:
         """Drop cached LoRA state after weight sync or engine sleep/wake."""
@@ -455,244 +400,6 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             )
             return self._lora_request_cache  # type: ignore[return-value]
 
-    @staticmethod
-    def _map_stop_reason(finish_reason: Optional[str]) -> Optional[str]:
-        """Map a vLLM finish_reason to verl's stop_reason vocabulary."""
-        if finish_reason == "abort":
-            return "aborted"
-        if finish_reason in ("stop", "length"):
-            return "completed"
-        return finish_reason
-
-    # -----------------------------------------------------------------------
-    # Mode-specific pipeline steps
-    # -----------------------------------------------------------------------
-
-    def _preprocess_input(
-        self,
-        prompt_ids: list[int],
-        sampling_params: dict[str, Any],
-        multi_modal_data: dict[str, Any],
-        lora_request: Optional[LoRARequest],
-        negative_prompt_ids: Optional[list[int]],
-        prompt_mask: torch.BoolTensor | None = None,
-        mm_processor_kwargs: Optional[dict[str, Any]] = None,
-        extra_prompt_ids: Optional[dict[str, list[int]]] = None,
-        negative_extra_prompt_ids: Optional[dict[str, list[int]]] = None,
-    ):
-        """Build the engine prompt + sampling params for the active mode.
-
-        Returns ``(prompt, params)`` consumed by ``_run_generation``.
-        """
-        if self._ar_mode:
-            if multi_modal_data:
-                # Deduplicate already-expanded multimodal pad tokens to prevent
-                # double-expansion inside vLLM-Omni.
-                processor = getattr(self.model_config, "processor", None)
-                if processor is not None and hasattr(processor, "dedup_pad_tokens"):
-                    prompt_ids = processor.dedup_pad_tokens(prompt_ids)
-            max_possible_tokens = self.config.max_model_len - len(prompt_ids)
-            if max_possible_tokens <= 0:
-                raise ValueError(
-                    f"Prompt length ({len(prompt_ids)}) meets or exceeds the model's maximum context length "
-                    f"({self.config.max_model_len}), leaving no space for generation."
-                )
-
-            if "max_tokens" in sampling_params:
-                max_tokens = sampling_params.pop("max_tokens")
-            elif "max_new_tokens" in sampling_params:
-                max_tokens = sampling_params.pop("max_new_tokens")
-            else:
-                max_tokens = min(
-                    self.config.response_length,
-                    self.config.prompt_length + self.config.response_length - len(prompt_ids),
-                )
-            max_tokens = max(0, min(max_tokens, max_possible_tokens))
-
-            # Normalize ``logprobs``: bare ``True`` -> 0 (sampled-token logprob),
-            # preserve explicit int counts (incl. 0), fall back to None otherwise.
-            logprobs = sampling_params.pop("logprobs", None)
-            if logprobs is True:
-                sampling_params["logprobs"] = 0
-            elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
-                sampling_params["logprobs"] = logprobs
-            else:
-                sampling_params["logprobs"] = None
-            sampling_params.setdefault("repetition_penalty", getattr(self.config, "repetition_penalty", 1.0))
-            params = SamplingParams(max_tokens=max_tokens, **sampling_params)
-
-            prompt = {"prompt_token_ids": prompt_ids}
-            if multi_modal_data:
-                prompt["multi_modal_data"] = multi_modal_data
-            if mm_processor_kwargs:
-                prompt["mm_processor_kwargs"] = mm_processor_kwargs
-            return prompt, params
-
-        # diffusion
-        default_params_list = self.engine.default_sampling_params_list
-
-        custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_ids}
-        if prompt_mask is not None:
-            custom_prompt["prompt_mask"] = prompt_mask
-        if len(default_params_list) > 1:
-            # Multi-stage pipelines tag the diffusion stage so the orchestrator can route inputs correctly.
-            custom_prompt["modalities"] = ["image"]
-        if negative_prompt_ids is not None:
-            custom_prompt["negative_prompt_ids"] = negative_prompt_ids
-        # Per-text-encoder token ids for multi-encoder models (e.g. SD3.5),
-        # produced by the agent loop so pipelines never decode/re-encode text.
-        if extra_prompt_ids is not None:
-            custom_prompt["extra_prompt_ids"] = extra_prompt_ids
-        if negative_extra_prompt_ids is not None:
-            custom_prompt["negative_extra_prompt_ids"] = negative_extra_prompt_ids
-        if multi_modal_data:
-            custom_prompt["multi_modal_data"] = multi_modal_data
-            custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
-
-        sampling_kwargs: dict[str, Any] = {}
-        extra_args: dict[str, Any] = {}
-        for k, v in sampling_params.items():
-            if hasattr(OmniDiffusionSamplingParams, k):
-                sampling_kwargs[k] = v
-            else:
-                extra_args[k] = v
-        sampling_kwargs["extra_args"] = extra_args
-        if lora_request is not None:
-            sampling_kwargs["lora_request"] = lora_request
-        diffusion_sampling_params = OmniDiffusionSamplingParams(**sampling_kwargs)
-        # Multi-stage models use defaults for non-diffusion stages.
-        params = default_params_list[:-1] + [diffusion_sampling_params]
-        return custom_prompt, params
-
-    async def _run_generation(self, prompt, params, request_id: str, lora_request, priority: int):
-        """Drive the engine and return the final OmniRequestOutput."""
-        if self._ar_mode:
-            generator = self.engine.generate(
-                prompt=prompt,
-                sampling_params_list=params,
-                request_id=request_id,
-                lora_request=lora_request,
-                priority=priority,
-            )
-        else:
-            generator = self.engine.generate(
-                prompt=prompt,
-                request_id=request_id,
-                sampling_params_list=params,
-            )
-        final_res: Optional[OmniRequestOutput] = None
-        async for output in generator:
-            final_res = output
-        return final_res
-
-    def _process_output(self, final_res, params, sampling_params: dict[str, Any]):
-        """Convert the engine output into the active mode's verl output dataclass."""
-        if self._ar_mode:
-            if final_res is None:
-                raise RuntimeError("AR mode: vLLM-Omni engine yielded no output for the prompt.")
-
-            req_output = final_res.request_output
-            if req_output is None:
-                raise RuntimeError("AR mode expects request_output with token IDs, but got None.")
-
-            extra_fields = {"global_steps": self.global_steps}
-            completion = req_output.outputs[0]
-            token_ids = getattr(completion, "cumulative_token_ids", None)
-            if token_ids is None:
-                token_ids = completion.token_ids
-            log_probs = None
-            if params.logprobs is not None:
-                log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(completion.logprobs)]
-
-            finish_reason = completion.finish_reason
-            stop_reason = self._map_stop_reason(finish_reason)
-
-            num_preempted = None
-            if hasattr(completion, "num_preempted"):
-                num_preempted = completion.num_preempted
-
-            return TokenOutput(
-                token_ids=token_ids,
-                log_probs=log_probs,
-                stop_reason=stop_reason,
-                num_preempted=num_preempted,
-                extra_fields=extra_fields,
-            )
-
-        # diffusion
-        # Handle aborted requests: the engine may yield a terminal output with
-        # finish_reason="abort" and no images (e.g. when abort_all_requests
-        # synthesizes an abort OutputMessage to unblock the generate() coroutine).
-        # Return a DiffusionOutput with stop_reason="aborted" so the retry client
-        # can retry the whole sample.
-        if final_res is None or not final_res.images:
-            finish_reason = "abort"
-            if final_res is not None and final_res.request_output is not None:
-                finish_reason = getattr(final_res.request_output, "finish_reason", None) or "abort"
-            stop_reason = self._map_stop_reason(finish_reason)
-            logger.debug(
-                "diffusion rollout produced no image (finish_reason=%s); returning %s", finish_reason, stop_reason
-            )
-            return DiffusionOutput(
-                diffusion_output=torch.empty(0),
-                log_probs=None,
-                stop_reason=stop_reason,
-                num_preempted=None,
-                extra_fields={"global_steps": self.global_steps},
-            )
-
-        assert final_res is not None
-        diffusion_output = final_res.images[0]
-        if isinstance(diffusion_output, torch.Tensor):
-            diffusion_output = diffusion_output.float()
-        elif isinstance(diffusion_output, np.ndarray):
-            diffusion_output = torch.from_numpy(diffusion_output).float()
-        else:
-            diffusion_output = self._to_tensor(diffusion_output).float() / 255.0
-
-        # Extract extra data from custom_output (populated by DiffusionEngine)
-        mm_output = final_res.custom_output or {}
-
-        if sampling_params.get("logprobs", False):
-            all_log_probs = mm_output.get("all_log_probs")
-            log_probs = all_log_probs[0] if all_log_probs is not None else None
-        else:
-            log_probs = None
-
-        def _maybe_unbatch(value: Any) -> Any:
-            if value is None:
-                return None
-            if isinstance(value, torch.Tensor):
-                return value[0] if value.dim() > 0 else value
-            if isinstance(value, np.ndarray):
-                return value[0] if value.ndim > 0 else value
-            if isinstance(value, list | tuple):
-                return value[0] if value else None
-            return value
-
-        extra_fields = {k: _maybe_unbatch(v) for k, v in mm_output.items() if k != "all_log_probs"}
-        extra_fields["global_steps"] = self.global_steps
-
-        if final_res.request_output is not None and hasattr(final_res.request_output, "finish_reason"):
-            finish_reason = final_res.request_output.finish_reason or "stop"
-        else:
-            finish_reason = "stop"
-
-        stop_reason = self._map_stop_reason(finish_reason)
-
-        num_preempted = None
-        if final_res.request_output is not None and hasattr(final_res.request_output, "num_preempted"):
-            num_preempted = final_res.request_output.num_preempted
-
-        return DiffusionOutput(
-            diffusion_output=diffusion_output,
-            log_probs=log_probs,
-            stop_reason=stop_reason,
-            num_preempted=num_preempted,
-            extra_fields=extra_fields,
-        )
-
-    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
     async def wait_for_requests_to_drain(self):
         # TODO (mike): implement this once DP is supported.
         pass
@@ -703,72 +410,64 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # so the parent's AsyncLLM-specific implementation must be overridden.
     # -----------------------------------------------------------------------
 
-    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
     async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
-        return await self._run_on_server_loop(self._abort_all_requests(reset_prefix_cache))
-
-    async def _abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
-        """Abort all in-flight requests on the AsyncOmni engine.
-
-        Pause new admissions, abort unfinished rollouts, and wait for
-        Orchestrator/backend cleanup before returning.
-        """
+        """Abort all in-flight requests on the AsyncOmni engine."""
         engine = self.engine
         if getattr(engine, "output_processor", None) is not None:
             return await super().abort_all_requests(reset_prefix_cache)
 
-        await engine.pause_generation(
-            wait_for_inflight_requests=False,
-            clear_cache=False,
-        )
+        # ``engine.abort`` takes EXTERNAL ids; ``request_states`` is keyed by internal.
+        in_flight: list[tuple[str, str, Any]] = []
+        seen: set[str] = set()
+        for state in engine.request_states.values():
+            if state.external_request_id in seen:
+                continue
+            seen.add(state.external_request_id)
+            in_flight.append((state.request_id, state.external_request_id, state))
 
-        # Snapshot queue references before AsyncOmni.abort() removes frontend
-        # request state. The abort call returns only after the Orchestrator has
-        # aborted backend work and released all request bindings.
-        in_flight_states = [
-            (state.request_id, state)
-            for state in engine.request_states.values()
-            if getattr(state, "external_request_id", None) is not None
-        ]
-        request_ids = list(dict.fromkeys(state.external_request_id for _, state in in_flight_states))
+        request_ids = [external_id for _, external_id, _ in in_flight]
 
-        output_request_ids = set()
-        if request_ids or self._ar_mode:
-            output_request_ids = set(
-                await engine.abort_with_output_ids(
-                    request_ids,
-                    pause=self._ar_mode,
-                )
+        aborted = False
+        try:
+            # TODO (mike): multi-stage AR abort is broken upstream — the engine's
+            # abort fallback terminal is stage_id=0 and the consume loop breaks on
+            # finished non-final messages, so generate() exits empty. Single-stage /
+            # thinker-only is correct here; needs a vllm-omni fix + pin bump.
+            await asyncio.wait_for(
+                engine.abort(request_ids), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
             )
-
-        # AR abort outputs come from vLLM-Omni's OutputProcessor and retain the
-        # cumulative token IDs and logprobs. A request not yet admitted by a
-        # stage has no OutputProcessor state, so synthesize a terminal response
-        # only for that missing case. Diffusion always retries the whole sample.
-        for internal_id, state in in_flight_states:
-            if not self._ar_mode or internal_id not in output_request_ids:
-                self._enqueue_abort_output(internal_id, state)
+            aborted = True
+            # Pause even with nothing to abort: holds admission until resume_generation.
+            await engine.pause_generation(
+                mode="abort", wait_for_inflight_requests=False, clear_cache=reset_prefix_cache
+            )
+        except Exception:
+            # Nothing engine-side enqueued terminals — synthesize them so
+            # generate() cannot hang on queue.get.
+            if not aborted:
+                for internal_id, _, state in in_flight:
+                    self._enqueue_abort_output(internal_id, state)
+            raise
 
         if reset_prefix_cache:
-            await self.clear_kv_cache()
+            # pause_generation(clear_cache=True) wiped the engine-side mm cache;
+            # drop the frontend copy too, or hash-only follow-ups finish empty.
+            # TODO (mike): drop after vllm-omni fixes AsyncOmni.reset_mm_cache.
+            await self._reset_frontend_mm_cache()
 
         logger.info("Aborted %d request(s): %s", len(request_ids), request_ids)
         return {"aborted_count": len(request_ids), "request_ids": request_ids}
-
-    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
-    async def resume_generation(self):
-        return await self._run_on_server_loop(super().resume_generation())
 
     def _enqueue_abort_output(self, internal_id: str, req_state: Any) -> None:
         """Synthesize a terminal abort OutputMessage and put it into a per-request queue.
 
         ``_process_orchestrator_results`` reads from ``req_state.queue`` and
         expects ``OutputMessage`` (or ``ErrorMessage``) objects. We build a
-        minimal ``OmniRequestOutput`` carrying a ``RequestOutput`` with
-        ``finish_reason="abort"`` so that ``_process_single_result`` yields it
-        and ``_process_output`` maps it to ``stop_reason="aborted"``.
+        minimal ``OmniRequestOutput`` with ``finish_reason="abort"`` so that
+        ``_process_single_result`` yields it and the active generation strategy maps it
+        to ``stop_reason="aborted"``.
         """
-        from vllm.outputs import CompletionOutput, RequestOutput
+        from vllm.outputs import CompletionOutput
         from vllm_omni.engine.messages import OutputMessage
         from vllm_omni.outputs import OmniRequestOutput
 
@@ -777,22 +476,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             text="",
             token_ids=[],
             cumulative_logprob=None,
-            logprobs=[],  # empty list (not None) so _process_output won't crash iterating
+            logprobs=None,
             finish_reason="abort",
             stop_reason=None,
         )
-        request_output = RequestOutput(
-            request_id=internal_id,
-            prompt=None,
-            prompt_token_ids=[],
-            prompt_logprobs=None,
-            outputs=[completion],
-            finished=True,
-        )
         omni_output = OmniRequestOutput(
             request_id=internal_id,
+            outputs=[completion],
             finished=True,
-            request_output=request_output,
         )
         # Use the final stage so _process_single_result's stage_meta.final_output
         # check passes and the output is yielded (not silently dropped).
@@ -805,38 +496,29 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         )
         req_state.queue.put_nowait(msg)
 
-    @ray.method(concurrency_group=_CONTROL_CONCURRENCY_GROUP)
     async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
-        return await self._run_on_server_loop(self._abort_request(request_id, reset_prefix_cache))
-
-    async def _abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a single in-flight request on the AsyncOmni engine."""
         engine = self.engine
         if getattr(engine, "output_processor", None) is not None:
             return await super().abort_request(request_id, reset_prefix_cache)
 
+        in_flight_state = None
+        for state in engine.request_states.values():
+            if state.external_request_id == request_id:
+                in_flight_state = state
+                break
+
         try:
-            in_flight_state = None
-            for state in engine.request_states.values():
-                if getattr(state, "external_request_id", None) == request_id:
-                    in_flight_state = state
-                    break
-
-            output_request_ids = set(await engine.abort_with_output_ids(request_id))
-
-            if in_flight_state is not None and (
-                not self._ar_mode or in_flight_state.request_id not in output_request_ids
-            ):
+            await asyncio.wait_for(
+                engine.abort(request_id), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
+            )
+        except Exception:
+            if in_flight_state is not None:
                 self._enqueue_abort_output(in_flight_state.request_id, in_flight_state)
+            raise
 
-            if reset_prefix_cache:
-                await self.clear_kv_cache()
-                logger.info(f"Prefix cache reset after abort request {request_id}")
-            logger.info(f"Aborted request: {request_id}")
-            return {"aborted": True, "request_id": request_id}
-        except Exception as e:
-            logger.error(f"Error aborting request {request_id}: {e}")
-            return {"aborted": False, "request_id": request_id, "error": str(e)}
+        logger.info("Aborted request: %s", request_id)
+        return {"aborted": True, "request_id": request_id}
 
 
 class vLLMOmniReplica(vLLMReplica):
@@ -847,16 +529,13 @@ class vLLMOmniReplica(vLLMReplica):
         model_config: DiffusionModelConfig | OmniModelConfig,
         gpus_per_node: int = 8,
         is_reward_model: bool = False,
+        is_teacher_model: bool = False,
+        name_suffix: str = "",
     ):
-        super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
-        self.server_class = ray.remote(concurrency_groups={_CONTROL_CONCURRENCY_GROUP: CONTROL_METHOD_CONCURRENCY})(
-            vLLMOmniHttpServer
+        super().__init__(
+            replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
         )
-
-    def _validate_launch_requirements(self) -> None:
-        """No-op: the parent check validates vllm.__version__ which is
-        irrelevant for vllm-omni (a separate package)."""
-        pass
+        self.server_class = ray.remote(vLLMOmniHttpServer)
 
     def _get_server_name_prefix(self) -> str:
         return "vllm_omni_"

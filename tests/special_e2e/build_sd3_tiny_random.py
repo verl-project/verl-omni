@@ -27,9 +27,8 @@ import torch
 from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler, SD3Transformer2DModel, StableDiffusion3Pipeline
 from tokenizers import Tokenizer
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
-from tokenizers.models import BPE, WordLevel
+from tokenizers.models import BPE
 from tokenizers.pre_tokenizers import ByteLevel as ByteLevelPreTokenizer
-from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.trainers import BpeTrainer
 from transformers import (
     CLIPTextConfig,
@@ -37,6 +36,7 @@ from transformers import (
     PreTrainedTokenizerFast,
     T5Config,
     T5EncoderModel,
+    T5Tokenizer,
 )
 
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/models/tiny-random/stable-diffusion-3-tiny-random")
@@ -91,19 +91,17 @@ def _build_tiny_clip_tokenizer() -> PreTrainedTokenizerFast:
     )
 
 
-def _build_tiny_t5_tokenizer(*, vocab_size: int = 1000, model_max_length: int = 512) -> PreTrainedTokenizerFast:
-    """Build a minimal T5-style tokenizer from an in-memory WordLevel vocab."""
-    vocab: dict[str, int] = {"<pad>": 0, "</s>": 1}
-    for idx in range(2, vocab_size):
-        vocab[f"tok{idx}"] = idx
-    tokenizer = Tokenizer(WordLevel(vocab=vocab, unk_token="<pad>"))
-    tokenizer.pre_tokenizer = Whitespace()
-    return PreTrainedTokenizerFast(
-        tokenizer_object=tokenizer,
-        pad_token="<pad>",
-        eos_token="</s>",
-        model_max_length=model_max_length,
-    )
+def _build_tiny_t5_tokenizer(*, vocab_size: int = 1000, model_max_length: int = 512) -> T5Tokenizer:
+    """Build a real T5Tokenizer over a tiny in-memory Unigram vocab.
+
+    A real T5Tokenizer (not a generic PreTrainedTokenizerFast) is required so the
+    saved checkpoint also loads through pipelines that construct ``T5Tokenizer``
+    themselves, e.g. the vllm-omni SD3 rollout server.
+    """
+    vocab: list[tuple[str, float]] = [("<pad>", 0.0), ("</s>", 0.0), ("<unk>", 0.0), ("▁", -2.0)]
+    # Leave room for the 100 <extra_id_*> special tokens appended after the vocab.
+    vocab += [(f"▁tok{idx}", -3.0) for idx in range(len(vocab), vocab_size - 100)]
+    return T5Tokenizer(vocab=vocab, model_max_length=model_max_length)
 
 
 def get_dummy_sd3_components(*, hidden_size: int = 8, seed: int = 42) -> dict[str, Any]:

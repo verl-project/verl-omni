@@ -6,10 +6,28 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_gpu_smoke.sh"
 gpu_smoke_init "ci-e2e-omni" 2 "$@"
 
+omni_trainer_args=()
+if [[ -n "${RAY_MASTER_PORT_RANGE:-}" ]]; then
+    omni_trainer_args+=("+trainer.ray_master_port_range=[${RAY_MASTER_PORT_RANGE}]")
+fi
+
 # Fixed at 2 GPUs: FSDP/FSPD2 needs >1 GPU to shard (NO_SHARD can't run the
 # offload_to_cpu LoRA-sync summon).
 run_test 0 "Qwen3-Omni Thinker GSPO LoRA e2e (V1)" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS=2 \
     bash tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_v1_smoke.sh
+
+run_test 1 "Qwen3-Omni multimodal offline MLLM DPO LoRA e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS=2 \
+    bash tests/special_e2e/run_qwen3_omni_multimodal_offline_mllm_dpo_lora_smoke.sh "${omni_trainer_args[@]}"
+
+# Separate-async: 1 trainer GPU + 1 standalone TP=1 rollout replica.
+run_test 2 "Qwen3-Omni Thinker GSPO LoRA separate-async e2e (V1)" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_TRAIN_GPUS=1 NUM_ROLLOUT_GPUS=1 \
+    bash tests/special_e2e/run_gspo_qwen3_omni_thinker_lora_v1_separate_async_smoke.sh
+
+run_test 3 "Qwen3-TTS Talker full-parameter GRPO e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS=2 \
+    bash tests/special_e2e/run_qwen3_tts_grpo_smoke.sh "${omni_trainer_args[@]}"
 
 gpu_smoke_summary

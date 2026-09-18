@@ -124,6 +124,29 @@ def test_dataset_rejects_inverted_pair_scores(tmp_path):
         dataset[0]
 
 
+@pytest.mark.parametrize("score_key", ["win_score", "lose_score"])
+def test_dataset_rejects_missing_score_columns(tmp_path, score_key):
+    row = _row()
+    del row[score_key]
+    data_file = tmp_path / "pairs.json"
+    data_file.write_text(json.dumps([row]))
+
+    with pytest.raises(ValueError, match=score_key):
+        OfflineDPODataset(str(data_file), tokenizer=DummyTokenizer(), config=_config())
+
+
+@pytest.mark.parametrize("score_key", ["win_score", "lose_score"])
+def test_dataset_rejects_missing_score_values(tmp_path, score_key):
+    rows = [_row(uid="pair-0"), _row(uid="pair-1")]
+    del rows[1][score_key]
+    data_file = tmp_path / "pairs.json"
+    data_file.write_text(json.dumps(rows))
+    dataset = OfflineDPODataset(str(data_file), tokenizer=DummyTokenizer(), config=_config())
+
+    with pytest.raises(ValueError, match=rf"row 1 column '{score_key}'.*finite number"):
+        dataset[1]
+
+
 def test_expand_offline_dpo_features_preserves_pair_order():
     feature = {
         OFFLINE_DPO_PAIR_MARKER: True,

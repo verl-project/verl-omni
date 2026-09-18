@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import copy
 import os
-from dataclasses import replace
 from typing import Any, Literal
 
 import torch
@@ -24,8 +25,9 @@ from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
 from vllm_omni.diffusion.models.qwen_image.rope_utils import txt_seq_lens_from_embeds
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
-from vllm_omni.diffusion.worker.utils import DiffusionRequestState
+from vllm_omni.diffusion.worker.utils import StepRequestState
 
+from verl_omni.pipelines.diffusion_rollout_output import rollout_output, with_rollout_data
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.request_batch import (
     collate_prompt_mask as _collate_prompt_mask,
@@ -39,6 +41,7 @@ from verl_omni.pipelines.request_batch import (
 from verl_omni.pipelines.request_batch import (
     split_diffusion_output_by_request as _split_diffusion_output_by_request,
 )
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import QwenImageTokenIdPromptMixin, apply_true_cfg, build_img_shapes, coalesce_not_none
@@ -60,6 +63,11 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
     """
 
     supports_request_batch = True
+
+    #: Declares the primary rollout media stream so downstream consumers read
+    #: the modality from the adapter instead of inferring it from tensor rank.
+    #: Inherited by the dual-GRPO and mix-GRPO Qwen-Image subclasses.
+    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
@@ -110,8 +118,8 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
 
     def encode_prompt(
         self,
-        prompt_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        prompt_ids: torch.Tensor | list[int] | list[list[int]] | None,
+        attention_mask: torch.Tensor | list[int] | list[bool] | list[list[int]] | list[list[bool]] | None = None,
         num_images_per_prompt: int = 1,
         prompt_embeds: torch.Tensor | None = None,
         prompt_embeds_mask: torch.Tensor | None = None,
@@ -120,8 +128,8 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         """Encode text prompt token IDs into dense embeddings.
 
         Args:
-            prompt_ids (torch.Tensor): Token IDs of shape ``(B, L)`` or ``(L,)``.
-            attention_mask (torch.Tensor, *optional*): Boolean mask of shape
+            prompt_ids (torch.Tensor | list): Token IDs of shape ``(B, L)`` or ``(L,)``.
+            attention_mask (torch.Tensor | list, *optional*): Boolean mask of shape
                 ``(B, L)`` for *prompt_ids*; inferred as all-ones when ``None``.
             num_images_per_prompt (int): Number of images to generate per prompt;
                 embeddings are repeated accordingly.
@@ -138,12 +146,27 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
                 ``(B * num_images_per_prompt, L, D)`` and
                 ``(B * num_images_per_prompt, L)`` respectively.
         """
-        prompt_ids = prompt_ids.unsqueeze(0) if prompt_ids.ndim == 1 else prompt_ids
-        attention_mask = (
-            attention_mask.unsqueeze(0) if attention_mask is not None and attention_mask.ndim == 1 else attention_mask
-        )
-
         if prompt_embeds is None:
+            if prompt_ids is None:
+                raise ValueError("`prompt_ids` must be provided when `prompt_embeds` is None.")
+            if isinstance(prompt_ids, list):
+                prompt_ids = torch.tensor(prompt_ids, device=self.device, dtype=torch.long)
+            elif isinstance(prompt_ids, torch.Tensor):
+                prompt_ids = prompt_ids.to(self.device)
+            else:
+                raise TypeError("`prompt_ids` must be a tensor or list.")
+            if isinstance(attention_mask, list):
+                attention_mask = torch.tensor(attention_mask, device=self.device)
+            elif isinstance(attention_mask, torch.Tensor):
+                attention_mask = attention_mask.to(self.device)
+            elif attention_mask is not None:
+                raise TypeError("`attention_mask` must be a tensor or list.")
+            prompt_ids = prompt_ids.unsqueeze(0) if prompt_ids.ndim == 1 else prompt_ids
+            attention_mask = (
+                attention_mask.unsqueeze(0)
+                if attention_mask is not None and attention_mask.ndim == 1
+                else attention_mask
+            )
             prompt_embeds, prompt_embeds_mask = self._get_qwen_prompt_embeds(prompt_ids, attention_mask=attention_mask)
 
         prompt_embeds = prompt_embeds[:, :max_sequence_length]
@@ -187,20 +210,25 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         """Tokenize a text prompt using the Qwen chat template (parent behavior)."""
         prompt = [text] if isinstance(text, str) else text
         txt = [self.prompt_template_encode.format(e) for e in prompt]
+        prompt_embed_cache = getattr(self, "_prompt_embed_cache", None)
+        use_prompt_embed_cache = bool(prompt_embed_cache is not None and prompt_embed_cache.enabled)
+        tokenizer_kwargs = {} if use_prompt_embed_cache else {"return_tensors": "pt"}
         tokens = self.tokenizer(
             txt,
             max_length=self.tokenizer_max_length + self.prompt_template_encode_start_idx,
             padding=True,
             truncation=True,
-            return_tensors="pt",
-        ).to(self.device)
+            **tokenizer_kwargs,
+        )
+        if not use_prompt_embed_cache:
+            tokens = tokens.to(self.device)
         return tokens.input_ids, tokens.attention_mask
 
     def prepare_encode(
         self,
-        state: "DiffusionRequestState",
+        state: StepRequestState,
         **kwargs: Any,
-    ) -> "DiffusionRequestState":
+    ) -> StepRequestState:
         """Populate *state* with encoded prompts, latents, timesteps, and CFG config.
 
         Override of ``QwenImagePipeline.prepare_encode`` that accepts pre-tokenized
@@ -208,17 +236,11 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         matching the input contract of ``QwenImagePipelineWithLogProb``.
         """
         sampling = state.sampling
-        # vllm-omni >=0.24 stores a single prompt on DiffusionRequestState.prompt
+        # vllm-omni >=0.24 stores a single prompt on StepRequestState.prompt
         # (not .prompts). Match upstream QwenImagePipeline.prepare_encode.
         prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask = self._extract_prompt_ids(
             [state.prompt] if state.prompt is not None else []
         )
-
-        # Normalize list inputs to tensors on device.
-        if isinstance(prompt_ids, list):
-            prompt_ids = torch.tensor(prompt_ids, device=self.device)
-        if isinstance(negative_prompt_ids, list):
-            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
 
         if prompt_ids is None:
             raise ValueError(
@@ -244,10 +266,10 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         self._current_timestep = None
         self._interrupt = False
 
-        if prompt_ids is not None:
+        if isinstance(prompt_ids, torch.Tensor):
             batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
         else:
-            batch_size = 1
+            batch_size = len(prompt_ids) if prompt_ids and isinstance(prompt_ids[0], list) else 1
 
         has_neg_prompt = negative_prompt_ids is not None
         do_true_cfg = true_cfg_scale > 1 and has_neg_prompt
@@ -338,7 +360,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         # from the same RNG stream as ``forward()``.
         state.sampling.generator = generator
         # Rollout / SDE state consumed by ``step_scheduler`` and packaged
-        # into ``custom_output`` by ``post_decode``.
+        # into trajectory/metadata fields by ``post_decode``.
         state.sde_window = sde_window
         state.noise_level = noise_level
         state.sde_type = sde_type
@@ -496,7 +518,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
 
     def step_scheduler(
         self,
-        state: DiffusionRequestState,
+        state: StepRequestState,
         noise_pred: torch.Tensor,
         **kwargs: Any,
     ) -> None:
@@ -593,7 +615,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
 
     def post_decode(
         self,
-        state: DiffusionRequestState,
+        state: StepRequestState,
         **kwargs: Any,
     ) -> DiffusionOutput:
         """Decode final latents, package rollout trajectory, and move to CPU.
@@ -602,7 +624,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         :class:`DiffusionOutput` across an inter-process MessageQueue to the
         ``vLLMOmniHttpServer`` actor.  We must (a) move tensors to CPU so the
         receiving process does not initialise a stray CUDA context on GPU 0,
-        and (b) populate ``custom_output`` with the trajectory fields that
+        and (b) populate native ``trajectory_*`` / metadata fields that
         :meth:`forward` produces, so downstream consumers
         (``vllm_omni_async_server.generate`` ->
         ``embeds_padding_2_no_padding``) receive real tensors rather than
@@ -625,12 +647,12 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             torch.stack(all_timesteps).unsqueeze(0).expand(state.latents.shape[0], -1) if all_timesteps else None
         )
 
-        return replace(
+        return with_rollout_data(
             output,
-            custom_output={
-                "all_latents": stacked_latents,
-                "all_log_probs": stacked_log_probs,
-                "all_timesteps": stacked_timesteps,
+            trajectory_latents=stacked_latents,
+            trajectory_log_probs=stacked_log_probs,
+            trajectory_timesteps=stacked_timesteps,
+            prompt_embeddings={
                 "prompt_embeds": state.prompt_embeds,
                 "prompt_embeds_mask": state.prompt_embeds_mask,
                 "negative_prompt_embeds": state.negative_prompt_embeds,
@@ -642,10 +664,10 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
     def forward(
         self,
         req: OmniDiffusionRequest | DiffusionRequestBatch,
-        prompt_token_ids: torch.Tensor | list[int] | None = None,
-        prompt_mask: torch.Tensor | None = None,
-        negative_prompt_ids: torch.Tensor | list[int] | None = None,
-        negative_prompt_mask: torch.Tensor | None = None,
+        prompt_token_ids: torch.Tensor | list[int] | list[list[int]] | None = None,
+        prompt_mask: torch.Tensor | list[int] | list[bool] | list[list[int]] | list[list[bool]] | None = None,
+        negative_prompt_ids: torch.Tensor | list[int] | list[list[int]] | None = None,
+        negative_prompt_mask: torch.Tensor | list[int] | list[bool] | list[list[int]] | list[list[bool]] | None = None,
         true_cfg_scale: float = 4.0,
         height: int | None = None,
         width: int | None = None,
@@ -678,12 +700,12 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         Args:
             req (OmniDiffusionRequest | DiffusionRequestBatch): One rollout request
                 or a request batch containing prompts and sampling parameters.
-            prompt_token_ids (torch.Tensor | list[int], *optional*): Token IDs for
-                the positive prompt.
-            prompt_mask (torch.Tensor, *optional*): Attention mask for *prompt_token_ids*.
-            negative_prompt_ids (torch.Tensor | list[int], *optional*): Token IDs
-                for the negative prompt used in True-CFG.
-            negative_prompt_mask (torch.Tensor, *optional*): Attention mask for
+            prompt_token_ids (torch.Tensor | list[int] | list[list[int]], *optional*): Token IDs
+                for the positive prompt.
+            prompt_mask (torch.Tensor | list, *optional*): Attention mask for *prompt_token_ids*.
+            negative_prompt_ids (torch.Tensor | list[int] | list[list[int]], *optional*): Token
+                IDs for the negative prompt used in True-CFG.
+            negative_prompt_mask (torch.Tensor | list, *optional*): Attention mask for
                 *negative_prompt_ids*.
             true_cfg_scale (float): Classifier-free guidance scale; CFG is
                 disabled when ``<= 1``.
@@ -723,20 +745,22 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
 
         Returns:
             DiffusionOutput | list[DiffusionOutput]: Contains the decoded *output*
-                image and a *custom_output* dict with keys ``"all_latents"``,
-                ``"all_log_probs"``, ``"all_timesteps"``, ``"prompt_embeds"``,
-                ``"prompt_embeds_mask"``, ``"negative_prompt_embeds"``, and
-                ``"negative_prompt_embeds_mask"``.
+                image plus native ``trajectory_*`` fields and prompt-embedding
+                metadata used for FlowGRPO training.
         """
         request_batch = req if isinstance(req, DiffusionRequestBatch) else DiffusionRequestBatch(requests=[req])
         return_batch = isinstance(req, DiffusionRequestBatch)
         prompts = request_batch.prompts
+        prompt_embed_cache = getattr(self, "_prompt_embed_cache", None)
+        use_prompt_embed_cache = bool(prompt_embed_cache is not None and prompt_embed_cache.enabled)
+        # The prompt cache wraps encode_prompt, so keep token inputs as lists until that boundary.
         prompt_token_ids, prompt_token_lengths = _collate_prompt_rows(
             prompts,
             ("prompt_token_ids", "prompt_ids"),
             prompt_token_ids,
             device=self.device,
             field_name="prompt_token_ids",
+            preserve_lists=use_prompt_embed_cache,
         )
         prompt_mask = _collate_prompt_mask(
             prompts,
@@ -745,7 +769,8 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             device=self.device,
             field_name="prompt_mask",
             token_lengths=prompt_token_lengths,
-            target_seq_len=None if prompt_token_ids is None else int(prompt_token_ids.shape[1]),
+            target_seq_len=max(prompt_token_lengths) if prompt_token_lengths else None,
+            preserve_lists=use_prompt_embed_cache,
         )
         negative_prompt_ids, negative_prompt_lengths = _collate_prompt_rows(
             prompts,
@@ -753,6 +778,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             negative_prompt_ids,
             device=self.device,
             field_name="negative_prompt_ids",
+            preserve_lists=use_prompt_embed_cache,
         )
         negative_prompt_mask = _collate_prompt_mask(
             prompts,
@@ -761,7 +787,8 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             device=self.device,
             field_name="negative_prompt_mask",
             token_lengths=negative_prompt_lengths,
-            target_seq_len=None if negative_prompt_ids is None else int(negative_prompt_ids.shape[1]),
+            target_seq_len=max(negative_prompt_lengths) if negative_prompt_lengths else None,
+            preserve_lists=use_prompt_embed_cache,
         )
 
         sampling_params = request_batch.sampling_params_list[0]
@@ -799,15 +826,16 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         self._interrupt = False
 
         if prompt_token_ids is not None:
-            if isinstance(prompt_token_ids, list):
-                prompt_token_ids = torch.tensor(prompt_token_ids, device=self.device)
-            batch_size = prompt_token_ids.shape[0] if prompt_token_ids.ndim == 2 else 1
+            if isinstance(prompt_token_ids, torch.Tensor):
+                batch_size = prompt_token_ids.shape[0] if prompt_token_ids.ndim == 2 else 1
+            else:
+                batch_size = len(prompt_token_ids)
         elif prompt_embeds is not None:
             batch_size = prompt_embeds.shape[0]
         else:
             # Both prompt_token_ids and prompt_embeds are None (e.g. during warmup/dummy run).
             # Return a minimal dummy output to avoid crashing.
-            outputs = [DiffusionOutput(output=None, custom_output={}) for _ in range(request_batch.num_reqs)]
+            outputs = [DiffusionOutput(output=None) for _ in range(request_batch.num_reqs)]
             return outputs if return_batch else outputs[0]
 
         has_neg_prompt = negative_prompt_ids is not None or (
@@ -909,12 +937,12 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             latents = latents / latents_std + latents_mean
             image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
 
-        result = DiffusionOutput(
-            output=image,
-            custom_output={
-                "all_latents": all_latents,
-                "all_log_probs": all_log_probs,
-                "all_timesteps": all_timesteps,
+        result = rollout_output(
+            media=image,
+            trajectory_latents=all_latents,
+            trajectory_log_probs=all_log_probs,
+            trajectory_timesteps=all_timesteps,
+            prompt_embeddings={
                 "prompt_embeds": prompt_embeds,
                 "prompt_embeds_mask": prompt_embeds_mask,
                 "negative_prompt_embeds": negative_prompt_embeds,

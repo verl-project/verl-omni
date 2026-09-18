@@ -21,10 +21,6 @@ Patches dropped from the adapter:
 """
 
 import importlib.metadata
-import importlib.util
-import sys
-import types
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -32,11 +28,12 @@ import torch
 import torch.nn as nn
 from packaging.version import parse as parse_version
 
+from verl_omni.pipelines.qwen3_omni.thinker_training_adapter import Qwen3OmniThinkerAdapter
+
 
 def _require_version(pkg_name: str, min_version: str):
-    """Raise ``AssertionError`` if *pkg_name* is below *min_version*."""
     ver = importlib.metadata.version(pkg_name)
-    assert parse_version(ver) >= parse_version(min_version), f"{pkg_name} >= {min_version} is required, got {ver}"
+    assert parse_version(ver) >= parse_version(min_version), f"{pkg_name} >= {min_version} required, got {ver}"
 
 
 def _has_lora(module: nn.Module) -> bool:
@@ -49,29 +46,9 @@ def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):
     pytest.importorskip("transformers")
     _require_version("transformers", "5.0.0")
 
-    from transformers import AutoConfig, AutoProcessor
+    from transformers import AutoConfig
 
-    class _FakeOmniModelBase:
-        @classmethod
-        def register(cls, *args, **kwargs):
-            return lambda subclass: subclass
-
-    model_base = types.ModuleType("verl_omni.pipelines.model_base")
-    model_base.OmniModelBase = _FakeOmniModelBase
-    for package_name in ("verl_omni", "verl_omni.pipelines", "verl_omni.pipelines.qwen3_omni"):
-        package = types.ModuleType(package_name)
-        package.__path__ = []
-        monkeypatch.setitem(sys.modules, package_name, package)
-    monkeypatch.setitem(sys.modules, "verl_omni.pipelines.model_base", model_base)
-
-    module_name = "verl_omni.pipelines.qwen3_omni.thinker_training_adapter"
-    adapter_path = Path(__file__).parents[2] / "verl_omni" / "pipelines" / "qwen3_omni" / "thinker_training_adapter.py"
-    spec = importlib.util.spec_from_file_location(module_name, adapter_path)
-    assert spec is not None and spec.loader is not None
-    adapter_module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, module_name, adapter_module)
-    spec.loader.exec_module(adapter_module)
-    Qwen3OmniThinkerAdapter = adapter_module.Qwen3OmniThinkerAdapter
+    from verl_omni.pipelines.qwen3_omni.video_processor import Qwen3OmniVideoProcessor
 
     token_ids = {
         "<|image_pad|>": 101,
@@ -93,27 +70,8 @@ def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):
         talker_config=SimpleNamespace(vision_start_token_id=104),
     )
 
-    monkeypatch.setattr(AutoProcessor, "from_pretrained", lambda *args, **kwargs: processor)
+    monkeypatch.setattr(Qwen3OmniVideoProcessor, "from_pretrained", lambda *args, **kwargs: processor)
     monkeypatch.setattr(AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
-
-    class AgentLoopWorker:
-        def _compute_position_ids(self, input_ids, attention_mask, multi_modal_inputs, mm_processor_kwargs=None):
-            del input_ids, attention_mask, multi_modal_inputs, mm_processor_kwargs
-
-    agent_loop_tq_module = types.ModuleType("verl.trainer.ppo.v1.agent_loop_tq")
-    agent_loop_tq_module.AgentLoopWorkerTQ = SimpleNamespace(
-        __ray_metadata__=SimpleNamespace(modified_class=AgentLoopWorker)
-    )
-    for package_name in (
-        "verl",
-        "verl.trainer",
-        "verl.trainer.ppo",
-        "verl.trainer.ppo.v1",
-    ):
-        package = types.ModuleType(package_name)
-        package.__path__ = []
-        monkeypatch.setitem(sys.modules, package_name, package)
-    monkeypatch.setitem(sys.modules, "verl.trainer.ppo.v1.agent_loop_tq", agent_loop_tq_module)
 
     configured = Qwen3OmniThinkerAdapter.configure_processor(
         "/fake/qwen3-omni",
@@ -135,34 +93,16 @@ def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):
     ]
 
 
-def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch):
-    """The V1 adapter must install the audio-aware agent-loop RoPE path."""
+@pytest.mark.parametrize("has_audio,has_video", [(True, False), (False, True), (True, True), (False, False)])
+def test_v1_adapter_forwards_qwen3_omni_media_metadata_to_rope(monkeypatch, has_audio, has_video):
+    """Forward audio lengths and video timing without adding absent modalities."""
     pytest.importorskip("transformers")
     _require_version("transformers", "5.0.0")
 
-    from transformers import AutoConfig, AutoProcessor
+    from transformers import AutoConfig
     from transformers.models.qwen3_omni_moe import Qwen3OmniMoeThinkerForConditionalGeneration
 
-    class _FakeOmniModelBase:
-        @classmethod
-        def register(cls, *args, **kwargs):
-            return lambda subclass: subclass
-
-    model_base = types.ModuleType("verl_omni.pipelines.model_base")
-    model_base.OmniModelBase = _FakeOmniModelBase
-    for package_name in ("verl_omni", "verl_omni.pipelines", "verl_omni.pipelines.qwen3_omni"):
-        package = types.ModuleType(package_name)
-        package.__path__ = []
-        monkeypatch.setitem(sys.modules, package_name, package)
-    monkeypatch.setitem(sys.modules, "verl_omni.pipelines.model_base", model_base)
-
-    module_name = "verl_omni.pipelines.qwen3_omni.thinker_training_adapter"
-    adapter_path = Path(__file__).parents[2] / "verl_omni" / "pipelines" / "qwen3_omni" / "thinker_training_adapter.py"
-    spec = importlib.util.spec_from_file_location(module_name, adapter_path)
-    assert spec is not None and spec.loader is not None
-    adapter_module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, module_name, adapter_module)
-    spec.loader.exec_module(adapter_module)
+    from verl_omni.pipelines.qwen3_omni.video_processor import Qwen3OmniVideoProcessor
 
     class Qwen3OmniMoeProcessor:
         def __init__(self):
@@ -172,32 +112,19 @@ def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch):
     class AgentLoopWorker:
         def _compute_position_ids(self, input_ids, attention_mask, multi_modal_inputs, mm_processor_kwargs=None):
             del mm_processor_kwargs
+            multi_modal_kwargs = {
+                "image_grid_thw": multi_modal_inputs.get("image_grid_thw"),
+                "video_grid_thw": multi_modal_inputs.get("video_grid_thw"),
+            }
+            get_rope_index_kwargs = getattr(self.processor, "get_rope_index_kwargs", None)
+            if get_rope_index_kwargs is not None:
+                multi_modal_kwargs.update(get_rope_index_kwargs(multi_modal_inputs))
             position_ids, _ = self.processor.get_rope_index(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                image_grid_thw=multi_modal_inputs.get("image_grid_thw"),
-                video_grid_thw=multi_modal_inputs.get("video_grid_thw"),
+                **multi_modal_kwargs,
             )
             return position_ids
-
-    class AgentLoopWorkerTQ(AgentLoopWorker):
-        # Ray copies inherited methods when @ray.remote builds the actor class.
-        _compute_position_ids = AgentLoopWorker._compute_position_ids
-
-    agent_loop_tq_module = types.ModuleType("verl.trainer.ppo.v1.agent_loop_tq")
-    agent_loop_tq_module.AgentLoopWorkerTQ = SimpleNamespace(
-        __ray_metadata__=SimpleNamespace(modified_class=AgentLoopWorkerTQ)
-    )
-    for package_name in (
-        "verl",
-        "verl.trainer",
-        "verl.trainer.ppo",
-        "verl.trainer.ppo.v1",
-    ):
-        package = types.ModuleType(package_name)
-        package.__path__ = []
-        monkeypatch.setitem(sys.modules, package_name, package)
-    monkeypatch.setitem(sys.modules, "verl.trainer.ppo.v1.agent_loop_tq", agent_loop_tq_module)
 
     def _get_rope_index(
         processor,
@@ -207,10 +134,11 @@ def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch):
         image_grid_thw=None,
         video_grid_thw=None,
         audio_seqlens=None,
+        second_per_grids=None,
     ):
         del attention_mask, image_grid_thw, video_grid_thw
         processor.audio_seqlens = audio_seqlens
-        _ = audio_seqlens[0]
+        processor.second_per_grids = second_per_grids
         return torch.zeros((3, *input_ids.shape), dtype=torch.float32), torch.zeros((input_ids.shape[0], 1))
 
     processor = Qwen3OmniMoeProcessor()
@@ -218,22 +146,39 @@ def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch):
         thinker_config=SimpleNamespace(vision_config=SimpleNamespace(spatial_merge_size=2)),
         talker_config=SimpleNamespace(vision_start_token_id=104),
     )
-    monkeypatch.setattr(AutoProcessor, "from_pretrained", lambda *args, **kwargs: processor)
+    monkeypatch.setattr(Qwen3OmniVideoProcessor, "from_pretrained", lambda *args, **kwargs: processor)
     monkeypatch.setattr(AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
     monkeypatch.setattr(Qwen3OmniMoeThinkerForConditionalGeneration, "get_rope_index", _get_rope_index)
 
-    configured = adapter_module.Qwen3OmniThinkerAdapter.configure_processor(
+    configured = Qwen3OmniThinkerAdapter.configure_processor(
         "/fake/qwen3-omni",
         SimpleNamespace(trust_remote_code=False),
     )
-    worker = type("Worker", (), {"processor": configured})()
+    assert hasattr(configured, "get_rope_index_kwargs")
+
+    multi_modal_inputs = {}
+    if has_audio:
+        multi_modal_inputs["feature_attention_mask"] = torch.tensor([[1, 1, 1, 0]])
+    if has_video:
+        multi_modal_inputs["video_second_per_grid"] = torch.tensor([3.75])
+    extra_kwargs = configured.get_rope_index_kwargs(multi_modal_inputs)
+    assert ("audio_seqlens" in extra_kwargs) == has_audio
+    assert ("second_per_grids" in extra_kwargs) == has_video
+
+    worker = AgentLoopWorker()
+    worker.processor = configured
     input_ids = torch.tensor([[1, 2, 3]])
     attention_mask = torch.ones_like(input_ids)
-    multi_modal_inputs = {"feature_attention_mask": torch.tensor([[1, 1, 1, 0]])}
 
-    AgentLoopWorkerTQ._compute_position_ids(worker, input_ids, attention_mask, multi_modal_inputs)
-
-    torch.testing.assert_close(configured.audio_seqlens, torch.tensor([3]))
+    worker._compute_position_ids(input_ids, attention_mask, multi_modal_inputs)
+    if has_audio:
+        torch.testing.assert_close(configured.audio_seqlens, torch.tensor([3]))
+    else:
+        assert configured.audio_seqlens is None
+    if has_video:
+        torch.testing.assert_close(configured.second_per_grids, torch.tensor([3.75]))
+    else:
+        assert configured.second_per_grids is None
 
 
 class _FusedMoEExperts(nn.Module):
@@ -412,9 +357,20 @@ def test_thinker_class_no_split_modules_is_correct():
         Qwen3OmniMoeThinkerForConditionalGeneration,
     )
 
-    expected = ["Qwen3OmniMoeAudioEncoder", "Qwen3OmniMoeVisionEncoder"]
+    required = {
+        "Qwen3OmniMoeAudioEncoder",
+        "Qwen3OmniMoeVisionEncoder",
+    }
+    optional = {"Qwen3OmniMoeThinkerTextDecoderLayer"}
     actual = Qwen3OmniMoeThinkerForConditionalGeneration._no_split_modules
-    assert actual == expected, f"_no_split_modules should be {expected} in transformers >= 5.0, got {actual}"
+    actual_set = set(actual)
+    assert required.issubset(actual_set), (
+        f"_no_split_modules should include {sorted(required)} in transformers >= 5.0, got {actual}"
+    )
+    unexpected = actual_set - required - optional
+    assert not unexpected, (
+        f"_no_split_modules has unexpected entries {sorted(unexpected)} in transformers >= 5.0, got {actual}"
+    )
 
 
 def test_peft_wrapped_model_forwards():

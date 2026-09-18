@@ -17,25 +17,28 @@ dynamic = ["version"]
 description = "verl-omni: Easy, fast, and stable RL training for diffusion and omni-modality models"
 license = {text = "Apache-2.0"}
 readme = {file = "README.md", content-type = "text/markdown"}
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "accelerate>=1.14.0",
     "cachetools",
     "codetiming",
-    "datasets",
-    "diffusers>=0.37.1",
+    "datasets>=2.20.0",  # 2.19- uses pa.PyExtensionType; pyarrow>=21 removed it
+    "diffusers>=0.40.0",
     "dill",
     "hydra-core",
+    "imageio[ffmpeg]>=2.37.2",
     "pandas",
     "peft",
-    "pyarrow>=19.0.0",
+    "pyarrow>=19.0.0,<25.0.0",  # 25.0.0 breaks pd.read_parquet with ArrowInvalid: column length mismatch
     "pybind11",
     "pylatexenc",
     "ray[default]",
     "safetensors>=0.4.5",
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
     "torchdata",
-    "transformers",
+    # TODO: Remove this cap after the Qwen3-Omni adapter and tests support the
+    # FSDP `_no_split_modules` metadata change introduced in Transformers 5.15.0.
+    "transformers>=5.13.0,<=5.14.1",
     "wandb",
     "packaging>=20.0",
     "uvicorn",
@@ -43,28 +46,39 @@ dependencies = [
     "latex2sympy2_extended",
     "math_verify",
     "tensorboard",
-    "TransferQueue==0.1.8",
+    "TransferQueue==0.1.9",
 ]
 
 [project.optional-dependencies]
 # Rollout engine (install in step 2, after gpu step 1).
 vllm-omni = [
-    "vllm-omni==0.24.0",
+    "vllm-omni==0.28.0rc1",
     "qwen-vl-utils>=0.0.14",
 ]
 audio = [
     "qwen-omni-utils>=0.0.9",
+    "audioread",
+]
+# Install qwen-tts separately from the pinned upstream Transformers 5 support
+# revision. The released 0.1.1 source and metadata target Transformers 4.57.3.
+omni = [
+    "einops>=0.8.0",
+    "librosa>=0.10.2",
+    "onnxruntime>=1.20.0",
+    "soundfile>=0.12.1",
+    "sox>=1.5.0",
+    "torchaudio==2.11.0",
 ]
 # CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
 gpu = [
-    "vllm==0.24.0",
-    "kernels==0.14.1",
+    "vllm==0.28.0",
+    "kernels==0.16.0",
     "liger-kernel",
 ]
 # Training stack (install in step 2).
-# Git commit must match .github/verl_pin.txt (reports as 0.9.0.dev0 at 8a69493).
+# Git commit must match .github/verl_pin.txt (reports as 0.10.0.dev at fefb080).
 train = [
-    "verl @ git+https://github.com/verl-project/verl.git@8a694930275061f52ebd538c906ef8819af56dbd",
+    "verl @ git+https://github.com/verl-project/verl.git@fefb080262e1c015a0ea05f958822a6a512dc795",
 ]
 dev = [
     "pytest",
@@ -189,4 +203,6 @@ verl_omni = [
 [tool.uv]
 override-dependencies = [
     "accelerate>=1.14.0",
+    "kernels==0.16.0",
+    "transformers>=5.13.0,<=5.14.1",
 ]

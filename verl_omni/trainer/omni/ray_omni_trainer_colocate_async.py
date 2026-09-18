@@ -11,16 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Omni colocate-async trainer — a PPOTrainerColocateAsync subclass.
-
-Registered via ``@register_trainer("omni_colocate_async")``. Overrides
-``_init_tokenizer`` to wire the omni tokenizer/processor from
-``OmniModelConfig`` (identical to ``OmniPPOTrainerSync``), and overrides
-``on_train_begin`` to read warmup batches from the ``omni_colocate_async``
-config key (consistent with the ``trainer_mode`` name). All other async
-lifecycle hooks (abort/sleep/resume, weight sync) are inherited from
-``PPOTrainerColocateAsync``.
-"""
+"""Omni colocate-async trainer — a thin ``PPOTrainerColocateAsync`` subclass (RFC #320)."""
 
 import logging
 import os
@@ -38,8 +29,9 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 @register_trainer("omni_colocate_async")
 class OmniPPOTrainerColocateAsync(PPOTrainerColocateAsync):
     """``PPOTrainerColocateAsync`` subclass that wires tokenizer/processor
-    from ``OmniModelConfig`` and reads warmup batches from the
-    ``omni_colocate_async`` config key.
+    from ``OmniModelConfig``. Warmup and all async lifecycle hooks are
+    inherited from verl and read the generic ``trainer.v1.colocate_async``
+    config key (#320 §3.6).
     """
 
     def _init_tokenizer(self):
@@ -47,9 +39,3 @@ class OmniPPOTrainerColocateAsync(PPOTrainerColocateAsync):
         model_config: OmniModelConfig = omega_conf_to_dataclass(self.config.actor_rollout_ref.model, OmniModelConfig)
         self.tokenizer = model_config.tokenizer
         self.processor = model_config.processor
-
-    def on_train_begin(self):
-        num_warmup_batches = self.config.trainer.v1.omni_colocate_async.num_warmup_batches
-        for _ in range(num_warmup_batches):
-            self._add_batch_to_generate()
-        logger.info(f"Added {num_warmup_batches} warmup batches to the agent loop manager")

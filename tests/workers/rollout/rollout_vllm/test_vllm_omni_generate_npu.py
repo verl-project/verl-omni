@@ -166,7 +166,8 @@ def test_generate_and_sleep_wakeup(init_server):
     assert isinstance(output, DiffusionOutput)
     assert len(output.diffusion_output) == 3
     assert output.stop_reason in ("completed", "aborted", None)
-    assert 0.0 <= output.diffusion_output[0][0][0] <= 1.0
+    assert output.diffusion_output.dtype == torch.uint8
+    assert 0 <= output.diffusion_output[0][0][0] <= 255
     assert output.log_probs is not None
 
     ray.get(server.sleep.remote())

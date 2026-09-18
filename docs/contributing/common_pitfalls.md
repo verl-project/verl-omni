@@ -1,6 +1,6 @@
 # Common Pitfalls
 
-Last updated: 06/29/2026.
+Last updated: 08/22/2026.
 
 ---
 
@@ -244,3 +244,35 @@ SDE window seeding:
 
 The fix brings `critic/rewards/std_mean` into the same ~0.01–0.02 range
 observed in reference flow_grpo PickScore runs.
+
+---
+
+## Float32 Islands Flattened by a Blanket bf16 Cast
+
+### Symptom (fp32 Islands)
+
+A diffusers model whose class declares `_keep_in_fp32_modules` (e.g. rope,
+time, or input/output projections) trains without any crash or NaN, but the
+reward signal is noisier and RL converges more weakly than expected — the
+numerically-sensitive submodules are silently downcast to bf16.
+
+### Root cause (fp32 Islands)
+
+`_keep_in_fp32_modules` is a native diffusers/transformers `ModelMixin`
+mechanism: `from_pretrained(torch_dtype=bf16)` loads the listed submodules in
+fp32 while casting the rest. A naive blanket `module.to(bf16)` at load, plus
+FSDP `MixedPrecision(param_dtype=bf16)`, would flatten those fp32 islands. The
+damage is worst for phase-sensitive math — at `seq_len=4096`, `rope.cos()`
+fp32-vs-bf16 max error is ~2.0 (the full `[-1, 1]` range), and adjacent
+timesteps (`t=500` vs `501`) round to the same bf16 value.
+
+### Behavior (fp32 Islands)
+
+You do not need to do anything. verl-omni's diffusers FSDP engine
+(`DiffusersFSDPEngine`) reads `_keep_in_fp32_modules` and preserves the islands
+automatically at load and under FSDP mixed precision (`_cast_loaded_diffusers_module`
+skips the blanket cast for a declaring module and `_fsdp_param_dtype` returns
+`None` so FSDP keeps the checkpoint dtypes instead of recasting every
+parameter). Models that do not declare the attribute degrade to the ordinary
+blanket bf16 cast. Just declare `_keep_in_fp32_modules` in your diffusers model
+class (the diffusers convention) — there is no verl-omni hook to add.

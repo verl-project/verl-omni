@@ -22,10 +22,12 @@ import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import numpy as np
 import pandas as pd
 import pytest
 import torch
 from omegaconf import OmegaConf
+from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -132,6 +134,18 @@ def mixed_parquet_path(tmp_path):
     return str(parquet_path)
 
 
+@pytest.fixture
+def imbalanced_parquet_path(tmp_path):
+    rows = (
+        [_parquet_row("image", index) for index in range(5)]
+        + [_parquet_row("video", index) for index in range(4)]
+        + [_parquet_row("audio", index) for index in range(3)]
+    )
+    parquet_path = tmp_path / "imbalanced.parquet"
+    pd.DataFrame(rows).to_parquet(parquet_path, index=False)
+    return str(parquet_path)
+
+
 class FakeModalityDataset:
     def __init__(self, modalities: list[str]):
         self._modalities = modalities
@@ -157,7 +171,6 @@ def test_build_preference_branch_extracts_media_and_answer():
     }
     branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
 
-    assert branch["source_name"] == "omni_preference/video"
     assert branch["videos"] == ["/tmp/clip.mp4"]
     assert branch["conversations"][-1] == ["assistant", ("text", "answer A")]
     assert branch["conversations"][0][0] == "user"
@@ -172,7 +185,6 @@ def test_build_preference_branch_supports_compact_top_level_media_schema():
     }
     branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
 
-    assert branch["source_name"] == "omni_preference/video"
     assert branch["videos"] == ["/tmp/clip.mp4"]
     assert branch["conversations"][0] == ["user", ("video", None), ("text", "What happens at the end?")]
     assert branch["conversations"][-1] == ["assistant", ("text", "preferred answer")]
@@ -189,14 +201,40 @@ def test_build_preference_branch_rejects_missing_top_level_media():
         dataset_mod._build_preference_branch(sample, sample["chosen"])
 
 
-def test_merge_chosen_rejected_stacks_branch_tensors():
+def test_pair_branch_values_keeps_chosen_rejected_branches_separate():
     chosen = {"input_ids": torch.tensor([1, 2]), "labels": torch.tensor([3, 4])}
     rejected = {"input_ids": torch.tensor([5]), "labels": torch.tensor([7])}
 
-    merged = dataset_mod._merge_chosen_rejected(chosen, rejected)
+    merged = dataset_mod.OfflineMLLMDPODataset._pair_branch_values(chosen, rejected)
 
-    torch.testing.assert_close(merged["input_ids"], torch.tensor([[1, 2], [5, 0]]))
-    torch.testing.assert_close(merged["labels"], torch.tensor([[3, 4], [7, -100]]))
+    assert merged["input_ids"] == [chosen["input_ids"], rejected["input_ids"]]
+    assert merged["labels"] == [chosen["labels"], rejected["labels"]]
+
+
+def test_split_model_inputs_squeezes_position_ids_singleton_axis():
+    model_inputs = {
+        "input_ids": torch.tensor([1, 2]),
+        "position_ids": torch.ones(3, 1, 2),
+    }
+
+    split = dataset_mod.OfflineMLLMDPODataset._split_model_inputs(model_inputs)
+
+    assert split["position_ids"].shape == (3, 2)
+
+
+def test_prepare_branch_inputs_does_not_pad_in_getitem():
+    dataset = object.__new__(dataset_mod.OfflineMLLMDPODataset)
+    dataset.pad_mode = dataset_mod.DatasetPadMode.RIGHT
+    dataset.max_length = 4
+    dataset.truncation = "error"
+    dataset.tokenizer = MagicMock()
+
+    branch = {"input_ids": torch.tensor([1, 2]), "labels": torch.tensor([-100, 2])}
+    prepared = dataset._prepare_branch_inputs(branch)
+
+    torch.testing.assert_close(prepared["input_ids"], torch.tensor([1, 2]))
+    torch.testing.assert_close(prepared["labels"], torch.tensor([-100, 2]))
+    assert "pad_mode" not in prepared
 
 
 def test_collate_tensor_values_pads_variable_length_sequences():
@@ -220,6 +258,17 @@ def test_offline_mllm_dpo_collate_fn_rejects_mixed_modalities():
         dataset_mod.offline_mllm_dpo_collate_fn(features)
 
 
+def test_get_batch_modality_reads_first_extra_info_modality():
+    assert dataset_mod.get_batch_modality({"extra_info": np.array([{"modality": "image"}], dtype=object)}) == "image"
+    assert dataset_mod.get_batch_modality({"extra_info": [{"modality": "video"}, {"modality": "video"}]}) == "video"
+
+    stacked = NonTensorStack.from_list([NonTensorData({"modality": "audio"}), NonTensorData({"modality": "audio"})])
+    assert dataset_mod.get_batch_modality({"extra_info": stacked}) == "audio"
+
+    with pytest.raises(ValueError, match="Unsupported offline MLLM DPO batch modality"):
+        dataset_mod.get_batch_modality({"extra_info": [{"modality": "text"}]})
+
+
 def test_offline_mllm_dpo_collate_fn_batches_same_modality():
     features = [
         {
@@ -235,33 +284,100 @@ def test_offline_mllm_dpo_collate_fn_batches_same_modality():
             "extra_info": {"index": 1},
         },
     ]
-    batch = dataset_mod.offline_mllm_dpo_collate_fn(features)
+    batch = dataset_mod.offline_mllm_dpo_collate_fn(features, pad_mode="right")
 
     assert batch["input_ids"].shape == (2, 2)
     assert batch["labels"].shape == (2, 2)
+    torch.testing.assert_close(batch["loss_mask"], torch.tensor([[True, True], [True, False]]))
     assert batch["modality"].tolist() == ["image", "image"]
     assert batch["extra_info"].tolist() == [{"index": 0}, {"index": 1}]
 
 
-def test_offline_mllm_dpo_collate_fn_pads_branch_stacked_pairs():
+def test_offline_mllm_dpo_collate_fn_expands_paired_features_to_adjacent_rows():
     features = [
         {
             "modality": "image",
-            "input_ids": torch.tensor([[1, 2], [3, 0]]),
-            "labels": torch.tensor([[-100, 2], [3, -100]]),
+            "input_ids": [torch.tensor([1, 2]), torch.tensor([3])],
+            "labels": [torch.tensor([-100, 2]), torch.tensor([3])],
         },
         {
             "modality": "image",
-            "input_ids": torch.tensor([[4, 5, 6], [7, 8, 0]]),
-            "labels": torch.tensor([[-100, 5, 6], [7, 8, -100]]),
+            "input_ids": [torch.tensor([4, 5, 6]), torch.tensor([7, 8])],
+            "labels": [torch.tensor([-100, 5, 6]), torch.tensor([7, 8])],
         },
     ]
-    batch = dataset_mod.offline_mllm_dpo_collate_fn(features)
+    batch = dataset_mod.offline_mllm_dpo_collate_fn(features, pad_mode="right")
 
-    assert batch["input_ids"].shape == (2, 2, 3)
-    assert batch["labels"].shape == (2, 2, 3)
-    torch.testing.assert_close(batch["input_ids"][0], torch.tensor([[1, 2, 0], [3, 0, 0]]))
-    torch.testing.assert_close(batch["labels"][0], torch.tensor([[-100, 2, -100], [3, -100, -100]]))
+    assert batch["input_ids"].shape == (4, 3)
+    assert batch["labels"].shape == (4, 3)
+    torch.testing.assert_close(batch["input_ids"][0], torch.tensor([1, 2, 0]))
+    torch.testing.assert_close(batch["input_ids"][1], torch.tensor([3, 0, 0]))
+    torch.testing.assert_close(batch["labels"][0], torch.tensor([-100, 2, -100]))
+    torch.testing.assert_close(batch["loss_mask"][0], torch.tensor([False, True, False]))
+
+
+def test_offline_mllm_dpo_collate_fn_no_padding_uses_jagged_and_non_tensor_stack():
+    features = [
+        {
+            "modality": ["image", "image"],
+            "uid": ["pair-0", "pair-0"],
+            "input_ids": [torch.tensor([1, 2]), torch.tensor([3])],
+            "labels": [torch.tensor([-100, 2]), torch.tensor([3])],
+            "position_ids": [torch.ones(3, 2), torch.ones(3, 1) * 2],
+            "multi_modal_inputs": {
+                "pixel_values": [torch.ones(2, 4), torch.ones(1, 4) * 2],
+                "video_grid_thw": [torch.tensor([[1], [2], [3]]), torch.tensor([[4], [5], [6]])],
+            },
+        },
+    ]
+
+    batch = dataset_mod.offline_mllm_dpo_collate_fn(features, pad_mode="no_padding")
+
+    assert batch["input_ids"].is_nested
+    assert batch["input_ids"].layout == torch.jagged
+    torch.testing.assert_close(batch["position_ids"].offsets(), torch.tensor([0, 2, 3]))
+
+    multi_modal_inputs = batch["multi_modal_inputs"]
+    assert isinstance(multi_modal_inputs, list)
+    assert len(multi_modal_inputs) == 2
+    torch.testing.assert_close(multi_modal_inputs[0]["pixel_values"], torch.ones(2, 4))
+    torch.testing.assert_close(multi_modal_inputs[1]["pixel_values"], torch.ones(1, 4) * 2)
+    torch.testing.assert_close(multi_modal_inputs[0]["video_grid_thw"], torch.tensor([[1, 2, 3]]))
+    torch.testing.assert_close(multi_modal_inputs[1]["video_grid_thw"], torch.tensor([[4, 5, 6]]))
+    assert batch["uid"].tolist() == ["pair-0", "pair-0"]
+
+
+def test_offline_mllm_dpo_collate_fn_keeps_multimodal_inputs_nested():
+    features = [
+        {
+            "modality": "image",
+            "input_ids": torch.tensor([1]),
+            "multi_modal_inputs": {
+                "pixel_values": torch.ones(2, 4),
+                "image_grid_thw": torch.tensor([[1, 2, 3]]),
+            },
+        },
+        {
+            "modality": "image",
+            "input_ids": torch.tensor([2]),
+            "multi_modal_inputs": {
+                "pixel_values": torch.ones(2, 4) * 2,
+                "image_grid_thw": torch.tensor([[4, 5, 6]]),
+            },
+        },
+    ]
+
+    batch = dataset_mod.offline_mllm_dpo_collate_fn(features, pad_mode="right")
+
+    assert "pixel_values" not in batch
+    assert "image_grid_thw" not in batch
+    multi_modal_inputs = batch["multi_modal_inputs"]
+    assert isinstance(multi_modal_inputs, list)
+    assert len(multi_modal_inputs) == 2
+    torch.testing.assert_close(multi_modal_inputs[0]["pixel_values"], torch.ones(2, 4))
+    torch.testing.assert_close(multi_modal_inputs[1]["pixel_values"], torch.ones(2, 4) * 2)
+    torch.testing.assert_close(multi_modal_inputs[0]["image_grid_thw"], torch.tensor([[1, 2, 3]]))
+    torch.testing.assert_close(multi_modal_inputs[1]["image_grid_thw"], torch.tensor([[4, 5, 6]]))
 
 
 def test_modality_grouped_batch_sampler_yields_same_modality_chunks():
@@ -300,8 +416,48 @@ def test_modality_grouped_batch_sampler_respects_weights(monkeypatch):
     assert sampled == ["video"] * 6
 
 
+def test_modality_grouped_batch_sampler_without_replacement_visits_each_row_once():
+    dataset = FakeModalityDataset(["image", "image", "video", "audio", "video", "audio"])
+    sampler = dataset_mod.ModalityGroupedBatchSampler(
+        data_source=dataset,
+        batch_size=2,
+        shuffle=True,
+        drop_last=False,
+        replacement=False,
+    )
+
+    sampled = list(sampler)
+    assert sampled == [3, 5, 0, 1, 2, 4]
+    assert sorted(sampled) == list(range(len(dataset)))
+    for start in range(0, len(sampled), sampler.batch_size):
+        batch = sampled[start : start + sampler.batch_size]
+        assert len({dataset.get_modality(index) for index in batch}) == 1
+
+
+def test_modality_grouped_batch_sampler_sequential_drop_last_skips_partial_batches():
+    dataset = FakeModalityDataset(["image", "image", "image", "video", "audio"])
+    sampler = dataset_mod.ModalityGroupedBatchSampler(
+        data_source=dataset,
+        batch_size=2,
+        drop_last=True,
+        replacement=False,
+    )
+
+    sampled = list(sampler)
+    assert sampled == [0, 1]
+    assert len(sampled) == sampler.batch_size
+
+    sampler_keep_partial = dataset_mod.ModalityGroupedBatchSampler(
+        data_source=dataset,
+        batch_size=2,
+        drop_last=False,
+        replacement=False,
+    )
+    assert list(sampler_keep_partial) == [4, 0, 1, 2, 3]
+
+
 def test_offline_mllm_dpo_dataset_init_and_get_modality(mock_processor, mixed_parquet_path):
-    config = OmegaConf.create({"train_batch_size": 2})
+    config = OmegaConf.create({"train_batch_size": 2, "max_length": 1})
     dataset = dataset_mod.OfflineMLLMDPODataset(
         data_files=mixed_parquet_path,
         tokenizer=None,
@@ -315,6 +471,23 @@ def test_offline_mllm_dpo_dataset_init_and_get_modality(mock_processor, mixed_pa
     assert dataset.get_modality(3) == "audio"
 
 
+def test_offline_mllm_dpo_dataset_balances_max_samples_by_modality(mock_processor, imbalanced_parquet_path):
+    config = OmegaConf.create({"train_batch_size": 2, "max_length": 1, "balance_max_samples_by_modality": True})
+    dataset = dataset_mod.OfflineMLLMDPODataset(
+        data_files=imbalanced_parquet_path,
+        tokenizer=None,
+        processor=mock_processor,
+        config=config,
+        max_samples=6,
+    )
+
+    modalities = [dataset.get_modality(index) for index in range(len(dataset))]
+    assert len(dataset) == 6
+    assert modalities.count("image") == 2
+    assert modalities.count("video") == 2
+    assert modalities.count("audio") == 2
+
+
 def test_offline_mllm_dpo_dataset_getitem(monkeypatch, mock_processor, mixed_parquet_path):
     def fake_transform(sample, **kwargs):
         answer = sample["conversations"][-1][1][1]
@@ -323,7 +496,7 @@ def test_offline_mllm_dpo_dataset_getitem(monkeypatch, mock_processor, mixed_par
 
     monkeypatch.setattr(dataset_mod, "process_qwen3_omni_sample", fake_transform)
 
-    config = OmegaConf.create({"train_batch_size": 2})
+    config = OmegaConf.create({"train_batch_size": 2, "max_length": 1})
     dataset = dataset_mod.OfflineMLLMDPODataset(
         data_files=mixed_parquet_path,
         tokenizer=None,
@@ -332,11 +505,13 @@ def test_offline_mllm_dpo_dataset_getitem(monkeypatch, mock_processor, mixed_par
     )
     item = dataset[0]
 
-    torch.testing.assert_close(item["input_ids"], torch.tensor([[1], [2]]))
-    torch.testing.assert_close(item["sample_level_scores"], torch.tensor([8.0, 4.0]))
-    assert item["modality"] == "image"
-    assert item["data_source"] == "omni_preference/image"
-    assert item["extra_info"]["modality"] == "image"
+    torch.testing.assert_close(item["input_ids"][0], torch.tensor([1]))
+    torch.testing.assert_close(item["input_ids"][1], torch.tensor([2]))
+    torch.testing.assert_close(item["sample_level_scores"][0], torch.tensor([8.0]))
+    torch.testing.assert_close(item["sample_level_scores"][1], torch.tensor([4.0]))
+    assert item["modality"] == ["image", "image"]
+    assert item["data_source"] == ["omni_preference/image", "omni_preference/image"]
+    assert item["extra_info"][0]["modality"] == "image"
 
 
 def test_offline_mllm_dpo_dataset_getitem_compact_top_level_media_schema(monkeypatch, mock_processor, tmp_path):
@@ -366,7 +541,7 @@ def test_offline_mllm_dpo_dataset_getitem_compact_top_level_media_schema(monkeyp
         data_files=str(parquet_path),
         tokenizer=None,
         processor=mock_processor,
-        config=OmegaConf.create({"train_batch_size": 1}),
+        config=OmegaConf.create({"train_batch_size": 1, "max_length": 1}),
     )
     item = dataset[0]
 
@@ -375,9 +550,11 @@ def test_offline_mllm_dpo_dataset_getitem_compact_top_level_media_schema(monkeyp
     assert seen_samples[0]["conversations"][0] == ["user", ("video", None), ("text", "What visual is shown?")]
     assert seen_samples[0]["conversations"][-1] == ["assistant", ("text", "preferred answer")]
     assert seen_samples[1]["conversations"][-1] == ["assistant", ("text", "rejected answer")]
-    torch.testing.assert_close(item["input_ids"], torch.tensor([[1], [2]]))
-    torch.testing.assert_close(item["sample_level_scores"], torch.tensor([9.0, 2.0]))
-    assert item["modality"] == "video"
+    torch.testing.assert_close(item["input_ids"][0], torch.tensor([1]))
+    torch.testing.assert_close(item["input_ids"][1], torch.tensor([2]))
+    torch.testing.assert_close(item["sample_level_scores"][0], torch.tensor([9.0]))
+    torch.testing.assert_close(item["sample_level_scores"][1], torch.tensor([2.0]))
+    assert item["modality"] == ["video", "video"]
 
 
 def test_offline_mllm_dpo_dataset_requires_processor():
@@ -482,19 +659,29 @@ def test_read_dataframe_supports_multiple_parquet_files(tmp_path):
     assert set(frame["data_source"]) == {"omni_preference/image", "omni_preference/video"}
 
 
+def test_read_dataframe_supports_omegaconf_listconfig(tmp_path):
+    parquet_path = tmp_path / "a.parquet"
+    pd.DataFrame([_parquet_row("image", 0)]).to_parquet(parquet_path, index=False)
+
+    frame = dataset_mod._read_dataframe(OmegaConf.create([str(parquet_path)]))
+
+    assert len(frame) == 1
+    assert frame.iloc[0]["data_source"] == "omni_preference/image"
+
+
 def test_row_modality_prefers_extra_info():
     row = {
         "data_source": "omni_preference/image",
         "extra_info": {"modality": "video"},
     }
-    assert dataset_mod._row_modality(row, "data_source") == "video"
+    assert dataset_mod._row_modality(row) == "video"
 
 
 def test_row_modality_falls_back_to_top_level_media_columns():
     row = {
         "videos": ["/tmp/clip.mp4"],
     }
-    assert dataset_mod._row_modality(row, "data_source") == "video"
+    assert dataset_mod._row_modality(row) == "video"
 
 
 def test_offline_mllm_dpo_collate_fn_squeezes_position_ids():
@@ -510,6 +697,6 @@ def test_offline_mllm_dpo_collate_fn_squeezes_position_ids():
             "input_ids": torch.tensor([2]),
         },
     ]
-    batch = dataset_mod.offline_mllm_dpo_collate_fn(features)
+    batch = dataset_mod.offline_mllm_dpo_collate_fn(features, pad_mode="right")
 
     assert batch["position_ids"].shape == (2, 3, 4)

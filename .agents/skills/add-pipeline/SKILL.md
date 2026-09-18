@@ -77,5 +77,6 @@ Title, trailers, duplicate-work checks: [commit-and-pr](../commit-and-pr/SKILL.m
 <!--
 MAINTAINER GUIDE — this file must stay a router. If you catch yourself restating a
 guide's steps here, edit the guide instead. Update the tables when a guide is
-added, renamed, or changes scope.
+added, renamed, or changes scope. Also add or update the matching link in
+CONTRIBUTING.md (and the Developer Guide toctree).
 -->

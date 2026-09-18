@@ -161,24 +161,61 @@ class TestOmniDPOLossCallable:
         loss_fn = omni_algos.get_omni_loss_fn("dpo")
         actor_config = _FakeActorConfig(omni_loss=OmniLossConfig())
         model_output = {
-            "policy_chosen_logps": torch.tensor([0.0, 0.2]),
-            "policy_rejected_logps": torch.tensor([-1.0, -0.8]),
-            "reference_chosen_logps": torch.tensor([-0.1, 0.0]),
-            "reference_rejected_logps": torch.tensor([-0.9, -0.7]),
+            "log_probs": torch.tensor([[0.0, 9.0], [-1.0, 9.0], [0.2, 9.0], [-0.8, 9.0]]),
         }
+        labels = torch.tensor([[-100, 1], [-100, 1], [-100, 1], [-100, 1]])
         result = loss_fn(
             config=actor_config,
             model_output=model_output,
-            data=TensorDict({}, batch_size=[2]),
+            data=TensorDict(
+                {
+                    "labels": labels,
+                    "ref_log_prob": torch.tensor([[-0.1, 9.0], [-0.9, 9.0], [0.0, 9.0], [-0.7, 9.0]]),
+                },
+                batch_size=[4],
+            ),
         )
         assert result.loss.shape == ()
         assert "dpo_loss" in result.metrics
         assert "reward_margin" in result.metrics
+
+    def test_callable_respects_average_log_prob(self, omni_algos, OmniLossConfig):
+        loss_fn = omni_algos.get_omni_loss_fn("dpo")
+        model_output = {
+            "log_probs": torch.tensor([[2.0, 2.0, 9.0], [0.0, 0.0, 9.0]]),
+        }
+        data = TensorDict(
+            {
+                "labels": torch.tensor([[-100, 1, 1], [-100, 1, 1]]),
+                "ref_log_prob": torch.zeros(2, 3),
+            },
+            batch_size=[2],
+        )
+
+        summed = loss_fn(
+            config=_FakeActorConfig(omni_loss=OmniLossConfig(average_log_prob=False)),
+            model_output=model_output,
+            data=data,
+        )
+        averaged = loss_fn(
+            config=_FakeActorConfig(omni_loss=OmniLossConfig(average_log_prob=True)),
+            model_output=model_output,
+            data=data,
+        )
+
+        assert summed.metrics["reward_margin"].item() == pytest.approx(0.4)
+        assert averaged.metrics["reward_margin"].item() == pytest.approx(0.2)
 
     def test_validate_inputs_reports_missing_keys(self, omni_algos):
         loss_fn = omni_algos.get_omni_loss_fn("dpo")
         with pytest.raises(KeyError, match="missing required model_output keys"):
             loss_fn.validate_inputs(
                 model_output={"policy_chosen_logps": torch.tensor([0.0])},
-                data=TensorDict({}, batch_size=[1]),
+                data=TensorDict(
+                    {
+                        "labels": torch.tensor([[-100, 1]]),
+                        "ref_log_prob": torch.tensor([[0.0]]),
+                    },
+                    batch_size=[1],
+                ),
             )

@@ -21,14 +21,39 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.utils import need_reference_policy
 from verl.utils.device import auto_set_device, is_cuda_available
 
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     DirectPreferenceRayTrainer,
     PolicyGradientRayTrainer,
+    validate_separate_config,
 )
-from verl_omni.utils.diffusion_attention import fallback_fa3_if_unavailable, validate_attention_consistency
+from verl_omni.utils.config import validate_config
+from verl_omni.utils.diffusion_attention import validate_attention_consistency
+from verl_omni.utils.rl_insight import enable_rl_insight
+from verl_omni.workers.config.reward import reward_pool_is_separate, reward_role_required
+
+
+def _count_controller_capture_ranges(profile_steps: list[int], profile_continuous_steps: bool) -> int:
+    """Return the number of CUDA profiler capture ranges emitted by the controller."""
+    steps = sorted(set(profile_steps))
+    if not profile_continuous_steps:
+        return len(steps)
+    return sum(index == 0 or step != steps[index - 1] + 1 for index, step in enumerate(steps))
+
+
+def _resolve_controller_nsight_options(config) -> dict:
+    """Resolve controller Nsight options for the configured profiling steps."""
+    nsight_options = OmegaConf.to_container(config.global_profiler.global_tool_config.nsys.controller_nsight_options)
+    if nsight_options.get("capture-range") == "cudaProfilerApi" and nsight_options.get("capture-range-end") is None:
+        capture_count = _count_controller_capture_ranges(
+            OmegaConf.select(config, "global_profiler.steps"),
+            OmegaConf.select(config, "global_profiler.profile_continuous_steps", default=False),
+        )
+        nsight_options["capture-range-end"] = f"repeat-shutdown:{capture_count}"
+    return nsight_options
 
 
 @hydra.main(config_path="./config", config_name="diffusion_trainer", version_base=None)
@@ -41,9 +66,35 @@ def main(config):
     # Automatically set `config.trainer.device = npu` when running on Ascend NPU.
     auto_set_device(config)
     OmegaConf.resolve(config)
-    fallback_fa3_if_unavailable(config)
+    validate_config(config)
     validate_attention_consistency(config)
     run_diffusion(config)
+
+
+def _determinism_requested(config) -> bool:
+    """Whether reward inference determinism is requested."""
+    rm_rollout = config.reward.reward_model.rollout
+    return bool(config.reward.reward_model.get("enable", False) and rm_rollout.get("full_determinism", False))
+
+
+def _export_full_determinism_env(config) -> None:
+    """Set determinism switch env vars before ray.init() so actors inherit them."""
+    os.environ["VERL_FULL_DETERMINISM"] = "1"
+    os.environ["VLLM_BATCH_INVARIANT"] = "1"
+    os.environ["PYTHONHASHSEED"] = str(config.reward.reward_model.rollout.get("seed", 42))
+
+
+def _validate_grm_reward_function(config) -> None:
+    """Require an explicit reward function when the RM is enabled."""
+    rm_cfg = config.reward.reward_model
+    if not rm_cfg.get("enable", False):
+        return
+    crf = config.reward.custom_reward_function
+    if not crf.get("path"):
+        raise ValueError(
+            "reward.reward_model.enable=true requires reward.custom_reward_function.path. "
+            "For GRM OCR scoring set it to 'verl_omni/utils/reward_score/genrm_ocr.py' with name 'compute_score_ocr'."
+        )
 
 
 def run_diffusion(config, task_runner_class=None) -> None:
@@ -55,6 +106,14 @@ def run_diffusion(config, task_runner_class=None) -> None:
                 settings, model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    OmegaConf.resolve(config)
+    validate_separate_config(config)
+    enable_rl_insight(config)
+    _validate_grm_reward_function(config)
+    # Before ray.init() so actors inherit these via runtime_env.
+    if _determinism_requested(config):
+        _export_full_determinism_env(config)
+
     # Check if Ray is not initialized
     if not ray.is_initialized():
         # Initialize Ray with a local cluster configuration
@@ -84,9 +143,7 @@ def run_diffusion(config, task_runner_class=None) -> None:
         from verl.utils.import_utils import is_nvtx_available
 
         assert is_nvtx_available(), "nvtx is not available in CUDA platform. Please 'pip3 install nvtx'"
-        nsight_options = OmegaConf.to_container(
-            config.global_profiler.global_tool_config.nsys.controller_nsight_options
-        )
+        nsight_options = _resolve_controller_nsight_options(config)
         runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
     else:
         runner = task_runner_class.remote()
@@ -141,7 +198,12 @@ class TaskRunner:
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
-        if config.algorithm.sample_source == "offline":
+        separate = config.actor_rollout_ref.get("separate", False)
+        if separate:
+            if not hasattr(Role, "Actor"):
+                raise ValueError("Separate training without colocated rollout requires verl Role.Actor support.")
+            role = Role.Actor
+        elif config.algorithm.sample_source == "offline":
             if not hasattr(Role, "Actor"):
                 raise ValueError("Offline training without rollout requires verl Role.Actor support.")
             role = Role.Actor
@@ -162,17 +224,27 @@ class TaskRunner:
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         }
 
-        if config.reward.reward_model.enable_resource_pool:
-            if config.reward.reward_model.n_gpus_per_node <= 0:
+        if reward_role_required(config) and reward_pool_is_separate(config):
+            reward_gpus = config.reward.reward_model.n_gpus_per_node
+            reward_nnodes = config.reward.reward_model.nnodes
+            if reward_gpus <= 0:
                 raise ValueError("config.reward.reward_model.n_gpus_per_node must be greater than 0")
-            if config.reward.reward_model.nnodes <= 0:
+            if reward_nnodes <= 0:
                 raise ValueError("config.reward.reward_model.nnodes must be greater than 0")
 
-            reward_pool = [config.reward.reward_model.n_gpus_per_node] * config.reward.reward_model.nnodes
+            reward_pool = [reward_gpus] * reward_nnodes
             resource_pool_spec["reward_pool"] = reward_pool
-        else:
+        elif reward_role_required(config):
             config.reward.reward_model.nnodes = config.trainer.nnodes
             config.reward.reward_model.n_gpus_per_node = config.trainer.n_gpus_per_node
+
+        distillation_config = config.get("distillation")
+        if is_distillation_enabled(distillation_config) and distillation_config.nnodes > 0:
+            if distillation_config.n_gpus_per_node <= 0:
+                raise ValueError("config.distillation.n_gpus_per_node must be greater than 0")
+
+            teacher_pool = [distillation_config.n_gpus_per_node] * distillation_config.nnodes
+            resource_pool_spec["teacher_pool"] = teacher_pool
 
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
@@ -184,21 +256,41 @@ class TaskRunner:
         from verl.trainer.ppo.ray_trainer import Role
 
         if config.algorithm.sample_source == "online":
-            if config.reward.reward_model.enable:
+            if reward_role_required(config):
                 # we do not use reward model workers, so we only register reward model in resource pool
                 # without continue to register reward model worker in role mapping
-                if config.reward.reward_model.enable_resource_pool:
+                if reward_pool_is_separate(config):
                     self.mapping[Role.RewardModel] = "reward_pool"
                 else:
                     self.mapping[Role.RewardModel] = "global_pool"
         elif config.algorithm.sample_source == "offline":
             return
 
+    def add_teacher_model_worker(self, config, teacher_model_cls):
+        """Add standalone teacher model workers when distillation runs on its own resource pool."""
+        from verl.trainer.ppo.ray_trainer import Role
+
+        distillation_config = config.get("distillation")
+        if is_distillation_enabled(distillation_config) and distillation_config.nnodes > 0:
+            self.role_worker_mapping[Role.TeacherModel] = ray.remote(teacher_model_cls)
+            self.mapping[Role.TeacherModel] = "teacher_pool"
+
     def add_ref_policy_worker(self, config, ref_policy_cls):
         """Add reference policy worker if KL loss or KL reward is used."""
-        # Ref policy has been fused into ActorRolloutRefWorker in new model engine.
-        # we don't need to add a separate ref policy worker group.
-        return
+        if not config.actor_rollout_ref.get("separate", False) or not need_reference_policy(config):
+            return
+
+        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+        if lora_rank <= 0:
+            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        if ref_in_actor:
+            return
+
+        from verl.trainer.ppo.ray_trainer import Role
+
+        self.role_worker_mapping[Role.RefPolicy] = ray.remote(ref_policy_cls)
+        self.mapping[Role.RefPolicy] = "global_pool"
 
     def run(self, config):
         """Execute the main diffusion training workflow.
@@ -221,6 +313,8 @@ class TaskRunner:
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
 
         self.add_reward_model_resource_pool(config)
+
+        self.add_teacher_model_worker(config, actor_rollout_cls)
 
         # Add a reference policy worker if KL loss is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)

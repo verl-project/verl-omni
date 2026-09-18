@@ -40,7 +40,7 @@ from typing import Any
 
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
-from vllm_omni.diffusion.worker.utils import DiffusionRequestState
+from vllm_omni.diffusion.worker.utils import StepRequestState
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.vllm_omni_rollout_adapter import QwenImagePipelineWithLogProb
@@ -54,9 +54,9 @@ class QwenImageMixGRPOPipelineWithLogProb(QwenImagePipelineWithLogProb):
 
     def prepare_encode(
         self,
-        state: DiffusionRequestState,
+        state: StepRequestState,
         **kwargs: Any,
-    ) -> DiffusionRequestState:
+    ) -> StepRequestState:
         """Fix the SDE window before step-execution ``prepare_encode`` draws it.
 
         In step-execution mode ``forward()`` is never called, so

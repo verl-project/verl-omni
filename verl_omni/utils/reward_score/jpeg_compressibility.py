@@ -27,7 +27,7 @@ from PIL import Image
 def jpeg_incompressibility():
     def _fn(images, prompts):
         if isinstance(images, torch.Tensor):
-            images = (images * 255).round().clamp(0, 255).to(torch.uint8).cpu().numpy()
+            images = images.detach().cpu().numpy()
             images = images.transpose(0, 2, 3, 1)  # NCHW -> NHWC
         images = [Image.fromarray(image) for image in images]
         buffers = [io.BytesIO() for _ in images]

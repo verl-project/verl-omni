@@ -26,8 +26,8 @@ def default_compute_score_image(
 
     Args:
         data_source (str): Dataset identifier that determines the scoring method.
-        solution_image: The generated image, as a ``torch.Tensor`` in shape
-            ``(C, H, W)`` or ``(N, C, H, W)``.
+        solution_image: The generated image, as a uint8 ``torch.Tensor`` in
+            ``[0, 255]`` with shape ``(C, H, W)`` or ``(N, C, H, W)``.
         ground_truth (str): Ground-truth answer (may be unused for rule-based
             rewards such as ``jpeg_compressibility``).
         extra_info (dict, optional): Additional metadata passed by the reward

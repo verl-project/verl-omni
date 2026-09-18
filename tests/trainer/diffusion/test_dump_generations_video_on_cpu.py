@@ -22,6 +22,8 @@ for the trainer.
 
 import json
 import os
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -31,10 +33,11 @@ import torch
 # branch; skip the whole module rather than hard-fail where it is absent.
 pytest.importorskip("diffusers")
 
+import verl_omni.trainer.diffusion.ray_diffusion_trainer as ray_diffusion_trainer
 from verl_omni.trainer.diffusion.ray_diffusion_trainer import BaseRayDiffusionTrainer
 
 
-def _dump(dump_path, outputs, *, max_samples=None, global_steps=0):
+def _dump(dump_path, outputs, *, max_samples=None, global_steps=0, audios=None, audio_sample_rates=None):
     """Invoke the unbound ``_dump_generations`` with a minimal stub ``self``."""
     n = outputs.shape[0]
     stub = SimpleNamespace(global_steps=global_steps)
@@ -43,6 +46,9 @@ def _dump(dump_path, outputs, *, max_samples=None, global_steps=0):
     scores = [float(i) for i in range(n)]
     # An extra whose length matches the full batch must be sliced alongside it.
     reward_extra_infos_dict = {"reward": [float(i) for i in range(n)]}
+    kwargs = {}
+    if audios is not None:
+        kwargs = {"audios": audios, "audio_sample_rates": audio_sample_rates}
     BaseRayDiffusionTrainer._dump_generations(
         stub,
         inputs,
@@ -53,6 +59,7 @@ def _dump(dump_path, outputs, *, max_samples=None, global_steps=0):
         str(dump_path),
         max_samples=max_samples,
         fps=8,
+        **kwargs,
     )
 
 
@@ -62,8 +69,17 @@ def _read_jsonl(dump_path, global_steps=0):
 
 
 class TestDumpGenerations:
+    def test_rejects_non_uint8_outputs(self, tmp_path):
+        outputs = torch.zeros(1, 3, 16, 16)
+
+        with pytest.raises(
+            ValueError,
+            match=r"Expected generation outputs to be a uint8 tensor, got torch\.float32\.",
+        ):
+            _dump(tmp_path, outputs)
+
     def test_video_batch_writes_one_mp4_per_sample(self, tmp_path):
-        outputs = torch.rand(2, 8, 3, 16, 16)  # [N, T, C, H, W]
+        outputs = torch.randint(256, (2, 8, 3, 16, 16), dtype=torch.uint8)  # [N, T, C, H, W]
         _dump(tmp_path, outputs)
 
         visual = os.path.join(str(tmp_path), "0")
@@ -77,33 +93,42 @@ class TestDumpGenerations:
         # Full-length extras are carried through, sliced to the dumped count.
         assert [row["reward"] for row in rows] == [0.0, 1.0]
 
-    def test_video_colors_not_inverted(self, tmp_path):
-        """``export_to_video`` rescales NumPy input by 255 even when it is already
-        ``uint8`` [0, 255], overflowing to a photographic negative (255 - x) that
-        flips warm scenes to a cold "X-ray" look. The dump sidesteps this by
-        handing it PIL frames (via ``video_tensor_to_pil_frames``), which are not
-        rescaled; decode a solid warm clip and assert the channel order survives."""
-        imageio = pytest.importorskip("imageio")
+    def test_video_batch_muxes_generated_audio(self, tmp_path):
+        from imageio_ffmpeg import get_ffmpeg_exe
 
-        outputs = torch.zeros(1, 8, 3, 32, 32)  # solid warm frame: R > G > B
-        outputs[:, :, 0] = 0.75  # R
-        outputs[:, :, 1] = 0.35  # G
-        outputs[:, :, 2] = 0.15  # B
-        _dump(tmp_path, outputs)
+        outputs = torch.randint(256, (1, 8, 3, 16, 16), dtype=torch.uint8)
+        audios = torch.sin(torch.linspace(0, 100, 48_000)).reshape(1, 1, -1)
+        _dump(tmp_path, outputs, audios=audios, audio_sample_rates=[48_000])
 
         path = os.path.join(str(tmp_path), "0", "0.mp4")
-        reader = imageio.get_reader(path)  # ffmpeg backend (imageio-ffmpeg)
-        frame = reader.get_data(4)  # a mid frame, [H, W, C] uint8 RGB
-        reader.close()
-        r, g, b = (float(frame[..., c].mean()) for c in range(3))
-        # Warm source must stay warm. Under the old uint8 overflow these invert
-        # (b > r, r < 128), so the ordering + range pins the fix.
-        assert r > g > b, f"channel order not preserved: R={r:.1f} G={g:.1f} B={b:.1f}"
-        assert r > 128 and b < 128, f"expected a warm frame, got R={r:.1f} B={b:.1f}"
+        probe = subprocess.run([get_ffmpeg_exe(), "-i", path], capture_output=True, text=True)
+        assert "Video:" in probe.stderr and "Audio: aac" in probe.stderr
+
+    def test_video_export_failure_preserves_raw_fallback_and_writes_jsonl(self, monkeypatch, tmp_path):
+        outputs = torch.randint(256, (2, 8, 3, 16, 16), dtype=torch.uint8)
+
+        def fake_export(output, output_path, **kwargs):
+            if output_path.endswith("1.mp4"):
+                raise subprocess.CalledProcessError(1, ["ffmpeg"])
+            Path(output_path).write_bytes(b"video")
+
+        monkeypatch.setattr(ray_diffusion_trainer, "_export_video", fake_export)
+        _dump(tmp_path, outputs)
+
+        rows = _read_jsonl(tmp_path)
+        assert rows[0]["output"].endswith("0.mp4")
+        assert rows[1]["output"] is None
+        assert rows[1]["video_export_error"].startswith("CalledProcessError:")
+        fallback_path = rows[1]["output_fallback"]
+        assert fallback_path.endswith("1.pt")
+        fallback = torch.load(fallback_path, weights_only=True)
+        torch.testing.assert_close(fallback["video"], outputs[1])
+        assert fallback["audio"] is None
+        assert fallback["audio_sample_rate"] is None
 
     def test_image_batch_writes_one_jpg_per_sample(self, tmp_path):
         # Image regression: the 4-D path must stay byte-for-byte behaviour.
-        outputs = torch.rand(2, 3, 16, 16)  # [N, C, H, W]
+        outputs = torch.randint(256, (2, 3, 16, 16), dtype=torch.uint8)  # [N, C, H, W]
         _dump(tmp_path, outputs)
 
         visual = os.path.join(str(tmp_path), "0")
@@ -116,7 +141,7 @@ class TestDumpGenerations:
         assert all(row["output"].endswith(".jpg") for row in rows)
 
     def test_max_samples_bounds_video_dump(self, tmp_path):
-        outputs = torch.rand(3, 8, 3, 16, 16)
+        outputs = torch.randint(256, (3, 8, 3, 16, 16), dtype=torch.uint8)
         _dump(tmp_path, outputs, max_samples=1)
 
         visual = os.path.join(str(tmp_path), "0")

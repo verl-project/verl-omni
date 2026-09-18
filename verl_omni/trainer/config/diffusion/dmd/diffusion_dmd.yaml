@@ -1,0 +1,59 @@
+# DMD2 distribution-only configuration; does not activate OPD.
+_target_: verl_omni.workers.config.DiffusionDMDConfig
+
+# Fake-score update attempts per student attempt.
+fake_update_ratio: 2
+
+# Student physical microbatch size per GPU.
+student_micro_batch_size_per_gpu: 1
+
+# Fake-score physical microbatch size per GPU.
+fake_score_micro_batch_size_per_gpu: 1
+
+# Independent fake-score optimizer, reusing the FSDP optimizer configuration.
+fake_score_optim:
+  _target_: verl.workers.config.FSDPOptimizerConfig
+  lr: 2.0e-5
+  weight_decay: 0.001
+  betas: [0.9, 0.999]
+  clip_grad: 1.0
+  lr_scheduler_type: constant
+  lr_warmup_steps: -1
+  lr_warmup_steps_ratio: 0.0
+  total_training_steps: -1
+
+# Teacher CFG scale; student and fake score are conditional-only.
+teacher_guidance_scale: 4.0
+
+# Packed-denoiser-space teacher CFG normalization.
+cfg_norm: layer_norm
+
+# Explicit negative teacher condition.
+negative_prompt: ' '
+
+# Per-sample score normalization floor.
+normalization_epsilon: 1.0e-6
+
+# Fixed inference sigma shift.
+rollout_timestep_shift: 3.0
+
+# Discrete score grid size; zero selects continuous uniform sampling.
+score_discrete_steps: 1000
+
+# Lower score sigma bound.
+score_sigma_min: 0.02
+
+# Upper score sigma bound.
+score_sigma_max: 0.98
+
+# Discrete score timestep shift.
+score_timestep_shift: 3.0
+
+# EMA after successful student updates.
+ema_decay: 0.999
+
+# Successful student steps before EMA starts.
+ema_start_step: 0
+
+# Default inference artifact.
+export_role: student

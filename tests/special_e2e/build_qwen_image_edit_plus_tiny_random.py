@@ -11,10 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Build a tiny Qwen-Image-Edit-Plus checkpoint for smoke tests.
-
-The tokenizer and processor come from the source checkpoint because image
-placeholder expansion depends on their special-token IDs and geometry.
+"""Build a tiny Qwen-Image-Edit-Plus checkpoint for smoke tests fully offline.
 
 Usage:
     python tests/special_e2e/build_qwen_image_edit_plus_tiny_random.py \
@@ -31,10 +28,51 @@ from typing import Any
 
 import torch
 from diffusers import AutoencoderKLQwenImage, FlowMatchEulerDiscreteScheduler, QwenImageTransformer2DModel
-from transformers import AutoProcessor, AutoTokenizer, Qwen2_5_VLConfig, Qwen2_5_VLForConditionalGeneration
+from tokenizers import Tokenizer
+from tokenizers.decoders import ByteLevel as ByteLevelDecoder
+from tokenizers.models import BPE
+from tokenizers.pre_tokenizers import ByteLevel as ByteLevelPreTokenizer
+from tokenizers.trainers import BpeTrainer
+from transformers import (
+    Qwen2_5_VLConfig,
+    Qwen2_5_VLForConditionalGeneration,
+    Qwen2TokenizerFast,
+    Qwen2VLImageProcessor,
+    Qwen2VLProcessor,
+)
 
 DEFAULT_OUTPUT_DIR = os.path.expanduser("~/models/tiny-random/qwen-image-edit-plus")
-DEFAULT_SOURCE_MODEL = "Qwen/Qwen-Image-Edit-2511"
+_CHECKPOINT_METADATA_FILE = "tiny_checkpoint_metadata.json"
+
+_CHATML_TEMPLATE = (
+    "{% for message in messages %}"
+    "{{ '<|im_start|>' + message['role'] + '\n' }}"
+    "{% if message['content'] is string %}"
+    "{{ message['content'] }}"
+    "{% else %}"
+    "{% for content in message['content'] %}"
+    "{% if content['type'] == 'text' %}"
+    "{{ content['text'] }}"
+    "{% elif content['type'] == 'image' %}"
+    "{{ '<|vision_start|><|image_pad|><|vision_end|>' }}"
+    "{% elif content['type'] == 'video' %}"
+    "{{ '<|vision_start|><|video_pad|><|vision_end|>' }}"
+    "{% endif %}"
+    "{% endfor %}"
+    "{% endif %}"
+    "{{ '<|im_end|>\n' }}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}"
+    "{{ '<|im_start|>assistant\n' }}"
+    "{% endif %}"
+)
+
+_MM_EXTRA_SPECIAL_TOKENS = {
+    "image_token": "<|image_pad|>",
+    "video_token": "<|video_pad|>",
+    "vision_bos_token": "<|vision_start|>",
+    "vision_eos_token": "<|vision_end|>",
+}
 
 # VAE latent statistics (16 channels). Copied from the real checkpoint so the
 # packing math (transformer in_channels == z_dim * patch_size**2 == 64) and the
@@ -76,16 +114,6 @@ _LATENTS_STD = [
     1.916,
 ]
 
-# Qwen2.5-VL special-token ids (must match the copied tokenizer/processor).
-_IMAGE_TOKEN_ID = 151655
-_VIDEO_TOKEN_ID = 151656
-_VISION_START_TOKEN_ID = 151652
-_VISION_END_TOKEN_ID = 151653
-_VISION_TOKEN_ID = 151654
-_BOS_TOKEN_ID = 151643
-_EOS_TOKEN_ID = 151645
-_VOCAB_SIZE = 152064
-
 
 def _mrope_section(head_dim: int) -> list[int]:
     """Split ``head_dim // 2`` into a 3-way (temporal, height, width) M-RoPE section.
@@ -101,7 +129,67 @@ def _mrope_section(head_dim: int) -> list[int]:
     return [t, h, w]
 
 
-def get_dummy_components(*, hidden_size: int = 16, seed: int = 42) -> dict[str, Any]:
+def _build_tiny_chatml_tokenizer(*, vocab_size: int = 2048) -> Qwen2TokenizerFast:
+    """Build a tiny Qwen tokenizer with the multimodal tokens used by the processor."""
+    tokenizer = Tokenizer(BPE(unk_token="<|endoftext|>"))
+    tokenizer.pre_tokenizer = ByteLevelPreTokenizer(add_prefix_space=False)
+    tokenizer.decoder = ByteLevelDecoder()
+    special_tokens = [
+        "<|endoftext|>",
+        "<|im_start|>",
+        "<|im_end|>",
+        "<|vision_pad|>",
+        *_MM_EXTRA_SPECIAL_TOKENS.values(),
+    ]
+    trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=special_tokens)
+    tokenizer.train_from_iterator(
+        [
+            "Describe the key features of the input image and follow the user's edit instruction.",
+            "Picture 1: a red circle on a white background.",
+            "Change the red circle to a blue square.",
+            "<|im_start|>user\nEdit this image.<|im_end|>\n<|im_start|>assistant\n",
+            " ".join(str(i) for i in range(256)),
+        ],
+        trainer=trainer,
+    )
+    return Qwen2TokenizerFast(
+        tokenizer_object=tokenizer,
+        bos_token="<|im_start|>",
+        eos_token="<|im_end|>",
+        pad_token="<|endoftext|>",
+        unk_token="<|endoftext|>",
+        model_max_length=2048,
+        chat_template=_CHATML_TEMPLATE,
+        extra_special_tokens=_MM_EXTRA_SPECIAL_TOKENS,
+    )
+
+
+def _build_tiny_processor(tokenizer: Qwen2TokenizerFast) -> Qwen2VLProcessor:
+    """Build the Qwen2-VL image processor without reading a Hub checkpoint."""
+    try:
+        from transformers import Qwen2VLVideoProcessor
+    except ImportError:
+        from transformers.models.qwen2_vl.video_processing_qwen2_vl import Qwen2VLVideoProcessor
+
+    return Qwen2VLProcessor(
+        image_processor=Qwen2VLImageProcessor(
+            patch_size=14,
+            merge_size=2,
+            temporal_patch_size=2,
+            min_pixels=56 * 56,
+            max_pixels=1024 * 1024,
+        ),
+        video_processor=Qwen2VLVideoProcessor(
+            patch_size=14,
+            merge_size=2,
+            temporal_patch_size=2,
+        ),
+        tokenizer=tokenizer,
+        chat_template=_CHATML_TEMPLATE,
+    )
+
+
+def get_dummy_components(*, tokenizer: Qwen2TokenizerFast, hidden_size: int = 16, seed: int = 42) -> dict[str, Any]:
     """Instantiate tiny Qwen-Image-Edit diffusion components (random weights)."""
     torch.manual_seed(seed)
     transformer = QwenImageTransformer2DModel(
@@ -132,22 +220,26 @@ def get_dummy_components(*, hidden_size: int = 16, seed: int = 42) -> dict[str, 
     text_num_heads = 2
     text_head_dim = hidden_size // text_num_heads
     text_encoder_config = Qwen2_5_VLConfig(
-        vocab_size=_VOCAB_SIZE,
+        vocab_size=len(tokenizer),
         tie_word_embeddings=True,
-        image_token_id=_IMAGE_TOKEN_ID,
-        video_token_id=_VIDEO_TOKEN_ID,
-        vision_start_token_id=_VISION_START_TOKEN_ID,
-        vision_end_token_id=_VISION_END_TOKEN_ID,
-        vision_token_id=_VISION_TOKEN_ID,
-        bos_token_id=_BOS_TOKEN_ID,
-        eos_token_id=_EOS_TOKEN_ID,
+        image_token_id=tokenizer.convert_tokens_to_ids("<|image_pad|>"),
+        video_token_id=tokenizer.convert_tokens_to_ids("<|video_pad|>"),
+        vision_start_token_id=tokenizer.convert_tokens_to_ids("<|vision_start|>"),
+        vision_end_token_id=tokenizer.convert_tokens_to_ids("<|vision_end|>"),
+        vision_token_id=tokenizer.convert_tokens_to_ids("<|vision_pad|>"),
+        bos_token_id=tokenizer.bos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=tokenizer.pad_token_id,
         text_config=dict(
             hidden_size=hidden_size,
             num_hidden_layers=2,
             num_attention_heads=text_num_heads,
             num_key_value_heads=1,
             intermediate_size=hidden_size * 2,
-            vocab_size=_VOCAB_SIZE,
+            vocab_size=len(tokenizer),
+            bos_token_id=tokenizer.bos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.pad_token_id,
             rms_norm_eps=1e-6,
             rope_theta=1000000.0,
             rope_scaling={"rope_type": "default", "mrope_section": _mrope_section(text_head_dim)},
@@ -173,39 +265,6 @@ def get_dummy_components(*, hidden_size: int = 16, seed: int = 42) -> dict[str, 
     return {"transformer": transformer, "vae": vae, "text_encoder": text_encoder}
 
 
-def _resolve_source_dir(source_model: str) -> str:
-    """Resolve ``source_model`` to a local directory (offline; never downloads weights)."""
-    local = os.path.expanduser(source_model)
-    if os.path.isdir(local):
-        return local
-    from huggingface_hub import snapshot_download
-
-    return snapshot_download(
-        source_model,
-        local_files_only=True,
-        allow_patterns=["tokenizer/*", "processor/*", "scheduler/*"],
-    )
-
-
-def _copy_pretrained_assets(source_model: str, output_dir: str) -> None:
-    """Re-serialize tokenizer, processor and scheduler from a cached source checkpoint.
-
-    Everything is loaded from the local HF cache (no Hub access); the source
-    checkpoint only needs its tokenizer/processor/scheduler files present -- the
-    multi-GB weight shards are never loaded here.
-    """
-    src = _resolve_source_dir(source_model)
-
-    tokenizer = AutoTokenizer.from_pretrained(os.path.join(src, "tokenizer"))
-    tokenizer.save_pretrained(os.path.join(output_dir, "tokenizer"))
-
-    processor = AutoProcessor.from_pretrained(os.path.join(src, "processor"))
-    processor.save_pretrained(os.path.join(output_dir, "processor"))
-
-    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(os.path.join(src, "scheduler"))
-    scheduler.save_pretrained(os.path.join(output_dir, "scheduler"))
-
-
 def _write_model_index(output_dir: str) -> None:
     """Write the diffusers ``model_index.json`` describing every pipeline component."""
     model_index = {
@@ -222,10 +281,27 @@ def _write_model_index(output_dir: str) -> None:
         json.dump(model_index, f, indent=2, sort_keys=True)
 
 
+def _write_checkpoint_metadata(output_dir: str) -> None:
+    """Record builder-owned assets so stale smoke checkpoints are rebuilt."""
+    metadata = {"format_version": 1, "chat_template": _CHATML_TEMPLATE}
+    with open(os.path.join(output_dir, _CHECKPOINT_METADATA_FILE), "w") as f:
+        json.dump(metadata, f, indent=2, sort_keys=True)
+
+
+def _checkpoint_is_current(output_dir: str) -> bool:
+    if not os.path.isfile(os.path.join(output_dir, "model_index.json")):
+        return False
+    try:
+        with open(os.path.join(output_dir, _CHECKPOINT_METADATA_FILE)) as f:
+            metadata = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return metadata == {"format_version": 1, "chat_template": _CHATML_TEMPLATE}
+
+
 def build(
     output_dir: str,
     *,
-    source_model: str = DEFAULT_SOURCE_MODEL,
     hidden_size: int = 16,
     seed: int = 42,
     dtype: torch.dtype = torch.bfloat16,
@@ -234,20 +310,23 @@ def build(
     output_dir = os.path.expanduser(output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
-    components = get_dummy_components(hidden_size=hidden_size, seed=seed)
+    tokenizer = _build_tiny_chatml_tokenizer()
+    components = get_dummy_components(tokenizer=tokenizer, hidden_size=hidden_size, seed=seed)
     components["transformer"].to(dtype).save_pretrained(os.path.join(output_dir, "transformer"))
     components["vae"].to(dtype).save_pretrained(os.path.join(output_dir, "vae"))
     components["text_encoder"].to(dtype).save_pretrained(os.path.join(output_dir, "text_encoder"))
 
-    _copy_pretrained_assets(source_model, output_dir)
+    tokenizer.save_pretrained(os.path.join(output_dir, "tokenizer"))
+    _build_tiny_processor(tokenizer).save_pretrained(os.path.join(output_dir, "processor"))
+    FlowMatchEulerDiscreteScheduler().save_pretrained(os.path.join(output_dir, "scheduler"))
     _write_model_index(output_dir)
+    _write_checkpoint_metadata(output_dir)
     return output_dir
 
 
 def ensure_tiny_qwen_image_edit_checkpoint(
     output_dir: str,
     *,
-    source_model: str = DEFAULT_SOURCE_MODEL,
     hidden_size: int = 16,
     seed: int = 42,
     dtype: torch.dtype = torch.bfloat16,
@@ -255,9 +334,9 @@ def ensure_tiny_qwen_image_edit_checkpoint(
 ) -> str:
     """Build the tiny checkpoint only if it is not already present."""
     output_dir = os.path.expanduser(output_dir)
-    if skip_if_exists and os.path.isfile(os.path.join(output_dir, "model_index.json")):
+    if skip_if_exists and _checkpoint_is_current(output_dir):
         return output_dir
-    return build(output_dir, source_model=source_model, hidden_size=hidden_size, seed=seed, dtype=dtype)
+    return build(output_dir, hidden_size=hidden_size, seed=seed, dtype=dtype)
 
 
 def main() -> None:
@@ -265,11 +344,6 @@ def main() -> None:
         description="Build a tiny Qwen-Image-Edit-Plus checkpoint offline (random weights).",
     )
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument(
-        "--source-model",
-        default=DEFAULT_SOURCE_MODEL,
-        help="Cached checkpoint to copy tokenizer/processor/scheduler from (local_files_only).",
-    )
     parser.add_argument("--hidden-size", type=int, default=16, help="Shared context/hidden size")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dtype", choices=["float16", "bfloat16", "float32"], default="bfloat16")
@@ -285,7 +359,6 @@ def main() -> None:
         shutil.rmtree(os.path.expanduser(args.output_dir))
     output_dir = ensure_tiny_qwen_image_edit_checkpoint(
         args.output_dir,
-        source_model=args.source_model,
         hidden_size=args.hidden_size,
         seed=args.seed,
         dtype=dtype,

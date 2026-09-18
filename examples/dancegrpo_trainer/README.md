@@ -1,16 +1,24 @@
 # DanceGRPO Trainer
 
-Last updated: 06/30/2026
+Last updated: 09/01/2026
 
 This example shows how to post-train `Wan2.2-TI2V-5B` with DanceGRPO on text-to-video generation tasks. DanceGRPO extends FlowGRPO with a score-based SDE step formulation for improved numerical stability during rollout sampling.
 
-For the base Flow-GRPO setup, see [Examples - FlowGRPO Trainer](https://verl-omni.readthedocs.io/en/latest/examples/flowgrpo_trainer.html). For algorithm details, see [Algorithms - Flow-GRPO](../../docs/algo/flowgrpo.md).
+For the base Flow-GRPO setup, see [Examples - FlowGRPO Trainer](https://verl-omni.readthedocs.io/en/latest/examples/flowgrpo_trainer.html). For algorithm details, see [Algorithms - Flow-GRPO](../../docs/algo/flowgrpo.md). For the V1 trainer (TransferQueue + ReplayBuffer), see [Diffusion V1 training](../../docs/start/diffusion_v1.md).
+
+The **default CUDA recipe** is the V1 sync launcher:
+
+- [`run_wan22_5b_t2v_hpsv3_v1.sh`](wan22/run_wan22_5b_t2v_hpsv3_v1.sh) — **GPU**, **V1 sync** (`verl_omni.trainer.main_diffusion_v1`)
+
+> **Deprecated:** `run_wan22_5b_t2v_hpsv3_auto.sh` is the legacy v0 launcher
+> (`verl_omni.trainer.main_diffusion`). It remains for NPU auto-detect and
+> backward compatibility. New CUDA runs should use the V1 script.
 
 ## Installation
 
 Follow the [installation guide](../../docs/start/install.md) to set up the base environment.
 
-The provided scripts are configured for a single node with `8` NPUs.
+The V1 CUDA script targets 8 GPUs on a single node. The deprecated v0 auto-detect script still configures 16 NPUs or 8 GPUs.
 
 ## Prepare the dataset
 
@@ -39,21 +47,71 @@ This produces:
 
 ## Prepare the models
 
-**Policy model (Wan2.2-TI2V-5B):** the script uses the Hugging Face Hub ID `Wan-AI/Wan2.2-TI2V-5B-Diffusers` directly — no manual download is required. Hugging Face will cache the weights automatically on first run. To use a local copy instead, edit the `model_name` variable in the script directly.
+**Policy model (Wan2.2-TI2V-5B):** the script uses the Hugging Face Hub ID `Wan-AI/Wan2.2-TI2V-5B-Diffusers` directly - no manual download is required. Hugging Face will cache the weights automatically on first run. To use a local copy instead, set the `MODEL_NAME` environment variable or edit the `model_name` variable in the script.
 
-**Reward model for HPSv3:** download the HPSv3 checkpoint and place it at `$WORKSPACE/CKPT/HPSv3/HPSv3.safetensors`. See the [DanceGRPO repository](https://github.com/XueZeyue/DanceGRPO) for download instructions.
+**Reward model for HPSv3:** download the HPSv3 checkpoint and place it at `$WORKSPACE/CKPT/HPSv3/HPSv3.safetensors`. To use a different path, set the `CUSTOM_REWARD_MODEL_PATH` environment variable. See the [DanceGRPO repository](https://github.com/XueZeyue/DanceGRPO) for download instructions.
 
 ## Run training
 
-### HPSv3 reward
+### HPSv3 reward (default: V1 sync)
 
 Launch the HPSv3 example from the repository root:
 
 ```bash
-bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_npu.sh
+bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_v1.sh
 ```
 
-The script runs `python3 -m verl_omni.trainer.main_diffusion` with:
+The V1 script is CUDA-only and selects `PolicyGradientDiffusionTrainerV1Sync` via `trainer.v1.trainer_mode=sync`. TransferQueue is force-enabled inside the runner.
+
+For Ascend NPU, or to keep the legacy v0 trainer, use the auto-detect script:
+
+```bash
+bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_auto.sh
+```
+
+> **Deprecated:** the auto-detect script uses the v0 `main_diffusion` trainer.
+> Prefer the V1 launcher on CUDA. The v0 script auto-detects the device
+> (`npu` via `npu-smi info`, or `gpu` via `nvidia-smi`) and exits with an
+> error if neither is found.
+
+#### Configurable environment variables
+
+All of the following can be overridden via environment variables before launching the script:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `TRAIN_FILES_PATH` | `$WORKSPACE/data/hpsv3/train.parquet` | Training parquet file |
+| `VAL_FILES_PATH` | `$WORKSPACE/data/hpsv3/test.parquet` | Validation parquet file |
+| `MODEL_NAME` | `Wan-AI/Wan2.2-TI2V-5B-Diffusers` | Policy model path or Hub ID |
+| `CUSTOM_REWARD_MODEL_PATH` | `$WORKSPACE/CKPT/HPSv3/HPSv3.safetensors` | HPSv3 reward model checkpoint |
+| `ROLLOUT_TP` | `1` | Rollout tensor parallel size |
+| `TRAIN_BATCH_SIZE` | `64` | Training batch size |
+| `WORKSPACE` | `$HOME` | Base directory for data and checkpoints |
+
+Example with custom overrides:
+
+```bash
+TRAIN_FILES_PATH=/data/my_train.parquet \
+VAL_FILES_PATH=/data/my_val.parquet \
+MODEL_NAME=/path/to/local/model \
+CUSTOM_REWARD_MODEL_PATH=/path/to/HPSv3.safetensors \
+bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_v1.sh
+```
+
+The V1 launcher configures HPSv3 reward micro-batching through
+`reward.custom_reward_function.reward_kwargs.max_batch_size` and defaults to `4` flattened frames per
+forward. To override it through Hydra configuration:
+
+```bash
+bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_v1.sh \
+  reward.custom_reward_function.reward_kwargs.max_batch_size=8
+```
+
+This value limits flattened frames rather than top-level reward requests. For example, frames sampled from
+several videos may share one HPSv3 forward until this limit is reached. Larger values use more GPU memory and
+are not guaranteed to be faster, so benchmark with a representative workload before changing the default.
+
+The V1 script runs `python3 -m verl_omni.trainer.main_diffusion_v1` with:
 
 - `algorithm.adv_estimator=dance_grpo`
 - `actor_rollout_ref.model.path=Wan-AI/Wan2.2-TI2V-5B-Diffusers`
@@ -63,7 +121,12 @@ The script runs `python3 -m verl_omni.trainer.main_diffusion` with:
 - `actor_rollout_ref.rollout.algo.noise_level=1.2`
 - `actor_rollout_ref.rollout.algo.sde_window_size=2`
 - `reward.custom_reward_function.name=compute_score_hpsv3`
+- `trainer.use_v1=true`
+- `trainer.v1.trainer_mode=sync`
 - `trainer.n_gpus_per_node=8`
+- `trainer.total_training_steps=120`
+
+The deprecated v0 auto-detect script still uses `python3 -m verl_omni.trainer.main_diffusion` and sets `trainer.n_gpus_per_node=16` (NPU) or `8` (GPU).
 
 ## SDE variants
 
@@ -91,11 +154,11 @@ trainer.logger='["console", "wandb"]'
 The script sets:
 
 ```bash
-trainer.project_name=dance_grpo_npu
-trainer.experiment_name=wan22_hpsv3_npu
+trainer.project_name=dance_grpo
+trainer.experiment_name=wan22_5b_t2v_hpsv3_gpu_v1
 ```
 
-Override these values on the command line if you want to log under a different project or run name.
+The V1 script hard-codes that experiment name. The deprecated v0 auto-detect script still sets `wan22_5b_t2v_hpsv3_npu` or `wan22_5b_t2v_hpsv3_gpu` from the detected device. Override them by editing the `PROJECT_NAME` and `EXPERIMENT_NAME` variables in the script.
 
 ### Diffusion-specific metrics
 

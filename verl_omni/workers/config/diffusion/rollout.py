@@ -42,6 +42,7 @@ class DiffusionRolloutAlgoConfig(BaseConfig):
     sde_type: str = "sde"
     sde_window_size: Optional[int] = None
     sde_window_range: Optional[list[int]] = None
+    sde_contiguous: bool = True
 
     # MixGRPO-only configs
     sample_strategy: str = "random"
@@ -65,9 +66,26 @@ class DiffusionPipelineConfig(BaseConfig):
     true_cfg_scale: float = 1.0
     max_sequence_length: int = 512
     guidance_scale: Optional[float] = None
+    reference_image_short_edge: Optional[int] = None
 
     # Wan2.2 video generation: number of frames (81 = ~3s at 24fps)
     num_frames: int = 1
+
+    # Audio-video generation frame rate.
+    frame_rate: float = 24.0
+
+    # Task label forwarded to the pipeline request contract, read by vLLM-Omni as
+    # the request `task`; values are pipeline-specific (e.g. t2va / fl2va / ref2va).
+    task: Optional[str] = None
+    # Frame indices (e.g. keyframe positions) for pipelines that condition on them.
+    frame_indices: Optional[list[int]] = None
+
+    # Named canvas aspect ratio for pipelines that accept one (e.g. 16:9);
+    # the set of supported ratios is pipeline-specific.
+    aspect_ratio: Optional[str] = None
+
+    # Flow-matching sigma-schedule shift for the video stream (maps to vllm-omni's flow_shift)
+    video_flow_shift: float = 12.0
 
 
 @dataclass
@@ -78,10 +96,24 @@ class DiffusionSamplingConfig(BaseConfig):
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
     algo: DiffusionRolloutAlgoConfig = field(default_factory=DiffusionRolloutAlgoConfig)
 
+    # for llm part when needed
+    temperature: float = 1.0
+    top_k: int = 0
+    top_p: float = 1.0
+
 
 @dataclass
 class DiffusionRolloutConfig(BaseConfig):
-    _mutable_fields = {"max_model_len", "load_format", "engine_kwargs", "prompt_length", "expert_parallel_size"}
+    _mutable_fields = {
+        "max_model_len",
+        "load_format",
+        "engine_kwargs",
+        "prompt_length",
+        "expert_parallel_size",
+        "full_determinism",
+        "seed",
+        "max_num_seqs",
+    }
 
     name: Optional[str] = MISSING
     mode: str = "async"
@@ -89,11 +121,23 @@ class DiffusionRolloutConfig(BaseConfig):
     n_gpus_per_node: int = 8
     n: int = 1
 
+    # for llm part when needed
+    temperature: float = 1.0
+    top_k: int = 0
+    top_p: float = 1.0
+    repetition_penalty: float = 1.0
+    max_new_tokens: int = 256
+
     # Base seed for deterministic training rollout RNG. Per-step base is
     # ``seed + global_step - 1``. null disables rollout seeding.
-    seed: Optional[int] = None
+    seed: Optional[int] = 42
+    full_determinism: bool = False
 
     prompt_length: int = 512
+
+    # Final prompt-embedding sequence length after combining all text encoders.
+    # Falls back to pipeline.max_sequence_length for single-encoder models.
+    max_prompt_embed_length: Optional[int] = None
 
     dtype: str = "bfloat16"
     gpu_memory_utilization: float = 0.5
@@ -107,6 +151,8 @@ class DiffusionRolloutConfig(BaseConfig):
     data_parallel_size: int = 1
     expert_parallel_size: int = 1
     tensor_model_parallel_size: int = 2
+    # Text-encoder TP shard size: 1 or tensor_model_parallel_size (validated below).
+    text_encoder_tp_size: int = 1
     pipeline_model_parallel_size: int = 1
     max_num_batched_tokens: int = 8192
     logprobs_mode: Optional[str] = "processed_logprobs"
@@ -121,6 +167,10 @@ class DiffusionRolloutConfig(BaseConfig):
     # step-execution mode.
     step_execution: bool = False
 
+    enable_prompt_embed_cache: bool = False
+    prompt_embed_cache_size: int = 32
+    enable_prompt_embed_cache_routing_affinity: bool = False
+
     # note that the logprob computation should belong to the actor
     log_prob_micro_batch_size_per_gpu: Optional[int] = None
     log_prob_use_dynamic_bsz: bool = False
@@ -133,6 +183,8 @@ class DiffusionRolloutConfig(BaseConfig):
     pipeline: DiffusionPipelineConfig = field(default_factory=DiffusionPipelineConfig)
 
     calculate_log_probs: bool = False
+    llm_calculate_log_probs: bool = False
+
     rollout_adapter: str = "default"
 
     agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
@@ -171,8 +223,14 @@ class DiffusionRolloutConfig(BaseConfig):
 
     external_lib: Optional[str] = None
 
+    def to_vllm_omni_attention_config(self) -> dict:
+        """Convert the rollout backend to vLLM-Omni's canonical config form."""
+        return {"default": {"backend": self.rollout_attn_backend}}
+
     def __post_init__(self):
         """Validate the diffusion rollout config"""
+        if self.max_prompt_embed_length is not None and self.max_prompt_embed_length <= 0:
+            raise ValueError(f"max_prompt_embed_length must be positive when set, got {self.max_prompt_embed_length}.")
         if self.mode == "sync":
             raise ValueError(
                 "Rollout mode 'sync' has been removed. Please set "
@@ -183,8 +241,22 @@ class DiffusionRolloutConfig(BaseConfig):
                 f"Invalid diffusion rollout rollout_adapter: {self.rollout_adapter}. Must be one of ['default', 'old']."
             )
 
+        if self.prompt_embed_cache_size <= 0:
+            raise ValueError(f"prompt_embed_cache_size must be positive, got {self.prompt_embed_cache_size}.")
+
         if self.pipeline_model_parallel_size > 1:
             if self.name == "vllm_omni":
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
+
+        if self.text_encoder_tp_size < 1:
+            raise ValueError(f"text_encoder_tp_size must be >= 1, got {self.text_encoder_tp_size}.")
+        if self.text_encoder_tp_size not in (1, self.tensor_model_parallel_size):
+            # vLLM-Omni only builds a valid text-encoder group for tp_size == 1 or
+            # tp_size == tensor_model_parallel_size; intermediate sizes leave the
+            # out-of-group ranks without a device group and crash during init.
+            raise ValueError(
+                "text_encoder_tp_size must be either 1 or equal to tensor_model_parallel_size "
+                f"({self.tensor_model_parallel_size}), got {self.text_encoder_tp_size}."
+            )

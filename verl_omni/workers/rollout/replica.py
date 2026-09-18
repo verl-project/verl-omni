@@ -21,7 +21,7 @@ class DiffusionOutput(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     diffusion_output: Any
-    """generated image tensor (CHW format) / video tensor (TCHW format)"""
+    """Generated uint8 pixel tensor (CHW/TCHW) in [0, 255], or floating-point latents."""
     log_probs: Optional[Any] = None
     """logprobs of generated image/video"""
     stop_reason: Optional[str] = None

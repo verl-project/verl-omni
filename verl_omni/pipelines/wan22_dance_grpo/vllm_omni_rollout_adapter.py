@@ -31,11 +31,18 @@ import torch
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.forward_context import set_forward_context_denoise_step_idx
+from vllm_omni.diffusion.models.wan2_2 import pipeline_wan2_2
 from vllm_omni.diffusion.models.wan2_2.pipeline_wan2_2 import Wan22Pipeline, retrieve_latents
 from vllm_omni.diffusion.request import OmniDiffusionRequest
+from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 from vllm_omni.platforms import current_omni_platform
 
+from verl_omni.pipelines.diffusion_rollout_output import (
+    rollout_output,
+    wrap_rollout_postprocessor,
+)
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import sd3_time_shift, seed_from_prompt_ids
@@ -43,9 +50,49 @@ from .common import sd3_time_shift, seed_from_prompt_ids
 logger = logging.getLogger(__name__)
 __all__ = ["Wan22DanceGRPOPipelineWithLogProb"]
 
+_WAN_POST_PROCESS_FACTORY = pipeline_wan2_2.get_wan22_post_process_func
+
+
+def get_rollout_post_process_func(od_config):
+    """Postprocess Wan media while preserving rollout metadata."""
+    return wrap_rollout_postprocessor(_WAN_POST_PROCESS_FACTORY(od_config))
+
+
+# vllm-omni resolves the built-in architecture's factory in the engine process.
+pipeline_wan2_2.get_wan22_post_process_func = get_rollout_post_process_func
+
 
 def _coalesce_not_none(value, default):
     return default if value is None else value
+
+
+def _unwrap_single_request(req: OmniDiffusionRequest | DiffusionRequestBatch) -> OmniDiffusionRequest:
+    """Normalize vLLM-Omni 0.27's serial request-batch wrapper."""
+    if not isinstance(req, DiffusionRequestBatch):
+        return req
+    if req.num_reqs != 1:
+        raise ValueError(f"Wan2.2 DanceGRPO expects one request, got {req.num_reqs}.")
+    return req.requests[0]
+
+
+def _validate_wan_rollout_inputs(
+    *,
+    prompt_ids: torch.Tensor | list[int] | None,
+    negative_prompt_ids: torch.Tensor | list[int] | None,
+    height: int,
+    width: int,
+    prompt_embeds: torch.Tensor | None,
+    negative_prompt_embeds: torch.Tensor | None,
+) -> None:
+    """Validate the token-based DanceGRPO inputs without using Wan's text API."""
+    if height % 16 != 0 or width % 16 != 0:
+        raise ValueError(f"`height` and `width` have to be divisible by 16 but are {height} and {width}.")
+    if prompt_ids is not None and prompt_embeds is not None:
+        raise ValueError("Cannot provide both `prompt_ids` and `prompt_embeds`.")
+    if prompt_ids is None and prompt_embeds is None:
+        raise ValueError("Provide either `prompt_ids` or `prompt_embeds`.")
+    if negative_prompt_ids is not None and negative_prompt_embeds is not None:
+        raise ValueError("Cannot provide both `negative_prompt_ids` and `negative_prompt_embeds`.")
 
 
 @VllmOmniPipelineBase.register("WanPipeline", algorithm="dance_grpo")
@@ -61,6 +108,10 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
 
     Registered under ``("WanPipeline", "dance_grpo")``.
     """
+
+    #: Declares the primary rollout media stream so downstream consumers read
+    #: the modality from the adapter instead of inferring it from tensor rank.
+    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("video"))
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
@@ -305,7 +356,7 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
 
     def forward(
         self,
-        req: OmniDiffusionRequest,
+        req: OmniDiffusionRequest | DiffusionRequestBatch,
         prompt_ids: torch.Tensor | list[int] | None = None,
         prompt_mask: torch.Tensor | None = None,
         negative_prompt_ids: torch.Tensor | list[int] | None = None,
@@ -328,7 +379,7 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
 
         Sampling parameters in *req* take precedence over keyword arguments.
         Returns raw latents (``output_type="latent"``) with full rollout data in
-        ``custom_output``.
+        native ``trajectory_*`` / metadata fields.
 
         Args:
             req: Rollout request containing prompts and sampling params.
@@ -351,44 +402,37 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
             **kwargs: Additional arguments.
 
         Returns:
-            DiffusionOutput: Contains the output video and a *custom_output* dict
-                with ``"all_latents"``, ``"all_log_probs"``, ``"all_timesteps"``,
-                ``"prompt_embeds"``, ``"prompt_embeds_mask"``,
-                ``"negative_prompt_embeds"``, and ``"negative_prompt_embeds_mask"``.
+            DiffusionOutput: Contains the output video plus trajectory/metadata
+                fields used for DanceGRPO training.
         """
-        # --- Extract parameters from request ---
-        if len(req.prompts) > 1:
-            raise ValueError(
-                """This model only supports a single prompt, not a batched request.""",
-                """Please pass in a single prompt object or string, or a single-item list.""",
-            )
-        if len(req.prompts) == 1:
-            custom_prompt = req.prompts[0] if isinstance(req.prompts[0], dict) else {}
-            if isinstance(custom_prompt, dict):
-                prompt_ids = custom_prompt.get("prompt_token_ids", prompt_ids)
-                prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
-                negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
-                negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)
-                if image is None:
-                    # Check both top-level and extra_args for multi_modal_data
-                    multi_modal_data = custom_prompt.get("multi_modal_data", None)
-                    if multi_modal_data is None:
-                        extra_args = custom_prompt.get("extra_args", {})
-                        multi_modal_data = (
-                            extra_args.get("multi_modal_data", {}) if isinstance(extra_args, dict) else {}
-                        )
-                    raw_image = multi_modal_data.get("image", None) if multi_modal_data else None
-                    image = raw_image if raw_image is not None else image
+        req = _unwrap_single_request(req)
 
-                # --- Handle warmup / dummy run (both prompt_ids and prompt_embeds are None) ---
-                if custom_prompt.get("prompt", None) == "dummy run":
-                    return DiffusionOutput(output=None, custom_output={})
+        # --- Extract parameters from request ---
+        custom_prompt = req.prompt if isinstance(req.prompt, dict) else {}
+        if isinstance(custom_prompt, dict):
+            prompt_ids = custom_prompt.get("prompt_token_ids", prompt_ids)
+            prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
+            negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
+            negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)
+            if image is None:
+                # Check both top-level and extra_args for multi_modal_data
+                multi_modal_data = custom_prompt.get("multi_modal_data", None)
+                if multi_modal_data is None:
+                    extra_args = custom_prompt.get("extra_args", {})
+                    multi_modal_data = extra_args.get("multi_modal_data", {}) if isinstance(extra_args, dict) else {}
+                raw_image = multi_modal_data.get("image", None) if multi_modal_data else None
+                image = raw_image if raw_image is not None else image
+
+            # --- Handle warmup / dummy run (both prompt_ids and prompt_embeds are None) ---
+            if custom_prompt.get("prompt", None) == "dummy run":
+                return DiffusionOutput(output=None)
 
         # Default dimensions
         sampling_params = req.sampling_params
         height = sampling_params.height or height
         width = sampling_params.width or width
         num_frames = sampling_params.num_frames or frame_num
+        output_type = _coalesce_not_none(sampling_params.output_type, output_type)
 
         # Ensure dimensions are compatible with VAE and patch size
         # For expand_timesteps mode, we need latent dims to be even (divisible by patch_size)
@@ -436,10 +480,9 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
         shift = _coalesce_not_none(sampling_params.extra_args.get("shift", None), kwargs.get("shift", 5.0))
 
         # Validate inputs
-        self.check_inputs(
+        _validate_wan_rollout_inputs(
             prompt_ids=prompt_ids,
             negative_prompt_ids=negative_prompt_ids,
-            image=image,
             height=height,
             width=width,
             prompt_embeds=prompt_embeds,
@@ -651,12 +694,13 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
             latents = latents / latents_std + latents_mean
             output = self.vae.decode(latents, return_dict=False)[0]
 
-        return DiffusionOutput(
-            output=output,
-            custom_output={
-                "all_latents": all_latents,
-                "all_log_probs": all_log_probs,
-                "all_timesteps": all_timesteps_tensor,
+        return rollout_output(
+            media=output,
+            media_key="video",
+            trajectory_latents=all_latents,
+            trajectory_log_probs=all_log_probs,
+            trajectory_timesteps=all_timesteps_tensor,
+            prompt_embeddings={
                 "prompt_embeds": prompt_embeds,
                 "prompt_embeds_mask": prompt_embeds_mask,
                 "negative_prompt_embeds": negative_prompt_embeds,

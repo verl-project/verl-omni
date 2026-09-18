@@ -233,6 +233,13 @@ class DiffusionModelFlops:
             return [int(prompt_embeds.shape[1])] * int(prompt_embeds.shape[0])
         return []
 
+    def collect_meta(self, data: Any) -> dict[str, list[int]]:
+        """Extract standard latent and prompt sequence lengths from one batch."""
+        return {
+            "latent_seqlens": list(self.get_latent_seqlens(data)),
+            "prompt_seqlens": list(self.get_prompt_seqlens(data)),
+        }
+
 
 def read_latents(data: Any) -> tuple[Any, bool]:
     """Return ``(latents_tensor, is_rollout_stacked)``."""
@@ -271,10 +278,7 @@ class DiffusionFlopsCounter:
         if self._arch is None:
             return {"latent_seqlens": [], "prompt_seqlens": []}
 
-        return {
-            "latent_seqlens": list(self._arch.get_latent_seqlens(data)),
-            "prompt_seqlens": list(self._arch.get_prompt_seqlens(data)),
-        }
+        return self._arch.collect_meta(data)
 
     def estimate_flops(
         self,
@@ -284,6 +288,7 @@ class DiffusionFlopsCounter:
         *,
         num_timesteps: int = 1,
         num_forward_passes: int = 1,
+        **architecture_meta: list[int],
     ) -> tuple[float, float]:
         promised = get_device_peak_tflops()
         if self._arch is None or delta_time <= 0 or num_timesteps <= 0 or num_forward_passes <= 0:
@@ -295,6 +300,7 @@ class DiffusionFlopsCounter:
             delta_time,
             num_timesteps=num_timesteps,
             num_forward_passes=num_forward_passes,
+            **architecture_meta,
         )
 
         return float(estimated), float(promised)
@@ -337,8 +343,7 @@ def collect_diffusion_flops_meta(
     num_forward_passes = get_forward_passes_per_step(pcfg_view, transformer_config)
 
     return {
-        "latent_seqlens": seqlens["latent_seqlens"],
-        "prompt_seqlens": seqlens["prompt_seqlens"],
+        **seqlens,
         "num_timesteps": num_timesteps,
         "num_forward_passes": num_forward_passes,
     }
@@ -358,13 +363,16 @@ def allgather_diffusion_flops_meta(meta: dict, dp_group) -> dict:
     if dp_world <= 1:
         return meta
 
-    gathered_latent = [None] * dp_world
-    gathered_prompt = [None] * dp_world
-    torch.distributed.all_gather_object(gathered_latent, meta["latent_seqlens"], dp_group)
-    torch.distributed.all_gather_object(gathered_prompt, meta["prompt_seqlens"], dp_group)
-    return {
-        "latent_seqlens": [x for xs in gathered_latent for x in xs],
-        "prompt_seqlens": [x for xs in gathered_prompt for x in xs],
+    gathered_meta = {
         "num_timesteps": meta["num_timesteps"],
         "num_forward_passes": meta["num_forward_passes"],
     }
+    for key, value in meta.items():
+        if key in gathered_meta:
+            continue
+        if not isinstance(value, list):
+            raise TypeError(f"Diffusion FLOPs metadata {key!r} must be a list, got {type(value).__name__}.")
+        gathered = [None] * dp_world
+        torch.distributed.all_gather_object(gathered, value, dp_group)
+        gathered_meta[key] = [item for values in gathered for item in values]
+    return gathered_meta

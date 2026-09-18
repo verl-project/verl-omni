@@ -49,13 +49,16 @@ class TestOmniColocateAsyncInitTokenizer:
 
 
 class TestOmniColocateAsyncOnTrainBegin:
-    def test_warmup_reads_from_omni_colocate_async_key(self):
+    def test_warmup_reads_generic_colocate_async_key(self):
+        # on_train_begin is inherited from PPOTrainerColocateAsync and must read
+        # the generic trainer.v1.colocate_async key, not an omni_* stub (#320 §3.6).
         trainer = OmniPPOTrainerColocateAsync.__new__(OmniPPOTrainerColocateAsync)
         trainer.config = OmegaConf.create(
             {
+                "skip": {"rollout_tq": {"enable": False}},
                 "trainer": {
                     "v1": {
-                        "omni_colocate_async": {"num_warmup_batches": 3},
+                        "colocate_async": {"num_warmup_batches": 3},
                     }
                 },
             }
@@ -65,3 +68,21 @@ class TestOmniColocateAsyncOnTrainBegin:
             trainer.on_train_begin()
 
         assert mock_add.call_count == 3
+
+    def test_skip_guard_disables_warmup(self):
+        trainer = OmniPPOTrainerColocateAsync.__new__(OmniPPOTrainerColocateAsync)
+        trainer.config = OmegaConf.create(
+            {
+                "skip": {"rollout_tq": {"enable": True}},
+                "trainer": {
+                    "v1": {
+                        "colocate_async": {"num_warmup_batches": 3},
+                    }
+                },
+            }
+        )
+
+        with patch.object(trainer, "_add_batch_to_generate") as mock_add:
+            trainer.on_train_begin()
+
+        mock_add.assert_not_called()

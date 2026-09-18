@@ -89,10 +89,10 @@ def create_training_config(model_type, strategy, device_count, model, policy_sta
         "algo.noise_level=1.2",
         "algo.sde_type=sde",
     ]
-    from verl_omni.utils.diffusion_attention import fa3_available
+    from verl_omni.utils.diffusion_attention import fa_available
 
     # TODO: fix cp and fa3 compatibility
-    if cp > 1 or not fa3_available():
+    if cp > 1 or not fa_available():
         model_overrides.append("attn_backend=native")
     if policy_state_adapters is not None:
         adapters = ",".join(f'"{adapter}"' for adapter in policy_state_adapters)

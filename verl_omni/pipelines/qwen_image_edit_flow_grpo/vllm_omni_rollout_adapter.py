@@ -20,6 +20,7 @@ from typing import Any, Literal
 import torch
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.utils import get_local_device
+from vllm_omni.diffusion.models.qwen_image import pipeline_qwen_image_edit_plus
 from vllm_omni.diffusion.models.qwen_image.pipeline_qwen_image_edit_plus import (
     VAE_IMAGE_SIZE,
     QwenImageEditPlusPipeline,
@@ -27,16 +28,32 @@ from vllm_omni.diffusion.models.qwen_image.pipeline_qwen_image_edit_plus import 
 )
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
+from verl_omni.pipelines.diffusion_rollout_output import (
+    rollout_output,
+    wrap_rollout_postprocessor,
+)
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.common import (
     QwenImageTokenIdPromptMixin,
     apply_true_cfg,
     coalesce_not_none,
 )
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
+from verl_omni.pipelines.rollout_request import condition_images_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
-from verl_omni.pipelines.utils import ImageGenerationRequest
 
 __all__ = ["QwenImageEditPlusPipelineWithLogProb"]
+
+_QWEN_EDIT_POST_PROCESS_FACTORY = pipeline_qwen_image_edit_plus.get_qwen_image_edit_plus_post_process_func
+
+
+def get_rollout_post_process_func(od_config):
+    """Postprocess Qwen-Image-Edit media while preserving rollout metadata."""
+    return wrap_rollout_postprocessor(_QWEN_EDIT_POST_PROCESS_FACTORY(od_config))
+
+
+# vllm-omni resolves the built-in architecture's factory in the engine process.
+pipeline_qwen_image_edit_plus.get_qwen_image_edit_plus_post_process_func = get_rollout_post_process_func
 
 
 def _maybe_to_cpu(value):
@@ -95,9 +112,24 @@ def _validate_condition_image_sizes(condition_images, vae_image_sizes, target_si
         )
 
 
+def _condition_images_for_prompt_encoding(custom_prompt: dict) -> list[Any]:
+    """Use the raw image that was used to build the pre-tokenized prompt."""
+    raw_payload = {
+        key: custom_prompt[key] for key in ("images", "image", "multi_modal_data", "extra_args") if key in custom_prompt
+    }
+    raw_images = condition_images_from_payload(raw_payload)
+    if raw_images:
+        return raw_images
+    return condition_images_from_payload(custom_prompt)
+
+
 @VllmOmniPipelineBase.register("QwenImageEditPlusPipeline", algorithm="flow_grpo")
 class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImageEditPlusPipeline):
     """Qwen-Image-Edit-Plus rollout pipeline for FlowGRPO."""
+
+    #: Declares the primary rollout media stream so downstream consumers read
+    #: the modality from the adapter instead of inferring it from tensor rank.
+    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
@@ -345,20 +377,11 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
         """
         custom_prompt = req.prompts[0] if req.prompts else {}
 
-        # Parse the condition images via the shared ImageGenerationRequest interface.
-        # NOTE: only this image-edit pipeline consumes ImageGenerationRequest for now;
-        # migrating the existing T2I pipelines onto it is left to a follow-up PR to keep
-        # this change focused.
-        request_payload = custom_prompt
-        if (
-            isinstance(custom_prompt, dict)
-            and prompt_embeds is not None
-            and custom_prompt.get("prompt") is None
-            and custom_prompt.get("prompt_token_ids") is None
-        ):
-            request_payload = {**custom_prompt, "prompt": ""}
-        gen_request = ImageGenerationRequest.from_request_payload(request_payload) if request_payload else None
-        condition_images = gen_request.images if gen_request else None
+        # Condition images are parsed from the rollout request payload; the prompt
+        # itself is read from custom_prompt below.
+        condition_images = (
+            _condition_images_for_prompt_encoding(custom_prompt) if isinstance(custom_prompt, dict) else None
+        )
         if not condition_images:
             raise ValueError("Qwen-Image-Edit requires at least one condition image")
 
@@ -409,7 +432,7 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
         elif prompt_embeds is not None:
             batch_size = prompt_embeds.shape[0]
         else:
-            return DiffusionOutput(output=None, custom_output={})
+            return DiffusionOutput(output=None)
 
         if isinstance(negative_prompt_ids, list):
             negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
@@ -531,17 +554,20 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
             latents = latents / latents_std + latents_mean
             image = self.vae.decode(latents, return_dict=False)[0][:, :, 0]
 
-        return DiffusionOutput(
-            output=_maybe_to_cpu(image),
-            custom_output={
-                "all_latents": _maybe_to_cpu(all_latents),
-                "all_log_probs": _maybe_to_cpu(all_log_probs),
-                "all_timesteps": _maybe_to_cpu(all_timesteps),
+        return rollout_output(
+            media=_maybe_to_cpu(image),
+            trajectory_latents=_maybe_to_cpu(all_latents),
+            trajectory_log_probs=_maybe_to_cpu(all_log_probs),
+            trajectory_timesteps=_maybe_to_cpu(all_timesteps),
+            prompt_embeddings={
                 "prompt_embeds": _maybe_to_cpu(prompt_embeds),
                 "prompt_embeds_mask": _maybe_to_cpu(prompt_embeds_mask),
                 "negative_prompt_embeds": _maybe_to_cpu(negative_prompt_embeds),
                 "negative_prompt_embeds_mask": _maybe_to_cpu(negative_prompt_embeds_mask),
+            },
+            rl={
                 "condition_image_latents": _maybe_to_cpu(condition_image_latents),
                 "img_shapes": img_shapes,
             },
+            to_cpu=False,
         )

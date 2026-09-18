@@ -13,6 +13,8 @@ disagree, these files record the repo and say so.
 - **[`docs/contributing/`](../docs/contributing/) is authoritative for procedures.**
   Seven `integrating_*` guides, each ending in a final checklist, plus a testing
   guide and a symptom-first pitfalls reference. Nothing here restates them.
+  When you add a new guide there, also list it in
+  [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 - **`skills/`** are **routers and deltas**: they classify the task, name the guide
   that owns it, and add only what the guide does not cover. Invoked as `/<skill>` or
   auto-loaded by description.
@@ -41,6 +43,7 @@ thing, the guide wins and the file links to it.
 | [add-pipeline](skills/add-pipeline/SKILL.md)         | routing a model / algorithm integration to the right guide under `docs/contributing/` |
 | [add-reward-score](skills/add-reward-score/SKILL.md) | a new reward scorer plus the config overrides that select it    |
 | [run-cpu-tests](skills/run-cpu-tests/SKILL.md)       | what the CPU job does that `testing_guide.md`'s local commands don't |
+| [train-infer-consistency](skills/train-infer-consistency/SKILL.md) | rollout / actor consistency collection and analysis using MindStudio skills |
 
 `commit-and-pr` holds the authoritative module list; other files link to it rather
 than duplicating it.

@@ -222,6 +222,7 @@ actor_rollout_ref:
     nnodes: 0
     n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
     prompt_length: ${oc.select:data.max_prompt_length,512}
+    max_prompt_embed_length: null
     dtype: bfloat16
     rollout_attn_backend: FLASH_ATTN_3_HUB
     gpu_memory_utilization: 0.5
@@ -229,6 +230,7 @@ actor_rollout_ref:
     cudagraph_capture_sizes: null
     free_cache_engine: true
     tensor_model_parallel_size: 2
+    text_encoder_tp_size: 1
     data_parallel_size: 1
     expert_parallel_size: 1
     pipeline_model_parallel_size: 1
@@ -245,12 +247,16 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: null
     disable_log_stats: true
     'n': 1
-    seed: null
+    seed: 42
+    full_determinism: false
     multi_turn:
       _target_: verl.workers.config.MultiTurnConfig
       enable: false
     engine_kwargs:
       vllm_omni: {}
+    enable_prompt_embed_cache: false
+    prompt_embed_cache_size: 32
+    enable_prompt_embed_cache_routing_affinity: false
     val_kwargs:
       _target_: verl_omni.workers.config.diffusion.DiffusionSamplingConfig
       'n': 1
@@ -262,19 +268,27 @@ actor_rollout_ref:
         true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.true_cfg_scale,1.0}
         max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
         guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
+        reference_image_short_edge: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_image_short_edge,null}
         num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
+        frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
+        video_flow_shift: ${oc.select:actor_rollout_ref.rollout.pipeline.video_flow_shift,12.0}
+        task: ${oc.select:actor_rollout_ref.rollout.pipeline.task,null}
+        frame_indices: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_indices,null}
+        aspect_ratio: ${oc.select:actor_rollout_ref.rollout.pipeline.aspect_ratio,null}
       algo:
         _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
         noise_level: 0.0
         sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
         sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
         sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
+        sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
     algo:
       _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
       noise_level: 1.0
       sde_type: sde
       sde_window_size: null
       sde_window_range: null
+      sde_contiguous: true
       sample_strategy: random
       iters_per_group: 1
       sde_window_seed: 0
@@ -286,8 +300,20 @@ actor_rollout_ref:
       true_cfg_scale: 1.0
       max_sequence_length: 512
       guidance_scale: null
+      reference_image_short_edge: null
       num_frames: 1
+      frame_rate: 24.0
+      video_flow_shift: 12.0
+      task: null
+      frame_indices: null
+      aspect_ratio: null
     calculate_log_probs: false
+    llm_calculate_log_probs: false
+    temperature: 1.0
+    top_k: 0
+    top_p: 1.0
+    repetition_penalty: 1.0
+    max_new_tokens: 256
     rollout_adapter: default
     agent:
       _target_: verl.workers.config.AgentLoopConfig
@@ -330,6 +356,8 @@ actor_rollout_ref:
     target_modules: all-linear
     target_parameters: null
     exclude_modules: null
+    lora:
+      merge: false
     lora_adapter_path: null
     policy_state_adapters:
     - default
@@ -347,14 +375,21 @@ actor_rollout_ref:
       true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.true_cfg_scale,1.0}
       max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
       guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
+      reference_image_short_edge: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_image_short_edge,null}
       num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
+      frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
+      task: ${oc.select:actor_rollout_ref.rollout.pipeline.task,null}
+      frame_indices: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_indices,null}
+      video_flow_shift: ${oc.select:actor_rollout_ref.rollout.pipeline.video_flow_shift,12.0}
     algo:
       _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
       noise_level: ${oc.select:actor_rollout_ref.rollout.algo.noise_level,1.0}
       sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
       sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
       sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
+      sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
     model_type: diffusion_model
+  separate: false
   hybrid_engine: true
   nccl_timeout: 600
 data:
@@ -453,6 +488,8 @@ reward:
       top_p: 1
       do_sample: true
       'n': 1
+      seed: 42
+      full_determinism: false
       prompt_length: 2048
       response_length: 2048
       quantization: null
@@ -475,7 +512,11 @@ reward:
   custom_reward_function:
     path: null
     name: compute_score
+    use_accelerator: false
+  accelerator_workers:
+    enabled: false
   reward_functions: {}
+  models: {}
   aggregation: weighted_sum
   reward_manager:
     _target_: verl.workers.config.reward_model.RewardManagerConfig
@@ -488,6 +529,48 @@ reward:
     url: null
     max_concurrent: 64
     memory_limit_mb: 1024
+distillation:
+  _target_: verl_omni.workers.config.diffusion.DiffusionDistillationConfig
+  enabled: false
+  n_gpus_per_node: 0
+  nnodes: 0
+  teacher_models:
+    teacher_model:
+      _target_: verl_omni.workers.config.diffusion.DiffusionDistillationTeacherModelConfig
+      key: null
+      model_path: null
+      world_size: 0
+  teacher_key: data_source
+  scheduler: inline
+dmd:
+  _target_: verl_omni.workers.config.DiffusionDMDConfig
+  fake_update_ratio: 2
+  student_micro_batch_size_per_gpu: 1
+  fake_score_micro_batch_size_per_gpu: 1
+  fake_score_optim:
+    _target_: verl.workers.config.FSDPOptimizerConfig
+    lr: 2.0e-05
+    weight_decay: 0.001
+    betas:
+    - 0.9
+    - 0.999
+    clip_grad: 1.0
+    lr_scheduler_type: constant
+    lr_warmup_steps: -1
+    lr_warmup_steps_ratio: 0.0
+    total_training_steps: -1
+  teacher_guidance_scale: 4.0
+  cfg_norm: layer_norm
+  negative_prompt: ' '
+  normalization_epsilon: 1.0e-06
+  rollout_timestep_shift: 3.0
+  score_discrete_steps: 1000
+  score_sigma_min: 0.02
+  score_sigma_max: 0.98
+  score_timestep_shift: 3.0
+  ema_decay: 0.999
+  ema_start_step: 0
+  export_role: student
 algorithm:
   _target_: verl_omni.trainer.config.DiffusionAlgoConfig
   trainer_type: policy_gradient
@@ -539,9 +622,7 @@ trainer:
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
   max_actor_ckpt_to_keep: null
   ray_wait_register_center_timeout: 300
-  ray_master_port_range:
-  - 20000
-  - 30000
+  ray_master_port_range: null
   device: cuda
   use_v1: false
   v1:
@@ -553,9 +634,20 @@ trainer:
       num_warmup_batches: 1
       parameter_sync_step: 4
       sync_compatible: false
+      hybrid_rollout:
+        _target_: verl.trainer.config.HybridRolloutSwitchConfig
+        enable_switch: false
+        switch_threshold_ratio: 0.4
+        adaptive_switch_threshold: true
+        switch_threshold_step_up: 0.05
+        switch_threshold_step_down: 0.03
+        switch_threshold_release_steps: 2
+        switch_cost_window_size: 3
     sampler:
       max_off_policy_threshold: 8
       max_off_policy_strategy: drop
+      drop_incomplete_groups: false
+      max_incomplete_group_refill_rounds: 3
       custom_sampler:
         path: null
         name: null

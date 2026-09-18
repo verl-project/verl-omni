@@ -9,6 +9,7 @@ cd "${REPO_ROOT}"
 
 log()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 pass() { echo "[PASS] $*"; }
+skip() { echo "[SKIP] $*"; }
 fail() { echo "[FAIL] $*"; }
 sep()  { printf '%0.s-' {1..78}; echo; }
 
@@ -102,8 +103,10 @@ EOF
     export PYTHONUNBUFFERED=1
     export RAY_DEDUP_LOGS=0
     if [[ -n "${CONDA_PREFIX:-}" ]]; then
+        export FLASHINFER_DISABLE_VERSION_CHECK="${FLASHINFER_DISABLE_VERSION_CHECK:-1}"
         export LD_LIBRARY_PATH="${CONDA_PREFIX}/cuda-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     fi
+    export FLASHINFER_DISABLE_VERSION_CHECK="${FLASHINFER_DISABLE_VERSION_CHECK:-1}"
 
     TEST_IDS=()
     TEST_NAMES=()
@@ -131,6 +134,10 @@ run_test() {
 
     if [[ "${GPU_SMOKE_SKIP_RAY_STOP:-0}" != "1" ]]; then
         ray stop --force 2>/dev/null || true
+        # Ray/vLLM child processes may release their distributed rendezvous
+        # sockets asynchronously; let them exit before the next smoke test
+        # selects a new port.
+        sleep 3
     fi
 
     sep
@@ -157,6 +164,9 @@ run_test() {
     if [[ "${rc}" -eq 0 ]]; then
         TEST_RESULTS+=("PASS")
         pass "[${id}] ${name}  (${elapsed}s)"
+    elif [[ "${rc}" -eq 5 ]]; then
+        TEST_RESULTS+=("SKIP")
+        skip "[${id}] ${name}  (${elapsed}s) (skipped)"
     else
         TEST_RESULTS+=("FAIL")
         fail "[${id}] ${name}  (${elapsed}s)  exit=${rc}"

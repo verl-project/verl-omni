@@ -21,7 +21,7 @@
 #   - actor_rollout_ref.rollout.checkpoint_engine.backend != naive
 #     (nccl/nixl/mooncake/...). CKPT_BACKEND below selects the backend; nccl is
 #     the default. Make sure the corresponding checkpoint engine is importable.
-#   - data.train_batch_size == actor.ppo_mini_batch_size (enforced by the trainer).
+#   - data.train_batch_size == parameter_sync_step * actor.ppo_mini_batch_size.
 #
 # Reference (sync v1 script):
 # verl-omni/examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh
@@ -60,7 +60,8 @@ NUM_WARMUP_BATCHES=${NUM_WARMUP_BATCHES:-0}
 PARAMETER_SYNC_STEP=${PARAMETER_SYNC_STEP:-1}
 MAX_OFF_POLICY_THRESHOLD=${MAX_OFF_POLICY_THRESHOLD:-1}
 MAX_OFF_POLICY_STRATEGY=${MAX_OFF_POLICY_STRATEGY:-drop}
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-8}            # must equal ppo_mini_batch_size
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-8}
+PPO_MINI_BATCH_SIZE=$((TRAIN_BATCH_SIZE / PARAMETER_SYNC_STEP))
 # Pause the standalone rollout during actor training (abort + remove from
 # balancer on on_sample_end, resume after weight sync on on_step_end). With
 # the on-policy knobs above this makes separate_async algorithmically
@@ -116,6 +117,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.actor.diffusion_loss.clip_ratio=1e-5 \
     actor_rollout_ref.model.path=$model_name \
     actor_rollout_ref.model.custom_chat_template="\"$custom_chat_template\"" \
+    'actor_rollout_ref.model.extra_tokenizers={clip: {path: tokenizer, max_length: 77}, t5: {path: tokenizer_3, max_length: 256}}' \
     actor_rollout_ref.model.attn_backend=$ATTN_BACKEND \
     actor_rollout_ref.rollout.rollout_attn_backend=$ROLLOUT_ATTN_BACKEND \
     actor_rollout_ref.model.lora_rank=32 \
@@ -123,7 +125,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.model.target_modules="['to_q','to_k','to_v','to_out.0','add_q_proj','add_k_proj','add_v_proj','to_add_out']" \
     actor_rollout_ref.actor.optim.lr=1e-4 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=$TRAIN_BATCH_SIZE \
+    actor_rollout_ref.actor.ppo_mini_batch_size=$PPO_MINI_BATCH_SIZE \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
@@ -149,6 +151,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.rollout.pipeline.num_inference_steps=10 \
     actor_rollout_ref.rollout.pipeline.guidance_scale=1.0 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=256 \
+    actor_rollout_ref.rollout.max_prompt_embed_length=333 \
     actor_rollout_ref.rollout.algo.noise_level=0.8 \
     actor_rollout_ref.rollout.algo.sde_type="cps" \
     actor_rollout_ref.rollout.algo.sde_window_size=3 \

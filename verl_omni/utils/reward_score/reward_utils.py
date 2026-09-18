@@ -21,18 +21,42 @@ import torch
 from PIL import Image
 
 
+def normalize_video_tensor(video: torch.Tensor) -> torch.Tensor:
+    """Normalize an RGB uint8 video to the ``[T, 3, H, W]`` layout.
+
+    Accepted layouts are time-first channels-first ``[T, 3, H, W]``,
+    channels-first temporal ``[3, T, H, W]``, and channels-last
+    ``[T, H, W, 3]``. Ambiguous shapes such as ``[3, 3, H, W]`` retain the
+    canonical time-first interpretation.
+    """
+    if not isinstance(video, torch.Tensor) or video.dtype != torch.uint8:
+        dtype = video.dtype if isinstance(video, torch.Tensor) else type(video)
+        raise ValueError(f"Expected a uint8 video tensor, got {dtype}")
+    if video.ndim != 4:
+        raise ValueError(f"Expected an RGB video tensor with shape [T, 3, H, W], got {tuple(video.shape)}")
+
+    if video.shape[1] == 3:
+        normalized = video
+    elif video.shape[0] == 3:
+        normalized = video.permute(1, 0, 2, 3)
+    elif video.shape[-1] == 3:
+        normalized = video.permute(0, 3, 1, 2)
+    else:
+        raise ValueError(f"Expected an RGB video tensor with shape [T, 3, H, W], got {tuple(video.shape)}")
+
+    if normalized.shape[0] == 0 or normalized.shape[2] == 0 or normalized.shape[3] == 0:
+        raise ValueError(f"Expected a video with non-empty time and spatial dimensions, got {tuple(video.shape)}")
+    return normalized
+
+
 def video_tensor_to_pil_frames(video: torch.Tensor) -> list[Image.Image]:
-    """Convert an RGB ``[T, C, H, W]`` tensor in ``[0, 1]`` to PIL frames.
+    """Convert a normalized RGB uint8 video tensor to PIL frames.
 
     PIL (not NumPy) frames avoid ``export_to_video`` rescaling already-uint8 input
     by 255, which would invert colors modulo 256.
     """
-    if video.ndim != 4 or video.shape[1] != 3:
-        raise ValueError(f"Expected an RGB video tensor with shape [T, 3, H, W], got {tuple(video.shape)}")
-
-    video = video.detach().permute(0, 2, 3, 1).to(dtype=torch.float32)
-    video = torch.nan_to_num(video, nan=0.0, posinf=1.0, neginf=0.0).clamp_(0, 1)
-    frames = video.mul_(255).round_().to(dtype=torch.uint8, device="cpu").contiguous().numpy()
+    video = normalize_video_tensor(video)
+    frames = video.detach().permute(0, 2, 3, 1).to(device="cpu").contiguous().numpy()
     return [Image.fromarray(frame) for frame in frames]
 
 

@@ -80,8 +80,8 @@ class QwenImageTokenIdPromptMixin:
 
     def encode_prompt(
         self,
-        prompt_ids: torch.Tensor | None,
-        attention_mask: torch.Tensor | None = None,
+        prompt_ids: torch.Tensor | list[int] | list[list[int]] | None,
+        attention_mask: torch.Tensor | list[int] | list[bool] | list[list[int]] | list[list[bool]] | None = None,
         num_images_per_prompt: int = 1,
         prompt_embeds: torch.Tensor | None = None,
         prompt_embeds_mask: torch.Tensor | None = None,
@@ -90,6 +90,18 @@ class QwenImageTokenIdPromptMixin:
         if prompt_embeds is None:
             if prompt_ids is None:
                 raise ValueError("`prompt_ids` must be provided when `prompt_embeds` is None.")
+            if isinstance(prompt_ids, list):
+                prompt_ids = torch.tensor(prompt_ids, device=self.device, dtype=torch.long)
+            elif isinstance(prompt_ids, torch.Tensor):
+                prompt_ids = prompt_ids.to(self.device)
+            else:
+                raise TypeError("`prompt_ids` must be a tensor or list.")
+            if isinstance(attention_mask, list):
+                attention_mask = torch.tensor(attention_mask, device=self.device)
+            elif isinstance(attention_mask, torch.Tensor):
+                attention_mask = attention_mask.to(self.device)
+            elif attention_mask is not None:
+                raise TypeError("`attention_mask` must be a tensor or list.")
             prompt_ids = prompt_ids.unsqueeze(0) if prompt_ids.ndim == 1 else prompt_ids
             attention_mask = (
                 attention_mask.unsqueeze(0)

@@ -1,0 +1,1 @@
+../../../examples/flowgrpo_trainer/qwen_image/README.md

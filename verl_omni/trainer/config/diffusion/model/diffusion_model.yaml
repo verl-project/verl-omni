@@ -41,8 +41,8 @@ config_path: null
 transformer_subfolder: transformer
 
 # Diffusers attention backend.
-# Supported: "native", "_native_npu", "_flash_3_varlen_hub"
-# GPU default; NPU recipes override with _native_npu. Falls back to native when FA3 deps are missing.
+# Supported: "native", "_native_npu", "flash_varlen_hub", "_flash_3_varlen_hub"
+# GPU default; NPU recipes override with _native_npu. Falls back to native when FA2/FA3 deps are missing.
 attn_backend: _flash_3_varlen_hub
 
 # Set to positive value to enable LoRA (e.g., 32)
@@ -62,6 +62,12 @@ target_parameters: null
 
 # Exclude modules from LoRA adaptation
 exclude_modules: null
+
+# LoRA (Low-Rank Adaptation) configuration
+lora:
+
+  # whether to merge LoRA into base weights before transferring to vllm_omni
+  merge: False
 
 # Path to pre-trained LoRA adapter to load for continued training
 lora_adapter_path: null
@@ -109,8 +115,23 @@ pipeline:
   # Distilled guidance scale
   guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
 
+  # Reference-image resize short edge for compatible pipelines
+  reference_image_short_edge: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_image_short_edge,null}
+
   # Wan2.2 video number of frames
   num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
+
+  # Audio-video frame rate
+  frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
+
+  # Task label forwarded to the vLLM-Omni request `task`, pipeline-specific
+  task: ${oc.select:actor_rollout_ref.rollout.pipeline.task,null}
+
+  # Keyframe frame positions for pipelines that accept them
+  frame_indices: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_indices,null}
+
+  # MiniMax H3 video-stream sigma-schedule shift
+  video_flow_shift: ${oc.select:actor_rollout_ref.rollout.pipeline.video_flow_shift,12.0}
 
 # Rollout Algorithm configuration
 algo:
@@ -124,8 +145,11 @@ algo:
   # SDE variant: "sde" or "cps"
   sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
 
-  # Number of consecutive denoising steps in the active SDE window; null = all steps
+  # Number of denoising steps selected from sde_window_range; null = all steps
   sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
 
-  # [start, end] envelope of valid window-start positions; null = entire trajectory
+  # [start, end) range of eligible denoising steps; null = entire trajectory
   sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
+
+  # Whether selected SDE steps must form one consecutive window
+  sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}

@@ -50,7 +50,7 @@ Managers call scorers **by keyword**, so parameter names are the contract:
 ```python
 async def compute_score_<name>(
     data_source: str,
-    solution_image,       # torch.Tensor, (C,H,W) or (N,C,H,W), float in [0, 1]
+    solution_image,       # pixel: uint8 CHW/TCHW; latent: model-native floating point
     ground_truth: str,    # prompt / reference text
     extra_info: dict,     # manager-injected: num_turns, rollout_reward_scores, ...
     **kwargs,             # forwarded config keys: server_url, model_name, ...
@@ -69,14 +69,26 @@ async def compute_score_<name>(
 
 ## Input contract
 
-`solution_image` is a float tensor in `[0, 1]`; scale by 255 inside the scorer.
+The manager validates `responses` against the active training or validation
+`output_type`, then forwards it without dtype conversion. Follow the
+[rollout response contract](../../docs/contributing/integrating_a_diffusion_model.md#41-rollout-response-contract):
+
+- Pixel-valued `solution_image` is `torch.uint8` in `[0, 255]`; do not multiply
+  it by 255 again. Convert with `.float() / 255.0` only when the reward model
+  requires normalized input.
+- A single image arrives as `(C, H, W)`, while a video arrives as
+  `(T, C, H, W)` and can be frame-subsampled via
+  `extra_info["frame_interval"]`.
+- `latent_http_scorer_client` receives a model-native floating-point latent when
+  `output_type=latent`. With `output_type=both`, the latent is carried separately
+  in `extra_info["latents_clean"]`.
+- Generated audio is separate from `solution_image` and retains its original
+  floating-point dtype.
+
 Don't assume more than that:
 
 - Channels-last is accepted by some scorers (`hpsv3`, `pickscore` sniff
   `shape[-1] in (1, 3)`).
-- Video arrives 5-D and is frame-subsampled via `extra_info["frame_interval"]`.
-- `latent_http_scorer_client` receives a **latent**, not an image — the parameter
-  name is a convention, not a guarantee.
 - `extra_info` is mutated by the manager before the scorer sees it.
 
 ## Failure and heavy state

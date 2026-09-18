@@ -108,6 +108,7 @@ def test_token_id_encode_matches_text_encode(pipeline, num_images_per_prompt):
     (ref_embeds, ref_pooled), (embeds, pooled) = _encode_both_paths(pipeline, prompts, num_images_per_prompt)
 
     assert embeds.shape == ref_embeds.shape
+    assert embeds.shape[1] == pipeline.tokenizer_max_length + T5_MAX_SEQUENCE_LENGTH
     assert pooled.shape == ref_pooled.shape
     torch.testing.assert_close(embeds, ref_embeds, rtol=0.0, atol=0.0)
     torch.testing.assert_close(pooled, ref_pooled, rtol=0.0, atol=0.0)

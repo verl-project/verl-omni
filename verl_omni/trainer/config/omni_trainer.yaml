@@ -67,12 +67,6 @@ trainer:
     # Use the omni trainer mode for omni models.
     trainer_mode: omni_sync
 
-    # Omni colocate-async trainer mode (mirrors colocate_async).
-    omni_colocate_async:
-
-      # Number of warmup batches to add before training loop starts.
-      num_warmup_batches: 1
-
 
 # Config for the algorithm.
 algorithm:
@@ -81,19 +75,32 @@ algorithm:
   _target_: verl_omni.trainer.config.OmniAlgoConfig
 
   # Trainer loop.
-  trainer_type: direct_preference
+  trainer_type: policy_gradient
 
   # Sample provenance.
-  sample_source: offline
+  sample_source: online
 
   # True for pair-based algorithms such as offline DPO.
-  paired_preference: true
+  paired_preference: false
 
   # Advantage estimator placeholder inherited by shared trainer utilities.
-  adv_estimator: dpo
+  adv_estimator: grpo
 
   # Whether to normalize advantages by std.
   norm_adv_by_std_in_grpo: true
 
   # Whether to normalize advantages using global standard deviation.
   global_std: true
+
+
+# Distillation config. Overrides only the teacher _target_ so vllm_omni is
+# accepted by _validate_topk_logprobs; all other defaults are inherited from
+# verl's distillation group.
+distillation:
+
+  teacher_models:
+
+    teacher_model:
+
+      # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+      _target_: verl_omni.workers.config.omni.distillation.OmniDistillationTeacherModelConfig

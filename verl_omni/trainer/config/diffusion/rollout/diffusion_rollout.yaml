@@ -26,6 +26,10 @@ n_gpus_per_node: ${oc.select:trainer.n_gpus_per_node,8}
 # same as data.max_prompt_length if it exists
 prompt_length: ${oc.select:data.max_prompt_length,512}
 
+# Final prompt-embedding sequence length after combining all text encoders.
+# null falls back to pipeline.max_sequence_length for single-encoder models.
+max_prompt_embed_length: null
+
 # for vllm-omni rollout
 # Rollout model parameters type. Align with actor model's FSDP/Megatron type.
 dtype: bfloat16
@@ -54,6 +58,9 @@ free_cache_engine: True
 
 # TP size for rollout
 tensor_model_parallel_size: 2
+
+# Text-encoder TP shard size: 1 or tensor_model_parallel_size.
+text_encoder_tp_size: 1
 
 # DP size for rollout
 data_parallel_size: 1
@@ -107,7 +114,10 @@ n: 1
 
 # Base seed for deterministic training rollout RNG.
 # Per-step base is ``seed + global_step - 1``. null disables rollout seeding.
-seed: null
+seed: 42
+
+# Whether to enable full determinism for reproducibility.
+full_determinism: False
 
 # Multi-turn interaction config for tools or chat.
 multi_turn:
@@ -123,6 +133,15 @@ engine_kwargs:
 
   # vllm-omni engine config
   vllm_omni: {}
+
+# Reuse text-encoder outputs for repeated diffusion prompts.
+enable_prompt_embed_cache: false
+
+# Maximum number of prompt embeddings cached per diffusion worker.
+prompt_embed_cache_size: 32
+
+# Route repeated rollouts for one sample to the same worker when prompt cache is enabled.
+enable_prompt_embed_cache_routing_affinity: false
 
 # Sampling parameters used during validation (diffusion-specific).
 val_kwargs:
@@ -157,8 +176,26 @@ val_kwargs:
     # Distilled guidance scale for models with guidance_embeds; null to disable
     guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
 
+    # Reference-image short edge for compatible pipelines (validation)
+    reference_image_short_edge: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_image_short_edge,null}
+
     # Wan2.2 number of frames (validation)
     num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
+
+    # Audio-video frame rate (validation)
+    frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
+
+    # Flow-matching sigma-schedule shift for the video stream (validation)
+    video_flow_shift: ${oc.select:actor_rollout_ref.rollout.pipeline.video_flow_shift,12.0}
+
+    # Task label forwarded to the vLLM-Omni request `task`, pipeline-specific (validation)
+    task: ${oc.select:actor_rollout_ref.rollout.pipeline.task,null}
+
+    # Optional frame indices for pipelines that accept them (validation)
+    frame_indices: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_indices,null}
+
+    # Named canvas aspect ratio for compatible pipelines (validation)
+    aspect_ratio: ${oc.select:actor_rollout_ref.rollout.pipeline.aspect_ratio,null}
 
 # Rollout Algorithm configuration for validation
   algo:
@@ -172,11 +209,14 @@ val_kwargs:
     # SDE variant: "sde" or "cps"
     sde_type: ${oc.select:actor_rollout_ref.rollout.algo.sde_type,sde}
 
-    # Number of consecutive denoising steps in the active SDE window; null = all steps
+    # Number of denoising steps selected from sde_window_range; null = all steps
     sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
 
-    # [start, end] envelope of valid window-start positions; null = entire trajectory
+    # [start, end) range of eligible denoising steps; null = entire trajectory
     sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
+
+    # Whether selected SDE steps must form one consecutive window
+    sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
 
 # Rollout Algorithm configuration
 algo:
@@ -190,11 +230,14 @@ algo:
   # SDE variant: "sde" or "cps"
   sde_type: sde
 
-  # Length of the active SDE window; null = all steps
+  # Number of denoising steps selected from sde_window_range; null = all steps
   sde_window_size: null
 
-  # [start, end) range for random window start-index sampling
+  # [start, end) range of eligible denoising steps; null = entire trajectory
   sde_window_range: null
+
+  # Whether selected SDE steps must form one consecutive window
+  sde_contiguous: true
 
   # MixGRPO sliding-window scheduler configs
 
@@ -232,11 +275,47 @@ pipeline:
   # Distilled guidance scale for models with guidance_embeds; null to disable
   guidance_scale: null
 
+  # Reference-image short edge for compatible pipelines
+  reference_image_short_edge: null
+
   # Wan2.2 number of frames
   num_frames: 1
 
+  # Audio-video frame rate
+  frame_rate: 24.0
+
+  # Flow-matching sigma-schedule shift for the video stream
+  video_flow_shift: 12.0
+
+  # Task label forwarded to the vLLM-Omni request `task`, pipeline-specific
+  task: null
+
+  # Optional frame indices for pipelines that accept them
+  frame_indices: null
+
+  # Named canvas aspect ratio for compatible pipelines
+  aspect_ratio: null
+
 # support logging rollout prob for debugging purpose
 calculate_log_probs: False
+
+# Optional. LLM generation use
+llm_calculate_log_probs: False
+
+# Optional. LLM generation use
+temperature: 1.0
+
+# Optional. LLM generation use
+top_k: 0
+
+# Optional. LLM generation use
+top_p: 1.0
+
+# Optional. LLM generation use
+repetition_penalty: 1.0
+
+# Optional. Max number of LLM generated tokens
+max_new_tokens: 256
 
 # Named adapter used by rollout generation
 rollout_adapter: default

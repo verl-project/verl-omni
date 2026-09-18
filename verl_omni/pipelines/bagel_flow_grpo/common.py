@@ -70,5 +70,7 @@ def setup_bagel_sigmas(
         scheduler.set_timesteps(sigmas=sigmas, timesteps=sigmas, device=device)
     else:
         scheduler.set_timesteps(sigmas=sigmas, timesteps=sigmas)
+    # diffusers >= 0.40 ignores `timesteps=` and stores sigmas * 1000; the replay matches timesteps by exact value.
+    scheduler.timesteps = scheduler.sigmas[:-1]
     scheduler.set_begin_index(0)
     return sigmas

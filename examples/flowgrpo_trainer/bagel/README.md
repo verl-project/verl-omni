@@ -1,6 +1,6 @@
 # BAGEL-7B-MoT FlowGRPO training
 
-Last updated: 07/06/2026
+Last updated: 09/07/2026
 
 [BAGEL-7B-MoT](https://github.com/ByteDance-Seed/BAGEL) is a
 Mixture-of-Transformers model supporting both image understanding and
@@ -135,6 +135,7 @@ wrapper replacement but simply has ``requires_grad=False`` set by the
 | Architecture | Auto-detected | Explicit: ``+actor_rollout_ref.model.architecture=OmniBagelForConditionalGeneration`` |
 | Deploy config | Not needed | ``bagel_deploy_config.yaml`` (single-stage topology) |
 | LoRA targets | ``*_proj`` layers | ``*_proj`` + ``*_moe_gen`` (MoT dual-pathway) |
+| LoRA weight sync | Adapter tensors | Merged full weights (``lora.merge=True``): the rollout engine's fused MoT layout cannot bind ``*_moe_gen`` adapters |
 | FSDP prefixes | ``transformer_blocks.`` | ``layers.`` |
 | CFG | Standard true CFG | 3-branch (gen / text-uncond / img-uncond) with global renormalisation |
 | Timestep convention | ``t / 1000`` | Raw sigma with SD3-style shift of 3.0 |

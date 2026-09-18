@@ -14,7 +14,6 @@
 """Qwen-Image rollout adapter for DiffusionNFT."""
 
 import copy
-from dataclasses import replace
 from typing import Any
 
 import torch
@@ -22,14 +21,16 @@ from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.models.qwen_image import QwenImagePipeline
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.utils.size_utils import normalize_min_aligned_size
-from vllm_omni.diffusion.worker.utils import DiffusionRequestState
+from vllm_omni.diffusion.worker.utils import StepRequestState
 
+from verl_omni.pipelines.diffusion_rollout_output import rollout_output, with_rollout_data
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.common import (
     QwenImageTokenIdPromptMixin,
     build_img_shapes,
     coalesce_not_none,
 )
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 
 __all__ = ["QwenImageDiffusionNFTPipeline"]
 
@@ -42,6 +43,10 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
     objective, so the rollout side does not collect reverse-SDE trajectories or
     log-probabilities.
     """
+
+    #: Declares the primary rollout media stream so downstream consumers read
+    #: the modality from the adapter instead of inferring it from tensor rank.
+    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -70,20 +75,25 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         """Tokenize raw text for the step-execution warm-up request."""
         prompt = [text] if isinstance(text, str) else text
         formatted = [self.prompt_template_encode.format(item) for item in prompt]
+        prompt_embed_cache = getattr(self, "_prompt_embed_cache", None)
+        use_prompt_embed_cache = bool(prompt_embed_cache is not None and prompt_embed_cache.enabled)
+        tokenizer_kwargs = {} if use_prompt_embed_cache else {"return_tensors": "pt"}
         tokens = self.tokenizer(
             formatted,
             max_length=self.tokenizer_max_length + self.prompt_template_encode_start_idx,
             padding=True,
             truncation=True,
-            return_tensors="pt",
-        ).to(self.device)
+            **tokenizer_kwargs,
+        )
+        if not use_prompt_embed_cache:
+            tokens = tokens.to(self.device)
         return tokens.input_ids, tokens.attention_mask
 
     def prepare_encode(
         self,
-        state: DiffusionRequestState,
+        state: StepRequestState,
         **kwargs: Any,
-    ) -> DiffusionRequestState:
+    ) -> StepRequestState:
         """Initialize request-local state for step execution."""
         sampling = state.sampling
         prompt_ids, prompt_mask, negative_prompt_ids, negative_prompt_mask = self._extract_step_prompt_ids(state.prompt)
@@ -152,7 +162,7 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
 
     def post_decode(
         self,
-        state: DiffusionRequestState,
+        state: StepRequestState,
         **kwargs: Any,
     ) -> DiffusionOutput:
         """Decode step execution output with DiffusionNFT training tensors."""
@@ -162,15 +172,17 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         output = self._decode_latents(state.latents, height, width, kwargs.get("output_type") or "pil")
 
         latents_clean = state.latents.float()
-        return replace(
+        return with_rollout_data(
             output,
-            custom_output={
-                "latents_clean": latents_clean,
-                "train_timesteps": state.timesteps.unsqueeze(0).expand(latents_clean.shape[0], -1),
+            prompt_embeddings={
                 "prompt_embeds": state.prompt_embeds,
                 "prompt_embeds_mask": state.prompt_embeds_mask,
                 "negative_prompt_embeds": state.negative_prompt_embeds,
                 "negative_prompt_embeds_mask": state.negative_prompt_embeds_mask,
+            },
+            rl={
+                "latents_clean": latents_clean,
+                "train_timesteps": state.timesteps.unsqueeze(0).expand(latents_clean.shape[0], -1),
             },
             to_cpu=True,
         )
@@ -178,10 +190,10 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
     def _prepare_token_id_generation_context(
         self,
         *,
-        prompt_ids: torch.Tensor,
-        prompt_mask: torch.Tensor | None,
-        negative_prompt_ids: torch.Tensor | None,
-        negative_prompt_mask: torch.Tensor | None,
+        prompt_ids: torch.Tensor | list[int] | list[list[int]] | None,
+        prompt_mask: torch.Tensor | list[int] | list[bool] | list[list[int]] | list[list[bool]] | None,
+        negative_prompt_ids: torch.Tensor | list[int] | list[list[int]] | None,
+        negative_prompt_mask: torch.Tensor | list[int] | list[bool] | list[list[int]] | list[list[bool]] | None,
         true_cfg_scale: float,
         height: int,
         width: int,
@@ -203,13 +215,11 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         self._current_timestep = None
         self._interrupt = False
 
-        if isinstance(prompt_ids, list):
-            prompt_ids = torch.tensor(prompt_ids, device=self.device)
-        if isinstance(negative_prompt_ids, list):
-            negative_prompt_ids = torch.tensor(negative_prompt_ids, device=self.device)
-
         if prompt_ids is not None:
-            batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
+            if isinstance(prompt_ids, torch.Tensor):
+                batch_size = prompt_ids.shape[0] if prompt_ids.ndim == 2 else 1
+            else:
+                batch_size = len(prompt_ids) if prompt_ids and isinstance(prompt_ids[0], list) else 1
         elif prompt_embeds is not None:
             batch_size = prompt_embeds.shape[0]
         else:
@@ -286,10 +296,10 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
     def forward(
         self,
         req: OmniDiffusionRequest,
-        prompt_ids: torch.Tensor | list[int] | None = None,
-        prompt_mask: torch.Tensor | None = None,
-        negative_prompt_ids: torch.Tensor | list[int] | None = None,
-        negative_prompt_mask: torch.Tensor | None = None,
+        prompt_ids: torch.Tensor | list[int] | list[list[int]] | None = None,
+        prompt_mask: torch.Tensor | list[int] | list[bool] | list[list[int]] | list[list[bool]] | None = None,
+        negative_prompt_ids: torch.Tensor | list[int] | list[list[int]] | None = None,
+        negative_prompt_mask: torch.Tensor | list[int] | list[bool] | list[list[int]] | list[list[bool]] | None = None,
         true_cfg_scale: float = 4.0,
         height: int | None = None,
         width: int | None = None,
@@ -337,7 +347,7 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
             num_images_per_prompt = req_num_outputs
 
         if prompt_ids is None and prompt_embeds is None:
-            return DiffusionOutput(output=None, custom_output={})
+            return DiffusionOutput(output=None)
 
         ctx = self._prepare_token_id_generation_context(
             prompt_ids=prompt_ids,
@@ -386,15 +396,17 @@ class QwenImageDiffusionNFTPipeline(QwenImageTokenIdPromptMixin, QwenImagePipeli
         latents_clean = latents.float()
         decoded = self._decode_latents(latents, height, width, output_type or "pil")
 
-        return DiffusionOutput(
-            output=decoded.output,
-            custom_output={
-                "latents_clean": latents_clean,
-                "train_timesteps": ctx["timesteps"].unsqueeze(0).expand(latents_clean.shape[0], -1),
+        return rollout_output(
+            media=decoded.output,
+            prompt_embeddings={
                 "prompt_embeds": ctx["prompt_embeds"],
                 "prompt_embeds_mask": ctx["prompt_embeds_mask"],
                 "negative_prompt_embeds": ctx["negative_prompt_embeds"],
                 "negative_prompt_embeds_mask": ctx["negative_prompt_embeds_mask"],
+            },
+            rl={
+                "latents_clean": latents_clean,
+                "train_timesteps": ctx["timesteps"].unsqueeze(0).expand(latents_clean.shape[0], -1),
             },
             to_cpu=True,
         )

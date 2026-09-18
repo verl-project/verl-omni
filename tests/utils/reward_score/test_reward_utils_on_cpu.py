@@ -30,20 +30,25 @@ assert _SPEC is not None
 assert _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
+normalize_video_tensor = _MODULE.normalize_video_tensor
 video_tensor_to_pil_frames = _MODULE.video_tensor_to_pil_frames
 pil_image_to_base64 = _MODULE.pil_image_to_base64
 
 
-def test_video_tensor_to_pil_frames_clips_before_uint8_quantization():
-    video = torch.tensor(
-        [
-            [
-                [[-0.1, 0.0, 1.0, 1.1]],
-                [[float("nan"), 0.5, float("inf"), -float("inf")]],
-                [[0.25, 0.75, 0.999, 0.001]],
-            ]
-        ]
-    )
+@pytest.mark.parametrize("layout", ["tchw", "cthw", "thwc"])
+def test_normalize_video_tensor_accepts_supported_rgb_layouts(layout):
+    canonical = torch.arange(2 * 3 * 4 * 5, dtype=torch.uint8).reshape(2, 3, 4, 5)
+    video = {
+        "tchw": canonical,
+        "cthw": canonical.permute(1, 0, 2, 3),
+        "thwc": canonical.permute(0, 2, 3, 1),
+    }[layout]
+
+    torch.testing.assert_close(normalize_video_tensor(video), canonical)
+
+
+def test_video_tensor_to_pil_frames_preserves_uint8_pixels():
+    video = torch.tensor([[[[0, 1, 255]], [[64, 128, 191]], [[255, 32, 0]]]], dtype=torch.uint8)
 
     frames = video_tensor_to_pil_frames(video)
 
@@ -51,13 +56,19 @@ def test_video_tensor_to_pil_frames_clips_before_uint8_quantization():
     assert frames[0].mode == "RGB"
     pixels = np.asarray(frames[0])
     assert pixels.dtype == np.uint8
-    assert pixels.tolist() == [[[0, 0, 64], [0, 128, 191], [255, 255, 255], [255, 0, 0]]]
+    assert pixels.tolist() == [[[0, 64, 255], [1, 128, 32], [255, 191, 0]]]
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.int32])
+def test_video_tensor_to_pil_frames_rejects_non_uint8(dtype):
+    with pytest.raises(ValueError, match=f"Expected a uint8 video tensor, got {dtype}"):
+        video_tensor_to_pil_frames(torch.zeros((1, 3, 4, 5), dtype=dtype))
 
 
 @pytest.mark.parametrize("shape", [(3, 4, 5), (2, 4, 4, 5), (2, 3, 4, 5, 1)])
 def test_video_tensor_to_pil_frames_rejects_non_tchw_rgb(shape):
     with pytest.raises(ValueError, match="Expected an RGB video tensor"):
-        video_tensor_to_pil_frames(torch.zeros(shape))
+        video_tensor_to_pil_frames(torch.zeros(shape, dtype=torch.uint8))
 
 
 def test_pil_image_to_base64_roundtrips_to_the_same_image():

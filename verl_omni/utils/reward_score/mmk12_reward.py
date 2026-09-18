@@ -138,11 +138,17 @@ def compute_score(
             # gt is a letter but the model output a value (not a letter) ->
             # partial credit (0.5) if the value matches the correct option's
             # content. Reuses verl's math_verify (subprocess-isolated, timed).
-            options_raw = (kwargs.get("extra_info") or {}).get("options") or {}
-            try:
-                options = json.loads(options_raw)
-            except (ValueError, TypeError):
+            extra_info = kwargs.get("extra_info") or {}
+            if "options" not in extra_info or extra_info["options"] is None:
                 options = {}
+            else:
+                options_raw = extra_info["options"]
+                try:
+                    options = json.loads(options_raw) if isinstance(options_raw, str) else options_raw
+                except (json.JSONDecodeError, TypeError) as exc:
+                    raise ValueError("MMK12 extra_info['options'] must be valid JSON.") from exc
+                if not isinstance(options, dict):
+                    raise ValueError("MMK12 extra_info['options'] must decode to an object.")
             option_content = options.get(gt.upper())
             if option_content:
                 accuracy_reward = _math_verify_score(content, option_content, timeout=math_verify_timeout) * 0.5

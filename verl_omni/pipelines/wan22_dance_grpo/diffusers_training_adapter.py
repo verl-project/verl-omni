@@ -79,6 +79,11 @@ class Wan22DanceGRPO(DiffusionModelBase):
     """
 
     @classmethod
+    def preserve_fp32_modules(cls) -> bool:
+        """Use one dtype because Wan blocks mix direct fp32 and bf16 parameters under FSDP1."""
+        return False
+
+    @classmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig):
         """Build and configure the SDE scheduler for Wan2.2.
 

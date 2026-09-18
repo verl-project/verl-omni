@@ -23,6 +23,7 @@ from omegaconf import OmegaConf
 from verl import DataProto
 
 from verl_omni.reward_loop.reward_manager.multi import MultiVisualRewardManager, _filter_kwargs
+from verl_omni.reward_loop.reward_manager.visual import VisualRewardManager
 
 # Path to this file — load_extern_object will import dummy functions from here.
 DUMMY_REWARDS_PATH = "tests/reward_loop/test_multi_reward_manager_on_cpu.py"
@@ -53,6 +54,45 @@ async def reward_async(data_source, solution_image, ground_truth, extra_info):
     return 0.8
 
 
+async def reward_asserts_uint8_contract(data_source, solution_image, ground_truth, extra_info):
+    """Verify reward managers preserve the uint8 response contract."""
+    assert solution_image.dtype == torch.uint8
+    return int(solution_image[0, 0, 0])
+
+
+async def reward_asserts_float_latent_contract(data_source, solution_image, ground_truth, extra_info):
+    """Verify reward managers preserve floating-point latent responses."""
+    assert solution_image.dtype == torch.float32
+    assert solution_image.shape == (16, 2, 2)
+    return float(solution_image[0, 0, 0])
+
+
+async def reward_uses_named_engine_router(reward_router_address, model_name):
+    assert reward_router_address == "engine-router"
+    assert model_name == "ocr-model"
+    return {"score": 0.6, "backend": "engine-function"}
+
+
+async def reward_uses_native_model(reward_model, ground_truth, solution_image):
+    output = await reward_model.infer(prompt=ground_truth, image=solution_image)
+    return {"score": output["value"], "backend": "native-function"}
+
+
+class _NativeModelExecutor:
+    def reward_kwargs(self):
+        return {"reward_model": self}
+
+    async def infer(self, prompt, image):
+        assert prompt == "hello"
+        assert image.dtype == torch.uint8
+        return {"value": 0.75}
+
+
+class _EngineRouterClient:
+    def reward_kwargs(self):
+        return {"reward_router_address": "engine-router", "model_name": "ocr-model"}
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -68,12 +108,12 @@ def _make_config(reward_functions: dict):
     return config
 
 
-def _make_single_data() -> DataProto:
+def _make_single_data(data_source: str = "test_source") -> DataProto:
     """Create a single-item DataProto for run_single."""
     return DataProto.from_dict(
-        tensors={"responses": torch.randn(1, 3, 64, 64)},
+        tensors={"responses": torch.randint(256, (1, 3, 64, 64), dtype=torch.uint8)},
         non_tensors={
-            "data_source": ["test_source"],
+            "data_source": [data_source],
             "reward_model": [{"ground_truth": "hello"}],
             "extra_info": [{}],
         },
@@ -84,6 +124,42 @@ def _build_manager(reward_functions: dict) -> MultiVisualRewardManager:
     config = _make_config(reward_functions)
     tokenizer = MagicMock()
     return MultiVisualRewardManager(config, tokenizer, compute_score=None)
+
+
+def _build_visual_latent_manager() -> VisualRewardManager:
+    config = _make_config({})
+    OmegaConf.update(config, "actor_rollout_ref.rollout.pipeline.output_type", "latent", force_add=True)
+    return VisualRewardManager(config, MagicMock(), reward_asserts_float_latent_contract)
+
+
+def _build_latent_multi_manager() -> MultiVisualRewardManager:
+    manager = _build_manager(
+        {
+            "latent": {
+                "path": DUMMY_REWARDS_PATH,
+                "name": "reward_asserts_float_latent_contract",
+                "weight": 1.0,
+            }
+        }
+    )
+    OmegaConf.update(manager.config, "actor_rollout_ref.rollout.pipeline.output_type", "latent", force_add=True)
+    return manager
+
+
+def _build_visual_pixel_manager() -> VisualRewardManager:
+    return VisualRewardManager(_make_config({}), MagicMock(), reward_asserts_uint8_contract)
+
+
+def _build_pixel_multi_manager() -> MultiVisualRewardManager:
+    return _build_manager(
+        {
+            "pixel": {
+                "path": DUMMY_REWARDS_PATH,
+                "name": "reward_asserts_uint8_contract",
+                "weight": 1.0,
+            }
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +194,72 @@ class TestFilterKwargs:
 # ---------------------------------------------------------------------------
 
 
+class TestVisualRewardManagerDefaults:
+    def test_default_jpeg_reward_accepts_manager_call_contract(self):
+        manager = VisualRewardManager(_make_config({}), MagicMock(), compute_score=None)
+        data = _make_single_data(data_source="jpeg_compressibility")
+        data.batch["responses"] = torch.zeros_like(data.batch["responses"])
+
+        result = manager.loop.run_until_complete(manager.run_single(data))
+
+        assert result["reward_score"] < 0
+        assert result["reward_extra_info"]["acc"] == pytest.approx(result["reward_score"])
+
+
 class TestMultiVisualRewardManagerRunSingle:
+    @pytest.mark.parametrize("manager_factory", [_build_visual_latent_manager, _build_latent_multi_manager])
+    def test_float_latent_response_is_forwarded_to_reward(self, manager_factory):
+        manager = manager_factory()
+        data = _make_single_data()
+        data.batch["responses"] = torch.full((1, 16, 2, 2), 0.5)
+
+        result = manager.loop.run_until_complete(manager.run_single(data))
+
+        assert result["reward_score"] == pytest.approx(0.5)
+
+    @pytest.mark.parametrize("manager_factory", [_build_visual_pixel_manager, _build_pixel_multi_manager])
+    def test_float_pixel_response_is_rejected(self, manager_factory):
+        manager = manager_factory()
+        data = _make_single_data()
+        data.batch["responses"] = data.batch["responses"].float()
+
+        with pytest.raises(
+            ValueError,
+            match=r"Expected uint8 pixel responses for output_type='image', got torch\.float32\.",
+        ):
+            manager.loop.run_until_complete(manager.run_single(data))
+
+    @pytest.mark.parametrize("manager_factory", [_build_visual_latent_manager, _build_latent_multi_manager])
+    def test_uint8_latent_response_is_rejected(self, manager_factory):
+        manager = manager_factory()
+        data = _make_single_data()
+
+        with pytest.raises(ValueError, match=r"Expected floating-point latent responses, got torch\.uint8\."):
+            manager.loop.run_until_complete(manager.run_single(data))
+
+    @pytest.mark.parametrize("manager_factory", [_build_visual_pixel_manager, _build_pixel_multi_manager])
+    def test_validation_uses_validation_output_type(self, manager_factory):
+        manager = manager_factory()
+        OmegaConf.update(
+            manager.config,
+            "actor_rollout_ref.rollout.val_kwargs.pipeline.output_type",
+            "latent",
+            force_add=True,
+        )
+        manager.compute_score = reward_asserts_float_latent_contract
+        manager.is_async_reward_score = True
+        if isinstance(manager, MultiVisualRewardManager):
+            manager._sub_rewards[0]["fn"] = reward_asserts_float_latent_contract
+            manager._sub_rewards[0]["is_async"] = True
+
+        data = _make_single_data()
+        data.batch["responses"] = torch.full((1, 16, 2, 2), 0.5)
+        data.meta_info["validate"] = True
+
+        result = manager.loop.run_until_complete(manager.run_single(data))
+
+        assert result["reward_score"] == pytest.approx(0.5)
+
     def test_weighted_aggregation(self):
         """Two reward functions with different weights produce correct combined score."""
         reward_fns = {
@@ -138,20 +279,36 @@ class TestMultiVisualRewardManagerRunSingle:
         assert "reward/dict_result/score" not in result["reward_extra_info"]
         assert result["reward_extra_info"]["reward/combined"] == pytest.approx(2.0)
 
-    def test_exception_contributes_zero(self):
-        """A failing sub-reward contributes 0 without breaking others."""
+    def test_required_exception_fails_fast(self):
+        """A failing required sub-reward aborts reward computation."""
         reward_fns = {
             "good": {"path": DUMMY_REWARDS_PATH, "name": "reward_fixed_score", "weight": 1.0},
-            "bad": {"path": DUMMY_REWARDS_PATH, "name": "reward_raises", "weight": 1.0},
+            "bad": {
+                "path": DUMMY_REWARDS_PATH,
+                "name": "reward_raises",
+                "weight": 1.0,
+                "required": True,
+            },
         }
         manager = _build_manager(reward_fns)
         data = _make_single_data()
 
-        result = manager.loop.run_until_complete(manager.run_single(data))
+        with pytest.raises(RuntimeError, match="Required sub-reward 'bad' failed: intentional failure"):
+            manager.loop.run_until_complete(manager.run_single(data))
 
-        # combined = 1.0 * 0.5 + 1.0 * 0.0 = 0.5
-        assert result["reward_score"] == pytest.approx(0.5)
+    def test_optional_exception_contributes_zero(self):
+        """A failing optional sub-reward records the error and contributes zero."""
+        reward_fns = {
+            "good": {"path": DUMMY_REWARDS_PATH, "name": "reward_fixed_score", "weight": 2.0},
+            "bad": {"path": DUMMY_REWARDS_PATH, "name": "reward_raises", "weight": 3.0},
+        }
+        manager = _build_manager(reward_fns)
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == pytest.approx(1.0)
         assert result["reward_extra_info"]["reward/bad"] == pytest.approx(0.0)
+        assert result["reward_extra_info"]["reward/bad/errors"] == 1
 
     def test_async_reward_function(self):
         """Async reward functions are awaited correctly."""
@@ -165,6 +322,72 @@ class TestMultiVisualRewardManagerRunSingle:
 
         assert result["reward_score"] == pytest.approx(0.8)
 
+    def test_mixes_rule_engine_and_native_models(self):
+        manager = _build_manager(
+            {
+                "rule": {"path": DUMMY_REWARDS_PATH, "name": "reward_fixed_score", "weight": 1.0},
+                "engine": {
+                    "model": "ocr_engine",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_uses_named_engine_router",
+                    "weight": 2.0,
+                },
+                "native": {
+                    "model": "native_pickscore",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_uses_native_model",
+                    "weight": 1.0,
+                },
+            }
+        )
+        manager.set_reward_executors(
+            {"ocr_engine": _EngineRouterClient()}, {"native_pickscore": _NativeModelExecutor()}
+        )
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == pytest.approx(2.45)
+        assert result["reward_extra_info"]["reward/rule"] == pytest.approx(0.5)
+        assert result["reward_extra_info"]["reward/engine"] == pytest.approx(0.6)
+        assert result["reward_extra_info"]["reward/native"] == pytest.approx(0.75)
+        assert result["reward_extra_info"]["reward/engine/backend"] == "engine-function"
+        assert result["reward_extra_info"]["reward/native/backend"] == "native-function"
+
+    def test_native_reward_function_receives_only_inference_handle(self):
+        manager = _build_manager(
+            {
+                "native": {
+                    "model": "native_model",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_uses_native_model",
+                }
+            }
+        )
+        manager.set_reward_executors(None, {"native_model": _NativeModelExecutor()})
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == pytest.approx(0.75)
+        assert result["reward_extra_info"]["reward/native/backend"] == "native-function"
+
+    def test_engine_reward_function_uses_its_named_router(self):
+        manager = _build_manager(
+            {
+                "ocr": {
+                    "model": "ocr_engine",
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_uses_named_engine_router",
+                    "weight": 1.0,
+                },
+            }
+        )
+        manager.set_reward_executors({"ocr_engine": _EngineRouterClient()}, None)
+
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == pytest.approx(0.6)
+        assert result["reward_extra_info"]["reward/ocr/backend"] == "engine-function"
+
     def test_jpeg_reward_via_file_path(self):
         """JPEG reward loaded via file path must not fail on relative imports."""
         reward_fns = {
@@ -176,7 +399,7 @@ class TestMultiVisualRewardManagerRunSingle:
         }
         manager = _build_manager(reward_fns)
         data = DataProto.from_dict(
-            tensors={"responses": torch.randn(1, 3, 64, 64)},
+            tensors={"responses": torch.randint(256, (1, 3, 64, 64), dtype=torch.uint8)},
             non_tensors={
                 "data_source": ["jpeg_compressibility"],
                 "reward_model": [{"ground_truth": "hello"}],
@@ -188,6 +411,18 @@ class TestMultiVisualRewardManagerRunSingle:
 
         assert result["reward_score"] != pytest.approx(0.0)
         assert "reward/jpeg" in result["reward_extra_info"]
+
+    def test_uint8_response_is_forwarded_to_custom_reward(self):
+        reward_fns = {
+            "contract": {"path": DUMMY_REWARDS_PATH, "name": "reward_asserts_uint8_contract", "weight": 1.0},
+        }
+        manager = _build_manager(reward_fns)
+        data = _make_single_data()
+        data.batch["responses"] = torch.full_like(data.batch["responses"], 128, dtype=torch.uint8)
+
+        result = manager.loop.run_until_complete(manager.run_single(data))
+
+        assert result["reward_score"] == pytest.approx(128)
 
 
 class TestMultiVisualRewardManagerInit:
@@ -203,3 +438,34 @@ class TestMultiVisualRewardManagerInit:
         assert len(manager._sub_rewards) == 1
         assert manager._sub_rewards[0]["key"] == "a"
         assert manager._sub_rewards[0]["weight"] == 0.5
+        assert manager._sub_rewards[0]["required"] is False
+
+    @pytest.mark.parametrize(
+        ("configured", "expected"),
+        [(True, True), (False, False), ("true", True), ("false", False)],
+    )
+    def test_parses_required(self, configured, expected):
+        manager = _build_manager(
+            {
+                "a": {
+                    "path": DUMMY_REWARDS_PATH,
+                    "name": "reward_fixed_score",
+                    "required": configured,
+                }
+            }
+        )
+
+        assert manager._sub_rewards[0]["required"] is expected
+
+    @pytest.mark.parametrize("configured", ["yes", 1, None])
+    def test_rejects_invalid_required(self, configured):
+        with pytest.raises((TypeError, ValueError), match="required"):
+            _build_manager(
+                {
+                    "a": {
+                        "path": DUMMY_REWARDS_PATH,
+                        "name": "reward_fixed_score",
+                        "required": configured,
+                    }
+                }
+            )

@@ -1,6 +1,6 @@
 # FlowGRPO Trainer
 
-Last updated: 07/18/2026
+Last updated: 08/26/2026
 
 This example shows how to post-train `Qwen-Image` with FlowGRPO on an OCR-style image generation task using `vllm-omni` rollout and a visual generative reward model (`Qwen3-VL-8B-Instruct` in this example).
 
@@ -49,9 +49,15 @@ Launch the example from the repository root:
 bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
+For the V1 trainer (TransferQueue + ReplayBuffer, sync mode):
+
+```bash
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh
+```
+
 GPU training defaults to matched kernels FA3 in config (`attn_backend: _flash_3_varlen_hub`;
-`rollout_attn_backend: FLASH_ATTN_3_HUB`). Training falls back to native/SDPA if FA3 deps
-are unavailable.
+`rollout_attn_backend: FLASH_ATTN_3_HUB`). Missing FA3 deps fail fast; install them or
+switch to native/`TORCH_SDPA` explicitly.
 
 Optional KL loss tuning:
 
@@ -67,6 +73,16 @@ The script runs `python3 -m verl_omni.trainer.main_diffusion` with:
 - `actor_rollout_ref.rollout.name=vllm_omni`
 - `reward.custom_reward_function.name=compute_score_ocr`
 - `trainer.n_gpus_per_node=4`
+
+The V1 script uses `python3 -m verl_omni.trainer.main_diffusion_v1` with the same
+model/LoRA/reward knobs plus `trainer.use_v1=true` and `trainer.v1.trainer_mode=sync`,
+including the v0 micro-batch sizes: between phases the v1 trainer sleeps the rollout
+engine, and a vllm-omni level-1 sleep offloads the whole pipeline (transformer + text
+encoder + VAE) to pinned host memory, so the actor update runs next to only a few GB
+of engine skeleton instead of ~55GB of resident weights. Both micro-batch knobs are
+env-overridable (`PPO_MICRO_BATCH_SIZE`, `LOG_PROB_MICRO_BATCH_SIZE`) if you colocate
+other tenants on the same GPUs. Each sleeping replica pins ~55GB of host RAM
+(220GB total for the four TP=1 replicas of this recipe).
 
 ## Logging
 
@@ -99,6 +115,7 @@ All example scripts in this directory:
 | Variant | Script | GPUs | Notes |
 |---------|--------|------|-------|
 | LoRA (baseline) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU | Standard LoRA FlowGRPO + OCR reward |
+| LoRA (V1 sync) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh` | 4×GPU | V1 trainer (`main_diffusion_v1`, TransferQueue + ReplayBuffer) |
 | LoRA + async reward | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_async_reward.sh` | 5×GPU | Dedicated GPU pool for reward model |
 | LoRA + SP=2 | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_sp2.sh` | 4×GPU | Ulysses sequence parallelism |
 | LoRA + FA3 | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_fsdp2_fa3.sh` | 4×GPU | FSDP2 with FlashAttention 3 |
@@ -119,6 +136,12 @@ All example scripts in this directory:
 | Variant | Script | GPUs | Notes |
 |---------|--------|------|-------|
 | LoRA | `examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh` | 3×GPU | 2 actor+rollout, 1 reward pool |
+
+### LTX-2.3
+
+| Variant | Script | GPUs | Notes |
+|---------|--------|------|-------|
+| T2AV LoRA | `examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora.sh` | 8×GPU | Joint audio-video CPS, CLAP + ImageBind rewards |
 
 ### BAGEL
 

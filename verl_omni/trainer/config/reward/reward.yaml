@@ -20,11 +20,23 @@ custom_reward_function:
   path: null
   # The name of the reward function within the specified file. Default is 'compute_score'.
   name: compute_score
+  # Deprecated alias; use reward.accelerator_workers.enabled instead.
+  use_accelerator: false
+
+# Bind legacy custom reward workers to bundles in the trainer-selected
+# accelerator pool. Native named models select this automatically; this switch
+# only preserves an explicit path for existing custom reward functions.
+accelerator_workers:
+  enabled: false
 
 # Multi-reward configuration (dict-based, mutually exclusive with custom_reward_function).
 # Keys are user-chosen names used for metric logging (e.g., "ocr", "jpeg").
 # Each entry: path (str), name (str), weight (float).
 reward_functions: {}
+
+# Named reward models. See docs/algo/named_reward_models.md for configuration
+# and extension instructions.
+models: {}
 
 # Aggregation method for multi-reward. Only "weighted_sum" is supported.
 aggregation: weighted_sum
@@ -43,8 +55,9 @@ reward_manager:
 reward_model:
   enable: False
 
-  # Whether to deploy the model to a separate resource pool.
-  # If true, n_gpus_per_node & nnodes will be used to determine the resource node.
+  # Select the parent pool for the existing reward_model and named engine models.
+  # If true, use a dedicated reward_pool; otherwise, use global_pool.
+  # MultiRewardModelManager splits the selected parent pool per named model.
   enable_resource_pool: False
   n_gpus_per_node: 8
   nnodes: 0
@@ -87,6 +100,8 @@ reward_model:
     top_p: 1
     do_sample: true
     n: 1
+    seed: 42
+    full_determinism: false
 
     prompt_length: 2048
     response_length: 2048
