@@ -372,6 +372,21 @@ def _collect_lora_params_with_adapter(
     return _collect_base_weights_to_cpu(peft_model)
 
 
+def _extract_adapter_lora_state_dict(raw_state: dict, adapter_name: str) -> dict:
+    """Pull one adapter's ``lora_`` tensors out of a raw module state dict.
+
+    Fallback for when ``get_peft_model_state_dict`` comes back empty for a
+    frozen, non-``"default"`` adapter (e.g. DiffusionNFT's ``"old"`` rollout
+    snapshot) even though ``raw_state`` clearly holds its tensors. Strips the
+    adapter suffix to match ``get_peft_model_state_dict``'s own key convention.
+    """
+    return {
+        k.replace(f".{adapter_name}.", "."): v
+        for k, v in raw_state.items()
+        if "lora_" in k and f".{adapter_name}." in k
+    }
+
+
 def _layered_summon_lora_params_diffusers(
     fsdp_module, adapter_name: str = "default", layer_prefixes: Sequence[str] = ("transformer_blocks.",)
 ) -> OrderedDict:
@@ -406,9 +421,12 @@ def _layered_summon_lora_params_diffusers(
                 continue
             if fsdp_version(submodule) > 0:
                 with FSDP.summon_full_params(submodule, writeback=False):
+                    raw_state = submodule.state_dict()
                     sub_lora_params = get_peft_model_state_dict(
-                        peft_model, state_dict=submodule.state_dict(), adapter_name=adapter_name
+                        peft_model, state_dict=raw_state, adapter_name=adapter_name
                     )
+                    if not sub_lora_params and any(f".{adapter_name}." in k for k in raw_state):
+                        sub_lora_params = _extract_adapter_lora_state_dict(raw_state, adapter_name)
                     sub_lora_params = {
                         f"{block_prefix}.{param_name}": _param_to_cpu(param)
                         for param_name, param in sub_lora_params.items()
