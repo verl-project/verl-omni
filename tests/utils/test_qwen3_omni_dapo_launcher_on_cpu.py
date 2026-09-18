@@ -42,7 +42,6 @@ def _assert_dapo_without_dynamic_sampling_contract(script: str) -> None:
     assert set(DAPO_WITHOUT_DYNAMIC_SAMPLING_SETTINGS) <= settings
     assert "actor_rollout_ref.actor.policy_loss.loss_mode=gspo" not in settings
     assert "algorithm.filter_groups.enable=true" not in settings
-    assert "overlong_buffer_cfg" not in script
 
 
 def test_dapo_example_launcher_has_phase_one_contract():
@@ -78,3 +77,25 @@ def test_dapo_example_launcher_has_phase_one_contract():
     assert "data.val_max_samples=4" not in settings
     assert "data.validation_shuffle=true" not in settings
     assert "trainer.val_before_train=false" not in settings
+    assert "overlong_buffer_cfg" not in launcher
+
+
+def test_dapo_tiny_random_smoke_matches_example_contract():
+    repo_root = Path(__file__).parents[2]
+    smoke = (repo_root / "tests/special_e2e/run_dapo_qwen3_omni_thinker_lora_v1_smoke.sh").read_text(encoding="utf-8")
+
+    _assert_dapo_without_dynamic_sampling_contract(smoke)
+    settings = _script_settings(smoke)
+    assert "reward.reward_manager.name=dapo" in settings
+    assert "build_qwen3_omni_tiny_random.py" in smoke
+    assert "SKIP_COMPAT_DEPS_INSTALL:-0" in smoke
+    assert 'trainer.total_training_steps="${TOTAL_TRAIN_STEPS}"' in smoke
+
+    assert "data.max_response_length=512" in settings
+    assert {
+        "reward.reward_kwargs.max_resp_len=512",
+        "reward.reward_kwargs.overlong_buffer_cfg.enable=true",
+        "reward.reward_kwargs.overlong_buffer_cfg.len=128",
+        "reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=1.0",
+        "reward.reward_kwargs.overlong_buffer_cfg.log=true",
+    } <= settings
