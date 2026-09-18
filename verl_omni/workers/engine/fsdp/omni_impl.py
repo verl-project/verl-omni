@@ -43,10 +43,13 @@ logger = logging.getLogger(__name__)
 class OmniFSDPEngine(FSDPEngineWithLMHead):
     """FSDP engine for omni models"""
 
-    @staticmethod
-    def _cast_dtensor_weight_for_sync(tensor: torch.Tensor) -> torch.Tensor:
-        if tensor.is_floating_point() and tensor.dtype != torch.bfloat16:
-            return tensor.to(dtype=torch.bfloat16, non_blocking=True)
+    def _cast_dtensor_weight_for_sync(self, tensor: torch.Tensor) -> torch.Tensor:
+        from verl.utils.torch_dtypes import PrecisionType
+
+        mixed_precision = self.engine_config.mixed_precision or {}
+        dtype = PrecisionType.to_dtype(mixed_precision.get("param_dtype", "bf16"))
+        if tensor.is_floating_point() and tensor.dtype != dtype:
+            return tensor.to(dtype=dtype, non_blocking=True)
         return tensor
 
     def prepare_model_inputs(self, micro_batch):
