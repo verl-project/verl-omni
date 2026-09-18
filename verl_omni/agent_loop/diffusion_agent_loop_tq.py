@@ -30,7 +30,7 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
     _config_to_sampling_dict,
     _InternalDiffusionAgentLoopOutput,
 )
-from verl_omni.agent_loop.utils import _derive_rollout_seed
+from verl_omni.agent_loop.utils import derive_rollout_seed
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -142,8 +142,12 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                     # Seed from the global prompt index: each worker only sees a
                     # chunk of the batch, so a chunk-local position would reuse
                     # the same seed offsets in every worker and roll out
-                    # duplicated noise.
-                    run_sampling_params["seed"] = _derive_rollout_seed(rollout_base_seed, prompt_index * n + session_id)
+                    # duplicated noise. ``prompt_index`` is ``index[i]`` from the
+                    # batch, i.e. the global index, and ``prompt_index * n +
+                    # session_id`` is the expanded row index in
+                    # ``0 .. num_prompts * n - 1`` that ``derive_rollout_seed``
+                    # expects.
+                    run_sampling_params["seed"] = derive_rollout_seed(rollout_base_seed, prompt_index * n + session_id)
                 task = asyncio.create_task(
                     self._run_agent_loop(
                         run_sampling_params,
