@@ -5,7 +5,6 @@
 set -x
 
 export CPATH=/usr/include${CPATH:+:$CPATH}
-export VLLM_ASCEND_ENABLE_NZ=0
 export VERL_USE_EXTERNAL_MODULES=verl_omni
 
 ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.0.0}
