@@ -14,6 +14,7 @@
 """MiniCPM omni pipeline adapters."""
 
 from .omni_rollout_adapter import MiniCPMORolloutAdapter
+from .reward_decode import MiniCPMNaiveRewardManager
 from .thinker_training_adapter import MiniCPMThinkerAdapter
 
-__all__ = ["MiniCPMORolloutAdapter", "MiniCPMThinkerAdapter"]
+__all__ = ["MiniCPMNaiveRewardManager", "MiniCPMORolloutAdapter", "MiniCPMThinkerAdapter"]

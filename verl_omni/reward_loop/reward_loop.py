@@ -74,15 +74,6 @@ class OmniRewardLoopWorker(RewardLoopWorker):
 
     def _init_reward_fn(self):
         super()._init_reward_fn()
-        # TODO (mike): refactor later — the worker should not reach into the reward
-        # manager's tokenizer; the demotion belongs with the checkpoint's tokenizer setup.
-        from verl_omni.models.transformers.minicpm_o import (
-            actor_registers_special_answer_tags,
-            patch_minicpm_answer_tags,
-        )
-
-        if actor_registers_special_answer_tags(self.config):
-            patch_minicpm_answer_tags(self.reward_manager.tokenizer)
         if hasattr(self.reward_manager, "set_reward_executors"):
             self.reward_manager.set_reward_executors(
                 self.engine_reward_executors,

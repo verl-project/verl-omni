@@ -30,7 +30,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "actor_registers_special_answer_tags",
     "patch_minicpm_answer_tags",
     "patch_minicpm_auto_model_init",
     "patch_minicpm_get_audio_embedding",
@@ -383,30 +382,6 @@ def patch_minicpm_answer_tags(tokenizer) -> bool:
     return demoted
 
 
-def actor_registers_special_answer_tags(config) -> bool:
-    """Whether the configured actor needs the answer-tag demotion.
-
-    True unless the actor is a *different* registered omni model.
-
-    Args:
-        config: The trainer config holding ``actor_rollout_ref.model.path``.
-
-    Returns:
-        True for MiniCPM-o and for an unreadable or unregistered architecture, since
-        the demotion no-ops unless the tags are special — a false negative would
-        silently zero the reward, which is worse than a wasted tokenizer scan.
-    """
-    architecture = _actor_architecture(config)
-    if architecture is None:
-        return True
-    # Lazy: this is a leaf module, while the adapters below import it.
-    from verl_omni.pipelines.minicpm.thinker_training_adapter import MiniCPMThinkerAdapter
-    from verl_omni.pipelines.model_base import OmniModelBase
-
-    adapter_cls = OmniModelBase.peek_class(architecture, "thinker")
-    return adapter_cls is None or adapter_cls is MiniCPMThinkerAdapter
-
-
 def _wrap_init_with_post_init(model_cls: type) -> None:
     """Ensure ``model_cls.__init__`` ends with ``post_init()`` when needed."""
     marker = "_verl_omni_post_init_patched"
@@ -464,19 +439,3 @@ def _has_pixel_slices(pixel_values) -> bool:
     if isinstance(pixel_values, (list | tuple)):
         return any(_has_pixel_slices(sample) for sample in pixel_values)
     return True
-
-
-def _actor_architecture(config) -> str | None:
-    """HF ``architectures[0]`` of the configured actor, or None when unreadable."""
-    import os
-
-    model_cfg = getattr(getattr(config, "actor_rollout_ref", None), "model", None)
-    model_path = getattr(model_cfg, "path", None)
-    if not model_path:
-        return None
-    try:
-        with open(os.path.join(model_path, "config.json")) as f:
-            architectures = json.load(f).get("architectures") or []
-    except (OSError, json.JSONDecodeError):
-        return None
-    return architectures[0] if architectures else None
