@@ -13,6 +13,12 @@
 # limitations under the License.
 
 from verl_omni.trainer.omni.ray_omni_trainer import OmniDirectPreferenceRayTrainer, OmniPPOTrainerSync  # noqa: F401
+from verl_omni.trainer.omni.ray_omni_trainer_colocate_async import OmniPPOTrainerColocateAsync  # noqa: F401
 from verl_omni.trainer.omni.ray_omni_trainer_separate_async import OmniPPOTrainerSeparateAsync  # noqa: F401
 
-__all__ = ["OmniPPOTrainerSync", "OmniDirectPreferenceRayTrainer", "OmniPPOTrainerSeparateAsync"]
+__all__ = [
+    "OmniPPOTrainerSync",
+    "OmniDirectPreferenceRayTrainer",
+    "OmniPPOTrainerColocateAsync",
+    "OmniPPOTrainerSeparateAsync",
+]
