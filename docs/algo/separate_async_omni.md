@@ -1,10 +1,11 @@
 (separate_async_omni)=
-# Separate-Async RL Training for Qwen3-Omni
+# Separate-Async RL Training for Omni AR Models
 
-Last updated: 09/08/2026
+Last updated: 09/18/2026
 
 `trainer.v1.trainer_mode=omni_separate_async` runs training and rollout on
-separate GPU pools for omni AR models (Qwen3-Omni thinker). Standalone rollout
+separate GPU pools for omni AR models (Qwen3-Omni thinker, MiniCPM-o 4.5
+thinker). Standalone rollout
 replicas generate one batch ahead of training; the trainer pushes weights to
 them every `trainer.v1.separate_async.parameter_sync_step` steps over a
 non-naive checkpoint engine (nccl/nixl/...). Generations aborted by a weight
@@ -55,9 +56,26 @@ The trainer reads `parameter_sync_step` from `v1.separate_async` (the key the
 parent validates and syncs on), not from a mode-specific stub. The MMK12
 example sets `parameter_sync_step=8` so `128 == 8 * 16`.
 
+MiniCPM-o 4.5 runs the same trainer with the AVQA recipe (2 trainer + 2
+rollout GPUs as **two TP=1 replicas**; fall back to one TP=2 replica by
+overriding `rollout.tensor_model_parallel_size` if the multi-replica shape
+misbehaves):
+
+```bash
+bash examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_separate_async_v1.sh
+```
+
 LoRA recipes should set `actor_rollout_ref.model.lora.merge=False` so weight
 sync ships only adapter tensors (applied on the replicas via the LoRA-aware
-checkpoint engine manager).
+checkpoint engine manager). The actor-side peft keys resolve onto both rollout
+classes without a remap — Qwen3-Omni through transformers'
+`_checkpoint_conversion_mapping` strip, MiniCPM-o natively because the actor's
+`MiniCPMO.llm.*` tree matches the `llm.`-prefixed registration in
+`MiniCPMO45OmniLLMForConditionalGeneration` (pinned by
+`tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py`). The colocated
+`omni_sync` mode intentionally keeps the opposite semantics (`merge=True`,
+merged full-weight IPC sync); the divergence is resolved per-mode, not
+unified.
 
 ## Monitor
 
@@ -69,13 +87,16 @@ and `timing_s/update_weights`. If weight sync stalls dominate, raise
 
 CPU (no GPU required; covers registration, the `parameter_sync_step` key fix,
 LoRA-aware worker/manager wiring, CPU save/restore wiring, recovery-client
-contracts, and the `adapter_name` forwarding fix):
+contracts, the `adapter_name` forwarding fix, and the MiniCPM recipe contract
++ adapter-delta key alignment):
 
 ```bash
 pytest -s --asyncio-mode=auto \
     tests/trainer/omni/test_ray_omni_trainer_separate_async_on_cpu.py \
     tests/workers/rollout/test_omni_rollout_recovery_on_cpu.py \
-    tests/workers/test_omni_fsdp_engine_on_cpu.py
+    tests/workers/test_omni_fsdp_engine_on_cpu.py \
+    tests/utils/test_minicpmo_gspo_separate_async_launcher_on_cpu.py \
+    tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py
 ```
 
 GPU smoke (2 GPUs, tiny-random Qwen3-Omni, 3 separate-async steps):
