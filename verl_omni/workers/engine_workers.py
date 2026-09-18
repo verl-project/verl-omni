@@ -1078,6 +1078,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     self.rollout_adapter,
                 )
                 per_tensor_param, _ = self.actor.engine.get_per_tensor_param(
+                    layered_summon=self.layered_summon,
                     base_sync_done=True,
                     adapter_name=self.rollout_adapter,
                 )
@@ -1085,7 +1086,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
                 return
 
-            per_tensor_param, _ = self.actor.engine.get_per_tensor_param(adapter_name=self.rollout_adapter)
+            per_tensor_param, _ = self.actor.engine.get_per_tensor_param(
+                layered_summon=self.layered_summon,
+                adapter_name=self.rollout_adapter,
+            )
             with RLInsightLogger.trace_state("update_weights", state_lane_id=f"rank_{self.rank}"):
                 await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
             return

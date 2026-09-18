@@ -64,6 +64,7 @@ def _make_mock_model_config(**overrides):
     cfg.enable_gradient_checkpointing = False
     cfg.lora_rank = 0
     cfg.lora = {}
+    cfg.fsdp_layer_prefixes = []
 
     hf_config = MagicMock()
     thinker_config = types.SimpleNamespace(tie_word_embeddings=False)
@@ -868,6 +869,8 @@ class TestAdapterNameForwarding:
 
         def fake_collect(module, layered_summon, base_sync_done, adapter_name="default", **kwargs):
             captured["adapter_name"] = adapter_name
+            captured["layered_summon"] = layered_summon
+            captured["layer_prefixes"] = kwargs.get("layer_prefixes")
             return {"w": torch.zeros(1)}
 
         with (
@@ -878,5 +881,42 @@ class TestAdapterNameForwarding:
             per_tensor_param, peft_config = engine.get_per_tensor_param(base_sync_done=True, adapter_name="old")
 
         assert captured["adapter_name"] == "old"
+        assert captured["layered_summon"] is False
+        assert captured["layer_prefixes"] == []
         assert peft_config == {"adapter": "old"}
         assert dict(per_tensor_param).keys() == {"w"}
+
+    def test_get_per_tensor_param_routes_layered_summon_and_prefixes(self):
+        # Separate-async LoRA sync reads these kwargs; dropping them substitutes
+        # collect_lora_params' DiT prefix default and ignores rollout.layered_summon.
+        import torch.nn as nn
+
+        omni_impl = _get_omni_impl_module()
+
+        module = nn.Module()
+        module.peft_config = {"default": MagicMock()}
+        module.peft_config["default"].to_dict.return_value = {"adapter": "default"}
+
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine.module = module
+        engine.model_config = _make_mock_model_config(fsdp_layer_prefixes=["layers."])
+        engine._uses_fsdp2_cpu_offload_policy = True
+        engine._is_offload_param = False
+        engine._qat_enabled = False
+
+        captured = {}
+
+        def fake_collect(module, layered_summon, base_sync_done, adapter_name="default", **kwargs):
+            captured["layered_summon"] = layered_summon
+            captured["layer_prefixes"] = kwargs.get("layer_prefixes")
+            return {"w": torch.zeros(1)}
+
+        with (
+            patch.object(omni_impl, "log_gpu_memory_usage", MagicMock()),
+            patch.object(omni_impl, "collect_lora_params", side_effect=fake_collect),
+            patch.object(omni_impl, "convert_weight_keys", side_effect=lambda params, module: params),
+        ):
+            engine.get_per_tensor_param(layered_summon=True, base_sync_done=True, adapter_name="default")
+
+        assert captured["layered_summon"] is True
+        assert captured["layer_prefixes"] == ["layers."]

@@ -24,7 +24,10 @@ and, with LoRA, ``self.peft_merge``. The v0 diffusion separate e2e crashed with
 omni-config defaults (no ``rollout_adapter`` field, no lora merge).
 """
 
+import asyncio
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from omegaconf import DictConfig
 
@@ -66,3 +69,49 @@ def test_weight_sync_knobs_read_diffusion_dual_adapter_and_lora_merge():
     assert worker.peft_merge is True
     assert worker.layered_summon is True
     assert worker.base_sync_done is False  # dummy load_format skips base sync
+
+
+def _checkpoint_worker(*, has_lora: bool, layered_summon: bool, adapter_name: str = "default"):
+    worker = object.__new__(ew.ActorRolloutRefWorker)
+    engine = MagicMock()
+    module = SimpleNamespace()
+    if has_lora:
+        module.peft_config = {"default": object()}
+    engine.module = module
+    engine.get_per_tensor_param.return_value = (iter([("w", MagicMock())]), {"r": 8})
+    worker.actor = SimpleNamespace(engine=engine)
+    worker.checkpoint_engine = SimpleNamespace(send_weights=AsyncMock())
+    worker.config = SimpleNamespace(rollout=SimpleNamespace(checkpoint_engine=SimpleNamespace(backend="nccl")))
+    worker.peft_merge = False
+    worker.layered_summon = layered_summon
+    worker.rollout_adapter = adapter_name
+    worker._rank = 0
+    return worker, engine
+
+
+def test_adapter_only_checkpoint_send_forwards_layered_summon():
+    # Separate-async NCCL LoRA send used to omit layered_summon, so collect always
+    # used the engine default False even when rollout.layered_summon=True.
+    worker, engine = _checkpoint_worker(has_lora=True, layered_summon=True, adapter_name="old")
+
+    with patch.object(ew.RLInsightLogger, "trace_state", return_value=nullcontext()):
+        asyncio.run(ew.ActorRolloutRefWorker.update_weights(worker, mode="nccl", global_steps=1))
+
+    engine.get_per_tensor_param.assert_called_once_with(
+        layered_summon=True,
+        base_sync_done=True,
+        adapter_name="old",
+    )
+    worker.checkpoint_engine.send_weights.assert_awaited_once()
+
+
+def test_full_weight_checkpoint_send_forwards_layered_summon():
+    worker, engine = _checkpoint_worker(has_lora=False, layered_summon=True)
+
+    with patch.object(ew.RLInsightLogger, "trace_state", return_value=nullcontext()):
+        asyncio.run(ew.ActorRolloutRefWorker.update_weights(worker, mode="nccl", global_steps=1))
+
+    engine.get_per_tensor_param.assert_called_once_with(
+        layered_summon=True,
+        adapter_name="default",
+    )
