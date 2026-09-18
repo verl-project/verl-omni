@@ -57,6 +57,7 @@ from verl.utils.py_functional import append_to_dict
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig
 from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
 from verl.workers.engine.fsdp.utils import create_device_mesh, get_sharding_strategy
+from verl.workers.engine.spec import ShardSpec
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
@@ -963,6 +964,69 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             if self._is_offload_param:
                 offload_fsdp_model_to_cpu(self.module)
             log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
+
+    def get_per_tensor_param_shard(self, **kwargs):
+        """Like :meth:`get_per_tensor_param`, but yields each rank's *local* shard
+        ``(name, local_flat_shard_bf16, ShardSpec)`` instead of all-gathering full
+        tensors. Consumed by the ``delta_sharded`` checkpoint engine, which byte-diffs
+        each rank's shard against a pinned snapshot; non-LoRA base path only. Names
+        match the full export (``convert_weight_keys`` plus the ``transformer.``
+        prefix) so HF coordinates are what the rollout pipelines already load.
+        """
+        peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        if hasattr(peft_model, "peft_config"):
+            raise NotImplementedError(
+                "delta_sharded shard export supports full-weight training only; LoRA runs "
+                "keep the adapter (merge=false) or merged full-weight (merge=true) sync paths."
+            )
+
+        # Staging rule mirrors verl's FSDP engine: FSDP1's sharded state-dict export runs
+        # through the unshard machinery and needs GPU-resident params; FSDP2 state_dict()
+        # only collects DTensor refs and the generator below stages each shard lazily.
+        _needs_staging = fsdp_version(self.module) == 1
+        if _needs_staging and not self._uses_fsdp2_cpu_offload_policy:
+            load_fsdp_model_to_gpu(self.module)
+        params = self.module.state_dict()
+        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+        if _needs_staging and self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.module)
+
+        device = get_device_id()
+
+        def _gen():
+            for name, param in params.items():
+                spec = ShardSpec.from_param(param)
+                p = param.to(device, non_blocking=True)
+                if p.is_floating_point():
+                    p = p.to(torch.bfloat16, non_blocking=True)
+                local = p.to_local() if hasattr(p, "to_local") else p
+                yield f"transformer.{name}", local.reshape(-1), spec
+
+        return _gen(), None
+
+    def _hf_delta_entry(self, name, spec, place, lidx, lval):
+        """Per-param HF delta entry builder: diffusers params are identity params
+        (weight name == HF name after conversion, coordinates translate directly)."""
+        from verl.workers.engine.utils import _hf_entry_identity
+
+        if spec.to_hf_chunk is not None:
+            raise NotImplementedError(
+                f"{name}: the diffusers engine only handles identity params; "
+                "converter specs belong to the engine that declared them"
+            )
+        return _hf_entry_identity(name, spec, place, lidx, lval)
+
+    def get_per_tensor_param_delta_shard(self, **kwargs):
+        """Yield the delta engine's steady payloads -- FINAL HF-coordinate entries
+        ``(slots, dtype_str, counts, hf_idx, hf_val, gather_group)`` per parameter,
+        byte-diffed against the pinned shard snapshot. Requires a prior
+        :meth:`prime_delta_snapshots` call (the delta engine primes right after the
+        seed sync)."""
+        from verl.workers.engine.utils import hf_delta_export
+
+        self._delta_shard_snap = getattr(self, "_delta_shard_snap", {})
+        gen, _ = self.get_per_tensor_param_shard()
+        return hf_delta_export(gen, self._delta_shard_snap, self._hf_delta_entry), None
 
     def _run_forward_backward_batch(
         self,
