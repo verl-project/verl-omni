@@ -1,25 +1,14 @@
 #!/usr/bin/env bash
 # MiniCPM-o 4.5 Thinker GSPO + LoRA training on AVQA (audio + image -> text) with
-# the omni separate-async V1 trainer: 4 GPUs = 2 for the FSDP trainer, 2 for two
-# standalone TP=1 rollout replicas. Generation runs one batch ahead of training;
-# LoRA adapter deltas sync to the standalone replicas via add_lora every
-# trainer.v1.separate_async.parameter_sync_step inner steps.
+# the omni separate-async V1 trainer: 4 GPUs = 2 FSDP trainer + 2 standalone
+# rollout (two TP=1 replicas). Generation runs one batch ahead of training; LoRA
+# adapter deltas sync to the standalone replicas every
+# trainer.v1.separate_async.parameter_sync_step inner steps (128 = 8 x 16).
 #
-# Hyperparameters are copied verbatim from the two parent recipes: the colocated
-# MiniCPM-o AVQA recipe
-# (examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh)
-# supplies the model/data/reward lines; the Qwen3-Omni separate-async recipe
-# (examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_separate_async_v1.sh)
-# supplies the disaggregated-topology lines.
-#
-# Requirements (asserted at startup by the trainer):
-#   - actor_rollout_ref.rollout.nnodes > 0  (standalone rollout on dedicated GPUs)
-#   - actor_rollout_ref.rollout.checkpoint_engine.backend != naive
-#   - data.train_batch_size == parameter_sync_step * actor.ppo_mini_batch_size
-#     (128 == 8 * 16, matching both parent recipes)
-#
-# If the 2-replica DP shape misbehaves (balancer fan-out under abort), fall back
-# to one TP=2 replica: rollout.tensor_model_parallel_size=2 — config-only.
+# Hyperparameters are copied verbatim from the proven colocated MiniCPM-o AVQA
+# recipe (examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh);
+# only the disaggregation lines differ (trainer mode, GPU split, rollout topology,
+# checkpoint-engine backend, lora.merge, memory utilization, staleness pin).
 #
 # Data preparation (run once, same as the colocated recipe):
 #   python examples/gspo_trainer/data_process/avqa.py \
@@ -33,9 +22,7 @@
 
 set -x
 
-# Standalone server actors import verl_omni through this export; a silent
-# module-miss fails the first warmup batch (trust_remote_code reaches the
-# replica-side load through the same mechanism).
+# Make verl_omni available to Ray workers
 export VERL_USE_EXTERNAL_MODULES=verl_omni
 
 MODEL_PATH=${MODEL_PATH:-"$HOME/models/openbmb/MiniCPM-o-4_5"}
