@@ -964,6 +964,12 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                 offload_fsdp_model_to_cpu(self.module)
             log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
+    def _gradient_sync_context(self, *, is_last_micro_batch: bool):
+        """Reuse verl FSDPEngine: skip reduce-scatter until the last accumulation step."""
+        from verl.workers.engine.fsdp.transformer_impl import FSDPEngine
+
+        return FSDPEngine._gradient_sync_context(self, is_last_micro_batch=is_last_micro_batch)
+
     def _run_forward_backward_batch(
         self,
         data: TensorDict,
@@ -987,8 +993,12 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         gradient_accumulation_steps = len(micro_batches) * num_timesteps
         output_lst = []
         ctx = torch.no_grad() if forward_only else nullcontext()
+        defer_sync = (not forward_only) and tu.get_non_tensor_data(
+            data, "use_no_sync_for_gradient_accumulation", default=False
+        )
+        n_micro = len(micro_batches)
 
-        for micro_batch in micro_batches:
+        for micro_idx, micro_batch in enumerate(micro_batches):
             tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
             if stage_inputs:
                 shared_batch = micro_batch.select(*shared_keys, strict=False).to(get_device_id())
@@ -998,23 +1008,26 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             # Forward and backward for each timestep
             with ctx:
                 for step in range(num_timesteps):
+                    is_last = micro_idx == n_micro - 1 and step == num_timesteps - 1
+                    sync_ctx = self._gradient_sync_context(is_last_micro_batch=is_last) if defer_sync else nullcontext()
                     if stage_inputs:
                         step_batch = shared_batch.clone(recurse=False)
                         for key, width in step_fields.items():
                             step_batch[key] = micro_batch[key][:, step : step + width].to(get_device_id())
                     else:
                         step_batch = micro_batch
-                    loss, meta_info = self.forward_step(
-                        step_batch,
-                        loss_function=loss_function,
-                        forward_only=forward_only,
-                        step=0 if stage_inputs else step,
-                    )
-                    if not forward_only:
-                        loss.backward()
-                        if not return_model_output:
-                            # Training consumers only need metrics; do not retain every timestep's latents.
-                            meta_info.pop("model_output", None)
+                    with sync_ctx:
+                        loss, meta_info = self.forward_step(
+                            step_batch,
+                            loss_function=loss_function,
+                            forward_only=forward_only,
+                            step=0 if stage_inputs else step,
+                        )
+                        if not forward_only:
+                            loss.backward()
+                            if not return_model_output:
+                                # Training consumers only need metrics; do not retain every timestep's latents.
+                                meta_info.pop("model_output", None)
                     for key, val in meta_info.items():
                         meta_info_lst[key].append(val)
                     del step_batch
