@@ -23,6 +23,7 @@ from pprint import pprint
 from typing import Optional
 
 import numpy as np
+import ray
 import torch
 from omegaconf import OmegaConf, open_dict
 from torch.utils.data import Dataset, Sampler
@@ -74,6 +75,29 @@ class OmniPPOTrainerSync(PPOTrainerSync):
         model_config: OmniModelConfig = omega_conf_to_dataclass(self.config.actor_rollout_ref.model, OmniModelConfig)
         self.tokenizer = model_config.tokenizer
         self.processor = model_config.processor
+
+    def _init_resource_pool_mgr(self):
+        super()._init_resource_pool_mgr()
+        from verl_omni.workers.engine_workers import ActorRolloutRefWorker
+
+        for role in (Role.ActorRolloutRef, Role.ActorRollout):
+            if role in self.role_worker_mapping:
+                self.role_worker_mapping[role] = ray.remote(ActorRolloutRefWorker)
+
+    def _ensure_teacher_unembeds(self):
+        if getattr(self, "_teacher_unembeds", None) is not None:
+            return
+
+        from verl_omni.utils.lm_head import load_lm_head_weight
+
+        teacher_models = self.distillation_config.teacher_models
+        unembeds = {}
+        for key, teacher_config in teacher_models.items():
+            w = load_lm_head_weight(teacher_config.model_path)
+            unembeds[key] = w.to(dtype=torch.bfloat16).contiguous()
+
+        self._teacher_unembeds = unembeds
+        self.actor_rollout_wg.set_teacher_unembeds(unembeds)
 
     # The rollout server resumes admission after every successful wake; this
     # bridge remains a safety net for holds not preceded by a wake (init).
