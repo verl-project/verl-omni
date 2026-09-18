@@ -22,9 +22,12 @@ backbone under the ``llm.`` prefix (``maybe_prefix(prefix, "llm")`` +
 resolution, through the same machinery every verl LoRA run uses). The actor's
 ``MiniCPMO`` wrapper carries the same ``self.llm`` subtree and defines no
 ``_checkpoint_conversion_mapping``, so verl's ``convert_weight_keys`` is an
-identity pass — both sides meet without a remap. This test pins that contract
-with a tiny CPU model; if either side's naming drifts, the sanctioned fix is a
-remap at the MiniCPM sync surface, not an engine change.
+identity pass — both sides meet without a remap. The separate-async recipe
+currently ships ``lora.merge=True`` (accuracy parity with its colocated
+reference); this contract governs the planned performance flip to
+``merge=False`` and stays valid for any run that sets it. This test pins that
+contract with a tiny CPU model; if either side's naming drifts, the sanctioned
+fix is a remap at the MiniCPM sync surface, not an engine change.
 """
 
 import torch

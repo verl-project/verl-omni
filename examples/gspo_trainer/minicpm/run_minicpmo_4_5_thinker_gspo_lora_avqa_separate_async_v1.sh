@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # MiniCPM-o 4.5 Thinker GSPO + LoRA training on AVQA (audio + image -> text) with
 # the omni separate-async V1 trainer: 4 GPUs = 2 FSDP trainer + 2 standalone
-# rollout (two TP=1 replicas). Generation runs one batch ahead of training; LoRA
-# adapter deltas sync to the standalone replicas every
-# trainer.v1.separate_async.parameter_sync_step inner steps (128 = 8 x 16).
+# rollout (two TP=1 replicas). Generation runs one batch ahead of training; merged
+# LoRA weights (lora.merge=True, same as the colocated recipe) sync to the
+# standalone replicas every trainer.v1.separate_async.parameter_sync_step inner
+# steps (128 = 8 x 16). Flip to lora.merge=False later to ship adapter deltas
+# instead (~100 MB vs ~19 GB per sync); the key alignment is pinned by
+# tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py.
 #
 # Hyperparameters are copied verbatim from the proven colocated MiniCPM-o AVQA
 # recipe (examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh);
 # only the disaggregation lines differ (trainer mode, GPU split, rollout topology,
-# checkpoint-engine backend, lora.merge, memory utilization, staleness pin).
+# checkpoint-engine backend, memory utilization, staleness pin).
 #
 # Data preparation (run once, same as the colocated recipe):
 #   python examples/gspo_trainer/data_process/avqa.py \
@@ -46,7 +49,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.model.lora_rank=32 \
     actor_rollout_ref.model.lora_alpha=64 \
     actor_rollout_ref.model.lora_dtype=float32 \
-    actor_rollout_ref.model.lora.merge=False \
+    actor_rollout_ref.model.lora.merge=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.exclude_modules=".*vpm.*|.*apm.*|.*talker.*|.*code2wav.*|.*code_predictor.*|.*codec.*|.*audio_decoder.*|.*audio_generator.*|.*audio_head.*|.*tts.*|.*vocoder.*" \

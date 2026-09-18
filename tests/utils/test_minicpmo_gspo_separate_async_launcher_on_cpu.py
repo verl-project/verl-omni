@@ -84,13 +84,15 @@ def test_launcher_splits_gpu_pools():
     assert "actor_rollout_ref.rollout.gpu_memory_utilization=0.8" in settings
 
 
-def test_launcher_ships_lora_adapter_deltas():
+def test_launcher_ships_merged_lora_weights():
     settings = _active_settings()
 
-    # The opposite of the colocated recipe: unmerged LoRA travels as adapter
-    # tensors through the LoRA-aware checkpoint engine (add_lora on replicas).
-    assert "actor_rollout_ref.model.lora.merge=False" in settings
-    # Adapter-only sends require the base weights preloaded on the replicas.
+    # Merged full-weight sync, the same semantics as the colocated recipe, so
+    # the first separate-async run stays directly comparable with its reference.
+    # merge=False (adapter deltas via add_lora, ~100 MB vs ~19 GB per sync) is
+    # the later performance flip; its key alignment is pinned by
+    # tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py.
+    assert "actor_rollout_ref.model.lora.merge=True" in settings
     assert "actor_rollout_ref.rollout.load_format=safetensors" in settings
 
 
