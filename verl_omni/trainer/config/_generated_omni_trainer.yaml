@@ -1107,3 +1107,31 @@ ray_kwargs:
     runtime_env:
       py_executable: null
   timeline_json_file: null
+agentic_image_gen:
+  vllm_omni_url: ''
+  qwen_image_url: ''
+  qwen_image_seed: null
+  qwen_image_diversify_seed: true
+  qwen_image_height: 512
+  qwen_image_width: 512
+  qwen_image_steps: 20
+  qwen_image_true_cfg_scale: 4.0
+  diffusion_tool_url: ''
+  diffusion_tool_token: null
+  diffusion_tool_timeout: 900
+  vllm_url: ''
+  vllm_model: ''
+  reflect_max_new_tokens: 1024
+  judge_parse_retries: 1
+  reflect_vlm_timeout: 120
+  judge_enable_thinking: false
+  good_enough_threshold: 0.8
+  block_generate_after_yes: true
+  block_generate_after_max_passes: true
+  max_generate_image_passes: 3
+  force_first_generate: false
+  force_first_warmup_steps: 10
+  force_first_end_step: 20
+  force_reflection_after_judge: true
+  rewrite_judge_before_generate: true
+  e2e_root: null

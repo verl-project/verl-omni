@@ -37,9 +37,13 @@ run_test 6 "diffusion composite agent loop" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
     python3 -m pytest -s tests/agent_loop/test_composite_agent_loop.py
 
+run_test 7 "OmniAgentLoopWorker image_gen tool agent loop" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    python3 -m pytest -s tests/agent_loop/test_omni_agent_loop_worker_gpu.py
+
 # Ulysses sequence-parallel equivalence tests (needs torchrun; sp=4 cases
 # self-skip on 2 GPUs, non-native backends self-skip without `kernels`).
-run_test 7 "diffusers ulysses sp" \
+run_test 8 "diffusers ulysses sp" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
     torchrun --nproc_per_node="${NUM_GPUS}" --local-ranks-filter=0 tests/workers/test_diffusers_ulysses.py
 
