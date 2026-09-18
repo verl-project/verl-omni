@@ -600,6 +600,125 @@ binary `<answer>` exact-match reward): `critic/rewards/mean` rose from ~0.73 to
 ~0.94, `val-core/avqa_r1_6k/reward/mean@1` reached **0.877**.
 `rollout_corr/log_ppl_diff` stayed near zero (~0.007).
 
+## VeOmni full-parameter Thinker training
+
+[`run_qwen3_omni_thinker_gspo_veomni.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_veomni.sh)
+uses the V1 omni trainer with VeOmni **0.1.12** (PyPI), FSDP2 and expert
+parallelism for the actor/reference, and vLLM-Omni for text rollout. Install
+VeOmni on every node following the [installation guide](../../docs/start/install.md#optional-engine-backends).
+The recipe uses the MMK12 parquet files prepared above.
+
+Both FSDP and VeOmni use `verl_omni.trainer.main_omni` and the same
+`OmniModelBase` registry keyed by `(architecture, model_stage)`.
+`model_engine=veomni` selects the shared `OmniVeOmniEngine`; the registered
+`Qwen3OmniThinkerAdapter` supplies model-specific behavior. Adding another
+architecture does not require a new engine class or engine registration.
+
+To support VeOmni in an existing training adapter, override these hooks:
+
+| Hook | Responsibility |
+| --- | --- |
+| `setup_veomni(model_config, engine_config)` | Opt in, validate supported settings before model loading, and install backend integrations such as weight-export handlers. |
+| `prepare_veomni_inputs(model_inputs, micro_batch, model_config)` | Adapt packed inputs after verl's VeOmni transforms; defaults to passthrough. |
+| `configure_veomni_trainable_params(module, model_config)` | Set trainable parameters after parallelization and before optimizer creation; defaults to no-op. |
+
+The existing `prepare_model_inputs` replay hook runs for both backends.
+Keep optional VeOmni imports inside the backend hooks. Adapters that do not
+implement `setup_veomni` fail before model loading; selecting this backend does
+not imply that every registered architecture is supported. Qwen3's helpers,
+including prompt-region masking, live under `pipelines/qwen3_omni/veomni.py`.
+
+```bash
+MODEL_PATH=Qwen/Qwen3-Omni-30B-A3B-Instruct \
+TRAIN_FILE=$HOME/data/mmk12/train.parquet \
+VAL_FILE=$HOME/data/mmk12/test.parquet \
+NUM_GPUS=8 NNODES=2 ACTOR_EP=8 \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_veomni.sh
+```
+
+The Ray cluster must already span the requested nodes. The full text backbone
+is trainable; vision/audio encoders remain frozen and Talker/Code2Wav are not
+constructed. This backend currently accepts **text and image inputs**, with
+`use_remove_padding=true` and `ulysses_parallel_size=1`. Audio/video inputs,
+LoRA and Talker training are rejected. Prompt-only modality masks prevent
+placeholder tokens sampled into a response from consuming image features.
+Fused expert weights are expanded to per-expert weights during rollout updates.
+
+Defaults use rollout TP=2 and actor EP=8; EP must divide the GPU world size and
+expert count. The launcher explicitly selects VeOmni 0.1.12's GPU defaults for
+the Qwen3-relevant operators, overriding verl's conservative eager defaults:
+
+| VeOmni selector | Recipe default |
+| --- | --- |
+| `attn_implementation` | `flash_attention_2` |
+| `moe_implementation` | `fused_triton` |
+| `cross_entropy_loss_implementation` | `liger_kernel` |
+| `rms_norm_implementation` | `liger_kernel` |
+| `swiglu_mlp_implementation` | `liger_kernel` |
+| `rotary_pos_emb_implementation` | `liger_kernel` |
+| `load_balancing_loss_implementation` | `triton` |
+
+Set these under `actor_rollout_ref.actor.veomni`. Reference operator selectors
+interpolate the actor's values, including CLI overrides; explicitly overriding
+`actor_rollout_ref.ref.veomni.<selector>` still takes precedence. For example:
+
+```bash
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_veomni.sh \
+    actor_rollout_ref.actor.veomni.moe_implementation=fused_quack
+```
+
+`MOE_IMPL` and `ATTN_IMPL` are optional launcher conveniences for the same fields.
+Use explicit `fused_triton` / `fused_quack` names instead of VeOmni's deprecated
+`fused` alias. Both GPU smoke scripts use the same operator defaults; the backend
+check builds its CPU checkpoint with eager ops only to generate the fixture.
+
+`model.use_fused_kernels=true` is verl's RL output-path switch: its VeOmni engine
+passes `return_log_probs=True`, temperature and pre-shifted labels to the model.
+It does not select the MoE, norm or CE implementation. VeOmni's non-eager CE
+path avoids materializing the full logits tensor before computing chunked
+log-probabilities; selecting `cross_entropy_loss_implementation=eager` may still
+materialize logits. The adapter adds no new operator-selection mapping.
+
+Hydra overrides go last, for example `trainer.total_training_steps=2` or
+`--cfg job` to inspect the composed configuration. The learning-rate schedule
+uses `lr_warmup_steps_ratio`; evaluation sets `temperature=0.0` explicitly. This
+recipe does not claim numerical equivalence to PR #231 or the LoRA curves above.
+
+The two scripts below are manual validation tools. They are not registered in
+the required `ci-e2e-omni` group until both complete through normal package
+initialization on the pinned vLLM 0.28 / PyTorch 2.13 stack. Backend-only results
+on PyTorch 2.11 do not establish full V1 rollout compatibility.
+
+Two-GPU end-to-end smoke test (tiny random checkpoint, no external model download):
+
+```bash
+bash tests/special_e2e/run_gspo_qwen3_omni_thinker_veomni_smoke.sh
+```
+
+The backend check loads a speech-enabled config with extra Talker/Codec
+checkpoint keys and verifies a Thinker-only optimizer. It compares the actual
+`use_fused_kernels` input/output path against logits for log-probabilities and
+entropy at temperatures 1.0 and 0.8, with images on one rank and text on the
+other. It also checks two optimizer updates with EP=2 and exact agreement of
+exported weights across ranks:
+
+```bash
+torchrun --standalone --nproc_per_node=2 tests/special_e2e/check_qwen3_omni_veomni_backend.py
+```
+
+The adapter rejects a loaded model containing `talker`, `code2wav`, or
+`code_predictor` (or reporting `has_talker=True`) before optimizer construction.
+It uses the same excluded-module names as the FSDP adapter. VeOmni 0.1.12's
+default modeling constructs only the Thinker even with speech enabled in the
+checkpoint config; the runtime check protects against a different backend or
+release changing that behavior.
+
+The `create_causal_mask` shim is version-sensitive: it adapts VeOmni 0.1.12's
+generated GPU model to the Transformers signature without `cache_position`,
+validated with Transformers 5.14.1. It leaves signatures that still accept the
+argument unchanged and does not suppress errors for other unknown arguments.
+Recheck this shim whenever VeOmni or Transformers is upgraded.
+
 ## Logging
 
 The NExT-QA launcher uses console and TensorBoard logging. For launchers

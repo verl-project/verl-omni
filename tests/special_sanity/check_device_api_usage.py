@@ -28,6 +28,7 @@ CUDA_KEYWORD_CHECK_WHITELIST = [
     "verl_omni/trainer/diffusion/ray_diffusion_trainer.py",  # appear in default device_name
     "verl_omni/workers/engine/fsdp/omni_impl.py",  # device=[...] registry declaration
     "verl_omni/workers/engine/veomni/diffusion_impl.py",  # device=[...] registry declaration
+    "verl_omni/workers/engine/veomni/omni_impl.py",  # CUDA engine registry declaration
     "verl_omni/pipelines/qwen_image_flow_grpo/diffusers_training_adapter.py",  # docstring only
     "verl_omni/utils/mfu/diffusion_flops_counter.py",  # comment only
     "verl_omni/utils/diffusion_attention.py",  # CUDA-only by design: FA3 capability probe

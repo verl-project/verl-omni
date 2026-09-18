@@ -42,3 +42,16 @@ def test_qwen3_tts_smoke_files_select_only_omni_e2e_group():
     )
 
     assert selected == ["ci-e2e-omni"]
+
+
+def test_shared_omni_veomni_engine_and_adapters_select_omni_smoke():
+    selector = _load_selector()
+    for path in (
+        "verl_omni/workers/engine/veomni/omni_impl.py",
+        "verl_omni/pipelines/model_base.py",
+        "verl_omni/pipelines/qwen3_omni/thinker_training_adapter.py",
+        "verl_omni/pipelines/qwen3_omni/veomni.py",
+        "tests/workers/test_omni_veomni_engine_on_cpu.py",
+        "tests/pipelines/test_qwen3_omni_veomni_on_cpu.py",
+    ):
+        assert "ci-e2e-omni" in selector.select_group_names([path]), path
