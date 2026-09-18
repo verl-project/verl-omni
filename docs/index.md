@@ -86,6 +86,7 @@ examples/grpoguard_trainer.md
 examples/gspo_trainer.md
 examples/mixgrpo_trainer.md
 examples/diffusionopd_trainer.md
+examples/qwen_image/dmd2_trainer.md
 examples/flowgrpo_trainer_sd35_drm.md
 examples/bagel/flowgrpo_trainer_bagel.md
 examples/qwen3_tts/grpo_trainer_qwen3_tts.md

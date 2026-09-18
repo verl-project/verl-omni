@@ -71,4 +71,8 @@ run_test 9 "Diffusion OPD v1 separate_async standalone teachers e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" SMOKE=async \
     bash tests/special_e2e/run_diffusion_teacher_smoke.sh
 
+run_test 13 "Qwen-Image offline DMD2 trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
+    bash tests/special_e2e/run_dmd2_qwen_image.sh "${diffusion_trainer_args[@]}"
+
 gpu_smoke_summary
