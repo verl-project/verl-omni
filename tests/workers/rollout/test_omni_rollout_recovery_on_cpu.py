@@ -92,3 +92,62 @@ async def test_continuation_resends_media_merges_tokens_and_shrinks_budget():
     assert final.stop_reason == "completed"
     assert final.extra_fields["min_global_steps"] == 3
     assert final.extra_fields["max_global_steps"] == 5
+
+
+async def test_avqa_continuation_resubmits_both_media_with_processor_kwargs():
+    """MiniCPM-o AVQA shape: the 16 kHz sampling kwarg and both the image and
+    audio payloads must ride every resubmission across a weight-sync abort —
+    a continuation that drops either re-renders the prompt under the wrong
+    media expansion and splices mismatched ids."""
+    outputs = [
+        SimpleNamespace(
+            token_ids=[4],
+            log_probs=[-0.1],
+            routed_experts=None,
+            num_preempted=0,
+            stop_reason="abort",
+            extra_fields={"global_steps": 2},
+        ),
+        SimpleNamespace(
+            token_ids=[5, 6],
+            log_probs=[-0.2, -0.3],
+            routed_experts=None,
+            num_preempted=0,
+            stop_reason="completed",
+            extra_fields={"global_steps": 3},
+        ),
+    ]
+    client = _client(FullyAsyncLLMServerClient, config=SimpleNamespace())
+    seen_budgets = []
+    output_iter = iter(outputs)
+
+    async def _record(*args, **kwargs):
+        seen_budgets.append(kwargs["sampling_params"]["max_tokens"])
+        return next(output_iter)
+
+    with patch.object(LLMServerClient, "generate", new=AsyncMock(side_effect=_record)) as mock_gen:
+        final = await client.generate(
+            "req-avqa",
+            prompt_ids=[1, 2, 3],
+            sampling_params={"max_tokens": 8},
+            mm_processor_kwargs={"sampling_rate": 16000},
+            image_data=["img"],
+            video_data=None,
+            audio_data=["aud"],
+        )
+
+    assert mock_gen.call_count == 2
+    first, second = mock_gen.call_args_list
+    # The continuation prompt is prompt + tokens generated before the abort.
+    assert second.kwargs["prompt_ids"] == [1, 2, 3, 4]
+    for call in (first, second):
+        assert call.kwargs["image_data"] == ["img"]
+        assert call.kwargs["audio_data"] == ["aud"]
+        assert call.kwargs["mm_processor_kwargs"] == {"sampling_rate": 16000}
+    # Budget shrinks by the tokens already generated.
+    assert seen_budgets == [8, 7]
+
+    assert final.token_ids == [4, 5, 6]
+    assert final.stop_reason == "completed"
+    assert final.extra_fields["min_global_steps"] == 2
+    assert final.extra_fields["max_global_steps"] == 3
