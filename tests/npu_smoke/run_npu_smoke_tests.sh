@@ -164,10 +164,14 @@ echo -e "  ASCEND_RT_VISIBLE_DEVICES : ${ASCEND_RT_VISIBLE_DEVICES}"
 sep
 echo ""
 
+ray stop --force || true
+pkill -TERM -f 'DiffusionWorker|VLLMWorker|vLLMOmniHttpServer' || true
 run_selected_test 0 "vllm-omni rollout + sleep/wake_up" \
     env ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}" NUM_NPUS="${NUM_NPUS}" \
     pytest -s tests/workers/rollout/rollout_vllm/test_vllm_omni_generate_npu.py
 
+ray stop --force || true
+pkill -TERM -f 'DiffusionWorker|VLLMWorker|vLLMOmniHttpServer' || true
 run_selected_test 1 "FlowGRPO trainer e2e" \
     env ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}" NUM_NPUS="${NUM_NPUS}" \
     bash tests/special_e2e/run_flowgrpo_qwen_image_npu.sh

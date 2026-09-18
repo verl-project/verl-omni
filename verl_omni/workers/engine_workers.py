@@ -1016,6 +1016,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         CPU (independent allocations), so the subsequent actor offload can run
         concurrently with the rollout-side sync without affecting these tensors.
         """
+        if is_npu_available:
+            torch.npu.set_device(int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", 0))))
         gather_start = time.perf_counter()
         per_tensor_param, peft_config = self.actor.engine.get_per_tensor_param(
             layered_summon=self.layered_summon,

@@ -2,8 +2,8 @@
 # FlowGRPO diffusion e2e smoke test for Ascend NPU, vllm_omni rollout.
 set -xeuo pipefail
 
-NUM_NPUS=${NUM_NPUS:-4}
-MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/Qwen-Image}
+NUM_NPUS=${NUM_NPUS:-8}
+MODEL_PATH=${MODEL_PATH:~/.cache/modelscope/hub/models/Qwen/Qwen-Image}
 TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_PATH}/tokenizer}
 DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_diffusion}
 dummy_train_path=${TRAIN_FILES:-${DATA_DIR}/train.parquet}
@@ -25,7 +25,7 @@ export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 if [ ! -f "${dummy_train_path}" ] || [ ! -f "${dummy_test_path}" ]; then
     python3 tests/special_e2e/create_dummy_diffusion_data.py \
         --local_save_dir "${DATA_DIR}" \
-        --train_size 8 \
+        --train_size "${train_batch_size}" \
         --val_size 4
 fi
 
@@ -38,7 +38,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.max_prompt_length=${max_prompt_length} \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.model.tokenizer_path=${TOKENIZER_PATH} \
-    actor_rollout_ref.model.use_shm=True \
+    actor_rollout_ref.model.attn_backend=_native_npu \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \
     actor_rollout_ref.model.target_modules=all-linear \
@@ -52,6 +52,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_grpo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${micro_bsz_per_npu} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+    actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA \
     actor_rollout_ref.rollout.name=${ENGINE} \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     actor_rollout_ref.rollout.agent.num_workers=1 \
