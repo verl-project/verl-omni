@@ -151,6 +151,14 @@ actor_rollout_ref.rollout.algo.sde_type=sde
 The first and third lines pin the cascaded estimator/loss back to
 `flow_grpo`; see [Caveat: cascade vs. validators](#caveat-cascade-vs-validators).
 
+A V1 trainer (TransferQueue + ReplayBuffer, `sync` mode) counterpart is at
+`examples/mixgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_mixgrpo_v1.sh` --
+see [Diffusion V1 training](../start/diffusion_v1.md). The sliding-window
+scheduler depends only on `global_steps` being present on the rollout
+sampling params, which the V1 `DiffusionAgentLoopWorkerTQ` forwards the same
+way the legacy rollout strategy does, so `random` / `progressive` scheduling
+is unchanged under `sync` mode.
+
 
 ## Tuning guide
 
