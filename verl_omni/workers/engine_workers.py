@@ -892,11 +892,31 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         output = self.actor.infer_batch(data)
         return output.cpu() if output is not None else None
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_teacher_unembeds(self, teacher_unembeds: dict[str, torch.Tensor]) -> None:
+        """Store teacher lm_head weights for hidden-state (nitrobrew) loss.
+
+        Each entry is ``{teacher_key: W [V, D_t]}`` bf16.  Factored into the
+        micro-batch on ``update_actor`` via a NonTensorData reference so the
+        chunked KL kernel can reconstruct teacher logits on this rank.
+
+        Args:
+            teacher_unembeds: key -> unembedding matrix (CPU/any device).
+        """
+        assert "actor" in self.role, "set_teacher_unembeds is only valid for actor workers"
+        self._teacher_unembeds: dict[str, torch.Tensor] = {
+            key: W.detach().to(dtype=torch.bfloat16).cpu().contiguous() for key, W in teacher_unembeds.items()
+        }
+        self._teacher_key_vocab: list[str] = sorted(teacher_unembeds.keys())
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
         tu.assign_non_tensor(data, enable_timestep_staging=self.config.actor.get("enable_timestep_staging", False))
+        if getattr(self, "_teacher_unembeds", None):
+            data["teacher_unembeds"] = NonTensorData(self._teacher_unembeds)
+            data["teacher_key_to_id"] = NonTensorData({key: i for i, key in enumerate(self._teacher_key_vocab)})
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
 
