@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import logging
 import math
 import os
@@ -29,7 +28,6 @@ import torch
 import transfer_queue as tq
 from omegaconf import OmegaConf, open_dict
 from packaging.version import InvalidVersion, Version
-from PIL import Image
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from transfer_queue import KVBatchMeta
@@ -60,6 +58,11 @@ from verl.utils.skip import SkipManager
 from verl.utils.tracking import Tracking, ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 
+from verl_omni.pipelines.rollout_media import (
+    resolve_batch_media_kind,
+    resolve_is_video,
+    validate_visual_media_batch_rank,
+)
 from verl_omni.trainer.diffusion.diffusion_algos import get_diffusion_loss_fn
 from verl_omni.trainer.diffusion.diffusion_metric_utils import (
     compute_data_metrics_diffusion,
@@ -73,7 +76,14 @@ from verl_omni.trainer.diffusion.diffusion_trainer_utils import (
     validate_distillation_config,
     worker_group_port_ranges,
 )
-from verl_omni.trainer.diffusion.ray_diffusion_trainer import _to_diffusion_worker_tensordict, compute_advantage
+from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
+    BaseRayDiffusionTrainer,
+    _resolve_rollout_media_field,
+    _to_diffusion_worker_tensordict,
+    _validate_generation_outputs,
+    compute_advantage,
+    dump_generations,
+)
 from verl_omni.trainer.diffusion.rollout_correction import (
     apply_bypass_mode_to_diffusion_batch,
     apply_rollout_correction_to_diffusion_batch,
@@ -134,6 +144,17 @@ def get_diffusion_trainer_cls(name: str):
     except KeyError:
         available = ", ".join(sorted(DIFFUSION_TRAINER_REGISTRY)) or "<none>"
         raise ValueError(f"Unknown diffusion trainer '{name}'. Available: {available}.") from None
+
+
+def _copy_media_to_cpu(value):
+    """Return an independent CPU snapshot safe for background media export."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().to(device="cpu", copy=True)
+    if isinstance(value, list):
+        return [_copy_media_to_cpu(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_media_to_cpu(item) for item in value)
+    return value
 
 
 class PolicyGradientDiffusionTrainerV1(ABC):
@@ -280,7 +301,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             self._compute_metrics(batch, metrics, self.timing_raw, self.global_steps, current_epoch)
 
             rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
-            if rollout_data_dir:
+            rollout_data_save_freq = self.config.trainer.get("rollout_data_save_freq", 1)
+            if rollout_data_dir and rollout_data_save_freq > 0 and self.global_steps % rollout_data_save_freq == 0:
                 self._log_rollout_data(batch, self.timing_raw, rollout_data_dir)
 
             tq.kv_clear(keys=batch.keys, partition_id=batch.partition_id)
@@ -814,11 +836,33 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self._dump_executor = ThreadPoolExecutor(max_workers=1)
         self._dump_futures = []
 
+    @staticmethod
+    def _report_dump_failure(future, global_step: int) -> None:
+        """Log a completed media-dump failure without interrupting training."""
+        try:
+            future.result()
+        except Exception as error:
+            logger.warning(
+                "Ignoring background media dump failure at step %s: %s",
+                global_step,
+                error,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    def _drain_dump_futures(self) -> None:
+        still_pending = []
+        for future, global_step in self._dump_futures:
+            if future.done():
+                self._report_dump_failure(future, global_step)
+            else:
+                still_pending.append((future, global_step))
+        self._dump_futures = still_pending
+
     def _shutdown_dump_executor(self):
-        for f in self._dump_futures:
-            f.result()
-        self._dump_futures.clear()
         self._dump_executor.shutdown(wait=True)
+        for future, global_step in self._dump_futures:
+            self._report_dump_failure(future, global_step)
+        self._dump_futures.clear()
 
     def _shutdown_dataloaders(self):
         for attr in ("train_dataloader", "val_dataloader"):
@@ -1294,9 +1338,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         return DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
 
     def _validate(self) -> dict:
-        """Validation via TransferQueue: dispatch, sample, convert, reward, dump images."""
+        """Validation via TransferQueue: dispatch, sample, convert, reward, dump media."""
         sample_inputs: list[str] = []
         sample_outputs: list[torch.Tensor] = []
+        sample_audios: list = []
+        sample_audio_sample_rates: list = []
+        sample_media_kinds: list = []
         sample_gts: list = []
         sample_scores: list[float] = []
         sample_turns: list = []
@@ -1350,7 +1397,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 else 0
             )
             logger.info(
-                "Validation batch (step=%d): %d trajectories, responses shape=%s, real_images=%s",
+                "Validation batch (step=%d): %d trajectories, responses shape=%s, real_media=%s",
                 self.global_steps,
                 len(data),
                 tuple(output_images.shape) if isinstance(output_images, torch.Tensor) else None,
@@ -1358,6 +1405,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             )
             sample_inputs.extend(input_texts)
             sample_outputs.append(output_images)
+            tool_extra = data.non_tensor_batch.get("tool_extra_fields")
+            sample_audios.extend(_resolve_rollout_media_field(data, tool_extra, "audio"))
+            sample_audio_sample_rates.extend(_resolve_rollout_media_field(data, tool_extra, "audio_sample_rate"))
+            sample_media_kinds.extend(_resolve_rollout_media_field(data, tool_extra, "media_kind"))
             uids = data.non_tensor_batch.get("uid")
             sample_uids.extend(list(uids) if uids is not None else [None] * len(data))
 
@@ -1384,7 +1435,14 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             tq.kv_clear(keys=batch_meta.keys, partition_id=batch_meta.partition_id)
 
         sample_outputs = torch.cat(sample_outputs, dim=0) if sample_outputs else torch.empty(0)
-        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+        self._maybe_log_val_generations(
+            inputs=sample_inputs,
+            outputs=sample_outputs,
+            scores=sample_scores,
+            audios=sample_audios,
+            audio_sample_rates=sample_audio_sample_rates,
+            media_kinds=sample_media_kinds,
+        )
 
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir and len(sample_outputs) > 0:
@@ -1395,101 +1453,76 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 scores=sample_scores,
                 reward_extra_infos_dict=reward_extra_infos_dict,
                 dump_path=val_data_dir,
+                max_samples=self.config.trainer.get("validation_data_max_samples", None),
+                fps=int(self.config.trainer.get("video_fps", 24)),
+                audios=sample_audios,
+                audio_sample_rates=sample_audio_sample_rates,
+                media_kind=resolve_batch_media_kind(sample_media_kinds),
             )
 
         data_sources_arr = np.concatenate(data_sources, axis=0) if data_sources else np.array([])
         return self._val_metrics_update(data_sources_arr, sample_uids, reward_extra_infos_dict, sample_turns)
 
-    def _maybe_log_val_generations(self, inputs, outputs, scores):
-        generations_to_log = self.config.trainer.log_val_generations
-        if generations_to_log == 0:
-            return
-        if "wandb" in self.config.trainer.logger:
-            for image in outputs:
-                if not isinstance(image, torch.Tensor) or image.dtype != torch.uint8:
-                    raise ValueError(f"Expected a uint8 image tensor, got {getattr(image, 'dtype', type(image))}.")
-            import wandb
-
-            outputs = [wandb.Image(image, file_type="jpg") for image in outputs]
-        samples = list(zip(inputs, outputs, scores, strict=True))
-        samples.sort(key=lambda x: x[0])
-        rng = np.random.RandomState(42)
-        rng.shuffle(samples)
-        samples = samples[:generations_to_log]
-        self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
-
-    def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
-        """Dump validation/rollout samples as images + JSONL (runs in background)."""
-        if not isinstance(outputs, torch.Tensor) or outputs.dtype != torch.uint8:
-            dtype = getattr(outputs, "dtype", type(outputs))
-            raise ValueError(f"Expected generation outputs to be a uint8 tensor, got {dtype}.")
-
-        future = self._dump_executor.submit(
-            self._write_generations,
+    def _maybe_log_val_generations(
+        self,
+        inputs,
+        outputs,
+        scores,
+        audios=None,
+        audio_sample_rates=None,
+        media_kinds=None,
+    ):
+        """Use the shared image/video W&B path with declared media metadata."""
+        return BaseRayDiffusionTrainer._maybe_log_val_generations(
+            self,
             inputs,
             outputs,
+            scores,
+            audios=audios,
+            audio_sample_rates=audio_sample_rates,
+            media_kinds=media_kinds,
+        )
+
+    def _dump_generations(
+        self,
+        inputs,
+        outputs,
+        gts,
+        scores,
+        reward_extra_infos_dict,
+        dump_path,
+        max_samples=None,
+        fps=24,
+        audios=None,
+        audio_sample_rates=None,
+        media_kind=None,
+    ):
+        """Validate media synchronously, then submit best-effort I/O with a step snapshot."""
+        _validate_generation_outputs(outputs)
+        resolve_is_video(outputs.ndim, media_kind)
+        dump_ndim = outputs.ndim - 1 if outputs.ndim == 6 and outputs.shape[1] == 1 else outputs.ndim
+        validate_visual_media_batch_rank(dump_ndim, media_kind)
+        global_step = self.global_steps
+        outputs_to_dump = _copy_media_to_cpu(outputs)
+        audios_to_dump = _copy_media_to_cpu(audios)
+        audio_sample_rates_to_dump = _copy_media_to_cpu(audio_sample_rates)
+        future = self._dump_executor.submit(
+            dump_generations,
+            global_step,
+            inputs,
+            outputs_to_dump,
             gts,
             scores,
             reward_extra_infos_dict,
             dump_path,
-            self.global_steps,
+            max_samples,
+            fps,
+            audios_to_dump,
+            audio_sample_rates_to_dump,
+            media_kind,
         )
-        self._dump_futures.append(future)
-        still_pending = []
-        for f in self._dump_futures:
-            if f.done():
-                f.result()
-            else:
-                still_pending.append(f)
-        self._dump_futures = still_pending
-
-    @staticmethod
-    def _write_generations(inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path, global_steps):
-        os.makedirs(dump_path, exist_ok=True)
-        visual_folder = os.path.join(dump_path, f"{global_steps}")
-        os.makedirs(visual_folder, exist_ok=True)
-
-        output_paths = []
-        images_pil = outputs.cpu()
-        # images: [N, C, H, W] -> [N, H, W, C]
-        if images_pil.dim() == 4:
-            images_pil = images_pil.permute(0, 2, 3, 1).numpy()
-        else:
-            images_pil = images_pil.numpy()
-        for i, image in enumerate(images_pil):
-            image_path = os.path.join(visual_folder, f"{i}.jpg")
-            Image.fromarray(image).save(image_path)
-            output_paths.append(image_path)
-
-        filename = os.path.join(dump_path, f"{global_steps}.jsonl")
-        n = len(inputs)
-        base_data = {
-            "input": inputs,
-            "output": output_paths,
-            "gts": gts,
-            "score": scores,
-            "step": [global_steps] * n,
-        }
-        for k, v in reward_extra_infos_dict.items():
-            if len(v) == n:
-                base_data[k] = v
-
-        def json_encode_default(obj):
-            if isinstance(obj, np.integer):
-                return int(obj)
-            if isinstance(obj, np.floating):
-                return float(obj)
-            if isinstance(obj, np.bool_):
-                return bool(obj)
-            if hasattr(obj, "tolist"):
-                return obj.tolist()
-            raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
-
-        with open(filename, "w") as f:
-            for i in range(n):
-                entry = {k: v[i] for k, v in base_data.items()}
-                f.write(json.dumps(entry, ensure_ascii=False, default=json_encode_default) + "\n")
-        print(f"Dumped diffusion generations to {filename}")
+        self._dump_futures.append((future, global_step))
+        self._drain_dump_futures()
 
     def _log_rollout_data(self, batch_meta: KVBatchMeta, timing_raw: dict, rollout_data_dir: str):
         """Fetch rollout rows from TQ and dump sorted by uid."""
@@ -1510,12 +1543,19 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 if rm_meta is not None
                 else [None] * len(data)
             )
+            tool_extra = data.non_tensor_batch.get("tool_extra_fields")
+            audios = _resolve_rollout_media_field(data, tool_extra, "audio")
+            audio_sample_rates = _resolve_rollout_media_field(data, tool_extra, "audio_sample_rate")
+            media_kinds = _resolve_rollout_media_field(data, tool_extra, "media_kind")
 
             sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
             inputs = [inputs[i] for i in sort_idx]
             outputs = outputs[torch.tensor(sort_idx)]
             gts = [gts[i] for i in sort_idx]
             scores = [scores[i] for i in sort_idx]
+            audios = [audios[i] for i in sort_idx]
+            audio_sample_rates = [audio_sample_rates[i] for i in sort_idx]
+            media_kinds = [media_kinds[i] for i in sort_idx]
             reward_extra_infos_dict = {"uid": [batch_meta.keys[i] for i in sort_idx]}
             self._dump_generations(
                 inputs=inputs,
@@ -1524,6 +1564,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 scores=scores,
                 reward_extra_infos_dict=reward_extra_infos_dict,
                 dump_path=rollout_data_dir,
+                max_samples=self.config.trainer.get("rollout_data_max_samples", None),
+                fps=int(self.config.trainer.get("video_fps", 24)),
+                audios=audios,
+                audio_sample_rates=audio_sample_rates,
+                media_kind=resolve_batch_media_kind(media_kinds),
             )
 
     def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns) -> dict:
