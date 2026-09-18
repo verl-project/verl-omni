@@ -21,7 +21,6 @@
 
 set -x
 
-export VLLM_ASCEND_ENABLE_NZ=0
 # Make verl_omni available to Ray workers
 export VERL_USE_EXTERNAL_MODULES=verl_omni
 
