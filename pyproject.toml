@@ -22,7 +22,7 @@ dependencies = [
     "accelerate>=1.14.0",
     "cachetools",
     "codetiming",
-    "datasets>=2.20.0",  # 2.19- uses pa.PyExtensionType; pyarrow>=21 removed it
+    "datasets>=2.20.0",
     "diffusers>=0.40.0",
     "dill",
     "hydra-core",
@@ -53,7 +53,6 @@ dependencies = [
 # Rollout engine (install in step 2, after gpu step 1).
 vllm-omni = [
     "vllm-omni==0.28.0rc1",
-    "qwen-vl-utils>=0.0.14",
 ]
 audio = [
     "qwen-omni-utils>=0.0.9",
@@ -67,13 +66,16 @@ omni = [
     "onnxruntime>=1.20.0",
     "soundfile>=0.12.1",
     "sox>=1.5.0",
-    "torchaudio==2.11.0",
+    "torchaudio>=2.11.0",
+    "av",
 ]
 # CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
 gpu = [
     "vllm==0.28.0",
     "kernels==0.16.0",
     "liger-kernel",
+    "pyzmq",
+    "qwen-vl-utils>=0.0.14",
 ]
 # Training stack (install in step 2).
 # Git commit must match .github/verl_pin.txt (reports as 0.10.0.dev at fefb080).
