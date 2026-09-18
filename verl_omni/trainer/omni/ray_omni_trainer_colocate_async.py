@@ -13,17 +13,11 @@
 # limitations under the License.
 """Omni colocate-async trainer — a thin ``PPOTrainerColocateAsync`` subclass (RFC #320)."""
 
-import logging
-import os
-
 from verl.trainer.ppo.v1.trainer_base import register_trainer
 from verl.trainer.ppo.v1.trainer_colocate_async import PPOTrainerColocateAsync
 from verl.utils.config import omega_conf_to_dataclass
 
 from verl_omni.workers.config import OmniModelConfig
-
-logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 @register_trainer("omni_colocate_async")
