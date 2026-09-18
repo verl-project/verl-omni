@@ -42,6 +42,7 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, Res
 from verl.single_controller.ray.base import create_colocated_worker_cls, split_resource_pool
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.metric_utils import compute_variance_proxy_metrics, process_validation_metrics
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import extract_reward
 from verl.trainer.ppo.utils import Role, WorkerType, need_reference_policy
 from verl.utils import tensordict_utils as tu
@@ -53,6 +54,7 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.llm_server import LLMServerManager
+from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 from verl_omni.trainer.config import DiffusionAlgoConfig
 from verl_omni.trainer.diffusion.diffusion_algos import (
@@ -161,7 +163,9 @@ def compute_advantage(
         adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
 
     adv_estimator_fn = get_diffusion_adv_estimator_fn(adv_estimator)
-    if adv_estimator == DiffusionAdvantageEstimator.FLOW_GRPO:
+    if adv_estimator in {
+        DiffusionAdvantageEstimator.FLOW_GRPO,
+    }:
         adv_kwargs["norm_adv_by_std_in_grpo"] = norm_adv_by_std_in_grpo
         adv_kwargs["global_std"] = global_std
     advantages, returns = adv_estimator_fn(**adv_kwargs)
@@ -273,6 +277,11 @@ class BaseRayDiffusionTrainer(ABC):
             and controller_nsight_options.get("capture-range") == "cudaProfilerApi"
         )
         self._controller_nsys_profile_active = False
+        self.train_ar_n_diffusion = self.config.trainer.get("train_ar", False) and not self.config.trainer.get(
+            "freeze_diffusion", False
+        )
+        if not self.train_ar_n_diffusion:
+            self.config.actor_rollout_ref.rollout.m = 1
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -524,7 +533,17 @@ class BaseRayDiffusionTrainer(ABC):
                 audio_sample_rates=audio_rates_to_dump,
             )
 
-    def _maybe_log_val_generations(self, inputs, outputs, scores, audios=None, audio_sample_rates=None):
+    def _maybe_log_val_generations(
+        self,
+        inputs,
+        outputs,
+        scores,
+        audios=None,
+        audio_sample_rates=None,
+        ar_inputs=None,
+        ar_outputs=None,
+        ar_scores=None,
+    ):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
         generations_to_log = self.config.trainer.log_val_generations
@@ -571,6 +590,28 @@ class BaseRayDiffusionTrainer(ABC):
             if video_tmp_dir is not None:
                 shutil.rmtree(video_tmp_dir, ignore_errors=True)
 
+        if self.train_ar_n_diffusion:
+            samples = list(zip(ar_inputs, ar_outputs, ar_scores, strict=True))
+            samples.sort(key=lambda x: x[0])
+            rng = np.random.RandomState(42)
+            rng.shuffle(samples)
+            samples = samples[:generations_to_log]
+            self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
+
+    def _dump_ar_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
+        """Dump rollout/validation samples as JSONL."""
+
+        global_steps = self.global_steps
+        RayPPOTrainer._write_generations(
+            inputs,
+            outputs,
+            gts,
+            scores,
+            reward_extra_infos_dict,
+            dump_path,
+            global_steps,
+        )
+
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
         reward_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
 
@@ -598,6 +639,8 @@ class BaseRayDiffusionTrainer(ABC):
     def _validate(self):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
+        ar_data_source_lst = []
+        ar_reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
         # Lists to collect samples for the table
         sample_inputs = []
@@ -608,6 +651,16 @@ class BaseRayDiffusionTrainer(ABC):
         sample_scores = []
         sample_turns = []
         sample_uids = []
+        ar_sample_inputs = []
+        ar_sample_outputs = []
+        ar_sample_gts = []
+        ar_sample_scores = []
+        ar_sample_turns = []
+        ar_sample_uids = []
+
+        rollout_cfg = self.config.actor_rollout_ref.rollout
+        val_n = rollout_cfg.val_kwargs.n
+        val_m = rollout_cfg.val_kwargs.m
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -618,13 +671,20 @@ class BaseRayDiffusionTrainer(ABC):
                 )
 
             # repeat test batch
-            test_batch = test_batch.repeat(
-                repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True
-            )
-
-            ground_truths = [
-                item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch
-            ]
+            if self.train_ar_n_diffusion:
+                test_batch = test_batch.repeat(repeat_times=val_m, interleave=True)
+                ar_sample_gts.extend(
+                    [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch]
+                )
+                ground_truths = [
+                    item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None)
+                    for item in test_batch.repeat(repeat_times=val_n, interleave=True)
+                ]
+            else:
+                test_batch = test_batch.repeat(repeat_times=val_n, interleave=True)
+                ground_truths = [
+                    item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in test_batch
+                ]
             sample_gts.extend(ground_truths)
 
             test_gen_batch = self._get_gen_batch(test_batch)
@@ -636,9 +696,14 @@ class BaseRayDiffusionTrainer(ABC):
             print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
             # pad to be divisible by dp_size
-            size_divisor = self.config.actor_rollout_ref.rollout.agent.num_workers
+            size_divisor = rollout_cfg.agent.num_workers
             test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
-            test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
+            if self.train_ar_n_diffusion:
+                ar_output_gen_batch_padded, test_output_gen_batch_padded = (
+                    self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
+                )
+            else:
+                test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
             if self.use_rm and "rm_scores" not in test_output_gen_batch_padded.batch.keys():
                 # for colocate reward models, we need to sleep rollout model
@@ -646,6 +711,8 @@ class BaseRayDiffusionTrainer(ABC):
                 if not self.separate:
                     self.checkpoint_manager.sleep_replicas()
                 batch_reward = self._compute_reward_colocate(test_output_gen_batch_padded)
+                if self.train_ar_n_diffusion:
+                    self._extract_ar_reward_tensor(batch_reward, ar_output_gen_batch_padded, avg_size=val_n)
                 test_output_gen_batch_padded = test_output_gen_batch_padded.union(batch_reward)
                 # wake up rollout model
                 # replace with wake_up method once supported
@@ -653,7 +720,11 @@ class BaseRayDiffusionTrainer(ABC):
                     self.checkpoint_manager.update_weights(self.global_steps)
 
             # unpad
-            test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
+            if self.train_ar_n_diffusion:
+                ar_output_gen_batch = unpad_dataproto(ar_output_gen_batch_padded, pad_size=pad_size)
+                test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size * val_n)
+            else:
+                test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
 
             print("validation generation end")
 
@@ -670,6 +741,16 @@ class BaseRayDiffusionTrainer(ABC):
                 )
             )
 
+            if self.train_ar_n_diffusion:
+                # copy batch
+                ar_test_batch = DataProto(
+                    batch=test_batch.batch.copy(),
+                    non_tensor_batch=test_batch.non_tensor_batch.copy(),
+                    meta_info=test_batch.meta_info.copy(),
+                )
+                ar_batch = ar_test_batch.union(ar_output_gen_batch)
+                ar_batch.meta_info["validate"] = True
+                test_batch = test_batch.repeat(repeat_times=val_n, interleave=True)
             test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
 
@@ -700,6 +781,35 @@ class BaseRayDiffusionTrainer(ABC):
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
+            if self.train_ar_n_diffusion:  # AR part
+                # Store generated outputs
+                ar_sample_outputs.extend(ar_batch.non_tensor_batch["text_encoder_responses"].tolist())
+
+                # Store original inputs
+                input_ids = ar_batch.batch["prompts"]
+                input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
+                ar_sample_inputs.extend(input_texts)
+                ar_sample_uids.extend(ar_batch.non_tensor_batch["uid"])
+
+                # evaluate using reward_function
+                ar_reward_tensor, ar_reward_extra_info = extract_reward(ar_batch)
+                ar_scores = ar_reward_tensor.sum(-1).cpu().tolist()
+                ar_sample_scores.extend(ar_scores)
+                ar_reward_extra_infos_dict["reward"].extend(ar_scores)
+                for key, values in ar_reward_extra_info.items():
+                    if key not in ar_reward_extra_infos_dict:
+                        ar_reward_extra_infos_dict[key] = []
+                    if isinstance(values, np.ndarray):
+                        ar_reward_extra_infos_dict[key].extend(values.tolist())
+                    else:
+                        ar_reward_extra_infos_dict[key].extend(values if isinstance(values, list) else [values])
+
+                if "__num_turns__" in ar_batch.non_tensor_batch:
+                    ar_sample_turns.append(ar_batch.non_tensor_batch["__num_turns__"])
+                ar_data_source_lst.append(
+                    ar_batch.non_tensor_batch.get("data_source", ["unknown"] * ar_reward_tensor.shape[0])
+                )
+
         sample_outputs = torch.cat(sample_outputs, dim=0)
         self._maybe_log_val_generations(
             inputs=sample_inputs,
@@ -707,8 +817,10 @@ class BaseRayDiffusionTrainer(ABC):
             scores=sample_scores,
             audios=sample_audios,
             audio_sample_rates=sample_audio_sample_rates,
+            ar_inputs=ar_sample_inputs,
+            ar_outputs=ar_sample_outputs,
+            ar_scores=ar_sample_scores,
         )
-
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir:
@@ -724,14 +836,48 @@ class BaseRayDiffusionTrainer(ABC):
                 audios=sample_audios,
                 audio_sample_rates=sample_audio_sample_rates,
             )
+            if self.train_ar_n_diffusion:
+                self._dump_ar_generations(
+                    inputs=ar_sample_inputs,
+                    outputs=ar_sample_outputs,
+                    gts=ar_sample_gts,
+                    scores=ar_sample_scores,
+                    reward_extra_infos_dict=ar_reward_extra_infos_dict,
+                    dump_path=val_data_dir,
+                )
 
         for key_info, lst in reward_extra_infos_dict.items():
             assert len(lst) == 0 or len(lst) == len(sample_scores), f"{key_info}: {len(lst)=}, {len(sample_scores)=}"
 
         data_sources = np.concatenate(data_source_lst, axis=0)
-        return self._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
+        metric_dict = self._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
 
-    def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns):
+        if self.train_ar_n_diffusion:
+            for key_info, lst in ar_reward_extra_infos_dict.items():
+                assert len(lst) == 0 or len(lst) == len(ar_sample_uids), (
+                    f"ar {key_info}: {len(lst)=}, {len(ar_sample_uids)=}"
+                )
+            ar_data_sources = np.concatenate(ar_data_source_lst, axis=0)
+            metric_dict.update(
+                self._val_metrics_update(
+                    ar_data_sources,
+                    ar_sample_uids,
+                    ar_reward_extra_infos_dict,
+                    ar_sample_turns,
+                    metric_prefix="val-ar",
+                )
+            )
+        return metric_dict
+
+    def _val_metrics_update(
+        self,
+        data_sources,
+        sample_uids,
+        reward_extra_infos_dict,
+        sample_turns,
+        *,
+        metric_prefix: str = "val",
+    ):
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
@@ -744,17 +890,17 @@ class BaseRayDiffusionTrainer(ABC):
                         and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
                         and (f"@{n_max}" in metric_name)
                     ):
-                        metric_sec = "val-core"
+                        metric_sec = f"{metric_prefix}-core"
                     else:
-                        metric_sec = "val-aux"
+                        metric_sec = f"{metric_prefix}-aux"
                     pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
                     metric_dict[pfx] = metric_val
 
         if len(sample_turns) > 0:
             sample_turns = np.concatenate(sample_turns)
-            metric_dict["val-aux/num_turns/min"] = sample_turns.min()
-            metric_dict["val-aux/num_turns/max"] = sample_turns.max()
-            metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
+            metric_dict[f"{metric_prefix}-aux/num_turns/min"] = sample_turns.min()
+            metric_dict[f"{metric_prefix}-aux/num_turns/max"] = sample_turns.max()
+            metric_dict[f"{metric_prefix}-aux/num_turns/mean"] = sample_turns.mean()
 
         return metric_dict
 
@@ -913,6 +1059,7 @@ class BaseRayDiffusionTrainer(ABC):
             rm_resource_pool=resource_pool,
             accelerator_resource_pool=actor_rollout_resource_pool,
         )
+        # TODO: (susan) set dual reward worker handles for ar
 
         # create async rollout manager and request scheduler
         # Note: mode is always "async" since sync mode is deprecated
@@ -920,8 +1067,13 @@ class BaseRayDiffusionTrainer(ABC):
 
         # Support custom AgentLoopManager via config
         manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
+
         if manager_class_fqn:
             AgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
+        elif self.train_ar_n_diffusion:
+            from verl_omni.agent_loop.composite_agent_loop import CompositeAgentLoopManager
+
+            AgentLoopManager = CompositeAgentLoopManager
         else:
             from verl.experimental.agent_loop import AgentLoopManager
 
@@ -1089,7 +1241,6 @@ class BaseRayDiffusionTrainer(ABC):
             width=self.config.actor_rollout_ref.model.pipeline.width,
             vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
         )
-
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
         actor_output = tu.get(actor_output, "metrics")
         actor_output = rename_dict(actor_output, "actor/")
@@ -1177,6 +1328,43 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         )
         return DataProto.from_tensordict(ref_log_prob)
 
+    def _compute_ar_old_log_prob(self, batch: DataProto) -> tuple[DataProto, Optional[float]]:
+        # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
+        # step 1: convert dataproto to tensordict.
+        batch_td = batch.to_tensordict()
+        # step 2: convert from padding to nopadding
+        batch_td = left_right_2_no_padding(batch_td)
+        # step 3: add meta info
+        # calculate_sum_pi_squared = self.config.actor_rollout_ref.actor.get("calculate_sum_pi_squared", False)
+        tu.assign_non_tensor(
+            batch_td,
+            calculate_entropy=True,  # TODO: TBD (susan) seems useless
+            # calculate_sum_pi_squared=calculate_sum_pi_squared,
+            compute_loss=False,
+        )
+        output = self.actor_rollout_wg.infer_actor_batch(batch_td)
+        # gather output
+        entropy = tu.get(output, "entropy")
+        log_probs = tu.get(output, "log_probs")
+        # routed_experts = tu.get(output, "routed_experts")
+        # sum_pi_squared = tu.get(output, "sum_pi_squared") if calculate_sum_pi_squared else None
+
+        old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
+        # step 4. No padding to padding
+        entropy = no_padding_2_padding(entropy, batch_td)
+        log_probs = no_padding_2_padding(log_probs, batch_td)
+        # if sum_pi_squared is not None:
+        #     sum_pi_squared = no_padding_2_padding(sum_pi_squared, batch_td)
+        # step 5: rebuild a tensordict and convert to dataproto
+        result = {"old_log_probs": log_probs.float(), "entropys": entropy.float()}
+        # if routed_experts is not None:
+        #     result["routed_experts"] = routed_experts
+        # if sum_pi_squared is not None:
+        #     result["sum_pi_squared"] = sum_pi_squared.float()
+        old_log_prob = tu.get_tensordict(result)
+        old_log_prob = DataProto.from_tensordict(old_log_prob)
+        return old_log_prob, old_log_prob_mfu
+
     def _compute_old_log_prob(self, batch: DataProto) -> tuple[DataProto, Optional[float]]:
         batch_td = _to_diffusion_worker_tensordict(batch)
         batch_td = embeds_padding_2_no_padding(batch_td)
@@ -1196,6 +1384,97 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         old_log_prob = tu.get_tensordict(old_log_prob_dict)
         old_log_prob_mfu = tu.get(output, "metrics").get("mfu")
         return DataProto.from_tensordict(old_log_prob), old_log_prob_mfu
+
+    def _extract_ar_reward_tensor(self, batch_reward: Any, ar_batch: DataProto, avg_size: int) -> Any:
+        if "rm_scores" not in ar_batch.batch.keys():
+            assert "reward/ar" in batch_reward.non_tensor_batch.keys(), (
+                "`ar` must be used as reward function name for "
+                "ar reward computation when using MultiVisualRewardManager"
+            )
+
+            # extract raw scores for prompt-image pairs
+            reward_scores = batch_reward.non_tensor_batch.pop("reward/ar")
+
+            # compute average score for each raw-refined prompt pairs
+            num_rewards = ar_batch.batch["responses"].shape[0]
+            assert (reward_scores.ndim == 1) and (num_rewards * avg_size == reward_scores.shape[0]), (
+                f"reward_scores shape: {reward_scores.shape}, num_rewards: {num_rewards}, avg_size: {avg_size}"
+            )
+            reward_mean = []
+            reward_mean = reward_scores.reshape(num_rewards, avg_size, 1).mean(axis=1)
+            reward_tensor = torch.from_numpy(reward_mean).float()
+            ar_batch.batch["rm_scores"] = reward_tensor
+            ar_batch.non_tensor_batch["reward/ar"] = reward_mean
+
+            all_reward_keys = list(batch_reward.meta_info["reward_extra_keys"])
+            reward_extra_keys = ["reward/ar"]
+            batch_reward.meta_info["reward_extra_keys"].remove("reward/ar")
+            for key in all_reward_keys:
+                if "reward/ar" != key and "reward/ar" in key:
+                    sub_scores = batch_reward.non_tensor_batch.pop(key)
+                    if sub_scores.ndim == 1:
+                        sub_scores = sub_scores.reshape(-1, 1)
+                    is_number = isinstance(sub_scores[0][0], np.number)
+                    if is_number:
+                        sub_reward = sub_scores.reshape(num_rewards, avg_size, sub_scores.shape[1]).mean(axis=1)
+                    else:
+                        sub_reward = sub_scores[::avg_size]
+                    ar_batch.non_tensor_batch[key] = sub_reward
+
+                    reward_extra_keys.append(key)
+                    batch_reward.meta_info["reward_extra_keys"].remove(key)
+            ar_batch.meta_info["reward_extra_keys"] = reward_extra_keys
+
+    def _update_ar_actor(self, batch: DataProto) -> DataProto:
+        rollout_config = self.config.actor_rollout_ref.rollout
+        batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
+        batch.meta_info["temperature"] = rollout_config.ar.temperature
+        # update actor
+        batch_td = batch.to_tensordict()
+        # step 2: convert from padding to no-padding
+        batch_td = left_right_2_no_padding(batch_td)
+        calculate_entropy = self.config.actor_rollout_ref.actor.ar.calculate_entropy or (
+            self.config.actor_rollout_ref.actor.ar.entropy_coeff != 0.0
+        )
+        distillation_use_topk = False
+        # distillation_use_topk = (
+        #     self.distillation_config.distillation_loss.loss_settings.use_topk
+        #     if is_distillation_enabled(self.config.get("distillation"))
+        #     else False
+        # )
+        distillation_only = False  # distillation_only flag means we can skip policy loss and reduce mem footprint
+        # if is_distillation_enabled(self.config.get("distillation")):
+        #     distillation_loss_cfg = self.distillation_config.distillation_loss
+        #     distillation_only = (
+        #         distillation_use_topk
+        #         and not distillation_loss_cfg.use_task_rewards
+        #         and not distillation_loss_cfg.use_policy_gradient
+        #     )
+        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.m
+        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
+        seed = self.config.actor_rollout_ref.actor.data_loader_seed
+        shuffle = self.config.actor_rollout_ref.actor.shuffle
+        tu.assign_non_tensor(
+            batch_td,
+            calculate_entropy=calculate_entropy,
+            distillation_use_topk=distillation_use_topk,
+            distillation_only=distillation_only,
+            global_batch_size=ppo_mini_batch_size,
+            mini_batch_size=ppo_mini_batch_size,
+            epochs=ppo_epochs,
+            seed=seed,
+            dataloader_kwargs={"shuffle": shuffle},
+            compute_loss=True,
+        )
+        actor_output = self.actor_rollout_wg.update_actor(batch_td)
+        actor_output = tu.get(actor_output, "metrics")
+        actor_output = rename_dict(actor_output, "actor/ar/")
+        # modify key name
+        actor_output["perf/ar/mfu/actor"] = actor_output.pop("actor/ar/mfu")
+        actor_output = DataProto.from_single_dict(data={}, meta_info={"metrics": actor_output})
+
+        return actor_output
 
     def fit(self):
         """
@@ -1280,14 +1559,19 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                 if rollout_seed_cfg is not None:
                     gen_batch.meta_info["rollout_seed"] = int(rollout_seed_cfg) + self.global_steps - 1
 
-                gen_batch_output = gen_batch.repeat(
-                    repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
-                )
-                gen_batch_output.non_tensor_batch["_rollout_seed_global_idx"] = np.arange(
-                    len(gen_batch_output), dtype=np.int64
+                rollout_n = self.config.actor_rollout_ref.rollout.n
+                rollout_m = self.config.actor_rollout_ref.rollout.m
+                if self.train_ar_n_diffusion:
+                    gen_batch_for_rollout = gen_batch.repeat(repeat_times=rollout_m, interleave=True)
+                else:
+                    gen_batch_for_rollout = gen_batch.repeat(repeat_times=rollout_n, interleave=True)
+                gen_batch_for_rollout.non_tensor_batch["_rollout_seed_global_idx"] = np.arange(
+                    rollout_m * rollout_n, dtype=np.int64
                 )
 
                 is_last_step = self.global_steps >= self.total_training_steps
+                rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
+                bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
@@ -1296,7 +1580,12 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                             # streaming reward scores inside the gen window; colocate in the reward phase
                             if self.enable_agent_reward_loop:
                                 self.reward_loop_manager.start_profile()
-                        gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                        if self.train_ar_n_diffusion:
+                            ar_gen_batch_output, gen_batch_output = self.async_rollout_manager.generate_sequences(
+                                gen_batch_for_rollout
+                            )
+                        else:
+                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_for_rollout)
                         if not self.separate:
                             self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
@@ -1307,8 +1596,17 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
 
-                    # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    if self.train_ar_n_diffusion:
+                        batch = batch.repeat(repeat_times=rollout_m, interleave=True)
+                        # copy batch
+                        ar_batch = DataProto(
+                            batch=batch.batch.copy(),
+                            non_tensor_batch=batch.non_tensor_batch.copy(),
+                            meta_info=batch.meta_info.copy(),
+                        )
+                        ar_batch = ar_batch.union(ar_gen_batch_output)
+                    if rollout_n > 1:
+                        batch = batch.repeat(repeat_times=rollout_n, interleave=True)
                     batch = batch.union(gen_batch_output)
 
                     with marked_timer("reward", timing_raw, color="yellow"):
@@ -1319,19 +1617,30 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                             batch_reward = self._compute_reward_colocate(batch)
                             if curr_step_profile:
                                 self.reward_loop_manager.stop_profile()
+                            if self.train_ar_n_diffusion:
+                                self._extract_ar_reward_tensor(batch_reward, ar_batch, avg_size=rollout_n)
                             batch = batch.union(batch_reward)
 
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+                        if self.train_ar_n_diffusion:
+                            ar_reward_tensor, ar_reward_extra_infos_dict = extract_reward(ar_batch)
 
                     # Bypass mode: skip old_log_prob recompute (2 policies).
                     # Decoupled mode: recompute old_log_probs as proximal anchor (3 policies).
-                    rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
-                    bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
                     if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
+                        if self.train_ar_n_diffusion:
+                            ar_batch.batch["ar_old_log_probs"] = ar_batch.batch["rollout_ar_log_probs"]
                         apply_bypass_mode_to_diffusion_batch(batch)
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
+                            if self.train_ar_n_diffusion:
+                                # AR part
+                                ar_old_log_prob, ar_old_log_prob_mfu = self._compute_ar_old_log_prob(ar_batch)
+                                if ar_old_log_prob_mfu is not None:
+                                    metrics.update({"perf/ar/mfu/actor_infer": ar_old_log_prob_mfu})
+                                ar_batch = ar_batch.union(ar_old_log_prob)
+
                             old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
                             if old_log_prob_mfu is not None:
                                 metrics.update({"perf/mfu/actor_infer": old_log_prob_mfu})
@@ -1391,9 +1700,25 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                             global_std=self.config.algorithm.global_std,
                             config=self.config.algorithm,
                         )
+                        if self.train_ar_n_diffusion:
+                            # AR has different group size
+                            ar_batch.batch["sample_level_scores"] = ar_reward_tensor
+                            if ar_reward_extra_infos_dict:
+                                ar_batch.non_tensor_batch.update(
+                                    {k: np.array(v) for k, v in ar_reward_extra_infos_dict.items()}
+                                )
+                            ar_batch = compute_advantage(
+                                ar_batch,
+                                adv_estimator=self.config.algorithm.adv_estimator,
+                                norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                                global_std=self.config.algorithm.global_std,
+                                config=self.config.algorithm,
+                            )
 
                     # update actor
                     with marked_timer("update_actor", timing_raw, color="red"):
+                        if self.train_ar_n_diffusion:
+                            ar_actor_output = self._update_ar_actor(ar_batch)
                         actor_output = self._update_actor(batch)
 
                     # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
@@ -1424,6 +1749,9 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
 
                     actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                     metrics.update(actor_output_metrics)
+                    if self.train_ar_n_diffusion:
+                        ar_actor_output_metrics = reduce_metrics(ar_actor_output.meta_info["metrics"])
+                        metrics.update(ar_actor_output_metrics)
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)

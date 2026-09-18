@@ -204,10 +204,9 @@ async def compute_score_unified_reward(
 
     valid_results = [result for result in frame_results if result is not None]
     malformed_frames = len(frame_results) - len(valid_results)
-    reward_extra_info = {}
+    malformed_frames_info = []  # make it list of numbers, validation metrics do not support dicts
     if malformed_frames:
-        reward_extra_info["malformed_frames"] = malformed_frames
-        extra_info["unified_reward/malformed_frames"] = malformed_frames
+        malformed_frames_info.append(malformed_frames)
     if not valid_results:
         raise ValueError(
             "UnifiedReward returned malformed output for every frame; expected all three labeled axes "
@@ -224,5 +223,5 @@ async def compute_score_unified_reward(
         "score": score,
         "raw_score": raw_score,
         "response": unified_reward_response,
-        "reward_extra_info": reward_extra_info,
+        "malformed_frames": malformed_frames_info,
     }
