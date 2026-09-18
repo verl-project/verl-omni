@@ -13,19 +13,41 @@
 # limitations under the License.
 """Omni distillation configs.
 
-Subclass verl's ``DistillationTeacherModelConfig`` to teach the on-policy
-distillation path about the ``vllm_omni`` rollout engine:
+Subclass verl's distillation configs to teach the on-policy distillation
+path about (a) the ``vllm_omni`` rollout engine and (b) the hidden-state
+(nitrobrew) loss modes, which consume teacher hidden states instead of
+top-k logprobs and add ``kd_temperature``.
 """
 
 from dataclasses import dataclass
 from typing import Optional
 
-from verl.workers.config import DistillationTeacherModelConfig
+from verl.trainer.distillation.losses import DistillationLossSettings
+from verl.workers.config import DistillationLossConfig, DistillationTeacherModelConfig
 
-__all__ = ["OmniDistillationTeacherModelConfig", "HIDDEN_STATE_LOSS_MODES"]
+__all__ = [
+    "OmniDistillationTeacherModelConfig",
+    "OmniDistillationLossConfig",
+    "OmniDistillationLossSettings",
+]
 
 # Loss modes that consume per-position teacher hidden states.
 HIDDEN_STATE_LOSS_MODES = ("nitrobrew", "nitrobrew_reverse_kl")
+
+
+@dataclass
+class OmniDistillationLossSettings(DistillationLossSettings):
+    """Loss settings for the omni path."""
+
+    use_hidden_states: bool = False
+
+    def __post_init__(self):
+        self.names = [self.names] if isinstance(self.names, str) else self.names
+        if sum([self.use_topk, self.use_estimator, self.use_hidden_states]) != 1:
+            raise ValueError(
+                "Exactly one of use_topk, use_estimator, use_hidden_states must be True, "
+                f"but got {self.use_topk}, {self.use_estimator}, {self.use_hidden_states}."
+            )
 
 
 @dataclass
@@ -40,6 +62,7 @@ class OmniDistillationTeacherModelConfig(DistillationTeacherModelConfig):
 
         if self.inference.name != "vllm_omni":
             raise ValueError(f"the inference.name should be 'vllm_omni', got {self.inference.name}")
+
         engine_kwargs = self.inference.engine_kwargs
         omni_engine_kwargs = dict(engine_kwargs.get("vllm_omni", {}))
         max_logprobs = omni_engine_kwargs.get("max_logprobs")
@@ -52,3 +75,42 @@ class OmniDistillationTeacherModelConfig(DistillationTeacherModelConfig):
                 f"({topk}) to enable distillation loss computation."
             )
         engine_kwargs["vllm_omni"] = omni_engine_kwargs
+
+
+@dataclass
+class OmniDistillationLossConfig(DistillationLossConfig):
+    """Loss config for the omni path.
+
+    Adds ``kd_temperature`` and teaches the hidden-state (nitrobrew) loss
+    modes: those are absent from verl's registry (which only knows top-k /
+    estimator modes), so their ``loss_settings`` are synthesized here with
+    ``use_hidden_states=True`` instead of being looked up.
+    """
+
+    kd_temperature: float = 1.0
+
+    def __post_init__(self):
+        if self.loss_mode in HIDDEN_STATE_LOSS_MODES:
+            self._mutable_fields.add("loss_settings")
+            if self.loss_settings is None:
+                self.loss_settings = OmniDistillationLossSettings(names=self.loss_mode, use_hidden_states=True)
+            else:
+                self.loss_settings = OmniDistillationLossSettings(**self.loss_settings.__dict__)
+                if not self.loss_settings.use_hidden_states:
+                    raise ValueError("loss_settings.use_hidden_states must be True for hidden-state loss modes.")
+
+            if self.policy_loss_mode != "vanilla":
+                raise NotImplementedError(
+                    f"Only vanilla policy loss is currently supported when use_policy_gradient is True, "
+                    f"but got {self.policy_loss_mode}."
+                )
+            if self.use_policy_gradient and self.loss_mode in ("nitrobrew",):
+                raise ValueError(
+                    "nitrobrew full-vocabulary KL is most effective as a supervised distillation loss "
+                    "(use_policy_gradient=False), so the whole-vocab signal is backpropagated directly. "
+                    "Set distillation.distillation_loss.use_policy_gradient=false."
+                )
+            return
+
+        # Non-hidden modes delegate to verl's registry + validations.
+        super().__post_init__()
