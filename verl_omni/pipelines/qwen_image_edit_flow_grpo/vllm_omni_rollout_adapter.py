@@ -39,7 +39,7 @@ from verl_omni.pipelines.qwen_image_flow_grpo.common import (
     coalesce_not_none,
 )
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
-from verl_omni.pipelines.rollout_request import condition_images_from_payload
+from verl_omni.pipelines.rollout_request import condition_images_from_payload, prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 __all__ = ["QwenImageEditPlusPipelineWithLogProb"]
@@ -386,7 +386,7 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
             raise ValueError("Qwen-Image-Edit requires at least one condition image")
 
         if isinstance(custom_prompt, dict):
-            prompt_ids = custom_prompt.get("prompt_token_ids", prompt_ids)
+            prompt_ids = prompt_ids_from_payload(custom_prompt, prompt_ids)
             prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
             negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
             negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)

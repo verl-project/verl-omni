@@ -20,6 +20,7 @@ from typing import Any
 import torch
 
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import MINIMAX_H3_TOKEN_ID_NATIVE_KEY
+from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 
 # Diffusers and vLLM-Omni use different names for the same H3 modules. QKV
 # and GEGLU projections also have different tensor layouts and are handled
@@ -120,7 +121,7 @@ class MiniMaxH3WeightSyncMixin:
         custom_prompt = prompts[0] if prompts and isinstance(prompts[0], dict) else getattr(request, "prompt", None)
         if not isinstance(custom_prompt, dict):
             return
-        token_ids = custom_prompt.get("prompt_token_ids")
+        token_ids = prompt_ids_from_payload(custom_prompt)
         if token_ids is None:
             return
         sampling_params = getattr(request, "sampling_params", None)
@@ -137,7 +138,7 @@ class MiniMaxH3WeightSyncMixin:
             token_ids = token_ids[0]
         self._h3_prompt_ids = torch.as_tensor([int(token) for token in token_ids], dtype=torch.long)
         if self._h3_prompt_ids.numel() == 0:
-            raise ValueError("MiniMax H3 requires non-empty prompt_token_ids.")
+            raise ValueError("MiniMax H3 requires non-empty prompt_ids.")
         custom_prompt["prompt"] = "[pretokenized]"
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

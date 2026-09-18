@@ -104,8 +104,9 @@ expects pre-tokenised input on every request.
 
 ### Single text encoder (Qwen-Image and similar)
 
-One tokenizer, one text encoder. The agent loop sends `prompt_token_ids`; your
-rollout adapter overrides `encode_prompt` to accept `prompt_ids=` (and an
+One tokenizer, one text encoder. The agent loop sends `prompt_ids` to the server;
+the diffusion prompt keeps that canonical spelling. Your rollout adapter overrides
+`encode_prompt` to accept `prompt_ids=` (and an
 optional attention mask) and runs the text encoder directly — see
 [`qwen_image_flow_grpo/common.py`](../../verl_omni/pipelines/qwen_image_flow_grpo/common.py).
 
@@ -137,12 +138,21 @@ t5:   {path: tokenizer_3, max_length: 256}   # feeds T5; align max_length with p
 **Rollout transport**
 
 [`vLLMOmniHttpServer`](../../verl_omni/workers/rollout/vllm_rollout/vllm_omni_async_server.py)
-forwards `extra_prompt_ids` / `negative_extra_prompt_ids` on the diffusion
-custom prompt dict alongside `prompt_token_ids`.
+places `extra_prompt_ids` / `negative_extra_prompt_ids` inside the diffusion
+prompt's `extra_args`, alongside the top-level canonical `prompt_ids`. Media and
+`mm_processor_kwargs` stay at the top level: the pinned MiniMax/Bagel runtime reads
+them there, even though upstream's `OmniCustomPrompt` TypedDict omits those fields.
+The server never duplicates media into `extra_args`.
+
+Multistage rollout whose first stage is AR still needs vLLM's `prompt_token_ids`
+at that entrance. `prompt_ids_from_payload` is the sole shared adapter bridge for
+that spelling and rejects conflicting IDs. The public Ray keyword API and AR
+strategy are unchanged. Historical condition-image aliases are accepted only by
+the conflict-checking compatibility parser, not emitted on the new wire path.
 
 **Rollout adapter behaviour**
 
-Read `req.prompts[0]["extra_prompt_ids"]`, pad each id list to the encoder's
+Read `req.prompts[0]["extra_args"]["extra_prompt_ids"]`, pad each id list to the encoder's
 fixed length using **that tokenizer's** `pad_token_id` (SD3 CLIP-L and CLIP-G
 use different pad tokens even though they share a vocab), run the text
 encoders on `input_ids`, and concatenate embeddings exactly as the upstream
@@ -659,7 +669,7 @@ third model demands the same code, then unify.
 Before opening the PR, confirm every box:
 
 - [ ] Prompt tokenisation follows [Prompt Tokenisation](#prompt-tokenisation-agent-loop--rollout):
-      single-encoder models use `prompt_token_ids` only; multi-encoder models
+      single-encoder diffusion prompts use `prompt_ids`; multi-encoder models
       configure `extra_tokenizers` and a token-id-native rollout encoder
       (no decode-and-re-encode in the pipeline).
 - [ ] `verl_omni/pipelines/<model>_flow_grpo/` contains `__init__.py`,

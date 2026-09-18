@@ -42,6 +42,7 @@ from verl_omni.pipelines.request_batch import (
     split_diffusion_output_by_request as _split_diffusion_output_by_request,
 )
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
+from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import QwenImageTokenIdPromptMixin, apply_true_cfg, build_img_shapes, coalesce_not_none
@@ -192,7 +193,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         if prompts:
             p0 = prompts[0]
             if isinstance(p0, dict):
-                prompt_ids = p0.get("prompt_token_ids", None)
+                prompt_ids = prompt_ids_from_payload(p0)
                 prompt_mask = p0.get("prompt_mask", None)
                 negative_prompt_ids = p0.get("negative_prompt_ids", None)
                 negative_prompt_mask = p0.get("negative_prompt_mask", None)
@@ -245,7 +246,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         if prompt_ids is None:
             raise ValueError(
                 f"{self.__class__.__name__}.prepare_encode requires either "
-                "'prompt_ids'/'prompt_token_ids' or a text 'prompt' on state.prompt."
+                "'prompt_ids' or a text 'prompt' on state.prompt."
             )
 
         height = sampling.height or self.default_sample_size * self.vae_scale_factor
@@ -756,7 +757,7 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
         # The prompt cache wraps encode_prompt, so keep token inputs as lists until that boundary.
         prompt_token_ids, prompt_token_lengths = _collate_prompt_rows(
             prompts,
-            ("prompt_token_ids", "prompt_ids"),
+            ("prompt_ids",),
             prompt_token_ids,
             device=self.device,
             field_name="prompt_token_ids",

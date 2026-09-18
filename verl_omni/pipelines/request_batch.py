@@ -21,6 +21,8 @@ from typing import Any
 import numpy as np
 import torch
 
+from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
+
 __all__ = [
     "collate_prompt_mask",
     "collate_prompt_rows",
@@ -71,7 +73,7 @@ def _get_prompt_field(prompt: Any, aliases: tuple[str, ...]) -> Any:
     if isinstance(prompt, str) or not hasattr(prompt, "get"):
         return None
     for name in aliases:
-        value = prompt.get(name)
+        value = prompt_ids_from_payload(prompt) if name == "prompt_ids" else prompt.get(name)
         if value is None:
             additional = prompt.get("additional_information")
             if isinstance(additional, dict):
