@@ -77,6 +77,7 @@ def _run_update(worker, **kwargs):
         patch.object(ew.asyncio, "to_thread", run_in_event_loop),
         patch.object(ew, "log_gpu_memory_usage", MagicMock()),
         patch.object(ew, "set_expandable_segments", MagicMock()),
+        patch.object(ew, "get_torch_device", return_value=MagicMock(current_device=MagicMock(return_value=0))),
     ):
         asyncio.run(ew.ActorRolloutRefWorker.update_weights(worker, mode="naive", **kwargs))
     return sender
