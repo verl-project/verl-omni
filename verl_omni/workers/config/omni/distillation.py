@@ -22,7 +22,10 @@ from typing import Optional
 
 from verl.workers.config import DistillationTeacherModelConfig
 
-__all__ = ["OmniDistillationTeacherModelConfig"]
+__all__ = ["OmniDistillationTeacherModelConfig", "HIDDEN_STATE_LOSS_MODES"]
+
+# Loss modes that consume per-position teacher hidden states.
+HIDDEN_STATE_LOSS_MODES = ("nitrobrew", "nitrobrew_reverse_kl")
 
 
 @dataclass
