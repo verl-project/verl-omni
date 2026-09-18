@@ -44,7 +44,8 @@ Model Base
    :members: register, get_class, get_class_by_name,
              register_auto_classes,
              get_strip_modules, configure_processor, configure_tokenizer,
-             configure_model, prepare_model_inputs
+             configure_model, get_fsdp_ignored_module_names,
+             prepare_model_inputs
 
 .. autoclass:: verl_omni.pipelines.model_base.OmniRolloutPipelineBase
    :members: register, get_class,
