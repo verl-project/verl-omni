@@ -609,18 +609,21 @@ colocated script; only the disaggregation lines differ:
 | `trainer.v1.trainer_mode` | `omni_sync` | `omni_separate_async` | trainer selection |
 | GPU split | 4 colocated | 2 train + 2 rollout (`rollout.nnodes=1`, `n_gpus_per_node=2`) | disaggregation |
 | Rollout topology | TP=2, colocated | `tensor_model_parallel_size=1` → two standalone replicas | independent rollout capacity |
-| `model.lora.merge` | `True` (merged full-weight IPC sync) | `False` (adapter deltas via `add_lora`) | the validated separate-async LoRA path |
+| `model.lora.merge` | `True` (merged full-weight IPC sync) | `True` — merged full weights via the NCCL engine | accuracy parity with the colocated reference; `False` (adapter deltas, ~100 MB vs ~19 GB per sync) is the later perf flip |
 | `rollout.checkpoint_engine.backend` | — (naive colocated sync) | `nccl` | required non-naive backend |
 | `rollout.gpu_memory_utilization` | 0.7 | 0.8 | rollout GPUs are dedicated |
 | `trainer.v1.sampler.max_off_policy_threshold` | — (default 8) | pinned `8` | one sync cycle; keeps clipfrac readings interpretable |
 
-LoRA naming note: the actor's adapters live under `llm.*` (the `MiniCPMO.llm`
-Qwen3 backbone), and the rollout-side
+LoRA sync note: this recipe ships `lora.merge=True` — merged full weights over
+the NCCL engine, the same semantics as the colocated recipe — so the first
+separate-async run stays directly comparable with the colocated reference. The
+performance flip, `lora.merge=False` (adapter deltas via `add_lora`, ~100 MB
+vs ~19 GB per sync), is config-only: the actor's adapters live under `llm.*`
+(the `MiniCPMO.llm` Qwen3 backbone) and the rollout-side
 `MiniCPMO45OmniLLMForConditionalGeneration` registers the same backbone under
-the `llm.` prefix — the adapter-delta send resolves without any key remap
-(pinned by `tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py`). The
-colocated recipe keeps merged-weight sync; the two modes' LoRA send semantics
-intentionally differ (see [separate-async omni](../../docs/algo/separate_async_omni.md)).
+the `llm.` prefix, so the adapter-delta send resolves without any key remap
+(pinned by `tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py`; see
+[separate-async omni](../../docs/algo/separate_async_omni.md)).
 
 If the two-replica shape misbehaves (generation stalls around weight syncs),
 fall back to one TP=2 replica — the validated Qwen3-Omni topology — by

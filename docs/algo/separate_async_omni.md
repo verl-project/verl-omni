@@ -72,10 +72,10 @@ classes without a remap — Qwen3-Omni through transformers'
 `_checkpoint_conversion_mapping` strip, MiniCPM-o natively because the actor's
 `MiniCPMO.llm.*` tree matches the `llm.`-prefixed registration in
 `MiniCPMO45OmniLLMForConditionalGeneration` (pinned by
-`tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py`). The colocated
-`omni_sync` mode intentionally keeps the opposite semantics (`merge=True`,
-merged full-weight IPC sync); the divergence is resolved per-mode, not
-unified.
+`tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py`). The MiniCPM AVQA
+recipe currently ships `merge=True` — merged full weights through the same
+NCCL manager — to keep its first run directly comparable with the colocated
+reference; flipping to adapter deltas later is config-only.
 
 ## Monitor
 
