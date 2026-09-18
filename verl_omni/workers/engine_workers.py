@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import functools
+import hashlib
 import logging
 import os
 import time
@@ -21,6 +22,7 @@ from copy import deepcopy
 from dataclasses import replace
 from functools import partial
 from itertools import chain
+from pathlib import Path
 from typing import Optional
 
 import torch
@@ -65,6 +67,7 @@ from verl_omni.utils.mfu import (
 )
 from verl_omni.workers.config import (
     DiffusionActorConfig,
+    DiffusionDMDConfig,
     DiffusionModelConfig,
     OmniModelConfig,
 )
@@ -107,7 +110,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
     and do not provide exact APIs as Tinker does. But this can be added in the future.
     """
 
-    def __init__(self, config: TrainingWorkerConfig):
+    def __init__(self, config: TrainingWorkerConfig, *, dmd_config: Optional[DiffusionDMDConfig] = None):
         Worker.__init__(self)
 
         from verl.workers.engine import BaseEngine, EngineRegistry
@@ -156,6 +159,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         )
 
         self.model_config.model_type = self.config.model_type
+        engine_kwargs = {"dmd_config": dmd_config} if dmd_config is not None else {}
         self.engine: BaseEngine = EngineRegistry.new(
             model_type=self.config.model_type,
             backend=self.engine_config.strategy,
@@ -163,6 +167,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             engine_config=self.engine_config,
             optimizer_config=self.optimizer_config,
             checkpoint_config=self.checkpoint_config,
+            **engine_kwargs,
         )
 
         # build dispatch info
@@ -552,6 +557,93 @@ def build_teacher_training_config(
         config
     )
     return teacher_training_config
+
+
+class DMDTrainingWorker(TrainingWorker):
+    """Own DMD worker construction without changing the generic worker lifecycle."""
+
+    def __init__(self, config, *, dmd_config, role="actor", distillation_config=None):
+        if role != "actor" or (distillation_config is not None and distillation_config.get("enabled", False)):
+            raise ValueError("DMD2 uses one offline actor group, not OPD teacher workers.")
+        self.dmd_config = omega_conf_to_dataclass(dmd_config)
+        self.actor_config = omega_conf_to_dataclass(config.actor)
+        model_config = omega_conf_to_dataclass(config.model)
+        profiler = self.actor_config.profiler
+        if profiler is not None and profiler.tool_config.get(profiler.tool) is not None:
+            profiler.tool_config[profiler.tool] = omega_conf_to_dataclass(
+                config.actor.profiler.tool_config[profiler.tool]
+            )
+        worker_config = TrainingWorkerConfig(
+            model_type="diffusion_dmd_model",
+            model_config=model_config,
+            engine_config=self.actor_config.engine,
+            optimizer_config=self.actor_config.optim,
+            checkpoint_config=self.actor_config.checkpoint,
+            profiler_config=profiler,
+        )
+
+        from verl_omni.workers.engine.fsdp import diffusers_impl  # noqa: F401
+
+        super().__init__(worker_config, dmd_config=self.dmd_config)
+        self.flops_counter = DiffusionFlopsCounter(
+            architecture=getattr(self.model_config, "architecture", None),
+            transformer_config=getattr(self.model_config, "transformer_config", None),
+        )
+        self.loss_fn = partial(diffusion_loss, config=self.actor_config)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        """Reuse the standard worker reset/model initialization boundary."""
+        self.reset()
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=True)
+    def update_actor(self, data):
+        """Execute exactly one optimizer attempt using existing mini/microbatch machinery."""
+        stage = tu.get_non_tensor_data(data, "dmd_stage", default="student")
+        if stage not in {"student", "fake_score"}:
+            raise ValueError(f"Invalid DMD2 stage {stage!r}.")
+        if tu.get_non_tensor_data(data, "epochs", default=1) != 1:
+            raise ValueError("DMD2 update_actor performs one optimizer attempt, not multiple epochs.")
+        previous = self.engine.active_stage
+        self.engine.select_stage(stage)
+        tu.assign_non_tensor(
+            data,
+            global_token_num=None,
+            num_mini_batch=1,
+            mini_batch_size=None,
+            epochs=1,
+            dataloader_kwargs={"shuffle": False},
+            micro_batch_size_per_gpu=getattr(self.dmd_config, f"{stage}_micro_batch_size_per_gpu"),
+        )
+        try:
+            result = self.train_mini_batch(data)
+            if result is not None:
+                metrics = tu.get_non_tensor_data(result, "metrics", default=None)
+                metrics["dmd/update_applied"] = float(self.engine.last_step_succeeded)
+                metrics["dmd/skip_nonfinite"] = float(not self.engine.last_step_succeeded)
+            return result
+        finally:
+            self.engine.select_stage(previous)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def get_model_provenance(self):
+        """Read the base identity needed only by the DMD2 inference export."""
+        root = Path(self.engine.model_config.local_path)
+        revision = root.name if root.parent.name == "snapshots" else None
+        metadata = root / ".cache/huggingface/download/model_index.json.metadata"
+        if metadata.is_file():
+            with metadata.open() as file:
+                revision = file.readline().strip()
+        if not revision or len(revision) != 40 or any(char not in "0123456789abcdef" for char in revision):
+            revision = None
+        with (root / "transformer/config.json").open("rb") as file:
+            config_hash = hashlib.file_digest(file, "sha256").hexdigest()
+        return {"base_model_revision": revision, "base_transformer_config_sha256": config_hash}
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def export_student(self, directory, role="student"):
+        """Export the selected student adapter without exposing score-model weights."""
+        self.engine.export_student(directory, role)
 
 
 class ActorRolloutRefWorker(Worker, DistProfilerExtension):

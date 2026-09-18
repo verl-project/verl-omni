@@ -1,6 +1,6 @@
 # Config Explanation
 
-Last updated: 09/01/2026
+Last updated: 09/18/2026
 
 VeRL-Omni builds on [verl](https://github.com/verl-project/verl) and reuses the
 same Hydra config surface for shared RL trainer fields (`data`, FSDP actor /
@@ -60,8 +60,8 @@ algorithm:
   rollout_correction: { ... }   # mirrors upstream RolloutCorrectionConfig
 ```
 
-- `algorithm.trainer_type`: Trainer loop. `policy_gradient` (FlowGRPO, MixGRPO, Flow-DPPO, …) or `direct_preference` (DPO, DiffusionNFT, AWM).
-- `algorithm.sample_source`: `online` (rollout + reward engines) or `offline` (actor-only, precomputed batches).
+- `algorithm.trainer_type`: Trainer loop. `policy_gradient` (FlowGRPO, MixGRPO, Flow-DPPO, …), `direct_preference` (DPO, DiffusionNFT, AWM), or `distribution_matching` (DMD2).
+- `algorithm.sample_source`: `online` uses rollout and reward engines. `offline` selects actor-only execution; DMD2 uses it for fresh differentiable samples inside the training engine rather than pregenerated images.
 - `algorithm.adv_estimator`: Advantage estimator name; defaults to `actor_rollout_ref.model.algorithm` (e.g. `flow_grpo`).
 - `algorithm.norm_adv_by_std_in_grpo`: Normalize advantages by within-group std (GRPO-style).
 - `algorithm.global_std`: Use a global (cross-group) std for advantage normalization.
@@ -228,6 +228,17 @@ actor_rollout_ref:
 Shared PPO / FSDP / optim fields (`ppo_mini_batch_size`, `ppo_epochs`, `optim.lr`, `fsdp_config`, …) follow upstream verl — see the [verl Config Explanation](https://verl.readthedocs.io/en/latest/examples/config.html).
 
 VeOmni engine path (`strategy=veomni`) adds `veomni_config` / VeOmni optimizer fields; see {doc}`../start/install` and the `run_*_veomni.sh` recipes.
+
+### `dmd` — `DiffusionDMDConfig`
+
+The independent top-level `dmd` group configures distribution-only DMD2 when
+`algorithm.trainer_type=distribution_matching` and
+`algorithm.sample_source=offline`. It owns the student/fake-score update ratio,
+per-role microbatch sizes, fake-score optimizer, teacher guidance, score-sigma
+sampling, EMA and inference-export role. Do not combine it with
+`distillation.enabled`; that group belongs to diffusion OPD. See
+{doc}`../algo/diffusion_distillation` for the objective, runtime contract and
+field defaults.
 
 ### `actor_rollout_ref.rollout` — `DiffusionRolloutConfig`
 

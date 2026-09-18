@@ -33,6 +33,7 @@ defaults:
   - diffusion/distillation@distillation: diffusion_distillation
 
   # DMD2 distribution matching, separate from OPD.
+  # See docs/algo/diffusion_distillation.md for the runtime contract.
   - diffusion/dmd@dmd: diffusion_dmd
 
   # load the reference default config, then apply the fields in the current yaml
@@ -63,10 +64,12 @@ algorithm:
   # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl_omni.trainer.config.DiffusionAlgoConfig
 
-  # Trainer loop: policy_gradient (FlowGRPO, MixGRPO, …) or direct_preference (DPO, DiffusionNFT, AWM)
+  # Trainer loop: policy_gradient, direct_preference, or distribution_matching (DMD2)
+  # See docs/algo/diffusion_distillation.md for distribution-matching configuration.
   trainer_type: policy_gradient
 
-  # Sample provenance: online (rollout+reward engines) or offline (actor-only, precomputed batches)
+  # Sample source: online uses rollout/reward engines; offline is actor-only execution
+  # DMD2 uses offline for fresh engine-local differentiable sampling, not pregenerated images.
   sample_source: online
 
   # Advantage estimator type: follows actor_rollout_ref.model.algorithm
