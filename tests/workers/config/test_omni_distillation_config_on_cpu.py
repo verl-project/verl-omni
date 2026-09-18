@@ -107,3 +107,46 @@ class TestOmniDistillationComposition:
         # the dataclass ValueError in InstantiationException.
         with pytest.raises(InstantiationException, match="must divide the distillation resource pool size"):
             _materialize_distillation(OPD_OVERRIDES + ["distillation.n_gpus_per_node=3"])
+
+
+class TestOmniHiddenStateLossConfig:
+    def test_nitrobrew_materializes_hidden_settings(self):
+        from verl_omni.workers.config.omni.distillation import (
+            HIDDEN_STATE_LOSS_MODES,
+            OmniDistillationLossConfig,
+        )
+
+        for mode in HIDDEN_STATE_LOSS_MODES:
+            cfg = OmniDistillationLossConfig(loss_mode=mode, use_policy_gradient=False)
+            assert cfg.loss_settings.use_hidden_states is True
+            assert cfg.loss_settings.use_topk is False
+            assert cfg.loss_settings.use_estimator is False
+
+    def test_nitrobrew_forbids_policy_gradient(self):
+        from verl_omni.workers.config.omni.distillation import OmniDistillationLossConfig
+
+        with pytest.raises(ValueError, match="use_policy_gradient"):
+            OmniDistillationLossConfig(loss_mode="nitrobrew", use_policy_gradient=True)
+
+    def test_kd_temperature_default(self):
+        from verl_omni.workers.config.omni.distillation import OmniDistillationLossConfig
+
+        cfg = OmniDistillationLossConfig(loss_mode="nitrobrew", use_policy_gradient=False)
+        assert cfg.kd_temperature == 1.0
+        assert cfg.log_prob_min_clamp == -10.0
+
+    def test_yaml_override_materializes_omni_loss(self):
+        from verl_omni.workers.config.omni.distillation import OmniDistillationLossConfig
+
+        overrides = OPD_OVERRIDES + [
+            "distillation.distillation_loss.loss_mode=nitrobrew",
+            "distillation.distillation_loss.use_policy_gradient=false",
+        ]
+        obj: DistillationConfig = _materialize_distillation(overrides)
+        assert isinstance(obj.distillation_loss, OmniDistillationLossConfig)
+        assert obj.distillation_loss.loss_settings.use_hidden_states is True
+        # Hidden mode: teacher validation runs with use_topk=False, so it must not
+        # seed or error on max_logprobs.
+        tm = obj.teacher_models["default"]
+        tm._validate_topk_logprobs(use_topk=False, topk=None)
+        assert tm.inference.engine_kwargs["vllm_omni"].get("max_logprobs") == 8  # untouched, from overrides
