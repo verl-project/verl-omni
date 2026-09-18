@@ -570,6 +570,26 @@ outputs go to `${OUTPUT_DIR}/checkpoints` and `${OUTPUT_DIR}/validation`.
 Logging uses console and TensorBoard; the launcher also writes
 `run_qwen3omni_npu_nextqa_full_ms_16.log` in the repository root.
 
+## Training with MiniCPM-o 4.5 (AVQA)
+
+Same AVQA-R1-6K data, same reward, and the same recipe as Qwen3-Omni above,
+with four model-specific changes: the checkpoint path,
+`trust_remote_code=True`, `pipeline_name="minicpmo_4_5"`, and
+[`MiniCPMORLHFDataset`](../../verl_omni/utils/dataset/omni_rl_datasets.py),
+which reads the image and audio blocks without a Qwen dependency.
+
+```bash
+bash examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh
+```
+
+The recipe trains the thinker (`llm` = dense Qwen3-8B). The vision and audio
+towers (`vpm`/`apm`) stay frozen and unsharded under FSDP2, and the rollout
+serves a one-stage thinker-only pipeline (text output) with
+`model_arch=MiniCPMO45OmniLLMForConditionalGeneration` for logprob support.
+Keep `flash_attention_2`: sdpa breaks train/rollout consistency. See the
+[integrating guide](../../docs/contributing/integrating_an_omni_model.md) for
+the rollout memory-sizing knobs the script sets.
+
 ## Performance
 
 All GPU results measured on a single node of **4 × H800 80GB**, actor and
@@ -624,5 +644,7 @@ examples/gspo_trainer/
 │   ├── mmk12.py                                      ← MMK12 → verl RL parquet converter
 │   ├── avqa.py                                       ← AVQA → verl RL parquet converter
 │   └── nextqa.py                                     ← NExT-QA → verl RL parquet converter
+├── minicpm/
+│   └── run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh ← V1 launch script (MiniCPM-o 4.5, LoRA r=32, audio + image)
 └── README.md                                         ← (this file)
 ```
