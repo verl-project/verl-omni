@@ -87,7 +87,7 @@ Smoke tests need a working CUDA environment, Ray, and the pinned `verl` /
 `vllm-omni` dependencies. From the repo root:
 
 ```bash
-uv pip install -e ".[gpu]" --torch-backend=auto
+uv pip install -e ".[gpu,audio,omni]" --torch-backend=auto
 uv pip install -e ".[vllm-omni,train,dev]"
 ```
 

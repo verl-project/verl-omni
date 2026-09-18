@@ -44,7 +44,7 @@ This installs `vllm-omni`, then `verl` and `verl-omni`.
 
 | Extra       | Adds                                                          | When                     |
 | ----------- | ------------------------------------------------------------- | ------------------------ |
-| `gpu`       | `vllm==0.28.0`, `kernels==0.16.0`, `liger-kernel`             | CUDA rollout + actor FA3 |
+| `gpu`       | `vllm==0.28.0`, `kernels==0.16.0`, `liger-kernel`, `pyzmq`, `qwen-vl-utils` | CUDA rollout + actor FA3 |
 | `vllm-omni` | `vllm-omni==0.28.0rc1`                                        | Optional PyPI baseline only; CI/docs use the git pin above |
 | `train`     | `verl` @ [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | RL training              |
 | `dev`       | `pytest`, `pre-commit`, `Levenshtein`, …                      | Local development / CI   |
@@ -55,7 +55,6 @@ This installs `vllm-omni`, then `verl` and `verl-omni`.
 | Extra                 | Install                                                   | When needed                             |
 | --------------------- | --------------------------------------------------------- | --------------------------------------- |
 | OCR reward            | `uv pip install -e ".[ocr]"`                              | FlowGRPO training with OCR-based reward |
-| Multimodal training   | `pip install qwen-vl-utils math-verify`                   | Vision-language training (e.g. MMK12)   |
 | Dev tools             | `uv pip install -e ".[dev]"`                              | Linting and unit tests                  |
 | VeOmni engine backend | See [Optional engine backends](#optional-engine-backends) | VeOmni instead of default FSDP2         |
 
