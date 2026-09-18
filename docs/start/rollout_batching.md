@@ -39,12 +39,14 @@ Do not enable both modes at once.
 
 | Recipe | Default mode |
 |---|---|
-| Qwen-Image FlowGRPO baselines (`run_qwen_image_ocr.sh`, `run_qwen_image_ocr_lora.sh`) | Step-wise (`step_execution=true`, `max_num_seqs=256`) |
+| Qwen-Image FlowGRPO baseline (`run_qwen_image_ocr.sh`) | Step-wise (`step_execution=true`, `max_num_seqs` aligned with log-prob micro-batch) |
+| Qwen-Image FlowGRPO LoRA (`run_qwen_image_ocr_lora.sh`) | Request-level (`step_execution=false`, yaml default `max_num_seqs=8`, `wait_ms=10`) |
 | SD3.5 FlowGRPO (`run_sd35_medium_ocr_lora.sh`) | Request-level (`step_execution=false`, `max_num_seqs=256`, `wait_ms=10`) |
 
-Other `run_qwen_image_ocr*.sh` launchers do not all set these overrides.
-Inspect the selected launcher before assuming that step-wise batching is
-enabled.
+Remaining Qwen-Image request-level launchers inherit the yaml defaults
+(`max_num_seqs=8`, `request_batch_max_wait_ms=10`) and can still override
+them with `MAX_NUM_SEQS` / `REQUEST_BATCH_MAX_WAIT_MS`. Inspect the selected
+launcher before assuming that step-wise batching is enabled.
 
 On Qwen-Image FlowGRPO e2e LoRA (32×16, 512²) the two modes were essentially
 tied (~106–108s gen). SD3.5 currently has request-level support only.
@@ -109,8 +111,8 @@ actor_rollout_ref.rollout.step_execution=false
 | Knob | Meaning |
 |---|---|
 | `step_execution=false` | Required (yaml default). |
-| `max_num_seqs` | Max requests packed per forward. Engine default is effectively serial (`1`) unless raised. |
-| `request_batch_max_wait_ms` | Optional admission wait before the first schedule of a wave. Default `0`; `10` is enough for typical training bursts. |
+| `max_num_seqs` | Max requests packed per forward. Yaml default is `8` (safe for large image models); pipelines without `supports_request_batch` are clamped to `1`. Raise per-recipe when the model can take more. |
+| `request_batch_max_wait_ms` | Optional admission wait before the first schedule of a wave. Yaml default `10`; `0` disables the wait. |
 
 Override with `MAX_NUM_SEQS` / `REQUEST_BATCH_MAX_WAIT_MS` in the example
 scripts, or Hydra as above.

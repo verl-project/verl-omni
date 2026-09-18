@@ -18,6 +18,9 @@ IMAGE_RESOLUTION=512
 
 ENGINE=vllm_omni
 REWARD_ENGINE=vllm
+# Request-level packing (mutually exclusive with step-wise continuous batching).
+MAX_NUM_SEQS=${MAX_NUM_SEQS:-8}
+REQUEST_BATCH_MAX_WAIT_MS=${REQUEST_BATCH_MAX_WAIT_MS:-10}
 
 
 python3 -m verl_omni.trainer.main_diffusion \
@@ -59,6 +62,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.pipeline.width=$IMAGE_RESOLUTION \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=256 \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=40 \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.max_num_seqs=${MAX_NUM_SEQS} \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm_omni.request_batch_max_wait_ms=${REQUEST_BATCH_MAX_WAIT_MS} \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=online \
