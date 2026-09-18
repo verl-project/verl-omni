@@ -236,6 +236,7 @@ async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(mo
     assert field["extra_fields"]["img_shapes"] == img_shapes
     assert "unrelated_metadata" not in field["extra_fields"]
     assert field["condition_image_latents"].shape == (4096, 64)
+    assert captured["tags"][0]["response_shape"] == (3, 2, 2)
 
 
 def test_tq_batch_restores_non_tensor_trajectory_metadata(monkeypatch):

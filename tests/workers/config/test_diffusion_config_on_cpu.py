@@ -315,6 +315,7 @@ class TestFSDPDiffusionActorConfig:
 
         assert actor_cfg.strategy == "fsdp"
         assert actor_cfg.ppo_micro_batch_size_per_gpu == 4
+        assert actor_cfg.use_no_sync_for_gradient_accumulation is False
         assert isinstance(actor_cfg.diffusion_loss, DiffusionLossConfig)
 
     def test_engine_strategy_synced(self):
