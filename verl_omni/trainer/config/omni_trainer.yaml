@@ -98,6 +98,14 @@ algorithm:
 # verl's distillation group.
 distillation:
 
+  # Loss config. Overrides the _target_ so the hidden-state (nitrobrew) loss
+  # modes materialize loss_settings with use_hidden_states; all other fields
+  # inherit verl's distillation_loss defaults.
+  distillation_loss:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl_omni.workers.config.omni.distillation.OmniDistillationLossConfig
+
   teacher_models:
 
     teacher_model:

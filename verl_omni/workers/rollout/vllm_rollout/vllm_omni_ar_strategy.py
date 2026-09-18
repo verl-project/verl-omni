@@ -31,6 +31,10 @@ from vllm_omni.lora.request import LoRARequest
 from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.rollout_request import OmniRolloutRequest
 from verl_omni.workers.config import OmniModelConfig
+from verl_omni.workers.rollout.vllm_rollout.process_hidden_states import (
+    RETURN_FLAG_KEY,
+    extract_hidden_states,
+)
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_strategy_base import OmniStrategyBase
 
 logger = logging.getLogger(__file__)
@@ -226,6 +230,11 @@ class ARStrategy(OmniStrategyBase):
             if timeout_value is not None:
                 engine_args[timeout_key] = int(timeout_value)
         engine_args["logprobs_mode"] = getattr(self.server.config, "logprobs_mode", "processed_logprobs")
+        omni_kwargs = getattr(self.server.config, "engine_kwargs", {}).get("vllm_omni", {})
+        for key, value in omni_kwargs.items():
+            if key in engine_args and value is not None:
+                engine_args[key] = value
+
         if isinstance(engine_args.get("compilation_config"), dict):
             engine_args["compilation_config"] = _drop_none_mapping_values(engine_args["compilation_config"])
 
@@ -307,6 +316,7 @@ class ARStrategy(OmniStrategyBase):
         sampling_params.setdefault("repetition_penalty", getattr(self.server.config, "repetition_penalty", 1.0))
         if getattr(self.server.config, "full_determinism", False):
             sampling_params.setdefault("seed", getattr(self.server.config, "seed", 42))
+        return_hidden = bool(sampling_params.pop("return_hidden_states", False))
         policy_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         if self._rollout_output_modalities is not None:
             default_stage_sampling_params = self.server.engine.default_sampling_params_list
@@ -330,6 +340,15 @@ class ARStrategy(OmniStrategyBase):
             prompt.setdefault("multi_modal_data", multi_modal_data)
         if mm_processor_kwargs and not adapter_prepared_prompt:
             prompt.setdefault("mm_processor_kwargs", mm_processor_kwargs)
+        if return_hidden:
+            # Carry the opt-in on the request's SamplingParams so it survives the
+            # engine's per-step request bookkeeping; a prompt dict
+            # ``model_intermediate_buffer`` entry gets overwritten by the engine's
+            # own additional_information on the first scheduled step.
+            policy_stage_params = params[self._policy_stage_index] if isinstance(params, list) else params
+            extra_args = dict(policy_stage_params.extra_args or {})
+            extra_args[RETURN_FLAG_KEY] = True
+            policy_stage_params.extra_args = extra_args
         return prompt, params
 
     async def run_generation(
@@ -394,6 +413,12 @@ class ARStrategy(OmniStrategyBase):
                 result_dict=extra_fields,
             )
 
+        # Teacher hidden states ride CompletionOutput.multimodal_output when the
+        # request opted in via sampling_params["return_hidden_states"]
+        # (popped in preprocess_input; presence of the payload is the signal).
+        hidden = extract_hidden_states(req_output)
+        if hidden is not None:
+            extra_fields["teacher_hidden_states"] = hidden
         token_ids = req_output.outputs[0].token_ids
         log_probs = None
         policy_params = params[self._policy_stage_index] if isinstance(params, list) else params

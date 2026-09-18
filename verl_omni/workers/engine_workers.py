@@ -57,6 +57,8 @@ from verl.workers.rollout.base import BaseRollout, get_rollout_class
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
 from verl.workers.utils.losses import ppo_loss
 
+# Register nitrobrew / nitrobrew_reverse_kl aggregate into verl's loss registry.
+import verl_omni.trainer.distillation.losses as _omni_distill_losses  # noqa: E402, F401
 from verl_omni.pipelines.utils import build_scheduler
 from verl_omni.utils.mfu import (
     DiffusionFlopsCounter,
@@ -69,6 +71,7 @@ from verl_omni.workers.config import (
     OmniModelConfig,
 )
 from verl_omni.workers.config.diffusion import DiffusionDistillationTeacherModelConfig
+from verl_omni.workers.config.omni.distillation import HIDDEN_STATE_LOSS_MODES
 from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle, make_update_zmq_id
 from verl_omni.workers.utils.losses import diffusion_loss, omni_loss
 
@@ -748,9 +751,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             elif actor_model_type == "omni_model" and actor_config.trainer_type == "direct_preference":
                 self.loss_fn = partial(omni_loss, config=actor_config)
             elif self.distillation_enabled:
-                self.loss_fn = partial(
-                    distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
-                )
+                loss_mode = distillation_config.distillation_loss.loss_mode
+                if loss_mode in HIDDEN_STATE_LOSS_MODES:
+                    from verl_omni.trainer.distillation.losses import omni_distillation_ppo_loss
+
+                    self.loss_fn = partial(
+                        omni_distillation_ppo_loss,
+                        config=actor_config,
+                        distillation_config=distillation_config,
+                    )
+                else:
+                    self.loss_fn = partial(
+                        distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
+                    )
             else:
                 self.loss_fn = partial(ppo_loss, config=actor_config)
             self.actor = TrainingWorker(config=actor_training_config)
@@ -892,11 +905,31 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         output = self.actor.infer_batch(data)
         return output.cpu() if output is not None else None
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_teacher_unembeds(self, teacher_unembeds: dict[str, torch.Tensor]) -> None:
+        """Store teacher lm_head weights for hidden-state (nitrobrew) loss.
+
+        Each entry is ``{teacher_key: W [V, D_t]}`` bf16.  Factored into the
+        micro-batch on ``update_actor`` via a NonTensorData reference so the
+        chunked KL kernel can reconstruct teacher logits on this rank.
+
+        Args:
+            teacher_unembeds: key -> unembedding matrix (CPU/any device).
+        """
+        assert "actor" in self.role, "set_teacher_unembeds is only valid for actor workers"
+        self._teacher_unembeds: dict[str, torch.Tensor] = {
+            key: W.detach().to(dtype=torch.bfloat16).cpu().contiguous() for key, W in teacher_unembeds.items()
+        }
+        self._teacher_key_vocab: list[str] = sorted(teacher_unembeds.keys())
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
         tu.assign_non_tensor(data, enable_timestep_staging=self.config.actor.get("enable_timestep_staging", False))
+        if getattr(self, "_teacher_unembeds", None):
+            data["teacher_unembeds"] = NonTensorData(self._teacher_unembeds)
+            data["teacher_key_to_id"] = NonTensorData({key: i for i, key in enumerate(self._teacher_key_vocab)})
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
 

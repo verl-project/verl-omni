@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
-Last updated: 09/14/2026
+Last updated: 09/18/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
@@ -208,7 +208,8 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_
 Compared with the GPU script, the NPU variant includes two important Ascend
 settings:
 
-- `export VLLM_ASCEND_ENABLE_NZ=0` disables the NZ format in vLLM Ascend.
+- `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.additional_config='{weight_nz_mode: 0}'`
+  disables the NZ format in vLLM Ascend.
 - `actor_rollout_ref.rollout.cudagraph_capture_sizes` limits the graph shapes
   captured by the rollout engine. Capturing too many shapes can cause runtime
   errors, so keep this list sparse. The current script uses capture sizes
@@ -247,6 +248,45 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_
 The script sets `distillation.enabled=true` with a `vllm_omni` teacher
 (`loss_mode=kl`, `use_policy_gradient=true`). Teacher and student must share
 the same tokenizer (same model family).
+
+### MMK12 Full-Vocabulary On-Policy Distillation (nitrobrew)
+
+A variant of the OPD recipe replaces the sampled / top-k teacher signal with an
+**exact KL over the full vocabulary**. The teacher serves its Thinker last-layer
+hidden states instead of log-probs, and the actor reconstructs the teacher
+logits as `h @ W.T` from the teacher's `lm_head` in vocabulary chunks of 1024
+with a single online-softmax pass — peak extra memory is `O(N × 1024)` instead of
+`O(N × 151936)`. The loss is supervised (`use_policy_gradient=false`), so the
+whole-vocabulary signal is backpropagated directly instead of being folded into
+the policy-gradient reward.
+
+Same student (25% weight noise), same teacher (the un-noised model) and the same
+2 × Ascend 910C topology as the OPD recipe above:
+
+```bash
+# 1. On the master node (node 1): ray start --head
+# 2. On the slave node (node 2): ray start --address='<head_ip>:<port>'
+# 3. Run on the master node:
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_nitrobrew_opd_npu.sh
+```
+
+`STUDENT_MODEL`, `TEACHER_MODEL`, `TRAIN_FILE`, `VAL_FILE` and
+`REWARD_FUNCTION_PATH` are overridable the same way as in the other MMK12
+scripts. Beyond the teacher block shared with the OPD recipe, the script sets:
+
+- `distillation.distillation_loss.loss_mode=nitrobrew` with
+  `use_policy_gradient=false`. `nitrobrew_reverse_kl` selects `KL(p_S ‖ p_T)`
+  instead of the default forward `KL(p_T ‖ p_S)`.
+- `+actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl_omni.agent_loop.nitrobrew_opd_agent_loop.NitrobrewOPDAgentLoopManagerTQ`
+  — the agent loop that asks the teacher for hidden states and lifts them onto
+  the batch as a first-class tensor field.
+- `+...rollout.engine_kwargs.vllm_omni.block_size=128`, and the teacher's
+  `enable_chunked_prefill=false`: hidden states are only emitted for the tokens
+  scheduled in the step that finishes prefill, so a chunked prefill would
+  return partial tensors.
+
+See [`docs/algo/omni_opd.md`](../../docs/algo/omni_opd.md#full-vocabulary-opd-nitrobrew)
+for the mechanism and the additional config keys.
 
 ## Training with `AVQA-R1-6K`
 
@@ -618,6 +658,9 @@ examples/gspo_trainer/
 │   ├── run_qwen3_omni_thinker_gspo_lora_v1.sh       ← V1 launch script (GPU, LoRA r=32, text)
 │   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh  ← V1 launch script (GPU, LoRA r=32, image)
 │   ├── run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh   ← V1 launch script (GPU, LoRA r=32, audio + image)
+│   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1_npu.sh        ← V1 launch script (NPU, MMK12)
+│   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh    ← V1 OPD script (NPU, MMK12, top-k teacher)
+│   ├── run_qwen3_omni_thinker_gspo_lora_mmk12_v1_nitrobrew_opd_npu.sh  ← V1 OPD script (NPU, MMK12, full-vocabulary)
 │   ├── run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh    ← V1 launch script (NPU, AVQA)
 │   ├── run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh  ← V1 launch script (NPU, NExT-QA)
 ├── data_process/

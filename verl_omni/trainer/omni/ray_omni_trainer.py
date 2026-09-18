@@ -23,6 +23,7 @@ from pprint import pprint
 from typing import Optional
 
 import numpy as np
+import ray
 import torch
 from omegaconf import OmegaConf, open_dict
 from torch.utils.data import Dataset, Sampler
@@ -31,6 +32,7 @@ from tqdm import tqdm
 from verl.protocol import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
+from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.utils import Role
 from verl.trainer.ppo.v1.trainer_base import register_trainer
 from verl.trainer.ppo.v1.trainer_sync import PPOTrainerSync
@@ -74,6 +76,78 @@ class OmniPPOTrainerSync(PPOTrainerSync):
         model_config: OmniModelConfig = omega_conf_to_dataclass(self.config.actor_rollout_ref.model, OmniModelConfig)
         self.tokenizer = model_config.tokenizer
         self.processor = model_config.processor
+
+    def _init_resource_pool_mgr(self):
+        super()._init_resource_pool_mgr()
+        from verl_omni.workers.engine_workers import ActorRolloutRefWorker
+
+        for role in (Role.ActorRolloutRef, Role.ActorRollout):
+            if role in self.role_worker_mapping:
+                self.role_worker_mapping[role] = ray.remote(ActorRolloutRefWorker)
+
+    def _ensure_teacher_unembeds(self):
+        if getattr(self, "_teacher_unembeds", None) is not None:
+            return
+
+        from verl_omni.utils.lm_head import load_lm_head_weight
+
+        teacher_models = self.distillation_config.teacher_models
+        unembeds = {}
+        for key, teacher_config in teacher_models.items():
+            w = load_lm_head_weight(teacher_config.model_path)
+            unembeds[key] = w.to(dtype=torch.bfloat16).contiguous()
+
+        self._teacher_unembeds = unembeds
+        self.actor_rollout_wg.set_teacher_unembeds(unembeds)
+
+    def _update_actor(self, batch, metrics):
+        """Mark the logits processor as needed when using hidden-state distillation.
+
+        Verl keys its logits-processor dispatch off ``distillation_use_topk``
+        (== ``loss_settings.use_topk``). Hidden-state (nitrobrew) modes set that
+        flag False but still need the full ``student_logits`` tensor in the
+        processor, so expand the trigger to ``use_topk or use_hidden_states``.
+        """
+        calculate_entropy = self.config.actor_rollout_ref.actor.calculate_entropy or (
+            self.config.actor_rollout_ref.actor.entropy_coeff != 0.0
+        )
+        enabled = is_distillation_enabled(self.config.get("distillation"))
+        distillation_use_topk = False
+        distillation_only = False
+        if enabled:
+            loss_settings = self.distillation_config.distillation_loss.loss_settings
+            distillation_use_topk = bool(loss_settings.use_topk or getattr(loss_settings, "use_hidden_states", False))
+            distillation_loss_cfg = self.distillation_config.distillation_loss
+            distillation_only = (
+                distillation_use_topk
+                and not distillation_loss_cfg.use_task_rewards
+                and not distillation_loss_cfg.use_policy_gradient
+            )
+
+            if distillation_loss_cfg.loss_mode in ("nitrobrew", "nitrobrew_reverse_kl"):
+                self._ensure_teacher_unembeds()
+
+        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        extra_info = {
+            "calculate_entropy": calculate_entropy,
+            "distillation_use_topk": distillation_use_topk,
+            "distillation_only": distillation_only,
+            "global_batch_size": ppo_mini_batch_size,
+            "mini_batch_size": ppo_mini_batch_size,
+            "epochs": self.config.actor_rollout_ref.actor.ppo_epochs,
+            "seed": self.config.actor_rollout_ref.actor.data_loader_seed,
+            "dataloader_kwargs": {"shuffle": self.config.actor_rollout_ref.actor.shuffle},
+            "temperature": self.config.actor_rollout_ref.rollout.temperature,
+        }
+        batch.extra_info.update(extra_info)
+
+        output = self.actor_rollout_wg.update_actor(batch)
+        output = rename_dict(output["metrics"], "actor/")
+        output["perf/mfu/actor"] = output.pop("actor/mfu")
+        actor_metrics = reduce_metrics(output)
+        metrics.update(actor_metrics)
+        return batch
 
     # The rollout server resumes admission after every successful wake; this
     # bridge remains a safety net for holds not preceded by a wake (init).

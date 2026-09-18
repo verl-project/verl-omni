@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Qwen3-Omni Thinker GSPO + LoRA + On-Policy Distillation (OPD) training on MMK12 with omni V1 trainer.
+# Qwen3-Omni Thinker GSPO + LoRA + Full-Vocabulary (Nitrobrew) OPD on MMK12.
+#
+# Same recipe as the top-k OPD run, but with the teacher serving the thinker's
+# last-layer hidden states (not logprobs) and the actor reconstructing teacher
+# logits in vocab chunks via teacher lm_head (chunked online-softmax KL).
+# Loss is supervised (use_policy_gradient=false): the full-vocab signal is
+# backpropagated directly. See docs/algo/omni_opd.md#full-vocabulary-opd-nitrobrew.
 #
 # Data preparation (run once):
 #   pip install math-verify
@@ -11,8 +17,7 @@
 #   pip install math-verify    # required by mmk12_reward.py
 #   pip install qwen-vl-utils  # required for multimodal data processing
 #
-# Validated on 2x Ascend 910C machines: student rollout/actor on 16 GPUs of node 1,
-# teacher model on 16 GPUs of node 2.
+# Validated on 2x Ascend 910C (student rollout/actor + 2-node teacher pool).
 #
 # Start the task as follows (replace <head_ip> and <port> with the actual values from the head node):
 #   1. On the master node (node 1): ray start --head
@@ -23,6 +28,8 @@ set -x
 
 # Make verl_omni available to Ray workers
 export VERL_USE_EXTERNAL_MODULES=verl_omni
+# Nitrobrew loss mode requires the omni loss-fn init + the agent-loop
+# hidden-state manager; both are enabled by the config below.
 
 STUDENT_MODEL=${STUDENT_MODEL:-"$HOME/models/Qwen/Qwen3-Omni-30B-A3B-Instruct-Noised"}
 TEACHER_MODEL=${TEACHER_MODEL:-"$HOME/models/Qwen/Qwen3-Omni-30B-A3B-Instruct"}
@@ -68,6 +75,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.fsdp_config.param_offload=true \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
+    actor_rollout_ref.actor.fsdp_config.use_torch_compile=False \
     actor_rollout_ref.rollout.n=16 \
     actor_rollout_ref.rollout.cudagraph_capture_sizes="[1,2,4,16,64,128,512,1024,2048,3072,4096]" \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
@@ -77,6 +85,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=30720 \
     actor_rollout_ref.rollout.enable_prefix_caching=False \
+    +actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl_omni.agent_loop.nitrobrew_opd_agent_loop.NitrobrewOPDAgentLoopManagerTQ \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.output_mode="ar" \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.pipeline_name="qwen3_omni_moe" \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.additional_config='{weight_nz_mode: 0}' \
@@ -98,7 +107,7 @@ python3 -m verl_omni.trainer.main_omni \
     trainer.critic_warmup=0 \
     trainer.logger='["console","tensorboard"]' \
     trainer.project_name=gspo \
-    trainer.experiment_name=qwen3_omni_thinker_lora_mmk12_opd_npu \
+    trainer.experiment_name=qwen3_omni_thinker_lora_mmk12_opd_nitrobrew_npu \
     trainer.n_gpus_per_node=${N_GPUS_PER_NODE} \
     trainer.nnodes=1 \
     trainer.save_freq=50 \
@@ -110,13 +119,17 @@ python3 -m verl_omni.trainer.main_omni \
     distillation.teacher_models.teacher_model.model_path="${TEACHER_MODEL}" \
     distillation.teacher_models.teacher_model.inference.name=vllm_omni \
     distillation.teacher_models.teacher_model.inference.tensor_model_parallel_size=2 \
-    distillation.teacher_models.teacher_model.inference.gpu_memory_utilization=0.6 \
+    distillation.teacher_models.teacher_model.inference.gpu_memory_utilization=0.4 \
     distillation.teacher_models.teacher_model.inference.max_model_len=16640 \
     distillation.teacher_models.teacher_model.inference.prompt_length=4160 \
     distillation.teacher_models.teacher_model.inference.response_length=12288 \
+    distillation.teacher_models.teacher_model.inference.enable_chunked_prefill=false \
+    distillation.teacher_models.teacher_model.inference.enable_prefix_caching=false \
+    distillation.teacher_models.teacher_model.inference.max_num_batched_tokens=16640 \
+    +distillation.teacher_models.teacher_model.inference.engine_kwargs.vllm_omni.block_size=128 \
     +distillation.teacher_models.teacher_model.inference.engine_kwargs.vllm_omni.output_mode="ar" \
     +distillation.teacher_models.teacher_model.inference.engine_kwargs.vllm_omni.pipeline_name="qwen3_omni_moe" \
     +distillation.teacher_models.teacher_model.inference.engine_kwargs.vllm_omni.additional_config='{weight_nz_mode: 0}' \
-    distillation.distillation_loss.loss_mode=kl \
-    distillation.distillation_loss.use_policy_gradient=true \
+    distillation.distillation_loss.loss_mode=nitrobrew \
+    distillation.distillation_loss.use_policy_gradient=false \
     "$@"

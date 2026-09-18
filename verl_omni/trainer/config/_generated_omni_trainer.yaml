@@ -927,7 +927,7 @@ distillation:
   _target_: verl.workers.config.DistillationConfig
   enabled: false
   distillation_loss:
-    _target_: verl.workers.config.DistillationLossConfig
+    _target_: verl_omni.workers.config.omni.distillation.OmniDistillationLossConfig
     loss_mode: k3
     topk: 32
     use_task_rewards: true
