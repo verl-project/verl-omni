@@ -14,10 +14,8 @@
 """Launcher contract test for the MiniCPM-o 4.5 thinker GSPO AVQA recipe on the
 separate-async trainer.
 
-Pins the disaggregation wiring (trainer mode, GPU split, the batch identity the
-trainer asserts on, the staleness pin, and the adapter-delta LoRA send) plus the
-model wiring inherited from the colocated recipe — not the tunable training
-hyperparameters.
+Pins the disaggregation wiring and the model wiring inherited from the colocated
+recipe, not the tunable training hyperparameters.
 """
 
 from pathlib import Path
@@ -47,16 +45,12 @@ def test_launcher_selects_the_separate_async_trainer():
     assert "trainer.v1.trainer_mode=omni_separate_async" in settings
     assert "trainer.v1.separate_async.num_warmup_batches=1" in settings
     assert "trainer.v1.separate_async.parameter_sync_step=8" in settings
-    # Staleness pinned to one sync cycle so clipfrac readings stay interpretable
-    # even if the generated default drifts on a config regeneration.
     assert "trainer.v1.sampler.max_off_policy_threshold=8" in settings
-    # Non-naive backend is asserted at startup by the trainer.
     assert "actor_rollout_ref.rollout.checkpoint_engine.backend=nccl" in settings
 
 
 def test_launcher_batch_identity_and_staleness_pin():
-    # The upstream assert: train_batch_size == parameter_sync_step * ppo_mini_batch_size.
-    # Both parent recipes run 128 = 8 * 16; this one must not drift from either.
+    # The upstream assert: 128 == parameter_sync_step * ppo_mini_batch_size, as in both parents.
     train_batch = int(_setting_value("data.train_batch_size"))
     sync_step = int(_setting_value("trainer.v1.separate_async.parameter_sync_step"))
     mini_batch = int(_setting_value("actor_rollout_ref.actor.ppo_mini_batch_size"))
@@ -70,28 +64,22 @@ def test_launcher_batch_identity_and_staleness_pin():
 def test_launcher_splits_gpu_pools():
     settings = _active_settings()
 
-    # Standalone rollout pool on dedicated GPUs (nnodes/n_gpus > 0 is asserted
-    # at startup); two TP=1 replicas, with one TP=2 replica the pre-agreed
-    # config-only fallback.
+    # Two standalone TP=1 replicas (one TP=2 replica is the config-only fallback).
     assert "actor_rollout_ref.rollout.nnodes=1" in settings
     assert "actor_rollout_ref.rollout.n_gpus_per_node=2" in settings
     assert "actor_rollout_ref.rollout.tensor_model_parallel_size=1" in settings
-    # FSDP trainer pool: 2 GPUs (4 total with the rollout pool above).
+    # FSDP trainer pool: 2 GPUs (4 total).
     assert "trainer.n_gpus_per_node=2" in settings
     assert "trainer.nnodes=1" in settings
-    # Dedicated rollout GPUs afford the higher utilization of the reference
-    # separate-async recipe (the colocated recipe uses 0.7 on shared GPUs).
+    # Rollout GPUs are dedicated, unlike the colocated recipe's 0.7 on shared GPUs.
     assert "actor_rollout_ref.rollout.gpu_memory_utilization=0.8" in settings
 
 
 def test_launcher_ships_merged_lora_weights():
     settings = _active_settings()
 
-    # Merged full-weight sync, the same semantics as the colocated recipe, so
-    # the first separate-async run stays directly comparable with its reference.
-    # merge=False (adapter deltas via add_lora, ~100 MB vs ~19 GB per sync) is
-    # the later performance flip; its key alignment is pinned by
-    # tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py.
+    # Merged sync for accuracy parity with the colocated reference; the
+    # merge=False adapter-delta flip is pinned by the naming test.
     assert "actor_rollout_ref.model.lora.merge=True" in settings
     assert "actor_rollout_ref.rollout.load_format=safetensors" in settings
 
@@ -119,13 +107,11 @@ def test_launcher_keeps_the_minicpm_model_wiring():
         for line in settings
     )
 
-    # Reward is rule-based and CPU-side — no GPU RM placement exists to break
-    # the separate-async colocated-RM assert.
+    # Rule-based reward: no GPU RM to trip the separate-async colocated-RM assert.
     assert "reward.reward_manager.name=minicpm_naive" in settings
     assert "reward.custom_reward_function.path=verl_omni/utils/reward_score/choice_reward.py" in settings
 
-    # Standalone server actors import verl_omni through this export; a silent
-    # module-miss fails the first warmup batch.
+    # Standalone server actors import verl_omni through this export.
     assert "export VERL_USE_EXTERNAL_MODULES=verl_omni" in settings
 
 
