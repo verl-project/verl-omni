@@ -114,6 +114,18 @@ class DiffusionModelBase(ABC):
         return True
 
     @classmethod
+    def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
+        """Submodule name components to leave unsharded under FSDP2 (default: none).
+
+        FSDP2 only — under ``strategy=fsdp`` the engine raises when a
+        non-empty list is declared. Declare a subtree whose forward is
+        skipped for some micro-batches: unsharded forwards emit no
+        collectives, so the skip cannot desync ranks. Ignored parameters
+        must stay frozen — FSDP2 does not synchronize their gradients.
+        """
+        return []
+
+    @classmethod
     def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:
         """Validate LoRA settings; default no-op. Override for rollout-sync-constrained models."""
         return
@@ -643,6 +655,18 @@ class OmniModelBase(ABC):
                 delattr(module, submod_name)
 
         return module
+
+    @classmethod
+    def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
+        """Submodule name components to leave unsharded under FSDP2 (default: none).
+
+        FSDP2 only — under ``strategy=fsdp`` the engine raises when a
+        non-empty list is declared. Declare a subtree whose forward is
+        skipped for some micro-batches: unsharded forwards emit no
+        collectives, so the skip cannot desync ranks. Ignored parameters
+        must stay frozen — FSDP2 does not synchronize their gradients.
+        """
+        return []
 
     @classmethod
     def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:

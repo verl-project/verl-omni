@@ -17,12 +17,21 @@ import logging
 import warnings
 
 import torch
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 from torch.distributed.tensor import DTensor
 from transformers import AutoModelForMultimodalLM
+from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.device import get_device_id
 from verl.utils.fsdp_utils import (
+    CPUOffloadPolicy,
+    MixedPrecisionPolicy,
+    fsdp2_load_full_state_dict,
+    fsdp_version,
+    get_fsdp_wrap_policy,
     get_init_weight_context_manager,
+    init_fn,
     load_fsdp_model_to_gpu,
     merged_lora_context,
     normalize_peft_param_name,
@@ -32,8 +41,9 @@ from verl.utils.fsdp_utils import (
 from verl.utils.model import convert_weight_keys
 from verl.workers.engine.base import EngineRegistry
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
+from verl.workers.engine.fsdp.utils import get_sharding_strategy
 
-from verl_omni.utils.fsdp_utils import collect_lora_params
+from verl_omni.utils.fsdp_utils import apply_fsdp2, collect_lora_params
 from verl_omni.workers.config import OmniModelConfig
 
 logger = logging.getLogger(__name__)
@@ -245,5 +255,125 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
             for submodule in module.modules():
                 if isinstance(submodule, BaseTunerLayer):
                     submodule.cast_input_dtype_enabled = False
+
+        return module
+
+    def _build_fsdp_module(self, module):
+        # TODO(ziheng): need to improve
+        # Faithful copy of verl's FSDPEngine._build_fsdp_module; deltas are DIFF-marked.
+        from torch.distributed.fsdp import CPUOffload, MixedPrecision
+        from verl.utils.torch_dtypes import PrecisionType
+
+        # DIFF vs upstream: adapters declare frozen subtrees to leave unsharded (fsdp2 only)
+        ignored_names = list(self.model_adapter_cls.get_fsdp_ignored_module_names(self.model_config))
+        if ignored_names and self.engine_config.strategy != "fsdp2":
+            raise NotImplementedError(
+                f"{type(self).__name__}: FSDP2-ignored module names require strategy=fsdp2, "
+                f"got {self.engine_config.strategy!r}."
+            )
+
+        mixed_precision_config = self.engine_config.mixed_precision
+        if mixed_precision_config is not None:
+            param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
+            reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.get("reduce_dtype", "fp32"))
+            buffer_dtype = PrecisionType.to_dtype(mixed_precision_config.get("buffer_dtype", "fp32"))
+        else:
+            param_dtype = torch.bfloat16
+            reduce_dtype = torch.float32
+            buffer_dtype = torch.float32
+
+        mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
+
+        self._autocast_dtype = param_dtype
+        # fp16 training requires loss scaling to avoid gradient underflow. Mirror the pattern
+        # landed in #4036 for the legacy dp_actor path. bf16 / fp32 do not need a scaler.
+        if param_dtype == torch.float16:
+            from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
+
+            self.scaler = ShardedGradScaler(growth_interval=400)
+        else:
+            self.scaler = None
+
+        auto_wrap_policy = get_fsdp_wrap_policy(
+            module=module,
+            config=self.engine_config.wrap_policy,
+            is_lora=self.model_config.lora_rank > 0,
+        )
+
+        fsdp_mesh = self.device_mesh
+        sharding_strategy = get_sharding_strategy(fsdp_mesh, zero3_enable=self.engine_config.reshard_after_forward)
+
+        # Note: We force turn off CPUOffload because it causes incorrect results when using grad accumulation
+        if self.engine_config.strategy == "fsdp":
+            # cpu_offload:
+            # - actor: None
+            # - critic: None
+            # - ref: CPUOffload(offload_params=True)
+
+            # We force reference policy to use CPUOffload to save memory.
+            # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
+            cpu_offload = None
+            if self.engine_config.forward_only:
+                cpu_offload = CPUOffload(offload_params=True)
+                self._is_offload_param = False
+                self._is_offload_optimizer = False
+
+            module = FSDP(
+                module,
+                param_init_fn=init_fn,
+                auto_wrap_policy=auto_wrap_policy,
+                device_id=get_device_id(),
+                sharding_strategy=sharding_strategy,
+                mixed_precision=mixed_precision,
+                sync_module_states=True,
+                device_mesh=self.device_mesh,
+                forward_prefetch=self.engine_config.forward_prefetch,
+                use_orig_params=self.engine_config.use_orig_params,
+                cpu_offload=cpu_offload,
+            )
+        elif self.engine_config.strategy == "fsdp2":
+            # - actor: offload_policy
+            # - critic: offload_policy
+            # - ref: CPUOffloadPolicy(pin_memory=True)
+            assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
+            mp_policy = MixedPrecisionPolicy(
+                param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True
+            )
+            offload_policy = None
+            if self.engine_config.offload_policy or self.engine_config.forward_only:
+                self._is_offload_param = False
+                self._is_offload_optimizer = False
+                offload_policy = CPUOffloadPolicy(pin_memory=True)
+                self._uses_fsdp2_cpu_offload_policy = True
+
+            fsdp_kwargs = {
+                "mesh": fsdp_mesh,
+                "mp_policy": mp_policy,
+                "offload_policy": offload_policy,
+                "reshard_after_forward": self.engine_config.reshard_after_forward,
+            }
+            full_state = module.state_dict()
+            # DIFF vs upstream: our apply_fsdp2 takes the ignored subtrees
+            apply_fsdp2(module, fsdp_kwargs, self.engine_config, ignored_names=ignored_names)
+            fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
+        else:
+            raise NotImplementedError(f"Unknown strategy {self.engine_config.strategy}")
+
+        if self.model_config.enable_activation_offload:
+            enable_gradient_checkpointing = self.model_config.enable_gradient_checkpointing
+            enable_activation_offloading(module, self.engine_config.strategy, enable_gradient_checkpointing)
+
+        if torch.distributed.get_world_size() == 1 and fsdp_version(module) == 1:
+            FSDP.set_state_dict_type(
+                module,
+                state_dict_type=StateDictType.FULL_STATE_DICT,
+                state_dict_config=FullStateDictConfig(),
+            )
+        elif fsdp_version(module) == 1:
+            FSDP.set_state_dict_type(
+                module,
+                state_dict_type=StateDictType.SHARDED_STATE_DICT,
+                state_dict_config=ShardedStateDictConfig(),
+            )
 
         return module
