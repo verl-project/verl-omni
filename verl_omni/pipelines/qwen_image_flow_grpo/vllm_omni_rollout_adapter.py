@@ -81,6 +81,27 @@ class QwenImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImagePipelin
             local_files_only=local_files_only,
         )
 
+    @staticmethod
+    def map_lora_update_to_engine(lora_tensors: dict, peft_config: dict) -> tuple[dict, dict]:
+        """Map diffusers output-projection LoRA names to the vLLM layout."""
+        tensors = {name.replace(".to_out.0.", ".to_out."): tensor for name, tensor in lora_tensors.items()}
+        config = dict(peft_config)
+        targets = config.get("target_modules")
+        if isinstance(targets, list):
+            config["target_modules"] = [
+                target[:-2] if target == "to_out.0" or target.endswith(".to_out.0") else target for target in targets
+            ]
+        return tensors, config
+
+    @staticmethod
+    def _validate_diffusion_lora_binding(*, lora_model, bound_lora_names):
+        unbound = set(lora_model.loras) - bound_lora_names
+        if unbound:
+            raise ValueError(
+                f"Qwen-Image LoRA has {len(unbound)} unbound modules; refusing a partial or no-op sync. "
+                f"First unbound names: {sorted(unbound)[:5]}"
+            )
+
     def _get_qwen_prompt_embeds(
         self,
         prompt_ids: torch.Tensor,

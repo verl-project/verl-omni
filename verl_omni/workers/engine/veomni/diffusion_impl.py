@@ -15,7 +15,7 @@
 import gc
 import logging
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import fields
 from typing import Callable, Optional
 
@@ -63,12 +63,14 @@ class VeOmniDiffusionEngine(BaseEngine):
         optimizer_config: VeOmniDiffusionOptimizerConfig,
         checkpoint_config: CheckpointConfig,
     ):
-        if model_config.lora_rank > 0 or model_config.lora_adapter_path is not None:
-            raise NotImplementedError(
-                "VeOmni diffusion backend does not support LoRA training yet. "
-                "Use the existing fsdp/fsdp2 diffusion backend for LoRA runs."
-            )
         super().__init__()
+
+        is_lora = model_config.lora_rank > 0 or model_config.lora_adapter_path is not None
+        if is_lora and model_config.lora.get("merge", False):
+            raise NotImplementedError(
+                "VeOmni diffusion backend does not support model.lora.merge=True yet; "
+                "use adapter-only sync (model.lora.merge=False)."
+            )
 
         self.model_config = model_config
         self.engine_config = engine_config
@@ -84,7 +86,7 @@ class VeOmniDiffusionEngine(BaseEngine):
 
         self._is_offload_param = self.engine_config.param_offload
         self._is_offload_optimizer = self.engine_config.optimizer_offload
-        self._is_lora = False
+        self._is_lora = is_lora
 
     @property
     def is_param_offload_enabled(self) -> bool:
@@ -147,6 +149,40 @@ class VeOmniDiffusionEngine(BaseEngine):
 
     def _build_scheduler(self):
         return build_scheduler(self.model_config)
+
+    def _build_veomni_lora_config(self) -> dict:
+        """Translate the verl-omni LoRA fields into VeOmni's ``lora_config`` dict.
+
+        An empty dict keeps VeOmni on full-parameter training.
+        """
+        if not self._is_lora:
+            return {}
+
+        try:
+            __import__("veomni.lora")
+        except ModuleNotFoundError as e:
+            if e.name != "veomni.lora":
+                raise
+            raise RuntimeError("VeOmni diffusion LoRA requires veomni>=0.1.12.") from e
+
+        target_modules = self.model_config.target_modules
+        # VeOmni has no "all-linear" shorthand and otherwise injects zero adapters.
+        if isinstance(target_modules, str) and target_modules == "all-linear":
+            raise ValueError(
+                "VeOmni diffusion backend does not support target_modules='all-linear'; "
+                "list the modules explicitly, e.g. "
+                "actor_rollout_ref.model.target_modules=[to_q,to_k,to_v,to_out.0]."
+            )
+
+        lora_config = {
+            "rank": self.model_config.lora_rank,
+            "alpha": self.model_config.lora_alpha,
+            "lora_modules": target_modules,
+            "exclude_modules": self.model_config.exclude_modules,
+        }
+        if self.model_config.lora_adapter_path is not None:
+            lora_config["lora_adapter"] = self.model_config.lora_adapter_path
+        return lora_config
 
     def _build_veomni_dit_args(self):
         from veomni.arguments import (
@@ -232,7 +268,7 @@ class VeOmniDiffusionEngine(BaseEngine):
                     self.model_config.local_tokenizer_path or self.model_config.tokenizer_path or config_path
                 ),
                 basic_modules=[],
-                lora_config={},
+                lora_config=self._build_veomni_lora_config(),
                 ops_implementation=self._build_ops_config(),
             ),
             data=DiTDataArguments(train_path=self.model_config.local_path, text_keys="messages"),
@@ -258,6 +294,9 @@ class VeOmniDiffusionEngine(BaseEngine):
         self.veomni_trainer = self._build_veomni_dit_trainer()
         veomni_base = self.veomni_trainer.base
         BaseTrainer._build_model(veomni_base)
+        if self._is_lora:
+            # Wrap the model before parallelization; otherwise no adapter is injected.
+            BaseTrainer._freeze_model_module(veomni_base)
         BaseTrainer._build_parallelized_model(veomni_base)
         scheduler = self._build_scheduler()
         if not self.engine_config.forward_only:
@@ -584,13 +623,59 @@ class VeOmniDiffusionEngine(BaseEngine):
         if self._is_offload_optimizer:
             offload_optimizer(self.optimizer)
 
-    def get_per_tensor_param(self, **kwargs):
-        if self.model_config.lora_rank > 0 or self.model_config.lora_adapter_path is not None:
-            raise NotImplementedError("VeOmni diffusion backend does not support LoRA weight export yet.")
+    def _lora_per_tensor_param(self, base_sync_done: bool, adapter_name: str | None):
+        """Export adapter (or base) weights for a rollout LoRA sync.
 
+        VeOmni keeps LoRA in its own ``veomni.lora`` wrappers, whose module layout
+        and state-dict keys already match PEFT on disk, so the rollout side
+        consumes this exactly like the FSDP backend's PEFT export.
+        """
+        from veomni.lora import is_veomni_lora_model
+        from veomni.lora.state_dict import get_lora_state_dict
+
+        peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        if not is_veomni_lora_model(peft_model):
+            raise RuntimeError(
+                "LoRA is configured but the VeOmni module is not a LoRA model; the adapter "
+                "was never injected, so a sync would ship frozen base weights."
+            )
+
+        lora_config = peft_model.get_lora_config(adapter_name)
+        if base_sync_done:
+            params = get_lora_state_dict(peft_model, adapter_name=adapter_name or "default", config=lora_config)
+            # Sync keys are relative to the transformer, unlike PEFT checkpoint
+            # keys. vLLM only strips base_model.model at the start of a key;
+            # retaining it after the transformer prefix silently binds no layers.
+            params = {name.removeprefix("base_model.model."): param for name, param in params.items()}
+            if not params:
+                raise RuntimeError(
+                    "VeOmni LoRA export produced no adapter tensors for "
+                    f"adapter={adapter_name or 'default'!r}; the rollout would keep the previous policy."
+                )
+        else:
+            # The first sync ships base weights. Read them off the inner base model so the
+            # keys match the plain transformer the rollout engine loaded, with no LoRA
+            # wrapper prefix.
+            params = {
+                name.replace(".base_layer", ""): param
+                for name, param in peft_model.get_base_model().state_dict().items()
+                if "lora_" not in name
+            }
+
+        return convert_weight_keys(params, peft_model), lora_config.to_peft_dict()
+
+    def get_per_tensor_param(self, **kwargs):
         load_model_to_gpu(self.module, get_device_id())
-        params = self.module.state_dict()
-        params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+
+        peft_config_dict = None
+        if self._is_lora:
+            params, peft_config_dict = self._lora_per_tensor_param(
+                base_sync_done=kwargs.get("base_sync_done", False),
+                adapter_name=kwargs.get("adapter_name"),
+            )
+        else:
+            params = self.module.state_dict()
+            params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
 
         if self._is_offload_param:
             offload_model_to_cpu(self.module)
@@ -606,10 +691,41 @@ class VeOmniDiffusionEngine(BaseEngine):
                     tensor = tensor.to(export_dtype, non_blocking=True)
                 yield f"transformer.{name}", tensor
 
-        return param_generator(), None
+        return param_generator(), peft_config_dict
 
+    @contextmanager
     def disable_adapter(self):
-        return nullcontext()
+        """Temporarily bypass the LoRA adapters (used for the reference policy).
+
+        ``veomni.lora`` has no enable/disable switch, but ``LoraLinear.forward``
+        returns the base output when the active adapter is unknown, so point the
+        active adapter at a sentinel and restore it afterwards.
+        """
+        if not self._is_lora:
+            yield
+            return
+
+        from veomni.lora.layers import is_lora_linear
+        from veomni.lora.moe_layers import LoraIndependentExperts, LoraSharedExperts
+
+        modules = list(self.module.modules())
+        if any(isinstance(module, LoraIndependentExperts | LoraSharedExperts) for module in modules):
+            raise NotImplementedError(
+                "VeOmni diffusion backend cannot disable MoE expert LoRA; "
+                "the reference policy would reuse the actor's adapter."
+            )
+
+        saved = [(module, module.active_adapter) for module in modules if is_lora_linear(module)]
+        if not saved:
+            raise RuntimeError("LoRA is configured but no VeOmni LoRA layers were injected.")
+
+        try:
+            for module, _ in saved:
+                module.active_adapter = "__verl_omni_disabled__"
+            yield
+        finally:
+            for module, adapter in saved:
+                module.active_adapter = adapter
 
 
 class EngineEvalModeCtx(BaseEngineCtx):

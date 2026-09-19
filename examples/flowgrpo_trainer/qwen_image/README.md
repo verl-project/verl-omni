@@ -1,9 +1,21 @@
 # Qwen-Image FlowGRPO
 
-Last updated: 09/10/2026
+Last updated: 09/18/2026
 
 See the [FlowGRPO trainer guide](../../../docs/examples/flowgrpo_trainer.md) for installation, OCR data and
 reward-model setup.
+
+## VeOmni LoRA
+
+VeOmni 0.1.12 or newer is required for native LoRA injection and adapter-to-rollout synchronization:
+
+```bash
+bash examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_veomni.sh
+```
+
+The recipe mirrors `run_qwen_image_ocr_lora.sh` and replaces the actor and reference backends with VeOmni.
+It keeps vLLM-Omni for rollout and uses explicit LoRA target modules because VeOmni does not support the
+`all-linear` shorthand.
 
 ## Optional timestep input staging
 
