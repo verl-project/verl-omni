@@ -92,6 +92,8 @@ actor_rollout_ref:
       dpo_beta: 2000.0
       kl_mask_threshold: 1.0e-05
       add_kl_coefficient: true
+      mse_weight: 1.5e-05
+      ratio_norm: true
     rollout_correction:
       _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
       bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}

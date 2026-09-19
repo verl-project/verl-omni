@@ -163,8 +163,13 @@ def _get_trainer_cls(config):
         return PolicyGradientRayTrainer
     if trainer_type == "direct_preference":
         return DirectPreferenceRayTrainer
+    if trainer_type == "unigrpo":
+        from verl_omni.trainer.diffusion.unigrpo_ray_trainer import UniGRPORayTrainer
+
+        return UniGRPORayTrainer
     raise ValueError(
-        f"Unsupported diffusion trainer_type {trainer_type!r}. Expected one of: 'policy_gradient', 'direct_preference'."
+        f"Unsupported diffusion trainer_type {trainer_type!r}. "
+        "Expected one of: 'policy_gradient', 'direct_preference', 'unigrpo'."
     )
 
 

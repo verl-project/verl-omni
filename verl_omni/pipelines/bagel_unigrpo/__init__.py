@@ -11,21 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .bagel_unigrpo_impl import UniGRPODiffusersFSDPEngine  # noqa: F401
-from .diffusers_impl import (  # noqa: F401
-    DiffusersFSDPEngine,
-    DPODiffusersFSDPEngine,
-    NFTDiffusersFSDPEngine,
-    PPODiffusersFSDPEngine,
-)
-from .omni_impl import OmniFSDPEngine  # noqa: F401
 
-# TODO(andy): unify DPO and NFT engines later.
-__all__ = [
-    "PPODiffusersFSDPEngine",
-    "DPODiffusersFSDPEngine",
-    "NFTDiffusersFSDPEngine",
-    "DiffusersFSDPEngine",
-    "OmniFSDPEngine",
-    "UniGRPODiffusersFSDPEngine",
-]
+from .diffusers_training_adapter import BagelUniGRPO
+
+__all__ = ["BagelUniGRPO"]

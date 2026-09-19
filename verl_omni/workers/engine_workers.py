@@ -174,7 +174,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         if getattr(self.model_config, "hf_config", None) is not None:
             self.flops_counter = FlopsCounter(self.model_config.hf_config)
-        elif self.config.model_type in ("diffusion_model", "diffusion_dpo_model", "diffusion_nft_model"):
+        elif self.config.model_type in (
+            "diffusion_model",
+            "diffusion_dpo_model",
+            "diffusion_nft_model",
+            "diffusion_unigrpo_model",
+        ):
             self.flops_counter = DiffusionFlopsCounter(
                 architecture=getattr(self.model_config, "architecture", None),
                 transformer_config=getattr(self.model_config, "transformer_config", None),
@@ -627,6 +632,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             "diffusion_model",
             "diffusion_dpo_model",
             "diffusion_nft_model",
+            "diffusion_unigrpo_model",
         )
 
         # 1. build reference model
@@ -797,7 +803,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self._init_weight_sync_knobs(model_config)
 
         # 3. build rollout engine
-        if "rollout" in self.role:
+        # Trainside UniGRPO samples on the live FSDP actor module via the worker `generate`
+        # method, so no vLLM rollout engine is built when rollout.name == "trainside".
+        self.rollout = None
+        if "rollout" in self.role and self.config.rollout.get("name") != "trainside":
             rollout_config: RolloutConfig = omega_conf_to_dataclass(self.config.rollout)
 
             # TODO: move rollout_device_mesh into ServerAdapter
@@ -903,6 +912,41 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         )
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="green", role="generate")
+    @_with_routing_replay_flag(enabled=True)
+    def generate(self, data: TensorDict) -> TensorDict:
+        """Trainside UniGRPO rollout on the live FSDP actor module (no vLLM).
+
+        Delegates to the custom UniGRPO engine's ``generate_rollout``: sample thinking->image on a flat
+        bf16 replica synced from the FSDP master, re-anchor ``old_logp`` to the training module, and
+        return per-sample ``responses`` (uint8 images for reward/validation/logging) plus
+        ``unigrpo_samples`` (the rollout trajectories) for advantage + the joint ``update_actor``.
+        """
+        engine = self.actor.engine
+        if not hasattr(engine, "generate_rollout"):
+            raise NotImplementedError(
+                "Worker.generate (rollout.name=trainside) requires a UniGRPO engine exposing "
+                f"generate_rollout; got {type(engine).__name__}. Set model.model_type=diffusion_unigrpo_model."
+            )
+        output = engine.generate_rollout(data)
+        return output.cpu() if output is not None else None
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def dump_report_samples(self, eval_prompts, eval_gts, out_dir, step, seed=1234):
+        """Trainside UniGRPO report dump: replica sync (all ranks) + rank-0 official-CFG eval.
+
+        Delegates to the custom UniGRPO engine's ``dump_report_samples`` (returns ``None`` on engines
+        that do not expose it). Dispatched ONE_TO_ALL so every actor rank reaches the replica-sync
+        collective; only rank 0 samples + writes the report artifacts and returns its per-prompt
+        PickScores. Non-fatal: a failed dump must not abort training.
+        """
+        actor = getattr(self, "actor", None)
+        engine = getattr(actor, "engine", None) if actor is not None else None
+        if engine is None or not hasattr(engine, "dump_report_samples"):
+            return None
+        return engine.dump_report_samples(eval_prompts, eval_gts, out_dir, step, seed)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def get_lora_peft_config(self):

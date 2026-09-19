@@ -16,6 +16,7 @@ from .fsdp import (  # noqa: F401
     DPODiffusersFSDPEngine,
     NFTDiffusersFSDPEngine,
     PPODiffusersFSDPEngine,
+    UniGRPODiffusersFSDPEngine,
 )
 from .fsdp.omni_impl import OmniFSDPEngine  # noqa: F401
 
@@ -26,6 +27,7 @@ except ImportError:
 
 __all__ = [
     "PPODiffusersFSDPEngine",
+    "UniGRPODiffusersFSDPEngine",
     "DPODiffusersFSDPEngine",
     "NFTDiffusersFSDPEngine",
     "DiffusersFSDPEngine",

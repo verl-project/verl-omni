@@ -20,6 +20,7 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import CheckpointConfig
 from verl.trainer.config.algorithm import RolloutCorrectionConfig
 from verl.utils.profiler import ProfilerConfig
+from verl.workers.config import FSDPOptimizerConfig
 from verl.workers.config.engine import EngineConfig, FSDPEngineConfig
 from verl.workers.config.optimizer import OptimizerConfig
 
@@ -29,6 +30,7 @@ __all__ = [
     "DiffusionLossConfig",
     "VeOmniDiffusionEngineConfig",
     "VeOmniDiffusionOptimizerConfig",
+    "FSDPDiffusionOptimizerConfig",
     "DiffusionActorConfig",
     "FSDPDiffusionActorConfig",
     "VeOmniDiffusionActorConfig",
@@ -46,6 +48,10 @@ class DiffusionLossConfig(BaseConfig):
     dpo_beta: float = 2000.0
     kl_mask_threshold: float = 1e-5
     add_kl_coefficient: bool = True
+    # UniGRPO image-side velocity-MSE regularizer weight (0 disables the MSE term)
+    mse_weight: float = 1.5e-5
+    # UniGRPO image-side GRPO-Guard RatioNorm; False falls back to the plain Flow-GRPO ratio
+    ratio_norm: bool = True
 
     def __post_init__(self):
         """Validate diffusion loss configuration."""
@@ -53,6 +59,7 @@ class DiffusionLossConfig(BaseConfig):
             "flow_grpo",
             "flow_dppo",
             "grpo_guard",
+            "unigrpo",
             "diffusion_nft",
             "dpo",
             "dmd2",
@@ -129,6 +136,15 @@ class VeOmniDiffusionOptimizerConfig(OptimizerConfig):
                 f"Invalid VeOmni lr_scheduler_type={self.lr_scheduler_type!r}; "
                 "expected one of ['constant', 'linear', 'cosine']."
             )
+
+
+@dataclass
+class FSDPDiffusionOptimizerConfig(FSDPOptimizerConfig):
+    # Per-expert LR groups for the FSDP diffusion actor: a trainable param whose name contains a
+    # key substring uses that group's LR, the rest use the base ``lr``. UniGRPO sets
+    # {"moe_gen": <generation-expert lr>} so the und/base params keep ``lr`` and the moe_gen
+    # experts train faster. Read by the custom UniGRPO FSDP engine's ``_build_optimizer``.
+    param_group_lrs: dict | None = None
 
 
 @dataclass

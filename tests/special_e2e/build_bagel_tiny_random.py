@@ -198,6 +198,7 @@ def ensure_tiny_bagel_checkpoint(
     seed: int = 42,
     vocab_size: int = 2048,
     skip_if_exists: bool = True,
+    untied_lm_head: bool = False,
 ) -> str:
     """Build and save a tiny BAGEL checkpoint if it does not already exist."""
     output_dir = os.path.expanduser(output_dir)
@@ -219,6 +220,9 @@ def ensure_tiny_bagel_checkpoint(
     vocab_size = max(int(len(tokenizer)), soi_id + 1, eoi_id + 1)
 
     llm_config = _tiny_llm_config(vocab_size, bos_token_id=bos_id, eos_token_id=eos_id)
+    # BagelForSFT (AR thinking track) requires an untied lm_head checkpoint.
+    if untied_lm_head:
+        llm_config["tie_word_embeddings"] = False
     vit_config = _tiny_vit_config()
     vit_max_num_patch_per_side = 16
     root_config = {
@@ -322,6 +326,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--vocab-size", type=int, default=2048)
     parser.add_argument("--force", action="store_true", help="Rebuild even when ema.safetensors already exists")
+    parser.add_argument(
+        "--untied-lm-head",
+        action="store_true",
+        help="Emit an untied lm_head config so BagelForSFT (AR thinking track) can load it.",
+    )
     args = parser.parse_args()
 
     output_dir = ensure_tiny_bagel_checkpoint(
@@ -329,6 +338,7 @@ def main() -> None:
         seed=args.seed,
         vocab_size=args.vocab_size,
         skip_if_exists=not args.force,
+        untied_lm_head=args.untied_lm_head,
     )
     print(f"Tiny BAGEL checkpoint ready at {output_dir}")
 
