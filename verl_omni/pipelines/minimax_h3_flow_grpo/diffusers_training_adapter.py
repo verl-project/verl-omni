@@ -72,6 +72,11 @@ class MiniMaxH3FlowGRPO(DiffusionModelBase):
     """Replay flattened joint video/audio transitions with the H3 DiT."""
 
     @classmethod
+    def context_parallel_config_kwargs(cls, model_config: DiffusionModelConfig) -> dict[str, bool]:
+        """Allow Ulysses to partition H3's unpadded joint multimodal sequence."""
+        return {"ulysses_anything": True}
+
+    @classmethod
     def prepare_processor_files(cls, model_path: str) -> str:
         """Make the official Qwen3-VL processor discoverable by AutoProcessor."""
         return prepare_h3_processor_files(model_path)

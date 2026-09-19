@@ -15,6 +15,11 @@ if [[ -z "${MODEL_PATH:-}" || ! -d "$MODEL_PATH/FL2VA" || ! -d "$MODEL_PATH/tran
 fi
 
 N_GPUS=${N_GPUS:-8}
+ACTOR_SP=${ACTOR_SP:-1}
+if (( ACTOR_SP <= 0 || N_GPUS % ACTOR_SP != 0 )); then
+    echo "N_GPUS (${N_GPUS}) must be a positive multiple of ACTOR_SP ($ACTOR_SP)." >&2
+    exit 1
+fi
 ROLLOUT_TP=${ROLLOUT_TP:-4}
 # This now defaults to full rollout TP; set to 1 for the previous unsharded behavior.
 TEXT_ENCODER_TP=${TEXT_ENCODER_TP:-$ROLLOUT_TP}
@@ -94,7 +99,7 @@ python3 -m verl_omni.trainer.main_diffusion \
   actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
   actor_rollout_ref.actor.fsdp_config.param_offload=True \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
-  actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=1 \
+  actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=$ACTOR_SP \
   actor_rollout_ref.rollout.name=vllm_omni \
   actor_rollout_ref.rollout.max_num_seqs=1 \
   actor_rollout_ref.rollout.rollout_attn_backend="$ROLLOUT_ATTN_BACKEND" \

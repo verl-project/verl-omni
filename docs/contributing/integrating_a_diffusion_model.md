@@ -1,6 +1,6 @@
 # How to Integrate a New Diffusion Model for FlowGRPO Training
 
-Last updated: 08/21/2026.
+Last updated: 09/18/2026.
 
 This guide walks you through everything required to integrate a new diffusion
 model into VeRL-Omni so it can be trained end-to-end with the **FlowGRPO**
@@ -315,7 +315,15 @@ FSDP wrapping, when ``lora_rank=0``.  When LoRA is enabled this hook
 is **not** called — ``requires_grad`` is managed by the LoRA adapter
 instead.  The default is a no-op (all params trainable).
 
-### 3.2 `build_scheduler` and `set_timesteps`
+### 3.2 (Optional) `context_parallel_config_kwargs`
+
+Override this hook when an architecture needs extra Diffusers
+`ContextParallelConfig` options. The FSDP engine owns `ulysses_degree` and
+`mesh`; adapters must not override them. MiniMax H3 returns
+`{"ulysses_anything": True}` because its unpadded joint text/video/audio
+sequence is not guaranteed to divide evenly across SP ranks.
+
+### 3.3 `build_scheduler` and `set_timesteps`
 
 Reuse
 [`FlowMatchSDEDiscreteScheduler`](../../verl_omni/pipelines/schedulers/flow_match_sde.py)
@@ -326,7 +334,7 @@ Compute `image_seq_len` and `mu` exactly as the upstream diffusers
 pipeline does. If they drift, the training-time noise schedule will not
 match deployment.
 
-### 3.3 `prepare_model_inputs`
+### 3.4 `prepare_model_inputs`
 
 This method receives the **full** batched tensors for the entire
 denoising trajectory (`latents` of shape `(B, T, ...)`, `timesteps` of
@@ -354,7 +362,7 @@ transitions from being treated as adjacent states.
 The dict keys must match the kwargs of the diffusers transformer
 class verbatim — the FSDP engine calls `module(**model_inputs)`.
 
-### 3.4 `forward_and_sample_previous_step`
+### 3.5 `forward_and_sample_previous_step`
 
 Call the transformer once for the positive prompt; if CFG is active,
 call it again for the negative prompt and combine them. Always finish with
@@ -587,7 +595,7 @@ Backend selection is **orthogonal** to model integration: the adapters you wrote
 
 - `DiffusionModelBase` subclass (Step 3) — used verbatim. The VeOmni engine calls the same `prepare_model_inputs` / `forward_and_sample_previous_step` contract.
 - `VllmOmniPipelineBase` subclass (Step 4) — used verbatim. Rollout always runs in vllm-omni, independent of the actor backend.
-- `FlowMatchSDEDiscreteScheduler` (Step 3.1) — used verbatim.
+- `FlowMatchSDEDiscreteScheduler` (Step 3.3) — used verbatim.
 
 #### What VeOmni requires that diffusers does not
 

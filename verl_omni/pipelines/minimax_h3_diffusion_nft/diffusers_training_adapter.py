@@ -43,6 +43,11 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
     """Forward-process MiniMax H3 adapter used by DiffusionNFT."""
 
     @classmethod
+    def context_parallel_config_kwargs(cls, model_config: DiffusionModelConfig) -> dict[str, bool]:
+        """Allow Ulysses to partition H3's unpadded joint multimodal sequence."""
+        return {"ulysses_anything": True}
+
+    @classmethod
     def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:
         """Reject LoRA targets the rollout weight sync cannot transport (shares common.py whitelist)."""
         if model_config.lora_rank > 0:

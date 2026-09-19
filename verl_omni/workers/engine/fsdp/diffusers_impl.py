@@ -478,8 +478,37 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             raise NotImplementedError(f"LR scheduler type {lr_scheduler_type} is not supported")
         return lr_scheduler
 
-    def _build_model_optimizer(self):
+    def _enable_context_parallel(self, module: torch.nn.Module) -> None:
+        """Enable Diffusers context parallelism with architecture-specific options."""
+        if not self.use_ulysses_sp:
+            return
+
         from diffusers import ContextParallelConfig
+
+        model_cls = DiffusionModelBase.get_class(self.model_config)
+        config_kwargs = model_cls.context_parallel_config_kwargs(self.model_config)
+        reserved = {"ulysses_degree", "mesh"}.intersection(config_kwargs)
+        if reserved:
+            raise ValueError(f"Architecture context-parallel options cannot override {sorted(reserved)}.")
+        if config_kwargs.get("ulysses_anything", False):
+            num_heads = getattr(getattr(module, "config", None), "num_attention_heads", None)
+            if num_heads is not None and int(num_heads) % self.ulysses_sequence_parallel_size:
+                raise ValueError(
+                    f"The model's {int(num_heads)} attention heads must be divisible by "
+                    f"ulysses_sequence_parallel_size={self.ulysses_sequence_parallel_size}."
+                )
+            from verl_omni.utils.diffusers_context_parallel import ensure_ulysses_uneven_sequence_backward
+
+            ensure_ulysses_uneven_sequence_backward()
+        module.enable_parallelism(
+            config=ContextParallelConfig(
+                ulysses_degree=self.ulysses_sequence_parallel_size,
+                mesh=self.ulysses_device_mesh,
+                **config_kwargs,
+            )
+        )
+
+    def _build_model_optimizer(self):
         from verl.utils.model import print_model_size
 
         # Load base model with specified configuration and dtype
@@ -491,11 +520,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             # configure trainable parameters for non-lora training
             DiffusionModelBase.get_class(self.model_config).configure_trainable_params(module, self.model_config)
 
-        if self.use_ulysses_sp:
-            sp_size = self.ulysses_sequence_parallel_size
-            module.enable_parallelism(
-                config=ContextParallelConfig(ulysses_degree=sp_size, mesh=self.ulysses_device_mesh)
-            )
+        self._enable_context_parallel(module)
 
         # Load diffusion scheduler
         scheduler = self._build_scheduler()

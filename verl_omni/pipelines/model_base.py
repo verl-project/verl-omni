@@ -114,6 +114,11 @@ class DiffusionModelBase(ABC):
         return True
 
     @classmethod
+    def context_parallel_config_kwargs(cls, model_config: DiffusionModelConfig) -> dict[str, Any]:
+        """Return architecture-specific Diffusers ``ContextParallelConfig`` options."""
+        return {}
+
+    @classmethod
     def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:
         """Validate LoRA settings; default no-op. Override for rollout-sync-constrained models."""
         return

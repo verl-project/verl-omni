@@ -1,6 +1,6 @@
 # MiniMax H3 T2VA, FL2VA, and Ref2VA DiffusionNFT
 
-Last updated: 09/14/2026
+Last updated: 09/18/2026
 
 These recipes train rank-64 MiniMax H3 LoRA adapters with online DiffusionNFT
 for text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
@@ -204,6 +204,25 @@ override remains supported. Prefer the typed field and do not set conflicting
 values through both paths. The fix for [#563](https://github.com/verl-project/verl-omni/issues/563)
 retains ETP through CLI conversion into the fused diffusion engine's parallel
 config; a CLI argument alone was not evidence that the encoder was sharded.
+
+### Actor FSDP sequence parallelism
+
+The T2VA, FL2VA, and Ref2VA launchers accept `ACTOR_SP` (default `1`). Set it
+to a divisor of the GPU count to shard each Actor's unpadded joint
+text/video/audio sequence with Diffusers Ulysses context parallelism:
+
+```bash
+ACTOR_SP=2 bash examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh
+```
+
+This changes Actor FSDP data parallelism to `NUM_GPUS / ACTOR_SP`; it does not
+change rollout `ROLLOUT_TP` or text-encoder `TEXT_ENCODER_TP`. MiniMax H3 uses
+the uneven-sequence Ulysses path because prompt and reference layouts are not
+padded to a common sequence length. The SP size must also divide the model's
+attention-head count (56 for the released H3 checkpoint). Keep timestep staging
+disabled. DiffusionNFT retains its per-sample H3 forward loop, so SP reduces the
+memory of each long packed sequence but does not combine heterogeneous samples
+into one transformer call.
 
 ### T2VA
 

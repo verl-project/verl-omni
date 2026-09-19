@@ -59,9 +59,9 @@ run_test 6 "FlowGRPO synchronous separate trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_flowgrpo_qwen_image_separate.sh "${diffusion_trainer_args[@]}"
 
-run_test 7 "MiniMax-H3 FlowGRPO T2VA trainer e2e" \
-    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ROLLOUT_TP=2 TOTAL_TRAINING_STEPS=1 \
-    python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task t2va
+run_test 7 "MiniMax-H3 FlowGRPO T2VA FSDP-SP trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \
+    TOTAL_TRAINING_STEPS=1 python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task t2va
 
 run_test 8 "Diffusion OPD v1 sync colocated teachers e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" SMOKE=sync \

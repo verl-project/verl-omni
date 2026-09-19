@@ -1,6 +1,6 @@
 # MiniMax H3 T2VA, FL2VA, and Ref2VA FlowGRPO
 
-Last updated: 09/14/2026
+Last updated: 09/18/2026
 
 These recipes train `MiniMaxAI/MiniMax-H3` LoRA adapters with FlowGRPO for
 text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
@@ -178,6 +178,32 @@ measure fidelity to the supplied references.
 
 
 ## Launch
+
+### Actor FSDP sequence parallelism
+
+The NVIDIA T2VA, FL2VA, and Ref2VA launchers accept `ACTOR_SP` (default `1`).
+Set it to a divisor of the GPU count to shard each Actor's unpadded joint
+text/video/audio sequence with Diffusers Ulysses context parallelism:
+
+```bash
+ACTOR_SP=2 bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh
+```
+
+This changes Actor FSDP data parallelism to `NUM_GPUS / ACTOR_SP`; it does not
+change rollout `ROLLOUT_TP` or text-encoder `TEXT_ENCODER_TP`. MiniMax H3 uses
+the uneven-sequence Ulysses path because prompt and reference layouts are not
+padded to a common sequence length. The SP size must also divide the model's
+attention-head count (56 for the released H3 checkpoint). Keep timestep staging
+disabled. FlowGRPO micro-batches must still share one packed layout; sequence
+parallelism does not relax that replay contract.
+
+For a four-GPU Ref2VA run with Actor SP, rollout TP, and text-encoder TP all
+set to `4`, use the 1,000-step preset (the same `MODEL_PATH` and `DATA_DIR`
+requirements apply):
+
+```bash
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_ref2va_lora_sp4.sh
+```
 
 ### NVIDIA GPU
 

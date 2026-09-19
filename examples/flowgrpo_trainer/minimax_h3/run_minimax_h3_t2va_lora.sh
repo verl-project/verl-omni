@@ -11,6 +11,11 @@ CLAP_MODEL_PATH=${CLAP_MODEL_PATH:-laion/larger_clap_general}
 IMAGEBIND_MODEL_PATH=${IMAGEBIND_MODEL_PATH:-.checkpoints/imagebind_huge.pth}
 ACTOR_CONFIG_PATH=${ACTOR_CONFIG_PATH:-$(dirname "$MODEL_PATH")/transformer}
 NUM_GPUS=${NUM_GPUS:-8}
+ACTOR_SP=${ACTOR_SP:-1}
+if (( ACTOR_SP <= 0 || NUM_GPUS % ACTOR_SP != 0 )); then
+    echo "NUM_GPUS (${NUM_GPUS}) must be a positive multiple of ACTOR_SP ($ACTOR_SP)." >&2
+    exit 1
+fi
 ROLLOUT_TP=${ROLLOUT_TP:-2}
 TEXT_ENCODER_TP=${TEXT_ENCODER_TP:-$ROLLOUT_TP}
 REWARD_DEVICE=${REWARD_DEVICE:-cuda}
@@ -75,7 +80,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-    actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=1 \
+    actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=$ACTOR_SP \
     actor_rollout_ref.rollout.name=vllm_omni \
     actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN_3_HUB \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TP \

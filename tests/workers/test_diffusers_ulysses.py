@@ -334,7 +334,140 @@ def _diffusers_ulysses_fwd_bwd(sp_size: int, dp_size: int, backend: str):
 
 
 # =============================================================================
-# 3.  FSDP-wrapped SP forward + backward equivalence test
+# 3.  MiniMax H3 T2VA / FL2VA / Ref2VA SP equivalence
+# =============================================================================
+
+
+def _minimax_h3_inputs(task: str, device: str) -> dict[str, torch.Tensor | bool]:
+    """Build an odd/even packed joint layout for each supported H3 task."""
+    generator = torch.Generator(device=device).manual_seed({"t2va": 11, "fl2va": 12, "ref2va": 13}[task])
+    text_rows = 3
+    condition_video_rows = 0 if task == "t2va" else 1
+    condition_audio_rows = 1 if task == "ref2va" else 0
+    video_rows = condition_video_rows + 2
+    audio_rows = condition_audio_rows + 2
+    seq_len = text_rows + video_rows + audio_rows
+    text_indices = torch.arange(text_rows, device=device)
+    video_indices = torch.arange(text_rows, text_rows + video_rows, device=device)
+    audio_indices = torch.arange(text_rows + video_rows, seq_len, device=device)
+    token_tags = torch.cat(
+        (
+            torch.full((text_rows,), 1, device=device),
+            torch.full((video_rows,), 0, device=device),
+            torch.full((audio_rows,), 2, device=device),
+        )
+    )
+    row_timesteps = torch.full((seq_len,), 0.5, device=device)
+    if condition_video_rows:
+        row_timesteps[video_indices[:condition_video_rows]] = 0.999
+    if condition_audio_rows:
+        row_timesteps[audio_indices[:condition_audio_rows]] = 1.0
+    timesteps, timestep_indices = torch.unique(row_timesteps, sorted=True, return_inverse=True)
+    return {
+        "hidden_states": torch.randn(1, video_rows, 16, generator=generator, device=device),
+        "audio_hidden_states": torch.randn(1, audio_rows, 4, generator=generator, device=device),
+        "encoder_hidden_states": torch.randn(1, text_rows, 16, generator=generator, device=device),
+        "timestep": timesteps,
+        "timestep_indices": timestep_indices,
+        "token_tags": token_tags,
+        "position_ids": torch.zeros(seq_len, 3, device=device),
+        "video_indices": video_indices,
+        "audio_indices": audio_indices,
+        "text_indices": text_indices,
+        "return_dict": False,
+    }
+
+
+@pytest.mark.parametrize("sp_size", [2, 4])
+@pytest.mark.parametrize("backend", _ulysses_backends)
+def test_minimax_h3_ulysses_all_tasks_fwd_bwd(sp_size, backend):
+    """H3 Ulysses Anything must match serial execution for all three task layouts."""
+    if not torch.distributed.is_initialized():
+        initialize_global_process_group()
+
+    world_size = torch.distributed.get_world_size()
+    if world_size < sp_size:
+        pytest.skip(f"Requires ≥ {sp_size} GPUs, found {world_size}")
+    dp_size = world_size // sp_size
+    device = get_device_name()
+
+    from diffusers import ContextParallelConfig, MiniMaxH3Transformer3DModel
+
+    from verl_omni.utils.diffusers_context_parallel import ensure_ulysses_uneven_sequence_backward
+
+    ensure_ulysses_uneven_sequence_backward()
+    ulysses_device_mesh = init_device_mesh(
+        device_type=device,
+        mesh_shape=(dp_size, 1, sp_size),
+        mesh_dim_names=("dp", "ring", "ulysses"),
+    )
+    sp_group = ulysses_device_mesh["ulysses"].get_group()
+    config = dict(
+        in_channels=4,
+        audio_in_channels=4,
+        num_layers=1,
+        num_refiner_layers=1,
+        hidden_size=32,
+        num_attention_heads=sp_size,
+        attention_head_dim=32 // sp_size,
+        ffn_dim=64,
+        text_dim=16,
+        freq_dim=16,
+        time_embed_hidden_dim=32,
+        time_embed_dim=16,
+        rope_freq_dim=1,
+    )
+
+    torch.manual_seed(7)
+    module_sp = MiniMaxH3Transformer3DModel(**config).to(device=device, dtype=torch.float32)
+    module_sp.set_attention_backend(backend)
+    module_sp.enable_parallelism(
+        config=ContextParallelConfig(
+            ulysses_degree=sp_size,
+            mesh=ulysses_device_mesh,
+            ulysses_anything=True,
+        )
+    )
+    sync_model_parameters_global(module_sp)
+
+    module_no_sp = MiniMaxH3Transformer3DModel(**config).to(device=device, dtype=torch.float32)
+    module_no_sp.set_attention_backend(backend)
+    module_no_sp.load_state_dict({name: value.detach().clone() for name, value in module_sp.state_dict().items()})
+
+    sp_losses = []
+    no_sp_losses = []
+    for task in ("t2va", "fl2va", "ref2va"):
+        model_inputs = _minimax_h3_inputs(task, device)
+        output_sp = module_sp(**model_inputs)
+        output_no_sp = module_no_sp(**model_inputs)
+        assert len(output_sp) == len(output_no_sp) == 2
+        for actual, expected in zip(output_sp, output_no_sp, strict=True):
+            torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+        sp_losses.append(sum(output.float().square().mean() for output in output_sp))
+        no_sp_losses.append(sum(output.float().square().mean() for output in output_no_sp))
+
+    loss_sp = torch.stack(sp_losses).mean()
+    loss_no_sp = torch.stack(no_sp_losses).mean()
+    loss_sp.backward()
+    loss_no_sp.backward()
+    torch.testing.assert_close(loss_sp, loss_no_sp, rtol=1e-5, atol=1e-5)
+
+    for parameter in module_sp.parameters():
+        if parameter.grad is not None:
+            torch.distributed.all_reduce(parameter.grad, op=torch.distributed.ReduceOp.SUM, group=sp_group)
+
+    compared = 0
+    for parameter_sp, parameter_no_sp in zip(module_sp.parameters(), module_no_sp.parameters(), strict=True):
+        if parameter_sp.grad is None or parameter_no_sp.grad is None:
+            assert parameter_sp.grad is parameter_no_sp.grad
+            continue
+        torch.testing.assert_close(parameter_sp.grad, parameter_no_sp.grad, rtol=2e-4, atol=2e-5)
+        compared += 1
+    assert compared > 0
+
+
+# =============================================================================
+# 4.  FSDP-wrapped SP forward + backward equivalence test
 # =============================================================================
 
 
