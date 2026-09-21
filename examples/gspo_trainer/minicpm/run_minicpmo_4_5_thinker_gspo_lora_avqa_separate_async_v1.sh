@@ -9,7 +9,7 @@
 # Hyperparameters are copied verbatim from the proven colocated MiniCPM-o AVQA
 # recipe (examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh);
 # only the disaggregation lines differ (trainer mode, GPU split, rollout topology,
-# checkpoint-engine backend, offload flags, memory utilization, staleness pin).
+# checkpoint-engine backend, offload flags, staleness pin).
 #
 # Data preparation (run once, same as the colocated recipe):
 #   python examples/gspo_trainer/data_process/avqa.py \
@@ -73,7 +73,7 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.rollout.n_gpus_per_node=2 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.checkpoint_engine.backend=nccl \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.prompt_length=4160 \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
