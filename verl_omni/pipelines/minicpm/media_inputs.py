@@ -29,6 +29,7 @@ __all__ = [
     "normalize_audio_features",
     "sample_pixel_slices",
     "sample_tgt_sizes",
+    "unwrap_collated",
 ]
 
 
@@ -42,7 +43,7 @@ def batch_audio_feature_lens(value: Any, device: torch.device) -> list[torch.Ten
     Returns:
         List of 1-D ``torch.long`` tensors; empty for an audio-free batch.
     """
-    value = _unwrap_collated(value)
+    value = unwrap_collated(value)
     if _is_empty_audio_features(value):
         return []
     if isinstance(value, torch.Tensor) and value.ndim <= 1:
@@ -62,7 +63,7 @@ def normalize_audio_features(value: Any) -> torch.Tensor | list:
         ``[]`` for an audio-free batch, otherwise a padded ``(n_clips, n_mels, frames)``
         tensor.
     """
-    value = _unwrap_collated(value)
+    value = unwrap_collated(value)
     if _is_empty_audio_features(value):
         return []
     if isinstance(value, torch.Tensor):
@@ -108,13 +109,15 @@ def sample_pixel_slices(pixel_values: Any) -> list[torch.Tensor]:
     Returns:
         Flat list of slice tensors; empty when the sample has no images.
     """
-    pixel_values = _unwrap_collated(pixel_values)
+    pixel_values = unwrap_collated(pixel_values)
     if pixel_values is None:
         return []
     if isinstance(pixel_values, torch.Tensor):
         if pixel_values.numel() == 0:
             return []
-        if pixel_values.ndim >= 3:
+        # Only (n_slices, C, H, W) iterates; a single (C, H, W) slice is one slice,
+        # not C feature maps.
+        if pixel_values.ndim == 4:
             return [slice_tensor.contiguous() for slice_tensor in pixel_values]
         return [pixel_values.contiguous()]
     if isinstance(pixel_values, np.ndarray):
@@ -144,7 +147,7 @@ def sample_tgt_sizes(tgt_sizes: Any, *, device: torch.device) -> torch.Tensor:
     Returns:
         ``int32`` tensor of shape ``(n_slices, 2)``, or ``(0, 2)`` when absent.
     """
-    tgt_sizes = _unwrap_collated(tgt_sizes)
+    tgt_sizes = unwrap_collated(tgt_sizes)
     if tgt_sizes is None or (isinstance(tgt_sizes, (list | tuple)) and not tgt_sizes):
         return torch.zeros(0, 2, dtype=torch.int32, device=device)
     if isinstance(tgt_sizes, list | tuple) and len(tgt_sizes) == 1 and not isinstance(tgt_sizes[0], int | float):
@@ -159,7 +162,7 @@ def sample_tgt_sizes(tgt_sizes: Any, *, device: torch.device) -> torch.Tensor:
     return sizes.reshape(-1, 2).contiguous()
 
 
-def _unwrap_collated(value: Any) -> Any:
+def unwrap_collated(value: Any) -> Any:
     """Normalize DataProto's ragged-collation artifacts to plain containers.
 
     Ragged media (per-slice pixel arrays, variable-length clip lists) is collated
@@ -168,9 +171,9 @@ def _unwrap_collated(value: Any) -> Any:
     ``None`` padding, and keeps everything else in order.
     """
     if isinstance(value, np.ndarray) and value.dtype == object:
-        return _unwrap_collated(value.tolist())
+        return unwrap_collated(value.tolist())
     if isinstance(value, list | tuple):
-        return [item for item in (_unwrap_collated(member) for member in value) if item is not None]
+        return [item for item in (unwrap_collated(member) for member in value) if item is not None]
     return value
 
 
@@ -179,7 +182,7 @@ def _as_tensor(value: Any) -> torch.Tensor:
     if isinstance(value, torch.Tensor):
         return value
     if isinstance(value, np.ndarray) and value.dtype == object:
-        return _as_tensor(_unwrap_collated(value))
+        return _as_tensor(unwrap_collated(value))
     return torch.as_tensor(np.asarray(value))
 
 

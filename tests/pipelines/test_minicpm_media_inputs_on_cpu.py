@@ -19,11 +19,11 @@ import numpy as np
 import torch
 
 from verl_omni.pipelines.minicpm.media_inputs import (
-    _unwrap_collated,
     batch_audio_feature_lens,
     normalize_audio_features,
     sample_pixel_slices,
     sample_tgt_sizes,
+    unwrap_collated,
 )
 
 
@@ -41,11 +41,11 @@ def _collated(*rows):
 
 def test_unwrap_collated_drops_none_and_object_arrays():
     packed = _collated([np.zeros((3, 2, 2)), None], [np.zeros((3, 2, 2))])
-    unwrapped = _unwrap_collated(packed)
+    unwrapped = unwrap_collated(packed)
     assert isinstance(unwrapped, list)
     assert len(unwrapped) == 2 and len(unwrapped[0]) == 1 and len(unwrapped[1]) == 1
-    assert _unwrap_collated(None) is None
-    assert _unwrap_collated(np.zeros((2, 2))) is not None  # numeric arrays pass through
+    assert unwrap_collated(None) is None
+    assert unwrap_collated(np.zeros((2, 2))) is not None  # numeric arrays pass through
 
 
 def test_sample_pixel_slices_accepts_collated_pack_with_none_padding():
@@ -53,6 +53,15 @@ def test_sample_pixel_slices_accepts_collated_pack_with_none_padding():
     slices = sample_pixel_slices(packed)
     assert len(slices) == 3
     assert all(isinstance(item, torch.Tensor) and item.shape == (3, 4, 4) for item in slices)
+
+
+def test_sample_pixel_slices_tensor_forms():
+    # A (n_slices, C, H, W) pack iterates; a single (C, H, W) slice is ONE slice,
+    # not C feature maps (iterating dim 0 would return three (H, W) tensors).
+    nchw = torch.arange(2 * 3 * 4 * 4, dtype=torch.float32).reshape(2, 3, 4, 4)
+    assert [tuple(s.shape) for s in sample_pixel_slices(nchw)] == [(3, 4, 4), (3, 4, 4)]
+    chw = torch.arange(3 * 4 * 4, dtype=torch.float32).reshape(3, 4, 4)
+    assert [tuple(s.shape) for s in sample_pixel_slices(chw)] == [(3, 4, 4)]
 
 
 def test_sample_tgt_sizes_accepts_collated_pack_with_none_padding():

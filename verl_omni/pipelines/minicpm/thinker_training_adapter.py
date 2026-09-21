@@ -320,16 +320,19 @@ def _normalize_media_containers(data: dict[str, Any]) -> None:
         normalize_audio_features,
         sample_pixel_slices,
         sample_tgt_sizes,
+        unwrap_collated,
     )
 
     device = data["input_ids"].device
-    # Per-sample slice lists, including the collated single-batch form.
-    pixel_values = data["pixel_values"]
+    # Unwrap DataProto's ragged collation first: a padded bs>1 batch arrives as an
+    # object-dtype ndarray, which the isinstance checks below would otherwise treat
+    # as one sample and flatten every row's slices onto batch row 0.
+    pixel_values = unwrap_collated(data["pixel_values"])
     if isinstance(pixel_values, (list | tuple)):
         data["pixel_values"] = [sample_pixel_slices(sample) for sample in pixel_values]
     else:
         data["pixel_values"] = [sample_pixel_slices(pixel_values)]
-    tgt_sizes = data["tgt_sizes"]
+    tgt_sizes = unwrap_collated(data["tgt_sizes"])
     if isinstance(tgt_sizes, (list | tuple)):
         data["tgt_sizes"] = [sample_tgt_sizes(sample, device=device) for sample in tgt_sizes]
     # Mel features stack per clip; the lens must stay 1-D tensors for the tower's hstack.

@@ -204,7 +204,9 @@ def patch_minicpm_get_vllm_embedding(module) -> None:
             if len(cur_vs_hs) > 0:
                 cur_image_bound = image_bound[i]
                 if len(cur_image_bound) > 0:
-                    image_indices = torch.stack(
+                    # Spans of different token counts (per-slice grids) are unequal-
+                    # length aranges; cat keeps them in span order, stack would raise.
+                    image_indices = torch.cat(
                         [torch.arange(int(bound[0]), int(bound[1]), dtype=torch.long) for bound in cur_image_bound]
                     ).to(vllm_embedding.device)
                     src = cur_vs_hs.view(-1, cur_vs_hs.shape[-1]).to(device=row.device, dtype=row.dtype)

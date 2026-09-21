@@ -224,6 +224,32 @@ def test_split_minicpm_forward_kwargs_collapses_empty_audio_placeholders():
     assert data["audio_feature_lens"] == []
 
 
+def test_split_minicpm_forward_kwargs_keeps_object_array_batches_per_sample():
+    # The flagged padded-batch shape: DataProto collates ragged media into an
+    # object-dtype ndarray. Without the unwrap, both samples' slices were read as
+    # one sample's and every image landed on batch row 0.
+    import numpy as np
+
+    pixel = np.empty(2, dtype=object)
+    pixel[0] = [torch.zeros(3, 2, 2), torch.zeros(3, 2, 2)]
+    pixel[1] = [torch.zeros(3, 2, 2)]
+    sizes = np.empty(2, dtype=object)
+    sizes[0] = np.array([[2, 2], [2, 2]], dtype=np.int64)
+    sizes[1] = np.array([[2, 2]], dtype=np.int64)
+
+    data, _ = split_minicpm_forward_kwargs(
+        {
+            "input_ids": torch.ones(2, 4, dtype=torch.long),
+            "position_ids": torch.arange(4).repeat(2, 1),
+            "pixel_values": pixel,
+            "tgt_sizes": sizes,
+        }
+    )
+    assert [len(sample) for sample in data["pixel_values"]] == [2, 1]
+    assert all(tuple(slice_.shape) == (3, 2, 2) for sample in data["pixel_values"] for slice_ in sample)
+    assert [sample.tolist() for sample in data["tgt_sizes"]] == [[[2, 2], [2, 2]], [[2, 2]]]
+
+
 def test_split_minicpm_forward_kwargs_rejects_unprepared_packed_batch():
     with pytest.raises(ValueError, match="without going through MiniCPMThinkerAdapter.prepare_model_inputs"):
         split_minicpm_forward_kwargs(
@@ -309,6 +335,35 @@ def test_cloned_vllm_embedding_scatter_supports_backward():
     )
     embeddings.sum().backward()
     assert configured.llm.embed.weight.grad is not None
+
+
+def test_cloned_vllm_embedding_scatters_unequal_span_lengths():
+    # Per-slice grids give spans of different token counts; torch.stack of the
+    # per-span aranges raised on the first mixed-length batch.
+    class _FiveTokenVision(_MiniCPMOWithEncoders):
+        def get_vision_embedding(self, data):
+            del data
+            self.vision_calls += 1
+            return [torch.arange(5 * 4, dtype=torch.float32).reshape(1, 5, 4)]
+
+    module = _FiveTokenVision()
+    configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
+    vision = torch.arange(5 * 4, dtype=torch.float32).reshape(5, 4)
+    id_embedding = configured.llm.embed(torch.tensor([[7, 7, 7, 7, 7, 7]])).detach()
+
+    embeddings, _ = configured.get_vllm_embedding(
+        {
+            "input_ids": torch.tensor([[7, 7, 7, 7, 7, 7]]),
+            "pixel_values": [[torch.zeros(3, 2, 2)]],
+            "tgt_sizes": [torch.tensor([[2, 2]], dtype=torch.int32)],
+            # Spans of lengths 2 and 3, with position 2 left to the id embedding.
+            "image_bound": [torch.tensor([[0, 2], [3, 6]])],
+        }
+    )
+    torch.testing.assert_close(embeddings[0, 0], vision[0])
+    torch.testing.assert_close(embeddings[0, 1], vision[1])
+    torch.testing.assert_close(embeddings[0, 2], id_embedding[0, 2])  # non-span position untouched
+    torch.testing.assert_close(embeddings[0, 3:6], vision[2:5])
 
 
 def test_minicpmo_from_pretrained_patches_then_loads_auto_model(monkeypatch):
