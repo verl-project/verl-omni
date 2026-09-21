@@ -50,6 +50,15 @@ actor_rollout_ref:
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,outputs/profile}
       tool_config:
+        npu:
+          _target_: verl.utils.profiler.config.NPUToolConfig
+          contents: []
+          level: level0
+          analysis: true
+          discrete: false
+          profile_token_start: null
+          profile_token_end: null
+          name: npu
         nsys:
           _target_: verl.utils.profiler.config.NsightToolConfig
           discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
@@ -139,6 +148,15 @@ actor_rollout_ref:
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,outputs/profile}
       tool_config:
+        npu:
+          _target_: verl.utils.profiler.config.NPUToolConfig
+          contents: []
+          level: level0
+          analysis: true
+          discrete: false
+          profile_token_start: null
+          profile_token_end: null
+          name: npu
         nsys:
           _target_: verl.utils.profiler.config.NsightToolConfig
           discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
@@ -163,6 +181,15 @@ actor_rollout_ref:
       ranks: []
       save_path: ${oc.select:global_profiler.save_path,outputs/profile}
       tool_config:
+        npu:
+          _target_: verl.utils.profiler.config.NPUToolConfig
+          contents: []
+          level: level0
+          analysis: true
+          discrete: false
+          profile_token_start: null
+          profile_token_end: null
+          name: npu
         nsys:
           _target_: verl.utils.profiler.config.NsightToolConfig
           discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
@@ -311,6 +338,12 @@ actor_rollout_ref:
     config_path: null
     transformer_subfolder: transformer
     attn_backend: _flash_3_varlen_hub
+    use_regional_compile: false
+    regional_compile_options:
+      backend: inductor
+      mode: default
+      fullgraph: false
+      dynamic: true
     lora_rank: 0
     lora_alpha: 64
     lora_init_weights: gaussian
@@ -405,6 +438,15 @@ reward:
         ranks: []
         save_path: ${oc.select:global_profiler.save_path,outputs/profile}/reward_model
         tool_config:
+          npu:
+            _target_: verl.utils.profiler.config.NPUToolConfig
+            contents: []
+            level: level0
+            analysis: true
+            discrete: false
+            profile_token_start: null
+            profile_token_end: null
+            name: npu
           nsys:
             _target_: verl.utils.profiler.config.NsightToolConfig
             discrete: ${oc.select:global_profiler.global_tool_config.nsys.discrete,false}
