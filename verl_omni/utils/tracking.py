@@ -26,6 +26,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from verl_omni.pipelines.rollout_media import resolve_is_video
 from verl_omni.utils.reward_score.reward_utils import normalize_video_tensor
 
 logger = logging.getLogger(__name__)
@@ -165,31 +166,36 @@ def _export_video(
             audio_path.unlink(missing_ok=True)
 
 
-def wrap_val_samples_for_wandb(samples, fps=24, output_dir=None):
-    """Wrap validation samples and prepare top-level ``wandb`` video media.
+def wrap_val_samples_for_wandb(samples, fps=24, output_dir=None, media_kinds=None):
+    """Wrap validation samples and prepare top-level ``wandb`` media.
 
-    Video outputs in ``[T, C, H, W]``, ``[C, T, H, W]``, or ``[T, H, W, C]``
-    layouts are encoded to mp4 and passed to
-    ``wandb.Video`` by path. Provide ``output_dir`` to keep the media available
-    for asynchronous upload; otherwise a temp dir is returned for cleanup.
-    Optional tuple elements four and five carry audio and its sample rate. The
-    table stores a stable media key because offline ``wandb`` tables do not
-    reliably persist nested videos. Other outputs become ``wandb.Image``.
+    Declared ``media_kinds`` decide whether each output is an image or video;
+    tensor rank is retained only as a compatibility fallback. Video outputs in
+    ``[T, C, H, W]``, ``[C, T, H, W]``, or ``[T, H, W, C]`` layouts are encoded
+    to mp4 and passed to ``wandb.Video`` by path. Provide ``output_dir`` to keep
+    the media available for asynchronous upload; otherwise a temp dir is
+    returned for cleanup. Optional tuple elements four and five carry audio and
+    its sample rate. Media conversion failures are represented in the table and
+    logged instead of propagating into the training loop.
     """
     import wandb
 
+    samples = list(samples)
+    media_kinds = batch_items(media_kinds, len(samples), "media_kind")
     video_dir = output_dir
     video_tmp_dir = None
     wrapped = []
     media_to_log = {}
-    for sample in samples:
+    for sample, media_kind in zip(samples, media_kinds, strict=True):
         inp, out, score = sample[:3]
         audio = sample[3] if len(sample) > 3 else None
         audio_sample_rate = sample[4] if len(sample) > 4 else None
-        if hasattr(out, "ndim") and out.ndim == 5:
+        output_ndim = getattr(out, "ndim", -1)
+        is_video = resolve_is_video(output_ndim, media_kind) if media_kind is not None else output_ndim in (4, 5)
+        if is_video and output_ndim == 5:
             # Batched video [B, T, C, H, W], [B, C, T, H, W], or [B, T, H, W, C].
             out = out[0]
-        if hasattr(out, "ndim") and out.ndim == 4:
+        if is_video:
             try:
                 if video_dir is None:
                     video_tmp_dir = tempfile.mkdtemp(prefix="val_video_")
@@ -205,9 +211,13 @@ def wrap_val_samples_for_wandb(samples, fps=24, output_dir=None):
                 logger.warning("Could not log validation sample %d video: %s", len(wrapped), error)
                 media = f"[validation media unavailable: {type(error).__name__}: {error}]"
         else:
-            if not isinstance(out, torch.Tensor) or out.dtype != torch.uint8:
-                raise ValueError(f"Expected a uint8 image tensor, got {getattr(out, 'dtype', type(out))}.")
-            media = wandb.Image(out, file_type="jpg")
+            try:
+                if not isinstance(out, torch.Tensor) or out.dtype != torch.uint8:
+                    raise ValueError(f"Expected a uint8 image tensor, got {getattr(out, 'dtype', type(out))}.")
+                media = wandb.Image(out, file_type="jpg")
+            except Exception as error:
+                logger.warning("Could not log validation sample %d image: %s", len(wrapped), error)
+                media = f"[validation media unavailable: {type(error).__name__}: {error}]"
         wrapped.append((inp, media, score))
     return wrapped, video_tmp_dir, media_to_log
 

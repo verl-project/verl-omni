@@ -22,6 +22,7 @@ import pytest
 
 pytest.importorskip("verl_omni.pipelines.model_base")
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 
 # (adapter module, architecture, algorithm, primary modality)
 _PRIMARY_MODALITY = [
@@ -50,6 +51,7 @@ _PRIMARY_MODALITY = [
         "image",
     ),
     ("verl_omni.pipelines.sd3_flow_grpo.vllm_omni_rollout_adapter", "StableDiffusion3Pipeline", "flow_grpo", "image"),
+    ("verl_omni.pipelines.flux_dance_grpo.vllm_omni_rollout_adapter", "FluxPipeline", "dance_grpo", "image"),
     ("verl_omni.pipelines.wan22_dance_grpo.vllm_omni_rollout_adapter", "WanPipeline", "dance_grpo", "video"),
     ("verl_omni.pipelines.ltx2_flow_grpo.vllm_omni_rollout_adapter", "LTX2Pipeline", "flow_grpo", "video"),
     ("verl_omni.pipelines.minimax_h3_flow_grpo.vllm_omni_rollout_adapter", "MiniMaxH3Pipeline", "flow_grpo", "video"),
@@ -72,6 +74,19 @@ _JOINT_AUDIO_SAMPLE_RATE = [
     ),
     ("verl_omni.pipelines.ltx2_flow_grpo.vllm_omni_rollout_adapter", "LTX2Pipeline", "flow_grpo", 24000),
 ]
+
+
+@pytest.mark.parametrize(
+    "auxiliary",
+    [
+        (MediaSpec("image"),),
+        (MediaSpec("image"), MediaSpec("audio", sample_rate=48000)),
+        (MediaSpec("audio"), MediaSpec("audio")),
+    ],
+)
+def test_unsupported_auxiliary_declarations_are_rejected(auxiliary):
+    with pytest.raises(ValueError, match="at most one auxiliary audio stream"):
+        DiffusionIOSpec(primary=MediaSpec("video"), auxiliary=auxiliary)
 
 
 @pytest.mark.parametrize(("module", "architecture", "algorithm", "modality"), _PRIMARY_MODALITY)

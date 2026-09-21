@@ -189,6 +189,9 @@ class FSDPDiffusionActorConfig(DiffusionActorConfig):
     fsdp_config: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
     # Stage training inputs from CPU one timestep at a time.
     enable_timestep_staging: bool = False
+    # Defer FSDP reduce-scatter until the last (micro-batch, timestep) backward.
+    # Off by default: unsharded grads sit on GPU until that last backward.
+    use_no_sync_for_gradient_accumulation: bool = False
 
     def __post_init__(self):
         """Validate diffusion FSDP actor configuration parameters."""

@@ -305,10 +305,11 @@ def test_disabled_switch_first_step_reclaims_hybrid_without_waiting():
     assert trainer.checkpoint_manager.sleep_calls == 1
 
 
-def test_disabled_switch_reclaims_hybrid_before_the_warmup_feed():
+def test_disabled_switch_reclaims_hybrid_before_the_warmup_feed(monkeypatch):
     trainer = _trainer(enable_switch=False)
     trainer.config.trainer.v1 = {"separate_async": {"num_warmup_batches": 2}}
     trainer._add_batch_to_generate = lambda: trainer.events.append("feed")
+    monkeypatch.setattr(trainer_module.tq, "kv_list", lambda partition_id: {})
 
     trainer.on_train_begin()
 
@@ -319,10 +320,11 @@ def test_disabled_switch_reclaims_hybrid_before_the_warmup_feed():
     assert trainer.checkpoint_manager.sleep_calls == 1
 
 
-def test_enabled_switch_keeps_hybrid_lent_through_the_warmup_feed():
+def test_enabled_switch_keeps_hybrid_lent_through_the_warmup_feed(monkeypatch):
     trainer = _trainer()
     trainer.config.trainer.v1 = {"separate_async": {"num_warmup_batches": 1}}
     trainer._add_batch_to_generate = lambda: trainer.events.append("feed")
+    monkeypatch.setattr(trainer_module.tq, "kv_list", lambda partition_id: {})
 
     trainer.on_train_begin()
 

@@ -1,6 +1,6 @@
 # Config Explanation
 
-Last updated: 09/14/2026
+Last updated: 09/17/2026
 
 VeRL-Omni builds on [verl](https://github.com/verl-project/verl) and reuses the
 same Hydra config surface for shared RL trainer fields (`data`, FSDP actor /
@@ -145,6 +145,12 @@ actor_rollout_ref:
     transformer_subfolder: transformer
     attn_backend: _flash_3_varlen_hub
     enable_gradient_checkpointing: True
+    use_regional_compile: False
+    regional_compile_options:
+      backend: inductor
+      mode: default
+      fullgraph: False
+      dynamic: True
     lora_rank: 0
     lora_alpha: 64
     lora_init_weights: gaussian
@@ -165,6 +171,8 @@ actor_rollout_ref:
 - `actor_rollout_ref.model.config_path`: Optional transformer config path. If null, backends use `<path>/<transformer_subfolder>`.
 - `actor_rollout_ref.model.transformer_subfolder`: Subfolder with diffusion transformer weights/config (default `transformer`).
 - `actor_rollout_ref.model.attn_backend`: Diffusers attention backend. One of `native`, `_native_npu`, `flash_varlen_hub`, `_flash_3_varlen_hub`. Must stay consistent with `rollout.rollout_attn_backend`.
+- `actor_rollout_ref.model.use_regional_compile`: Compile repeated Diffusers transformer blocks before FSDP2 sharding. This currently requires `actor_rollout_ref.actor.strategy=fsdp2` and `actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=1`.
+- `actor_rollout_ref.model.regional_compile_options`: Keyword arguments forwarded to Diffusers `compile_repeated_blocks` and then to `torch.compile`. By default, `fullgraph=False` permits eager boundaries around code that cannot be compiled, while `dynamic=True` supports input-dependent shapes. Other `torch.compile` keyword arguments can also be supplied after validation for the target workload.
 - `actor_rollout_ref.model.lora_rank`: LoRA rank; `> 0` enables LoRA.
 - `actor_rollout_ref.model.lora_alpha`: LoRA scaling factor.
 - `actor_rollout_ref.model.lora_init_weights`: LoRA init method (default `gaussian`).
