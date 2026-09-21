@@ -138,3 +138,35 @@ def test_layered_collects_fsdp_leaf_lora_when_peft_dump_is_empty(monkeypatch):
     )
     assert list(params) == ["transformer_blocks.0.attn.lora_A.weight"]
     torch.testing.assert_close(params["transformer_blocks.0.attn.lora_A.weight"], torch.ones(2, 4))
+
+
+def test_layered_diffusers_falls_back_for_frozen_non_default_adapter(monkeypatch):
+    """DiffusionNFT syncs a frozen "old" adapter; PEFT's own state-dict lookup misses it."""
+    from contextlib import nullcontext
+
+    import verl_omni.utils.fsdp_utils as fsdp_utils
+
+    module = _peft_dit()
+    module.add_adapter("old", LoraConfig(r=2, lora_alpha=4, target_modules=["to_q"], bias="none"))
+
+    def _version(m):
+        return 2 if m is module else 0
+
+    monkeypatch.setattr(fsdp_utils, "fsdp_version", _version)
+    # Simulate PEFT's adapter-name lookup missing the frozen adapter's tensors even
+    # though they are present in the submodule's own state dict / named_parameters.
+    monkeypatch.setattr(fsdp_utils, "get_peft_model_state_dict", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        "torch.distributed.fsdp.FullyShardedDataParallel.summon_full_params",
+        lambda *args, **kwargs: nullcontext(),
+    )
+
+    params = collect_lora_params(
+        module,
+        layered_summon=True,
+        base_sync_done=True,
+        is_diffusers=True,
+        adapter_name="old",
+    )
+    assert any("lora_" in name and ".old." not in name for name in params)
+    assert all(isinstance(t, torch.Tensor) for t in params.values())

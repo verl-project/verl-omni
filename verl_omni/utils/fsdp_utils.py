@@ -499,6 +499,8 @@ def _layered_summon_lora_params_diffusers(
                     sub_lora_params = get_peft_model_state_dict(
                         peft_model, state_dict=submodule.state_dict(), adapter_name=adapter_name
                     )
+                    if not sub_lora_params:
+                        sub_lora_params = _lora_params_by_name(submodule, adapter_name)
                     sub_lora_params = {
                         f"{block_prefix}.{param_name}": _param_to_cpu(param)
                         for param_name, param in sub_lora_params.items()
