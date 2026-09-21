@@ -611,6 +611,7 @@ colocated script; only the disaggregation lines differ:
 | Rollout topology | TP=2, colocated | `tensor_model_parallel_size=1` → two standalone replicas | independent rollout capacity |
 | `model.lora.merge` | `True` (merged full-weight IPC sync) | `True` — merged full weights via the NCCL engine | accuracy parity with the colocated reference; `False` (adapter deltas, ~100 MB vs ~19 GB per sync) is the later perf flip |
 | `rollout.checkpoint_engine.backend` | — (naive colocated sync) | `nccl` | required non-naive backend |
+| `actor.fsdp_config.param_offload` / `optimizer_offload` | `true` — vacate shared GPUs for the rollout | `false` — dropped, not inherited | trainer GPUs are dedicated |
 | `rollout.gpu_memory_utilization` | 0.7 | 0.8 | rollout GPUs are dedicated |
 | `trainer.v1.sampler.max_off_policy_threshold` | — (default 8) | pinned `8` | one sync cycle; keeps clipfrac readings interpretable |
 

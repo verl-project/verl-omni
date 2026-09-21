@@ -9,7 +9,7 @@
 # Hyperparameters are copied verbatim from the proven colocated MiniCPM-o AVQA
 # recipe (examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh);
 # only the disaggregation lines differ (trainer mode, GPU split, rollout topology,
-# checkpoint-engine backend, memory utilization, staleness pin).
+# checkpoint-engine backend, offload flags, memory utilization, staleness pin).
 #
 # Data preparation (run once, same as the colocated recipe):
 #   python examples/gspo_trainer/data_process/avqa.py \
@@ -66,8 +66,8 @@ python3 -m verl_omni.trainer.main_omni \
     actor_rollout_ref.actor.clip_ratio_c=10.0 \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-    actor_rollout_ref.actor.fsdp_config.param_offload=true \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
+    actor_rollout_ref.actor.fsdp_config.param_offload=false \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=false \
     actor_rollout_ref.rollout.n=16 \
     actor_rollout_ref.rollout.nnodes=1 \
     actor_rollout_ref.rollout.n_gpus_per_node=2 \
