@@ -73,6 +73,9 @@ def test_launcher_splits_gpu_pools():
     assert "trainer.nnodes=1" in settings
     # Rollout GPUs are dedicated, unlike the colocated recipe's 0.7 on shared GPUs.
     assert "actor_rollout_ref.rollout.gpu_memory_utilization=0.8" in settings
+    # Colocated offload is dropped, not inherited: the trainer GPUs are dedicated.
+    assert "actor_rollout_ref.actor.fsdp_config.param_offload=false" in settings
+    assert "actor_rollout_ref.actor.fsdp_config.optimizer_offload=false" in settings
 
 
 def test_launcher_ships_merged_lora_weights():
