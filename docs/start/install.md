@@ -1,6 +1,6 @@
 # Installation
 
-Last updated: 09/09/2026
+Last updated: 09/21/2026
 
 For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`.
 
@@ -91,12 +91,12 @@ VeRL-Omni defaults to **FSDP2** as the training engine for the policy and refere
 
 ### Installing VeOmni alongside vLLM 0.28.0
 
-VeOmni 0.1.11's `gpu` extra pins `torch==2.9.1+cu129`, which conflicts with the `torch==2.13.0` pulled in by `vllm==0.28.0`. A plain `uv pip install veomni[gpu,dit]==0.1.11` therefore fails dependency resolution.
+VeOmni 0.1.12's `gpu` extra pins `torch==2.11.0+cu130`, which conflicts with the `torch==2.13.0` pulled in by `vllm==0.28.0`. A plain `uv pip install veomni[gpu,dit]==0.1.12` therefore fails dependency resolution.
 
 Install it without dependency resolution so the existing torch/vllm stack is preserved, and add the small set of runtime extras that the verl-omni VeOmni engine actually needs (this is the same recipe CI uses):
 
 ```bash
-uv pip install veomni==0.1.11 --no-deps
+uv pip install veomni==0.1.12 --no-deps
 uv pip install torchcodec librosa soundfile av audioread
 ```
 

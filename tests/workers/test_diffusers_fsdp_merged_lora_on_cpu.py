@@ -14,6 +14,7 @@
 """CPU checks for merged-LoRA weight export in the diffusers FSDP engine."""
 
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -200,4 +201,16 @@ def test_adapter_branch_unchanged_when_merge_disabled(monkeypatch):
         is_diffusers=True,
         adapter_name="default",
         layer_prefixes=["layers."],
+    )
+
+
+def test_bagel_pickscore_e2e_uses_merged_lora_like_the_recipe():
+    """Bagel LoRA smoke must merge adapters: vLLM-Omni fused MoT cannot bind *_moe_gen."""
+    repo = Path(__file__).resolve().parents[2]
+    e2e = (repo / "tests/special_e2e/run_flowgrpo_bagel_pickscore.sh").read_text(encoding="utf-8")
+    recipe = (repo / "examples/flowgrpo_trainer/bagel/run_bagel_pickscore_lora.sh").read_text(encoding="utf-8")
+    assert "actor_rollout_ref.model.lora.merge=True" in recipe
+    assert any(
+        "actor_rollout_ref.model.lora.merge=True" in line and not line.lstrip().startswith("#")
+        for line in e2e.splitlines()
     )

@@ -14,6 +14,7 @@
 import logging
 from argparse import Namespace
 from collections.abc import Mapping
+from dataclasses import asdict
 from typing import Any, Optional
 
 import numpy as np
@@ -102,6 +103,34 @@ class DiffusionStrategy(OmniStrategyBase):
         return _GPU_WORKER_EXTENSION
 
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
+        # TODO(vllm-omni#7564): Drop this pin-compat shim; tracked in verl-omni#445.
+        text_encoder_tp = self.server.config.text_encoder_tp_size
+        cli_text_encoder_tp = getattr(args, "text_encoder_tp_size", None)
+        if cli_text_encoder_tp is not None:
+            if text_encoder_tp not in (1, cli_text_encoder_tp):
+                raise ValueError("Conflicting text_encoder_tp_size in rollout config and engine_kwargs.")
+            text_encoder_tp = cli_text_encoder_tp
+
+        parallel_config = engine_args.get("parallel_config")
+        tp_size = self.server.config.tensor_model_parallel_size
+        if parallel_config is not None:
+            parallel_config = dict(parallel_config) if isinstance(parallel_config, Mapping) else asdict(parallel_config)
+            nested_text_encoder_tp = parallel_config.get("text_encoder_tp_size")
+            if nested_text_encoder_tp is not None:
+                if nested_text_encoder_tp != text_encoder_tp and (
+                    cli_text_encoder_tp is not None or text_encoder_tp != 1
+                ):
+                    raise ValueError("Conflicting text_encoder_tp_size in rollout/engine_kwargs and parallel_config.")
+                text_encoder_tp = nested_text_encoder_tp
+            tp_size = parallel_config.get("tensor_parallel_size", tp_size)
+
+        if text_encoder_tp < 1 or text_encoder_tp not in (1, tp_size):
+            raise ValueError(f"text_encoder_tp_size must be 1 or equal to tensor parallel size ({tp_size}).")
+        engine_args["text_encoder_tp_size"] = text_encoder_tp
+        if parallel_config is not None:
+            parallel_config["text_encoder_tp_size"] = text_encoder_tp
+            engine_args["parallel_config"] = parallel_config
+
         import_external_libs(self.server.config.external_lib)
 
         pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
@@ -202,9 +231,8 @@ class DiffusionStrategy(OmniStrategyBase):
     def _diffusion_io_spec(self) -> Optional[DiffusionIOSpec]:
         """Resolve the adapter-declared media I/O spec for the active pipeline.
 
-        The spec lets a diffusion adapter declare its auxiliary media streams
-        (e.g. joint audio and its sample rate) so this strategy does not have to
-        hard-code model-specific tuple positions or sample rates. Returns
+        The spec declares primary modality and the optional joint audio stream's
+        sample rate. The current transport fixes audio at tuple position 1. Returns
         ``None`` when the pipeline (or a bare test server) declares no spec.
         """
         model_config = getattr(self.server, "model_config", None)
@@ -248,15 +276,29 @@ class DiffusionStrategy(OmniStrategyBase):
                     diffusion_output = diffusion_output[key]
                     break
         io_spec = self._diffusion_io_spec()
+        req_output = getattr(final_res, "request_output", None) or final_res
+        request_id = getattr(req_output, "request_id", getattr(final_res, "request_id", "unknown"))
+        model_config = getattr(self.server, "model_config", None)
+        context = (
+            f"pipeline={getattr(model_config, 'architecture', 'unknown')}/"
+            f"{getattr(model_config, 'algorithm', 'unknown')}, request_id={request_id}"
+        )
         audio_sample_rate: Optional[int] = None
         rollout_audio: Any = None
         if isinstance(diffusion_output, tuple | list):
+            expected_streams = 1 + len(io_spec.auxiliary) if io_spec is not None else None
+            if len(diffusion_output) not in (1, 2) or (
+                expected_streams is not None and len(diffusion_output) != expected_streams
+            ):
+                raise ValueError(
+                    f"Unsupported diffusion media tuple ({context}): expected "
+                    f"{expected_streams if expected_streams is not None else '1 or 2'} streams, "
+                    f"got {len(diffusion_output)}"
+                )
             rollout_audio = diffusion_output[1] if len(diffusion_output) > 1 else None
             diffusion_output = diffusion_output[0]
-            if io_spec is not None:
-                audio_spec = next((spec for spec in io_spec.auxiliary if spec.modality == "audio"), None)
-                if audio_spec is not None:
-                    audio_sample_rate = audio_spec.sample_rate
+            if io_spec is not None and io_spec.auxiliary:
+                audio_sample_rate = io_spec.auxiliary[0].sample_rate
         if output_type == "latent":
             diffusion_output = torch.as_tensor(diffusion_output).float()
         else:
@@ -288,8 +330,16 @@ class DiffusionStrategy(OmniStrategyBase):
             # default lives in this shared strategy.
             if audio_sample_rate is not None:
                 extra_fields.setdefault("audio_sample_rate", audio_sample_rate)
+        # Surface the adapter-declared primary media kind so downstream consumers
+        # read the modality instead of inferring it from the response tensor rank.
+        if io_spec is not None:
+            runtime_kind = extra_fields.get("media_kind")
+            if runtime_kind is not None and runtime_kind != io_spec.primary.modality:
+                raise ValueError(
+                    f"Conflicting media_kind ({context}): expected {io_spec.primary.modality!r}, got {runtime_kind!r}"
+                )
+            extra_fields["media_kind"] = io_spec.primary.modality
 
-        req_output = getattr(final_res, "request_output", None) or final_res
         if hasattr(req_output, "outputs") and req_output.outputs:
             finish_reason = req_output.outputs[0].finish_reason or "stop"
         elif hasattr(req_output, "finish_reason"):

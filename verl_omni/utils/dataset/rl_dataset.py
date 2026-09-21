@@ -14,8 +14,12 @@
 """RLHF Dataset for diffusion model training."""
 
 import logging
+import os
+import re
+from io import BytesIO
 
 from omegaconf import DictConfig
+from PIL import Image
 from verl.trainer.ppo.utils import create_rl_dataset as _upstream_create_rl_dataset
 from verl.trainer.ppo.utils import create_rl_sampler as _upstream_create_rl_sampler
 from verl.utils.dataset.rl_dataset import RLHFDataset as _UpstreamRLHFDataset
@@ -45,9 +49,94 @@ class RLHFDataset(_UpstreamRLHFDataset):
     """
 
     def __init__(self, *args, config: DictConfig, **kwargs):
-        super().__init__(*args, config=config, **kwargs)
-        # For diffusion model training only.
+        # _build_messages also runs during upstream prompt filtering.
         self.negative_prompt_key = config.get("negative_prompt_key", "negative_prompt")
+        super().__init__(*args, config=config, **kwargs)
+
+    def _build_messages(self, example: dict, key: str):
+        """Build structured messages without requiring a processor for media transport.
+
+        Adapted from verl.utils.dataset.rl_dataset.RLHFDataset._build_messages;
+        retain its media formats and count checks without its processor guard.
+        """
+        messages = example[key]
+        # Text-only negative prompts do not consume the positive condition media.
+        if (
+            self.processor is None
+            and key == self.negative_prompt_key
+            and all(
+                isinstance(message["content"], str)
+                and not any(token in message["content"] for token in ("<image>", "<video>", "<audio>"))
+                for message in messages
+            )
+        ):
+            return messages
+
+        images = example.get(self.image_key) or []
+        videos = example.get(self.video_key) or []
+        audios = example.get(self.audio_key) or []
+        image_offset, video_offset, audio_offset = 0, 0, 0
+        for message in messages:
+            if not images and not videos and not audios:
+                continue
+            content = message["content"]
+            if not isinstance(content, str):
+                continue
+
+            content_list = []
+            segments = re.split("(<image>|<video>|<audio>)", content)
+            for segment in (item for item in segments if item != ""):
+                if segment == "<image>":
+                    assert image_offset < len(images), f"image_offset {image_offset} >= len(images) {len(images)}"
+                    image = images[image_offset]
+                    if isinstance(image, Image.Image):
+                        content_list.append({"type": "image", "image": image.convert("RGB")})
+                    elif isinstance(image, dict):
+                        if "bytes" in image:
+                            image["image"] = Image.open(BytesIO(image["bytes"]))
+                        content_list.append({"type": "image", **image})
+                    elif isinstance(image, str | os.PathLike):
+                        content_list.append({"type": "image", "image": os.fspath(image)})
+                    else:
+                        raise TypeError(
+                            f"image must be dict, PIL.Image, or path-like, unsupported image type: {type(image)}"
+                        )
+                    image_offset += 1
+                elif segment == "<video>":
+                    assert video_offset < len(videos), f"video_offset {video_offset} >= len(videos) {len(videos)}"
+                    video = videos[video_offset]
+                    if isinstance(video, dict):
+                        content_list.append({"type": "video", **video})
+                    elif isinstance(video, str | os.PathLike):
+                        content_list.append({"type": "video", "video": os.fspath(video)})
+                    elif isinstance(video, list):
+                        video = [os.fspath(frame) if isinstance(frame, os.PathLike) else frame for frame in video]
+                        content_list.append({"type": "video", "video": video})
+                    else:
+                        raise TypeError(
+                            f"video must be dict, list, or path-like, unsupported video type: {type(video)}"
+                        )
+                    video_offset += 1
+                elif segment == "<audio>":
+                    assert audio_offset < len(audios), f"audio_offset {audio_offset} >= len(audios) {len(audios)}"
+                    audio = audios[audio_offset]
+                    if isinstance(audio, dict):
+                        payload = dict(audio)
+                        payload["type"] = "audio"
+                        if "audio" not in payload and "audio_url" not in payload:
+                            payload = {"type": "audio", "audio": audio}
+                        content_list.append(payload)
+                    else:
+                        content_list.append({"type": "audio", "audio": audio})
+                    audio_offset += 1
+                else:
+                    content_list.append({"type": "text", "text": segment})
+            message["content"] = content_list
+
+        assert image_offset == len(images), f"image_offset {image_offset} != len(images) {len(images)}"
+        assert video_offset == len(videos), f"video_offset {video_offset} != len(videos) {len(videos)}"
+        assert audio_offset == len(audios), f"audio_offset {audio_offset} != len(audios) {len(audios)}"
+        return messages
 
     def __getitem__(self, item):
         """For rollout, apply_chat_template has been moved to AgentLoop, so we only return raw_prompt here."""

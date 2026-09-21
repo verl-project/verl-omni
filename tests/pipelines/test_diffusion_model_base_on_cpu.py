@@ -13,6 +13,8 @@
 # limitations under the License.
 """CPU tests for DiffusionModelBase registration and dispatch."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from verl_omni.pipelines.model_base import DiffusionModelBase, VllmOmniPipelineBase
@@ -79,6 +81,28 @@ class TestDiffusionModelBaseRegistry:
         # Decorator must return the original class
         assert _Impl.__name__ == "_Impl"
         assert issubclass(_Impl, DiffusionModelBase)
+
+    def test_fsdp_ignore_hook_defaults_to_empty_list(self):
+        """The hook is declared on the base: adapters opt in, others declare nothing."""
+        assert DiffusionModelBase.get_fsdp_ignored_module_names(SimpleNamespace()) == []
+
+        @DiffusionModelBase.register("_TestIgnoreArch_CPU", algorithm="flow_grpo")
+        class _Impl(DiffusionModelBase):
+            @classmethod
+            def build_scheduler(cls, model_config):
+                pass
+
+            @classmethod
+            def set_timesteps(cls, scheduler, model_config, device):
+                pass
+
+            @classmethod
+            def prepare_model_inputs(cls, module, model_config, *args, **kwargs):
+                pass
+
+        # An adapter that does not opt in inherits the empty default.
+        cfg = _make_model_config("_TestIgnoreArch_CPU")
+        assert DiffusionModelBase.get_class(cfg).get_fsdp_ignored_module_names(cfg) == []
 
 
 class TestVllmOmniPipelineBaseRegistry:

@@ -14,7 +14,7 @@
 
 import logging
 import os
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -26,6 +26,28 @@ from verl.utils import tensordict_utils as tu
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+
+def diffusion_persisted_tq_fields(
+    algorithm: Literal["policy_gradient", "direct_preference"],
+) -> list[str]:
+    """Return trainer-computed fields persisted after a diffusion update."""
+    if algorithm == "policy_gradient":
+        return ["old_log_probs", "advantages", "returns", "sample_level_scores", "sample_level_rewards"]
+    if algorithm == "direct_preference":
+        return ["sample_level_scores", "sample_level_rewards"]
+    raise ValueError(f"Unsupported diffusion trainer algorithm: {algorithm}")
+
+
+def diffusion_metric_tq_fields(
+    algorithm: Literal["policy_gradient", "direct_preference"],
+) -> list[str]:
+    """Return fields persisted and consumed by diffusion metric computation."""
+    if algorithm == "policy_gradient":
+        return ["sample_level_rewards", "sample_level_scores", "advantages", "returns", "uid", "extra_fields"]
+    if algorithm == "direct_preference":
+        return ["sample_level_rewards", "sample_level_scores", "uid", "extra_fields"]
+    raise ValueError(f"Unsupported diffusion trainer algorithm: {algorithm}")
 
 
 def _unwrap_non_tensor_item(item: Any) -> Any:
@@ -91,12 +113,15 @@ def _stack_field(value: Any, padding: float = 0.0) -> torch.Tensor | None:
 def diffusion_tq_batch_to_dataproto(
     batch_meta: KVBatchMeta,
     pad_token_id: int = 0,
+    select_fields: list[str] | None = None,
 ) -> DataProto:
-    """Read selected TQ rows and assemble a diffusion ``DataProto``.
+    """Read TQ rows and assemble a diffusion ``DataProto``.
 
     Args:
         batch_meta: ``KVBatchMeta`` returned by ``ReplayBuffer.sample``.
         pad_token_id: Padding token id for variable-length prompt token tensors.
+        select_fields: Optional TQ fields to retrieve. ``None`` preserves the
+            full-payload behavior required by training and validation.
 
     Returns:
         ``DataProto`` whose ``batch`` carries diffusion tensors (prompts,
@@ -109,6 +134,7 @@ def diffusion_tq_batch_to_dataproto(
     data = tq.kv_batch_get(
         keys=keys,
         partition_id=partition_id,
+        select_fields=select_fields,
     )
 
     batch_dict: dict[str, torch.Tensor] = {}
@@ -136,7 +162,7 @@ def diffusion_tq_batch_to_dataproto(
                 continue
             for k, v in extra.items():
                 if k not in non_tensor_batch:
-                    non_tensor_batch[k] = np.empty(len(extra_fields_arr), dtype=object)
+                    non_tensor_batch[k] = np.full(len(extra_fields_arr), None, dtype=object)
                 non_tensor_batch[k][i] = v
 
     batch = TensorDict(batch_dict, batch_size=len(keys))

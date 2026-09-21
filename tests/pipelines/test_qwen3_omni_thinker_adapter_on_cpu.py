@@ -419,7 +419,7 @@ def test_peft_wrapped_model_forwards():
     )
 
 
-def test_omni_model_base_fsdp_ignore_hook_defaults_to_none():
+def test_omni_model_base_fsdp_ignore_hook_defaults_to_empty_list():
     """The hook is declared on the base: adapters opt in, others declare nothing."""
     from verl_omni.pipelines.model_base import OmniModelBase
 

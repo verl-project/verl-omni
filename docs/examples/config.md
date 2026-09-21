@@ -1,6 +1,6 @@
 # Config Explanation
 
-Last updated: 09/01/2026
+Last updated: 09/17/2026
 
 VeRL-Omni builds on [verl](https://github.com/verl-project/verl) and reuses the
 same Hydra config surface for shared RL trainer fields (`data`, FSDP actor /
@@ -145,6 +145,12 @@ actor_rollout_ref:
     transformer_subfolder: transformer
     attn_backend: _flash_3_varlen_hub
     enable_gradient_checkpointing: True
+    use_regional_compile: False
+    regional_compile_options:
+      backend: inductor
+      mode: default
+      fullgraph: False
+      dynamic: True
     lora_rank: 0
     lora_alpha: 64
     lora_init_weights: gaussian
@@ -165,6 +171,8 @@ actor_rollout_ref:
 - `actor_rollout_ref.model.config_path`: Optional transformer config path. If null, backends use `<path>/<transformer_subfolder>`.
 - `actor_rollout_ref.model.transformer_subfolder`: Subfolder with diffusion transformer weights/config (default `transformer`).
 - `actor_rollout_ref.model.attn_backend`: Diffusers attention backend. One of `native`, `_native_npu`, `flash_varlen_hub`, `_flash_3_varlen_hub`. Must stay consistent with `rollout.rollout_attn_backend`.
+- `actor_rollout_ref.model.use_regional_compile`: Compile repeated Diffusers transformer blocks before FSDP2 sharding. This currently requires `actor_rollout_ref.actor.strategy=fsdp2` and `actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=1`.
+- `actor_rollout_ref.model.regional_compile_options`: Keyword arguments forwarded to Diffusers `compile_repeated_blocks` and then to `torch.compile`. By default, `fullgraph=False` permits eager boundaries around code that cannot be compiled, while `dynamic=True` supports input-dependent shapes. Other `torch.compile` keyword arguments can also be supplied after validation for the target workload.
 - `actor_rollout_ref.model.lora_rank`: LoRA rank; `> 0` enables LoRA.
 - `actor_rollout_ref.model.lora_alpha`: LoRA scaling factor.
 - `actor_rollout_ref.model.lora_init_weights`: LoRA init method (default `gaussian`).
@@ -232,6 +240,28 @@ VeOmni engine path (`strategy=veomni`) adds `veomni_config` / VeOmni optimizer f
 ### `actor_rollout_ref.rollout` — `DiffusionRolloutConfig`
 
 Diffusion-specific blocks sit under `pipeline`, `algo`, and `val_kwargs`. Several engine knobs are shared with verl vLLM rollout but have diffusion defaults.
+
+#### Text-encoder tensor parallelism
+
+`actor_rollout_ref.rollout.text_encoder_tp_size` (default `1`) controls encoder
+sharding for supporting diffusion pipelines. Use `1` or exactly
+`actor_rollout_ref.rollout.tensor_model_parallel_size`; intermediate subgroups
+are rejected for the pinned backend.
+
+```bash
+actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
+actor_rollout_ref.rollout.text_encoder_tp_size=4
+```
+
+NFT and FlowGRPO share this path. The field reaches the fused engine's
+`OmniDiffusionConfig.parallel_config.text_encoder_tp_size`; it is independent
+of CPU/layerwise offload. H3 launchers default `TEXT_ENCODER_TP` to `ROLLOUT_TP`.
+
+The legacy `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.text_encoder_tp_size`
+override is still accepted and overrides the typed default of `1`. Conflicting
+non-default typed and legacy values raise an error. If an explicit
+`parallel_config` provides ETP, it must agree with any requested override;
+otherwise its value is preserved. Prefer the typed field without `+`.
 
 #### Pipeline — `DiffusionPipelineConfig`
 

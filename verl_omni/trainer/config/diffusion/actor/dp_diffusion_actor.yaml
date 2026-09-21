@@ -31,5 +31,9 @@ strategy: fsdp
 # Stage training inputs from CPU per timestep; see the Qwen-Image recipe README.
 enable_timestep_staging: false
 
+# Skip FSDP gradient reduce-scatter on non-final (micro-batch, timestep) backwards.
+# Off by default because peak memory is higher until the last backward.
+use_no_sync_for_gradient_accumulation: false
+
 # Gradient clipping for actor updates, specific to the strategy.
 grad_clip: 1.0

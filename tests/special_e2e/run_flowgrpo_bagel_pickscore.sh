@@ -2,7 +2,12 @@
 # FlowGRPO BAGEL PickScore LoRA e2e smoke test (minimal runtime), vllm_omni rollout.
 #
 # Covers: Bagel NonDiffusers load -> vllm_omni BagelPipeline rollout ->
-# PickScore reward -> flow_grpo LoRA on *_moe_gen -> FSDP sync.
+# PickScore reward -> flow_grpo LoRA on *_moe_gen -> merged-weight FSDP sync.
+#
+# Must use actor_rollout_ref.model.lora.merge=True like
+# examples/flowgrpo_trainer/bagel/run_bagel_pickscore_lora.sh. Adapter-only
+# collect cannot dump *_moe_gen LoRA after FSDP leaf wrap, and vLLM-Omni fused
+# MoT cannot bind those adapters (#552).
 #
 # Requires: vllm-omni
 #   Builds offline if missing:
@@ -98,6 +103,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \
     actor_rollout_ref.model.lora_dtype=float32 \
+    actor_rollout_ref.model.lora.merge=True \
     actor_rollout_ref.model.target_modules="['q_proj_moe_gen','k_proj_moe_gen','v_proj_moe_gen','o_proj_moe_gen','mlp_moe_gen.gate_proj','mlp_moe_gen.up_proj','mlp_moe_gen.down_proj']" \
     actor_rollout_ref.model.fsdp_layer_prefixes="['layers.']" \
     actor_rollout_ref.actor.optim.lr=1e-4 \

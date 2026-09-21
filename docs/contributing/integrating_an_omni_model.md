@@ -66,10 +66,10 @@ adapt each implementation to your model's architecture:
   submodule name components to leave unsharded under FSDP2; default `[]`.
   Declare the frozen encoders when they *stay in the module graph* but their
   forward is skipped for some micro-batches — an unsharded forward emits no
-  collectives, so skipping it cannot desync the ranks. MiniCPM-o returns
-  `["apm", "vpm", "resampler"]`. Ignored parameters must stay frozen: FSDP2
-  does not synchronize their gradients. FSDP2 only — under `strategy=fsdp` the
-  engine raises when the list is non-empty.
+  collectives, so skipping it cannot desync the ranks (e.g. the MiniCPM-o
+  adapter in #572 returns `["apm", "vpm", "resampler"]`). Ignored parameters
+  must stay frozen: FSDP2 does not synchronize their gradients. FSDP2 only —
+  under `strategy=fsdp` the engine raises when the list is non-empty.
 
 - **`register_auto_classes()`** (optional): Register classes supplied by an
   optional model package with the appropriate Transformers Auto APIs. The model

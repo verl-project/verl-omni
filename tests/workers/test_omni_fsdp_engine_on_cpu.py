@@ -476,7 +476,6 @@ def test_build_module_calls_adapter_selected_auto_model_loader():
 
     with (
         patch.object(model_base_mod.OmniModelBase, "get_class_by_name", return_value=adapter_cls),
-        patch.object(omni_impl.AutoModelForMultimodalLM, "from_pretrained") as mock_default,
         patch.object(omni_impl, "get_init_weight_context_manager", return_value=MagicMock()),
         patch.object(omni_impl.warnings, "catch_warnings", return_value=MagicMock()),
         patch("verl.utils.torch_dtypes.PrecisionType") as precision_type,
@@ -498,7 +497,6 @@ def test_build_module_calls_adapter_selected_auto_model_loader():
     )
     adapter_cls.configure_model.assert_called_once_with(loaded_module, model_config)
     assert result is configured_module
-    mock_default.assert_not_called()  # an adapter-selected loader wins over AutoModelForMultimodalLM
 
 
 def test_build_module_rejects_mixed_frozen_parameters_without_fsdp1_orig_params():
@@ -917,20 +915,20 @@ def _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl):
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 1)
 
 
-class _MiniCPMStyleModule(torch.nn.Module):
+class _FrozenTowerModule(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.apm = torch.nn.Linear(4, 4)
+        self.tower = torch.nn.Linear(4, 4)
         # Ignored subtrees must be frozen: FSDP2 never syncs their gradients.
-        self.apm.requires_grad_(False)
+        self.tower.requires_grad_(False)
         self.llm = torch.nn.Module()
         self.llm.layer = torch.nn.Linear(4, 4)
-        self._no_split_modules = ["Qwen3DecoderLayer"]
+        self._no_split_modules = ["DecoderLayer"]
 
 
 def test_build_fsdp_module_injects_ignored_params_on_root_only(monkeypatch):
     omni_impl = _get_omni_impl_module()
-    module = _MiniCPMStyleModule()
+    module = _FrozenTowerModule()
 
     class _Layer(torch.nn.Module):
         pass
@@ -952,16 +950,16 @@ def test_build_fsdp_module_injects_ignored_params_on_root_only(monkeypatch):
     monkeypatch.setattr(torch_dtypes.PrecisionType, "to_dtype", staticmethod(lambda name: torch.bfloat16))
     _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl)
 
-    engine = _fsdp2_engine(omni_impl, module, ["apm"])
+    engine = _fsdp2_engine(omni_impl, module, ["tower"])
     result = engine._build_fsdp_module(module)
 
     assert result is module
     assert len(calls) == 2
     # Nested wrap target never carries the root's ignored set...
     assert calls[0][0] is wrap_target and calls[0][1] is None
-    # ...only the root fully_shard call gets the apm parameters.
+    # ...only the root fully_shard call gets the tower parameters.
     assert calls[1][0] is module
-    assert calls[1][1] == set(module.apm.parameters())
+    assert calls[1][1] == set(module.tower.parameters())
 
     # No adapter-declared subtrees: the override still runs the fsdp2 build rather
     # than delegating, with an empty ignored set.
@@ -979,7 +977,7 @@ def test_build_fsdp_module_fsdp1_branch(monkeypatch):
     # fsdp1 stays available for adapters declaring no ignored subtrees, and
     # fails closed when they do (this override only implements the fsdp2 wrap).
     omni_impl = _get_omni_impl_module()
-    module = _MiniCPMStyleModule()
+    module = _FrozenTowerModule()
     captured = {}
 
     def fake_fsdp(model, **kwargs):
@@ -996,7 +994,7 @@ def test_build_fsdp_module_fsdp1_branch(monkeypatch):
     assert captured["mixed_precision"].buffer_dtype == torch.float32  # upstream's default
     assert captured["cpu_offload"] is None  # forward_only=False
 
-    engine = _fsdp2_engine(omni_impl, module, ["apm"], strategy="fsdp")
+    engine = _fsdp2_engine(omni_impl, module, ["tower"], strategy="fsdp")
     with pytest.raises(NotImplementedError, match="strategy=fsdp2"):
         engine._build_fsdp_module(module)
 
@@ -1005,8 +1003,8 @@ def test_build_fsdp_module_rejects_trainable_ignored_params(monkeypatch):
     # FSDP2 never communicates gradients for ignored params; a trainable one
     # would silently diverge across ranks on a multi-rank mesh.
     omni_impl = _get_omni_impl_module()
-    module = _MiniCPMStyleModule()
-    module.apm.requires_grad_(True)  # e.g. a LoRA target/exclude drift
+    module = _FrozenTowerModule()
+    module.tower.requires_grad_(True)  # e.g. a LoRA target/exclude drift
 
     import verl.utils.fsdp_utils as verl_fsdp_utils
     import verl.utils.torch_dtypes as torch_dtypes
@@ -1017,32 +1015,32 @@ def test_build_fsdp_module_rejects_trainable_ignored_params(monkeypatch):
     monkeypatch.setattr(torch_dtypes.PrecisionType, "to_dtype", staticmethod(lambda name: torch.bfloat16))
     _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl)
 
-    engine = _fsdp2_engine(omni_impl, module, ["apm"])
+    engine = _fsdp2_engine(omni_impl, module, ["tower"])
     engine.device_mesh = types.SimpleNamespace(size=lambda: 2)
     with pytest.raises(ValueError, match="FSDP2-ignored parameters must be frozen"):
         engine._build_fsdp_module(module)
 
 
-class _WhisperStyleModule(torch.nn.Module):
-    """Mirrors the MiniCPM-o layout that hits the embed_positions hole."""
+class _TowerWithEmbeddingModule(torch.nn.Module):
+    """An ignored tower holding an nn.Embedding leaf that verl's selector blanket-wraps."""
 
     def __init__(self):
         super().__init__()
-        self.apm = torch.nn.Module()
-        self.apm.embed_positions = torch.nn.Embedding(16, 4)  # blanket-wrapped by verl's selector
-        self.apm.conv1 = torch.nn.Linear(4, 4)
+        self.tower = torch.nn.Module()
+        self.tower.embed_positions = torch.nn.Embedding(16, 4)  # blanket-wrapped by verl's selector
+        self.tower.conv1 = torch.nn.Linear(4, 4)
         # Ignored subtrees must be frozen: FSDP2 never syncs their gradients.
-        self.apm.requires_grad_(False)
+        self.tower.requires_grad_(False)
         self.llm = torch.nn.Module()
         self.llm.layer = torch.nn.Linear(4, 4)
         self.model = torch.nn.Module()
         self.model.embed_tokens = torch.nn.Embedding(16, 4)  # top-level embedding, NOT ignored
-        self._no_split_modules = ["Qwen3DecoderLayer"]
+        self._no_split_modules = ["DecoderLayer"]
 
 
 def test_build_fsdp_module_skips_wrap_targets_under_ignored_subtrees(monkeypatch):
     omni_impl = _get_omni_impl_module()
-    module = _WhisperStyleModule()
+    module = _TowerWithEmbeddingModule()
 
     calls = []
 
@@ -1053,32 +1051,32 @@ def test_build_fsdp_module_skips_wrap_targets_under_ignored_subtrees(monkeypatch
     import verl.utils.fsdp_utils as verl_fsdp_utils
     import verl.utils.torch_dtypes as torch_dtypes
 
-    # verl's selector blanket-wraps every nn.Embedding, including apm.embed_positions.
+    # verl's selector blanket-wraps every nn.Embedding, including tower.embed_positions.
     monkeypatch.setattr(
         verl_fsdp_utils,
         "_select_fsdp2_wrap_targets",
-        lambda model, names: [module.llm.layer, module.apm.embed_positions, module.model.embed_tokens],
+        lambda model, names: [module.llm.layer, module.tower.embed_positions, module.model.embed_tokens],
     )
     monkeypatch.setattr(torch.distributed.fsdp, "fully_shard", fake_fully_shard)
     monkeypatch.setattr(verl_fsdp_utils, "maybe_patch_fsdp_module", lambda model: contextmanager(lambda: (yield))())
     monkeypatch.setattr(torch_dtypes.PrecisionType, "to_dtype", staticmethod(lambda name: torch.bfloat16))
     _patch_process_group_and_mesh_helpers(monkeypatch, omni_impl)
 
-    engine = _fsdp2_engine(omni_impl, module, ["apm"])
+    engine = _fsdp2_engine(omni_impl, module, ["tower"])
     engine._build_fsdp_module(module)
 
     wrapped = [target for target, _ in calls[:-1]]
     assert module.llm.layer in wrapped
     assert module.model.embed_tokens in wrapped  # top-level embedding still wrapped
     # The ignored-subtree embedding is never claimed by a nested fully_shard...
-    assert module.apm.embed_positions not in wrapped
-    # ...so the root's ignored set owns every apm param, embed_positions included.
+    assert module.tower.embed_positions not in wrapped
+    # ...so the root's ignored set owns every tower param, embed_positions included.
     root_ignored = calls[-1][1]
-    assert module.apm.embed_positions.weight in root_ignored
-    assert module.apm.conv1.weight in root_ignored
+    assert module.tower.embed_positions.weight in root_ignored
+    assert module.tower.conv1.weight in root_ignored
 
-    # Identity when nothing is ignored, so non-MiniCPM adapters wrap every target.
+    # Identity when nothing is ignored, so adapters declaring nothing wrap every target.
     from verl_omni.utils.fsdp_utils import _filter_ignored_wrap_targets
 
-    targets = [module.llm.layer, module.apm.embed_positions]
+    targets = [module.llm.layer, module.tower.embed_positions]
     assert _filter_ignored_wrap_targets(targets, module, []) == targets

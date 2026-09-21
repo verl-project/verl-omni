@@ -100,7 +100,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.max_num_seqs=1 \
     actor_rollout_ref.rollout.rollout_attn_backend="$ROLLOUT_ATTN_BACKEND" \
     actor_rollout_ref.rollout.tensor_model_parallel_size="$ROLLOUT_TP" \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.text_encoder_tp_size="$TEXT_ENCODER_TP" \
+    actor_rollout_ref.rollout.text_encoder_tp_size="$TEXT_ENCODER_TP" \
     +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.enable_layerwise_offload=True \
     actor_rollout_ref.rollout.n="$ROLLOUT_N" \
     actor_rollout_ref.rollout.seed=42 \

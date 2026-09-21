@@ -260,6 +260,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
     def _build_fsdp_module(self, module):
         # TODO(ziheng): need to improve
+        # Faithful copy of verl's FSDPEngine._build_fsdp_module; deltas are DIFF-marked.
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
         from verl.utils.torch_dtypes import PrecisionType
 
