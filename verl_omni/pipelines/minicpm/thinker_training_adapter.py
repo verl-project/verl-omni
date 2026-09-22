@@ -336,13 +336,15 @@ def _normalize_media_containers(data: dict[str, Any]) -> None:
     if isinstance(tgt_sizes, (list | tuple)):
         data["tgt_sizes"] = [sample_tgt_sizes(sample, device=device) for sample in tgt_sizes]
     # Mel features stack per clip; the lens must stay 1-D tensors for the tower's hstack.
-    data["audio_features"] = normalize_audio_features(data.get("audio_features"))
-    if data["audio_features"] == []:
-        # An empty-features/nonnull-lens inconsistency is laundered into "no audio"
-        # here; the dangerous direction is caught fail-closed in _apply_media_bounds.
-        data["audio_feature_lens"] = []
-    else:
+    audio_features = normalize_audio_features(data.get("audio_features"))
+    data["audio_features"] = audio_features
+    if isinstance(audio_features, torch.Tensor):
         data["audio_feature_lens"] = batch_audio_feature_lens(data.get("audio_feature_lens"), device)
+    else:
+        # The empty list means no audio; an empty-features/nonnull-lens inconsistency
+        # is laundered into "no audio" here — the dangerous direction is caught
+        # fail-closed in _apply_media_bounds.
+        data["audio_feature_lens"] = []
 
 
 def _apply_media_bounds(data: dict[str, Any], model_config) -> None:

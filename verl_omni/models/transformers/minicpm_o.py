@@ -134,7 +134,8 @@ def patch_minicpm_get_vision_embedding(module) -> None:
             return _original(data)
         pixel_values = data.get("pixel_values") if isinstance(data, dict) else None
         if not _has_pixel_slices(pixel_values):
-            return [[] for _ in (pixel_values or [])]
+            rows = pixel_values if isinstance(pixel_values, (list | tuple)) else []
+            return [[] for _ in rows]
         import torch
 
         def _row(values, tgt_size):
@@ -197,7 +198,9 @@ def patch_minicpm_get_vllm_embedding(module) -> None:
 
         rows = []
         batch_size = len(data["input_ids"])
-        image_bound = data.get("image_bound") or [[] for _ in range(batch_size)]
+        image_bound = data.get("image_bound")
+        if image_bound is None:
+            image_bound = [[] for _ in range(batch_size)]
         for i in range(batch_size):
             row = vllm_embedding[i].clone()
             cur_vs_hs = vision_hidden_states[i] if i < len(vision_hidden_states) else []
@@ -263,7 +266,9 @@ def patch_minicpm_get_audio_embedding(module) -> None:
             )
             return original(data, chunk_length=chunk_length, dummy=dummy, **kwargs)
 
-        lens_raw = data.get("audio_feature_lens") or []
+        lens_raw = data.get("audio_feature_lens")
+        if lens_raw is None:
+            lens_raw = []
         flat_lens = [int(length) for row in lens_raw for length in torch.as_tensor(row).reshape(-1).tolist()]
         if len(flat_lens) != len(features):
             raise ValueError(f"Audio clips ({len(features)}) and audio_feature_lens ({len(flat_lens)}) disagree.")
@@ -436,7 +441,7 @@ def _wrap_whisper_attn_forward(attn_module) -> None:
 
 
 def _has_pixel_slices(pixel_values) -> bool:
-    if pixel_values is None or pixel_values == []:
+    if pixel_values is None or (isinstance(pixel_values, (list | tuple)) and not pixel_values):
         return False
     if isinstance(pixel_values, (list | tuple)):
         return any(_has_pixel_slices(sample) for sample in pixel_values)

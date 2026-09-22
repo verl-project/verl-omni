@@ -439,6 +439,34 @@ class _VisionTowerModule(torch.nn.Module):
         return rows
 
 
+def test_patched_get_vllm_embedding_accepts_bare_bound_tensor():
+    # A collated (N, 2) image_bound tensor must not be bool()'d by an `or`
+    # default — bool of a multi-element tensor raises.
+    from types import SimpleNamespace
+
+    class _Embeds(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.llm = SimpleNamespace(
+                model=SimpleNamespace(embed_tokens=nn.Embedding(8, 4)),
+                config=SimpleNamespace(),
+            )
+
+        def get_vision_embedding(self, data):
+            del data
+            return [[]]
+
+    module = _Embeds()
+    minicpm_o.patch_minicpm_get_vllm_embedding(module)
+    embeddings, _ = module.get_vllm_embedding(
+        {
+            "input_ids": torch.ones(1, 4, dtype=torch.long),
+            "image_bound": torch.tensor([[0, 2]], dtype=torch.long),
+        }
+    )
+    assert embeddings.shape == (1, 4, 4)
+
+
 def test_patch_get_vision_embedding_runs_each_sample_alone():
     from verl_omni.models.transformers import minicpm_o
 

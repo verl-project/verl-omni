@@ -250,6 +250,23 @@ def test_split_minicpm_forward_kwargs_keeps_object_array_batches_per_sample():
     assert [sample.tolist() for sample in data["tgt_sizes"]] == [[[2, 2], [2, 2]], [[2, 2]]]
 
 
+def test_split_minicpm_forward_kwargs_accepts_normalized_audio_tensor():
+    # The wrapped forward re-enters the split with audio_features already normalized
+    # to (n_clips, n_mels, frames); the emptiness check must not compare a tensor
+    # against [] (an elementwise comparison on some torch versions).
+    data, _ = split_minicpm_forward_kwargs(
+        {
+            "input_ids": torch.ones(2, 6, dtype=torch.long),
+            "position_ids": torch.arange(6).repeat(2, 1),
+            "audio_features": torch.zeros(2, 80, 10),
+            "audio_feature_lens": [torch.tensor([10]), torch.tensor([10])],
+        }
+    )
+    assert isinstance(data["audio_features"], torch.Tensor)
+    assert tuple(data["audio_features"].shape) == (2, 80, 10)
+    assert [lens.tolist() for lens in data["audio_feature_lens"]] == [[10], [10]]
+
+
 def test_split_minicpm_forward_kwargs_rejects_unprepared_packed_batch():
     with pytest.raises(ValueError, match="without going through MiniCPMThinkerAdapter.prepare_model_inputs"):
         split_minicpm_forward_kwargs(
