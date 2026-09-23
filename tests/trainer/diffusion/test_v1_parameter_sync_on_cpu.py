@@ -169,6 +169,50 @@ def test_separate_async_refuses_to_pad_invalid_local_batch(batch_size, dp_size, 
         trainer._balance_batch(data, {})
 
 
+class _SyncTrainerStub(PolicyGradientDiffusionTrainerV1):
+    """Concrete stub: object.__new__ rejects the ABC since on_step_end/on_sample_end went abstract."""
+
+    def on_step_end(self):
+        pass
+
+    def on_sample_end(self):
+        pass
+
+
+def test_sync_balance_batch_zeros_duplicated_pad_row_advantages():
+    """Duplicated pad rows from _balance_batch must not feed the loss (#561)."""
+    trainer = object.__new__(_SyncTrainerStub)
+    trainer.trainer_mode = "sync"
+    trainer.actor_rollout_wg = SimpleNamespace(_query_dispatch_info=lambda _mesh_name: [0, 1, 2, 3])
+    trainer.config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "actor": {"ppo_mini_batch_size": 2},
+                "rollout": {"n": 2},
+            }
+        }
+    )
+    # 6 rows; dp_size=4, actor_global_mini_batch_size=4, batch_multiple=lcm(4,4)=4; 6%4=2 -> pad to 8.
+    data = DataProto.from_dict(tensors={"advantages": torch.arange(1, 7, dtype=torch.float32)})
+
+    padded = trainer._balance_batch(data, {})
+
+    assert len(padded) == 8
+    is_pad = padded.non_tensor_batch["_balance_is_pad"]
+    assert is_pad.sum().item() == 2
+    assert is_pad[-1] and is_pad[-2]
+    assert not is_pad[:-2].any()
+
+    # _compute_advantage would recompute advantages; simulate that by restoring real
+    # advantages on every row (including the duplicated pad rows), then zeroing.
+    padded.batch["advantages"] = torch.arange(1, 9, dtype=torch.float32)
+    zeroed = trainer._zero_pad_row_advantages(padded)
+
+    assert torch.all(zeroed.batch["advantages"][is_pad] == 0.0)
+    assert torch.all(zeroed.batch["advantages"][~is_pad] != 0.0)
+    assert "_balance_is_pad" not in zeroed.non_tensor_batch
+
+
 def test_separate_async_uses_single_prompt_generation_batches_for_exact_refill():
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
     trainer.trainer_mode = "separate_async"
