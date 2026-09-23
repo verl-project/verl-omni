@@ -13,4 +13,8 @@
 # limitations under the License.
 from verl.workers.rollout.base import _ROLLOUT_REGISTRY
 
-_ROLLOUT_REGISTRY[("vllm_omni", "async")] = "verl.workers.rollout.vllm_rollout.ServerAdapter"
+# verl-omni's adapter adds the delta_flush wire format (delta_sharded backend) on top
+# of verl's vLLM ServerAdapter.
+_ROLLOUT_REGISTRY[("vllm_omni", "async")] = (
+    "verl_omni.workers.rollout.vllm_rollout.server_adapter.VLLMOmniServerAdapter"
+)

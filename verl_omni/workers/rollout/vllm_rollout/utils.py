@@ -100,6 +100,7 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         base_sync_done=False,
         use_shm: bool = False,
         zmq_update_id: str | None = None,
+        delta_flush: bool = False,
     ):
         """Update the weights of the rollout model.
 
@@ -107,6 +108,9 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         atomically via a single ``add_lora`` call, avoiding per-bucket partial loading.
         For full-weight updates, weights are streamed bucket-by-bucket via
         ``load_weights`` to keep GPU memory usage bounded.
+        With ``delta_flush=True`` (the ``delta_sharded`` checkpoint engine), the stream
+        carries per-flush sparse payloads: the dense seed loads through the same
+        ``load_weights`` path, steady deltas apply in place by HF coordinate.
         """
 
         from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
@@ -116,6 +120,12 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             base_sync_done = True
             # Consume the stash so a subsequent full-weight sync isn't misrouted.
             self._pending_lora_peft_config = None
+
+        if delta_flush and peft_config is not None:
+            raise ValueError(
+                "delta_sharded weight sync does not apply LoRA adapters; "
+                "run full-weight training or use a non-delta checkpoint engine backend."
+            )
 
         if self.device is None:
             raise RuntimeError("Worker device is not set.")
@@ -127,6 +137,10 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             device=self.device,
             use_shm=use_shm,
         )
+
+        if delta_flush:
+            self._update_weights_from_delta_ipc(receiver)
+            return
 
         if peft_config and base_sync_done:
             # In async mode, make sure the old lora is removed before adding the new one
@@ -232,6 +246,49 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 else:
                     raise RuntimeError("Diffusion pipeline worker has no load_weights-capable pipeline")
                 receiver.receive_weights(on_bucket_received=lambda weights, *args, **kwargs: load_fn(weights))
+
+    def _update_weights_from_delta_ipc(self, receiver) -> None:
+        """Receive ``delta_sharded`` flushes and apply them in place.
+
+        The dense seed flush decodes to full tensors and loads through the same
+        ``load_weights`` path as the bucketed full-weight sync (plus the AR-side
+        post-load processing pass); steady flushes apply sparse updates into the
+        live weights. See :mod:`verl_omni.workers.rollout.vllm_rollout.delta_apply`.
+        """
+        from verl_omni.workers.rollout.vllm_rollout.delta_apply import DeltaFlushReceiver
+        from verl_omni.workers.rollout.vllm_rollout.npu_utils import _is_npu_platform
+
+        if _is_npu_platform():
+            # The NPU full-weight path transposes fused-MoE params around the load;
+            # HF-coordinate deltas would land in the transposed layout.
+            raise NotImplementedError("delta_sharded weight sync is not supported on Ascend NPU yet")
+
+        standard = self._get_standard_weight_model_and_config()
+        if standard is not None:
+            model, model_config = standard
+            # Same FusedMoE weight_loader patch as the bucketed full-weight path, so
+            # delta entries for HF expert names route into the fused params.
+            from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
+
+            patch_vllm_moe_model_weight_loader(model)
+            load_target = model
+        else:
+            pipeline = getattr(getattr(self, "model_runner", None), "pipeline", None)
+            if pipeline is not None and hasattr(pipeline, "load_weights"):
+                load_target = pipeline
+            elif hasattr(self, "load_weights"):
+                load_target = self
+            else:
+                raise RuntimeError("Diffusion pipeline worker has no load_weights-capable pipeline")
+
+        applier = DeltaFlushReceiver(load_target)
+        receiver.receive_weights(on_bucket_received=applier.on_bucket)
+        if applier.saw_seed and standard is not None:
+            # The seed is a full load through load_weights; run the same single
+            # post-load processing pass as the bucketed full-weight path.
+            from vllm.model_executor.model_loader.utils import process_weights_after_loading
+
+            process_weights_after_loading(model, model_config, self.device)
 
     def _get_zmq_handle(self) -> str:
         """Get the ZMQ handle matching the co-located trainer actor on this rank.

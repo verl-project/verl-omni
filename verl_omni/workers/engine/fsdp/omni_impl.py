@@ -151,6 +151,31 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
 
         return per_tensor_param, peft_config_dict
 
+    def get_per_tensor_param_shard(self, **kwargs):
+        """Audit gate for the inherited delta shard export (RFC #38).
+
+        The inherited export (``state_dict`` + ``convert_weight_keys``, identity
+        coordinates) matches this engine's full export only for full-weight,
+        non-QAT runs:
+
+        - LoRA (either merge mode): the full export ships adapter weights
+          (``collect_lora_params``) or merged, name-normalized tensors, never a
+          plain ``state_dict``;
+        - QAT: the full export applies ``quantize_with_fusion`` after conversion,
+          which renames and repacks tensors the shard export emits unquantized.
+
+        Both would silently break the delta contract (seed and steady exports must
+        share names and coordinates), so fail closed.
+        """
+        if getattr(self, "_qat_enabled", False):
+            raise NotImplementedError("delta_sharded shard export does not support QAT exports.")
+        peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
+        if hasattr(peft_model, "peft_config"):
+            raise NotImplementedError(
+                "delta_sharded shard export supports full-weight training only (no LoRA adapters)."
+            )
+        return super().get_per_tensor_param_shard(**kwargs)
+
     def _merged_lora_per_tensor_param(self):
         """Stream materialized merged weights before restoring the actor."""
         device = get_device_id()

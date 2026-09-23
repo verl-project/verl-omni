@@ -50,6 +50,78 @@ def test_validate_config_timestep_staging(enabled, sp_size, as_dict):
         validate_config(config)
 
 
+def _delta_config(**overrides):
+    """A minimal delta_sharded config that passes the gates; overrides merge on top."""
+    base = {
+        "trainer": {"resume_mode": "disable", "use_v1": True, "v1": {"trainer_mode": "separate_async"}},
+        "actor_rollout_ref": {
+            "model": {"lora": {"rank": 0}},
+            "actor": {"fsdp_config": {"qat": {"enable": False}}},
+            "rollout": {"checkpoint_engine": {"backend": "delta_sharded"}},
+        },
+    }
+    return OmegaConf.merge(OmegaConf.create(base), OmegaConf.create(overrides))
+
+
+def test_delta_sharded_admitted_for_full_weight_separate_async():
+    validate_config(_delta_config())  # diffusion v1 separate_async, full-weight
+
+    # omni_separate_async is admitted without trainer.use_v1 (main_omni forces v1 later)
+    config = _delta_config()
+    OmegaConf.update(config, "trainer.v1.trainer_mode", "omni_separate_async")
+    OmegaConf.update(config, "trainer.use_v1", False)
+    validate_config(config)
+
+
+@pytest.mark.parametrize("mode", ["sync", "omni_sync", "colocate_async"])
+def test_delta_sharded_rejects_non_separate_async_modes(mode):
+    with pytest.raises(ValueError, match="trainer_mode"):
+        validate_config(_delta_config(trainer={"v1": {"trainer_mode": mode}}))
+
+
+def test_delta_sharded_rejects_legacy_diffusion_trainer():
+    # trainer.v1.trainer_mode=separate_async but the v0 runner was selected
+    with pytest.raises(ValueError, match="use_v1"):
+        validate_config(_delta_config(trainer={"use_v1": False}))
+
+
+@pytest.mark.parametrize(
+    "model_override",
+    [
+        {"lora": {"rank": 8}},  # adapter sync (merge=false default)
+        {"lora": {"rank": 8, "merge": True}},  # merged full-weight export
+        {"lora_rank": 16},  # legacy knob
+        {"lora_adapter_path": "/tmp/adapter"},
+    ],
+)
+def test_delta_sharded_rejects_lora(model_override):
+    with pytest.raises(ValueError, match="full-weight"):
+        validate_config(_delta_config(actor_rollout_ref={"model": model_override}))
+
+
+@pytest.mark.parametrize(
+    "actor_override",
+    [
+        {"fsdp_config": {"qat": {"enable": True}}},
+        {"megatron": {"qat": {"enable": True}}},
+    ],
+)
+def test_delta_sharded_rejects_qat(actor_override):
+    with pytest.raises(ValueError, match="QAT"):
+        validate_config(_delta_config(actor_rollout_ref={"actor": actor_override}))
+
+
+def test_delta_gates_do_not_fire_for_other_backends():
+    config = _delta_config(
+        trainer={"use_v1": False, "v1": {"trainer_mode": "sync"}},
+        actor_rollout_ref={
+            "model": {"lora": {"rank": 8}},
+            "rollout": {"checkpoint_engine": {"backend": "nccl"}},
+        },
+    )
+    validate_config(config)
+
+
 @pytest.mark.parametrize("strategy", ["fsdp", "fsdp2", "veomni", "megatron"])
 @pytest.mark.parametrize("enabled", [False, True])
 def test_validate_config_no_sync_gradient_accumulation(strategy, enabled):
