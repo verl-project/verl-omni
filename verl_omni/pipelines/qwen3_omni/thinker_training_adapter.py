@@ -45,6 +45,20 @@ class Qwen3OmniThinkerAdapter(OmniModelBase):
         return ["talker", "code2wav", "code_predictor"]
 
     @classmethod
+    def prepare_megatron_config(cls, model_config, engine_config):
+        """Validate the Thinker BSHD path and expose its nested text config."""
+        from .megatron_inputs import prepare_qwen3_omni_megatron_config
+
+        return prepare_qwen3_omni_megatron_config(model_config, engine_config)
+
+    @classmethod
+    def get_megatron_forward(cls):
+        """Select the direct Thinker BSHD forward without eager Megatron imports."""
+        from .megatron_inputs import qwen3_omni_forward_model_engine
+
+        return qwen3_omni_forward_model_engine
+
+    @classmethod
     def configure_model(cls, module, model_config):
         """Strip non-training stages and redirect forward to thinker.
 

@@ -14,7 +14,7 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import torch
 from diffusers import ModelMixin, SchedulerMixin
@@ -655,6 +655,26 @@ class OmniModelBase(ABC):
                 delattr(module, submod_name)
 
         return module
+
+    @classmethod
+    def prepare_megatron_config(cls, model_config, engine_config):
+        """Validate Megatron support and return the backend's model-config view.
+
+        Called before the Megatron engine initializes. Implementations must
+        reject unsupported configurations and preserve the original config
+        used by the processor and rollout. FSDP adapters need not implement it.
+        """
+        raise NotImplementedError(f"{cls.__name__} does not support Megatron training.")
+
+    @classmethod
+    def get_megatron_forward(cls) -> Callable:
+        """Return the pipeline's model-forward callable for the BSHD LM engine.
+
+        The callable consumes the prepared token and multimodal inputs plus
+        verl's logits-processing arguments, and returns BSHD-postprocessed
+        output. Import optional Megatron dependencies inside the override.
+        """
+        raise NotImplementedError(f"{cls.__name__} does not provide a Megatron forward.")
 
     @classmethod
     def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:

@@ -45,6 +45,7 @@ Model Base
              register_auto_classes,
              get_strip_modules, configure_processor, configure_tokenizer,
              configure_model, get_fsdp_ignored_module_names,
+             prepare_megatron_config, get_megatron_forward,
              prepare_model_inputs
 
 .. autoclass:: verl_omni.pipelines.model_base.OmniRolloutPipelineBase

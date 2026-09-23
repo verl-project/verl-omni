@@ -20,7 +20,14 @@ Both **GPU** and **NPU** training platforms are supported:
 - [`run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh)
   — **NPU**, **full-parameter V1** for video and soundtrack NExT-QA training.
 
+For full-parameter Megatron image-conditioned Geo3K training, see the
+[Geo3K V1 recipe](qwen3_omni/README.md#geo3k-full-parameter-megatron-separate-async).
+
 For the base environment setup, see the [installation guide](../../docs/start/install.md).
+
+For **Megatron full-parameter audio-only RL**, see the
+[AudioMCQ separate-async recipe](qwen3_omni/README.md), including an
+offline toy-model smoke and the configurable full-model run.
 
 ## Installation
 

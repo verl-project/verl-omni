@@ -1,0 +1,1 @@
+../../../examples/gspo_trainer/qwen3_omni/README.md

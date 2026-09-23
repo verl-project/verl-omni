@@ -85,6 +85,7 @@ examples/flux1/dancegrpo_trainer_flux1.md
 examples/diffusionnft_trainer.md
 examples/grpoguard_trainer.md
 examples/gspo_trainer.md
+examples/qwen3_omni/gspo_trainer_qwen3_omni.md
 examples/mixgrpo_trainer.md
 examples/diffusionopd_trainer.md
 examples/flowgrpo_trainer_sd35_drm.md

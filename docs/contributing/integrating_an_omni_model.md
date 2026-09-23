@@ -1,12 +1,16 @@
 # How to Add a New Omni Model
 
-Last updated: 09/17/2026.
+Last updated: 09/21/2026.
 
 This guide walks through adding a new omni (multimodal autoregressive) model to
 the verl-omni training framework. It uses the Qwen3-Omni Thinker adapter as a
 **running example**, not as the only valid pattern. Your model's architecture,
 decomposition, and required adapter logic may differ. All adapter code lives
 under [`verl_omni/pipelines/`](https://github.com/verl-project/verl-omni/tree/main/verl_omni/pipelines).
+
+The model-loading and wrapping examples below describe FSDP. For the current
+Megatron path, see §2.1; FSDP adapter registration alone does not provide
+Megatron support.
 
 ## 1. Understand the architecture
 
@@ -92,6 +96,69 @@ adapt each implementation to your model's architecture:
 Reference:
 [`verl_omni/pipelines/qwen3_omni/thinker_training_adapter.py`](../../verl_omni/pipelines/qwen3_omni/thinker_training_adapter.py)
 
+### 2.1 Megatron training adapters
+
+The current Megatron integration supports **Qwen3-Omni Thinker** through a
+BSHD forward path. This section documents the existing extension points,
+not general support for arbitrary Omni models
+or Talker training. Broader cross-model backend design belongs in a separate RFC.
+
+`OmniMegatronEngine` selects the same `OmniModelBase` registry entry by
+`(architecture, model_stage)`. To opt into this backend, implement both
+classmethods in the model's adapter under `verl_omni/pipelines/<model>/`:
+
+- **`prepare_megatron_config(model_config, engine_config)`**: Validate the
+  supported stage, parallelism and execution modes before backend initialization,
+  then return the model config for Megatron. If a compatibility view is needed,
+  copy it rather than mutating the worker/processor/rollout config. Qwen3-Omni
+  exposes `thinker_config.text_config` as `text_config` on a private copy.
+- **`get_megatron_forward()`**: Return the model-specific forward callable.
+  Import optional Megatron dependencies inside the hook so FSDP-only users do
+  not need that stack just to import the adapter. Both base hooks raise
+  `NotImplementedError`; adapters that do not opt in fail before backend setup.
+
+Keep architecture checks, nested-config mappings and modality handling in the
+pipeline, not in the shared engine. These hooks do not implement checkpoint
+conversion, model construction or weight export: a compatible Megatron bridge
+must already provide those for the model. The FSDP `configure_model` hook is
+not a replacement for a Megatron model implementation.
+
+The forward callable accepts `model`, `input_ids`, `multi_modal_inputs` and
+the keyword arguments `logits_processor`, `logits_processor_args`,
+`vision_model`, `pad_token_id` and `forced_max_seqlen`. The shared engine moves
+the batch to the device, prepares inputs and supplies the logits processor.
+The pipeline callable must preserve verl's BSHD preprocessing, next-token label
+shift, temperature handling and postprocessing conventions. It returns the
+postprocessed output dictionary when applying the logits processor, or the
+postprocessed model tensor otherwise, preserving autograd. In Qwen3-Omni,
+audio/vision tensors are forwarded explicitly and `position_ids=None` lets the
+Thinker construct M-RoPE; this is model-specific, not a rule for other models.
+
+Reference implementations:
+[adapter hooks](../../verl_omni/pipelines/qwen3_omni/thinker_training_adapter.py),
+[config preparation and forward](../../verl_omni/pipelines/qwen3_omni/megatron_inputs.py),
+and [shared engine](../../verl_omni/workers/engine/megatron/omni_impl.py).
+
+For this Qwen3 path, keep `use_remove_padding=false`, `use_fused_kernels=false`,
+PP=CP=1, MTP disabled and router replay disabled. Dynamic CP is unsupported;
+the recipe also disables dynamic micro-batching. Other execution modes require
+their own implementation and validation. Select the shared
+`omni_megatron_trainer.yaml` with `--config-name omni_megatron_trainer`, adding
+recipe-specific CLI overrides rather than a model-specific trainer YAML.
+See the [AudioMCQ recipe](../../examples/gspo_trainer/qwen3_omni/README.md)
+for the exact launcher and external dependency prerequisites; the documented
+development runs do not establish clean-checkout compatibility with public pins.
+
+When extending this path, cover adapter dispatch, unsupported-config rejection
+and config isolation, plus logits/gradient parity and modality forward/backward
+behavior. The existing
+[config tests](../../tests/trainer/omni/test_audiomcq_megatron_config_on_cpu.py)
+and [BSHD tests](../../tests/pipelines/test_qwen3_omni_megatron_inputs_on_cpu.py)
+are examples. Report dependency revisions and validation topology with results.
+A toy smoke establishes structural execution, not learning quality or full-model
+parallelism; changes to computation, dependencies or parallelism need validation
+at the affected topology before claiming support.
+
 ## 3. Create the rollout adapter
 
 Subclass `OmniRolloutPipelineBase` (see
@@ -173,8 +240,9 @@ activates all registrations. No `external_lib` CLI argument is needed.
 
 ## 5. Write the run script
 
-The V1 trainer uses pure CLI overrides on `verl_omni.trainer.main_omni` with
-no YAML config files or `--config-path/--config-name`:
+The FSDP V1 example uses CLI overrides on `verl_omni.trainer.main_omni` with
+no recipe-specific YAML files or `--config-path/--config-name`. The Megatron
+recipe instead selects the shared config described in §2.1.
 
 ```bash
 export VERL_USE_EXTERNAL_MODULES=verl_omni
@@ -195,6 +263,7 @@ python3 -m verl_omni.trainer.main_omni \
 ```
 
 Key points:
+
 - No `external_lib` — adapters are auto-registered via the Python import
   triggered by `VERL_USE_EXTERNAL_MODULES=verl_omni`.
 - No `stage_configs_path` — the rollout deploy config is auto-generated
@@ -203,8 +272,8 @@ Key points:
   stage when its rollout adapter must map model-native output to the Talker
   policy sequence. Standard text-token stages such as the Thinker can keep
   verl's `single_turn_agent`.
-- No `--config-path/--config-name` — all config comes from CLI overrides
-  on `verl_omni`'s `omni_trainer.yaml` defaults.
+- For this FSDP example, no `--config-path/--config-name` — config comes from
+  CLI overrides on `verl_omni`'s `omni_trainer.yaml` defaults.
 - The `"$@"` at the end lets callers override any field without editing
   the script (e.g. `bash run.sh trainer.total_epochs=10`).
 
