@@ -132,9 +132,9 @@ are no findings, say what supports that conclusion rather than just "LGTM".
 Iterate after the contributor fixes findings. Keep review notes out of the code
 diff. Suggest updating the PR description when scope or evidence changes.
 
-Do not post comments, submit reviews, mark a draft ready, request reviewers,
-change labels or trigger CI without explicit user authorization. Permission to
-commit/push code is not permission for those actions.
+Publishing follows the accountability rules in `AGENTS.md`: draft review
+comments and replies for the user, and post only what they asked for and
+approved word for word.
 
 When asked to suggest reviewers, use `docs/community/governance.md` for ownership
 and `.github/CODEOWNERS` for path routing (last matching rule wins). Suggest at

@@ -26,6 +26,7 @@ Do not open one-off PRs for tiny edits (single typo, isolated style change, one 
 
 - Pure code-agent PRs are **not allowed**. A human submitter must understand and defend the change end-to-end.
 - The submitting human must review every changed line and run relevant tests.
+- Everything a reviewer reads — commit messages, code comments and docstrings, the PR title and description, and any comment, review or reply — must be written by that human or approved by them word for word. Agents keep drafts short and hand them over; they do not commit without an approved message, and do not push, open or mark ready a PR, post on GitHub, request reviewers, change labels or trigger CI unless the user asks for that specific action.
 - PR descriptions for AI-assisted work **must** include:
   - Why this is not duplicating an existing PR.
   - Test commands run and results.
