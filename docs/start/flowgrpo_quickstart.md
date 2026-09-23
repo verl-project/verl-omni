@@ -1,7 +1,7 @@
 (flowgrpo_quickstart)=
 # Quickstart: FlowGRPO training on OCR dataset
 
-Last updated: 06/24/2026
+Last updated: 09/21/2026
 
 Post-train a diffusion image generation model with FlowGRPO.
 
@@ -11,10 +11,11 @@ In this example, we post-train a `Stable Diffusion 3.5 Medium` policy with FlowG
 
 ## Prerequisite
 
-- Install VeRL-Omni and its dependencies following the {doc}`installation guide <install>`. Also install the FlowGRPO-specific reward dependency:
+- Install VeRL-Omni and its dependencies following the {doc}`installation guide <install>`. Also install the FlowGRPO-specific reward dependency and TransferQueue (required by the default V1 trainer):
 
 ```bash
 pip install Levenshtein
+pip install TransferQueue==0.1.9
 ```
 
 - Use a machine with `3` GPUs for the provided example script (`2` for actor + rollout, `1` for the reward model in its own resource pool).
@@ -104,7 +105,7 @@ WORKSPACE              # base directory for data (default: $HOME)
 
 ## Step 3: Perform FlowGRPO training
 
-The provided example script launches `python3 -m verl_omni.trainer.main_diffusion` with the FlowGRPO-specific config needed for this OCR task:
+The provided example script launches `python3 -m verl_omni.trainer.main_diffusion_v1` — the V1 trainer (TransferQueue + ReplayBuffer), the default for every diffusion model since v0.3.0 — with the FlowGRPO-specific config needed for this OCR task:
 
 - `algorithm.adv_estimator=flow_grpo`
 - `actor_rollout_ref.rollout.name=vllm_omni`
@@ -117,8 +118,13 @@ The provided example script launches `python3 -m verl_omni.trainer.main_diffusio
 Run the training script:
 
 ```bash
-bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh
+bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh
 ```
+
+The legacy v0 script (`run_sd35_medium_ocr_lora.sh`, entrypoint
+`main_diffusion`) is **deprecated** and only remains for the v0 trainer; see
+{doc}`Diffusion V1 training <diffusion_v1>` for the V1/V0 differences and the
+migration recipe.
 
 Optional KL loss tuning:
 
@@ -159,7 +165,7 @@ The provided script already enables:
 ```bash
 trainer.logger='["console", "wandb"]' \
 trainer.project_name=flow_grpo \
-trainer.experiment_name=sd35_medium_ocr_lora
+trainer.experiment_name=sd35_medium_ocr_lora_v1
 ```
 
 Set your W&B credentials before launching if you want remote tracking:

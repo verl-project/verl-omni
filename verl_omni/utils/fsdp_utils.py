@@ -526,6 +526,22 @@ def _lora_checkpoint_key(name: str, adapter_name: str) -> str | None:
     return name
 
 
+def _clean_lora_param_names(params: OrderedDict, adapter_name: str) -> OrderedDict:
+    """Drop FSDP/PEFT wrapper tokens so vLLM's LoRA name parser can load the tensors.
+
+    Nested FSDP leaf wraps leave ``_fsdp_wrapped_module`` inside
+    ``state_dict()`` keys (e.g. ``transformer_blocks.0._fsdp_wrapped_module.attn.to_q.
+    lora_A.default._fsdp_wrapped_module.weight``). A non-empty dump of those keys
+    skips the ``_lora_params_by_name`` fallback, and vLLM then raises
+    ``unsupported LoRA weight``.
+    """
+    cleaned = OrderedDict()
+    for name, tensor in params.items():
+        key = _lora_checkpoint_key(name, adapter_name)
+        cleaned[key if key is not None else name.replace("_fsdp_wrapped_module.", "")] = tensor
+    return cleaned
+
+
 def _lora_params_by_name(module, adapter_name: str) -> OrderedDict:
     """Selected-adapter LoRA tensors from ``named_parameters`` when PEFT prefix matching misses."""
     params = OrderedDict()
@@ -563,7 +579,8 @@ def collect_lora_params(
     """
     use_diffusers_layered = is_diffusers and layered_summon and fsdp_version(module) > 0
     if adapter_name == "default" and not use_diffusers_layered and fsdp_version(module) != 2:
-        return _upstream_collect_lora_params(module, layered_summon=layered_summon, base_sync_done=base_sync_done)
+        params = _upstream_collect_lora_params(module, layered_summon=layered_summon, base_sync_done=base_sync_done)
+        return _clean_lora_param_names(params, adapter_name) if base_sync_done else params
 
     if is_diffusers:
         layered_summon_fn = partial(
@@ -604,4 +621,4 @@ def collect_lora_params(
         else:
             detail = "(FSDP LoRA collection returned no tensors)."
         raise RuntimeError(f"collect_lora_params collected 0 parameters {detail}")
-    return lora_params
+    return _clean_lora_param_names(lora_params, adapter_name) if base_sync_done else lora_params

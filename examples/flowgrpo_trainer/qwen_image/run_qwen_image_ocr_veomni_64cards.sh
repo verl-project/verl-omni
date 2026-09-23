@@ -36,6 +36,7 @@ TRAINER_BACKEND=veomni
 
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     diffusion/model_engine=veomni_diffusion \
     algorithm.adv_estimator=flow_grpo \
     data.train_files=$ocr_train_path \

@@ -175,8 +175,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         if self._is_direct_preference:
             if config.algorithm.get("sample_source", "online") == "offline":
                 raise NotImplementedError(
-                    "Diffusion offline DPO stays on the v0 trainer. Use "
-                    "`python -m verl_omni.trainer.main_diffusion` with trainer.use_v1=false."
+                    "Diffusion offline DPO stays on the v0 trainer by design. Use "
+                    "`python -m verl_omni.trainer.main_diffusion` (the legacy v0 entrypoint)."
                 )
             self._loss_fn = get_diffusion_loss_fn(loss_mode)
             self._has_old_adapter = "old" in tuple(

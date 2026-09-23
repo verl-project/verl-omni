@@ -75,8 +75,9 @@ algorithm:
 
 ### `actor_rollout_ref.separate` — synchronous resource separation
 
-`actor_rollout_ref.separate` defaults to `false`. When enabled, the legacy synchronous
-diffusion trainer (`trainer.use_v1=false`) places pure Actor workers on the trainer
+`actor_rollout_ref.separate` defaults to `false`. When enabled, the deprecated
+legacy synchronous diffusion trainer (`trainer.use_v1=false`) places pure Actor
+workers on the trainer
 resources and launches rollout/checkpoint workers on a separate Ray resource pool.
 The mode is limited to online policy-gradient training and publishes actor weights once
 before training and once after every logical-batch update.
@@ -110,9 +111,9 @@ standalone rollout GPUs from the Ray cluster.
 `actor_rollout_ref.rollout.agent.num_workers` controls CPU request concurrency; it
 does not allocate rollout GPUs and does not need to match `rollout.n_gpus_per_node`.
 
-This topology is v0-only (`trainer.use_v1=false`). The default CUDA DanceGRPO
-recipe is now the V1 sync launcher (`run_wan22_5b_t2v_hpsv3_v1.sh`); use the
-**deprecated** v0 auto-detect script below when you need
+This topology is v0-only (`trainer.use_v1=false`, deprecated). The default CUDA
+DanceGRPO recipe is now the V1 sync launcher (`run_wan22_5b_t2v_hpsv3_v1.sh`);
+use the **deprecated** v0 auto-detect script below when you need
 `actor_rollout_ref.separate`.
 
 On a CUDA Ray cluster, that v0 recipe forwards trailing Hydra overrides, so the
@@ -352,8 +353,9 @@ These sit on the diffusion trainer YAML (in addition to shared verl trainer fiel
 - `trainer.video_fps`: FPS for videos written to `rollout_data_dir` / `validation_data_dir` and logged to W&B (image runs ignore this).
 - `trainer.rollout_data_save_freq`: Dump train rollout every N steps (`1` = every step, `<= 0` = never).
 - `trainer.rollout_data_max_samples` / `validation_data_max_samples`: Cap samples dumped per train / val run (`null` = all).
-- `trainer.use_v1`: Use the V1 trainer (TransferQueue + ReplayBuffer). When `false`,
-  the legacy v0 diffusion trainer. Wan2.2 DanceGRPO on CUDA now defaults to V1
+- `trainer.use_v1`: Use the V1 trainer (TransferQueue + ReplayBuffer). Defaults
+  to `true` since v0.3.0; `false` explicitly selects the **deprecated** legacy
+  v0 diffusion trainer for every model. Wan2.2 DanceGRPO on CUDA defaults to V1
   via `run_wan22_5b_t2v_hpsv3_v1.sh`; the v0 auto-detect launcher is deprecated
   for CUDA.
 - `trainer.v1.*`: V1 mode / sampler / async placeholders (`trainer_mode`, `max_off_policy_threshold`, …). See {doc}`../start/diffusion_v1`.

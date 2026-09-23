@@ -116,6 +116,25 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
             local_files_only=local_files_only,
         )
 
+    # TODO: Remove after upgrading the vllm-omni pin to map live LoRA keys and targets
+    # natively for Boogu-Image (https://github.com/vllm-project/vllm-omni/issues/8001).
+    @staticmethod
+    def map_lora_update_to_engine(lora_tensors: dict, peft_config: dict) -> tuple[dict, dict]:
+        """Map diffusers output/joint-attention LoRA names to the native layout."""
+        tensors = {
+            name.replace("transformer.base_model.model.", "transformer.", 1)
+            .replace(".to_out.0.", ".to_out.")
+            .replace(".img_instruct_attn.processor.", ".img_instruct_attn."): tensor
+            for name, tensor in lora_tensors.items()
+        }
+        config = dict(peft_config)
+        targets = config.get("target_modules")
+        if isinstance(targets, list | tuple | set):
+            config["target_modules"] = [
+                target[:-2] if target == "to_out.0" or target.endswith(".to_out.0") else target for target in targets
+            ]
+        return tensors, config
+
     # ------------------------------------------------------------------
     # Prompt encoding from pre-tokenised IDs
     # ------------------------------------------------------------------

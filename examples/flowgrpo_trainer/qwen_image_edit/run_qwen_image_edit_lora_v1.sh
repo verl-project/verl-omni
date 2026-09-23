@@ -1,4 +1,19 @@
-# Qwen-Image-Edit-2511 LoRA RL with PickScore reward.
+#!/usr/bin/env bash
+# Qwen-Image-Edit-2511 LoRA RL with PickScore reward (V1 trainer:
+# TransferQueue + ReplayBuffer + sync mode).
+#
+# This is the v1 counterpart of run_qwen_image_edit_lora.sh. It uses the new
+# `verl_omni.trainer.main_diffusion_v1` entrypoint, which selects
+# `PolicyGradientDiffusionTrainerV1Sync` via `trainer.v1.trainer_mode=sync`.
+# TransferQueue is force-enabled inside the runner, so it does not need to be
+# set on the CLI.
+#
+# The I2I contract is unchanged from v0: parquet rows still carry `images`
+# (condition PNG bytes), and rollout/training still exchange
+# `condition_image_latents`.
+#
+# Reference (legacy v0 script):
+# examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora.sh
 set -x
 
 # Enable reward model on GPU: Ray num_gpus=0 actors can still see CUDA devices.
@@ -30,8 +45,7 @@ mkdir -p "$checkpoint_dir" "$(dirname "$log_file")"
 exec > >(tee -a "$log_file") 2>&1
 echo "Logging to $log_file"
 
-python3 -m verl_omni.trainer.main_diffusion \
-    trainer.use_v1=false \
+python3 -m verl_omni.trainer.main_diffusion_v1 \
     data.train_files=$train_path \
     data.val_files=$test_path \
     data.train_batch_size=32 \
@@ -82,7 +96,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.custom_reward_function.name=compute_score_pickscore \
     trainer.logger='["console", "tensorboard", "wandb"]' \
     trainer.project_name=flow_grpo \
-    trainer.experiment_name=qwen_image_edit_lora_pickscore \
+    trainer.experiment_name=qwen_image_edit_lora_pickscore_v1 \
     trainer.default_local_dir=$checkpoint_dir \
     +trainer.rollout_data_dir=$rollout_data_dir \
     +trainer.validation_data_dir=$val_data_dir \
@@ -94,4 +108,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.test_freq=20 \
     trainer.total_training_steps=300 \
     trainer.total_epochs=100 \
-    trainer.resume_mode=auto "$@"
+    trainer.resume_mode=auto \
+    trainer.use_v1=true \
+    trainer.v1.trainer_mode=sync "$@"
