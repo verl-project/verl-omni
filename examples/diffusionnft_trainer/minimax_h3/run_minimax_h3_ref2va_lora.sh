@@ -51,6 +51,7 @@ if [[ -n "${LORA_WARMSTART_PATH:-}" ]]; then
 fi
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
   algorithm.trainer_type=direct_preference \
   algorithm.sample_source=online \
   algorithm.adv_mode=continuous \

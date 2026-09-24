@@ -16,6 +16,7 @@
 import json
 import os
 import socket
+import warnings
 
 import hydra
 import ray
@@ -97,6 +98,34 @@ def _validate_grm_reward_function(config) -> None:
         )
 
 
+def uses_v1_trainer(config) -> bool:
+    """Return True unless the config selects offline direct preference training.
+
+    Offline DPO has no V1 equivalent and stays on the legacy trainer by design
+    (verl-project/verl-omni#389), mirroring ``main_omni.uses_v1_trainer``.
+    """
+    sample_source = OmegaConf.select(config, "algorithm.sample_source", default="online")
+    trainer_type = OmegaConf.select(config, "algorithm.trainer_type", default="policy_gradient")
+    return not (sample_source == "offline" and trainer_type == "direct_preference")
+
+
+def _deprecate_v0_trainer(config) -> None:
+    """Warn on legacy-trainer launches that have a V1 equivalent.
+
+    Always normalizes ``trainer.use_v1`` to False so validation and the printed
+    config reflect the code path this entrypoint actually runs.
+    """
+    if uses_v1_trainer(config):
+        warnings.warn(
+            "The legacy (v0) diffusion trainer is deprecated and will be removed in a future release. "
+            "The V1 trainer (TransferQueue + ReplayBuffer) is the default since v0.3.0; launch "
+            "`python -m verl_omni.trainer.main_diffusion_v1` to use it.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    config.trainer.use_v1 = False
+
+
 def run_diffusion(config, task_runner_class=None) -> None:
     """Initialize Ray and run distributed diffusion training.
 
@@ -107,6 +136,7 @@ def run_diffusion(config, task_runner_class=None) -> None:
         task_runner_class: For recipe to change TaskRunner.
     """
     OmegaConf.resolve(config)
+    _deprecate_v0_trainer(config)
     validate_separate_config(config)
     enable_rl_insight(config)
     _validate_grm_reward_function(config)

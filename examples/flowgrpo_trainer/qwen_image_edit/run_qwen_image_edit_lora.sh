@@ -31,6 +31,7 @@ exec > >(tee -a "$log_file") 2>&1
 echo "Logging to $log_file"
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     data.train_files=$train_path \
     data.val_files=$test_path \
     data.train_batch_size=32 \

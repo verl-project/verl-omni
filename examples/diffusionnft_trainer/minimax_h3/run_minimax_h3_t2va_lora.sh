@@ -58,6 +58,7 @@ if [[ -n "${LORA_WARMSTART_PATH:-}" ]]; then
 fi
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     data.train_files=$train_path \
     data.val_files=$test_path \
     data.train_batch_size=32 \

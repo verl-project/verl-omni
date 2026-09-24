@@ -248,6 +248,20 @@ bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1.sh
 bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_fl2va_lora_v1.sh
 ```
 
+The Ref2VA V1 launcher mirrors the same sync settings on top of the V0
+Ref2VA recipe (reference-image short edge, `MAX_PROMPT_EMBEDS`, and
+`video_flow_shift`), with training hyperparameters aligned to the FL2VA V1
+recipe:
+
+```bash
+MODEL_PATH="$MODEL_ROOT" \
+DATA_DIR="$HOME/data/minimax_h3_ref2va" \
+IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth \
+REF_IMAGE_SHORT_EDGE=512 \
+VAL_REF_IMAGE_SHORT_EDGE=768 \
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_ref2va_lora_v1.sh
+```
+
 These recipes use the same GPU topology as their V0 counterparts. A
 `separate_async` MiniMax H3 recipe is not provided: it requires dedicated
 actor/rollout pools and checkpoint-engine synchronization rather than a

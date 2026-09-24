@@ -114,6 +114,18 @@ class DiffusionModelBase(ABC):
         return True
 
     @classmethod
+    def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
+        """Submodule name components to leave unsharded under FSDP2 (default: none).
+
+        FSDP2 only — under ``strategy=fsdp`` the engine raises when a
+        non-empty list is declared. Declare a subtree whose forward is
+        skipped for some micro-batches: unsharded forwards emit no
+        collectives, so the skip cannot desync ranks. Ignored parameters
+        must stay frozen — FSDP2 does not synchronize their gradients.
+        """
+        return []
+
+    @classmethod
     def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:
         """Validate LoRA settings; default no-op. Override for rollout-sync-constrained models."""
         return
@@ -553,6 +565,35 @@ class OmniModelBase(ABC):
             ) from None
 
     @classmethod
+    def setup_veomni(cls, model_config, engine_config) -> None:
+        """Opt into VeOmni before model loading; validate settings and install integrations.
+
+        Override in the existing (architecture, stage) adapter. Keep optional
+        VeOmni imports inside the hook so FSDP users do not need that package.
+        The default rejects unported adapters instead of silently selecting an
+        incompatible model implementation.
+        """
+        raise NotImplementedError(f"{cls.__name__} does not support the VeOmni backend.")
+
+    @classmethod
+    def prepare_veomni_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:
+        """Adapt packed inputs after verl's VeOmni transforms, before LM loss inputs.
+
+        This hook may modify the input dictionary or return a replacement.
+        The shared ``prepare_model_inputs`` replay hook still runs afterwards.
+        """
+        return model_inputs
+
+    @classmethod
+    def configure_veomni_trainable_params(cls, module: torch.nn.Module, model_config) -> None:
+        """Set requires_grad after VeOmni parallelization, before optimizer creation.
+
+        Do not replace modules here: VeOmni already owns their distributed
+        layout. This hook is not called for forward-only reference engines.
+        """
+        return
+
+    @classmethod
     def register_auto_classes(cls) -> None:
         """Register optional model-package classes with Transformers auto APIs."""
         return
@@ -643,6 +684,18 @@ class OmniModelBase(ABC):
                 delattr(module, submod_name)
 
         return module
+
+    @classmethod
+    def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
+        """Submodule name components to leave unsharded under FSDP2 (default: none).
+
+        FSDP2 only — under ``strategy=fsdp`` the engine raises when a
+        non-empty list is declared. Declare a subtree whose forward is
+        skipped for some micro-batches: unsharded forwards emit no
+        collectives, so the skip cannot desync ranks. Ignored parameters
+        must stay frozen — FSDP2 does not synchronize their gradients.
+        """
+        return []
 
     @classmethod
     def prepare_model_inputs(cls, model_inputs: dict[str, Any], micro_batch, model_config) -> dict[str, Any]:

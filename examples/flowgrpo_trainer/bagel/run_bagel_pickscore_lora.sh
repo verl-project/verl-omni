@@ -30,6 +30,7 @@ ENGINE=vllm_omni
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     data.train_files=$pickscore_train_path \
     data.val_files=$pickscore_test_path \
     data.train_batch_size=48 \

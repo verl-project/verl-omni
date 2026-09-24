@@ -37,7 +37,6 @@ from verl.utils.fsdp_utils import (
     CPUOffloadPolicy,
     FSDPModule,
     MixedPrecisionPolicy,
-    apply_fsdp2,
     fsdp2_clip_grad_norm_,
     fsdp2_load_full_state_dict,
     fsdp_version,
@@ -68,7 +67,7 @@ from verl_omni.pipelines.utils import (
     prepare_noisy_latents,
 )
 from verl_omni.utils.diffusion_compile import _maybe_compile_repeated_blocks
-from verl_omni.utils.fsdp_utils import collect_lora_params
+from verl_omni.utils.fsdp_utils import apply_fsdp2, collect_lora_params
 from verl_omni.workers.config import DiffusionModelConfig
 from verl_omni.workers.engine.lora_adapter_mixin import LoRAAdapterMixin
 
@@ -348,6 +347,14 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         model_cls = DiffusionModelBase.get_class(self.model_config)
         preserve_fp32_modules = model_cls.preserve_fp32_modules()
 
+        # Adapters may declare frozen subtrees to keep unsharded (fsdp2 only).
+        ignored_names = list(model_cls.get_fsdp_ignored_module_names(self.model_config))
+        if ignored_names and self.engine_config.strategy != "fsdp2":
+            raise NotImplementedError(
+                f"{type(self).__name__}: FSDP2-ignored module names require strategy=fsdp2, "
+                f"got {self.engine_config.strategy!r}."
+            )
+
         # None preserves declared fp32 islands; a real dtype lets FSDP cast
         # forward inputs and flatten parameters using the configured dtype.
         param_dtype = _fsdp_param_dtype(
@@ -416,7 +423,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                 "reshard_after_forward": self.engine_config.reshard_after_forward,
             }
             full_state = module.state_dict()
-            apply_fsdp2(module, fsdp_kwargs, self.engine_config)
+            apply_fsdp2(module, fsdp_kwargs, self.engine_config, ignored_names=ignored_names)
             fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
         else:
             raise NotImplementedError(f"Unknown strategy {self.engine_config.strategy}")

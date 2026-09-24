@@ -47,6 +47,6 @@ leaves the parent's key intact — which is why inheriting beats copying here
 - Tunables belong in the config dataclasses under
   `verl_omni/workers/config/diffusion/`, not module-level constants
   ([config.md](config.md)).
-- Import diffusers / vllm_omni lazily inside methods so the adapter stays importable
-  on CPU; every adapter's `*_on_cpu.py` test depends on this
-  ([testing.md](testing.md)).
+- Imports follow [code-style](code-style.md#imports-and-lint-scope). The adapter
+  package is the diffusers / vllm_omni feature boundary, so adapters import them at
+  module scope; the CPU test job installs both ([testing.md](testing.md)).

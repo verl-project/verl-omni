@@ -38,6 +38,7 @@ REWARD_ENGINE=vllm
 
 echo "WARNING: BAGEL LoRA on vllm-omni >= 0.24 needs actor_rollout_ref.model.lora.merge=True (NPU validation pending); reward may stay flat without it" >&2
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     trainer.device=npu \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
