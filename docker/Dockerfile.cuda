@@ -12,13 +12,16 @@
 #
 # Run:
 #   docker run --gpus all --shm-size=16g -it verl-omni:gpu
+#
+# The base is pinned to CUDA 13.0.2 to match the cu130-pinned Python stack.
+# Bumping CUDA means changing the base image, the --torch-backend below, and
+# the pyproject pins together.
 
-ARG CUDA_VERSION=13.0.2
 ARG UBUNTU_VERSION=22.04
 # Default: read from .github/verl_pin.txt at build time (override with VERL_GIT_REF).
 ARG VERL_GIT_REF=
 
-FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu${UBUNTU_VERSION} AS base
+FROM nvidia/cuda:13.0.2-cudnn-devel-ubuntu${UBUNTU_VERSION} AS base
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG VERL_GIT_REF

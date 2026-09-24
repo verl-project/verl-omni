@@ -212,7 +212,7 @@ python -c "import verl_omni; print('VeRL-Omni ready')"
 
 CUDA Dockerfile: [`docker/Dockerfile.cuda`](https://github.com/verl-project/verl-omni/blob/main/docker/Dockerfile.cuda)
 
-The CUDA image is intended for NVIDIA GPU training and rollout. The default CUDA base image uses **CUDA 13.0.2** on Ubuntu 22.04. You can override the CUDA version with `--build-arg CUDA_VERSION=...` if needed.
+The CUDA image is intended for NVIDIA GPU training and rollout. The base image is pinned to **CUDA 13.0.2** to match the cu130-pinned Python stack; changing it requires updating the torch backend and the pyproject pins together.
 
 Build context is controlled by the repo-root [`.dockerignore`](https://github.com/verl-project/verl-omni/blob/main/.dockerignore); keep large local folders such as `.venv`, `data/`, and `checkpoints/` out of the context.
 
