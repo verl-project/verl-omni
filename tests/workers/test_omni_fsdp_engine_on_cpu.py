@@ -64,7 +64,6 @@ def _make_mock_model_config(**overrides):
     cfg.enable_gradient_checkpointing = False
     cfg.lora_rank = 0
     cfg.lora = {}
-    cfg.fsdp_layer_prefixes = []
 
     hf_config = MagicMock()
     thinker_config = types.SimpleNamespace(tie_word_embeddings=False)
@@ -867,10 +866,9 @@ class TestAdapterNameForwarding:
 
         captured = {}
 
-        def fake_collect(module, layered_summon, base_sync_done, adapter_name="default", **kwargs):
+        def fake_collect(module, layered_summon, base_sync_done, adapter_name="default"):
             captured["adapter_name"] = adapter_name
             captured["layered_summon"] = layered_summon
-            captured["layer_prefixes"] = kwargs.get("layer_prefixes")
             return {"w": torch.zeros(1)}
 
         with (
@@ -882,13 +880,10 @@ class TestAdapterNameForwarding:
 
         assert captured["adapter_name"] == "old"
         assert captured["layered_summon"] is False
-        assert captured["layer_prefixes"] == []
         assert peft_config == {"adapter": "old"}
         assert dict(per_tensor_param).keys() == {"w"}
 
-    def test_get_per_tensor_param_routes_layered_summon_and_prefixes(self):
-        # Separate-async LoRA sync reads these kwargs; dropping them substitutes
-        # collect_lora_params' DiT prefix default and ignores rollout.layered_summon.
+    def test_get_per_tensor_param_routes_layered_summon(self):
         import torch.nn as nn
 
         omni_impl = _get_omni_impl_module()
@@ -899,16 +894,15 @@ class TestAdapterNameForwarding:
 
         engine = object.__new__(omni_impl.OmniFSDPEngine)
         engine.module = module
-        engine.model_config = _make_mock_model_config(fsdp_layer_prefixes=["layers."])
+        engine.model_config = _make_mock_model_config()
         engine._uses_fsdp2_cpu_offload_policy = True
         engine._is_offload_param = False
         engine._qat_enabled = False
 
         captured = {}
 
-        def fake_collect(module, layered_summon, base_sync_done, adapter_name="default", **kwargs):
+        def fake_collect(module, layered_summon, base_sync_done, adapter_name="default"):
             captured["layered_summon"] = layered_summon
-            captured["layer_prefixes"] = kwargs.get("layer_prefixes")
             return {"w": torch.zeros(1)}
 
         with (
@@ -919,4 +913,3 @@ class TestAdapterNameForwarding:
             engine.get_per_tensor_param(layered_summon=True, base_sync_done=True, adapter_name="default")
 
         assert captured["layered_summon"] is True
-        assert captured["layer_prefixes"] == ["layers."]

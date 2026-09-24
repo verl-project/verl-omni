@@ -86,7 +86,6 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
                     layered_summon=layered_summon,
                     base_sync_done=base_sync_done,
                     adapter_name=adapter_name,
-                    layer_prefixes=self.model_config.fsdp_layer_prefixes,
                 )
                 if not base_sync_done:
                     params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
