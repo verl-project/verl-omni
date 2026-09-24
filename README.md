@@ -80,166 +80,139 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
 
 ## Model and Algorithm Support 🎨
 
-A check mark means that a runnable recipe is checked in and validated. `NPU` refers to Ascend NPUs, while `GPU` refers to NVIDIA GPUs. Follow the linked recipe for its tested accelerator model, device count, and topology.
-
 <table>
   <tr>
     <th>Model</th>
     <th>Category</th>
     <th>Modality</th>
     <th>Algorithm</th>
-    <th>NPU</th>
-    <th>GPU</th>
+    <th>Status</th>
   </tr>
   <tr>
-    <td rowspan="6">Qwen-Image &amp; Qwen-Image-Edit</td>
+    <td rowspan="6">Qwen-Image & Qwen-Image-Edit</td>
     <td rowspan="6">Diffusion generator</td>
     <td rowspan="6">Text/Image → Image</td>
     <td>FlowGRPO (+ CPS/SDE)</td>
-    <td><a href="docs/start/flowgrpo_quickstart_npu.md">✅</a></td>
-    <td><a href="examples/flowgrpo_trainer/README.md">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td>Flow-DPPO</td>
-    <td>—</td>
-    <td><a href="examples/flowdppo_trainer/README.md">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td>MixGRPO</td>
-    <td><a href="examples/mixgrpo_trainer/README.md">✅</a></td>
-    <td><a href="examples/mixgrpo_trainer/README.md">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td>GRPO-Guard</td>
-    <td><a href="examples/grpoguard_trainer/README.md">✅</a></td>
-    <td><a href="examples/grpoguard_trainer/README.md">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td>DiffusionNFT</td>
-    <td><a href="examples/diffusionnft_trainer/README.md">✅</a></td>
-    <td><a href="examples/diffusionnft_trainer/README.md">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td>DPO</td>
-    <td><a href="examples/dpo_trainer/README.md">✅</a></td>
-    <td><a href="examples/dpo_trainer/README.md">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td>Wan2.2</td>
     <td>Diffusion generator</td>
     <td>Text → Video</td>
     <td>DanceGRPO</td>
-    <td><a href="examples/dancegrpo_trainer/README.md">✅</a></td>
-    <td><a href="examples/dancegrpo_trainer/README.md">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td>LTX2.3</td>
     <td>Diffusion generator</td>
     <td>Text → Video + Audio</td>
     <td>FlowGRPO</td>
-    <td><a href="examples/flowgrpo_trainer/ltx2/README.md">✅</a></td>
-    <td><a href="examples/flowgrpo_trainer/ltx2/README.md">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td rowspan="2"><b>MiniMax-H3</b></td>
     <td rowspan="2">Diffusion generator</td>
     <td rowspan="2">Any → Video + Audio</td>
     <td>DiffusionNFT</td>
-    <td>—</td>
-    <td><a href="examples/diffusionnft_trainer/minimax_h3/README.md">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td>FlowGRPO</td>
-    <td><a href="examples/flowgrpo_trainer/minimax_h3/README.md">✅</a></td>
-    <td><a href="examples/flowgrpo_trainer/minimax_h3/README.md">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td><b>Boogu-Image</b></td>
     <td>Diffusion generator</td>
     <td>Text/Image → Image</td>
     <td>FlowGRPO (+ CPS/SDE)</td>
-    <td>—</td>
-    <td><a href="examples/flowgrpo_trainer/boogu_image/README.md">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td>BAGEL</td>
     <td>Unified understand + gen</td>
     <td>Text + Image</td>
     <td>FlowGRPO</td>
-    <td><a href="examples/flowgrpo_trainer/bagel/README.md">✅</a></td>
-    <td><a href="examples/flowgrpo_trainer/bagel/README.md">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td rowspan="4">SD3.5</td>
     <td rowspan="4">Diffusion generator</td>
     <td rowspan="4">Text → Image</td>
     <td>DPO</td>
-    <td>—</td>
-    <td><a href="examples/dpo_trainer/README.md#sd35-offline-dpo">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td>FlowGRPO</td>
-    <td>—</td>
-    <td><a href="docs/start/flowgrpo_quickstart.md">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td>FlowGRPO w/ DiNa-LRM</td>
-    <td>—</td>
-    <td><a href="docs/examples/flowgrpo_trainer_sd35_drm.md">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td><a href="docs/algo/diffusion_opd.md">DiffusionOPD</a> (incl. MOPD)</td>
-    <td>—</td>
-    <td><a href="examples/diffusionopd_trainer/README.md">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td rowspan="2">HunyuanImage-3.0</td>
     <td rowspan="2">Unified understand + gen</td>
     <td rowspan="2">Text + Image</td>
     <td>MixGRPO</td>
-    <td>—</td>
-    <td>—</td>
+    <td>Planned</td>
   </tr>
   <tr>
     <td>SRPO</td>
-    <td>—</td>
-    <td>—</td>
+    <td>Planned</td>
   </tr>
   <tr>
     <td rowspan="3">Qwen3-Omni-Thinker</td>
     <td rowspan="3">Omni-modality</td>
     <td rowspan="3">Text / Image / Video / Audio</td>
     <td>DPO</td>
-    <td>—</td>
-    <td><a href="examples/dpo_trainer/README.md#qwen3-omni-offline-dpo">✅</a></td>
+    <td>✅</td>
   </tr>
-  <tr>
+    <tr>
     <td>GSPO</td>
-    <td><a href="examples/gspo_trainer/README.md">✅</a></td>
-    <td><a href="examples/gspo_trainer/README.md">✅</a></td>
+    <td>✅</td>
   </tr>
   <tr>
     <td><a href="examples/dapo_trainer/README.md">DAPO (Phase 1, LoRA)</a></td>
-    <td>—</td>
-    <td><a href="examples/dapo_trainer/README.md">✅</a></td>
+    <td>✅</td>
   </tr>
-  <tr>
+    <tr>
     <td rowspan="3">Qwen3-TTS</td>
     <td rowspan="3">Audio-modality</td>
     <td rowspan="3">Text → Audio</td>
     <td>DPO</td>
     <td>WIP</td>
-    <td>WIP</td>
   </tr>
   <tr>
     <td>GSPO</td>
     <td>WIP</td>
-    <td>WIP</td>
   </tr>
   <tr>
     <td>GRPO</td>
-    <td>—</td>
-    <td><a href="examples/grpo_trainer/qwen3_tts/README.md">✅</a></td>
+    <td>✅</td>
   </tr>
 </table>
 
