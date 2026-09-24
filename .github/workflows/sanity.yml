@@ -16,6 +16,9 @@ on:
       - .github/vllm_omni_pin.txt
       - .github/verl_pin.txt
       - .github/workflows/sanity.yml
+      - .github/workflows/*.yml
+      - .readthedocs.yaml
+      - pyproject.toml
       - "tests/special_sanity/**"
 
 concurrency:

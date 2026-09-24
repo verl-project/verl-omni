@@ -11,7 +11,7 @@ For the full installation and quickstart guide, see [Quickstart: FlowGRPO traini
 Follow the [installation guide](../../docs/start/install.md) to set up the base environment, then install the FlowGRPO-specific dependency:
 
 ```bash
-pip install Levenshtein
+uv pip install -e ".[ocr]"
 ```
 
 The provided script is configured for a single node with `4` GPUs.

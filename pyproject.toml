@@ -66,10 +66,13 @@ omni = [
     "sox>=1.5.0",
     "torchaudio>=2.11.0",
     "av",
+]
+# flash-attn ships no CPU wheel (source build needs a CUDA toolkit); keep [omni] CPU-installable.
+fa2 = [
     "flash-attn>=2.8.3",
 ]
 # CUDA rollout backend (vllm) + rollout engine (vllm-omni) + actor FA3 (kernels).
-# The vllm-omni git commit must match .github/vllm_omni_pin.txt, which CI/Docker read.
+# The vllm-omni git commit must match .github/vllm_omni_pin.txt, which CI and the ROCm/NPU Dockerfiles read.
 gpu = [
     "vllm==0.28.0",
     "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@ded8934626aaad1a3e816c3a1d9d742efc012d93",

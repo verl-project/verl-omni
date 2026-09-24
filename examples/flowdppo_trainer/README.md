@@ -11,7 +11,7 @@ Flow-DPPO reuses the FlowGRPO training stack, but replaces ratio clipping with a
 Follow the [installation guide](../../docs/start/install.md) to set up the base environment, then install the OCR reward dependency:
 
 ```bash
-pip install Levenshtein
+uv pip install -e ".[ocr]"
 ```
 
 The provided script is configured for a single node with `4` GPUs.

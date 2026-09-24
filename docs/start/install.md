@@ -7,39 +7,12 @@ For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For AMD GPU
 ## Requirements
 
 * **Python**: Version >= 3.11
-* **NVIDIA driver**: R580+ (CUDA 13.0) for native execution. On datacenter GPUs, R535+ also works through [CUDA forward compatibility](#older-nvidia-drivers-cuda-forward-compatibility).
-
-## Install
-
-```bash
-git clone https://github.com/verl-project/verl-omni.git
-cd verl-omni
-```
-
-1. Create a Python virtual environment
-
-```bash
-uv venv --python 3.12 --seed
-source .venv/bin/activate
-```
-
-2. Install the backend, rollout engine, and training stack
-
-```bash
-uv pip install -e ".[gpu]" --torch-backend=auto
-```
-
-### Extras
-
-| Extra       | Adds                                                          | When                     |
-| ----------- | ------------------------------------------------------------- | ------------------------ |
-| `gpu`       | `vllm==0.28.0`, git-pinned `vllm-omni`, `kernels==0.16.0`, `liger-kernel`, `pyzmq`, `qwen-vl-utils`, `cupy-cuda13x` | CUDA rollout + actor FA3 |
-| `dev`       | `pytest`, `pre-commit`, `Levenshtein`, …                      | Local development / CI   |
-| `ocr`       | `Levenshtein`                                                 | OCR reward (FlowGRPO)    |
+* **CUDA**: >= 13.0
+* **NVIDIA driver**: 580+ natively; datacenter GPUs with older drivers (535+) can use [CUDA forward compatibility](#older-nvidia-drivers-cuda-forward-compatibility) instead.
 
 ### Older NVIDIA drivers (CUDA forward compatibility)
 
-On datacenter GPUs with a pre-CUDA-13.0 driver (R535+), install NVIDIA's
+On datacenter GPUs with a pre-CUDA-13.0 driver (535+), install NVIDIA's
 `cuda-compat` forward-compatibility package and point the loader at it
 (see [vLLM's driver requirements](https://docs.vllm.ai/en/v0.28.0/getting_started/installation/gpu.html)):
 
@@ -53,14 +26,44 @@ export LD_LIBRARY_PATH=${CONDA_PREFIX}/cuda-compat:${CONDA_PREFIX}/lib:${LD_LIBR
 export LIBRARY_PATH=${CONDA_PREFIX}/cuda-compat:${CONDA_PREFIX}/lib:${LIBRARY_PATH:-}
 ```
 
-Then run step 2 with `--python "$CONDA_PREFIX/bin/python"` and
-`--torch-backend=cu130` instead of `auto`. Forward compatibility is a
-datacenter-only fallback for clusters whose driver cannot be upgraded;
-for production (and consumer GPUs) prefer a native R580+ driver.
-
 Set both exports in every shell and launcher that runs training or rollout
 (e.g. in the training script) — without them CUDA initialization fails with
-"the NVIDIA driver on your system is too old".
+"the NVIDIA driver on your system is too old". Forward compatibility is a
+datacenter-only fallback for clusters whose driver cannot be upgraded and is
+not guaranteed across all driver branches and workloads; for production (and
+consumer GPUs) prefer a native 580+ driver.
+
+## Install
+
+```bash
+git clone https://github.com/verl-project/verl-omni.git
+cd verl-omni
+```
+
+1. Create a Python virtual environment — on a pre-CUDA-13.0 driver, use the conda environment from the [forward-compatibility section](#older-nvidia-drivers-cuda-forward-compatibility) above instead
+
+```bash
+uv venv --python 3.12 --seed
+source .venv/bin/activate
+```
+
+2. Install the backend, rollout engine, and training stack
+
+```bash
+uv pip install -e ".[gpu]" --torch-backend=auto
+```
+
+In the cuda-compat environment, pass `--python "$CONDA_PREFIX/bin/python"` and use `--torch-backend=cu130` instead of `auto`.
+
+### Extras
+
+| Extra       | Adds                                                          | When                     |
+| ----------- | ------------------------------------------------------------- | ------------------------ |
+| `gpu`       | `vllm==0.28.0`, git-pinned `vllm-omni`, `kernels==0.16.0`, `liger-kernel`, `pyzmq`, `qwen-vl-utils`, `cupy-cuda13x` | CUDA rollout + actor FA3 |
+| `omni`      | omni-trainer runtime (`librosa`, `torchaudio`, `av`, …)       | Omni-modality training   |
+| `fa2`       | `flash-attn` (source build, needs a CUDA toolkit)             | Omni trainer FA2 default |
+| `dev`       | `pytest`, `pre-commit`, …                                     | Local development / CI   |
+| `ocr`       | `Levenshtein`                                                 | OCR reward (FlowGRPO)    |
 
 ## Optional Dependencies
 

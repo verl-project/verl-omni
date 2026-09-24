@@ -14,10 +14,12 @@
 
 """Enforce that the git pins in pyproject.toml match the .github/ pin files.
 
-The [gpu]/[train] extras carry vllm-omni and verl as direct-URL git pins,
-while CI workflows and the ROCm/NPU Dockerfiles install the same packages
-from .github/vllm_omni_pin.txt and .github/verl_pin.txt. A drift between
-the two sources silently splits the stack; this check makes it a failure.
+The [gpu] extra and the core dependencies carry vllm-omni and verl as
+direct-URL git pins, while CI workflows and the ROCm/NPU Dockerfiles install
+the same packages from .github/vllm_omni_pin.txt and .github/verl_pin.txt.
+A drift between the two sources silently splits the stack; this check makes
+it a failure. Also enforces that vllm cpu wheel URLs in CI/RTD carry the
+toml's vllm version.
 """
 
 import re

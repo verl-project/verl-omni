@@ -13,7 +13,7 @@ For algorithm details, configuration reference, and tuning guides, see [Algorith
 Follow the [installation guide](../../docs/start/install.md) to set up the base environment, then install the MixGRPO/FlowGRPO-specific dependency:
 
 ```bash
-pip install Levenshtein
+uv pip install -e ".[ocr]"
 ```
 
 The provided GPU script is configured for a single node with `4` GPUs. An NPU script for Ascend 800T A2 with `8` NPUs is also available (see [Run training](#run-training) below).

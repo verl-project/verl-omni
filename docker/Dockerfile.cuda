@@ -54,7 +54,7 @@ COPY pyproject.toml setup.py README.md ./
 COPY .github/verl_pin.txt ./.github/
 COPY verl_omni ./verl_omni
 
-# Step 1 — gpu extra (vllm, git-pinned vllm-omni, kernels, liger-kernel, pyzmq, qwen-vl-utils) from pyproject.
+# Step 1 — gpu extra (vllm, git-pinned vllm-omni, kernels, liger-kernel, pyzmq, qwen-vl-utils, cupy-cuda13x) from pyproject.
 # cu130 is pinned for build determinism against the CUDA 13.0.2 base; `auto` would
 # depend on the build host's driver (install.md uses `auto` outside Docker).
 RUN uv pip install --torch-backend=cu130 ".[gpu]"
@@ -73,7 +73,7 @@ FROM base AS runtime
 WORKDIR /workspace/verl-omni
 CMD ["/bin/bash"]
 
-# Optional: dev extra (pytest, pre-commit, Levenshtein, …)
+# Optional: dev extra (pytest, pre-commit, …)
 FROM base AS dev
 RUN uv pip install -e ".[dev]"
 

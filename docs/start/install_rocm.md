@@ -48,7 +48,7 @@ installing inside the container:
 
 | Extra      | Install                     | When needed                             |
 | ---------- | --------------------------- | --------------------------------------- |
-| OCR reward | `pip install Levenshtein`   | FlowGRPO training with OCR-based reward |
+| OCR reward | `uv pip install -e ".[ocr]"`   | FlowGRPO training with OCR-based reward |
 | Profiling  | `pip install py-spy`        | Sampling profiler for stack traces      |
 
 `PIP_CONSTRAINT` is baked into the image, so these cannot pull a CUDA `torch` over the ROCm build.

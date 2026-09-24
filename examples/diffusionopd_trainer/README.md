@@ -11,7 +11,7 @@ Compared with running FlowGRPO again, distillation needs no reward in the loss a
 Follow the [installation guide](../../docs/start/install.md) to set up the base environment, then install the OCR reward dependency:
 
 ```bash
-pip install Levenshtein
+uv pip install -e ".[ocr]"
 ```
 
 The provided script uses a single node with `3` GPUs: 2 for actor + rollout (the frozen teacher shares them), 1 for the reward model server.

@@ -52,7 +52,7 @@ This installs `vllm-omni`, then `verl` and `verl-omni`.
 
 | Extra       | Adds                                                          | When                     |
 | ----------- | ------------------------------------------------------------- | ------------------------ |
-| `dev`       | `pytest`, `pre-commit`, `Levenshtein`, …                      | Local development / CI   |
+| `dev`       | `pytest`, `pre-commit`, …                                     | Local development / CI   |
 | `ocr`       | `Levenshtein`                                                 | OCR reward (FlowGRPO)    |
 
 The CUDA `gpu` extra is not used on NPU. NPU recipes override the attention backend with `actor_rollout_ref.model.attn_backend=_native_npu`.

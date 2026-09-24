@@ -25,11 +25,11 @@ For the base environment setup, see the [installation guide](../../docs/start/in
 ## Installation
 
 Follow the [installation guide](../../docs/start/install.md) to set up the base
-environment, then add the `[omni]` extra — it includes the `flash-attn` the
-omni trainer needs by default:
+environment, then add the `[omni]` and `[fa2]` extras — the omni trainer's
+actor defaults to flash attention 2:
 
 ```bash
-uv pip install -e ".[omni]"
+uv pip install -e ".[omni,fa2]"
 ```
 
 > **Tested with** `transformers==5.13.1`, `accelerate==1.14.0`, `peft==0.19.1`.
@@ -494,9 +494,9 @@ python -m pip install --no-deps --force-reinstall \
     "verl @ git+https://github.com/verl-project/verl.git@a0feb78fe8229fde644aec3bbec20b5dc4583509"
 ```
 
-Restart the training processes and Ray workers after updating. Installing
-`.[train]` again may restore the repository's older pin; apply the recipe-specific
-verl update after that installation.
+Restart the training processes and Ray workers after updating. Reinstalling
+the repository (`uv pip install -e .`) may restore the repository's older pin;
+apply the recipe-specific verl update after that installation.
 
 Launch with the original full model checkpoint:
 
