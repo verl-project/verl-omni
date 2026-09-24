@@ -55,8 +55,9 @@ export LIBRARY_PATH=${CONDA_PREFIX}/cuda-compat:${CONDA_PREFIX}/lib:${LIBRARY_PA
 ```
 
 Then run step 2 with `--python "$CONDA_PREFIX/bin/python"` and
-`--torch-backend=cu130` instead of `auto`. Forward compatibility is
-datacenter-only; on consumer GPUs upgrade the driver to R580+.
+`--torch-backend=cu130` instead of `auto`. Forward compatibility is a
+datacenter-only fallback for clusters whose driver cannot be upgraded;
+for production (and consumer GPUs) prefer a native R580+ driver.
 
 Set both exports in every shell and launcher that runs training or rollout
 (e.g. in the training script) — without them CUDA initialization fails with
