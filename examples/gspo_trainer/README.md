@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
-Last updated: 09/14/2026
+Last updated: 09/18/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
@@ -570,6 +570,70 @@ outputs go to `${OUTPUT_DIR}/checkpoints` and `${OUTPUT_DIR}/validation`.
 Logging uses console and TensorBoard; the launcher also writes
 `run_qwen3omni_npu_nextqa_full_ms_16.log` in the repository root.
 
+## Training with MiniCPM-o 4.5 (AVQA)
+
+Same AVQA-R1-6K data, same reward, and the same recipe as Qwen3-Omni above,
+with four model-specific changes: the checkpoint path,
+`trust_remote_code=True`, `pipeline_name="minicpmo_4_5"`, and
+[`MiniCPMORLHFDataset`](../../verl_omni/utils/dataset/omni_rl_datasets.py),
+which reads the image and audio blocks without a Qwen dependency.
+
+```bash
+bash examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh
+```
+
+The recipe trains the thinker (`llm` = dense Qwen3-8B). The vision and audio
+towers (`vpm`/`apm`) stay frozen and unsharded under FSDP2, and the rollout
+serves a one-stage thinker-only pipeline (text output) with
+`model_arch=MiniCPMO45OmniLLMForConditionalGeneration` for logprob support.
+Keep `flash_attention_2`: sdpa breaks train/rollout consistency. See the
+[integrating guide](../../docs/contributing/integrating_an_omni_model.md) for
+the rollout memory-sizing knobs the script sets.
+
+### Run disaggregated (separate-async)
+
+```bash
+bash examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_separate_async_v1.sh
+```
+
+The same recipe on the `omni_separate_async` trainer: the FSDP trainer and the
+vLLM-Omni rollout run on **separate GPU pools** (single node, 4 × 80GB = 2
+train + 2 rollout), generation runs one batch ahead of training through the
+replay buffer, and weights sync to the standalone replicas every
+`parameter_sync_step=8` inner steps (128 = 8 × 16, unchanged from both parent
+recipes). Data, reward, LoRA targets, and the GSPO block are identical to the
+colocated script; only the disaggregation lines differ:
+
+| knob | colocated | separate-async | why |
+| --- | --- | --- | --- |
+| `trainer.v1.trainer_mode` | `omni_sync` | `omni_separate_async` | trainer selection |
+| GPU split | 4 colocated | 2 train + 2 rollout (`rollout.nnodes=1`, `n_gpus_per_node=2`) | disaggregation |
+| Rollout topology | TP=2, colocated | `tensor_model_parallel_size=1` → two standalone replicas | independent rollout capacity |
+| `model.lora.merge` | `True` (merged full-weight IPC sync) | `True` — merged full weights via the NCCL engine | accuracy parity with the colocated reference; `False` (adapter deltas, ~100 MB vs ~19 GB per sync) is the later perf flip |
+| `rollout.checkpoint_engine.backend` | — (naive colocated sync) | `nccl` | required non-naive backend |
+| `actor.fsdp_config.param_offload` / `optimizer_offload` | `true` — vacate shared GPUs for the rollout | `false` — dropped, not inherited | trainer GPUs are dedicated |
+| `rollout.gpu_memory_utilization` | 0.7 | 0.7 | the hybrid-replica wake on the trainer GPUs must fit next to the resident actor |
+| `trainer.v1.sampler.max_off_policy_threshold` | — (default 8) | pinned `8` | one sync cycle; keeps clipfrac readings interpretable |
+
+LoRA sync note: this recipe ships `lora.merge=True` — merged full weights over
+the NCCL engine, the same semantics as the colocated recipe — so the first
+separate-async run stays directly comparable with the colocated reference. The
+performance flip, `lora.merge=False` (adapter deltas via `add_lora`, ~100 MB vs
+~19 GB per sync), is config-only: the actor's `llm.*` adapter keys align with
+the rollout class's `llm.`-prefixed backbone (pinned by
+`tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py`; see
+[separate-async omni](../../docs/algo/separate_async_omni.md)).
+
+If the two-replica shape misbehaves (generation stalls around weight syncs),
+fall back to one TP=2 replica — the validated Qwen3-Omni topology — by
+overriding `actor_rollout_ref.rollout.tensor_model_parallel_size=2`.
+
+Reward placement rule under this trainer mode: any future GPU reward model
+(judge models, RLAIF-V judges) must live on the standalone/dedicated pool or
+its own — never the trainer pool (the standalone rollout never pauses to free
+memory; colocated RMs are rejected at startup). This recipe's rule-based
+`minicpm_naive` reward needs no placement.
+
 ## Performance
 
 All GPU results measured on a single node of **4 × H800 80GB**, actor and
@@ -656,5 +720,8 @@ examples/gspo_trainer/
 │   ├── mmk12.py                                      ← MMK12 → verl RL parquet converter
 │   ├── avqa.py                                       ← AVQA → verl RL parquet converter
 │   └── nextqa.py                                     ← NExT-QA → verl RL parquet converter
+├── minicpm/
+│   ├── run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh ← V1 launch script (MiniCPM-o 4.5, LoRA r=32, audio + image)
+│   └── run_minicpmo_4_5_thinker_gspo_lora_avqa_separate_async_v1.sh ← V1 launch script (same, disaggregated 2+2 GPUs)
 └── README.md                                         ← (this file)
 ```

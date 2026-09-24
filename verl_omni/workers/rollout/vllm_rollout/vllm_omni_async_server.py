@@ -197,6 +197,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             self._temp_deploy_ctx = None
 
         self.engine = engine_client
+        if isinstance(self._generate_strategy, ARStrategy):
+            # attach engine-level monkey patches
+            await self.collective_rpc(method="monkey_patch_model")
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
 
     async def run_headless(self, args: argparse.Namespace):
