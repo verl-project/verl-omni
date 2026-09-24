@@ -20,9 +20,6 @@ REWARD_TP=${REWARD_TP:-1}
 DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_ocr_diffusion}
 TRAIN_FILES=${TRAIN_FILES:-${DATA_DIR}/train.parquet}
 VAL_FILES=${VAL_FILES:-${DATA_DIR}/test.parquet}
-
-# Bare clusters have no nvcc for flashinfer JIT; smokes do not measure sampler quality.
-export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-1}
 
 ENGINE=vllm_omni
@@ -97,7 +94,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.reward_model.model_path=${REWARD_MODEL_PATH} \
     reward.reward_model.rollout.name=${REWARD_ENGINE} \
     reward.reward_model.rollout.tensor_model_parallel_size=${REWARD_TP} \
-    reward.reward_model.rollout.gpu_memory_utilization=0.25 \
+    reward.reward_model.rollout.gpu_memory_utilization=0.4 \
     reward.reward_model.rollout.prompt_length=${max_prompt_length} \
     reward.reward_model.rollout.response_length=32 \
     reward.custom_reward_function.path=verl_omni/utils/reward_score/genrm_ocr.py \

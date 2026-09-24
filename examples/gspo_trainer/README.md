@@ -25,10 +25,11 @@ For the base environment setup, see the [installation guide](../../docs/start/in
 ## Installation
 
 Follow the [installation guide](../../docs/start/install.md) to set up the base
-environment. Local `flash-attn` is required for GPU training:
+environment, then add the `[omni]` extra — it includes the `flash-attn` the
+omni trainer needs by default:
 
 ```bash
-uv pip install "flash-attn>=2.8.3"
+uv pip install -e ".[omni]"
 ```
 
 > **Tested with** `transformers==5.13.1`, `accelerate==1.14.0`, `peft==0.19.1`.

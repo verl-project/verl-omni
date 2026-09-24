@@ -47,7 +47,6 @@ dependencies = [
     "math_verify",
     "tensorboard",
     "TransferQueue==0.1.9",
-    # verl-omni is a training framework; verl is a core dependency, not an extra.
     # Git commit must match .github/verl_pin.txt (reports as 0.10.0.dev at fefb080).
     "verl @ git+https://github.com/verl-project/verl.git@fefb080262e1c015a0ea05f958822a6a512dc795",
 ]

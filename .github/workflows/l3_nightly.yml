@@ -146,8 +146,6 @@ jobs:
       UV_SYSTEM_PYTHON: "1"
       UV_BREAK_SYSTEM_PACKAGES: "1"
       PIP_BREAK_SYSTEM_PACKAGES: "1"
-      NIGHTLY_PIN_KERNELS: "0.16.0"
-      NIGHTLY_PIN_FA3_FWD: "0.0.3"
       NIGHTLY_PIN_TRANSFORMERS: "5.14.1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -171,8 +169,6 @@ jobs:
           git config --global http.postBuffer 524288000 || true
           # Base image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
           uv pip install --system --break-system-packages -e ".[gpu,dev,audio,ocr]"
-          uv pip install --system --break-system-packages "kernels==${NIGHTLY_PIN_KERNELS}"
-          uv pip install --system --break-system-packages "fa3-fwd==${NIGHTLY_PIN_FA3_FWD}"
           uv pip install --system --break-system-packages --no-deps --reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
           # veomni's [gpu] extra pins torch 2.11 and would conflict with the vLLM stack.
           # See docs/start/install.md "Optional engine backends".

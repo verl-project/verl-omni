@@ -22,9 +22,6 @@ dummy_train_path=${TRAIN_FILES:-${DATA_DIR}/train.parquet}
 dummy_test_path=${VAL_FILES:-${DATA_DIR}/test.parquet}
 TOTAL_TRAIN_STEPS=${TOTAL_TRAIN_STEPS:-2}
 
-# Bare clusters have no nvcc for flashinfer JIT; smokes do not measure sampler quality.
-export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
-
 ENGINE=vllm_omni
 max_prompt_length=256
 
@@ -128,7 +125,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.reward_model.model_path=${REWARD_MODEL_PATH} \
     reward.reward_model.rollout.name=vllm \
     reward.reward_model.rollout.tensor_model_parallel_size=${REWARD_TP} \
-    reward.reward_model.rollout.gpu_memory_utilization=0.25 \
+    reward.reward_model.rollout.gpu_memory_utilization=0.4 \
     reward.reward_model.rollout.prompt_length=${max_prompt_length} \
     reward.reward_model.rollout.response_length=32 \
     reward.custom_reward_function.path=pkg://verl_omni.reward_loop.reward_manager.multi \
