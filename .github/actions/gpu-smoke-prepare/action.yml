@@ -29,8 +29,6 @@ runs:
         # The released qwen-tts targets Transformers 4.57.3; install the pinned upstream Transformers 5 archive without touching this repo's stack.
         uv pip install --system --break-system-packages --no-deps --reinstall \
           "qwen-tts @ https://github.com/QwenLM/Qwen3-TTS/archive/$(cat .github/qwen_tts_pin.txt).tar.gz"
-        # NCCL checkpoint engine (diffusion v1 separate_async weight sync).
-        uv pip install --system --break-system-packages cupy-cuda13x
         # uv.cu130 ships python3 only; Ray/scripts may still invoke `python`.
         if ! command -v python >/dev/null 2>&1; then
           ln -sfn "$(command -v python3)" /usr/local/bin/python

@@ -74,6 +74,7 @@ gpu = [
     "liger-kernel",
     "pyzmq",
     "qwen-vl-utils>=0.0.14",
+    "cupy-cuda13x",
 ]
 # Training stack.
 # Git commit must match .github/verl_pin.txt (reports as 0.10.0.dev at fefb080).
