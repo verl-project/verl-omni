@@ -866,7 +866,7 @@ class TestAdapterNameForwarding:
 
         captured = {}
 
-        def fake_collect(module, layered_summon, base_sync_done, adapter_name="default"):
+        def fake_collect(module, layered_summon, base_sync_done, adapter_name="default", **kwargs):
             captured["adapter_name"] = adapter_name
             captured["layered_summon"] = layered_summon
             return {"w": torch.zeros(1)}
