@@ -24,6 +24,7 @@ from __future__ import annotations
 import types
 from typing import Any
 
+import numpy as np
 import torch
 
 from verl_omni.pipelines.model_base import OmniModelBase
@@ -291,6 +292,18 @@ def _split_data_and_llm_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any], 
     return data, llm_kwargs
 
 
+def _is_flat_slice_pack(values: list, batch_size: int) -> bool:
+    """Whether a per-sample-looking list is one sample's flat ``(C, H, W)`` pack.
+
+    One image's slices arrive as a bare list of 3-D arrays; only a length
+    disagreement with the row count distinguishes it from one slice per row.
+    """
+    if not values or len(values) == batch_size:
+        return False
+    first = values[0]
+    return isinstance(first, torch.Tensor | np.ndarray) and first.ndim == 3
+
+
 def _reject_unprepared_packed_batch(data: dict[str, Any]) -> None:
     """Reject a packed batch whose per-sample bounds were never re-derived."""
     image_bound = data.get("image_bound")
@@ -324,17 +337,21 @@ def _normalize_media_containers(data: dict[str, Any]) -> None:
     )
 
     device = data["input_ids"].device
+    batch_size = _batch_size_from_input_ids(data["input_ids"])
     # Unwrap DataProto's ragged collation first: a padded bs>1 batch arrives as an
     # object-dtype ndarray, which the isinstance checks below would otherwise treat
-    # as one sample and flatten every row's slices onto batch row 0.
+    # as one sample and flatten every row's slices onto batch row 0. A flat list of
+    # (C, H, W) slices is likewise one sample's pack whenever the counts disagree.
     pixel_values = unwrap_collated(data["pixel_values"])
-    if isinstance(pixel_values, (list | tuple)):
+    if isinstance(pixel_values, (list | tuple)) and not _is_flat_slice_pack(pixel_values, batch_size):
         data["pixel_values"] = [sample_pixel_slices(sample) for sample in pixel_values]
     else:
         data["pixel_values"] = [sample_pixel_slices(pixel_values)]
     tgt_sizes = unwrap_collated(data["tgt_sizes"])
     if isinstance(tgt_sizes, (list | tuple)):
         data["tgt_sizes"] = [sample_tgt_sizes(sample, device=device) for sample in tgt_sizes]
+    else:
+        data["tgt_sizes"] = [sample_tgt_sizes(tgt_sizes, device=device)]
     # Mel features stack per clip; the lens must stay 1-D tensors for the tower's hstack.
     audio_features = normalize_audio_features(data.get("audio_features"))
     data["audio_features"] = audio_features

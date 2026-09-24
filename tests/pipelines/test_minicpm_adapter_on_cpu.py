@@ -267,6 +267,26 @@ def test_split_minicpm_forward_kwargs_accepts_normalized_audio_tensor():
     assert [lens.tolist() for lens in data["audio_feature_lens"]] == [[10], [10]]
 
 
+def test_split_minicpm_forward_kwargs_wraps_flat_slice_pack_as_one_sample():
+    # One image's slice grid arrives as a bare list of (C, H, W) tensors with a
+    # single input_ids row; splitting it into N samples drops every slice after
+    # the first at the scatter. Its tgt_sizes arrive as a bare (n_slices, 2) tensor.
+    slices = [torch.zeros(3, 2, 2) for _ in range(3)]
+    data, _ = split_minicpm_forward_kwargs(
+        {
+            "input_ids": torch.ones(1, 8, dtype=torch.long),
+            "position_ids": torch.arange(8).unsqueeze(0),
+            "pixel_values": slices,
+            "tgt_sizes": torch.tensor([[1, 4], [2, 2], [1, 2]], dtype=torch.int32),
+        }
+    )
+    assert len(data["pixel_values"]) == 1
+    assert [tuple(s.shape) for s in data["pixel_values"][0]] == [(3, 2, 2)] * 3
+    assert len(data["tgt_sizes"]) == 1
+    assert data["tgt_sizes"][0].shape == (3, 2)
+    assert data["tgt_sizes"][0].tolist() == [[1, 4], [2, 2], [1, 2]]
+
+
 def test_split_minicpm_forward_kwargs_rejects_unprepared_packed_batch():
     with pytest.raises(ValueError, match="without going through MiniCPMThinkerAdapter.prepare_model_inputs"):
         split_minicpm_forward_kwargs(
