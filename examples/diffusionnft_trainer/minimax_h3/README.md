@@ -56,19 +56,7 @@ published at https://huggingface.co/datasets/zyfenghit/dancegrpo-t2av
 
 ## Install
 
-Follow the project [installation guide](../../../docs/start/install.md),
-then install the repository-pinned vLLM-Omni revision:
-
-```bash
-uv pip install -e ".[gpu]" --torch-backend=auto
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train,dev]"
-uv pip install "diffusers @ git+https://github.com/huggingface/diffusers.git@d6726f38a0c5ca6c06a8f227fb7bade3486ed98d"
-```
-
-The explicit Diffusers revision is the tested API target that provides
-`MiniMaxH3Transformer3DModel` and the MiniMax H3 reference-conditioning
-components used by Ref2VA.
+Follow the project [installation guide](../../../docs/start/install.md).
 
 ## Checkpoint
 

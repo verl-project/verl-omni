@@ -50,10 +50,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Rollout engine (install in step 2, after gpu step 1).
-vllm-omni = [
-    "vllm-omni==0.28.0rc1",
-]
 audio = [
     "qwen-omni-utils>=0.0.9",
     "audioread",
@@ -69,15 +65,17 @@ omni = [
     "torchaudio>=2.11.0",
     "av",
 ]
-# CUDA rollout backend (vllm) + actor FA3 (kernels) + liger-kernel. Install in step 1 on GPU.
+# CUDA rollout backend (vllm) + rollout engine (vllm-omni) + actor FA3 (kernels).
+# The vllm-omni git commit must match .github/vllm_omni_pin.txt, which CI/Docker read.
 gpu = [
     "vllm==0.28.0",
+    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@ded8934626aaad1a3e816c3a1d9d742efc012d93",
     "kernels==0.16.0",
     "liger-kernel",
     "pyzmq",
     "qwen-vl-utils>=0.0.14",
 ]
-# Training stack (install in step 2).
+# Training stack.
 # Git commit must match .github/verl_pin.txt (reports as 0.10.0.dev at fefb080).
 train = [
     "verl @ git+https://github.com/verl-project/verl.git@fefb080262e1c015a0ea05f958822a6a512dc795",

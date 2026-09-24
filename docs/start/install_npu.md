@@ -1,6 +1,6 @@
 # Installation (NPU)
 
-Last updated: 09/09/2026
+Last updated: 09/24/2026
 
 For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`.
 
@@ -52,12 +52,11 @@ This installs `vllm-omni`, then `verl` and `verl-omni`.
 
 | Extra       | Adds                                                          | When                     |
 | ----------- | ------------------------------------------------------------- | ------------------------ |
-| `vllm-omni` | `vllm-omni==0.28.0rc1`                                        | Optional PyPI baseline only; CI/docs use the git pin above |
 | `train`     | `verl` @ [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | RL training              |
 | `dev`       | `pytest`, `pre-commit`, `Levenshtein`, …                      | Local development / CI   |
 | `ocr`       | `Levenshtein`                                                 | OCR reward (FlowGRPO)    |
 
-The CUDA `gpu` extra (`vllm`, `kernels`, `liger-kernel`) is not used on NPU. NPU recipes override the attention backend with `actor_rollout_ref.model.attn_backend=_native_npu`.
+The CUDA `gpu` extra is not used on NPU. NPU recipes override the attention backend with `actor_rollout_ref.model.attn_backend=_native_npu`.
 
 ## Optional Dependencies
 

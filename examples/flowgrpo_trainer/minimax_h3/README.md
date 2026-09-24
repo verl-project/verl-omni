@@ -13,34 +13,9 @@ Ref2VA paths target NVIDIA GPUs.
 
 ## Install
 
-Follow the project [installation guide](../../../docs/start/install.md). In
-particular, install the platform backend, the repository-pinned vLLM-Omni
-revision, and the training dependencies in that order. Run the commands below
-from the verl-omni repository root.
-
-For NVIDIA GPU:
-
-```bash
-uv pip install -e ".[gpu]" --torch-backend=auto
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train,dev]"
-```
-
-For Ascend NPU:
-
-```bash
-uv pip install vllm==0.28.0
-uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@$(cat .github/vllm_ascend_pin.txt)"
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train,dev]"
-```
-
-Install the tested Diffusers revision that provides
-`MiniMaxH3Transformer3DModel`:
-
-```bash
-uv pip install "diffusers @ git+https://github.com/huggingface/diffusers.git@d6726f38a0c5ca6c06a8f227fb7bade3486ed98d"
-```
+Follow the project [installation guide](../../../docs/start/install.md) for
+NVIDIA GPU, or the [NPU installation guide](../../../docs/start/install_npu.md)
+for Ascend NPU.
 
 ## Prepare the checkpoint
 

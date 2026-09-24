@@ -25,16 +25,10 @@ For the base environment setup, see the [installation guide](../../docs/start/in
 ## Installation
 
 Follow the [installation guide](../../docs/start/install.md) to set up the base
-environment. In short:
+environment. Local `flash-attn` is required for GPU training:
 
 ```bash
-git clone https://github.com/verl-project/verl-omni.git && cd verl-omni
-uv venv --python 3.12 --seed && source .venv/bin/activate
-uv pip install -e ".[gpu]" --torch-backend=auto
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train,dev]"
-# flash-attn is required for GPU training
-uv pip install flash-attn>=2.8.3
+uv pip install "flash-attn>=2.8.3"
 ```
 
 > **Tested with** `transformers==5.13.1`, `accelerate==1.14.0`, `peft==0.19.1`.

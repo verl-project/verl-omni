@@ -1,13 +1,13 @@
 # Installation
 
-Last updated: 09/22/2026
+Last updated: 09/24/2026
 
 For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`.
 
 ## Requirements
 
 * **Python**: Version >= 3.11
-* **CUDA**: Version >= 12.8
+* **NVIDIA driver**: R580+ (CUDA 13.0) for native execution. On datacenter GPUs, R535+ also works through [CUDA forward compatibility](#older-nvidia-drivers-cuda-forward-compatibility).
 
 ## Install
 
@@ -23,32 +23,39 @@ uv venv --python 3.12 --seed
 source .venv/bin/activate
 ```
 
-2. Install the platform backend
+2. Install the backend, rollout engine, and training stack
 
 ```bash
-uv pip install -e ".[gpu]" --torch-backend=auto
+uv pip install -e ".[gpu,train]" --torch-backend=auto
 ```
-
-This installs `vllm` for the CUDA PyTorch stack and `kernels` for FA3 backend.
-
-3. Install vLLM-Omni and VeRL-Omni
-
-```bash
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train]"
-```
-
-This installs `vllm-omni`, then `verl` and `verl-omni`.
 
 ### Extras
 
 | Extra       | Adds                                                          | When                     |
 | ----------- | ------------------------------------------------------------- | ------------------------ |
-| `gpu`       | `vllm==0.28.0`, `kernels==0.16.0`, `liger-kernel`, `pyzmq`, `qwen-vl-utils` | CUDA rollout + actor FA3 |
-| `vllm-omni` | `vllm-omni==0.28.0rc1`                                        | Optional PyPI baseline only; CI/docs use the git pin above |
+| `gpu`       | `vllm==0.28.0`, git-pinned `vllm-omni`, `kernels==0.16.0`, `liger-kernel`, `pyzmq`, `qwen-vl-utils` | CUDA rollout + actor FA3 |
 | `train`     | `verl` @ [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | RL training              |
 | `dev`       | `pytest`, `pre-commit`, `Levenshtein`, …                      | Local development / CI   |
 | `ocr`       | `Levenshtein`                                                 | OCR reward (FlowGRPO)    |
+
+### Older NVIDIA drivers (CUDA forward compatibility)
+
+On datacenter GPUs with a pre-CUDA-13.0 driver (R535+), install NVIDIA's
+`cuda-compat` forward-compatibility package and point the loader at it:
+
+```bash
+conda create -n verl-omni python=3.12 -c conda-forge
+conda activate verl-omni
+conda install -c conda-forge cuda-compat
+
+# the compat libcuda must take precedence over the driver's own
+export LD_LIBRARY_PATH=${CONDA_PREFIX}/cuda-compat:${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}
+export LIBRARY_PATH=${CONDA_PREFIX}/cuda-compat:${CONDA_PREFIX}/lib:${LIBRARY_PATH:-}
+```
+
+Then run step 2 with `--python "$CONDA_PREFIX/bin/python"` and
+`--torch-backend=cu130` instead of `auto`. Forward compatibility is
+datacenter-only; on consumer GPUs upgrade the driver to R580+.
 
 ## Optional Dependencies
 
