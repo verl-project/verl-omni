@@ -41,7 +41,8 @@ uv pip install -e ".[gpu,train]" --torch-backend=auto
 ### Older NVIDIA drivers (CUDA forward compatibility)
 
 On datacenter GPUs with a pre-CUDA-13.0 driver (R535+), install NVIDIA's
-`cuda-compat` forward-compatibility package and point the loader at it:
+`cuda-compat` forward-compatibility package and point the loader at it
+(see [vLLM's driver requirements](https://docs.vllm.ai/en/v0.28.0/getting_started/installation/gpu.html)):
 
 ```bash
 conda create -n verl-omni python=3.12 -c conda-forge
@@ -56,6 +57,10 @@ export LIBRARY_PATH=${CONDA_PREFIX}/cuda-compat:${CONDA_PREFIX}/lib:${LIBRARY_PA
 Then run step 2 with `--python "$CONDA_PREFIX/bin/python"` and
 `--torch-backend=cu130` instead of `auto`. Forward compatibility is
 datacenter-only; on consumer GPUs upgrade the driver to R580+.
+
+Set both exports in every shell and launcher that runs training or rollout
+(e.g. in the training script) — without them CUDA initialization fails with
+"the NVIDIA driver on your system is too old".
 
 ## Optional Dependencies
 
