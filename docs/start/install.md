@@ -63,15 +63,7 @@ In the cuda-compat environment, pass `--python "$CONDA_PREFIX/bin/python"` and u
 | `omni`      | omni-trainer runtime (`librosa`, `torchaudio`, `av`, …)       | Omni-modality training   |
 | `fa2`       | `flash-attn` (source build, needs a CUDA toolkit)             | Omni trainer FA2 default |
 | `dev`       | `pytest`, `pre-commit`, …                                     | Local development / CI   |
-| `ocr`       | `Levenshtein`                                                 | OCR reward (FlowGRPO)    |
-
-## Optional Dependencies
-
-| Extra                 | Install                                                   | When needed                             |
-| --------------------- | --------------------------------------------------------- | --------------------------------------- |
-| OCR reward            | `uv pip install -e ".[ocr]"`                              | FlowGRPO training with OCR-based reward |
-| Dev tools             | `uv pip install -e ".[dev]"`                              | Linting and unit tests                  |
-| VeOmni engine backend | See [Optional engine backends](#optional-engine-backends) | VeOmni instead of default FSDP2         |
+| `ocr`       | `Levenshtein`                                                 | OCR reward               |
 
 ### Flash Attention 3
 
@@ -97,7 +89,11 @@ actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN_HUB
 
 ### Flash Attention 2 (omni trainer)
 
-The omni trainer's actor is a transformers LLM; following verl's practice for LLM training, it defaults to `flash_attention_2`, which requires the local `flash-attn` package — see verl's [installation docs](https://verl.readthedocs.io/en/latest/start/install.html).
+The omni trainer's actor is a transformers LLM; following verl's practice for LLM training, it defaults to `flash_attention_2`, which requires the local `flash-attn` package:
+
+```bash
+uv pip install -e ".[fa2]"
+```
 
 ## Optional engine backends
 

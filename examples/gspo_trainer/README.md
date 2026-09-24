@@ -166,13 +166,7 @@ in [`examples/gspo_trainer/data_process/mmk12.py`](https://github.com/verl-proje
 ### Run training
 
 The MMK12 reward scorer grades responses with
-[`math_verify`](https://github.com/huggingface/math-verify). Multimodal data
-processing also requires [`qwen-vl-utils`](https://github.com/QwenLM/Qwen2.5-VL)
-for vision info extraction. Install both explicitly:
-
-```bash
-pip install math-verify qwen-vl-utils
-```
+[`math_verify`](https://github.com/huggingface/math_verify).
 
 Then launch the MMK12 V1 training script:
 

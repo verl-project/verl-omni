@@ -53,17 +53,9 @@ This installs `vllm-omni`, then `verl` and `verl-omni`.
 | Extra       | Adds                                                          | When                     |
 | ----------- | ------------------------------------------------------------- | ------------------------ |
 | `dev`       | `pytest`, `pre-commit`, …                                     | Local development / CI   |
-| `ocr`       | `Levenshtein`                                                 | OCR reward (FlowGRPO)    |
+| `ocr`       | `Levenshtein`                                                 | OCR reward               |
 
 The CUDA `gpu` extra is not used on NPU. NPU recipes override the attention backend with `actor_rollout_ref.model.attn_backend=_native_npu`.
-
-## Optional Dependencies
-
-| Extra               | Install                                 | When needed                             |
-| ------------------- | --------------------------------------- | --------------------------------------- |
-| OCR reward          | `uv pip install -e ".[ocr]"`            | FlowGRPO training with OCR-based reward |
-| Multimodal training | `pip install qwen-vl-utils math-verify` | Vision-language training (e.g. MMK12)   |
-| Dev tools           | `uv pip install -e ".[dev]"`            | Linting and unit tests                  |
 
 ## Post-Installation Verification
 
