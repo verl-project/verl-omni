@@ -320,16 +320,16 @@ trainer's README in `examples/`.
 
 | Algorithm | Qwen-Image | Qwen-Image-Edit | SD3.5 | Wan2.2 | LTX-2.3 | MiniMax-H3 | BAGEL | Qwen3-Omni | Qwen3-TTS |
 |-----------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| GRPO | — | — | — | — | — | — | — | — | [GPU ✅](../../examples/grpo_trainer/qwen3_tts/run_qwen3_tts_grpo.sh) |
-| Flow-GRPO | [NPU ✅](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_npu.sh)<br>[GPU ✅](../../examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh) | [NPU ✅](../../examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora_v1_npu.sh)<br>[GPU ✅](../../examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora.sh) | [GPU ✅](flowgrpo_quickstart.md) | — | [NPU ✅](../../examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora_npu.sh)<br>[GPU ✅](../../examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora.sh) | [NPU ✅](../../examples/flowgrpo_trainer/minimax_h3/README.md)<br>[GPU ✅](../../examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1.sh) | [NPU ✅](../../examples/flowgrpo_trainer/bagel/run_bagel_ocr_lora.sh)<br>[GPU ✅](../../examples/flowgrpo_trainer/bagel/run_bagel_ocr_lora.sh) | — | — |
-| Flow-DPPO | [GPU ✅](../../examples/flowdppo_trainer/README.md) | — | — | — | — | — | — | — | — |
-| GRPO-Guard | [NPU ✅](../../examples/grpoguard_trainer/README.md)<br>[GPU ✅](../../examples/grpoguard_trainer/README.md) | — | — | — | — | — | — | — | — |
-| Mix-GRPO | [NPU ✅](../../examples/mixgrpo_trainer/README.md)<br>[GPU ✅](../../examples/mixgrpo_trainer/README.md) | — | — | — | — | — | — | — | — |
-| DanceGRPO | — | — | — | [NPU ✅](../../examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_auto.sh)<br>[GPU ✅](../../examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_v1.sh) | — | — | — | — | — |
-| DPO | [NPU ✅](../../examples/dpo_trainer/README.md)<br>[GPU ✅](../../examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora_v1.sh) | — | [GPU ✅](../../examples/dpo_trainer/README.md#sd35-offline-dpo) | — | — | — | — | [GPU ✅](../../examples/dpo_trainer/README.md#qwen3-omni-offline-dpo) | — |
-| DiffusionNFT | [NPU ✅](../../examples/diffusionnft_trainer/README.md)<br>[GPU ✅](../../examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh) | — | — | — | — | [GPU ✅](../../examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh) | — | — | — |
-| [DiffusionOPD](../algo/diffusion_opd.md) (incl. MOPD) | — | — | [GPU ✅](../../examples/diffusionopd_trainer/README.md) | — | — | — | — | — | — |
-| GSPO (incl. OPD) | — | — | — | — | — | — | — | [NPU ✅](../../examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh)<br>[GPU ✅](../../examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh) | — |
+| GRPO | — | — | — | — | — | — | — | — | GPU ✅ |
+| Flow-GRPO | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅ | GPU ✅ | — | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅ | — | — |
+| Flow-DPPO | GPU ✅ | — | — | — | — | — | — | — | — |
+| GRPO-Guard | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — | — |
+| Mix-GRPO | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — | — |
+| DanceGRPO | — | — | — | NPU ✅<br>GPU ✅ | — | — | — | — | — |
+| DPO | NPU ✅<br>GPU ✅ | — | GPU ✅ | — | — | — | — | GPU ✅ | — |
+| DiffusionNFT | NPU ✅<br>GPU ✅ | — | — | — | GPU ✅ | — | — | — | — |
+| DiffusionOPD (incl. MOPD) | — | — | GPU ✅ | — | — | — | — | — | — |
+| GSPO (incl. OPD) | — | — | — | — | — | — | — | NPU ✅<br>GPU ✅ | — |
 
 HunyuanImage-3.0 (MixGRPO / SRPO) appears on the project README as Planned or
 WIP and does not yet have a ready-to-run recipe, so it is omitted from the
