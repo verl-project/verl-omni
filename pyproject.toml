@@ -29,7 +29,7 @@ dependencies = [
     "imageio[ffmpeg]>=2.37.2",
     "pandas",
     "peft",
-    "pyarrow>=19.0.0,<25.0.0",  # 25.0.0 breaks pd.read_parquet with ArrowInvalid: column length mismatch
+    "pyarrow>=19.0.0",
     "pybind11",
     "pylatexenc",
     "ray[default]",
@@ -47,7 +47,6 @@ dependencies = [
     "math_verify",
     "tensorboard",
     "TransferQueue==0.1.9",
-    # Git commit must match .github/verl_pin.txt (reports as 0.10.0.dev at fefb080).
     "verl @ git+https://github.com/verl-project/verl.git@fefb080262e1c015a0ea05f958822a6a512dc795",
 ]
 
@@ -56,8 +55,6 @@ audio = [
     "qwen-omni-utils>=0.0.9",
     "audioread",
 ]
-# Install qwen-tts separately from the pinned upstream Transformers 5 support
-# revision. The released 0.1.1 source and metadata target Transformers 4.57.3.
 omni = [
     "einops>=0.8.0",
     "librosa>=0.10.2",
@@ -67,12 +64,9 @@ omni = [
     "torchaudio>=2.11.0",
     "av",
 ]
-# flash-attn ships no CPU wheel (source build needs a CUDA toolkit); keep [omni] CPU-installable.
 fa2 = [
     "flash-attn>=2.8.3",
 ]
-# CUDA rollout backend (vllm) + rollout engine (vllm-omni) + actor FA3 (kernels).
-# The vllm-omni git commit must match .github/vllm_omni_pin.txt, which CI and the ROCm/NPU Dockerfiles read.
 gpu = [
     "vllm==0.28.0",
     "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@ded8934626aaad1a3e816c3a1d9d742efc012d93",
