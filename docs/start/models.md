@@ -1,11 +1,21 @@
 # Supported Models
 
-Last updated: 09/09/2026.
+Last updated: 09/21/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
 example, its architecture and pipeline details, supported trainers, and hardware
 requirements.
+
+> **The V1 trainer is the default since v0.3.0.** Scripts named `*_v1.sh`
+> (diffusion, entrypoint `main_diffusion_v1`) and online omni training
+> (`main_omni`) run the V1 trainer (TransferQueue + ReplayBuffer). The
+> remaining CUDA v0 launchers and the `main_diffusion` entrypoint are
+> **deprecated** and emit a `DeprecationWarning` until their V1 port lands
+> ([#389](https://github.com/verl-project/verl-omni/issues/389)); those
+> scripts pin `trainer.use_v1=false` explicitly. Offline DPO
+> recipes (SD3.5 diffusion DPO, Qwen3-Omni offline DPO) stay on the v0 trainer
+> by design. See {doc}`diffusion_v1` for the V1 guide and the migration recipe.
 
 ---
 
@@ -26,7 +36,7 @@ requirements.
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
-| Flow-GRPO (LoRA) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU |
+| Flow-GRPO (LoRA, V1 sync — default) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh` | 4×GPU |
 | Flow-GRPO (full) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr.sh` | 4×H200 |
 | Flow-GRPO (async) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_async_reward.sh` | 5×GPU |
 | Flow-GRPO (multi-node) | `examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_multi_node.sh` | 2×4 GPU |
@@ -37,8 +47,8 @@ requirements.
 | Flow-DPPO | `examples/flowdppo_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU |
 | GRPO-Guard | `examples/grpoguard_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU |
 | Mix-GRPO | `examples/mixgrpo_trainer/qwen_image/run_qwen_image_ocr_lora_mixgrpo.sh` | 4×GPU |
-| Diffusion-DPO | `examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora.sh` | 4×GPU |
-| DiffusionNFT | `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | 4×GPU |
+| Diffusion-DPO (V1 sync — default) | `examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora_v1.sh` | 4×GPU |
+| DiffusionNFT (V1 sync — default) | `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh` | 4×GPU |
 
 **Reward model:** `Qwen/Qwen3-VL-8B-Instruct` (OCR VLM judge, TP=4 colocated).
 
@@ -68,6 +78,7 @@ For dataset layout, launch overrides, and sequence-parallel constraints, see
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
 | Flow-GRPO (LoRA) | `examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora.sh` | 8×GPU |
+| Flow-GRPO (LoRA, V1 sync, NPU) | `examples/flowgrpo_trainer/qwen_image_edit/run_qwen_image_edit_lora_v1_npu.sh` | 16×NPU |
 
 **Reward model:** PickScore (`yuvalkirstain/PickScore_v1`) — CLIP preference
 scorer, async workers (default 4). PickScore measures instruction/image
@@ -89,9 +100,9 @@ alignment and does not directly enforce source-image preservation.
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
-| Flow-GRPO (LoRA) | `examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh` | 3×GPU (2 actor+rollout, 1 reward) |
+| Flow-GRPO (LoRA, V1 sync — default) | `examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh` | 3×GPU (2 actor+rollout, 1 reward) |
 | Flow-GRPO (DiNa-LRM) | `examples/flowgrpo_trainer/sd35/run_sd35_medium_drm_lora.sh` | 8×GPU (7 actor+rollout, 1 latent-reward server) |
-| Diffusion-DPO (offline) | `examples/dpo_trainer/sd35/run_sd35_medium_offline_dpo_lora.sh` | 3×GPU |
+| Diffusion-DPO (offline, v0 by design) | `examples/dpo_trainer/sd35/run_sd35_medium_offline_dpo_lora.sh` | 3×GPU |
 | [DiffusionOPD](../algo/diffusion_opd.md) (single teacher, OCR) | `examples/diffusionopd_trainer/sd35/run_sd35_medium_ocr_distill.sh` | 3×GPU (2 actor+rollout+teacher, 1 reward) |
 | [DiffusionOPD](../algo/diffusion_opd.md) (multi-teacher / MOPD) | `examples/diffusionopd_trainer/sd35/run_sd35_medium_mopd_distill.sh` | 3×GPU (2 actor+rollout+teachers, 1 reward) |
 
@@ -166,14 +177,16 @@ For dataset layout and launch overrides, see
 | **Pipeline** | Online DiffusionNFT with joint video and audio rollouts |
 | **Agent loop** | `minimax_h3_diffusion_single_turn_agent` (tokenizes text once for the H3 text encoder) |
 
-FlowGRPO for MiniMax-H3 is still WIP. For checkpoint layout, data prep, and
-Diffusers pin, see
+FlowGRPO for MiniMax-H3 runs on the V1 sync trainer. For checkpoint layout,
+data prep, and Diffusers pin, see
 [Examples - MiniMax-H3 DiffusionNFT](../../examples/diffusionnft_trainer/minimax_h3/README.md).
 
 **Supported trainers:**
 
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
+| Flow-GRPO (T2VA LoRA, V1 sync — default) | `examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_v1.sh` | 8×GPU (TP=2) |
+| Flow-GRPO (FL2VA LoRA, V1 sync — default) | `examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_fl2va_lora_v1.sh` | 8×GPU (TP=4) |
 | DiffusionNFT (T2VA LoRA) | `examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh` | 8×GPU (TP=2) |
 | DiffusionNFT (FL2VA LoRA) | `examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_fl2va_lora.sh` | 8×GPU (TP=4) |
 
@@ -226,6 +239,7 @@ For version requirements and detailed setup instructions, see
 | Trainer | Example script | GPU config |
 |---------|---------------|------------|
 | GSPO (text) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh` | 4×H100/H200 80GB |
+| GSPO (full, VeOmni 0.1.12; text/image) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_veomni.sh` | 2×8 GPU (recipe default) |
 | GSPO (image) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh` | 4×H100/H200 80GB |
 | GSPO (AVQA, NPU) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh` | 16×NPU (Atlas 800T A3) |
 | Offline DPO (LoRA) | `examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh` | 4×H800 |

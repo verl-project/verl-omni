@@ -28,6 +28,7 @@ See {doc}`start/models` for the full model catalogue and which algorithms run on
 
 start/install.md
 start/install_npu.md
+start/install_rocm.md
 start/models.md
 start/flowgrpo_quickstart.md
 start/multi_node_training.md

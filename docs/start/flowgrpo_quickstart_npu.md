@@ -1,6 +1,6 @@
 # Quickstart: FlowGRPO training on Qwen-Image OCR dataset with Ascend NPU
 
-Last updated: 09/09/2026
+Last updated: 09/21/2026
 
 Post-train a diffusion image generation model with FlowGRPO on Atlas 800T A2.
 
@@ -37,6 +37,13 @@ The script executes:
 ```bash
 python3 -m verl_omni.trainer.main_diffusion
 ```
+
+The V1 trainer (TransferQueue) is the default since v0.3.0, but this NPU
+launcher still uses the **deprecated** v0 trainer until an NPU V1 recipe for
+Qwen-Image FlowGRPO lands (tracked in
+[verl-project/verl-omni#389](https://github.com/verl-project/verl-omni/issues/389));
+expect a `DeprecationWarning` at launch. CUDA users should start from the V1
+recipe instead — see {doc}`flowgrpo_quickstart`.
 
 Checkpoints are saved to:
 

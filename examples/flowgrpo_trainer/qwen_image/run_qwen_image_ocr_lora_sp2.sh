@@ -23,6 +23,7 @@ REWARD_ENGINE=vllm
 export DIFFUSION_ATTENTION_BACKEND=TORCH_SDPA
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
     data.train_batch_size=32 \

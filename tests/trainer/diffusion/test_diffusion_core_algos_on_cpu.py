@@ -158,6 +158,68 @@ def test_compute_policy_loss_flow_grpo() -> None:
         assert "actor/pg_clipfrac_lower" in pg_metrics
 
 
+def test_flow_grpo_loss_with_zeroed_pad_rows() -> None:
+    """Pad rows zeroed by the v1 sync trainer must not bias the FlowGRPO objective (#561).
+
+    ``_balance_batch`` pads by duplicating real rows. With the duplicated real
+    advantages still in place the unmasked mean is inflated; after
+    ``_zero_pad_row_advantages`` the loss is ``sum(real per_elem) / (N + P)`` —
+    a uniform 1/(N+P) scale, deliberately not the unpadded mean, which would
+    require a masked reduction or unpad-before-loss.
+    """
+    from hydra import compose, initialize_config_dir
+    from verl.utils.config import omega_conf_to_dataclass
+
+    from verl_omni.workers.config.diffusion.actor import FSDPDiffusionActorConfig
+
+    n_real, n_pad = 4, 2
+    old_log_prob = torch.tensor([0.1, 0.2, 0.3, 0.4])
+    log_prob = torch.tensor([0.15, 0.1, 0.5, 0.2])
+    advantages = torch.tensor([1.0, -2.0, 3.0, -4.0])
+
+    with initialize_config_dir(
+        config_dir=os.path.abspath("verl_omni/trainer/config/diffusion/actor"), version_base=None
+    ):
+        cfg = compose(
+            config_name="dp_diffusion_actor",
+            overrides=[
+                "strategy=fsdp",
+                "diffusion_loss.clip_ratio=0.2",
+                "diffusion_loss.adv_clip_max=5.0",
+            ],
+        )
+    actor_config: FSDPDiffusionActorConfig = omega_conf_to_dataclass(cfg)
+    flow_grpo_loss = diffusion_algos.get_diffusion_loss_fn("flow_grpo")
+    clip_ratio = actor_config.diffusion_loss.clip_ratio
+    adv_clip_max = actor_config.diffusion_loss.adv_clip_max
+
+    def per_elem_loss(adv: torch.Tensor, log_prob: torch.Tensor, old_log_prob: torch.Tensor) -> torch.Tensor:
+        adv = torch.clamp(adv, -adv_clip_max, adv_clip_max)
+        ratio = torch.exp(log_prob - old_log_prob)
+        return torch.maximum(-adv * ratio, -adv * torch.clamp(ratio, 1.0 - clip_ratio, 1.0 + clip_ratio))
+
+    real_loss = per_elem_loss(advantages, log_prob, old_log_prob)
+    # pad_dataproto_to_divisor duplicates head rows onto the tail.
+    padded_old = torch.cat([old_log_prob, old_log_prob[:n_pad]])
+    padded_log = torch.cat([log_prob, log_prob[:n_pad]])
+
+    # Pre-fix: duplicated real advantages reach the unmasked mean and inflate it.
+    duplicated_adv = torch.cat([advantages, advantages[:n_pad]])
+    loss_duplicated, _ = flow_grpo_loss.compute_loss(
+        old_log_prob=padded_old, log_prob=padded_log, advantages=duplicated_adv, config=actor_config
+    )
+    torch.testing.assert_close(loss_duplicated, per_elem_loss(duplicated_adv, padded_log, padded_old).mean())
+    assert loss_duplicated > real_loss.mean()
+
+    # Post-fix: pad-row advantages zeroed, loss = sum(real per_elem) / (N + P).
+    zeroed_adv = torch.cat([advantages, torch.zeros(n_pad)])
+    loss_zeroed, _ = flow_grpo_loss.compute_loss(
+        old_log_prob=padded_old, log_prob=padded_log, advantages=zeroed_adv, config=actor_config
+    )
+    torch.testing.assert_close(loss_zeroed, real_loss.sum() / (n_real + n_pad))
+    assert not torch.isclose(loss_zeroed, real_loss.mean())
+
+
 def _reference_flow_dppo_loss(
     *,
     old_log_prob: torch.Tensor,

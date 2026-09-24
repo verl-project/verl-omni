@@ -192,9 +192,6 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
             logger.info("Loading standard weights (async)")
             standard = self._get_standard_weight_model_and_config()
             if standard is not None:
-                # AR (standard vLLM) model: load each bucket via the low-level
-                # model.load_weights (no per-bucket finalize), then run the single
-                # post-load processing pass once all buckets are received.
                 model, model_config = standard
                 # Re-attach weight_loader on Ascend FusedMoE params via verl's
                 # built-in patch (handles ACLGraph unwrap + SUPPORTED_MOE_MODELS
@@ -212,14 +209,44 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                     restore_moe_param_layout,
                 )
 
-                if _is_npu_platform():
-                    restore_moe_param_layout(model, model_config.hf_text_config.hidden_size)
-                receiver.receive_weights(
-                    on_bucket_received=lambda weights, *args, **kwargs: model.load_weights(weights)
-                )
-                from vllm.model_executor.model_loader.utils import process_weights_after_loading
+                is_npu = _is_npu_platform()
+                # Use checkpoint-layout restoration for packed MoE weights.
+                # Dense omni loaders may copy auxiliary encoder buffers and
+                # derive runtime tensors inside load_weights; turning those
+                # tensors into meta placeholders breaks their loading contract.
+                has_moe = False
+                if not is_npu:
+                    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
-                process_weights_after_loading(model, model_config, self.device)
+                    has_moe = any(isinstance(layer, RoutedExperts) for layer in model.modules())
+                if is_npu or not has_moe:
+                    if is_npu:
+                        restore_moe_param_layout(model, model_config.hf_text_config.hidden_size)
+                    receiver.receive_weights(
+                        on_bucket_received=lambda weights, *args, **kwargs: model.load_weights(weights)
+                    )
+                    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+
+                    process_weights_after_loading(model, model_config, self.device)
+                else:
+                    # vLLM records checkpoint layouts when constructing the
+                    # model. Restore those layouts before loading, then copy
+                    # processed weights back into the original kernel storage.
+                    from vllm.model_executor.model_loader.reload import (
+                        finalize_layerwise_reload,
+                        initialize_layerwise_reload,
+                    )
+
+                    initialize_layerwise_reload(model)
+                    # Layerwise loaders can retain tensors across buckets. The
+                    # receiver reuses its IPC buffer, so retained weights must
+                    # own their storage until the layer is ready to process.
+                    receiver.receive_weights(
+                        on_bucket_received=lambda weights, *args, **kwargs: model.load_weights(
+                            [(name, tensor.clone()) for name, tensor in weights]
+                        )
+                    )
+                    finalize_layerwise_reload(model, model_config)
             else:
                 # Diffusion pipeline worker: load via the pipeline. vllm-omni
                 # 0.26 removed DiffusionWorker/DiffusionModelRunner.load_weights;

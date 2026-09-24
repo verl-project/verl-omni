@@ -30,6 +30,7 @@ if [[ "${MAX_NUM_SEQS}" != "${LOG_PROB_MICRO_BATCH_SIZE}" ]]; then
 fi
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     algorithm.adv_estimator=flow_grpo \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \

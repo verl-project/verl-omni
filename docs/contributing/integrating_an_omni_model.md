@@ -1,6 +1,6 @@
 # How to Add a New Omni Model
 
-Last updated: 08/31/2026.
+Last updated: 09/22/2026.
 
 This guide walks through adding a new omni (multimodal autoregressive) model to
 the verl-omni training framework. It uses the Qwen3-Omni Thinker adapter as a
@@ -20,7 +20,9 @@ Decide which **training stage** you want to train and how the model decomposes:
 - **Encoder-frozen**: Vision/audio encoders are typically frozen during RL
   training (`freeze_vision_tower=True`). The training adapter's
   `get_strip_modules` excludes them from the trainable set if they are separate
-  submodules.
+  submodules. If they stay in the module graph and are *conditionally skipped*
+  rather than removed, keep them sharded-safe with
+  `get_fsdp_ignored_module_names` instead — see §2 and §6.
 - **Discrete-token**: Unlike diffusion models, omni models produce discrete
   text tokens. RL algorithms (GSPO, GRPO, RLOO) are selected through standard
   verl config fields (`actor.policy_loss.loss_mode`,
@@ -59,6 +61,15 @@ adapt each implementation to your model's architecture:
   `module.thinker.forward`, swaps the embedding accessors, and sets
   `module._no_split_modules` to the correct decoder layer class for FSDP.
   This method runs before FSDP wrapping and LoRA injection.
+
+- **`get_fsdp_ignored_module_names(model_config)`** (optional): Return
+  submodule name components to leave unsharded under FSDP2; default `[]`.
+  Declare the frozen encoders when they *stay in the module graph* but their
+  forward is skipped for some micro-batches — an unsharded forward emits no
+  collectives, so skipping it cannot desync the ranks (e.g. the MiniCPM-o
+  adapter in #572 returns `["apm", "vpm", "resampler"]`). Ignored parameters
+  must stay frozen: FSDP2 does not synchronize their gradients. FSDP2 only —
+  under `strategy=fsdp` the engine raises when the list is non-empty.
 
 - **`register_auto_classes()`** (optional): Register classes supplied by an
   optional model package with the appropriate Transformers Auto APIs. The model
@@ -233,9 +244,136 @@ KV is cheap relative to starving decode.
 Reference:
 [`examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh`](../../examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh)
 
+### VeOmni backend (optional)
+
+Install PyPI VeOmni **0.1.12** and its GPU kernels using the
+[installation guide](../start/install.md#optional-engine-backends).
+The [Thinker GSPO recipe](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/README.md#veomni-full-parameter-thinker-training)
+provides a complete launch example. Select the backend with:
+
+```bash
+python3 -m verl_omni.trainer.main_omni \
+    model_engine=veomni \
+    actor_rollout_ref.actor._target_=verl_omni.workers.config.omni.OmniVeOmniActorConfig \
+    ...
+```
+
+Both FSDP and VeOmni resolve the same `OmniModelBase` adapter by
+`(architecture, model_stage)`. Extend that adapter to support VeOmni; the
+shared `OmniVeOmniEngine` owns engine registration and delegates model loading,
+FSDP2/EP, optimization and checkpointing to verl. A new model does not need
+another engine class.
+
+#### Extend the training adapter
+
+| Hook | Responsibility |
+| --- | --- |
+| `setup_veomni(model_config, engine_config)` | Opt in, validate supported settings before model loading, and install backend integrations such as weight-export handlers. |
+| `prepare_veomni_inputs(model_inputs, micro_batch, model_config)` | Adapt packed inputs after verl's VeOmni transforms; defaults to passthrough. |
+| `configure_veomni_trainable_params(module, model_config)` | Set trainable parameters after parallelization and before optimizer creation; defaults to no-op. |
+
+The existing `prepare_model_inputs` replay hook runs afterwards on both
+backends. Keep optional VeOmni imports inside the backend hooks. Adapters
+without `setup_veomni` support fail before model loading; selecting VeOmni
+does not imply that every registered architecture is supported. Do not
+replace modules in `configure_veomni_trainable_params`: VeOmni already owns
+their distributed layout. This hook does not run for forward-only reference
+engines.
+
+Use [`qwen3_omni/veomni.py`](../../verl_omni/pipelines/qwen3_omni/veomni.py)
+as a model-specific reference:
+
+- Packed prompt/response boundaries define modality masks, so placeholder
+  tokens sampled into a response cannot consume prompt image features.
+- Weight export expands fused gate/up and down tensors to Hugging Face
+  per-expert weights, including EP rank offsets, for vLLM-Omni updates.
+- Setup accepts policy-gradient Thinker training with packed text/image
+  inputs and Ulysses size 1. It rejects direct-preference batches, unsupported
+  stages and LoRA, including a nonempty `lora_adapter_path` with rank zero.
+  Input preparation rejects audio/video features.
+- Before creating the optimizer, the adapter freezes vision/audio encoders
+  and rejects a loaded graph containing `talker`, `code2wav`, `code_predictor`
+  or `has_talker=True`. VeOmni 0.1.12 constructs only the Thinker even when
+  the checkpoint config enables speech; the guard detects changes to that
+  behavior. These are the same excluded-module names used by the FSDP adapter.
+- The version-sensitive `create_causal_mask` shim drops the obsolete
+  `cache_position` keyword from VeOmni 0.1.12's generated GPU model when the
+  Transformers signature no longer accepts it, validated with Transformers
+  5.14.1. Compatible signatures are unchanged and other unknown arguments
+  still raise. Recheck this shim when either dependency is upgraded.
+
+#### Select native operators
+
+Set VeOmni's operator fields under `actor_rollout_ref.actor.veomni`. The
+Thinker launcher explicitly selects VeOmni 0.1.12's GPU defaults for the
+Qwen3 operators, overriding verl's conservative eager defaults:
+
+| VeOmni selector | Recipe default |
+| --- | --- |
+| `attn_implementation` | `flash_attention_2` |
+| `moe_implementation` | `fused_triton` |
+| `cross_entropy_loss_implementation` | `liger_kernel` |
+| `rms_norm_implementation` | `liger_kernel` |
+| `swiglu_mlp_implementation` | `liger_kernel` |
+| `rotary_pos_emb_implementation` | `liger_kernel` |
+| `load_balancing_loss_implementation` | `triton` |
+
+The launcher makes reference selectors inherit the actor's values, including
+CLI overrides; an explicit `actor_rollout_ref.ref.veomni.<selector>` override
+still takes precedence. For example:
+
+```bash
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_veomni.sh \
+    actor_rollout_ref.actor.veomni.moe_implementation=fused_quack
+```
+
+`MOE_IMPL` and `ATTN_IMPL` are optional launcher conveniences for the same
+fields. Use explicit `fused_triton` / `fused_quack` names instead of VeOmni's
+deprecated `fused` alias. The field mapping to VeOmni's builder and
+`OpsImplementationConfig` lives in verl's VeOmni engine; the omni adapter
+adds no operator-selection mapping.
+
+`actor_rollout_ref.model.use_fused_kernels=true` selects verl's RL output
+protocol: the engine passes `return_log_probs=True`, temperature and
+pre-shifted labels. It does not select MoE, norm or CE operators. VeOmni's
+non-eager CE implementation computes chunked log-probabilities without
+materializing the full logits tensor; `cross_entropy_loss_implementation=eager`
+may still materialize logits.
+
+#### Validate the VeOmni integration
+
+Run both checks from the repository root through normal package initialization
+with the installed VeOmni and pinned verl/vLLM-Omni stack. They need two GPUs
+and use tiny random checkpoints without downloading the 30B model. Both use
+the launcher's default FA2 / fused Triton / Liger operators; the backend check
+uses eager operators on CPU only when generating its checkpoint fixture.
+
+```bash
+torchrun --standalone --nproc_per_node=2 \
+    tests/special_e2e/check_qwen3_omni_veomni_backend.py
+
+bash tests/special_e2e/run_gspo_qwen3_omni_thinker_veomni_smoke.sh
+```
+
+The backend check loads a speech-enabled config with extra Talker/codec
+checkpoint keys and verifies a Thinker-only optimizer. It compares the actual
+`use_fused_kernels` path with logits for log-probabilities and entropy at
+temperatures 1.0 and 0.8, with images on one rank and text on the other. It
+also checks two optimizer updates with EP=2 and exact agreement of exported
+weights across ranks.
+
+The V1 smoke exercises generation, actor/reference scoring, backward and
+optimizer execution, full-weight rollout updates, and final validation over
+two GSPO steps. It allows 1800 seconds for rollout startup because cold
+FlashInfer kernel compilation can exceed the default timeout. Its random
+arithmetic task may yield zero rewards; the backend check separately verifies
+nonzero gradients. These checks validate training and weight-transfer mechanics,
+not 30B-model convergence. Both scripts remain manual validation tools outside
+the required `ci-e2e-omni` group.
+
 ## 6. Common pitfalls
 
-These pitfalls are drawn from the Qwen3-Omni adapter. Some are
+These pitfalls are drawn from the Qwen3-Omni and MiniCPM-o adapters. Some are
 model-specific — verify each against your own model's architecture.
 
 - **`_no_split_modules`**: Must be set to the correct decoder layer class
@@ -260,6 +398,15 @@ model-specific — verify each against your own model's architecture.
   in `configure_tokenizer` and assign it to `tokenizer.chat_template`.
   verl's dataset loader calls `tokenizer.apply_chat_template()` and will
   fail without a template.
+
+- **Conditionally skipped encoders under FSDP2**: FSDP2 shards down to
+  individual `nn.Embedding` and `nn.Linear` leaves, so a *sharded* tower that
+  some micro-batches skip desyncs NCCL — the ranks that enter its collectives
+  and the ranks that skip it disagree on the collective order, and the failure
+  surfaces much later as a hang or a garbage gradient. Declare the subtree in
+  `get_fsdp_ignored_module_names`. The skip must be genuine too: if media
+  presence is not DP-balanced (verl balances token counts only), every rank
+  still has to reach the same number of collectives.
 
 - **Actor/rollout probability consistency**: Autoregressive codec policies may
   combine several codebook embeddings before predicting the selected token.

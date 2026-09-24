@@ -53,6 +53,7 @@ exec > >(tee -a "$log_file") 2>&1
 h3_lora_targets="['to_q','to_k','to_v','to_out.0','ff.net.0.proj','ff.net.2']"
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     trainer.device=npu \
     data.train_files=$train_path \
     data.val_files=$test_path \

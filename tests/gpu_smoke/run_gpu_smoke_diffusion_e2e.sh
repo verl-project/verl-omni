@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ci-e2e-diffusion GPU smoke tests (4-GPU): end-to-end diffusion training paths.
-# Includes FlowGRPO / online DPO / DiffusionNFT (v0), synchronous separate,
-# FlowGRPO v1 separate_async, and two-teacher OPD on the v1 sync and
-# separate_async trainers.
+# Includes Qwen-Image-Edit FlowGRPO v1 sync, FlowGRPO / online DPO /
+# DiffusionNFT (v0), synchronous separate, FlowGRPO v1 separate_async, and
+# two-teacher OPD on the v1 sync and separate_async trainers.
 
 set -euo pipefail
 
@@ -32,7 +32,7 @@ run_qwen_image_edit_flowgrpo_e2e() {
         bash tests/special_e2e/run_flowgrpo_qwen_image_edit.sh "${diffusion_trainer_args[@]}"
 }
 
-run_test 0 "Qwen-Image-Edit FlowGRPO trainer e2e" \
+run_test 0 "Qwen-Image-Edit FlowGRPO v1 sync trainer e2e" \
     run_qwen_image_edit_flowgrpo_e2e
 
 run_test 1 "FlowGRPO trainer e2e" \

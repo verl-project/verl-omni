@@ -1,6 +1,6 @@
 # Diffusion V1 training
 
-Last updated: 09/15/2026
+Last updated: 09/21/2026
 
 This guide runs the diffusion V1 trainer in synchronous or separate-asynchronous
 mode using the provided Stable Diffusion 3.5 Medium FlowGRPO OCR recipes.
@@ -9,6 +9,12 @@ trainer uses TransferQueue and ReplayBuffer to move rollout trajectories into
 the training loop. Synchronous mode waits for a complete rollout batch before
 each training step. Wan2.2 DanceGRPO on CUDA also defaults to the V1 sync
 recipe; see {doc}`../examples/dancegrpo_trainer`.
+
+Since v0.3.0 the V1 trainer is the **default for every diffusion model**:
+`trainer.use_v1` defaults to `true`, and `python -m verl_omni.trainer.main_diffusion_v1`
+launches it without extra flags. The legacy v0 trainer
+(`python -m verl_omni.trainer.main_diffusion` or `trainer.use_v1=false`) is
+**deprecated** — see [Legacy v0 trainer (deprecated)](#legacy-v0-trainer-deprecated).
 
 The examples support a single-node NVIDIA GPU setup. Sync mode uses two GPUs for
 the colocated actor and rollout plus one reward GPU. Separate-async mode also
@@ -77,6 +83,9 @@ python3 -m verl_omni.trainer.main_diffusion_v1
 trainer.use_v1=true
 trainer.v1.trainer_mode=sync
 ```
+
+`trainer.use_v1=true` and `trainer.v1.trainer_mode=sync` are the defaults since
+v0.3.0; the scripts keep them for explicitness.
 Hydra settings can be appended to the command. For example, to run fewer steps
 and disable W&B:
 
@@ -202,10 +211,48 @@ ENABLE_SWITCH=1 NUM_WARMUP_BATCHES=1 \
 bash tests/special_e2e/run_flowgrpo_qwen_image_v1_separate_async.sh
 ```
 
+## How TransferQueue supports the V1 trainer
+
+TransferQueue (pip package `TransferQueue`, imported as `transfer_queue`) is the
+streaming queue the V1 control plane uses to hand rollout data to the trainer.
+Every V1 diffusion run depends on it:
+
+1. **Install.** TransferQueue must be importable in the environment that
+   launches Ray *and* in every Ray worker. CI pins `pip install
+   TransferQueue==0.1.9`; use the same version unless a newer one is announced.
+   The import check in [Prerequisites](#prerequisites) fails fast when it is
+   missing.
+2. **Force-enabled lifecycle.** The yaml default `transfer_queue.enable` is
+   `false`, but a V1 launch force-sets it to `true` before `ray.init()` — a V1
+   run cannot start without TransferQueue. `ray.init` then exports
+   `TRANSFER_QUEUE_ENABLE=1` through the Ray runtime env so all workers join the
+   same queue, and the task runner wraps training in `tq.init(config.transfer_queue)`
+   … `tq.close()`. If Ray workers report `ModuleNotFoundError: No module named
+   'transfer_queue'`, stop the cluster (`ray stop`) and relaunch from the
+   environment where TransferQueue is installed.
+3. **Rollout-side producer.** The diffusion agent loop ships a TransferQueue
+   writer (`diffusion_agent_loop_tq.py`) that serializes each finished rollout
+   session — prompts, latents, rewards, and an explicit allowlist of extra
+   fields (e.g. `img_shapes` for Qwen-Image 2D RoPE). The allowlist is
+   intentional: silently forwarding unknown fields has broken metadata before,
+   so new fields must be added there explicitly.
+4. **Trainer-side consumer.** The trainer converts queued rows back to
+   `DataProto` batches (`tq_utils.diffusion_tq_batch_to_dataproto`) and feeds
+   them to the ReplayBuffer, which drives `sync` batching, staleness eviction,
+   and `separate_async` partial rollout.
+5. **Tuning.** `transfer_queue.backend.SimpleStorage.total_storage_size` caps
+   how many experience samples the default backend holds;
+   `num_data_storage_units` sets the in-memory storage units; metrics can be
+   exposed via `transfer_queue.metrics.*`. See [Important settings](#important-settings).
+
+Omni models get the same support through verl's `TaskRunnerV1`
+(`python -m verl_omni.trainer.main_omni`); omni inherits verl's TransferQueue
+setup and requires TransferQueue >= 0.1.9 for async checkpoint resume.
+
 ## Important settings
 
-- `trainer.use_v1=true` selects the V1 trainer instead of the legacy diffusion
-  trainer.
+- `trainer.use_v1` (default `true` since v0.3.0) selects the V1 trainer; setting
+  it to `false` explicitly selects the deprecated legacy v0 trainer.
 - `trainer.v1.trainer_mode` selects `sync` or `separate_async`.
 - `trainer.v1.separate_async.parameter_sync_step` controls the number of local
   actor updates per rollout-weight synchronization cycle.
@@ -229,6 +276,37 @@ bash tests/special_e2e/run_flowgrpo_qwen_image_v1_separate_async.sh
 The configurable incomplete-group refill policy above applies to `sync` mode.
 In `separate_async`, the upstream async replay buffer automatically evicts and
 replaces stale or failed prompt groups. `colocate_async` is not yet supported.
+
+## Legacy v0 trainer (deprecated)
+
+The legacy v0 diffusion trainer — launched by
+`python -m verl_omni.trainer.main_diffusion` or by
+`trainer.use_v1=false` — is **deprecated for every model** since v0.3.0:
+
+- Every v0 launch of a path that has a V1 equivalent emits a
+  `DeprecationWarning`; the v0 trainer will be removed in a future release.
+- Models without a landed V1 recipe (tracked in
+  [verl-project/verl-omni#389](https://github.com/verl-project/verl-omni/issues/389))
+  keep working on v0 until their port lands; the warning is expected there.
+  Their scripts pin `trainer.use_v1=false` explicitly, so the launch stays on
+  v0 even if the entrypoint is swapped to `main_diffusion_v1`.
+- **Stays on v0 by design** (no warning, no V1 planned): diffusion offline DPO
+  (`examples/dpo_trainer/sd35/`) and omni offline DPO
+  (`algorithm.sample_source=offline` + `algorithm.trainer_type=direct_preference`).
+
+Migrating a v0 recipe to V1 sync takes three lines — swap the entrypoint and
+the two (now-default) switches:
+
+```text
+python3 -m verl_omni.trainer.main_diffusion   ->  python3 -m verl_omni.trainer.main_diffusion_v1
+trainer.use_v1=false                          ->  trainer.use_v1=true
+trainer.v1.trainer_mode=sync
+```
+
+Batch math is unchanged for `sync`; `separate_async` adds the
+`train_batch_size = parameter_sync_step * ppo_mini_batch_size` identity
+described above. Install TransferQueue as described in
+[Prerequisites](#prerequisites) before the first V1 launch.
 
 ## Troubleshooting
 

@@ -417,3 +417,12 @@ def test_peft_wrapped_model_forwards():
     assert not torch.allclose(out.detach(), bare_out, atol=1e-6), (
         "LoRA-wrapped output should differ from bare model output"
     )
+
+
+def test_omni_model_base_fsdp_ignore_hook_defaults_to_empty_list():
+    """The hook is declared on the base: adapters opt in, others declare nothing."""
+    from verl_omni.pipelines.model_base import OmniModelBase
+
+    assert OmniModelBase.get_fsdp_ignored_module_names(SimpleNamespace()) == []
+    # The Qwen3-Omni thinker shards every subtree: it must not opt in.
+    assert Qwen3OmniThinkerAdapter.get_fsdp_ignored_module_names(SimpleNamespace()) == []

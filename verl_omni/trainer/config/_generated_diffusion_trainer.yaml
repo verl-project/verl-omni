@@ -627,7 +627,7 @@ trainer:
   ray_wait_register_center_timeout: 300
   ray_master_port_range: null
   device: cuda
-  use_v1: false
+  use_v1: true
   v1:
     trainer_mode: sync
     sync: {}

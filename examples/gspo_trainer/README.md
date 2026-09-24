@@ -600,6 +600,38 @@ binary `<answer>` exact-match reward): `critic/rewards/mean` rose from ~0.73 to
 ~0.94, `val-core/avqa_r1_6k/reward/mean@1` reached **0.877**.
 `rollout_corr/log_ppl_diff` stayed near zero (~0.007).
 
+## VeOmni full-parameter Thinker training
+
+[`run_qwen3_omni_thinker_gspo_veomni.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_veomni.sh)
+uses VeOmni **0.1.12** (PyPI) with FSDP2 and expert parallelism for the
+actor/reference, and vLLM-Omni for text rollout. Follow the
+[installation guide](../../docs/start/install.md#optional-engine-backends) on
+every node and prepare the MMK12 parquet files above. The Ray cluster must
+already span the requested nodes.
+
+```bash
+MODEL_PATH=Qwen/Qwen3-Omni-30B-A3B-Instruct \
+TRAIN_FILE=$HOME/data/mmk12/train.parquet \
+VAL_FILE=$HOME/data/mmk12/test.parquet \
+NUM_GPUS=8 NNODES=2 ACTOR_EP=8 \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_veomni.sh
+```
+
+The full text backbone is trainable; vision/audio encoders remain frozen.
+Supported inputs are **text and images**, with packed inputs and Ulysses size 1.
+Audio/video inputs, Talker training, LoRA and direct-preference training are
+not supported. Defaults use rollout TP=2 and actor EP=8; EP must divide the
+GPU world size and expert count.
+
+The recipe uses LR `2e-6` with cosine decay to zero and no warmup. Validation
+explicitly sets `temperature=0.0`. Hydra overrides go last, for example
+`trainer.total_training_steps=2` or `--cfg job` to inspect the configuration.
+This recipe does not claim numerical equivalence to PR #231 or the LoRA
+curves above.
+
+See the [VeOmni integration guide](../../docs/contributing/integrating_an_omni_model.md#veomni-backend-optional)
+for backend configuration and adapter integration.
+
 ## Logging
 
 The NExT-QA launcher uses console and TensorBoard logging. For launchers

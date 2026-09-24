@@ -24,6 +24,7 @@ REWARD_ENGINE=vllm
 
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     algorithm.adv_estimator=flow_grpo \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
