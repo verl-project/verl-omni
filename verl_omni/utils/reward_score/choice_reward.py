@@ -34,7 +34,10 @@ def compute_score(
     del kwargs
     prediction = extract_answer(solution_str)
     target = extract_answer(ground_truth)
-    accuracy = float(prediction == target)
+    # An empty prediction means no ``<answer>`` tag was found at all; never treat
+    # that as a match, even when ``ground_truth`` also fails to parse (both would
+    # otherwise extract to "" and compare equal).
+    accuracy = float(bool(prediction) and prediction == target)
     return {
         "score": accuracy,
         "accuracy": accuracy,
