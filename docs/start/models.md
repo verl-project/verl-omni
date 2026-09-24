@@ -327,8 +327,8 @@ trainer's README in `examples/`.
 | Mix-GRPO | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — | — |
 | DanceGRPO | — | — | — | NPU ✅<br>GPU ✅ | — | — | — | — | — |
 | DPO | NPU ✅<br>GPU ✅ | — | GPU ✅ | — | — | — | — | GPU ✅ | — |
-| DiffusionNFT | NPU ✅<br>GPU ✅ | — | — | — | GPU ✅ | — | — | — | — |
-| DiffusionOPD (incl. MOPD) | — | — | GPU ✅ | — | — | — | — | — | — |
+| DiffusionNFT | NPU ✅<br>GPU ✅ | — | — | — | — | GPU ✅ | — | — | — |
+| [DiffusionOPD](../algo/diffusion_opd.md) (incl. MOPD) | — | — | GPU ✅ | — | — | — | — | — | — |
 | GSPO (incl. OPD) | — | — | — | — | — | — | — | NPU ✅<br>GPU ✅ | — |
 
 HunyuanImage-3.0 (MixGRPO / SRPO) appears on the project README as Planned or
