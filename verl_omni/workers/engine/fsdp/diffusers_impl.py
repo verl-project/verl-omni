@@ -20,7 +20,7 @@ import os
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
-from typing import Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import torch
 import torch.distributed
@@ -53,8 +53,9 @@ from verl.utils.fsdp_utils import (
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.model import convert_weight_keys
 from verl.utils.py_functional import append_to_dict
-from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig
+from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
 from verl.workers.engine.base import BaseEngine, BaseEngineCtx, EngineRegistry
+from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
 from verl.workers.engine.fsdp.utils import create_device_mesh, get_sharding_strategy
 from verl.workers.engine.utils import enable_full_determinism, prepare_micro_batches
 
@@ -70,6 +71,7 @@ from verl_omni.utils.diffusion_compile import _maybe_compile_repeated_blocks
 from verl_omni.utils.fsdp_utils import apply_fsdp2, collect_lora_params
 from verl_omni.workers.config import DiffusionModelConfig
 from verl_omni.workers.engine.lora_adapter_mixin import LoRAAdapterMixin
+from verl_omni.workers.engine.utils import patch_composite_ar_engine_fsdp_build, qwen2_vl_base_forward
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -1527,3 +1529,330 @@ class EngineTrainModeCtx(BaseEngineCtx):
         assert isinstance(self.engine, DiffusersFSDPEngine)
         self.engine.optimizer_zero_grad()
         super().__exit__(exc_type, exc_value, traceback)
+
+
+@EngineRegistry.register(model_type="diffusion_composite_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+class CompositeFSDPEngine(BaseEngine):
+    """Composite engine delegating to separate AR and DiT FSDP backends.
+    Intialize two seperate engines.
+    Two seperate paths for inference, since rollout phase got intermediate results as inputs.
+    """
+
+    DIT_CHECKPOINT_SUBDIR = "transformer"
+    AR_CHECKPOINT_SUBDIR = "text_encoder"
+
+    def build_ar_hf_model_config(self, diffusion_model_config: DiffusionModelConfig) -> HFModelConfig:
+        """Build an HF config pointing at the diffusion pipeline text-encoder subfolder."""
+        subfolder = getattr(diffusion_model_config, "text_encoder_subfolder", None) or self.AR_CHECKPOINT_SUBDIR
+        text_encoder_path = os.path.join(diffusion_model_config.local_path, subfolder)
+        return HFModelConfig(
+            path=text_encoder_path,
+            trust_remote_code=diffusion_model_config.trust_remote_code,
+            use_shm=diffusion_model_config.use_shm,
+            enable_gradient_checkpointing=diffusion_model_config.enable_gradient_checkpointing,
+            lora_rank=diffusion_model_config.lora_rank,
+            lora_alpha=diffusion_model_config.lora_alpha,
+            target_modules=diffusion_model_config.target_modules,
+            target_parameters=diffusion_model_config.target_parameters,
+            exclude_modules=diffusion_model_config.exclude_modules,
+            lora_adapter_path=getattr(diffusion_model_config, "lora_adapter_path", None),
+            load_tokenizer=False,
+            override_config=diffusion_model_config.ar.override_config,
+        )
+
+    def __init__(
+        self,
+        model_config: DiffusionModelConfig,
+        engine_config: FSDPEngineConfig,
+        optimizer_config: FSDPOptimizerConfig,
+        checkpoint_config: CheckpointConfig,
+    ):
+        self.model_config = model_config
+        self.engine_config = engine_config
+        self.optimizer_config = optimizer_config
+        self.checkpoint_config = checkpoint_config
+        self.rank = torch.distributed.get_rank()
+        self.mode = None
+
+        # seperate engines, composite modules
+        ar_model_config = self.build_ar_hf_model_config(model_config)
+        ar_model_config.model_type = "language_model"
+        self.ar_engine = FSDPEngineWithLMHead(
+            model_config=ar_model_config,
+            engine_config=engine_config,
+            optimizer_config=optimizer_config,
+            checkpoint_config=checkpoint_config,
+        )
+        if engine_config.strategy == "fsdp2":
+            patch_composite_ar_engine_fsdp_build(self.ar_engine, model_config)
+        model_config.model_type = "diffusion_model"
+        self.dit_engine = PPODiffusersFSDPEngine(
+            model_config=model_config,
+            engine_config=engine_config,
+            optimizer_config=optimizer_config,
+            checkpoint_config=checkpoint_config,
+        )
+
+        # default: first stage
+        self.ar_stage = True
+        self.current_engine = self.ar_engine
+
+    def initialize(self) -> None:
+        self.ar_engine.initialize()
+        self.dit_engine.initialize()
+
+        # TODO: (susan) delete after fixing bug
+        if self.ar_engine._is_lora:
+            self.ar_engine.module.base_model.model.model.forward = qwen2_vl_base_forward.__get__(
+                self.ar_engine.module.base_model.model.model
+            )
+        else:
+            self.ar_engine.module.model.forward = qwen2_vl_base_forward.__get__(self.ar_engine.module.model)
+        print("Monkey patch verl.models.transformers.qwen2_vl._get_input_embeds")  # line 388-394
+
+    def next_stage(self) -> None:
+        """Switch stage and engine"""
+        self.ar_stage = not self.ar_stage
+        if self.ar_stage:
+            self.current_engine = self.ar_engine
+        else:
+            self.current_engine = self.dit_engine
+
+    @property
+    def is_param_offload_enabled(self) -> bool:
+        return self.current_engine.is_param_offload_enabled
+
+    @property
+    def is_optimizer_offload_enabled(self) -> bool:
+        return self.current_engine.is_optimizer_offload_enabled()
+
+    def train_mode(self, **kwargs):
+        return _CompositeEngineCtx(self, mode="train", **kwargs)
+
+    def eval_mode(self, **kwargs):
+        return _CompositeEngineCtx(self, mode="eval", **kwargs)
+
+    def optimizer_zero_grad(self) -> None:
+        self.current_engine.optimizer_zero_grad()
+
+    def optimizer_step(self) -> float:
+        return self.current_engine.optimizer_step()
+
+    def lr_scheduler_step(self):
+        return self.current_engine.lr_scheduler_step()
+
+    def forward_backward_batch(self, data: TensorDict, loss_function: Callable, forward_only: bool = False):
+        # Seperate forward backward stages
+        return self.current_engine.forward_backward_batch(data, loss_function, forward_only=forward_only)
+
+    def train_batch(self, data: TensorDict, loss_function: Callable) -> Any:
+        outputs = super().train_batch(data, loss_function)
+        self.next_stage()
+        return outputs
+
+    def infer_batch(self, data: TensorDict, loss_function: Optional[Callable] = None) -> Any:
+        outputs = super().infer_batch(data, loss_function)
+        self.next_stage()
+        return outputs
+
+    def get_data_parallel_rank(self):
+        return self.current_engine.get_data_parallel_rank()
+
+    def get_data_parallel_size(self):
+        return self.current_engine.get_data_parallel_size()
+
+    def get_data_parallel_group(self):
+        return self.current_engine.get_data_parallel_group()
+
+    def is_mp_src_rank_with_outputs(self):
+        return self.current_engine.is_mp_src_rank_with_outputs()
+
+    def to(self, device: str, model: bool = True, optimizer: bool = True, grad: bool = True):
+        self.ar_engine.to(device=device, model=model, optimizer=optimizer, grad=grad)
+        self.dit_engine.to(device=device, model=model, optimizer=optimizer, grad=grad)
+
+    def save_checkpoint(
+        self,
+        local_path: str,
+        hdfs_path: Optional[str] = None,
+        global_step: int = 0,
+        max_ckpt_to_keep: Optional[int] = None,
+        **kwargs,
+    ) -> None:
+        dit_path = os.path.join(local_path, self.DIT_CHECKPOINT_SUBDIR)
+        self.dit_engine.save_checkpoint(
+            local_path=dit_path,
+            hdfs_path=hdfs_path,
+            global_step=global_step,
+            max_ckpt_to_keep=max_ckpt_to_keep,
+            **kwargs,
+        )
+        ar_path = os.path.join(local_path, self.AR_CHECKPOINT_SUBDIR)
+        self.ar_engine.save_checkpoint(
+            local_path=ar_path,
+            hdfs_path=hdfs_path,
+            global_step=global_step,
+            max_ckpt_to_keep=max_ckpt_to_keep,
+            **kwargs,
+        )
+        torch.distributed.barrier()
+        gc.collect()
+        aggressive_empty_cache(force_sync=True)
+
+    def load_checkpoint(
+        self, local_path: str, hdfs_path: Optional[str] = None, del_local_after_load: int = True, **kwargs
+    ) -> None:
+        dit_path = os.path.join(local_path, self.DIT_CHECKPOINT_SUBDIR)
+        self.dit_engine.load_checkpoint(
+            local_path=dit_path,
+            hdfs_path=hdfs_path,
+            del_local_after_load=del_local_after_load,
+            **kwargs,
+        )
+        ar_path = os.path.join(local_path, self.AR_CHECKPOINT_SUBDIR)
+        if os.path.isdir(ar_path):
+            self.ar_engine.load_checkpoint(
+                local_path=ar_path,
+                hdfs_path=hdfs_path,
+                del_local_after_load=del_local_after_load,
+                **kwargs,
+            )
+        torch.distributed.barrier()
+
+    def _merge_composite_peft_configs(
+        self,
+        dit_peft: dict[str, Any] | None,
+        ar_peft: dict[str, Any] | None,
+        model_config: DiffusionModelConfig | None = None,
+    ) -> dict[str, Any] | None:
+        """Build one rollout ``peft_config`` with shared hyperparameters plus per-component exports."""
+        if dit_peft is None and ar_peft is None:
+            return None
+
+        merged: dict[str, Any] = {}
+        if model_config is not None and model_config.lora_rank > 0:
+            default_config = {  # shared basic configs
+                "r": model_config.lora_rank,
+                "lora_alpha": model_config.lora_alpha,
+                "target_modules": model_config.target_modules,
+                "target_parameters": model_config.target_parameters,
+                "exclude_modules": model_config.exclude_modules,
+                "bias": "none",
+            }
+            merged.update(default_config)
+
+        for export in (dit_peft, ar_peft):
+            if export is None:
+                continue
+            for key, value in export.items():
+                if key not in merged:
+                    merged[key] = value
+                else:
+                    if isinstance(merged[key], dict) and isinstance(value, dict):
+                        merged[key].update(value)
+                    elif isinstance(merged[key], list) and isinstance(value, list):
+                        merged[key].extend(value)
+                    else:
+                        assert merged[key] == value, (
+                            f"AR and DiT PEFT configs cannot be merged for {key}:\n {merged[key]}\n and \n {value}"
+                        )
+
+        return merged
+
+    @property
+    def has_lora(self) -> bool:
+        """Return True if either AR or DiT sub-engine carries a default LoRA adapter."""
+        for sub_engine in (self.ar_engine, self.dit_engine):
+            module = getattr(sub_engine, "module", None)
+            peft_model = getattr(module, "_fsdp_wrapped_module", module) if module is not None else None
+            if peft_model is not None and getattr(peft_model, "peft_config", None):
+                if peft_model.peft_config.get("default") is not None:
+                    return True
+        return False
+
+    def get_lora_peft_config(self) -> dict[str, Any] | None:
+        """PEFT metadata for colocated diffusion rollout LoRA apply."""
+        dit_module = getattr(self.dit_engine, "module", None)
+        dit_peft_model = getattr(dit_module, "_fsdp_wrapped_module", dit_module) if dit_module is not None else None
+        # no lora peft config
+        if dit_peft_model is None or not hasattr(dit_peft_model, "peft_config"):
+            return None
+
+        dit_peft_config = dit_peft_model.peft_config.get("default", None)
+        ar_module = getattr(self.ar_engine, "module", None)
+        ar_peft_model = getattr(ar_module, "_fsdp_wrapped_module", ar_module) if ar_module is not None else None
+        ar_peft_config = ar_peft_model.peft_config.get("default", None)
+
+        peft_config = self._merge_composite_peft_configs(dit_peft_config, ar_peft_config, self.model_config)
+        result = peft_config.to_dict() if peft_config is not None else None
+
+        return result
+
+    def get_per_tensor_param(
+        self, layered_summon=False, base_sync_done=False, adapter_name: str | None = None, **kwargs
+    ):
+        dit_params, dit_peft = self.dit_engine.get_per_tensor_param(
+            layered_summon=layered_summon,
+            base_sync_done=base_sync_done,
+            adapter_name=adapter_name,
+            **kwargs,
+        )
+        ar_params, ar_peft = self.ar_engine.get_per_tensor_param(
+            layered_summon=layered_summon,
+            base_sync_done=base_sync_done,
+            adapter_name=adapter_name,
+            **kwargs,
+        )
+
+        def merged() -> Iterator[tuple[str, torch.Tensor]]:
+            yield from dit_params
+            for name, tensor in ar_params:
+                yield f"text_encoder.{name}", tensor
+
+        return merged(), self._merge_composite_peft_configs(dit_peft, ar_peft, self.model_config)
+
+    def disable_adapter(self):
+        ar_ctx = self.ar_engine.disable_adapter()
+        dit_ctx = self.dit_engine.disable_adapter()
+
+        class _CombinedAdapterCtx:
+            def __enter__(self_inner):
+                ar_ctx.__enter__()
+                dit_ctx.__enter__()
+                return self_inner
+
+            def __exit__(self_inner, exc_type, exc_val, exc_tb):
+                dit_ctx.__exit__(exc_type, exc_val, exc_tb)
+                ar_ctx.__exit__(exc_type, exc_val, exc_tb)
+
+        return _CombinedAdapterCtx()
+
+
+class _CompositeEngineCtx:
+    """Enter/exit train/eval mode on both AR and DiT sub-engines."""
+
+    def __init__(self, engine: CompositeFSDPEngine, mode: str, **kwargs):
+        self.engine = engine
+        self.mode = mode
+        self.kwargs = kwargs
+        self._subcontexts: list = []
+
+    def __enter__(self):
+        self.engine.mode = self.mode
+        if self.mode == "train":
+            self._subcontexts = [
+                self.engine.current_engine.train_mode(**self.kwargs),
+            ]
+        else:
+            self._subcontexts = [
+                self.engine.current_engine.eval_mode(**self.kwargs),
+            ]
+        for ctx in self._subcontexts:
+            ctx.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        for ctx in reversed(self._subcontexts):
+            ctx.__exit__(exc_type, exc_value, traceback)
+        self._subcontexts = []
+        self.engine.mode = None

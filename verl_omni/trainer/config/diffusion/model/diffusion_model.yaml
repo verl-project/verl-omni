@@ -37,6 +37,9 @@ enable_gradient_checkpointing: True
 # Optional model config path. If null, backends use <path>/<transformer_subfolder>.
 config_path: null
 
+# Subfolder containing the diffusion text encoder weights/config.
+text_encoder_subfolder: text_encoder
+
 # Subfolder containing the diffusion transformer weights/config.
 transformer_subfolder: transformer
 
@@ -102,6 +105,9 @@ lora_dtype: null
 
 # FSDP layer name prefixes for LoRA parameter layered summon.
 fsdp_layer_prefixes: ["transformer_blocks."]
+
+# AR use only
+use_remove_padding: False
 
 # MTP
 mtp: 
@@ -174,3 +180,12 @@ algo:
 
   # Whether selected SDE steps must form one consecutive window
   sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
+
+# AR part model configuration
+ar:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.workers.config.diffusion.DiffusionModelARConfig
+
+  # Other configs, e.g., attn_implementation
+  override_config: {}
