@@ -7,14 +7,14 @@ For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For AMD GPU
 ## Requirements
 
 * **Python**: Version >= 3.11
-* **CUDA**: >= 13.0
+* **CUDA**: Version >= 13.0
 * **NVIDIA driver**: 580+ natively; datacenter GPUs with older drivers (535+) can use [CUDA forward compatibility](#older-nvidia-drivers-cuda-forward-compatibility) instead.
 
 ### Older NVIDIA drivers (CUDA forward compatibility)
 
 On datacenter GPUs with a pre-CUDA-13.0 driver (535+), install NVIDIA's
 `cuda-compat` forward-compatibility package and point the loader at it
-(see [vLLM's driver requirements](https://docs.vllm.ai/en/v0.28.0/getting_started/installation/gpu.html)):
+(see [NVIDIA's forward-compatibility guide](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html)):
 
 ```bash
 conda create -n verl-omni python=3.12 -c conda-forge
@@ -29,9 +29,9 @@ export LIBRARY_PATH=${CONDA_PREFIX}/cuda-compat:${CONDA_PREFIX}/lib:${LIBRARY_PA
 Set both exports in every shell and launcher that runs training or rollout
 (e.g. in the training script) — without them CUDA initialization fails with
 "the NVIDIA driver on your system is too old". Forward compatibility is a
-datacenter-only fallback for clusters whose driver cannot be upgraded and is
-not guaranteed across all driver branches and workloads; for production (and
-consumer GPUs) prefer a native 580+ driver.
+**datacenter-only fallback** for clusters whose driver cannot be upgraded and is
+**not guaranteed** across all driver branches and workloads; for production (and
+consumer GPUs) prefer a **native 580+ driver**.
 
 ## Install
 
