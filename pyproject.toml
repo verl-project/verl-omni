@@ -47,6 +47,9 @@ dependencies = [
     "math_verify",
     "tensorboard",
     "TransferQueue==0.1.9",
+    # verl-omni is a training framework; verl is a core dependency, not an extra.
+    # Git commit must match .github/verl_pin.txt (reports as 0.10.0.dev at fefb080).
+    "verl @ git+https://github.com/verl-project/verl.git@fefb080262e1c015a0ea05f958822a6a512dc795",
 ]
 
 [project.optional-dependencies]
@@ -64,6 +67,7 @@ omni = [
     "sox>=1.5.0",
     "torchaudio>=2.11.0",
     "av",
+    "flash-attn>=2.8.3",
 ]
 # CUDA rollout backend (vllm) + rollout engine (vllm-omni) + actor FA3 (kernels).
 # The vllm-omni git commit must match .github/vllm_omni_pin.txt, which CI/Docker read.
@@ -76,11 +80,6 @@ gpu = [
     "qwen-vl-utils>=0.0.14",
     "cupy-cuda13x",
 ]
-# Training stack.
-# Git commit must match .github/verl_pin.txt (reports as 0.10.0.dev at fefb080).
-train = [
-    "verl @ git+https://github.com/verl-project/verl.git@fefb080262e1c015a0ea05f958822a6a512dc795",
-]
 dev = [
     "pytest",
     "pytest-cov",
@@ -88,7 +87,6 @@ dev = [
     "py-spy",
     "pytest-asyncio",
     "pytest-rerunfailures",
-    "Levenshtein",
 ]
 ocr = [
     "Levenshtein",

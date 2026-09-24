@@ -34,7 +34,7 @@ uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.gi
 
 ```bash
 uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train]"
+uv pip install -e .
 ```
 
 This installs `vllm-omni`, then `verl` and `verl-omni`.
@@ -52,7 +52,6 @@ This installs `vllm-omni`, then `verl` and `verl-omni`.
 
 | Extra       | Adds                                                          | When                     |
 | ----------- | ------------------------------------------------------------- | ------------------------ |
-| `train`     | `verl` @ [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | RL training              |
 | `dev`       | `pytest`, `pre-commit`, `Levenshtein`, …                      | Local development / CI   |
 | `ocr`       | `Levenshtein`                                                 | OCR reward (FlowGRPO)    |
 

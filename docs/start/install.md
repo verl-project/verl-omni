@@ -26,7 +26,7 @@ source .venv/bin/activate
 2. Install the backend, rollout engine, and training stack
 
 ```bash
-uv pip install -e ".[gpu,train]" --torch-backend=auto
+uv pip install -e ".[gpu]" --torch-backend=auto
 ```
 
 ### Extras
@@ -34,7 +34,6 @@ uv pip install -e ".[gpu,train]" --torch-backend=auto
 | Extra       | Adds                                                          | When                     |
 | ----------- | ------------------------------------------------------------- | ------------------------ |
 | `gpu`       | `vllm==0.28.0`, git-pinned `vllm-omni`, `kernels==0.16.0`, `liger-kernel`, `pyzmq`, `qwen-vl-utils`, `cupy-cuda13x` | CUDA rollout + actor FA3 |
-| `train`     | `verl` @ [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | RL training              |
 | `dev`       | `pytest`, `pre-commit`, `Levenshtein`, …                      | Local development / CI   |
 | `ocr`       | `Levenshtein`                                                 | OCR reward (FlowGRPO)    |
 

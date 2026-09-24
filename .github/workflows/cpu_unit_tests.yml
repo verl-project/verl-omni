@@ -69,10 +69,10 @@ jobs:
           pip install -e ".[omni,dev]"
           pip install --no-deps \
             "qwen-tts @ https://github.com/QwenLM/Qwen3-TTS/archive/$(cat .github/qwen_tts_pin.txt).tar.gz"
-      - name: Verify the documented train install resolves
+      - name: Verify the documented install resolves
         run: |
           pip install uv
-          uv pip install --dry-run --python "$(command -v python)" -e ".[train]"
+          uv pip install --dry-run --python "$(command -v python)" -e .
       - name: Run CPU torch.compile contract tests
         env:
           TORCH_COMPILE_DISABLE: "0"

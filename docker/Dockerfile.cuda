@@ -59,7 +59,7 @@ COPY verl_omni ./verl_omni
 # depend on the build host's driver (install.md uses `auto` outside Docker).
 RUN uv pip install --torch-backend=cu130 ".[gpu]"
 
-# Step 2 — train extra (verl from .github/verl_pin.txt, overridable via VERL_GIT_REF)
+# Step 2 — verl core dependency (from .github/verl_pin.txt, overridable via VERL_GIT_REF)
 RUN VERL_REF="${VERL_GIT_REF:-$(tr -d '[:space:]' < .github/verl_pin.txt)}" \
     && echo "Installing verl@${VERL_REF}" \
     && uv pip install --no-deps \

@@ -35,11 +35,13 @@ PIN_FILES = {
 def _toml_git_pins() -> dict[str, str]:
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
     pins: dict[str, str] = {}
+    reqs: list[str] = list(pyproject["project"]["dependencies"])
     for deps in pyproject["project"]["optional-dependencies"].values():
-        for dep in deps:
-            m = re.match(r"([A-Za-z0-9_.-]+)\s*@\s*git\+https://[^@]+@([0-9a-f]{40})$", dep)
-            if m:
-                pins[m.group(1)] = m.group(2)
+        reqs.extend(deps)
+    for dep in reqs:
+        m = re.match(r"([A-Za-z0-9_.-]+)\s*@\s*git\+https://[^@]+@([0-9a-f]{40})$", dep)
+        if m:
+            pins[m.group(1)] = m.group(2)
     return pins
 
 
