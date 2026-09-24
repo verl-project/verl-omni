@@ -56,3 +56,25 @@ def test_git_pins_match_pin_files() -> None:
         assert toml_pins[name] == file_pin, (
             f"{name} pin mismatch: pyproject.toml has {toml_pins[name]}, {rel_path} has {file_pin}"
         )
+
+
+def test_vllm_cpu_wheel_urls_match_toml() -> None:
+    """The vllm cpu wheel URLs in CI/RTD must carry the toml's vllm version."""
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    reqs: list[str] = list(pyproject["project"]["dependencies"])
+    for deps in pyproject["project"]["optional-dependencies"].values():
+        reqs.extend(deps)
+    m = next(r for r in reqs if re.fullmatch(r"vllm==[0-9.]+", r))
+    toml_vllm = m.split("==")[1]
+
+    targets = sorted(REPO_ROOT.glob(".github/workflows/*.yml")) + [
+        REPO_ROOT / ".readthedocs.yaml",
+    ]
+    checked = 0
+    for path in targets:
+        for ver in re.findall(r"vllm-(\d+\.\d+\.\d+)\+cpu", path.read_text()):
+            checked += 1
+            assert ver == toml_vllm, (
+                f"{path.relative_to(REPO_ROOT)} pins vllm-{ver}+cpu but pyproject pins vllm=={toml_vllm}"
+            )
+    assert checked > 0, "no vllm cpu wheel URLs found to check"
