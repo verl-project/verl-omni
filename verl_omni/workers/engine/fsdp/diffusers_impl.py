@@ -152,6 +152,8 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         # leave shards on CPU and crash state_dict()/weight-sync (upstream verl#5995).
         # Set True in _build_fsdp_module to skip that manual load.
         self._uses_fsdp2_cpu_offload_policy = False
+        self._explicit_fsdp2_units = False
+        self._engine_hooks = None
 
     @property
     def is_param_offload_enabled(self) -> bool:
@@ -346,6 +348,9 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         model_cls = DiffusionModelBase.get_class(self.model_config)
         preserve_fp32_modules = model_cls.preserve_fp32_modules()
+        sharding_units = model_cls.fsdp2_sharding_units(module)
+        if sharding_units is not None and self.engine_config.strategy != "fsdp2":
+            raise ValueError(f"{model_cls.__name__} requires FSDP2 for explicit submodule sharding")
 
         # Adapters may declare frozen subtrees to keep unsharded (fsdp2 only).
         ignored_names = list(model_cls.get_fsdp_ignored_module_names(self.model_config))
@@ -422,9 +427,15 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                 "offload_policy": offload_policy,
                 "reshard_after_forward": self.engine_config.reshard_after_forward,
             }
-            full_state = module.state_dict()
-            apply_fsdp2(module, fsdp_kwargs, self.engine_config, ignored_names=ignored_names)
-            fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
+            if sharding_units is None:
+                full_state = module.state_dict()
+                apply_fsdp2(module, fsdp_kwargs, self.engine_config, ignored_names=ignored_names)
+                fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
+            else:
+                from .training_utils import shard_fsdp2_units
+
+                shard_fsdp2_units(module, sharding_units, fsdp_kwargs)
+                self._explicit_fsdp2_units = True
         else:
             raise NotImplementedError(f"Unknown strategy {self.engine_config.strategy}")
 
@@ -449,7 +460,9 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
     def _build_optimizer(self, module):
         from verl.workers.config.optimizer import build_optimizer
 
-        optimizer = build_optimizer(module.parameters(), self.optimizer_config)
+        from .training_utils import optimizer_parameters
+
+        optimizer = build_optimizer(optimizer_parameters(module, self.optimizer_config), self.optimizer_config)
 
         return optimizer
 
@@ -538,6 +551,9 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         self.scheduler = scheduler
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
+        self._engine_hooks = DiffusionModelBase.get_class(self.model_config).build_engine_hooks(
+            module, self.model_config, self.optimizer_config
+        )
 
     def train_mode(self, **kwargs):
         """
@@ -686,6 +702,12 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         """Run one diffusion step forward (and loss); implemented by algorithm-specific subclasses."""
         pass
 
+    def generate_rollout(self, data: TensorDict) -> TensorDict:
+        """Dispatch actor-side sampling to the registered hooks."""
+        if self._engine_hooks is None:
+            raise NotImplementedError("The selected model adapter has no actor-side sampling hooks")
+        return self._engine_hooks.generate(data)
+
     def optimizer_zero_grad(self):
         """
         Zero gradients and enforce FSDP grad-clipping logic.
@@ -701,7 +723,13 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         """
         assert self.optimizer_config.clip_grad is not None
 
-        if isinstance(self.module, FSDP):
+        if self._explicit_fsdp2_units:
+            from .training_utils import clip_grad_norm_sharded_
+
+            grad_norm = clip_grad_norm_sharded_(
+                self.module.parameters(), self.optimizer_config.clip_grad, self.device_mesh
+            )
+        elif isinstance(self.module, FSDP):
             grad_norm = self.module.clip_grad_norm_(self.optimizer_config.clip_grad)
         elif isinstance(self.module, FSDPModule):
             grad_norm = fsdp2_clip_grad_norm_(self.module.parameters(), max_norm=self.optimizer_config.clip_grad)
@@ -1060,6 +1088,8 @@ class PPODiffusersFSDPEngine(DiffusersFSDPEngine):
     def forward_backward_batch(
         self, data: TensorDict, loss_function: Callable, forward_only: bool = False
     ) -> list[TensorDict]:
+        if self._engine_hooks is not None:
+            return self._engine_hooks.forward_backward_batch(data, loss_function, forward_only)
         return self._run_forward_backward_batch(data, loss_function, forward_only, timesteps_key="all_timesteps")
 
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):

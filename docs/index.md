@@ -66,6 +66,7 @@ algo/flowdppo.md
 algo/diffusion_dpo.md
 algo/diffusionnft.md
 algo/grpo_guard.md
+algo/unigrpo.md
 algo/mixgrpo.md
 algo/diffusion_opd.md
 algo/omni_opd.md
@@ -90,6 +91,7 @@ examples/mixgrpo_trainer.md
 examples/diffusionopd_trainer.md
 examples/flowgrpo_trainer_sd35_drm.md
 examples/bagel/flowgrpo_trainer_bagel.md
+examples/bagel/unigrpo_trainer_bagel.md
 examples/qwen3_tts/grpo_trainer_qwen3_tts.md
 examples/qwen_image/flowgrpo_trainer_qwen_image.md
 examples/qwen_image_edit/flowgrpo_trainer_qwen_image_edit.md
@@ -137,6 +139,7 @@ contributing/testing_guide.md
 contributing/integrating_prompt_embedding_cache.md
 contributing/integrating_an_omni_model.md
 contributing/integrating_a_diffusion_model.md
+contributing/integrating_a_native_rollout.md
 contributing/integrating_an_i2i_diffusion_model.md
 contributing/integrating_a_non_diffusers_model.md
 contributing/integrating_a_stepwise_continuous_batching_model.md

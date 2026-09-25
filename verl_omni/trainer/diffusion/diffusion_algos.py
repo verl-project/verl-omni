@@ -587,6 +587,66 @@ class GRPOGuardLoss(DiffusionLossFn):
         return DiffusionLossResult(loss=loss, metrics=metrics)
 
 
+@register_diffusion_loss("unigrpo")
+class UniGRPOLoss(GRPOGuardLoss):
+    """UniGRPO image objective: flow PG (GRPO-Guard RatioNorm) + velocity-MSE regularizer.
+
+    The joint AR-thinking + image update (``verl_omni.pipelines.bagel_unigrpo``) drives this
+    loss on the image (generation) track. ``ratio_norm`` selects GRPO-Guard's mean-drift ratio
+    normalization; when off it falls back to the plain Flow-GRPO clipped objective. When
+    ``mse_weight > 0`` a velocity-MSE regularizer toward a frozen-reference velocity is added.
+    """
+
+    required_model_output_keys = ("log_probs", "prev_sample_mean", "std_dev_t", "sqrt_dt")
+    required_data_keys = ("old_log_probs", "advantages", "old_prev_sample_mean")
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        loss_cfg = config.diffusion_loss
+        if loss_cfg.ratio_norm:
+            loss, metrics = self.compute_loss(
+                old_log_prob=data["old_log_probs"],
+                log_prob=model_output["log_probs"],
+                advantages=data["advantages"],
+                old_prev_sample_mean=data["old_prev_sample_mean"],
+                prev_sample_mean=model_output["prev_sample_mean"],
+                std_dev_t=model_output["std_dev_t"],
+                sqrt_dt=model_output["sqrt_dt"],
+                config=config,
+                rollout_is_weights=data.get("rollout_is_weights", None),
+            )
+        else:
+            loss, metrics = FlowGRPOLoss.compute_loss(
+                old_log_prob=data["old_log_probs"],
+                log_prob=model_output["log_probs"],
+                advantages=data["advantages"],
+                config=config,
+                rollout_is_weights=data.get("rollout_is_weights", None),
+            )
+
+        mse_weight = float(loss_cfg.mse_weight)
+        if mse_weight > 0.0:
+            if "velocity" not in model_output or "ref_velocity" not in data:
+                raise KeyError(
+                    "UniGRPO loss with mse_weight>0 needs model_output['velocity'] and data['ref_velocity']; "
+                    f"available model_output keys: {_format_available_keys(model_output)}, "
+                    f"data keys: {_format_available_keys(data)}."
+                )
+            velocity = model_output["velocity"]
+            ref_velocity = data["ref_velocity"].detach().to(dtype=velocity.dtype, device=velocity.device)
+            mse = ((velocity - ref_velocity) ** 2).mean()
+            loss = loss + mse_weight * mse
+            metrics["actor/velocity_mse"] = mse.detach().item()
+        else:
+            metrics["actor/velocity_mse"] = 0.0
+        return DiffusionLossResult(loss=loss, metrics=metrics)
+
+
 @register_diffusion_loss("dpo")
 class DPOLoss(DiffusionLossFn):
     """DPO loss with win/reward optimization."""

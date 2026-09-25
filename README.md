@@ -148,10 +148,14 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
-    <td>BAGEL</td>
-    <td>Unified understand + gen</td>
-    <td>Text + Image</td>
+    <td rowspan="2">BAGEL</td>
+    <td rowspan="2">Unified understand + gen</td>
+    <td rowspan="2">Text + Image</td>
     <td>FlowGRPO</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td><a href="docs/algo/unigrpo.md">UniGRPO</a> (joint reasoning + image)</td>
     <td>✅</td>
   </tr>
   <tr>
