@@ -496,11 +496,19 @@ def _layered_summon_lora_params_diffusers(
                 continue
             if fsdp_version(submodule) > 0:
                 with FSDP.summon_full_params(submodule, writeback=False):
+                    # PEFT filters against root-model paths, while a nested FSDP
+                    # unit's state dict contains only block-local paths.
+                    state_prefix = block_prefix
+                    if fsdp_version(submodule) == 1:
+                        state_prefix = f"{state_prefix}._fsdp_wrapped_module"
+                    state_dict = {
+                        f"{state_prefix}.{param_name}": param for param_name, param in submodule.state_dict().items()
+                    }
                     sub_lora_params = get_peft_model_state_dict(
-                        peft_model, state_dict=submodule.state_dict(), adapter_name=adapter_name
+                        peft_model, state_dict=state_dict, adapter_name=adapter_name
                     )
                     sub_lora_params = {
-                        f"{block_prefix}.{param_name}": _param_to_cpu(param)
+                        param_name.replace("_fsdp_wrapped_module.", ""): _param_to_cpu(param)
                         for param_name, param in sub_lora_params.items()
                     }
                     lora_params.update(sub_lora_params)
