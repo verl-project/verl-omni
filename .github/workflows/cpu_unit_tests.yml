@@ -64,15 +64,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.28.0/vllm-0.28.0+cpu-cp38-abi3-manylinux_2_34_x86_64.whl"
-          pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-          pip install --no-deps "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
           pip install uv
           uv pip install --python "$(command -v python)" -e ".[omni,dev]"
           pip install --no-deps \
             "qwen-tts @ https://github.com/QwenLM/Qwen3-TTS/archive/$(cat .github/qwen_tts_pin.txt).tar.gz"
       - name: Verify the documented install resolves
         run: |
-          pip install uv
           uv pip install --dry-run --python "$(command -v python)" -e .
       - name: Run CPU torch.compile contract tests
         env:

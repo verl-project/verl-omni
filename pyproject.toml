@@ -47,6 +47,8 @@ dependencies = [
     "math_verify",
     "tensorboard",
     "TransferQueue==0.1.9",
+    "vllm==0.28.0",
+    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@ded8934626aaad1a3e816c3a1d9d742efc012d93",
     "verl @ git+https://github.com/verl-project/verl.git@fefb080262e1c015a0ea05f958822a6a512dc795",
 ]
 
@@ -63,17 +65,14 @@ omni = [
     "sox>=1.5.0",
     "torchaudio>=2.11.0",
     "av",
+    "qwen-vl-utils>=0.0.14",
 ]
 fa2 = [
     "flash-attn>=2.8.3",
 ]
 gpu = [
-    "vllm==0.28.0",
-    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@ded8934626aaad1a3e816c3a1d9d742efc012d93",
     "kernels==0.16.0",
     "liger-kernel",
-    "pyzmq",
-    "qwen-vl-utils>=0.0.14",
     "cupy-cuda13x",
 ]
 dev = [

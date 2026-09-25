@@ -65,7 +65,7 @@ In the cuda-compat environment, pass `--python "$CONDA_PREFIX/bin/python"` and u
 
 | Extra       | Adds                                                          | When                     |
 | ----------- | ------------------------------------------------------------- | ------------------------ |
-| `gpu`       | `vllm==0.28.0`, git-pinned `vllm-omni`, `kernels==0.16.0`, `liger-kernel`, `pyzmq`, `qwen-vl-utils`, `cupy-cuda13x` | CUDA rollout + actor FA3 |
+| `gpu`       | `kernels==0.16.0`, `liger-kernel`, `cupy-cuda13x` | CUDA rollout + actor FA3 |
 | `omni`      | omni-trainer runtime (`librosa`, `torchaudio`, `av`, …)       | Omni-modality training   |
 | `fa2`       | `flash-attn` (source build, needs a CUDA toolkit)             | Omni trainer FA2 default |
 | `dev`       | `pytest`, `pre-commit`, …                                     | Local development / CI   |
