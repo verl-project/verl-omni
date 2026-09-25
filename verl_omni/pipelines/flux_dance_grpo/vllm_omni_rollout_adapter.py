@@ -29,9 +29,13 @@ from vllm_omni.diffusion.models.flux.pipeline_flux import FluxPipeline
 from vllm_omni.diffusion.request import DUMMY_DIFFUSION_REQUEST_ID, OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
-from verl_omni.pipelines.diffusion_rollout_output import rollout_output, wrap_rollout_postprocessor
+from verl_omni.pipelines.diffusion_rollout_output import (
+    rollout_output,
+    with_visual_artifacts,
+    wrap_rollout_postprocessor,
+)
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
-from verl_omni.pipelines.request_batch import split_diffusion_output_by_request
+from verl_omni.pipelines.request_batch import requested_outputs_for_batch, split_diffusion_output_by_request
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
@@ -163,7 +167,12 @@ class FluxDanceGRPOPipelineWithLogProb(FluxPipeline):
     """FLUX.1-dev generation plus aligned DanceGRPO transition capture."""
 
     supports_request_batch = True
-    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
+    diffusion_io_spec = DiffusionIOSpec(
+        artifacts={
+            "image_preview": MediaSpec("image", "decoded", "CHW"),
+            "image_latent": MediaSpec("image", "latent", "LC"),
+        }
+    )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
@@ -390,6 +399,8 @@ class FluxDanceGRPOPipelineWithLogProb(FluxPipeline):
         output_type = sampling.output_type or extra_args.get("output_type") or output_type
         if output_type not in ("image", "latent"):
             raise ValueError(f"FLUX DanceGRPO output_type must be 'image' or 'latent', got {output_type!r}")
+        requested_outputs = requested_outputs_for_batch(request_batch)
+        decode = output_type != "latent" or "image_preview" in requested_outputs
         num_outputs = sampling.num_outputs_per_prompt if sampling.num_outputs_per_prompt > 0 else 1
         self._guidance_scale = guidance_scale
         self._interrupt = False
@@ -489,9 +500,8 @@ class FluxDanceGRPOPipelineWithLogProb(FluxPipeline):
         )
 
         self._current_timestep = None
-        if output_type == "latent":
-            output = pred_original
-        else:
+        output = None
+        if decode:
             clean = self._unpack_latents(pred_original, height, width, self.vae_scale_factor)
             clean = (clean / self.vae.config.scaling_factor) + self.vae.config.shift_factor
             output = self.vae.decode(clean.to(self.vae.dtype), return_dict=False)[0]
@@ -511,6 +521,15 @@ class FluxDanceGRPOPipelineWithLogProb(FluxPipeline):
             },
             rl={"all_next_latents": next_latents},
             to_cpu=True,
+        )
+        result = with_visual_artifacts(
+            result,
+            decoded=output,
+            latents=pred_original,
+            latent_layout="LC",
+            output_type=output_type,
+            context=f"pipeline={type(self).__name__}, request_id={request_batch.request_ids}",
+            requested=requested_outputs,
         )
         outputs = split_diffusion_output_by_request(
             result,

@@ -18,6 +18,15 @@ from collections.abc import Mapping
 import numpy as np
 import torch
 
+from verl_omni.pipelines.rollout_artifacts import (
+    ARTIFACT_CONTEXT,
+    ARTIFACT_PREFIX,
+    ARTIFACT_SPECS,
+    PREVIEW_ARTIFACT,
+    PRIMARY_ARTIFACT,
+    artifacts_from_fields,
+)
+
 
 def _metadata_mapping(value):
     if isinstance(value, np.ndarray) and value.shape == ():
@@ -33,11 +42,26 @@ def _reward_extra_info(data_item) -> dict:
     """Copy metadata and project generated media, rejecting conflicting sources."""
     extra_info = _metadata_mapping(data_item.non_tensor_batch.get("extra_info"))
     tool_extra_fields = _metadata_mapping(data_item.non_tensor_batch.get("tool_extra_fields"))
-    generated_media_keys = ("audio", "audio_sample_rate", "media_kind")
+    tensor_fields = data_item.batch if data_item.batch is not None else {}
+    artifact_keys = {
+        key
+        for fields in (tensor_fields, data_item.non_tensor_batch, tool_extra_fields)
+        for key in fields.keys()
+        if key.startswith(ARTIFACT_PREFIX)
+    }
+    generated_media_keys = {
+        "audio",
+        "audio_sample_rate",
+        "media_kind",
+        ARTIFACT_SPECS,
+        PRIMARY_ARTIFACT,
+        PREVIEW_ARTIFACT,
+        ARTIFACT_CONTEXT,
+        *artifact_keys,
+    }
     for key in generated_media_keys:
         extra_info.pop(key, None)
     extra_info.update({key: value for key, value in tool_extra_fields.items() if key not in generated_media_keys})
-    tensor_fields = data_item.batch if data_item.batch is not None else {}
     for key in generated_media_keys:
         tool_value = tool_extra_fields.get(key)
         value = tensor_fields.get(key)
@@ -55,4 +79,7 @@ def _reward_extra_info(data_item) -> dict:
             if not matches:
                 raise ValueError(f"Conflicting rollout media field {key!r} in batch and tool_extra_fields")
         extra_info[key] = value
+    artifacts = artifacts_from_fields(extra_info, context="reward entry")
+    if artifacts:
+        extra_info["media_artifacts"] = artifacts
     return extra_info

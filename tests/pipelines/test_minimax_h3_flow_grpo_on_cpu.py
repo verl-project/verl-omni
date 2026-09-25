@@ -151,9 +151,12 @@ def test_rollout_output_reaches_actor_and_replays_joint_transition(monkeypatch) 
     pipeline.tokenizer = MagicMock()
     pipeline._flow_grpo_trajectory = trajectory
     request = SimpleNamespace(
+        request_id="h3-contract",
         prompt={"prompt_token_ids": [1, 2]},
         sampling_params=SimpleNamespace(
             extra_args={MINIMAX_H3_TOKEN_ID_NATIVE_KEY: True},
+            frame_rate=24,
+            output_type="pt",
             max_sequence_length=2,
             num_outputs_per_prompt=1,
         ),
@@ -163,10 +166,11 @@ def test_rollout_output_reaches_actor_and_replays_joint_transition(monkeypatch) 
         prompts=[request.prompt],
         sampling_params=request.sampling_params,
     )
-    video_pixels = torch.zeros(1, 3, 2, 8, 8, dtype=torch.uint8)
-    audio_waveform = torch.zeros(1, 32000)
+    video_pixels = torch.zeros(1, 2, 8, 8, 3, dtype=torch.uint8)
+    audio_waveform = torch.zeros(1, 2, 32000)
 
     def fake_forward(*args):
+        pipeline._flow_grpo_final_latents = (torch.zeros(1, 24, 2, 4, 4), torch.zeros(2, 32, 8))
         pipeline._flow_grpo_trajectory = trajectory
         return VllmDiffusionOutput(output=(video_pixels, audio_waveform))
 
@@ -182,11 +186,11 @@ def test_rollout_output_reaches_actor_and_replays_joint_transition(monkeypatch) 
     assert "all_next_latents" in metadata["rl"]
 
     final_res = SimpleNamespace(
-        images=[(video_pixels, audio_waveform)],
+        images=rollout_output.output["payload"]["video"],
         trajectory_latents=rollout_output.trajectory_latents,
         trajectory_timesteps=rollout_output.trajectory_timesteps,
         trajectory_log_probs=rollout_output.trajectory_log_probs,
-        multimodal_output=rollout_output.output,
+        multimodal_output={"metadata": rollout_output.output["metadata"]},
         request_output=None,
     )
     server = object.__new__(vLLMOmniHttpServer)

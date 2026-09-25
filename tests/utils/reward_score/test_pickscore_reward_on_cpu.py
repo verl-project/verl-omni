@@ -107,7 +107,7 @@ class _FakeInferencer:
 
     def score(self, prompts, images):
         self.batches.append((list(prompts), list(images)))
-        return torch.tensor([float(image.getpixel((0, 0))) for image in images])
+        return torch.tensor([float(image.convert("L").getpixel((0, 0))) for image in images])
 
     def infer(self, prompts, images):
         self.batches.append((list(prompts), list(images)))
@@ -170,7 +170,7 @@ async def test_native_reward_function_computes_score_from_model_output():
         data_source="test",
         solution_image=torch.zeros(3, 2, 2, dtype=torch.uint8),
         ground_truth="prompt",
-        extra_info={},
+        extra_info={"media_kind": "image"},
         reward_model=_NativeModelHandle(),
     )
 
@@ -192,9 +192,9 @@ async def test_consumer_batches_burst_requests_and_preserves_order(monkeypatch):
         *(
             pickscore_reward.compute_score_pickscore(
                 data_source="test",
-                solution_image=Image.new("L", (1, 1), index),
+                solution_image=torch.full((3, 1, 1), index, dtype=torch.uint8),
                 ground_truth="shared prompt",
-                extra_info={},
+                extra_info={"media_kind": "image"},
                 device="cpu",
             )
             for index in range(4)
@@ -298,7 +298,7 @@ async def test_engine_reward_posts_openai_embedding_payloads(monkeypatch):
         data_source="test",
         solution_image=torch.zeros(3, 2, 2, dtype=torch.uint8),
         ground_truth="prompt",
-        extra_info={},
+        extra_info={"media_kind": "image"},
         reward_router_address="router:8000",
         model_name="pickscore",
         logit_scale=98.0,

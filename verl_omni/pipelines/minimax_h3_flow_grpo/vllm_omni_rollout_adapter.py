@@ -45,6 +45,7 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from verl_omni.pipelines.diffusion_rollout_output import with_rollout_data
+from verl_omni.pipelines.minimax_h3_diffusion_nft.artifacts import with_h3_artifacts
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
     ref2va_reference_image_short_edge,
     serialize_ref_blocks,
@@ -91,8 +92,12 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
     supports_request_batch = False
 
     diffusion_io_spec = DiffusionIOSpec(
-        primary=MediaSpec("video"),
-        auxiliary=(MediaSpec("audio", sample_rate=32000),),
+        artifacts={
+            "video_preview": MediaSpec("video", "decoded", "TCHW"),
+            "audio": MediaSpec("audio", "decoded", "CT", sample_rate=32000),
+            "video_latent": MediaSpec("video", "latent", "CTHW"),
+            "audio_latent": MediaSpec("audio", "latent", "CLT"),
+        }
     )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
@@ -496,6 +501,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             audio_t=audio_t * 2,
             audio_channel=2,
         )
+        self._flow_grpo_final_latents = (video_latent, audio_latent)
         return video_latent, audio_latent
 
     @torch.no_grad()
@@ -504,6 +510,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             raise ValueError(f"MiniMax H3 FlowGRPO expects one request, got {len(request.requests)}.")
         req = request.requests[0]
         self._configure_flow_grpo(req)
+        self._flow_grpo_final_latents = None
         extra_args = req.sampling_params.extra_args or {}
         short_edge = extra_args.get(
             "reference_image_short_edge",
@@ -546,7 +553,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             "ref_block_count",
         )
         replay_fields = tuple(key for key in replay_fields if key in trajectory)
-        return with_rollout_data(
+        result = with_rollout_data(
             output,
             trajectory_latents=trajectory["all_latents"],
             trajectory_log_probs=trajectory["all_log_probs"],
@@ -557,4 +564,18 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             },
             rl={key: trajectory[key] for key in replay_fields},
             to_cpu=True,
+        )
+        if self._flow_grpo_final_latents is None:
+            raise RuntimeError("MiniMax H3 rollout did not capture final native latents")
+        video_latent, audio_latent = self._flow_grpo_final_latents
+        self._flow_grpo_final_latents = None
+        video, audio = output.output
+        return with_h3_artifacts(
+            result,
+            video=video,
+            audio=audio,
+            video_latent=video_latent,
+            audio_latent=audio_latent,
+            sampling=req.sampling_params,
+            context=f"pipeline={type(self).__name__}, request_id={req.request_id}",
         )

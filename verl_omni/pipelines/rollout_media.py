@@ -11,34 +11,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Typed, CPU-importable contracts for diffusion rollout media.
-
-These types let a diffusion adapter *declare* what media its pipeline emits
-(primary stream plus any auxiliary streams such as joint audio) instead of the
-rollout strategy hard-coding model-specific conventions like "audio lives at
-tuple position 1" or "the audio sample rate is 32000 Hz". The diffusion
-strategy consults the adapter-owned :class:`DiffusionIOSpec` when it converts an
-engine result into a rollout output, so adding a new combination of existing
-modalities only touches the adapter, not the shared server/strategy code.
-"""
+"""Adapter-owned named diffusion output declarations; no positional media protocol."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
 
-#: Media kinds a diffusion pipeline can emit.
 Modality = Literal["image", "video", "audio"]
 
 
 def resolve_is_video(ndim: int, media_kind: str | None) -> bool:
-    """Prefer the declared modality, retaining rank fallback for legacy outputs."""
-    if media_kind is not None:
-        if media_kind not in ("image", "video", "audio"):
-            raise ValueError(f"Unsupported media kind: {media_kind!r}")
-        return media_kind == "video"
-    return ndim == 5
+    """Read the declared modality; rank is never a modality discriminator."""
+    del ndim
+    if media_kind is None:
+        raise ValueError("Explicit media_kind required, got None")
+    if media_kind not in ("image", "video", "audio"):
+        raise ValueError(f"Unsupported media kind: {media_kind!r}")
+    return media_kind == "video"
 
 
 def resolve_batch_media_kind(media_kinds: Iterable[str | None]) -> str | None:
@@ -69,49 +60,28 @@ def validate_visual_media_batch_rank(ndim: int, media_kind: str | None) -> None:
 
 @dataclass(frozen=True)
 class MediaSpec:
-    """Declaration of a single media stream produced by a diffusion pipeline.
-
-    Attributes:
-        modality: The media kind (``"image"``, ``"video"`` or ``"audio"``).
-        sample_rate: Default audio sample rate in Hz. Audio streams only; used
-            as a fallback when the adapter does not attach a runtime sample rate
-            through the rollout metadata.
-        fps: Default frames-per-second. Video streams only; ``None`` when the
-            pipeline does not declare one.
-
-    The float-latent vs. uint8-pixel distinction is intentionally *not* declared
-    here: it is decided per request by the sampling ``output_type`` (``latent``
-    keeps floats, otherwise pixels are quantized to uint8 in ``[0, 255]``).
-    """
+    """One media declaration; dtype belongs to the tensor, not config."""
 
     modality: Modality
-    sample_rate: Optional[int] = None
-    fps: Optional[int] = None
+    representation: Literal["decoded", "latent"]
+    layout: str
+    sample_rate: int | None = None
+    fps: float | None = None
 
 
 @dataclass(frozen=True)
 class DiffusionIOSpec:
-    """Adapter-owned declaration of a diffusion pipeline's rollout outputs.
+    """Available named artifacts, with canonical decoded and native latent axes.
 
-    Attributes:
-        primary: The main media stream. It is carried on
-            ``DiffusionOutput.diffusion_output`` and, when the pipeline emits a
-            media tuple, occupies position 0.
-        auxiliary: At most one audio stream, carried at position 1 of a
-            ``(visual, audio)`` tuple. Other auxiliary combinations are not
-            supported by the current rollout transport.
+    Each request selects its primary and optional preview explicitly. Runtime
+    sample rate/FPS live on returned artifacts; declarations constrain only the
+    adapter-owned artifact names, representations, and layouts.
     """
 
-    primary: MediaSpec
-    auxiliary: tuple[MediaSpec, ...] = ()
+    artifacts: Mapping[str, MediaSpec]
 
     def __post_init__(self) -> None:
-        if self.auxiliary and (
-            self.primary.modality not in ("image", "video")
-            or len(self.auxiliary) != 1
-            or self.auxiliary[0].modality != "audio"
-        ):
-            raise ValueError(
-                "DiffusionIOSpec supports image/video primary media with at most one auxiliary audio stream; "
-                f"got primary={self.primary.modality!r}, auxiliary={tuple(s.modality for s in self.auxiliary)!r}"
-            )
+        if not isinstance(self.artifacts, Mapping) or not self.artifacts:
+            raise ValueError("DiffusionIOSpec requires named artifacts")
+        if any(not isinstance(name, str) or not isinstance(spec, MediaSpec) for name, spec in self.artifacts.items()):
+            raise TypeError("DiffusionIOSpec requires artifact-name to MediaSpec declarations")

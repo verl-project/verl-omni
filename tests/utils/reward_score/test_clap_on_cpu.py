@@ -23,6 +23,9 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 
+from verl_omni.pipelines.rollout_artifacts import ArtifactContractError, MediaArtifact
+from verl_omni.pipelines.rollout_media import MediaSpec
+
 
 def _load_scorer_module():
     module_path = Path(__file__).parents[3] / "verl_omni/utils/reward_score/clap.py"
@@ -36,11 +39,12 @@ def _load_scorer_module():
 clap = _load_scorer_module()
 
 
-def test_get_audio_normalizes_batch_and_channels():
+def test_get_audio_uses_canonical_channels_and_declared_rate():
     audio, sample_rate = clap._get_audio(
         {
-            "audio": torch.ones(1, 2, 16),
-            "audio_sample_rate": torch.tensor(48_000),
+            "media_artifacts": {
+                "audio": MediaArtifact(MediaSpec("audio", "decoded", "CT", sample_rate=48000), torch.ones(2, 16)),
+            }
         }
     )
 
@@ -122,7 +126,13 @@ def _score(prompt, waveform, sample_rate=48_000, **kwargs):
         data_source="test",
         solution_image=None,
         ground_truth=prompt,
-        extra_info={"audio": torch.tensor(waveform), "audio_sample_rate": sample_rate},
+        extra_info={
+            "media_artifacts": {
+                "audio": MediaArtifact(
+                    MediaSpec("audio", "decoded", "CT", sample_rate=sample_rate), torch.tensor(waveform).unsqueeze(0)
+                ),
+            }
+        },
         device="cpu",
         **kwargs,
     )
@@ -287,7 +297,7 @@ async def test_consumer_isolates_invalid_audio_and_resamples_valid_requests(monk
     await _stop_consumer(state)
 
     assert results[0] == {"score": pytest.approx(1.0), "source_sample_rate": 24_000}
-    assert isinstance(results[1], KeyError)
+    assert isinstance(results[1], ArtifactContractError)
     assert results[2] == {"score": pytest.approx(1.0), "source_sample_rate": 48_000}
     assert resample_calls == [(24_000, 48_000)]
     assert len(processor.batches) == 1

@@ -110,6 +110,7 @@ async def test_single_turn_agent_forwards_all_multimodal_inputs():
     agent_loop.server_manager = SimpleNamespace(
         generate=AsyncMock(
             return_value=SimpleNamespace(
+                artifacts={},
                 diffusion_output=torch.zeros(1),
                 log_probs=None,
                 num_preempted=None,

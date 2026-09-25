@@ -541,6 +541,7 @@ def test_dpo_forward_passes_list_inputs_to_encode_prompt():
         seed=None,
         true_cfg_scale=None,
         num_outputs_per_prompt=None,
+        output_type="pil",
     )
     request = SimpleNamespace(
         prompts=[

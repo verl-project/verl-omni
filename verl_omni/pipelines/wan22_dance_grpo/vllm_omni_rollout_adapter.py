@@ -39,6 +39,8 @@ from vllm_omni.platforms import current_omni_platform
 
 from verl_omni.pipelines.diffusion_rollout_output import (
     rollout_output,
+    wants_decoded_preview,
+    with_visual_artifacts,
     wrap_rollout_postprocessor,
 )
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
@@ -112,7 +114,12 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
 
     #: Declares the primary rollout media stream so downstream consumers read
     #: the modality from the adapter instead of inferring it from tensor rank.
-    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("video"))
+    diffusion_io_spec = DiffusionIOSpec(
+        artifacts={
+            "video_preview": MediaSpec("video", "decoded", "TCHW"),
+            "video_latent": MediaSpec("video", "latent", "CTHW"),
+        }
+    )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
@@ -676,8 +683,9 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
             latents = (1 - first_frame_mask) * latent_condition + first_frame_mask * latents
 
         # Decode latents
-        if output_type == "latent":
-            output = latents
+        native_latents = latents
+        if not wants_decoded_preview(output_type, sampling_params, modality="video"):
+            output = None
         else:
             latents = latents.to(self.vae.dtype)
             latents_mean = (
@@ -691,7 +699,16 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
             latents = latents / latents_std + latents_mean
             output = self.vae.decode(latents, return_dict=False)[0]
 
-        return rollout_output(
+        fps = sampling_params.frame_rate
+        if output is not None and sampling_params.enable_frame_interpolation:
+            output, multiplier = pipeline_wan2_2.interpolate_video_tensor(
+                output,
+                exp=sampling_params.frame_interpolation_exp,
+                scale=sampling_params.frame_interpolation_scale,
+                model_path=sampling_params.frame_interpolation_model_path,
+            )
+            fps = fps * multiplier if fps is not None else None
+        result = rollout_output(
             media=output,
             media_key="video",
             trajectory_latents=all_latents,
@@ -704,6 +721,18 @@ class Wan22DanceGRPOPipelineWithLogProb(Wan22Pipeline):
                 "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
             },
             to_cpu=True,
+        )
+        return with_visual_artifacts(
+            result,
+            decoded=output,
+            latents=native_latents,
+            latent_layout="CTHW",
+            modality="video",
+            decoded_layout="CTHW",
+            fps=fps,
+            output_type=output_type,
+            context=f"pipeline={type(self).__name__}, request_id={req.request_id}",
+            requested=(sampling_params.extra_args or {}).get("requested_outputs"),
         )
 
     def check_inputs(
