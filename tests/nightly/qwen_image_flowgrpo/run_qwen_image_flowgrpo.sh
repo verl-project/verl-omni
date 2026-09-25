@@ -72,10 +72,10 @@ python3 "${SCRIPT_DIR}/env_metadata.py" \
     --attn-backend "${ATTN_BACKEND}" \
     --rollout-attn-backend "${ROLLOUT_ATTN_BACKEND}"
 
-python3 "${SCRIPT_DIR}/create_sample_data.py" \
+python3 "${SCRIPT_DIR}/create_single_sample_data.py" \
     --local_save_dir "${DATA_DIR}" \
     --train_size "${TRAIN_BATCH_SIZE}" \
-    --val_size 8
+    --val_size 4
 
 export DEBUG_DUMP_ENABLED=1
 export DEBUG_DUMP_DIR="${CURRENT_DUMP_DIR}"
@@ -132,10 +132,10 @@ python3 "${SCRIPT_DIR}/run.py" \
     actor_rollout_ref.rollout.pipeline.width=256 \
     actor_rollout_ref.rollout.pipeline.true_cfg_scale=1.0 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length=${MAX_PROMPT_LENGTH} \
-    actor_rollout_ref.rollout.algo.noise_level=1.0 \
+    actor_rollout_ref.rollout.algo.noise_level=0.0 \
     actor_rollout_ref.rollout.algo.sde_type=sde \
     actor_rollout_ref.rollout.algo.sde_window_size=2 \
-    actor_rollout_ref.rollout.algo.sde_window_range="[0,4]" \
+    actor_rollout_ref.rollout.algo.sde_window_range="[0,2]" \
     actor_rollout_ref.rollout.algo.sde_window_seed=42 \
     actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=4 \
     actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0 \
