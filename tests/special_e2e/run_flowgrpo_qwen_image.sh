@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# FlowGRPO diffusion e2e smoke test (minimal runtime), vllm_omni rollout.
+# FlowGRPO diffusion e2e smoke test (minimal runtime), V1 sync trainer,
+# vllm_omni rollout.
 #
 # Single pass covering:
 #   parquet load -> vllm_omni rollout -> multi-reward (jpeg_compressibility rule
@@ -78,7 +79,7 @@ python3 tests/special_e2e/create_dummy_diffusion_data.py \
     --val_size 4
 
 start_leak_monitor
-python3 -m verl_omni.trainer.main_diffusion \
+python3 -m verl_omni.trainer.main_diffusion_v1 \
     data.train_files=${dummy_train_path} \
     data.val_files=${dummy_test_path} \
     data.train_batch_size=${train_batch_size} \
@@ -141,7 +142,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.aggregation=weighted_sum \
     trainer.logger=console \
     trainer.project_name=verl-test \
-    trainer.experiment_name=flowgrpo-diffusion-e2e \
+    trainer.experiment_name=flowgrpo-diffusion-v1-sync-e2e \
     trainer.log_val_generations=0 \
     trainer.n_gpus_per_node=${NUM_GPUS} \
     trainer.nnodes=1 \
@@ -150,6 +151,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.save_freq=-1 \
     trainer.resume_mode=disable \
     trainer.total_training_steps=${TOTAL_TRAIN_STEPS} \
+    trainer.use_v1=true \
+    trainer.v1.trainer_mode=sync \
     "$@"
 check_leak_monitor
 

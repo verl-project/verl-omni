@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DiffusionNFT diffusion e2e smoke test, vllm_omni rollout.
+# DiffusionNFT diffusion e2e smoke test, V1 sync trainer, vllm_omni rollout.
 #
 # Requires: vllm-omni, diffusers>=0.37, and a tiny Qwen-Image checkpoint at
 #   ~/models/tiny-random/Qwen-Image
@@ -39,7 +39,7 @@ python3 tests/special_e2e/create_dummy_diffusion_data.py \
     --train_size "${synthetic_train_size}" \
     --val_size 4
 
-python3 -m verl_omni.trainer.main_diffusion \
+python3 -m verl_omni.trainer.main_diffusion_v1 \
     data.train_files=${dummy_train_path} \
     data.val_files=${dummy_test_path} \
     data.train_batch_size=${train_batch_size} \
@@ -94,7 +94,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.reward_model.enable=False \
     trainer.logger=console \
     trainer.project_name=verl-test \
-    trainer.experiment_name=diffusionnft-diffusion-e2e \
+    trainer.experiment_name=diffusionnft-diffusion-v1-sync-e2e \
     trainer.log_val_generations=0 \
     trainer.n_gpus_per_node=${NUM_GPUS} \
     trainer.nnodes=1 \
@@ -104,6 +104,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.resume_mode=disable \
     trainer.total_epochs=${TOTAL_EPOCHS} \
     trainer.total_training_steps=${TOTAL_TRAIN_STEPS} \
+    trainer.use_v1=true \
+    trainer.v1.trainer_mode=sync \
     "$@"
 
 echo "DiffusionNFT diffusion e2e test passed (training completed successfully)."

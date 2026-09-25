@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # ci-e2e-diffusion GPU smoke tests (4-GPU): end-to-end diffusion training paths.
-# Includes Qwen-Image-Edit FlowGRPO v1 sync, FlowGRPO / online DPO /
-# DiffusionNFT (v0), synchronous separate, FlowGRPO v1 separate_async, and
-# two-teacher OPD on the v1 sync and separate_async trainers.
+# Models with a landed v1 recipe run on the V1 sync trainer (Qwen-Image-Edit,
+# FlowGRPO, online DPO, DiffusionNFT, MiniMax-H3 T2VA) and the async V1
+# trainers keep their dedicated tests (FlowGRPO separate_async, two-teacher
+# OPD). Bagel PickScore stays on v0 until its v1 recipe lands (#511); the
+# sync-separate smoke keeps the deprecated v0 distributed path covered
+# (pinned trainer.use_v1=false) — its v1 counterpart is the separate_async test.
 
 set -euo pipefail
 
@@ -35,15 +38,15 @@ run_qwen_image_edit_flowgrpo_e2e() {
 run_test 0 "Qwen-Image-Edit FlowGRPO v1 sync trainer e2e" \
     run_qwen_image_edit_flowgrpo_e2e
 
-run_test 1 "FlowGRPO trainer e2e" \
+run_test 1 "FlowGRPO v1 sync trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_flowgrpo_qwen_image.sh "${diffusion_trainer_args[@]}"
 
-run_test 2 "Qwen-Image online DPO trainer e2e" \
+run_test 2 "Qwen-Image online DPO v1 sync trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_online_dpo_qwen_image.sh "${diffusion_trainer_args[@]}"
 
-run_test 3 "DiffusionNFT trainer e2e" \
+run_test 3 "DiffusionNFT v1 sync trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_diffusionnft_qwen_image.sh "${diffusion_trainer_args[@]}"
 
@@ -59,7 +62,7 @@ run_test 6 "FlowGRPO synchronous separate trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_flowgrpo_qwen_image_separate.sh "${diffusion_trainer_args[@]}"
 
-run_test 7 "MiniMax-H3 FlowGRPO T2VA trainer e2e" \
+run_test 7 "MiniMax-H3 FlowGRPO T2VA v1 sync trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ROLLOUT_TP=2 TOTAL_TRAINING_STEPS=1 \
     python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task t2va
 
