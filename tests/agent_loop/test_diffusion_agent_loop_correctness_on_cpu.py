@@ -213,9 +213,9 @@ async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(mo
         extra_fields={
             "condition_image_latents": torch.zeros(1, 4096, 64),
             "audio": torch.zeros(1, 1, 16),
-            "audio_sample_rate": 32_000,
             "media_kind": "video",
             "img_shapes": img_shapes,
+            "audio_sample_rate": 32_000,
             "unrelated_metadata": "do-not-forward",
         },
     )

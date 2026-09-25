@@ -85,14 +85,27 @@ def test_nft_tq_rows_and_old_policy_schedule(monkeypatch, step, refresh):
     latents = torch.arange(16, dtype=torch.float32).reshape(4, 1, 2, 2)
     timesteps = torch.tensor([[900, 600, 300]]).repeat(4, 1)
     rewards = torch.tensor([[1.0], [0.2], [0.0], [0.8]])
-    rollout = {
-        "uid": uids,
-        "sample_id": keys,
-        "latents_clean": latents,
-        "train_timesteps": timesteps,
-        "rm_scores": rewards,
+    rollout_by_key = {
+        k: {
+            "uid": uids[i],
+            "sample_id": k,
+            "latents_clean": latents[i],
+            "train_timesteps": timesteps[i],
+            "rm_scores": rewards[i],
+        }
+        for i, k in enumerate(keys)
     }
-    read = MagicMock(return_value=rollout)
+
+    def fake_kv_get(*, keys, partition_id, select_fields=None):
+        return {
+            "uid": [rollout_by_key[k]["uid"] for k in keys],
+            "sample_id": [rollout_by_key[k]["sample_id"] for k in keys],
+            "latents_clean": torch.stack([rollout_by_key[k]["latents_clean"] for k in keys]),
+            "train_timesteps": torch.stack([rollout_by_key[k]["train_timesteps"] for k in keys]),
+            "rm_scores": torch.stack([rollout_by_key[k]["rm_scores"] for k in keys]),
+        }
+
+    read = MagicMock(side_effect=fake_kv_get)
     write = MagicMock()
     monkeypatch.setattr("verl_omni.trainer.diffusion.v1.tq_utils.tq.kv_batch_get", read)
     monkeypatch.setattr("verl_omni.trainer.diffusion.v1.tq_utils.tq.kv_batch_put", write)
@@ -116,20 +129,25 @@ def test_nft_tq_rows_and_old_policy_schedule(monkeypatch, step, refresh):
     assert trainer._train_sampled_batch(metrics, {}, meta) is meta
     trainer.on_step_end()
 
-    read.assert_called_once_with(keys=keys, partition_id="train", select_fields=None)
+    sorted_keys = ["p0_0_0", "p0_1_0", "p1_0_0", "p1_1_0"]
+    sorted_uids = ["p0", "p0", "p1", "p1"]
+    sorted_latents = torch.stack([rollout_by_key[k]["latents_clean"] for k in sorted_keys])
+    sorted_rewards = torch.stack([rollout_by_key[k]["rm_scores"] for k in sorted_keys])
+
+    read.assert_called_once_with(keys=sorted_keys, partition_id="train", select_fields=None)
     sent = captured["data"]
-    assert list(sent.non_tensor_batch["uid"]) == uids
-    assert list(sent.non_tensor_batch["sample_id"]) == keys
-    torch.testing.assert_close(sent.batch["latents_clean"], latents)
+    assert list(sent.non_tensor_batch["uid"]) == sorted_uids
+    assert list(sent.non_tensor_batch["sample_id"]) == sorted_keys
+    torch.testing.assert_close(sent.batch["latents_clean"], sorted_latents)
     torch.testing.assert_close(sent.batch["train_timesteps"].sort(dim=1).values, timesteps.sort(dim=1).values)
-    torch.testing.assert_close(sent.batch["sample_level_scores"], rewards)
+    torch.testing.assert_close(sent.batch["sample_level_scores"], sorted_rewards)
     assert sent.batch["reward_prob"].shape == (4, 3)
     assert (sent.batch["reward_prob"][[0, 3]] > 0.5).all()
     assert (sent.batch["reward_prob"][[1, 2]] < 0.5).all()
     assert "old_log_probs" not in sent.batch
     assert "ref_noise_pred" not in sent.batch
-    assert write.call_args.kwargs["keys"] == keys
-    torch.testing.assert_close(write.call_args.kwargs["fields"]["sample_level_scores"], rewards)
+    assert write.call_args.kwargs["keys"] == sorted_keys
+    torch.testing.assert_close(write.call_args.kwargs["fields"]["sample_level_scores"], sorted_rewards)
     assert metrics["old_policy/update_applied"] == float(refresh is not None)
     assert events == ["actor", *([refresh] if refresh else []), "sync"]
     if refresh == "copy":

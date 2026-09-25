@@ -144,6 +144,7 @@ All example scripts in this directory:
 
 | Variant | Script | GPUs | Notes |
 |---------|--------|------|-------|
+| T2AV LoRA (V1 Sync) | `examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora_v1.sh` | 8×GPU | V1 sync trainer with TransferQueue + ReplayBuffer |
 | T2AV LoRA | `examples/flowgrpo_trainer/ltx2/run_ltx2_3_t2av_lora.sh` | 8×GPU | Joint audio-video CPS, CLAP + ImageBind rewards |
 | TI2VA LoRA (V1 sync) | `examples/flowgrpo_trainer/ltx2/run_ltx2_3_ti2va_lora_v1.sh` | 8×GPU | First-frame-conditioned joint audio-video CPS with TransferQueue + ReplayBuffer |
 
