@@ -210,7 +210,10 @@ the matching checks:
 | `ci-core` | Core GPU smoke (2 GPUs) (training, reward, rollout modules) |
 | `ci-e2e-omni` | Omni trainer e2e GPU smoke (2 GPUs) |
 | `ci-e2e-diffusion` | Diffusion trainer e2e GPU smoke (4 GPUs) |
-| `ready-for-ci` | Selective GPU smoke suite in parallel (Up to 8 GPUs) |
+| `ready-for-ci` | Selective GPU smoke suite in parallel (Up to 8 GPUs), plus the full NPU smoke suite when the PR matches the NPU path filter |
+| `ci-npu` | Full NPU smoke suite (8 NPUs) |
+| `ci-npu-rollout` | NPU rollout smoke only |
+| `ci-npu-flowgrpo` | NPU FlowGRPO smoke only |
 
 Labels are removed automatically when new commits are pushed; re-apply the
 label after each update. 
