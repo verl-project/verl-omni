@@ -72,9 +72,9 @@ def run_diffusion_v1(config, task_runner_class=None) -> None:
         from verl.utils.import_utils import is_nvtx_available
 
         assert is_nvtx_available(), "nvtx is not available in CUDA platform. Please 'pip3 install nvtx'"
-        nsight_options = OmegaConf.to_container(
-            config.global_profiler.global_tool_config.nsys.controller_nsight_options
-        )
+        from verl_omni.trainer.main_diffusion import _resolve_controller_nsight_options
+
+        nsight_options = _resolve_controller_nsight_options(config)
         runner = task_runner_class.options(runtime_env={"nsight": nsight_options}).remote()
     else:
         runner = task_runner_class.remote()

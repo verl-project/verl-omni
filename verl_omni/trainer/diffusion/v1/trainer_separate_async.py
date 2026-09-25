@@ -297,6 +297,15 @@ class PolicyGradientDiffusionTrainerV1SeparateAsync(PolicyGradientDiffusionTrain
         self.standalone_checkpoint_manager.update_weights(self.global_steps)
         self.checkpoint_manager.update_weights(self.global_steps)
 
+    def _profiling_rollout_managers(self):
+        # Standalone generation overlaps actor updates: keep its profiler open
+        # for the whole selected trainer window, including async warmup. Hybrid
+        # replicas join the window when they can contribute training rollouts.
+        managers = [self.standalone_server_manager]
+        if self.hybrid_rollout_config.enable_switch:
+            managers.append(self.llm_server_manager)
+        return managers
+
     def on_train_begin(self):
         if not self.hybrid_rollout_config.enable_switch and self.current_mode == HybridEngineMode.ROLLOUT:
             # Reclaim before the warmup feed so no warmup request is routed to a replica about to sleep.

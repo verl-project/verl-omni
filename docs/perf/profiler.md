@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 09/18/2026.
+Last updated: 09/22/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -41,10 +41,23 @@ global_profiler:
   steps: null                    # e.g. [1, 2, 5]
   profile_continuous_steps: False
   save_path: outputs/profile
+  relocate_results: False
+  finish_hook_cmd: null
+  finish_hook_all_ranks: False
+  finish_hook_ranks: []
   global_tool_config:
     nsys: { ... }                # see below
     torch_memory: { ... }
 ```
+
+The following optional fields control result relocation and finish commands.
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `relocate_results` | `False` | Gather supported backend artifacts into `save_path` when collection stops. |
+| `finish_hook_cmd` | `null` | Optional shell command for training workers to run after profiling finishes. `null` disables the command. |
+| `finish_hook_all_ranks` | `False` | Run the finish command on every profiled rank when enabled. |
+| `finish_hook_ranks` | `[]` | Explicit profiled ranks on which to run the finish command. |
 
 ### Per-role profiler fields
 
@@ -77,6 +90,19 @@ The same block exists under `actor_rollout_ref.ref.profiler` and
 `actor_rollout_ref.rollout.profiler`. Generation runs in separate vLLM-Omni
 server processes, not in the actor worker, so it has its own profiler driven
 by `actor_rollout_ref.rollout.profiler` (see recipe 5).
+
+Global values for `save_path`, `relocate_results`, and `finish_hook_*` provide
+defaults for the per-role configs. Set a field under
+`actor_rollout_ref.actor.profiler.<field>` to override it for the actor.
+For example, `global_profiler.relocate_results=True` enables result relocation
+for roles inheriting that value; an actor override of `False` disables it
+for the actor only.
+
+To configure an actor-only finish command, set
+`actor_rollout_ref.actor.profiler.finish_hook_cmd` and
+`actor_rollout_ref.actor.profiler.finish_hook_ranks='[0]'`. Rank 0 must also
+be selected for actor profiling. See [Implementation notes](#implementation-notes)
+for finish-command timing.
 
 All the profiler keys below already exist in the composed config, so use
 plain `key=value` overrides — a `+key=value` append fails with "An item is
@@ -167,12 +193,9 @@ When controller `capture-range-end` is null, it is resolved to the number of
 discrete profiled steps or contiguous step groups before Ray starts the
 TaskRunner.
 
-This step-scoped controller capture is not supported by
-`verl_omni.trainer.main_diffusion_v1`. The v1 entrypoint can launch its
-TaskRunner under `nsys`, but its trainer does not yet implement the step-based
-profiling lifecycle driven by `global_profiler.steps`, including coordinated
-start/stop control for the controller and workers. Consequently, controller
-`capture-range: cudaProfilerApi` is not supported by the v1 trainer.
+`verl_omni.trainer.main_diffusion_v1` also wires step-based controller and
+worker start/stop calls. GPU/Nsight collection on V1 still needs hardware
+validation; the V1 adaptation currently focuses on NPU profiling.
 
 `*.nsys-rep` files are written by Ray under
 `/tmp/ray/session_latest/logs/nsight/` on each node (this path is fixed by
@@ -300,8 +323,8 @@ traces apart from the actor rollout ones.
 
 ### 7. Ascend NPU profiling (`npu`)
 
-NPU profiling supports both diffusion training through `main_diffusion` and
-Omni training through `main_omni` with PPO V1. You can collect actor training
+NPU profiling supports diffusion training through `main_diffusion` or
+`main_diffusion_v1`, and Omni training through `main_omni` with PPO V1. You can collect actor training
 and rollout inference traces in the same run, or enable either role separately.
 Set `global_profiler.tool=npu` and configure each role under
 `actor_rollout_ref.{actor,rollout}.profiler`.
@@ -320,9 +343,9 @@ Set `global_profiler.tool=npu` and configure each role under
   Start with `contents='[npu,cpu]'` and add `module` or `stack` as needed;
   rollout collection options also depend on the inference backend.
 
-Diffusion V1 (`main_diffusion_v1` with `trainer.use_v1=True`) does not yet
-support step-based profiling. Use a `main_diffusion` launcher for diffusion
-profiling. This limitation does not apply to Omni PPO V1.
+Diffusion V1 (`trainer.use_v1=True`) supports `sync` and `separate_async`.
+Use the same per-role options below, with the device-selection constraints
+for your training mode.
 
 #### Collect actor and rollout traces
 
@@ -368,9 +391,37 @@ These fields already exist, so use plain `key=value` overrides without a `+` pre
 Keep `rollout.profiler.tool_config.npu.discrete=True` for engine-side collection.
 The example also uses actor `discrete=True` to collect individual training stages.
 Use this combination when collecting actor and rollout together.
+For diffusion V1 `sync`, also keep
+`global_profiler.profile_continuous_steps=False`: rollout collection stops
+before replicas sleep and actor computation begins. Actor-only collection can
+use either `discrete` value where supported by the backend.
+
+For diffusion V1 `separate_async`, set `all_ranks=False` and select actor and
+standalone rollout ranks on disjoint physical devices. This also applies with
+`trainer.v1.separate_async.hybrid_rollout.enable_switch=True`; lending actor
+devices to hybrid rollout does not serialize collectors on the same device.
+When switching is disabled, V1 does not profile the unused hybrid manager.
+
 Set either role's `profiler.enable=False` to
 collect only the other role. Reward-model profiling is configured separately
 under `reward.reward_model.rollout.profiler` (recipe 6).
+
+For diffusion V1, `actor_rollout_ref.rollout.profiler.ranks` contains global
+ranks within the rollout workers, not replica IDs or physical device IDs.
+For replica world size `W = TP * DP * PP`, selecting rank `r` selects replica
+`r // W`; collection may
+include all devices of that replica. With `H` hybrid replicas preceding the
+standalone replicas, standalone ranks begin at `H * W`. For example, eight
+hybrid devices with `TP=2, DP=PP=1` occupy ranks 0–7: actor rank `[0]` and
+standalone rollout rank `[8]` select disjoint devices, provided the resource
+pools are placed accordingly. Check actual replica placement; equal or unequal
+rank numbers across roles alone do not prove physical-device overlap.
+
+`all_ranks=true` remains usable when the participating collectors are physically
+disjoint. Manual rank selection cannot make overlapping NPU collectors safe.
+In diffusion V1 async mode, profile steps denote trainer time windows, not the
+policy version of samples already in the replay buffer. Hardware trace validation is still needed
+for the chosen engine and device layout.
 
 #### Collection options
 
@@ -508,12 +559,18 @@ recipe's own values, minding two couplings:
   [`verl/trainer/ppo/ray_trainer.py`](https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/ray_trainer.py).
 * `global_profiler.profile_continuous_steps=True` keeps a single profiling
   database open across consecutive steps in `global_profiler.steps`, which is
-  helpful for analysing inter-step behaviour.
-* For the rollout servers, the trainer calls
+  helpful for analysing inter-step behaviour. In diffusion V1, this keeps actor
+  and async rollout windows open across consecutive selected steps. Sync rollout
+  always stops before replicas sleep and restarts for the next selected step.
+* In the legacy diffusion trainer, for the rollout servers, the trainer calls
   `llm_server_manager.start_profile()`/`stop_profile()` around the generation
   phase of profiled steps; the servers record through vLLM's built-in torch
   profiler (recipe 5). The reward-model servers are driven the same way
   through `verl_omni.reward_loop.OmniRewardLoopManager` (recipe 6).
+* `relocate_results` and `finish_hook_*` are forwarded to upstream workers.
+  Diffusion V1 runs training-worker finish hooks after the last reachable
+  selected step, ignoring selections beyond the step or epoch limit.
+  Rollout-only collection does not run a training-worker finish hook.
 
 ## Further reading
 

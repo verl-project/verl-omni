@@ -91,6 +91,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     rollout_correction_enabled,
 )
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
+from verl_omni.trainer.diffusion.v1.profiling import DiffusionV1Profiler, profiler_worker_group_kwargs
 from verl_omni.trainer.diffusion.v1.tq_utils import (
     diffusion_metric_tq_fields,
     diffusion_persisted_tq_fields,
@@ -235,6 +236,28 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self.on_init_end()
 
     def fit(self, agent_loop_manager: AgentLoopManager):
+        """Run training and always flush active profiler windows on exit."""
+        self._profiler = DiffusionV1Profiler(
+            self.config,
+            self.actor_rollout_wg,
+            self._profiling_rollout_managers(),
+            total_training_steps=min(
+                self.total_training_steps, self.steps_per_epoch * self.config.trainer.total_epochs
+            ),
+        )
+        try:
+            self._fit(agent_loop_manager)
+        except BaseException:
+            # Preserve the training exception if a remote profiler also fails.
+            self._profiler.close(suppress_errors=True)
+            raise
+        else:
+            self._profiler.close()
+
+    def _profiling_rollout_managers(self):
+        return [self.llm_server_manager]
+
+    def _fit(self, agent_loop_manager: AgentLoopManager):
         """Run the v1 training loop, mirroring upstream ``PPOTrainer.fit``."""
         self.agent_loop_manager = agent_loop_manager
 
@@ -269,6 +292,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         self.global_steps += 1
         SkipManager.set_step(self.global_steps)
+        if current_epoch < self.config.trainer.total_epochs and self.global_steps <= self.total_training_steps:
+            # Start before reissuing restored prompts or feeding async warmup.
+            self._profiler.start_step(self.global_steps)
         self._reissue_inflight_prompts()
         self.on_train_begin()
         last_val_metrics = None
@@ -276,6 +302,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             is_last_step = self.global_steps >= self.total_training_steps
             metrics: dict = {}
             self.timing_raw: dict = {}
+            self._profiler.start_step(self.global_steps)
             with marked_timer("step", self.timing_raw):
                 self.on_step_begin()
                 batch = self.step(metrics, self.timing_raw)
@@ -298,6 +325,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                         last_val_metrics = val_metrics
                 metrics.update(val_metrics)
 
+            self._profiler.end_step(self.global_steps, last_step=is_last_step)
             self._compute_metrics(batch, metrics, self.timing_raw, self.global_steps, current_epoch)
 
             rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
@@ -954,6 +982,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         all_wg = {}
         wg_kwargs = {"device_name": self.config.trainer.device}
+        wg_kwargs.update(profiler_worker_group_kwargs(self.config))
         pools = [(pool, class_dict) for pool, class_dict in self.resource_pool_to_cls.items() if class_dict]
         master_port_range = OmegaConf.select(self.config.trainer, "ray_master_port_range")
         port_ranges = worker_group_port_ranges(master_port_range, len(pools))

@@ -333,6 +333,18 @@ global_profiler:
   # Path to save profiling contents
   save_path: "outputs/profile"
 
+  # Gather backend artifacts into save_path after each profiling window.
+  relocate_results: false
+
+  # Optional command run by training workers after the final profiled step.
+  finish_hook_cmd: null
+
+  # Run the finish hook on every profiled rank.
+  finish_hook_all_ranks: false
+
+  # Explicit profiled ranks on which to run the finish hook.
+  finish_hook_ranks: []
+
   # Tool-specific global configurations.
   # Override on the CLI via +global_profiler.global_tool_config.[tool].xxx=yyy
   global_tool_config:
