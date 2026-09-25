@@ -76,6 +76,17 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _get_engine_lora_config(engine, adapter_name: str = "default") -> dict | None:
+    """Read adapter metadata without gathering weights, including non-PEFT engines."""
+    get_config = getattr(engine, "get_lora_peft_config", None)
+    if callable(get_config):
+        return get_config(adapter_name=adapter_name)
+    module = getattr(engine, "module", None)
+    module = getattr(module, "_fsdp_wrapped_module", module)
+    config = getattr(module, "peft_config", {}).get(adapter_name)
+    return config.to_dict() if config is not None else None
+
+
 async def _timed_await(name: str, timings: dict, coro):
     """Await ``coro`` while recording its wall-clock duration into ``timings``."""
     start = time.perf_counter()
@@ -920,12 +931,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self.peft_merge:
             return None
         engine = getattr(self.actor, "engine", None)
-        module = getattr(engine, "module", None) if engine is not None else None
-        peft_model = getattr(module, "_fsdp_wrapped_module", module) if module is not None else None
-        if peft_model is None or not hasattr(peft_model, "peft_config"):
-            return None
-        peft_config = peft_model.peft_config.get("default", None)
-        result = peft_config.to_dict() if peft_config is not None else None
+        result = _get_engine_lora_config(engine)
         logger.debug("get_lora_peft_config role=%s -> %s", self.role, "LoRA" if result else "none")
         return result
 
@@ -947,9 +953,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         engine = getattr(self.actor, "engine", None)
         module = getattr(engine, "module", None) if engine is not None else None
         peft_model = getattr(module, "_fsdp_wrapped_module", module) if module is not None else None
-        if peft_model is None or not hasattr(peft_model, "peft_config"):
-            return None
-        if peft_model.peft_config.get("default", None) is None:
+        if _get_engine_lora_config(engine) is None:
             return None
 
         total_sum = 0.0
@@ -1066,9 +1070,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # 0. send_weights only for async training with disaggregated trainer and rollout
         if effective_mode != "naive":
-            actor_module = getattr(self.actor.engine, "module", None)
-            peft_module = getattr(actor_module, "_fsdp_wrapped_module", actor_module)
-            actor_has_lora = peft_module is not None and hasattr(peft_module, "peft_config")
+            actor_has_lora = _get_engine_lora_config(self.actor.engine, self.rollout_adapter) is not None
 
             if actor_has_lora and not self.peft_merge:
                 logger.debug(
@@ -1106,12 +1108,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 _timed_await("resume_weights", timings, self.rollout.resume(tags=["weights"]))
             )
 
-        # 2. Detect the actor's adapter setup *without* triggering the heavy param
-        #    gather (which runs collectives), so the right path can be chosen up
-        #    front. ``actor_has_lora`` is a cheap attribute check.
-        actor_module = getattr(self.actor.engine, "module", None)
-        peft_module = getattr(actor_module, "_fsdp_wrapped_module", actor_module)
-        actor_has_lora = peft_module is not None and hasattr(peft_module, "peft_config")
+        # 2. Read adapter metadata without triggering a collective parameter gather.
+        actor_has_lora = _get_engine_lora_config(self.actor.engine, self.rollout_adapter) is not None
         # Steady-state LoRA (base already synced) can overlap the *entire* gather +
         # actor offload with resume; the first base sync still needs the slow path.
         use_lora_fast_path = actor_has_lora and not self.peft_merge and self.base_sync_done

@@ -3,10 +3,8 @@
 # Build (from repo root):
 #   docker build -f docker/Dockerfile.cuda -t verl-omni:gpu .
 #
-# Override pinned versions (defaults match pyproject.toml extras):
+# Override the verl pin (vllm/kernels versions come from the pyproject extras):
 #   docker build -f docker/Dockerfile.cuda -t verl-omni:gpu \
-#     --build-arg VLLM_VERSION=0.28.0 \
-#     --build-arg KERNELS_VERSION=0.16.0 \
 #     --build-arg VERL_GIT_REF=fefb080262e1c015a0ea05f958822a6a512dc795 .
 #
 # Build with dev extras (pytest, pre-commit, …):
@@ -17,16 +15,12 @@
 
 ARG CUDA_VERSION=13.0.2
 ARG UBUNTU_VERSION=22.04
-ARG VLLM_VERSION=0.28.0
-ARG KERNELS_VERSION=0.16.0
 # Default: read from .github/verl_pin.txt at build time (override with VERL_GIT_REF).
 ARG VERL_GIT_REF=
 
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu${UBUNTU_VERSION} AS base
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG VLLM_VERSION
-ARG KERNELS_VERSION
 ARG VERL_GIT_REF
 
 # Python >= 3.10 (3.12 recommended), CUDA >= 12.8
@@ -57,12 +51,8 @@ COPY pyproject.toml setup.py README.md ./
 COPY .github/verl_pin.txt .github/vllm_omni_pin.txt ./.github/
 COPY verl_omni ./verl_omni
 
-# Step 1 — gpu extra: vllm, kernels, liger-kernel
-RUN echo "Installing vllm==${VLLM_VERSION} kernels==${KERNELS_VERSION}" \
-    && uv pip install --torch-backend=auto \
-        "vllm==${VLLM_VERSION}" \
-        "kernels==${KERNELS_VERSION}" \
-        liger-kernel
+# Step 1 — gpu extra (vllm, kernels, liger-kernel, pyzmq, qwen-vl-utils) from pyproject.
+RUN uv pip install --torch-backend=auto ".[gpu]"
 
 # Step 2 — vllm-omni from git pin + train extras (verl from .github/verl_pin.txt)
 RUN VERL_REF="${VERL_GIT_REF:-$(tr -d '[:space:]' < .github/verl_pin.txt)}" \

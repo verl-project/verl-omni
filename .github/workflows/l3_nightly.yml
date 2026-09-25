@@ -170,12 +170,11 @@ jobs:
           export UV_CACHE_DIR="${UV_CACHE_DIR:-${HOME}/.cache/uv}"
           git config --global http.postBuffer 524288000 || true
           # Base image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
-          uv pip install --system --break-system-packages ".[gpu,dev,audio]"
+          uv pip install --system --break-system-packages -e ".[gpu,dev,audio]"
           uv pip install --system --break-system-packages "kernels==${NIGHTLY_PIN_KERNELS}"
           uv pip install --system --break-system-packages "fa3-fwd==${NIGHTLY_PIN_FA3_FWD}"
           uv pip install --system --break-system-packages "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
           uv pip install --system --break-system-packages --no-deps --reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
-          uv pip install --system --break-system-packages --no-deps -e .
           # veomni's [gpu] extra pins torch 2.11 and would conflict with the vLLM stack.
           # See docs/start/install.md "Optional engine backends".
           # TODO: rm --no-deps when VeOmni supports the vLLM torch pin (torch 2.13 as of vLLM 0.28).

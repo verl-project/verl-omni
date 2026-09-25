@@ -40,6 +40,7 @@ from verl_omni.pipelines.bagel_flow_grpo.common import (
 from verl_omni.pipelines.diffusion_rollout_output import rollout_output
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
+from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 logger = logging.getLogger(__name__)
@@ -292,7 +293,7 @@ class BagelPipelineWithLogProb(BagelPipeline):
 
         custom_prompt = req.prompts[0]
         if not custom_prompt.get("prompt"):
-            prompt = self._decode_token_prompt(custom_prompt.get("prompt_token_ids"))
+            prompt = self._decode_token_prompt(prompt_ids_from_payload(custom_prompt))
             if prompt is not None:
                 custom_prompt["prompt"] = prompt
 
@@ -301,12 +302,6 @@ class BagelPipelineWithLogProb(BagelPipeline):
             negative_prompt = self._decode_token_prompt(custom_prompt.get("negative_prompt_ids"))
             if negative_prompt is not None:
                 extra_args["negative_prompt"] = negative_prompt
-
-        prompt_extra_args = custom_prompt.get("extra_args")
-        if isinstance(prompt_extra_args, dict):
-            multi_modal_data = prompt_extra_args.get("multi_modal_data")
-            if multi_modal_data is not None and "multi_modal_data" not in custom_prompt:
-                custom_prompt["multi_modal_data"] = multi_modal_data
 
     def forward(self, req: OmniDiffusionRequest) -> DiffusionOutput:
         self._ensure_bagel_prompt_text(req)

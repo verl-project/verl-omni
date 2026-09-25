@@ -60,3 +60,17 @@ def test_validate_config_no_sync_gradient_accumulation(strategy, enabled):
             validate_config(config)
     else:
         validate_config(config)
+
+
+def test_dynamic_resource_scheduling_default_off_is_admitted():
+    validate_config(_config())
+    config = _config()
+    config.async_training = {"use_dynamic_resource_scheduling": False}
+    validate_config(config)
+
+
+def test_dynamic_resource_scheduling_raises_on_v1_entrypoints():
+    config = _config()
+    config.async_training = {"use_dynamic_resource_scheduling": True}
+    with pytest.raises(ValueError, match="hybrid_rollout.enable_switch"):
+        validate_config(config)

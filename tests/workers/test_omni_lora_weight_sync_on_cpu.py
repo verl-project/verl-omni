@@ -23,6 +23,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 import torch
 
 import verl_omni.workers.engine_workers as ew
@@ -31,8 +32,8 @@ import verl_omni.workers.engine_workers as ew
 def _fast_path_worker(rollout_rank=0):
     worker = object.__new__(ew.ActorRolloutRefWorker)
 
-    engine = MagicMock()
-    engine.module = SimpleNamespace(peft_config={"default": object()})  # actor_has_lora
+    engine = MagicMock(spec=["module", "get_per_tensor_param"])
+    engine.module = SimpleNamespace(peft_config={"default": SimpleNamespace(to_dict=lambda: {"r": 8})})
     engine.get_per_tensor_param.return_value = (iter([("w", torch.zeros(1))]), {"r": 8})
     worker.actor = SimpleNamespace(engine=engine)
 
@@ -80,6 +81,21 @@ def _run_update(worker, **kwargs):
     ):
         asyncio.run(ew.ActorRolloutRefWorker.update_weights(worker, mode="naive", **kwargs))
     return sender
+
+
+@pytest.mark.parametrize("has_lora,merge", [(False, False), (True, False), (True, True)])
+def test_non_naive_sync_preserves_peft_and_full_weight_paths(has_lora, merge):
+    worker = _fast_path_worker()
+    if not has_lora:
+        worker.actor.engine.module = torch.nn.Linear(2, 2)
+    worker.peft_merge = merge
+    worker.checkpoint_engine = SimpleNamespace(send_weights=AsyncMock())
+    asyncio.run(worker.update_weights(mode="nccl", global_steps=3))
+    expected = {"adapter_name": "default"}
+    if has_lora and not merge:
+        expected["base_sync_done"] = True
+    worker.actor.engine.get_per_tensor_param.assert_called_once_with(**expected)
+    worker.checkpoint_engine.send_weights.assert_awaited_once()
 
 
 def test_lora_fast_path_stamps_global_steps_and_clears_kv_cache():

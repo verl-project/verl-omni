@@ -44,7 +44,7 @@ This installs `vllm-omni`, then `verl` and `verl-omni`.
 
 | Extra       | Adds                                                          | When                     |
 | ----------- | ------------------------------------------------------------- | ------------------------ |
-| `gpu`       | `vllm==0.28.0`, `kernels==0.16.0`, `liger-kernel`             | CUDA rollout + actor FA3 |
+| `gpu`       | `vllm==0.28.0`, `kernels==0.16.0`, `liger-kernel`, `pyzmq`, `qwen-vl-utils` | CUDA rollout + actor FA3 |
 | `vllm-omni` | `vllm-omni==0.28.0rc1`                                        | Optional PyPI baseline only; CI/docs use the git pin above |
 | `train`     | `verl` @ [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | RL training              |
 | `dev`       | `pytest`, `pre-commit`, `Levenshtein`, …                      | Local development / CI   |
@@ -55,7 +55,6 @@ This installs `vllm-omni`, then `verl` and `verl-omni`.
 | Extra                 | Install                                                   | When needed                             |
 | --------------------- | --------------------------------------------------------- | --------------------------------------- |
 | OCR reward            | `uv pip install -e ".[ocr]"`                              | FlowGRPO training with OCR-based reward |
-| Multimodal training   | `pip install qwen-vl-utils math-verify`                   | Vision-language training (e.g. MMK12)   |
 | Dev tools             | `uv pip install -e ".[dev]"`                              | Linting and unit tests                  |
 | VeOmni engine backend | See [Optional engine backends](#optional-engine-backends) | VeOmni instead of default FSDP2         |
 
@@ -94,8 +93,11 @@ VeRL-Omni defaults to **FSDP2** as the training engine for the policy and refere
 VeOmni 0.1.12's `gpu` extra pins `torch==2.11.0+cu130`, which conflicts with the `torch==2.13.0` pulled in by `vllm==0.28.0`. A plain `uv pip install veomni[gpu]==0.1.12` therefore fails dependency resolution.
 
 Install the base VeOmni package without dependency resolution so the existing
-torch/vLLM stack is preserved, then add its media runtime dependencies. This is
-the shared CI install; Qwen3-Omni Thinker also needs the kernels listed below.
+torch/vLLM stack is preserved, then add its media runtime dependencies
+(CI runs the image-only VeOmni smoke and pulls `librosa`/`soundfile`/`av`/`audioread`
+from the `[audio]`/`[omni]` extras; `torchcodec` is only needed when the VeOmni
+engine decodes video). This is the shared CI install; Qwen3-Omni Thinker also
+needs the kernels listed below.
 
 ```bash
 uv pip install veomni==0.1.12 --no-deps
