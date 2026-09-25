@@ -171,7 +171,7 @@ jobs:
           uv pip install --system --break-system-packages -e ".[gpu,dev,audio,ocr]"
           uv pip install --system --break-system-packages --no-deps --reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
           # veomni's [gpu] extra pins torch 2.11 and would conflict with the vLLM stack.
-          # See docs/start/install.md "Optional engine backends".
+          # See docs/start/engine_backends.md.
           # TODO: rm --no-deps when VeOmni supports the vLLM torch pin (torch 2.13 as of vLLM 0.28).
           uv pip install --system --break-system-packages veomni==0.1.12 --no-deps
           uv pip install --system --break-system-packages torchcodec librosa soundfile av audioread

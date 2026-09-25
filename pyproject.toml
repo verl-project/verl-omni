@@ -29,7 +29,7 @@ dependencies = [
     "imageio[ffmpeg]>=2.37.2",
     "pandas",
     "peft",
-    "pyarrow>=19.0.0",
+    "pyarrow>=19.0.0,<25.0.0",  # 25.0.0 breaks pd.read_parquet with ArrowInvalid: column length mismatch
     "pybind11",
     "pylatexenc",
     "ray[default]",

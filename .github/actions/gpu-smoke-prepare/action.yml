@@ -22,7 +22,7 @@ runs:
         uv pip install --system --break-system-packages --no-deps --reinstall "verl @ git+https://github.com/verl-project/verl.git@$(cat .github/verl_pin.txt)"
         # Base image PyPI mirror may lag pypi.org (e.g. kernels, fa3-fwd).
         uv pip install --system --break-system-packages -e ".[gpu,dev,audio,omni,ocr]"
-        # VeOmni overwrites: its [gpu] extra pins torch 2.11 and conflicts with the vLLM stack (docs/start/install.md "Optional engine backends").
+        # VeOmni overwrites: its [gpu] extra pins torch 2.11 and conflicts with the vLLM stack (docs/start/engine_backends.md).
         # TODO: rm --no-deps when VeOmni supports the vLLM torch pin (torch 2.13 as of vLLM 0.28).
         uv pip install --system --break-system-packages veomni==0.1.12 --no-deps
         # The released qwen-tts targets Transformers 4.57.3; install the pinned upstream Transformers 5 archive without touching this repo's stack.

@@ -44,6 +44,7 @@ If work is duplicate/trivial busywork, **do not proceed**. Return a short explan
 
 ```bash
 # GPU
+uv pip install vllm==0.28.0 --torch-backend=auto
 uv pip install -e ".[gpu,dev]" --torch-backend=auto
 
 pre-commit install

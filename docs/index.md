@@ -27,6 +27,7 @@ See {doc}`start/models` for the full model catalogue and which algorithms run on
 :caption: Getting Started
 
 start/install.md
+start/engine_backends.md
 start/install_npu.md
 start/install_rocm.md
 start/models.md

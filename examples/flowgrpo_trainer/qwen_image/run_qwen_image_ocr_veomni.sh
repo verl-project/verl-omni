@@ -9,7 +9,7 @@
 #   actor_rollout_ref.ref.veomni_config.strategy=veomni
 #
 # Requires VeOmni installed alongside the verl-omni base environment; see
-# docs/start/install.md "Optional engine backends" for the install workaround
+# docs/start/engine_backends.md for the install workaround
 # (veomni 0.1.12's `[gpu]` extra pins torch 2.11 and conflicts with vllm 0.28.0).
 set -x
 
