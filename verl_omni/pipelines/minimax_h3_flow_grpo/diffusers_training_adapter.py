@@ -218,8 +218,8 @@ class MiniMaxH3FlowGRPO(DiffusionModelBase):
         step_timesteps = torch.stack((timesteps[:, step], micro_batch["h3_audio_timesteps"][:, step]), dim=-1)
         if step_timesteps.shape[0] > 1 and not torch.all(step_timesteps == step_timesteps[0]):
             raise ValueError("MiniMax H3 requires shared video/audio timesteps per Actor micro-batch.")
-        video_t = float(step_timesteps[0, 0].item())
-        audio_t = float(step_timesteps[0, 1].item())
+        # One device round-trip for both timesteps instead of a sync per scalar.
+        video_t, audio_t = (float(value) for value in step_timesteps[0].tolist())
         device = current_video.device
         video_indices_device = video_indices.to(device)
         audio_indices_device = audio_indices.to(device)
@@ -276,10 +276,14 @@ class MiniMaxH3FlowGRPO(DiffusionModelBase):
         video = model_inputs["hidden_states"].float()
         audio = model_inputs["audio_hidden_states"].float()
         if target_only_trajectory:
+            # One device round-trip for both row counts instead of a sync per mask.
+            video_row_count, audio_row_count = (
+                int(count) for count in torch.stack((video_update_mask.sum(), audio_update_mask.sum())).tolist()
+            )
             next_video, next_audio = split_joint_latents(
                 scheduler_inputs["all_next_latents"][:, step],
-                int(video_update_mask.sum().item()),
-                int(audio_update_mask.sum().item()),
+                video_row_count,
+                audio_row_count,
             )
         else:
             next_video, next_audio = split_joint_latents(
