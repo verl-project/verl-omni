@@ -129,6 +129,7 @@ ENV/
 logs
 log
 outputs
+mlruns
 .history
 tensorboard_log
 

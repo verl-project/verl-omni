@@ -12,6 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Omni agent-loop runtime plus the generic loops shared by every pipeline.
+
+Layout rule: a module here that *registers* an ``AgentLoopBase`` subclass is named
+``*_agent_loop.py`` and holds a loop every pipeline may reuse
+(``single_turn_agent_loop.py``). A concrete loop that belongs to one training recipe
+lives in that pipeline instead (``verl_omni/pipelines/<recipe>/agent_loop.py``),
+which is where ``image_gen_tool_agent`` and the MiniMax H3 loop are. The remaining
+``*_agent_loop*.py`` modules here are the Ray workers and managers — the Omni
+counterpart of upstream's ``experimental/agent_loop/agent_loop.py``, which likewise
+keeps ``AgentLoopBase``, ``AgentLoopWorker`` and ``AgentLoopManager`` in one file.
+"""
+
 # The MiniMax H3 agent loop lives in its pipeline package; import it here so the
 # @register decorator fires when the agent_loop package is imported. Do not
 # re-export the class from the pipeline package __init__ (import cycle).
