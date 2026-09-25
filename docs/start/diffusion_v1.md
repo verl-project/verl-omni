@@ -304,10 +304,6 @@ described above.
 
 ## Troubleshooting
 
-`ModuleNotFoundError: No module named 'transfer_queue'`
-: The environment launching Ray is missing the base install; run
-  `uv pip install -e .` in it, then run the import verification command above.
-
 Ray workers cannot import `transfer_queue`
 : Stop the existing Ray cluster with `ray stop`, activate the environment where
   TransferQueue is installed, and launch the recipe again.

@@ -247,7 +247,7 @@ Reference:
 ### VeOmni backend (optional)
 
 Install PyPI VeOmni **0.1.12** and its GPU kernels using the
-[installation guide](../start/install.md#optional-engine-backends).
+[optional engine backends guide](../start/engine_backends.md).
 The [Thinker GSPO recipe](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/README.md#veomni-full-parameter-thinker-training)
 provides a complete launch example. Select the backend with:
 

@@ -52,7 +52,7 @@ def test_git_pins_match_pin_files() -> None:
     for name, rel_path in PIN_FILES.items():
         file_pin = (REPO_ROOT / rel_path).read_text().strip()
         assert name in toml_pins, (
-            f"{name} has no git pin in pyproject.toml optional-dependencies; "
+            f"{name} has no git pin in pyproject.toml; "
             f"either add it next to the {rel_path} consumer or drop the pin file"
         )
         assert toml_pins[name] == file_pin, (

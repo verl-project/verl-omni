@@ -37,7 +37,7 @@ used during conversion.
 Install the audio dependencies on every Ray worker, then launch:
 
 ```bash
-pip install -e ".[audio]"
+uv pip install -e ".[audio]"
 ```
 
 ```bash

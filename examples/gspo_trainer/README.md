@@ -260,7 +260,7 @@ Image and audio paths are decoded by Qwen's `qwen_omni_utils.process_mm_info`
 through
 [`QwenOmniRLHFDataset`](../../verl_omni/utils/dataset/omni_rl_datasets.py). Install
 the official media loader without changing the NPU engine stack with
-`pip install -e ".[audio]"`. `ffmpeg` is only required when the dataset carries
+`uv pip install -e ".[audio]"`. `ffmpeg` is only required when the dataset carries
 compressed audio (mp3/m4a/aac/ogg) or http(s) audio URLs — those go through
 `audioread`/ffmpeg. Plain local WAV files decode via `librosa`/`soundfile`
 (libsndfile) and need no ffmpeg.
@@ -397,10 +397,9 @@ Video sampling uses 1 FPS, 32--128 visual tokens per frame (`25088--100352` pixe
 Install the Qwen Omni media loader with:
 
 ```bash
-pip install -e ".[audio]"
+uv pip install -e ".[audio]"
 ```
 
-The `audio` extra already installs `qwen-omni-utils>=0.0.9`.
 Install the system FFmpeg package on the conversion host and every Ray worker;
 both `ffmpeg` and `ffprobe` must be available in `PATH`. For Ubuntu/Debian:
 

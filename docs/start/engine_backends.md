@@ -43,7 +43,7 @@ uses the following native VeOmni defaults on every training node:
 | Selector | Required package |
 | --- | --- |
 | `flash_attention_2` | Local `flash-attn` (FA2), built for the installed torch/CUDA ABI |
-| `liger_kernel` for CE, RMSNorm, SwiGLU and RoPE | `liger-kernel` (already included in verl-omni's `[gpu]` extra) |
+| `liger_kernel` for CE, RMSNorm, SwiGLU and RoPE | `liger-kernel` |
 | `fused_triton` MoE and `triton` load-balancing loss | `triton` from the installed torch stack; kernels ship in VeOmni |
 
 `kernels` Hub attention and vLLM's internal attention package do not supply the

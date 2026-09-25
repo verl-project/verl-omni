@@ -68,6 +68,7 @@ In the cuda-compat environment, pass `--python "$CONDA_PREFIX/bin/python"` and u
 | `gpu`       | `kernels==0.16.0`, `liger-kernel`, `cupy-cuda13x` | CUDA rollout + actor FA3 |
 | `omni`      | omni-trainer runtime (`librosa`, `torchaudio`, `av`, …)       | Omni-modality training   |
 | `fa2`       | `flash-attn` (source build, needs a CUDA toolkit)             | Omni trainer FA2 default |
+| `audio`     | `qwen-omni-utils`, `audioread`                                 | Audio parsing (omni data) |
 | `dev`       | `pytest`, `pre-commit`, …                                     | Local development / CI   |
 | `ocr`       | `Levenshtein`                                                 | OCR reward               |
 
@@ -101,7 +102,9 @@ The omni trainer's actor is a transformers LLM; following verl's practice for LL
 uv pip install -e ".[fa2]"
 ```
 
-VeOmni as an alternative training engine is documented in {doc}`Optional engine backends <engine_backends>`.
+### Optional engine backends
+
+VeRL-Omni defaults to FSDP2; the diffusion trainer and Qwen3-Omni Thinker can alternatively use [VeOmni]({doc}`Optional engine backends <engine_backends>`).
 
 ## Post-Installation Verification
 
