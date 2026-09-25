@@ -41,6 +41,7 @@ from .common import (
     pack_video_audio_rows,
     ref2va_reference_image_short_edge,
     serialize_ref_blocks,
+    validate_h3_parallel_config,
     validate_ref2va_reference_image_short_edge,
 )
 
@@ -61,6 +62,7 @@ class MiniMaxH3DiffusionNFTPipeline(MiniMaxH3RolloutWeightSyncMixin, MiniMaxH3Pi
     )
 
     def __init__(self, *, od_config: Any, prefix: str = "") -> None:
+        validate_h3_parallel_config(od_config.parallel_config)
         self._reference_image_short_edge = validate_ref2va_reference_image_short_edge()
         super().__init__(od_config=od_config, prefix=prefix)
         if hasattr(self, "set_progress_bar_config"):

@@ -215,7 +215,7 @@ class TestDiffusionRolloutConfig:
 
     @pytest.mark.parametrize("etp", [2, 3])
     def test_intermediate_text_encoder_tp_size_is_rejected(self, etp):
-        with pytest.raises(ValueError, match="must be either 1 or equal to tensor_model_parallel_size"):
+        with pytest.raises(ValueError, match="must be either 1 or equal to the DiT group size"):
             DiffusionRolloutConfig(name="vllm_omni", tensor_model_parallel_size=4, text_encoder_tp_size=etp)
 
     def test_non_positive_text_encoder_tp_size_is_rejected(self):

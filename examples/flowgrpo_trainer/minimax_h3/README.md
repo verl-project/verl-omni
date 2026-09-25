@@ -154,6 +154,27 @@ measure fidelity to the supplied references.
 
 ## Launch
 
+### Rollout VAE and sequence parallelism
+
+The GPU T2VA launcher exposes `ROLLOUT_USP`/`ROLLOUT_RING` (default `1`),
+`VAE_PATCH_PARALLEL_SIZE` (default `1`), `VAE_PARALLEL_MODE` (default `tile`),
+and `VAE_USE_TILING` (default `False`). Encoder TP defaults to the full
+`ROLLOUT_TP * ROLLOUT_USP * ROLLOUT_RING` group. Existing TP-only defaults remain
+unchanged. For TP=4 with parallel VAE decode, use
+`ROLLOUT_TP=4 VAE_PATCH_PARALLEL_SIZE=4 VAE_USE_TILING=True`.
+
+Pure Ulysses uses `ROLLOUT_TP=1 ROLLOUT_USP=4 ROLLOUT_RING=1`, with
+`TEXT_ENCODER_TP=4 VAE_PATCH_PARALLEL_SIZE=4 VAE_USE_TILING=True`. Local rollout
+subclasses account for SP ranks without patching verl; TP remains the actual
+engine TP degree. GPU validation is pending. H3 requires
+VAE mode `tile`, VAE parallel size `1` or the full DiT group, CFG parallel size
+`1`, and no hybrid Ulysses x Ring. Encoder TP must divide 8.
+
+Other GPU launchers can use the typed Hydra fields directly, without these
+T2VA environment shortcuts. See the
+[configuration reference](../../../docs/examples/config.md#rollout-sequence-and-vae-parallelism)
+for GPU allocation, encoder-group validation and the small-tile VAE fallback.
+
 ### Actor FSDP sequence parallelism
 
 The NVIDIA T2VA, FL2VA, and Ref2VA launchers accept `ACTOR_SP` (default `1`).
@@ -306,8 +327,8 @@ and Actor micro-batch 1. It enables layerwise rollout offload and FSDP2 Actor
 parameter/optimizer offload because reference presentations can be much longer
 than T2VA prompts.
 
-`NUM_GPUS` must be divisible by `ROLLOUT_TP`. `TEXT_ENCODER_TP` defaults to
-`ROLLOUT_TP` and is forwarded as `actor_rollout_ref.rollout.text_encoder_tp_size`
+Without sequence parallelism, `NUM_GPUS` must be divisible by `ROLLOUT_TP`.
+`TEXT_ENCODER_TP` defaults to `ROLLOUT_TP` and is forwarded as `actor_rollout_ref.rollout.text_encoder_tp_size`
 (without `+`), using the same diffusion engine path as NFT. With the pinned
 backend, ETP must be 1 or exactly equal to rollout TP.
 For example, `ROLLOUT_TP=4 TEXT_ENCODER_TP=4` shards the encoder across all four

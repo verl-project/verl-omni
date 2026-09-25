@@ -218,7 +218,12 @@ actor_rollout_ref:
     cudagraph_capture_sizes: null
     free_cache_engine: true
     tensor_model_parallel_size: 2
+    ulysses_degree: 1
+    ring_degree: 1
     text_encoder_tp_size: 1
+    vae_patch_parallel_size: 1
+    vae_parallel_mode: tile
+    vae_use_tiling: false
     data_parallel_size: 1
     expert_parallel_size: 1
     pipeline_model_parallel_size: 1

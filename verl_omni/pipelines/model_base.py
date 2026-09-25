@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import logging
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Optional
@@ -422,6 +423,35 @@ class DiffusionI2IModelBase(DiffusionModelBase):
         return model_inputs, negative_model_inputs
 
 
+def apply_rollout_parallel_setup(pipeline: Any, od_config: Any) -> None:
+    """Apply the VAE and DiT sequence-parallel setup that custom pipeline loading skips."""
+    # TODO: drop once vLLM-Omni's custom_pipeline loader runs initialize_model's post-construction setup.
+    from vllm_omni.diffusion.distributed.autoencoders.distributed_vae_executor import DistributedVaeMixin
+    from vllm_omni.diffusion.distributed.sp_plan import get_sp_plan_from_model
+    from vllm_omni.diffusion.registry import _apply_sequence_parallel_if_enabled
+
+    parallel_config = od_config.parallel_config
+    vae = getattr(pipeline, "vae", None)
+    if parallel_config.vae_patch_parallel_size > 1:
+        if not isinstance(vae, DistributedVaeMixin):
+            raise ValueError(f"{type(pipeline).__name__} does not support vae_patch_parallel_size > 1.")
+        od_config.vae_use_tiling = True
+        vae.set_parallel_size(parallel_config.vae_patch_parallel_size, mode=parallel_config.vae_parallel_mode)
+    if od_config.vae_use_tiling and hasattr(vae, "use_tiling"):
+        vae.use_tiling = True  # Only honor an explicit request; keep each VAE's constructor default otherwise.
+
+    if parallel_config.sequence_parallel_size <= 1:
+        return
+    dits = {name: getattr(pipeline, name, None) for name in getattr(pipeline, "_dit_modules", ())}
+    dits = {name: dit for name, dit in dits.items() if dit is not None}
+    if not dits or any(get_sp_plan_from_model(dit) is None for dit in dits.values()):
+        raise ValueError(f"{type(pipeline).__name__} does not support rollout sequence parallelism.")
+    _apply_sequence_parallel_if_enabled(pipeline, od_config)
+    for name, dit in dits.items():
+        if not any(getattr(module, "_hook_registry", None) is not None for module in dit.modules()):
+            raise RuntimeError(f"Sequence parallelism hooks were not applied to {type(pipeline).__name__}.{name}.")
+
+
 class VllmOmniPipelineBase:
     """Registry base for vllm-omni custom diffusion pipeline classes.
 
@@ -447,6 +477,15 @@ class VllmOmniPipelineBase:
         def decorator(subclass: type) -> type:
             if "supports_request_batch" not in subclass.__dict__:
                 subclass.supports_request_batch = False
+            init = subclass.__init__
+
+            @functools.wraps(init)
+            def __init__(self, *args, **kwargs):
+                init(self, *args, **kwargs)
+                if type(self) is subclass:  # registered subclasses of registered classes apply it once
+                    apply_rollout_parallel_setup(self, kwargs["od_config"])
+
+            subclass.__init__ = __init__
             cls._registry[(architecture, algorithm)] = subclass
             return subclass
 

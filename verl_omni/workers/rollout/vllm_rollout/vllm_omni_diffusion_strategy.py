@@ -103,18 +103,64 @@ class DiffusionStrategy(OmniStrategyBase):
         return _GPU_WORKER_EXTENSION
 
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
+        config = self.server.config
+        parallel_config = engine_args.get("parallel_config")
+        if parallel_config is not None:
+            parallel_config = dict(parallel_config) if isinstance(parallel_config, Mapping) else asdict(parallel_config)
+
+        # Resource-bearing degrees must agree with the config used by verl's allocator.
+        topology = {
+            "tensor_parallel_size": config.tensor_model_parallel_size,
+            "ulysses_degree": config.ulysses_degree,
+            "ring_degree": config.ring_degree,
+            "sequence_parallel_size": config.ulysses_degree * config.ring_degree,
+            "data_parallel_size": config.data_parallel_size,
+            "pipeline_parallel_size": config.pipeline_model_parallel_size,
+        }
+        explicit_kwargs = {
+            key.replace("-", "_"): value for key, value in (config.engine_kwargs.get("vllm_omni", {}) or {}).items()
+        }
+        for key, value in topology.items():
+            cli_value = getattr(args, key, None)
+            nested_value = (parallel_config or {}).get(key)
+            aliases = {"ulysses_degree": "usp", "ring_degree": "ring"}
+            explicit = key in explicit_kwargs or aliases.get(key) in explicit_kwargs
+            if (cli_value is not None and cli_value != value and (explicit or cli_value != 1)) or (
+                nested_value is not None and nested_value != value
+            ):
+                raise ValueError(
+                    f"Conflicting {key}; configure topology through actor_rollout_ref.rollout, not engine_kwargs."
+                )
+            engine_args[key] = value
+            if parallel_config is not None:
+                parallel_config[key] = value
+
+        for key, default in (("vae_patch_parallel_size", 1), ("vae_parallel_mode", "tile"), ("vae_use_tiling", False)):
+            value = getattr(config, key)
+            cli_value = getattr(args, key, None)
+            if cli_value is not None and (cli_value != default or key in explicit_kwargs):
+                if value not in (default, cli_value):
+                    raise ValueError(f"Conflicting {key} in rollout config and engine_kwargs.")
+                value = cli_value
+            if key != "vae_use_tiling" and parallel_config is not None:
+                nested_value = parallel_config.get(key)
+                if nested_value is not None:
+                    if nested_value != value and (value != default or cli_value not in (None, default)):
+                        raise ValueError(f"Conflicting {key} in rollout config and parallel_config.")
+                    value = nested_value
+                parallel_config[key] = value
+            engine_args[key] = value
+
         # TODO(vllm-omni#7564): Drop this pin-compat shim; tracked in verl-omni#445.
-        text_encoder_tp = self.server.config.text_encoder_tp_size
+        text_encoder_tp = config.text_encoder_tp_size
         cli_text_encoder_tp = getattr(args, "text_encoder_tp_size", None)
         if cli_text_encoder_tp is not None:
             if text_encoder_tp not in (1, cli_text_encoder_tp):
                 raise ValueError("Conflicting text_encoder_tp_size in rollout config and engine_kwargs.")
             text_encoder_tp = cli_text_encoder_tp
 
-        parallel_config = engine_args.get("parallel_config")
-        tp_size = self.server.config.tensor_model_parallel_size
+        dit_world_size = config.tensor_model_parallel_size * config.ulysses_degree * config.ring_degree
         if parallel_config is not None:
-            parallel_config = dict(parallel_config) if isinstance(parallel_config, Mapping) else asdict(parallel_config)
             nested_text_encoder_tp = parallel_config.get("text_encoder_tp_size")
             if nested_text_encoder_tp is not None:
                 if nested_text_encoder_tp != text_encoder_tp and (
@@ -122,11 +168,19 @@ class DiffusionStrategy(OmniStrategyBase):
                 ):
                     raise ValueError("Conflicting text_encoder_tp_size in rollout/engine_kwargs and parallel_config.")
                 text_encoder_tp = nested_text_encoder_tp
-            tp_size = parallel_config.get("tensor_parallel_size", tp_size)
 
-        if text_encoder_tp < 1 or text_encoder_tp not in (1, tp_size):
-            raise ValueError(f"text_encoder_tp_size must be 1 or equal to tensor parallel size ({tp_size}).")
+        if text_encoder_tp < 1 or text_encoder_tp not in (1, dit_world_size):
+            raise ValueError(f"text_encoder_tp_size must be 1 or equal to DiT group size ({dit_world_size}).")
         engine_args["text_encoder_tp_size"] = text_encoder_tp
+        if config.ulysses_degree * config.ring_degree > 1:
+            for key in ("cfg_parallel_size", "allgather_degree"):
+                value = (parallel_config or {}).get(key, getattr(args, key, None))
+                if value not in (None, 1):
+                    raise ValueError(f"Rollout sequence parallelism requires {key}=1.")
+            num_gpus = engine_args.get("num_gpus")
+            if num_gpus not in (None, dit_world_size):
+                raise ValueError(f"num_gpus must match the allocated DiT group size ({dit_world_size}).")
+            engine_args["num_gpus"] = dit_world_size
         if parallel_config is not None:
             parallel_config["text_encoder_tp_size"] = text_encoder_tp
             engine_args["parallel_config"] = parallel_config

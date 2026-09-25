@@ -151,8 +151,15 @@ class DiffusionRolloutConfig(BaseConfig):
     data_parallel_size: int = 1
     expert_parallel_size: int = 1
     tensor_model_parallel_size: int = 2
-    # Text-encoder TP shard size: 1 or tensor_model_parallel_size (validated below).
+    # Ulysses and Ring multiply the DiT tensor-parallel footprint.
+    ulysses_degree: int = 1
+    ring_degree: int = 1
+    # Text-encoder TP reuses the DiT group: 1 or its full size.
     text_encoder_tp_size: int = 1
+    # VAE parallelism reuses the DiT ranks rather than allocating extra GPUs.
+    vae_patch_parallel_size: int = 1
+    vae_parallel_mode: str = "tile"
+    vae_use_tiling: bool = False
     pipeline_model_parallel_size: int = 1
     max_num_batched_tokens: int = 8192
     logprobs_mode: Optional[str] = "processed_logprobs"
@@ -250,13 +257,26 @@ class DiffusionRolloutConfig(BaseConfig):
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
 
-        if self.text_encoder_tp_size < 1:
-            raise ValueError(f"text_encoder_tp_size must be >= 1, got {self.text_encoder_tp_size}.")
-        if self.text_encoder_tp_size not in (1, self.tensor_model_parallel_size):
-            # vLLM-Omni only builds a valid text-encoder group for tp_size == 1 or
-            # tp_size == tensor_model_parallel_size; intermediate sizes leave the
-            # out-of-group ranks without a device group and crash during init.
+        for name in ("ulysses_degree", "ring_degree", "vae_patch_parallel_size", "text_encoder_tp_size"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be >= 1 and an integer, got {value!r}.")
+        if self.vae_parallel_mode not in {"tile", "spatial_shard_height", "spatial_shard_width"}:
+            raise ValueError(f"Invalid vae_parallel_mode: {self.vae_parallel_mode!r}.")
+        dit_world_size = self.tensor_model_parallel_size * self.ulysses_degree * self.ring_degree
+        if self.text_encoder_tp_size not in (1, dit_world_size):
             raise ValueError(
-                "text_encoder_tp_size must be either 1 or equal to tensor_model_parallel_size "
-                f"({self.tensor_model_parallel_size}), got {self.text_encoder_tp_size}."
+                "text_encoder_tp_size must be either 1 or equal to the DiT group size "
+                f"(tensor_model_parallel_size * ulysses_degree * ring_degree = {dit_world_size}), "
+                f"got {self.text_encoder_tp_size}."
             )
+        if self.ulysses_degree * self.ring_degree > 1:
+            omni_kwargs = (self.engine_kwargs or {}).get("vllm_omni", {}) or {}
+            if (
+                self.name != "vllm_omni"
+                or self.data_parallel_size != 1
+                or self.pipeline_model_parallel_size != 1
+                or omni_kwargs.get("output_mode") == "ar"
+                or (self.disaggregation and self.disaggregation.get("enabled", False))
+            ):
+                raise ValueError("Rollout sequence parallelism requires vllm_omni diffusion with DP=PP=1 and no PD.")

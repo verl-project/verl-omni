@@ -60,6 +60,7 @@ __all__ = [
     "prepare_h3_processor_files",
     "ref2va_reference_image_short_edge",
     "validate_ref2va_reference_image_short_edge",
+    "validate_h3_parallel_config",
     "pad_h3_layout_for_ulysses",
     "h3_ulysses_forward",
     "keyframe_indices_to_anchors",
@@ -73,6 +74,22 @@ __all__ = [
 
 
 MINIMAX_H3_TOKEN_ID_NATIVE_KEY = "minimax_h3_token_id_native"
+
+
+def validate_h3_parallel_config(parallel_config: Any) -> None:
+    """Reject H3 topologies unsupported by the native encoder and tiled VAE."""
+    p = parallel_config
+    dit_world_size = p.tensor_parallel_size * p.ulysses_degree * p.ring_degree
+    if p.cfg_parallel_size != 1:
+        raise ValueError("MiniMax-H3 requires cfg_parallel_size=1.")
+    if p.ulysses_degree > 1 and p.ring_degree > 1:
+        raise ValueError("MiniMax-H3 does not support hybrid Ulysses x Ring.")
+    if p.vae_parallel_mode != "tile":
+        raise ValueError("MiniMax-H3 supports vae_parallel_mode=tile only.")
+    if p.vae_patch_parallel_size not in (1, dit_world_size):
+        raise ValueError(f"MiniMax-H3 vae_patch_parallel_size must be 1 or the full DiT group size ({dit_world_size}).")
+    if p.text_encoder_tp_size not in (1, dit_world_size) or 8 % p.text_encoder_tp_size:
+        raise ValueError("MiniMax-H3 text_encoder_tp_size must be 1 or the full DiT group size and divide 8.")
 
 
 _H3_FORWARD_PARAMETERS = (

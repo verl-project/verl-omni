@@ -25,6 +25,7 @@ from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
 from verl_omni.pipelines.qwen3_omni.omni_rollout_adapter import Qwen3OmniRolloutAdapter
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 from verl_omni.pipelines.rollout_request import OmniRolloutRequest
+from verl_omni.workers.config import DiffusionRolloutConfig
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_ar_strategy as ar_strategy_module
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_async_server as server_module
 from verl_omni.workers.rollout.vllm_rollout import vllm_omni_diffusion_strategy as diffusion_strategy_module
@@ -723,7 +724,7 @@ def test_diffusion_strategy_preserves_engine_argument_preparation(monkeypatch):
         staticmethod(lambda **kwargs: pipeline_cls),
     )
     server = SimpleNamespace(
-        config=SimpleNamespace(
+        config=DiffusionRolloutConfig(
             external_lib=["extension"],
             tensor_model_parallel_size=4,
             text_encoder_tp_size=1,
@@ -741,6 +742,15 @@ def test_diffusion_strategy_preserves_engine_argument_preparation(monkeypatch):
     assert imported == [["extension"]]
     assert engine_args == {
         "max_num_seqs": 1,
+        "tensor_parallel_size": 4,
+        "ulysses_degree": 1,
+        "ring_degree": 1,
+        "sequence_parallel_size": 1,
+        "data_parallel_size": 1,
+        "pipeline_parallel_size": 1,
+        "vae_patch_parallel_size": 1,
+        "vae_parallel_mode": "tile",
+        "vae_use_tiling": False,
         "text_encoder_tp_size": 1,
         "enable_dummy_pipeline": True,
         "custom_pipeline_args": {"pipeline_class": "package.Adapter"},

@@ -48,6 +48,7 @@ from verl_omni.pipelines.diffusion_rollout_output import with_rollout_data
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
     ref2va_reference_image_short_edge,
     serialize_ref_blocks,
+    validate_h3_parallel_config,
     validate_ref2va_reference_image_short_edge,
 )
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
@@ -96,6 +97,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
     )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
+        validate_h3_parallel_config(od_config.parallel_config)
         self._reference_image_short_edge = validate_ref2va_reference_image_short_edge()
         super().__init__(od_config=od_config, prefix=prefix)
         self.install_h3_lora_layout()

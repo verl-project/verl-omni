@@ -173,13 +173,35 @@ python3 examples/diffusionnft_trainer/minimax_h3/build_fl2va_jsonl.py \
 
 ## Launch
 
+### Rollout VAE and sequence parallelism
+
+The T2VA launcher accepts `ROLLOUT_USP`/`ROLLOUT_RING` (both default `1`),
+`VAE_PATCH_PARALLEL_SIZE` (default `1`), `VAE_PARALLEL_MODE` (default `tile`),
+and `VAE_USE_TILING` (default `False`). Existing TP-only behavior is unchanged.
+For example, add `ROLLOUT_TP=4 VAE_PATCH_PARALLEL_SIZE=4 VAE_USE_TILING=True`
+to reuse a four-rank TP group for tiled VAE decode.
+
+Pure Ulysses uses `ROLLOUT_TP=1 ROLLOUT_USP=4 ROLLOUT_RING=1`, with
+`TEXT_ENCODER_TP=4 VAE_PATCH_PARALLEL_SIZE=4 VAE_USE_TILING=True`. Local rollout
+subclasses account for SP ranks without patching verl; TP remains the actual
+engine TP degree. GPU validation is pending. H3 only permits VAE mode `tile`,
+VAE parallel size `1` or the full DiT
+group, and no hybrid Ulysses x Ring. Encoder TP must divide 8.
+
+FL2VA/Ref2VA and V1 users can pass the typed Hydra fields directly; their
+launchers do not yet provide these environment shortcuts. See the
+[configuration reference](../../../docs/examples/config.md#rollout-sequence-and-vae-parallelism)
+for allocation semantics and the native VAE's small-tile fallback.
+
 ### Text-encoder tensor parallelism
 
-All H3 NFT launchers use `TEXT_ENCODER_TP=${TEXT_ENCODER_TP:-$ROLLOUT_TP}`,
-forwarded as `actor_rollout_ref.rollout.text_encoder_tp_size` (without `+`).
+With sequence parallelism disabled, H3 NFT launchers default `TEXT_ENCODER_TP`
+to `ROLLOUT_TP`, forwarded as `actor_rollout_ref.rollout.text_encoder_tp_size`
+(without `+`). The T2VA launcher uses the full `TP * USP * Ring` group when SP
+is configured.
 For example, `ROLLOUT_TP=4 TEXT_ENCODER_TP=4` shards the encoder across all four
-DiT ranks; `TEXT_ENCODER_TP=1` keeps it unsharded. With the pinned backend, use
-ETP=1 or exactly ETP=rollout TP, not an intermediate subgroup. This applies to
+DiT ranks; `TEXT_ENCODER_TP=1` keeps it unsharded. Use ETP=1 or the complete
+DiT group, not an intermediate subgroup. This applies to
 T2VA, FL2VA, and Ref2VA and is independent of CPU/layerwise offload.
 
 > [!IMPORTANT]

@@ -816,7 +816,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             # TODO: move rollout_device_mesh into ServerAdapter
             # 3.1 build rollout device mesh (sglang need only)
-            infer_tp = rollout_config.tensor_model_parallel_size * rollout_config.data_parallel_size
+            infer_tp = (
+                rollout_config.tensor_model_parallel_size
+                * rollout_config.data_parallel_size
+                * getattr(rollout_config, "ulysses_degree", 1)
+                * getattr(rollout_config, "ring_degree", 1)
+            )
             infer_pp = rollout_config.pipeline_model_parallel_size
             infer_world_size = infer_tp * infer_pp
             dp = self.world_size // infer_world_size

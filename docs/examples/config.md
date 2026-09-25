@@ -1,6 +1,6 @@
 # Config Explanation
 
-Last updated: 09/17/2026
+Last updated: 09/25/2026
 
 VeRL-Omni builds on [verl](https://github.com/verl-project/verl) and reuses the
 same Hydra config surface for shared RL trainer fields (`data`, FSDP actor /
@@ -245,9 +245,9 @@ Diffusion-specific blocks sit under `pipeline`, `algo`, and `val_kwargs`. Severa
 #### Text-encoder tensor parallelism
 
 `actor_rollout_ref.rollout.text_encoder_tp_size` (default `1`) controls encoder
-sharding for supporting diffusion pipelines. Use `1` or exactly
-`actor_rollout_ref.rollout.tensor_model_parallel_size`; intermediate subgroups
-are rejected for the pinned backend.
+sharding for supporting diffusion pipelines. Use `1` or the full DiT group
+size (`tensor_model_parallel_size * ulysses_degree * ring_degree`);
+intermediate subgroups are rejected for the pinned backend.
 
 ```bash
 actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
@@ -256,13 +256,68 @@ actor_rollout_ref.rollout.text_encoder_tp_size=4
 
 NFT and FlowGRPO share this path. The field reaches the fused engine's
 `OmniDiffusionConfig.parallel_config.text_encoder_tp_size`; it is independent
-of CPU/layerwise offload. H3 launchers default `TEXT_ENCODER_TP` to `ROLLOUT_TP`.
+of CPU/layerwise offload. H3 launchers default `TEXT_ENCODER_TP` to `ROLLOUT_TP`
+when sequence parallelism is disabled.
 
 The legacy `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.text_encoder_tp_size`
 override is still accepted and overrides the typed default of `1`. Conflicting
 non-default typed and legacy values raise an error. If an explicit
 `parallel_config` provides ETP, it must agree with any requested override;
 otherwise its value is preserved. Prefer the typed field without `+`.
+
+#### Rollout sequence and VAE parallelism
+
+These are engine-startup fields under `actor_rollout_ref.rollout`, not per-request
+`pipeline` fields. Both NFT and FlowGRPO use the same configuration path.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `ulysses_degree` | `1` | Ulysses SP degree (`--usp` in vLLM-Omni) |
+| `ring_degree` | `1` | Ring SP degree |
+| `vae_patch_parallel_size` | `1` | VAE patch/tile ranks, reused from the DiT group |
+| `vae_parallel_mode` | `tile` | VAE parallel decode mode |
+| `vae_use_tiling` | `false` | Request tiled VAE execution |
+
+A replica occupies `TP * Ulysses * Ring` GPUs with `DP=PP=1`. Encoder TP and
+VAE parallelism reuse those ranks; they do not multiply GPU allocation again.
+Resource-bearing degrees must be set through these typed fields, not conflicting
+`engine_kwargs` or nested `parallel_config` overrides.
+
+The V0/V1 diffusion trainers use a local `LLMServerManager` subclass for SP-aware
+allocation, with matching vLLM-Omni replica, server-adapter and profiler rank
+mapping. No verl patch or TP-field substitution is needed. SP=1 delegates to the
+upstream path; SP>1 is limited to vLLM-Omni diffusion with DP=PP=1 and no
+prefill/decode disaggregation. GPU validation of the new SP/VAE path is still
+pending; CPU resource/routing checks are not performance evidence.
+
+vLLM-Omni's custom-pipeline loader skips its post-construction VAE/SP setup, so
+every registered rollout pipeline applies it after construction. Ulysses/Ring
+requires every declared DiT to define `_sp_plan`, and VAE parallelism requires a
+distributed VAE; unsupported combinations fail at startup instead of being
+ignored. At the pinned vLLM-Omni, Qwen-Image, Wan2.2, LTX-2 and MiniMax-H3 support
+both, Qwen-Image-Edit-Plus supports SP only, SD3 and Bagel support VAE parallelism
+only, and FLUX and Boogu-Image support neither.
+
+For MiniMax-H3, `vae_parallel_mode` must be `tile`, VAE parallel size must be `1`
+or the complete DiT group, CFG parallelism must be `1`, and hybrid Ulysses x Ring
+is rejected. Encoder TP must also divide 8. The native VAE may decode locally
+when there are fewer spatial tiles than ranks, so actual tile assignments must
+be checked when measuring speedup.
+
+Example using an existing four-GPU TP group:
+
+```bash
+actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
+actor_rollout_ref.rollout.text_encoder_tp_size=4 \
+actor_rollout_ref.rollout.vae_patch_parallel_size=4 \
+actor_rollout_ref.rollout.vae_parallel_mode=tile \
+actor_rollout_ref.rollout.vae_use_tiling=true
+```
+
+Pure Ulysses on four GPUs uses
+`tensor_model_parallel_size=1`, `ulysses_degree=4`, `ring_degree=1`, and encoder
+and VAE parallel sizes of `4`. Do not set both TP and Ulysses to `4` on four GPUs:
+that requests sixteen ranks.
 
 #### Pipeline — `DiffusionPipelineConfig`
 

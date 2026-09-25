@@ -59,8 +59,23 @@ free_cache_engine: True
 # TP size for rollout
 tensor_model_parallel_size: 2
 
-# Text-encoder TP shard size: 1 or tensor_model_parallel_size.
+# Ulysses sequence parallelism; multiplies the replica GPU footprint.
+ulysses_degree: 1
+
+# Ring sequence parallelism; multiplies the replica GPU footprint.
+ring_degree: 1
+
+# Text-encoder TP: 1 or the full TP * Ulysses * Ring DiT group.
 text_encoder_tp_size: 1
+
+# VAE patch parallelism reuses the DiT group.
+vae_patch_parallel_size: 1
+
+# VAE decode parallel mode; supported modes depend on the pipeline.
+vae_parallel_mode: tile
+
+# Enable tiled VAE execution.
+vae_use_tiling: false
 
 # DP size for rollout
 data_parallel_size: 1
