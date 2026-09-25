@@ -29,7 +29,7 @@ import torch
 from packaging.version import parse as parse_version
 
 from verl_omni.pipelines.qwen3_omni.thinker_training_adapter import Qwen3OmniThinkerAdapter
-from verl_omni.utils.dataset.omni_rl_datasets import DEFAULT_AUDIO_HOP_LENGTH, pad_audio_to_hop_multiple
+from verl_omni.utils.dataset.omni_rl_datasets import pad_audio_to_hop_multiple
 
 HOP = 160
 SR = 16000
@@ -148,13 +148,7 @@ def test_unpadded_audio_frame_counts_diverge_from_rollout(feature_extractor, L):
 
 @pytest.mark.parametrize("L", _audio_lengths())
 def test_hop_pad_restores_actor_rollout_frame_parity(feature_extractor, L):
-    """(b) WITH hop-padding, actor and rollout frame counts match everywhere.
-
-    ``DEFAULT_AUDIO_HOP_LENGTH`` is pinned to the local ``HOP`` here so the
-    keep-in-sync note in omni_rl_datasets.py stays enforced by this test.
-    """
-    assert DEFAULT_AUDIO_HOP_LENGTH == HOP
-
+    """(b) WITH hop-padding, actor and rollout frame counts match everywhere."""
     waveform = np.zeros(L, dtype=np.float32)
     padded = pad_audio_to_hop_multiple(waveform, HOP)
 
@@ -164,6 +158,12 @@ def test_hop_pad_restores_actor_rollout_frame_parity(feature_extractor, L):
     # Frames agree and both equal ceil(original L / hop).
     assert actor_frames == rollout_frames, f"L={L}: frames should match after hop-pad"
     assert actor_frames == (L + HOP - 1) // HOP, f"L={L}: frames should be ceil(L/hop)"
+
+
+def test_hop_pad_default_matches_the_feature_extractor_stride():
+    """The helper's default hop must stay in sync with Whisper's stride."""
+    # A 1-sample clip pads up to exactly one hop, whatever the default is.
+    assert len(pad_audio_to_hop_multiple(np.zeros(1, dtype=np.float32))) == HOP
 
 
 @pytest.mark.parametrize("frames", [7, 25, 50, 51, 100, 200])

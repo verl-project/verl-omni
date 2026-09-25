@@ -95,6 +95,12 @@ ocr = [
     "Levenshtein",
 ]
 
+# vLLM loads every `vllm.general_plugins` entry point at startup in each
+# engine process; see verl_omni/pipelines/minicpm/vllm_plugin.py.
+# TODO (mike): drop this entry point at the next vllm-omni pin bump, together with vllm_plugin.py.
+[project.entry-points."vllm.general_plugins"]
+verl_omni_minicpmo_embed_multimodal = "verl_omni.pipelines.minicpm.vllm_plugin:register"
+
 # -------------------------------
 # tool.ruff - Linting configuration
 # -------------------------------
