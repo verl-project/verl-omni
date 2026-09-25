@@ -15,11 +15,6 @@
 
 The task is *text editing*: each sample carries a source image that already
 contains rendered text, plus an instruction asking for that text to be replaced.
-The reward is the existing OCR GenRM (``compute_score_ocr``), which transcribes
-the rollout image and compares it to ``ground_truth`` — the text the edit was
-supposed to produce. No new reward code is needed, and unlike a preference
-scorer this reward *is* edit-aware for this task: the edit only scores if the
-requested text actually appears.
 
 Input layout (mirrors ``examples/flowgrpo_trainer/qwen_image_edit/prepare_data.py``)::
 
@@ -31,21 +26,13 @@ Input layout (mirrors ``examples/flowgrpo_trainer/qwen_image_edit/prepare_data.p
 first double-quoted span of the instruction, the same convention the T2I
 converter uses (``boogu_image_ocr.py::extract_solution``).
 
-Prompt conventions differ from the Qwen-Image-Edit converter in two ways that
-both silently corrupt training if copied over unchanged:
-
-- **Both** the positive and the negative prompt use the *TI2I unified* system
-  prompt. For T2I only the empty negative prompt hits that template; on the
-  editing path it is the positive template too.
-- The negative prompt carries **no** ``<image>`` placeholder. Upstream defaults
-  to ``use_input_images_4_neg_instruct=False``, so the rollout adapter encodes
-  the negative instruction text-only (``vllm_omni_rollout_adapter.py``). A
-  placeholder here would never be expanded into image features.
-
-Condition images are letterboxed onto a square canvas. Boogu-Image-Edit derives
-its output resolution from the VAE-preprocessed reference (``align_res``), so
-mixed source aspect ratios would produce mixed output resolutions inside a
-rollout batch. A fixed square canvas pins the output to ``image_size``.
+The negative prompt is **text-only**: guided TI2I encodes the negative instruction
+without the reference image (upstream default
+``use_input_images_4_neg_instruct=False``), so an ``<image>`` placeholder here would
+be tokenized but never expanded into image features. That satisfies the media-count
+check while quietly shifting the guidance, so the row deliberately references
+**fewer** media than it carries — which ``RLHFDataset._build_messages`` permits for
+the negative key and for no other.
 """
 
 import argparse
@@ -107,20 +94,26 @@ def convert_split(input_dir: Path, split: str, max_samples: int, image_size: int
 
             rows.append(
                 {
-                    "data_source": "flow_grpo/ocr_edit",
+                    "data_source": "pickscore_edit",
                     "prompt": [
                         {"role": "system", "content": BOOGU_SYSTEM_PROMPT_TI2I},
                         {"role": "user", "content": f"Picture 1: <image>{instruction}"},
                     ],
-                    # Text-only: upstream does not feed the reference image to the
-                    # negative branch, so no <image> placeholder here.
+                    # Text-only: the reference image is not fed to the negative branch
+                    # (upstream `use_input_images_4_neg_instruct=False`), so no `<image>`
+                    # placeholder here. `RLHFDataset._build_messages` allows the negative
+                    # key to consume fewer media than the row carries for exactly this
+                    # reason; adding a placeholder back would satisfy that check while
+                    # handing the negative encode a token that is never expanded.
                     "negative_prompt": [
                         {"role": "system", "content": BOOGU_SYSTEM_PROMPT_TI2I},
                         {"role": "user", "content": ""},
                     ],
                     "ability": "image_edit",
                     "images": [{"bytes": load_condition_image(image_path, image_size)}],
-                    "reward_model": {"style": "model", "ground_truth": target_text},
+                    # The instruction, not `target_text`: this is the prompt PickScore
+                    # CLIP-encodes against the generated image (see the module docstring).
+                    "reward_model": {"style": "model", "ground_truth": instruction},
                     "extra_info": {
                         "split": split,
                         "index": index,

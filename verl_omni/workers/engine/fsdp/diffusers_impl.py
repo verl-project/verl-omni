@@ -1374,7 +1374,15 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
         x0 = micro_batch["latents_clean"]
         timestep = micro_batch["train_timesteps"][:, step]
-        t = timestep.float() / 1000.0
+        num_train_timesteps = getattr(self.scheduler.config, "num_train_timesteps", None)
+        if num_train_timesteps is None:
+            raise ValueError(
+                "Converting `train_timesteps` to flow time requires "
+                f"scheduler.config.num_train_timesteps, but {type(self.scheduler).__name__} "
+                "does not define it."
+            )
+        tu.assign_non_tensor(micro_batch, num_train_timesteps=int(num_train_timesteps))
+        t = timestep.float() / float(num_train_timesteps)
         t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
 
         if micro_batch.get("forward_noise", None) is not None:

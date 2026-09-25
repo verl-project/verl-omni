@@ -15,6 +15,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+from functools import lru_cache
 from typing import Optional
 
 import torch
@@ -35,6 +38,7 @@ __all__ = [
     "prepare_model_inputs",
     "prepare_noisy_latents",
     "sample_noise_and_timesteps",
+    "scheduler_num_train_timesteps",
     "set_timesteps",
 ]
 
@@ -110,6 +114,36 @@ def prepare_model_inputs(
         model_inputs, negative_model_inputs = model_cls.inject_condition(model_inputs, negative_model_inputs, condition)
 
     return model_inputs, negative_model_inputs
+
+
+@lru_cache(maxsize=8)
+def scheduler_num_train_timesteps(model_path: str) -> int:
+    """Read a checkpoint's own timestep scale from ``scheduler/scheduler_config.json``.
+
+    Boogu-Image FlowGRPO needs this: its ``all_timesteps`` arrive as ``sigma * N`` from the
+    rollout process, whose scheduler the trainer cannot inspect, so the checkpoint is how the
+    training-side adapter recovers the same ``N``. Conditioning the DiT on a different one
+    noises the sample at one scale and conditions it at another.
+
+    Args:
+        model_path: Checkpoint directory holding ``scheduler/scheduler_config.json``.
+
+    Returns:
+        The checkpoint's ``num_train_timesteps``.
+
+    Raises:
+        ValueError: If the config does not define ``num_train_timesteps``.
+    """
+    config_path = os.path.join(model_path, "scheduler", "scheduler_config.json")
+    with open(config_path) as f:
+        config = json.load(f)
+    num_train_timesteps = config.get("num_train_timesteps")
+    if num_train_timesteps is None:
+        raise ValueError(
+            f"{config_path} does not define `num_train_timesteps`, which is required to map "
+            "scheduler timesteps onto flow time in [0, 1]."
+        )
+    return int(num_train_timesteps)
 
 
 def build_scheduler(model_config: DiffusionModelConfig) -> SchedulerMixin:

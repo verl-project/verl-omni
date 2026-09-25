@@ -141,10 +141,14 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
-    <td><b>Boogu-Image</b></td>
-    <td>Diffusion generator</td>
-    <td>Text/Image → Image</td>
+    <td rowspan="2"><b>Boogu-Image</b></td>
+    <td rowspan="2">Diffusion generator</td>
+    <td rowspan="2">Text/Image → Image</td>
     <td>FlowGRPO (+ CPS/SDE)</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>DiffusionNFT</td>
     <td>✅</td>
   </tr>
   <tr>

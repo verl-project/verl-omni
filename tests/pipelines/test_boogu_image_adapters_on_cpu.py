@@ -22,6 +22,7 @@ adapter. The time-shift/sigma conventions live in
 """
 
 import json
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,12 +39,27 @@ from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.workers.config.diffusion.model import DiffusionModelConfig
 
 
-def _model_config(local_path: str = "/nonexistent") -> DiffusionModelConfig:
+def _model_root() -> str:
+    """A throwaway model directory carrying a valid scheduler config.
+
+    ``prepare_model_inputs`` maps scheduler timesteps onto Boogu's ``[0, 1]`` flow
+    time using the checkpoint's own ``num_train_timesteps`` and refuses to guess
+    one, so the fixture has to supply the file a real checkpoint ships.
+    """
+    root = Path(tempfile.mkdtemp(prefix="boogu-fake-model-"))
+    (root / "scheduler").mkdir()
+    (root / "scheduler" / "scheduler_config.json").write_text(
+        json.dumps({"num_train_timesteps": 1000}), encoding="utf-8"
+    )
+    return str(root)
+
+
+def _model_config(local_path: str | None = None) -> DiffusionModelConfig:
     config = object.__new__(DiffusionModelConfig)
     object.__setattr__(config, "architecture", "BooguImagePipeline")
     object.__setattr__(config, "external_lib", None)
     object.__setattr__(config, "algorithm", "flow_grpo")
-    object.__setattr__(config, "local_path", local_path)
+    object.__setattr__(config, "local_path", local_path or _model_root())
     return config
 
 

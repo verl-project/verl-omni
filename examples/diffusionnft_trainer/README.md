@@ -17,6 +17,11 @@ They use the dedicated token-ID-native H3 AgentLoop; see the
 [MiniMax H3 recipe README](minimax_h3/README.md) for model staging, data
 preparation, and launch instructions.
 
+Boogu-Image-0.1-Base has a DiffusionNFT recipe as well:
+[`boogu_image/run_boogu_image_ocr_lora.sh`](boogu_image/run_boogu_image_ocr_lora.sh). See the
+[Boogu-Image recipe README](boogu_image/README.md) for its guided-CFG and LoRA-target
+constraints.
+
 For the full installation guide, see [Installation](../../docs/start/install.md). For implementation details on adding or extending direct-preference diffusion algorithms, see `docs/contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md`.
 
 ## Installation
@@ -178,12 +183,13 @@ See the [Metrics Documentation](../../docs/start/metrics.md) for a full descript
 
 ## Performance
 
-> All experiments were conducted on *NVIDIA H200* GPUs using the OCR reward. NPU experiments use *16× Ascend NPUs*.
+> All experiments were conducted on *NVIDIA H200* GPUs using the OCR reward, unless a row states otherwise. NPU experiments use *16× Ascend NPUs*.
 
 | Script | Model | Algorithm | Hybrid Engine | # Cards | Reward Fn | # Cards for Actor | # Cards for Rollout | # Cards for Async Reward | Batch Size | `rollout.n` | lr   | # Val Samples | Training Samples per Step | `ppo_micro_batch_size_per_gpu` | Throughput (Samples / Card / Seconds) | Time per Step (Seconds) |
 | --- | --- | --- | --- | --- | --- | --- | --- |-------------------------| --- | --- |------| --- | --- | --- |------------------------------| --------------------------------|
 | `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh` | Qwen-Image | DiffusionNFT | True | 4 (NVIDIA) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.166                        | 570 |
 | `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_npu.sh` | Qwen-Image | DiffusionNFT | True | 16 (NPU) | qwenvl-ocr-vllm | 16 | 16 | 0 (sync)               | 24 | 16 | 3e-4 | 1k (full set) | 24×16=384 | 12 | 0.049                      | 490 |
+| `examples/diffusionnft_trainer/boogu_image/run_boogu_image_ocr_lora.sh` | Boogu-Image | DiffusionNFT | True | 4 (H800) | qwenvl-ocr-vllm | 4 | 4 | 0 (sync)                | 24 | 16 | 1e-4 | 256 (subset) | 24×16=384 | 12 | 0.114                      | 839 |
 
 <table align="center" style="border: none;">
   <tr style="border: none;">

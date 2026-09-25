@@ -150,3 +150,58 @@ def test_no_processor_negative_prompt_only_uses_images_when_referenced(dataset, 
     else:
         assert messages == [{"role": "user", "content": negative_content}]
     assert dataset.processor is None
+
+
+@pytest.mark.parametrize("negative_content", ["", "blurry"])
+def test_processor_attached_text_only_negative_prompt_does_not_consume_condition_image(dataset, negative_content):
+    """A text-only negative prompt must not have to consume the row's condition image.
+
+    With a processor attached the text-only short-circuit at the top of ``_build_messages`` does
+    not apply, so the media count check used to run over a negative prompt that references no
+    media at all and rejected the documented guided-TI2I convention with
+    ``image_offset 0 != len(images) 1``. That is how ``boogu_image_edit_ocr.py`` rows -- one
+    condition image, empty negative instruction -- came to be unloadable, and why the on-disk
+    edit parquet had to carry a stray ``<image>`` in its negative prompt to train at all.
+    """
+    dataset.processor = object()
+    messages = dataset._build_messages(
+        {
+            "prompt": [{"role": "user", "content": '<image>Change the text to "WORLD"'}],
+            "negative_prompt": [{"role": "user", "content": negative_content}],
+            "images": [Image.new("RGB", (56, 56), "white")],
+        },
+        key="negative_prompt",
+    )
+
+    # The condition image is left alone: no "image" entry is spliced into the negative prompt.
+    assert all(part.get("type") != "image" for part in messages[0]["content"])
+
+
+def test_processor_attached_positive_prompt_still_requires_exact_media(dataset):
+    """The relaxation above is scoped to the negative branch.
+
+    For the positive prompt a shortfall means a condition image was silently dropped, so it must
+    stay a hard error even though the negative branch now tolerates referencing no media.
+    """
+    dataset.processor = object()
+    with pytest.raises(AssertionError, match="image_offset"):
+        dataset._build_messages(
+            {
+                "prompt": [{"role": "user", "content": 'Change the text to "WORLD"'}],
+                "images": [Image.new("RGB", (56, 56))],
+            },
+            key="prompt",
+        )
+
+
+def test_negative_prompt_may_not_over_reference_media(dataset):
+    """Tolerating a shortfall must not tolerate a negative prompt that references too much."""
+    dataset.processor = object()
+    with pytest.raises(AssertionError, match="image_offset"):
+        dataset._build_messages(
+            {
+                "negative_prompt": [{"role": "user", "content": "<image><image> blurry"}],
+                "images": [Image.new("RGB", (56, 56))],
+            },
+            key="negative_prompt",
+        )
