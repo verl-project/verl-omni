@@ -143,6 +143,9 @@ prompt_embed_cache_size: 32
 # Route repeated rollouts for one sample to the same worker when prompt cache is enabled.
 enable_prompt_embed_cache_routing_affinity: false
 
+# Print a per-sample progress bar for each rollout and validation pass.
+enable_rollout_progress: false
+
 # Sampling parameters used during validation (diffusion-specific).
 val_kwargs:
 

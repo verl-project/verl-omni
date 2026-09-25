@@ -171,6 +171,12 @@ class DiffusionRolloutConfig(BaseConfig):
     prompt_embed_cache_size: int = 32
     enable_prompt_embed_cache_routing_affinity: bool = False
 
+    # Print a per-sample progress bar while each agent loop worker runs its share
+    # of a rollout or validation pass.  Off by default: a diffusion sample costs
+    # seconds to minutes, so this is only worth the output for long runs, and the
+    # trainer's step-level bar is enough otherwise.
+    enable_rollout_progress: bool = False
+
     # note that the logprob computation should belong to the actor
     log_prob_micro_batch_size_per_gpu: Optional[int] = None
     log_prob_use_dynamic_bsz: bool = False

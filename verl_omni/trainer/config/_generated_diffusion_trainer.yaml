@@ -245,6 +245,7 @@ actor_rollout_ref:
     enable_prompt_embed_cache: false
     prompt_embed_cache_size: 32
     enable_prompt_embed_cache_routing_affinity: false
+    enable_rollout_progress: false
     val_kwargs:
       _target_: verl_omni.workers.config.diffusion.DiffusionSamplingConfig
       'n': 1
