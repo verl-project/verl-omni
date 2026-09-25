@@ -61,6 +61,8 @@ uv pip install -e ".[gpu]" --torch-backend=auto
 
 In the cuda-compat environment, pass `--python "$CONDA_PREFIX/bin/python"` and use `--torch-backend=cu130` instead of `auto`.
 
+> **Use uv, not pip.** If `pip install` fails with `ResolutionImpossible` ("Cannot install verl-omni ... conflicting dependencies"), rerun the command with `uv pip install` — pip cannot reconcile the core `verl`/`vllm-omni` pins against this repo's ranges, while uv applies the `[tool.uv] override-dependencies` in `pyproject.toml`.
+
 ### Extras
 
 | Extra       | Adds                                                          | When                     |
@@ -104,7 +106,7 @@ uv pip install -e ".[fa2]"
 
 ### Optional engine backends
 
-VeRL-Omni defaults to FSDP2; the diffusion trainer and Qwen3-Omni Thinker can alternatively use [VeOmni]({doc}`Optional engine backends <engine_backends>`).
+VeRL-Omni defaults to FSDP2; the diffusion trainer and Qwen3-Omni Thinker can alternatively use VeOmni — see {doc}`Optional engine backends <engine_backends>`.
 
 ## Post-Installation Verification
 

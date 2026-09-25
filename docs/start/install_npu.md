@@ -37,7 +37,7 @@ uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(
 uv pip install -e .
 ```
 
-This installs `vllm-omni`, then `verl` and `verl-omni`.
+This installs `vllm-omni` and `verl-omni` with its core dependencies.
 
 > **Ascend PyTorch version alignment:** VeRL-Omni does not require every NPU
 > environment to use one fixed `torch` version such as 2.10.0. Choose a
