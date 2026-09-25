@@ -173,7 +173,12 @@ def get_sigmas(noise_scheduler, timesteps, device, n_dim=4, dtype=torch.float32)
     sigmas = noise_scheduler.sigmas.to(device=device, dtype=dtype)
     schedule_timesteps = noise_scheduler.timesteps.to(device)
     timesteps = timesteps.to(device)
-    step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
+    # Vectorized first-match lookup: the previous per-row `(schedule_timesteps == t).nonzero().item()`
+    # loop hard-synchronized the device once per batch element on every DPO forward step.
+    matches = schedule_timesteps.reshape(1, -1) == timesteps.reshape(-1, 1)
+    # Async assertion (no host sync on CUDA): every row must hit the schedule.
+    torch._assert(matches.any(dim=1).all(), "timestep not found in scheduler.timesteps")
+    step_indices = matches.to(torch.int64).argmax(dim=1)
 
     sigma = sigmas[step_indices].flatten()
     while len(sigma.shape) < n_dim:
