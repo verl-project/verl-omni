@@ -1,6 +1,6 @@
 # Supported Models
 
-Last updated: 09/21/2026.
+Last updated: 09/24/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
@@ -320,16 +320,16 @@ trainer's README in `examples/`.
 
 | Algorithm | Qwen-Image | Qwen-Image-Edit | SD3.5 | Wan2.2 | LTX-2.3 | MiniMax-H3 | BAGEL | Qwen3-Omni | Qwen3-TTS |
 |-----------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| GRPO | — | — | — | — | — | — | — | — | ✅ |
-| Flow-GRPO | ✅ | ✅ | ✅ | — | ✅ | WIP | ✅ | — | — |
-| Flow-DPPO | ✅ | — | — | — | — | — | — | — | — |
-| GRPO-Guard | ✅ | — | — | — | — | — | — | — | — |
-| Mix-GRPO | ✅ | — | — | — | — | — | — | — | — |
-| DanceGRPO | — | — | — | ✅ | — | — | — | — | — |
-| DPO | ✅ | — | ✅ | — | — | — | — | ✅ | WIP |
-| DiffusionNFT | ✅ | — | — | — | — | ✅ | — | — | — |
-| [DiffusionOPD](../algo/diffusion_opd.md) (incl. MOPD) | — | — | ✅ | — | — | — | — | — | — |
-| GSPO (incl. OPD) | — | — | — | — | — | — | — | ✅ | WIP |
+| GRPO | — | — | — | — | — | — | — | — | GPU ✅ |
+| Flow-GRPO | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅ | GPU ✅ | — | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅ | NPU ✅<br>GPU ✅ | — | — |
+| Flow-DPPO | GPU ✅ | — | — | — | — | — | — | — | — |
+| GRPO-Guard | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — | — |
+| Mix-GRPO | NPU ✅<br>GPU ✅ | — | — | — | — | — | — | — | — |
+| DanceGRPO | — | — | — | NPU ✅<br>GPU ✅ | — | — | — | — | — |
+| DPO | NPU ✅<br>GPU ✅ | — | GPU ✅ | — | — | — | — | GPU ✅ | — |
+| DiffusionNFT | NPU ✅<br>GPU ✅ | — | — | — | — | GPU ✅ | — | — | — |
+| [DiffusionOPD](../algo/diffusion_opd.md) (incl. MOPD) | — | — | GPU ✅ | — | — | — | — | — | — |
+| GSPO (incl. OPD) | — | — | — | — | — | — | — | NPU ✅<br>GPU ✅ | — |
 
 HunyuanImage-3.0 (MixGRPO / SRPO) appears on the project README as Planned or
 WIP and does not yet have a ready-to-run recipe, so it is omitted from the
