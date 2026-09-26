@@ -300,6 +300,11 @@ trainer:
       # Maximum replacement rounds for incomplete groups within one training sample call.
       max_incomplete_group_refill_rounds: 3
 
+      # ReplayBuffer TransferQueue poll cadence in seconds. null = auto: 0.1 in
+      # sync mode (sample() waits on this poll loop and the upstream 2.0s sleep
+      # adds up to 2s of idle time per gen stage), 2.0 in separate_async mode.
+      poll_interval: null
+
       # Custom sampler config.
       custom_sampler:
 
