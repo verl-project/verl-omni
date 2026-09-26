@@ -128,7 +128,12 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         prompt_index: int,
         rollout_base_seed: int | None = None,
     ) -> None:
-        """Spawn ``rollout.n`` sessions per prompt and write trajectories to TQ."""
+        """Spawn ``rollout.n`` sessions per prompt and write trajectories to TQ.
+
+        All of a prompt's session rows go into one ``async_kv_batch_put``: each
+        put call costs several controller/storage round trips, so per-session
+        puts dominated rollout-side TQ overhead at typical group sizes.
+        """
         uid = prompt["uid"]
         partition_id = "val" if trajectory["validate"] else "train"
         await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
@@ -161,6 +166,20 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                     f"Error in _run_prompt for uid={uid}",
                     exc_info=(type(error), error, error.__traceback__),
                 )
+            rows = [
+                self._build_trajectory_row(
+                    result,
+                    uid=uid,
+                    session_id=session_id,
+                    trajectory=trajectory,
+                    global_steps=sampling_params.get("global_steps"),
+                    **{k: v for k, v in prompt.items() if k not in {"uid", "global_steps"}},
+                )
+                for session_id, result in enumerate(results)
+                if result is not None and not isinstance(result, BaseException)
+            ]
+            if rows:
+                await self._write_trajectory_rows_to_tq(rows, partition_id)
             status = "failure" if errors else "finished"
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": status})
         except Exception as e:
@@ -177,42 +196,29 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         session_id: int = 0,
         trajectory: dict | None = None,
         **kwargs,
-    ) -> None:
-        """Run one diffusion agent loop session and write its output to TransferQueue."""
-        internal: _InternalDiffusionAgentLoopOutput = await super()._run_agent_loop(
+    ) -> _InternalDiffusionAgentLoopOutput:
+        """Run one diffusion agent loop session; ``_run_prompt`` batches its TQ write."""
+        return await super()._run_agent_loop(
             sampling_params,
             agent_name=agent_name,
             validate=trajectory["validate"] if trajectory else False,
             **kwargs,
         )
-        uid = kwargs["uid"]
-        non_conflicting_kwargs = {k: v for k, v in kwargs.items() if k not in {"uid", "global_steps"}}
-        await self._write_trajectory_to_tq(
-            internal,
-            uid=uid,
-            session_id=session_id,
-            trajectory=trajectory,
-            validate=trajectory["validate"] if trajectory else False,
-            global_steps=sampling_params.get("global_steps"),
-            **non_conflicting_kwargs,
-        )
 
-    async def _write_trajectory_to_tq(
+    def _build_trajectory_row(
         self,
         internal: _InternalDiffusionAgentLoopOutput,
         *,
         uid: str,
         session_id: int,
         trajectory: dict | None,
-        validate: bool,
         global_steps: int | None = None,
         **kwargs,
-    ) -> None:
-        """Convert a padded diffusion agent loop output into a TransferQueue row."""
+    ) -> tuple[str, dict[str, Any], dict]:
+        """Convert a padded diffusion agent loop output into one TransferQueue row."""
         # Diffusion single-turn agent loops produce one output per session.
         index = 0
         key = f"{uid}_{session_id}_{index}"
-        partition_id = "val" if validate else "train"
 
         field: dict[str, Any] = {
             "prompts": internal.prompt_ids.squeeze(0),
@@ -255,25 +261,43 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         extra_fields_out["max_global_steps"] = step
         field["extra_fields"] = extra_fields_out
 
-        fields_td = list_of_dict_to_tensordict([field])
-
         prompt_len = int(internal.prompt_ids.shape[-1])
-        tags = [
-            {
-                "status": "success",
-                "prompt_len": prompt_len,
-                "response_len": 1,
-                "response_shape": tuple(int(dim) for dim in field["responses"].shape),
-                "seq_len": prompt_len + 1,
-                "global_steps": step,
-                "min_global_steps": step,
-                "max_global_steps": step,
-            }
-        ]
+        tag = {
+            "status": "success",
+            "prompt_len": prompt_len,
+            "response_len": 1,
+            "response_shape": tuple(int(dim) for dim in field["responses"].shape),
+            "seq_len": prompt_len + 1,
+            "global_steps": step,
+            "min_global_steps": step,
+            "max_global_steps": step,
+        }
+        return key, field, tag
+
+    async def _write_trajectory_rows_to_tq(self, rows: list[tuple[str, dict[str, Any], dict]], partition_id: str):
+        """Write session rows of one prompt group in a single batched put.
+
+        Sessions may legitimately emit different optional fields (e.g.
+        ``rollout_log_probs`` or ``rm_scores`` on a subset); the batched put
+        persists the fields every row carries.
+        """
+        keys = [key for key, _field, _tag in rows]
+        fields = [field for _key, field, _tag in rows]
+        common_fields = set(fields[0])
+        for field in fields[1:]:
+            common_fields &= field.keys()
+        if any(len(field) != len(common_fields) for field in fields):
+            logger.warning(
+                "Sessions disagree on emitted fields (%s); persisting the shared subset %s",
+                sorted(set.union(*(set(field) for field in fields)) - common_fields),
+                sorted(common_fields),
+            )
+            fields = [{k: v for k, v in field.items() if k in common_fields} for field in fields]
+
         await tq.async_kv_batch_put(
-            keys=[key],
-            fields=fields_td,
-            tags=tags,
+            keys=keys,
+            fields=list_of_dict_to_tensordict(fields),
+            tags=[tag for _key, _field, tag in rows],
             partition_id=partition_id,
         )
 

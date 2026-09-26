@@ -64,6 +64,51 @@ def test_metric_projection_is_subset_of_persisted_and_rollout_fields(algorithm):
     assert set(tq_utils.diffusion_metric_tq_fields(algorithm)).issubset(available_fields)
 
 
+def test_rollout_dump_fetches_only_dump_fields(monkeypatch):
+    """The dump re-read must project fields instead of re-pulling latents/embeds."""
+    data = DataProto.from_dict(
+        tensors={
+            "prompts": torch.zeros(2, 4, dtype=torch.int64),
+            "responses": torch.zeros(2, 3, 8, 8, dtype=torch.uint8),
+            "sample_level_scores": torch.ones(2, 1),
+        },
+        non_tensors={
+            "reward_model": np.array([{"ground_truth": "gt"}, {"ground_truth": "gt"}], dtype=object),
+        },
+    )
+    captured = {}
+
+    def get_data(batch_meta, pad_token_id, select_fields):
+        captured.update(select_fields=select_fields, pad_token_id=pad_token_id)
+        return data
+
+    monkeypatch.setattr(trainer_base_module, "diffusion_tq_batch_to_dataproto", get_data)
+    dumps = []
+    trainer = SimpleNamespace(
+        tokenizer=SimpleNamespace(pad_token_id=7, batch_decode=lambda ids, **kwargs: ["p", "p"]),
+        config=SimpleNamespace(trainer={}),
+        _dump_generations=lambda **kwargs: dumps.append(kwargs),
+    )
+    batch_meta = SimpleNamespace(
+        keys=["prompt_1_0", "prompt_0_0"],
+        tags=[
+            {"is_padding": False, "response_shape": (3, 8, 8)},
+            {"is_padding": False, "response_shape": (3, 8, 8)},
+        ],
+        partition_id="train",
+    )
+
+    trainer_base_module.PolicyGradientDiffusionTrainerV1._log_rollout_data(trainer, batch_meta, {}, "/tmp/dump")
+
+    assert set(captured["select_fields"]) == set(tq_utils.DIFFUSION_DUMP_TQ_FIELDS)
+    assert captured["pad_token_id"] == 7
+    # Trainer-only compute payloads stay out of the dump read.
+    assert "all_latents" not in captured["select_fields"]
+    assert "prompt_embeds" not in captured["select_fields"]
+    assert "old_log_probs" not in captured["select_fields"]
+    assert len(dumps) == 1
+
+
 @pytest.mark.parametrize("policy_gradient", [True, False])
 def test_metrics_fetches_only_metric_fields_and_preserves_outputs(monkeypatch, caplog, policy_gradient):
     tensors = {

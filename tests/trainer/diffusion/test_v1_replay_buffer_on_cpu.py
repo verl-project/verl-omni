@@ -356,6 +356,18 @@ def test_trainer_factory_uses_upstream_replay_buffer(trainer_mode, drop_incomple
     assert type(replay_buffer) is expected_type
 
 
+def test_trainer_factory_honors_sampler_poll_interval():
+    config = _make_config(drop_incomplete_groups=False, trainer_mode="separate_async")
+    config.trainer.v1.sampler.poll_interval = 0.5
+    trainer = SimpleNamespace(
+        config=config, trainer_mode="separate_async", _add_prompts_to_generate=lambda count: count
+    )
+
+    replay_buffer = PolicyGradientDiffusionTrainerV1._build_replay_buffer(trainer)
+
+    assert replay_buffer.poll_interval == 0.5
+
+
 def test_sample_rejects_non_exact_refill_result(monkeypatch):
     fake_tq = _FakeTransferQueue({})
     fake_tq.add_group("failed", status="failure", trajectories=0)

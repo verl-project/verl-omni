@@ -202,7 +202,6 @@ def test_reference_row_padding_rejects_invalid_inputs(value, count, target_lengt
 async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(monkeypatch):
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
-    captured = {}
     img_shapes = [(1, 32, 32), (1, 64, 64)]
     internal = SimpleNamespace(
         prompt_ids=torch.tensor([[1, 2]]),
@@ -220,22 +219,15 @@ async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(mo
         },
     )
 
-    monkeypatch.setattr(diffusion_agent_loop_tq, "list_of_dict_to_tensordict", lambda rows: rows)
-
-    async def fake_kv_batch_put(*, keys, fields, tags, partition_id):
-        captured.update(keys=keys, fields=fields, tags=tags, partition_id=partition_id)
-
-    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", fake_kv_batch_put)
-
-    await worker._write_trajectory_to_tq(
+    key, field, tag = worker._build_trajectory_row(
         internal,
         uid="sample",
         session_id=0,
         trajectory={"step": 3},
-        validate=False,
+        global_steps=None,
     )
 
-    field = captured["fields"][0]
+    assert key == "sample_0_0"
     assert field["extra_fields"] == {
         "img_shapes": img_shapes,
         "media_kind": "video",
@@ -246,7 +238,102 @@ async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(mo
     assert "unrelated_metadata" not in field["extra_fields"]
     assert field["condition_image_latents"].shape == (4096, 64)
     assert field["audio"].shape == (1, 16)
-    assert captured["tags"][0]["response_shape"] == (3, 2, 2)
+    assert tag["response_shape"] == (3, 2, 2)
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_batches_prompt_group_into_one_put(monkeypatch):
+    """All of a prompt's session rows must land in a single batched TQ put."""
+    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = object.__new__(worker_cls)
+    worker.rollout_config = SimpleNamespace(n=2, val_kwargs=SimpleNamespace(n=2))
+
+    def make_output(*, with_log_probs: bool):
+        return SimpleNamespace(
+            prompt_ids=torch.tensor([[1, 2]]),
+            response_diffusion_output=torch.zeros(1, 3, 2, 2),
+            response_logprobs=torch.zeros(1, 4) if with_log_probs else None,
+            reward_score=0.5,
+            num_turns=1,
+            extra_fields={"media_kind": "image"},
+        )
+
+    captured = {}
+
+    async def fake_run_agent_loop(self, sampling_params, *, session_id, **kwargs):
+        del self, sampling_params, kwargs
+        return make_output(with_log_probs=True)
+
+    async def fake_kv_batch_put(*, keys, fields, tags, partition_id):
+        captured.update(keys=keys, fields=fields, tags=tags, partition_id=partition_id)
+
+    async def fake_kv_put(*, key, partition_id, tag):
+        del key, partition_id, tag
+
+    worker._run_agent_loop = MethodType(fake_run_agent_loop, worker)
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", fake_kv_batch_put)
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_put", fake_kv_put)
+
+    await worker._run_prompt(
+        prompt={"uid": "sample", "agent_name": "diffusion_single_turn_agent"},
+        sampling_params={"global_steps": 3},
+        trajectory={"validate": False, "step": 3},
+        prompt_index=0,
+    )
+
+    assert captured["keys"] == ["sample_0_0", "sample_1_1"]
+    assert captured["partition_id"] == "train"
+    assert len(captured["tags"]) == 2
+    assert all(tag["status"] == "success" for tag in captured["tags"])
+    # One batched put call: the real list_of_dict_to_tensordict stacks the rows.
+    assert captured["fields"].batch_size == (2,)
+    assert "rollout_log_probs" in captured["fields"].keys()
+    assert "rm_scores" in captured["fields"].keys()
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_batched_put_keeps_only_shared_fields(monkeypatch, caplog):
+    """Sessions missing an optional field (e.g. log probs) shrink the batched put."""
+    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = object.__new__(worker_cls)
+    worker.rollout_config = SimpleNamespace(n=2, val_kwargs=SimpleNamespace(n=2))
+
+    def make_output(*, with_log_probs: bool):
+        return SimpleNamespace(
+            prompt_ids=torch.tensor([[1, 2]]),
+            response_diffusion_output=torch.zeros(1, 3, 2, 2),
+            response_logprobs=torch.zeros(1, 4) if with_log_probs else None,
+            reward_score=None,
+            num_turns=1,
+            extra_fields={},
+        )
+
+    captured = {}
+
+    async def fake_run_agent_loop(self, sampling_params, *, session_id, **kwargs):
+        del self, sampling_params, kwargs
+        return make_output(with_log_probs=session_id == 0)
+
+    async def fake_kv_batch_put(*, keys, fields, tags, partition_id):
+        captured.update(keys=keys, fields=fields, tags=tags, partition_id=partition_id)
+
+    async def fake_kv_put(*, key, partition_id, tag):
+        del key, partition_id, tag
+
+    worker._run_agent_loop = MethodType(fake_run_agent_loop, worker)
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", fake_kv_batch_put)
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_put", fake_kv_put)
+
+    with caplog.at_level("WARNING", logger="verl_omni.agent_loop.diffusion_agent_loop_tq"):
+        await worker._run_prompt(
+            prompt={"uid": "sample", "agent_name": "diffusion_single_turn_agent"},
+            sampling_params={"global_steps": 3},
+            trajectory={"validate": False, "step": 3},
+            prompt_index=0,
+        )
+
+    assert "rollout_log_probs" not in captured["fields"].keys()
+    assert any("Sessions disagree on emitted fields" in record.message for record in caplog.records)
 
 
 def test_tq_batch_restores_non_tensor_trajectory_metadata(monkeypatch):

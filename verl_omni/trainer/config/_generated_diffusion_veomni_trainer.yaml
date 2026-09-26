@@ -690,6 +690,7 @@ trainer:
       max_off_policy_strategy: drop
       drop_incomplete_groups: false
       max_incomplete_group_refill_rounds: 3
+      poll_interval: 1.0
       custom_sampler:
         path: null
         name: null
