@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 09/14/2026
+Last updated: 09/26/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -29,6 +29,46 @@ reward:
 ```
 
 Audio and other modality-specific multi-reward managers are follow-up work.
+
+## Native replica scheduling
+
+Named models use static padded splitting by default: each worker receives one
+equal-sized chunk. For native models whose sample costs or replica speeds vary,
+set `reward.models.<name>.dispatch_batch_size` to a positive integer to enable
+completion-driven dispatch:
+
+```yaml
+reward:
+  models:
+    pickscore:
+      backend: native
+      placement:
+        devices: [0, 1]
+      executor:
+        model: verl_omni.utils.reward_score.pickscore_reward:PickScoreNativeModel
+      dispatch_batch_size: 8
+```
+
+Keep the model's executor arguments and reward function configured as described
+below. Each placement entry still owns one complete model replica. Each replica
+receives at most one scoring RPC at a time and takes the next contiguous batch
+when it finishes. The final batch may be smaller; no duplicate padding is added.
+Results are restored to input order before existing per-model score aggregation.
+Omit this field or set it to `null` to keep static splitting. Engine models reject
+this option; their internal scheduling and parallelism remain engine-owned.
+
+Choose a batch size large enough for efficient model batching but small enough
+to leave work available for faster replicas. This controls reward-loop sample
+dispatch, not the model's own inference batch size. Opt in only when samples can
+be scored independently: batch-sensitive or replica-local random scorers can
+change scores when batch boundaries or replica assignments change.
+
+On a dispatched scoring failure or caller cancellation, no new batches are
+submitted once the dispatcher observes it. Already submitted RPCs are drained
+before the error is raised and models sleep, including across mixed engine/native
+groups. There is no automatic retry, actor recovery, speculative execution,
+autoscaling or streaming-trainer support. A stuck RPC can therefore delay drain;
+this option does not introduce a timeout or health-check policy.
 
 ## Backend selection
 
@@ -382,8 +422,9 @@ whose size is controlled by `reward.reward_model.n_gpus_per_node` and `nnodes`.
 - `false`: keep the model resident across training steps.
 
 Independent named models are woken, scored, and slept concurrently. Native
-batches are padded and split evenly across the workers assigned to that model.
-There is currently no dynamic load balancing or work stealing.
+batches are padded and split evenly across the workers assigned to that model
+by default. Native deployments can opt into completion-driven microbatch dispatch
+with `dispatch_batch_size`; see [Native replica scheduling](#native-replica-scheduling).
 
 The reward loop exposes `async_compute_rm_score()` for asynchronous callers and
 keeps `compute_rm_score()` as the synchronous compatibility entrypoint used by
@@ -407,12 +448,36 @@ PickScore = logit_scale * cosine(text_embedding, image_embedding) / 26
 The configured `logit_scale` is already exponentiated and must not be passed
 through `exp()` again.
 
+### Replica scheduling benchmark
+
+The opt-in two-GPU benchmark compares static splitting with dynamic microbatches
+of 4 and 16 on the same pretrained PickScore replicas:
+
+```bash
+python tests/reward_loop/benchmark_replica_dispatch.py \
+  --model-path /path/to/PickScore_v1 \
+  --processor-path /path/to/clip_processor \
+  --output /path/to/benchmark-results.json
+```
+
+It warms each configuration and records six paired rounds of 128 samples,
+alternating execution order and the slow replica. Conditions include balanced
+service and explicit synthetic per-sample delays; the latter demonstrate
+sensitivity to imbalance, not naturally occurring model latency. Every arm
+checks score parity, ordering, exact-once dispatch and bounded concurrency.
+
+Timings cover dispatch and scoring with resident models and actor-cached images.
+They exclude model loading, offloading and full image-payload transfer, and are
+not end-to-end training measurements. Small microbatches can reduce batching
+efficiency; retain the static default unless a representative workload benefits.
+
 ## Current limitations
 
 - Named-model aggregation currently uses the visual reward manager contract.
 - Native models are replicated; FSDP and tensor parallelism are not supported.
 - CPU-native placement is not supported.
-- Native routing uses a static even split rather than dynamic load balancing.
+- Native routing defaults to a static even split; optional microbatch dispatch
+  balances available work, without preempting or stealing an active batch.
 - Named models do not participate in streaming reward computation.
 - vLLM-Omni reward serving is not implemented.
 
