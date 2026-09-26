@@ -17,8 +17,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+from omegaconf import OmegaConf
 
+from verl_omni.pipelines.ltx2_omni_nft.config import LTXDiffusionPipelineConfig
 from verl_omni.pipelines.rollout_request import OmniRolloutRequest
+from verl_omni.workers.config import DiffusionModelConfig
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import DiffusionStrategy
 
@@ -28,6 +31,47 @@ def diffusion_strategy():
     server = object.__new__(vLLMOmniHttpServer)
     server.global_steps = 0
     return DiffusionStrategy(server)
+
+
+def test_diffusion_model_config_preserves_custom_pipeline_target(tmp_path):
+    server = object.__new__(vLLMOmniHttpServer)
+    server.config = SimpleNamespace(engine_kwargs={})
+    model_config = OmegaConf.create(
+        {
+            "_target_": "verl_omni.workers.config.diffusion.DiffusionModelConfig",
+            "path": str(tmp_path),
+            "architecture": "LTX2Pipeline",
+            "algorithm": "omni_nft",
+            "load_tokenizer": False,
+            "attn_backend": "native",
+            "pipeline": {
+                "_target_": "verl_omni.pipelines.ltx2_omni_nft.config.LTXDiffusionPipelineConfig",
+                "video_cfg_scale": 1.5,
+                "audio_cfg_scale": 3.0,
+            },
+        }
+    )
+
+    result = DiffusionStrategy(server).init_model_config(model_config)
+
+    assert isinstance(result, DiffusionModelConfig)
+    assert isinstance(result.pipeline, LTXDiffusionPipelineConfig)
+    assert result.pipeline.video_cfg_scale == 1.5
+    assert result.pipeline.audio_cfg_scale == 3.0
+
+
+def test_diffusion_model_config_rejects_unrelated_hydra_target():
+    server = object.__new__(vLLMOmniHttpServer)
+    server.config = SimpleNamespace(engine_kwargs={})
+    model_config = OmegaConf.create(
+        {
+            "_target_": "types.SimpleNamespace",
+            "architecture": "not-a-diffusion-config",
+        }
+    )
+
+    with pytest.raises(TypeError, match="must resolve to DiffusionModelConfig.*types.SimpleNamespace"):
+        DiffusionStrategy(server).init_model_config(model_config)
 
 
 def _request_output(diffusion_output, multimodal_output=None):
