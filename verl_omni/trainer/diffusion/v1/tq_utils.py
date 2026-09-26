@@ -205,11 +205,44 @@ def sort_diffusion_tq_keys(keys: list[str]) -> list[int]:
     Returns:
         Permutation indices that reorder ``keys`` by ``(uid, rollout, output)``.
     """
-    sort_keys = []
-    for key in keys:
-        parts = key.rsplit("_", 2)
-        if len(parts) == 3:
-            sort_keys.append((parts[0], int(parts[1]), int(parts[2])))
-        else:
-            sort_keys.append((key, 0, 0))
-    return sorted(range(len(keys)), key=lambda i: sort_keys[i])
+    return sorted(range(len(keys)), key=lambda i: _parse_tq_key(keys[i]))
+
+
+def _parse_tq_key(key: str) -> tuple[str, int, int]:
+    """Split a ``{uid}_{session}_{output}`` TransferQueue key."""
+    parts = key.rsplit("_", 2)
+    if len(parts) == 3:
+        try:
+            return parts[0], int(parts[1]), int(parts[2])
+        except ValueError:
+            return key, 0, 0
+    return key, 0, 0
+
+
+def canonicalize_diffusion_tq_meta(batch_meta: KVBatchMeta) -> KVBatchMeta:
+    """Return a copy of ``batch_meta`` with rows in v0 rollout order.
+
+    Upstream ``_materialize_batch`` emits trajectory keys in TransferQueue
+    ``kv_list`` iteration order, which is storage-arbitrary and differs per
+    run, while the v0 trainer produced rows prompt-major in dataset order
+    (``prompt_index * rollout.n + session``). Rows whose tag lacks
+    ``prompt_index`` (written before this ordering existed) fall back to uid
+    order, which is deterministic but not dataset order.
+    """
+    if len(batch_meta.keys) < 2:
+        return batch_meta
+
+    def sort_key(i: int) -> tuple:
+        uid, session, output = _parse_tq_key(batch_meta.keys[i])
+        tag = batch_meta.tags[i] if i < len(batch_meta.tags) else {}
+        prompt_index = tag.get("prompt_index") if isinstance(tag, dict) else None
+        if prompt_index is None:
+            return (1, 0, uid, session, output)
+        return (0, int(prompt_index), uid, session, output)
+
+    perm = sorted(range(len(batch_meta.keys)), key=sort_key)
+    return KVBatchMeta(
+        partition_id=batch_meta.partition_id,
+        keys=[batch_meta.keys[i] for i in perm],
+        tags=[batch_meta.tags[i] for i in perm],
+    )

@@ -277,6 +277,11 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 "min_global_steps": step,
                 "max_global_steps": step,
             }
+            # Dataset position of the prompt group; the trainer reorders TQ
+            # rows by this so driver batches keep the v0 prompt-major order.
+            prompt_index = kwargs.get("index")
+            if prompt_index is not None:
+                tag["prompt_index"] = int(prompt_index)
             rows.setdefault(tuple(field.keys()), []).append((key, field, tag))
 
         for group_rows in rows.values():
