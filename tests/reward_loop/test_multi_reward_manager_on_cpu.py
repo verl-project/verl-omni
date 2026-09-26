@@ -469,3 +469,41 @@ class TestMultiVisualRewardManagerInit:
                     }
                 }
             )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("weight, required", [(0.5, True), (1.0, False)])
+async def test_component_rewards_require_unit_weight_and_required_terms(weight, required):
+    config = _make_config(
+        {"quality": {"path": DUMMY_REWARDS_PATH, "name": "reward_fixed_score", "weight": weight, "required": required}}
+    )
+    config.reward.aggregation = "preserve_components"
+    with pytest.raises(ValueError, match="required=true and weight=1.0"):
+        MultiVisualRewardManager(config, MagicMock(), compute_score=None)
+
+
+async def reward_explicit_batch(batch, **kwargs):
+    assert len(batch) == 1
+    assert batch[0].non_tensor_batch["reward_model"]["ground_truth"] == "hello"
+    return {"score": float(batch.batch["audio"].mean())}
+
+
+async def reward_kwargs_without_batch(**kwargs):
+    assert "batch" not in kwargs
+    return {"score": 0.25}
+
+
+@pytest.mark.asyncio
+async def test_batch_injection_is_signature_gated():
+    manager = _build_manager(
+        {
+            "explicit": {"path": DUMMY_REWARDS_PATH, "name": "reward_explicit_batch", "required": True},
+            "legacy": {"path": DUMMY_REWARDS_PATH, "name": "reward_kwargs_without_batch", "required": True},
+        }
+    )
+    data = _make_single_data()
+    data.batch["audio"] = torch.full((1, 1, 8), 0.5)
+    result = await manager.run_single(data)
+    assert result["reward_score"] == pytest.approx(0.75)
+    assert result["reward_extra_info"]["reward/explicit"] == pytest.approx(0.5)
+    assert result["reward_extra_info"]["reward/legacy"] == pytest.approx(0.25)

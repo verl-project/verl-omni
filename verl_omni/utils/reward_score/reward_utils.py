@@ -21,6 +21,61 @@ import torch
 from PIL import Image
 
 
+def audio_info_from_batch(extra_info: dict | None, batch, *, scorer: str) -> dict:
+    """Use a single sample's decoded audio/rate in preference to extra_info."""
+    info = dict(extra_info or {})
+    if batch is None:
+        return info
+    if len(batch) != 1:
+        raise ValueError(f"{scorer} scoring requires exactly one sample.")
+    item = batch[0]
+    for key in ("audio", "audio_sample_rate"):
+        if key in item.batch:
+            info[key] = item.batch[key]
+        elif key in item.non_tensor_batch:
+            info[key] = item.non_tensor_batch[key]
+    return info
+
+
+def get_audio(extra_info: dict, *, default_sample_rate: int = 48_000) -> tuple[torch.Tensor, int]:
+    """Normalize decoded audio to CPU mono samples and return its source rate."""
+    audio = extra_info.get("audio")
+    if audio is None:
+        raise KeyError("Audio reward requires decoded audio in extra_info['audio'].")
+    audio = torch.as_tensor(audio).detach().float().cpu()
+    while audio.ndim > 2 and audio.shape[0] == 1:
+        audio = audio[0]
+    if audio.ndim == 2:
+        audio = audio.mean(dim=0)
+    elif audio.ndim != 1:
+        raise ValueError(f"Expected audio shape (T,) or (C,T), got {tuple(audio.shape)}.")
+    sample_rate = extra_info.get("audio_sample_rate", default_sample_rate)
+    if isinstance(sample_rate, torch.Tensor):
+        sample_rate = sample_rate.item()
+    if sample_rate is None:
+        raise KeyError("Audio reward requires extra_info['audio_sample_rate'].")
+    return audio, int(sample_rate)
+
+
+def resample_audio(waveform: torch.Tensor, source_rate: int, target_rate: int) -> torch.Tensor:
+    """Resample one mono waveform, leaving matching rates untouched."""
+    if source_rate == target_rate:
+        return waveform
+    import torchaudio.functional as audio_functional
+
+    return audio_functional.resample(waveform.unsqueeze(0), orig_freq=source_rate, new_freq=target_rate).squeeze(0)
+
+
+def load_torch_state_dict(path: str):
+    """Load tensor-only weights, including legacy torch.save files without mmap."""
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+    except RuntimeError as exc:
+        if "mmap can only be used with files saved with" not in str(exc):
+            raise
+        return torch.load(path, map_location="cpu", weights_only=True)
+
+
 def normalize_video_tensor(video: torch.Tensor) -> torch.Tensor:
     """Normalize an RGB uint8 video to the ``[T, 3, H, W]`` layout.
 
