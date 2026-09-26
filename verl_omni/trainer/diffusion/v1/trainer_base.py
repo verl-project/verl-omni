@@ -472,7 +472,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             apply_bypass_mode_to_diffusion_batch(data)
         else:
             with marked_timer("old_log_prob", timing_raw, color="blue"):
-                old_log_prob = self._compute_old_log_prob(data)
+                old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(data)
+                if old_log_prob_mfu is not None:
+                    metrics.update({"perf/mfu/actor_infer": old_log_prob_mfu})
                 data = data.union(old_log_prob)
 
         assert "old_log_probs" in data.batch, f'"old_log_probs" not in {data.batch.keys()}'
@@ -1270,7 +1272,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         advantages[is_pad] = 0.0
         return data
 
-    def _compute_old_log_prob(self, data: DataProto) -> DataProto:
+    def _compute_old_log_prob(self, data: DataProto) -> tuple[DataProto, float | None]:
         """Recompute old log-probs over diffusion latents with the actor engine."""
         batch_td = _to_diffusion_worker_tensordict(data)
         batch_td = embeds_padding_2_no_padding(batch_td)
@@ -1293,7 +1295,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         prev_sample_mean = tu.get(output, "prev_sample_mean")
         if prev_sample_mean is not None:
             old_log_prob_dict["old_prev_sample_mean"] = prev_sample_mean.float()
-        return DataProto.from_tensordict(tu.get_tensordict(old_log_prob_dict))
+        # v0 emits the infer-pass MFU as perf/mfu/actor_infer; keep metric parity
+        # so nightly baselines comparing v0 and v1 don't see it as missing.
+        old_log_prob_mfu = tu.get(output, "metrics").get("mfu")
+        return DataProto.from_tensordict(tu.get_tensordict(old_log_prob_dict)), old_log_prob_mfu
 
     def _compute_ref_log_prob(self, data: DataProto) -> DataProto:
         """Compute reference log-probs over diffusion latents."""

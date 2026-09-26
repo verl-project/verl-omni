@@ -197,3 +197,24 @@ def test_compute_old_log_prob_fails_closed_when_log_probs_missing():
 
     with pytest.raises(RuntimeError, match="log_probs=None"):
         PolicyGradientDiffusionTrainerV1._compute_old_log_prob(trainer, batch)
+
+
+def test_compute_old_log_prob_returns_infer_mfu_for_v0_metric_parity():
+    from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
+
+    actor = MagicMock()
+    actor.infer_actor_batch.return_value = tu.get_tensordict(
+        {"log_probs": torch.zeros(2, 2), "prev_sample_mean": torch.zeros(2, 2)},
+        non_tensor_dict={"metrics": {"mfu": 0.5}},
+    )
+    trainer = SimpleNamespace(
+        config=compose_cfg([]),
+        actor_rollout_wg=actor,
+    )
+    batch = DataProto.from_dict(tensors={"all_latents": torch.zeros(2, 1, 2, 2, 2)})
+
+    output, mfu = PolicyGradientDiffusionTrainerV1._compute_old_log_prob(trainer, batch)
+
+    assert mfu == 0.5
+    assert "old_log_probs" in output.batch
+    assert "old_prev_sample_mean" in output.batch
