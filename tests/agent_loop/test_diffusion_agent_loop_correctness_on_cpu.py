@@ -227,10 +227,9 @@ async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(mo
 
     monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", fake_kv_batch_put)
 
-    await worker._write_trajectory_to_tq(
-        internal,
+    await worker._write_trajectories_to_tq(
+        [(0, internal)],
         uid="sample",
-        session_id=0,
         trajectory={"step": 3},
         validate=False,
     )
@@ -247,6 +246,49 @@ async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(mo
     assert field["condition_image_latents"].shape == (4096, 64)
     assert field["audio"].shape == (1, 16)
     assert captured["tags"][0]["response_shape"] == (3, 2, 2)
+
+
+@pytest.mark.asyncio
+async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkeypatch):
+    worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
+    worker = object.__new__(worker_cls)
+    puts = []
+
+    def make_internal(with_reward: bool):
+        internal = SimpleNamespace(
+            prompt_ids=torch.tensor([[1, 2]]),
+            response_diffusion_output=torch.zeros(1, 3, 2, 2),
+            response_logprobs=None,
+            reward_score=0.5 if with_reward else None,
+            num_turns=1,
+            extra_fields={},
+        )
+        return internal
+
+    monkeypatch.setattr(diffusion_agent_loop_tq, "list_of_dict_to_tensordict", lambda rows: rows)
+
+    async def fake_kv_batch_put(*, keys, fields, tags, partition_id):
+        puts.append({"keys": keys, "fields": fields, "tags": tags, "partition_id": partition_id})
+
+    monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_batch_put", fake_kv_batch_put)
+
+    # Session 1 carries rm_scores, sessions 0/2 do not: rows split by field
+    # signature instead of crashing on missing keys.
+    await worker._write_trajectories_to_tq(
+        [(0, make_internal(False)), (1, make_internal(True)), (2, make_internal(False))],
+        uid="sample",
+        trajectory={"step": 7},
+        validate=False,
+        index=3,
+    )
+
+    assert [put["keys"] for put in puts] == [["sample_0_0", "sample_2_0"], ["sample_1_0"]]
+    assert "rm_scores" in puts[1]["fields"][0]
+    assert all("rm_scores" not in put["fields"][0] for put in puts[:1])
+    assert all(tag["global_steps"] == 7 for put in puts for tag in put["tags"])
+    # The dataset position rides in the tag so the trainer can restore the
+    # v0 prompt-major row order.
+    assert all(tag["prompt_index"] == 3 for put in puts for tag in put["tags"])
 
 
 def test_tq_batch_restores_non_tensor_trajectory_metadata(monkeypatch):
@@ -299,6 +341,15 @@ async def test_run_prompt_publishes_failure_after_siblings_settle(monkeypatch):
     monkeypatch.setattr(diffusion_agent_loop_tq.tq, "async_kv_put", fake_kv_put)
     worker._run_agent_loop = MethodType(fake_run_agent_loop, worker)
 
+    written = []
+
+    async def fake_write(outputs, **kwargs):
+        del kwargs
+        lifecycle.append("written")
+        written.append(outputs)
+
+    worker._write_trajectories_to_tq = fake_write
+
     await worker._run_prompt(
         prompt={"uid": "sample", "agent_name": "diffusion_single_turn_agent"},
         sampling_params={},
@@ -306,7 +357,8 @@ async def test_run_prompt_publishes_failure_after_siblings_settle(monkeypatch):
         prompt_index=0,
     )
 
-    assert lifecycle == ["running", "sibling_settled", "failure"]
+    assert lifecycle == ["running", "sibling_settled", "written", "failure"]
+    assert [session_id for session_id, _output in written[0]] == [1]
 
 
 @pytest.mark.asyncio

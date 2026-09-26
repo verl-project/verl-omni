@@ -105,7 +105,9 @@ def test_colocate_reward_keeps_rollout_asleep_through_actor_update(monkeypatch):
     monkeypatch.setattr(trainer, "_compute_reward_colocate", lambda d: (calls.append("reward"), reward)[1])
     monkeypatch.setattr(trainer, "_balance_batch", lambda d, metrics: d)
     old_log_prob = DataProto.from_tensordict(tu.get_tensordict({"old_log_probs": torch.zeros(2, 4)}))
-    monkeypatch.setattr(trainer, "_compute_old_log_prob", lambda d: (calls.append("old_log_prob"), old_log_prob)[1])
+    monkeypatch.setattr(
+        trainer, "_compute_old_log_prob", lambda d: (calls.append("old_log_prob"), (old_log_prob, None))[1]
+    )
     monkeypatch.setattr(
         "verl_omni.trainer.diffusion.v1.trainer_base.compute_rollout_corr_metrics_from_batch",
         lambda data, bypass_mode: {},

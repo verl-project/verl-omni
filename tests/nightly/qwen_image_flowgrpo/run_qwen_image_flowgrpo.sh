@@ -164,6 +164,8 @@ python3 "${SCRIPT_DIR}/run.py" \
     trainer.save_freq=-1 \
     trainer.resume_mode=disable \
     trainer.total_training_steps=${TOTAL_TRAIN_STEPS} \
+    trainer.use_v1=true \
+    trainer.v1.trainer_mode=sync \
     "$@" 2>&1 | tee "${CONSOLE_LOG}"
 
 METRICS_STATUS=0
