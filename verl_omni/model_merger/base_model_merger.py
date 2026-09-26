@@ -41,6 +41,7 @@ class ModelMergerConfig:
         dtype: Output tensor dtype or ``preserve``.
         max_shard_size: Maximum pending output safetensors shard size in bytes.
         trust_checkpoint: Acknowledge that rank checkpoints are trusted pickle inputs.
+        adapter_name: LoRA adapter folded into the base weights of a LoRA checkpoint.
     """
 
     operation: str
@@ -58,6 +59,7 @@ class ModelMergerConfig:
     dtype: str = "preserve"
     max_shard_size: int = 2 * 1024**3
     trust_checkpoint: bool = False
+    adapter_name: str = "default"
 
     def __post_init__(self):
         if self.operation not in {"merge", "test"}:
@@ -88,6 +90,8 @@ class ModelMergerConfig:
             raise ValueError("max_shard_size must be a positive byte count")
         if self.trust_checkpoint is not True:
             raise ValueError("Pickled rank checkpoints require explicit trust_checkpoint=True / --trust-checkpoint")
+        if not isinstance(self.adapter_name, str) or not self.adapter_name or "." in self.adapter_name:
+            raise ValueError("adapter_name must be a non-empty PEFT adapter name without '.'")
 
 
 @dataclass(frozen=True)
@@ -170,6 +174,13 @@ def parse_args() -> argparse.Namespace:
         help="Output shard budget in bytes",
     )
     merge.add_argument("--trust-checkpoint", action="store_true", help="Acknowledge trusted pickle inputs")
+    merge.add_argument(
+        "--adapter_name",
+        "--adapter-name",
+        dest="adapter_name",
+        default="default",
+        help="LoRA adapter folded into the base weights of a LoRA checkpoint",
+    )
 
     test = commands.add_parser("test", parents=[base], help="Test a published artifact")
     test.add_argument("--test_hf_dir", required=True, help="Published artifact directory to test")
@@ -197,6 +208,7 @@ def generate_config_from_args(args: argparse.Namespace) -> ModelMergerConfig:
             dtype=args.dtype,
             max_shard_size=args.max_shard_size,
             trust_checkpoint=args.trust_checkpoint,
+            adapter_name=args.adapter_name,
         )
     if args.operation == "test":
         return ModelMergerConfig(

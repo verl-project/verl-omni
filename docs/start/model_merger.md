@@ -1,6 +1,6 @@
 # Offline diffusion model publishing
 
-Last updated: 09/15/2026
+Last updated: 09/26/2026
 
 `verl_omni.model_merger` converts an existing FSDP actor checkpoint into a local
 transformer or self-contained inference pipeline. It follows verl's
@@ -51,7 +51,9 @@ Supported checkpoint representations:
 - Ordinary full-shaped tensors in a multi-rank checkpoint only when every replica
   is exactly equal. Plain dim-0 shards are not guessed or concatenated.
 
-Not supported yet: adapter-bearing/LoRA checkpoints, FSDP1 `ShardedTensor`,
+LoRA checkpoints are fused into a complete transformer; see
+[LoRA checkpoints](#lora-checkpoints). Not supported yet: standalone LoRA adapter
+export, FSDP1 `ShardedTensor`,
 HSDP/FSDP+TP, quantized weights, unaudited custom pipelines, architectures
 outside the audited table, BAGEL and Omni publishing. Standard Transformers can
 continue using `python -m verl.model_merger`; delegation through this entrypoint
@@ -192,6 +194,55 @@ metadata consume additional memory. MiniMax H3 QKV conversion temporarily holds
 three source projections plus the fused output tensor. No fallback to eager
 loading is performed for unsupported serialization.
 
+## LoRA checkpoints
+
+A checkpoint whose directory contains `lora_train_meta.json` (written by
+`FSDPCheckpointManager` for LoRA training) is published as a complete model: the
+selected adapter is folded into its base weights as
+`W + (lora_alpha / r) * B @ A`, computed in fp32 and cast back to the base weight
+dtype before the `--dtype` policy. The output layouts, verification and loaders
+are the same as for full training; no PEFT/LoRA support is needed to load it.
+
+```bash
+python -m verl_omni.model_merger merge \
+  --backend fsdp \
+  --local_dir "$LORA_ACTOR_CHECKPOINT" \
+  --target_dir "$OUTPUT" \
+  --base_model "$BASE_PIPELINE" \
+  --adapter_name default \
+  --trust-checkpoint
+```
+
+Two checkpoint layouts are accepted:
+
+- **Full state** (default save): `*.base_layer.*` base tensors, adapter tensors and
+  all other transformer tensors. Base weights come from the checkpoint and the
+  renamed tensor set must match the transformer schema exactly.
+- **LoRA-only** (`checkpoint.save_lora_only=True`): only adapter tensors. Every
+  base tensor is read from `--base_model`, which must therefore be the base used
+  for training. A native MiniMax H3 pipeline base uses the fused native layout and
+  is rejected here; export the standalone transformer from a Diffusers H3 base.
+
+`--adapter_name` (default `default`) selects exactly one adapter. Other adapters,
+such as DiffusionNFT's `old`, are not fused and are listed in the manifest's
+`lora_fusion.excluded_adapters`. `lora_train_meta.json` records the `default`
+adapter's positive integer `r` and `lora_alpha`; every adapter created by
+verl-omni training shares them. A/B pairing, shapes and rank are validated for
+all adapters, including excluded ones.
+
+Only linear LoRA A/B weights are supported. Export fails for missing or invalid
+metadata, unpaired A/B tensors, rank or shape mismatches, non-linear targets,
+DoRA magnitude, LoRA bias or embedding tensors, a missing adapter, and partial or
+mixed tensor sets. rsLoRA and PEFT `alpha_pattern` are not recorded in the
+metadata and cannot be detected: verl-omni training never enables them, but an
+external `lora_adapter_path` that used them would be fused with the wrong scale.
+
+The manifest `lora_fusion` record lists the adapter, `r`, `lora_alpha`, scaling,
+base-weight source, fused modules and excluded adapters, and the source
+fingerprint includes `lora_train_meta.json`. VeOmni LoRA checkpoints are not
+supported. Design and follow-up standalone adapter export are tracked in
+[RFC #675](https://github.com/verl-project/verl-omni/issues/675).
+
 ## Verification and failure semantics
 
 Before publication the exporter:
@@ -246,8 +297,23 @@ Run the matrix with the project's venv and optional `boogu-image` dependency:
 
 ```bash
 TORCH_COMPILE_DISABLE=1 TORCHINDUCTOR_DISABLE=1 OMP_NUM_THREADS=1 \
-  python -m pytest tests/model_merger/test_architectures_on_cpu.py -v
+  python -m pytest tests/model_merger/test_architectures_on_cpu.py \
+  tests/model_merger/test_lora_fusion_on_cpu.py -v
 ```
+
+The LoRA tests cover all eight architectures with full-state and LoRA-only
+checkpoints, both single-rank and two-rank DTensors. They compare fused tensors
+with PEFT's own `merge()`, reload without adapter layers, check fixed-input
+forward parity and exercise the dtype/fp32-island policy. Pipeline tests cover
+both layouts for all seven Diffusers-compatible pipelines and verify copied
+frozen components, including Wan's second transformer. MiniMax H3 tests check
+full-state native conversion and rejection of LoRA-only native pipeline export.
+
+Each architecture also trains `default` with a frozen `old` adapter for one
+two-rank FSDP2 step, saves both layouts through `FSDPCheckpointManager`, and
+checks the published model against the trained LoRA actor's forward output.
+The H3 LoRA case additionally checks the native DiT loader. Optional Boogu cases
+are reported explicitly as skipped when its package is unavailable.
 
 Without `boogu-image`, only its cases are skipped; this is not evidence that Boogu
 was tested. Local verification used Diffusers 0.40.0 and canonical Boogu source
