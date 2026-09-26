@@ -1490,6 +1490,213 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
         return loss, output
 
 
+@EngineRegistry.register(model_type="omni_nft_model", backend=["fsdp2"], device=[device_name])
+class OmniNFTDiffusersFSDPEngine(NFTDiffusersFSDPEngine):
+    """FSDP2 actor engine for joint LTX video/audio DiffusionNFT updates."""
+
+    @staticmethod
+    def _fsdp2_gradient_checkpointing_with_cast_func(param_dtype: Optional[torch.dtype]) -> Callable:
+        """Build a non-reentrant checkpoint wrapper using the FSDP parameter dtype."""
+        from torch.utils._pytree import tree_map
+        from torch.utils.checkpoint import checkpoint
+
+        def cast_fp_tensor(value):
+            if (
+                param_dtype is None
+                or not isinstance(value, torch.Tensor)
+                or not torch.is_floating_point(value)
+                or value.dtype == param_dtype
+            ):
+                return value
+            return value.to(param_dtype)
+
+        def gradient_checkpointing_func(module, *args, **kwargs):
+            def checkpointed_forward(*inner_args, **inner_kwargs):
+                cast_args = tree_map(cast_fp_tensor, inner_args)
+                cast_kwargs = tree_map(cast_fp_tensor, inner_kwargs)
+                return module.__call__(*cast_args, **cast_kwargs)
+
+            return checkpoint(checkpointed_forward, *args, use_reentrant=False, **kwargs)
+
+        return gradient_checkpointing_func
+
+    def __init__(
+        self,
+        model_config: DiffusionModelConfig,
+        engine_config: FSDPEngineConfig,
+        optimizer_config: FSDPOptimizerConfig,
+        checkpoint_config: CheckpointConfig,
+    ):
+        if engine_config.strategy != "fsdp2":
+            raise NotImplementedError(
+                f"OmniNFT currently supports only actor.strategy=fsdp2, got {engine_config.strategy!r}."
+            )
+        if engine_config.ulysses_sequence_parallel_size != 1:
+            raise NotImplementedError(
+                "OmniNFT FSDP2 does not implement Ulysses/context parallelism yet; "
+                "set actor.fsdp_config.ulysses_sequence_parallel_size=1."
+            )
+        super().__init__(model_config, engine_config, optimizer_config, checkpoint_config)
+
+    def _build_module(self):
+        from verl_omni.pipelines.ltx2_omni_nft.compat import apply_ltx_npu_rms_norm_workaround
+
+        module = super()._build_module()
+        if self.model_config.enable_gradient_checkpointing:
+            self._enable_omni_gradient_checkpointing(module)
+        return apply_ltx_npu_rms_norm_workaround(module)
+
+    def _enable_omni_gradient_checkpointing(self, module: torch.nn.Module) -> None:
+        from verl.utils.torch_dtypes import PrecisionType
+
+        mixed_precision_config = self.engine_config.mixed_precision
+        param_dtype = PrecisionType.to_dtype(
+            mixed_precision_config.get("param_dtype", "bf16") if mixed_precision_config is not None else "bf16"
+        )
+        keep_in_fp32 = getattr(module, "_keep_in_fp32_modules", None)
+        if keep_in_fp32 and DiffusionModelBase.get_class(self.model_config).preserve_fp32_modules():
+            param_dtype = None
+        module.enable_gradient_checkpointing(
+            gradient_checkpointing_func=self._fsdp2_gradient_checkpointing_with_cast_func(param_dtype)
+        )
+
+    @staticmethod
+    def _select_forward_noise(micro_batch: TensorDict, key: str, x0: torch.Tensor, step: int) -> torch.Tensor:
+        noise = micro_batch.get(key, None)
+        if noise is None:
+            return torch.randn_like(x0.float())
+        return noise[:, step] if noise.ndim == x0.ndim + 1 else noise
+
+    def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
+        video_x0 = micro_batch["video_latents_clean"]
+        audio_x0 = micro_batch["audio_latents_clean"]
+        timestep = micro_batch["train_timesteps"][:, step]
+        t = (timestep.float() / 1000.0).view(-1, 1, 1)
+
+        video_noise = self._select_forward_noise(micro_batch, "video_forward_noise", video_x0, step)
+        audio_noise = self._select_forward_noise(micro_batch, "audio_forward_noise", audio_x0, step)
+        video_xt = (1.0 - t) * video_x0 + t * video_noise
+        audio_xt = (1.0 - t) * audio_x0 + t * audio_noise
+
+        prompt_embeds = micro_batch["prompt_embeds"]
+        prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
+        negative_prompt_embeds = micro_batch.get("negative_prompt_embeds", None)
+        negative_prompt_embeds_mask = micro_batch.get("negative_prompt_embeds_mask", None)
+        if prompt_embeds.is_nested:
+            prompt_embeds, prompt_embeds_mask = self._unpad_nested_embeds(prompt_embeds, prompt_embeds_mask)
+        if isinstance(negative_prompt_embeds, torch.Tensor) and negative_prompt_embeds.is_nested:
+            negative_prompt_embeds, negative_prompt_embeds_mask = self._unpad_nested_embeds(
+                negative_prompt_embeds, negative_prompt_embeds_mask
+            )
+
+        model_inputs, negative_model_inputs = prepare_model_inputs(
+            module=self.module,
+            model_config=self.model_config,
+            latents=torch.cat((video_xt, audio_xt), dim=1),
+            timesteps=timestep,
+            prompt_embeds=prompt_embeds,
+            prompt_embeds_mask=prompt_embeds_mask,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+            micro_batch=micro_batch,
+            step=step,
+        )
+        return model_inputs, negative_model_inputs, (video_x0, audio_x0), (video_xt, audio_xt), (t, t)
+
+    @staticmethod
+    def prepare_model_outputs(output, micro_batch: TensorDict) -> dict[str, torch.Tensor]:
+        old_prediction, current_prediction, ref_prediction, x0, xt, t_expanded = output
+        video_old, audio_old = old_prediction
+        video_current, audio_current = current_prediction
+        video_ref, audio_ref = ref_prediction
+        video_x0, audio_x0 = x0
+        video_xt, audio_xt = xt
+        video_t, audio_t = t_expanded
+        return {
+            "video_old_prediction": video_old,
+            "audio_old_prediction": audio_old,
+            "video_forward_prediction": video_current,
+            "audio_forward_prediction": audio_current,
+            "video_ref_forward_prediction": video_ref,
+            "audio_ref_forward_prediction": audio_ref,
+            "video_x0": video_x0,
+            "audio_x0": audio_x0,
+            "video_xt": video_xt,
+            "audio_xt": audio_xt,
+            "video_t_expanded": video_t,
+            "audio_t_expanded": audio_t,
+        }
+
+    def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
+        """Run paired video/audio NFT forwards without changing the shared NFT engine."""
+        model_inputs, negative_model_inputs, x0, xt, t_expanded = self.prepare_model_inputs(
+            micro_batch=micro_batch, step=step
+        )
+
+        with self.use_adapter("old"), torch.no_grad():
+            old_prediction = tuple(
+                prediction.detach()
+                for prediction in forward(
+                    module=self.module,
+                    model_config=self.model_config,
+                    model_inputs=model_inputs,
+                    negative_model_inputs=negative_model_inputs,
+                )
+            )
+
+        current_prediction = forward(
+            module=self.module,
+            model_config=self.model_config,
+            model_inputs=model_inputs,
+            negative_model_inputs=negative_model_inputs,
+        )
+
+        with torch.no_grad(), self.disable_adapter():
+            ref_prediction = tuple(
+                prediction.detach()
+                for prediction in forward(
+                    module=self.module,
+                    model_config=self.model_config,
+                    model_inputs=model_inputs,
+                    negative_model_inputs=negative_model_inputs,
+                )
+            )
+        self._set_adapter("default")
+
+        model_output = self.prepare_model_outputs(
+            output=(old_prediction, current_prediction, ref_prediction, x0, xt, t_expanded),
+            micro_batch=micro_batch,
+        )
+        if loss_function is not None:
+            loss_data = {"reward_prob": micro_batch["reward_prob"][:, step]}
+            loss_data.update(
+                {
+                    key: micro_batch[key]
+                    for key in micro_batch.keys()
+                    if isinstance(key, str) and key.startswith("_omnift_reward_metric::")
+                }
+            )
+            data = tu.get_tensordict(loss_data)
+            tu.assign_non_tensor(
+                data,
+                gradient_accumulation_steps=tu.get_non_tensor_data(
+                    micro_batch, "gradient_accumulation_steps", default=None
+                ),
+                sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
+            )
+            loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
+        else:
+            assert forward_only, "forward_only must be True when loss_function is None"
+            loss = torch.tensor(1.0, device=x0[0].device)
+            metrics = {}
+
+        return loss, {
+            "model_output": model_output,
+            "loss": loss.detach().item(),
+            "metrics": metrics,
+        }
+
+
 class EngineEvalModeCtx(BaseEngineCtx):
     def __init__(self, engine: DiffusersFSDPEngine, **kwargs):
         super().__init__(engine=engine, mode="eval", **kwargs)

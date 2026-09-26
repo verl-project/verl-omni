@@ -14,7 +14,6 @@
 """CPU tests for CLAP burst batching."""
 
 import asyncio
-import importlib.util
 import sys
 import threading
 from pathlib import Path
@@ -22,18 +21,22 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
+from verl.utils.import_utils import load_extern_object, load_module
 
 
 def _load_scorer_module():
     module_path = Path(__file__).parents[3] / "verl_omni/utils/reward_score/clap.py"
-    spec = importlib.util.spec_from_file_location("clap_reward_under_test", module_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+    return load_module(str(module_path))
 
 
 clap = _load_scorer_module()
+
+
+@pytest.mark.parametrize("prefix", ["", "file://"])
+def test_clap_loads_through_production_file_entrypoint(prefix):
+    module_path = Path(__file__).parents[3] / "verl_omni/utils/reward_score/clap.py"
+    scorer = load_extern_object(prefix + str(module_path), "compute_score")
+    assert asyncio.iscoroutinefunction(scorer)
 
 
 def test_get_audio_normalizes_batch_and_channels():

@@ -34,9 +34,10 @@ reward.reward_manager.name=MultiVisualRewardManager
 ```
 
 `path` accepts a file path or a `pkg://` module. Under `reward_functions.<key>`,
-`{path, name, weight, required}` are reserved and **every other key is forwarded to
+`{path, name, model, weight, required, routing_weights}` are reserved and **every other key is forwarded to
 the scorer as a keyword argument** — that is how `server_url` and `noise_level`
-arrive. `data.reward_fn_key` (default `data_source`) names the dataset column that
+arrive. `model` selects a named reward model; `routing_weights` is reserved for
+component-reward consumers. `data.reward_fn_key` (default `data_source`) names the dataset column that
 becomes the `data_source` argument.
 
 The surrounding config — reward-model resource pools, worker counts, how the reward

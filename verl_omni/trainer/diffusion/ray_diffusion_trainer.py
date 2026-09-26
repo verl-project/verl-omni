@@ -1638,9 +1638,10 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         actor_loss_cfg = self.config.actor_rollout_ref.actor.diffusion_loss
         if rollout_cfg.rollout_adapter != "old":
             raise ValueError("Old-adapter algorithms require actor_rollout_ref.rollout.rollout_adapter=old.")
-        if actor_loss_cfg.loss_mode != "diffusion_nft":
+        if actor_loss_cfg.loss_mode not in {"diffusion_nft", "omni_nft"}:
             raise ValueError(
-                "Old-adapter algorithms require actor_rollout_ref.actor.diffusion_loss.loss_mode=diffusion_nft."
+                "Old-adapter algorithms require actor_rollout_ref.actor.diffusion_loss.loss_mode "
+                "to be 'diffusion_nft' or 'omni_nft'."
             )
 
     def init_workers(self):

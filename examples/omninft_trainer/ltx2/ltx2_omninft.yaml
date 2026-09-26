@@ -1,0 +1,235 @@
+# @package _global_
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+hydra:
+  searchpath:
+    - pkg://verl_omni.trainer.config
+
+defaults:
+  - /diffusion_trainer
+  - _self_
+
+algorithm:
+  trainer_type: direct_preference
+  sample_source: online
+  paired_preference: false
+  timestep_fraction: 1.0
+  old_policy_decay_schedule: linear_to_0_5
+  old_policy_update_interval: 1
+  norm_adv_by_std_in_grpo: true
+  global_std: true
+  adv_mode: continuous
+
+actor_rollout_ref:
+  model:
+    algorithm: omni_nft
+    model_type: omni_nft_model
+    attn_backend: native
+    enable_gradient_checkpointing: true
+    lora_rank: 32
+    lora_alpha: 64
+    policy_state_adapters: [default, old]
+    target_modules:
+      - attn1.to_q
+      - attn1.to_k
+      - attn1.to_v
+      - attn1.to_out.0
+      - attn2.to_q
+      - attn2.to_k
+      - attn2.to_v
+      - attn2.to_out.0
+      - audio_attn1.to_q
+      - audio_attn1.to_k
+      - audio_attn1.to_v
+      - audio_attn1.to_out.0
+      - audio_attn2.to_q
+      - audio_attn2.to_k
+      - audio_attn2.to_v
+      - audio_attn2.to_out.0
+      - audio_to_video_attn.to_q
+      - audio_to_video_attn.to_k
+      - audio_to_video_attn.to_v
+      - audio_to_video_attn.to_out.0
+      - video_to_audio_attn.to_q
+      - video_to_audio_attn.to_k
+      - video_to_audio_attn.to_v
+      - video_to_audio_attn.to_out.0
+      - ff.net.0.proj
+      - ff.net.2
+      - audio_ff.net.0.proj
+      - audio_ff.net.2
+    fsdp_layer_prefixes: [transformer_blocks.]
+    pipeline:
+      _target_: verl_omni.pipelines.ltx2_omni_nft.config.LTXDiffusionPipelineConfig
+      video_cfg_scale: 1.0
+      audio_cfg_scale: 1.0
+  actor:
+    strategy: fsdp2
+    optim:
+      lr: 3.0e-5
+      weight_decay: 1.0e-4
+    ppo_mini_batch_size: 32
+    ppo_micro_batch_size_per_gpu: 8
+    diffusion_loss:
+      _target_: verl_omni.pipelines.ltx2_omni_nft.config.OmniNFTLossConfig
+      loss_mode: omni_nft
+      video_weight: 1.0
+      audio_weight: 1.0
+      mix_beta: 1.0
+      video_ref_kl_coef: 1.0e-4
+      audio_ref_kl_coef: 1.0e-4
+    fsdp_config:
+      model_dtype: bfloat16
+      param_offload: true
+      optimizer_offload: true
+      offload_policy: false
+      ulysses_sequence_parallel_size: 1
+      wrap_policy:
+        transformer_layer_cls_to_wrap: [LTX2VideoTransformerBlock]
+  rollout:
+    max_num_seqs: 1
+    name: vllm_omni
+    rollout_attn_backend: TORCH_SDPA
+    free_cache_engine: true
+    enable_sleep_mode: true
+    seed: 42
+    agent:
+      default_agent_loop: ltx2_diffusion_single_turn_agent
+    load_format: safetensors
+    layered_summon: true
+    calculate_log_probs: false
+    rollout_adapter: old
+    pipeline:
+      _target_: verl_omni.pipelines.ltx2_omni_nft.config.LTXDiffusionPipelineConfig
+      height: 256
+      width: 384
+      num_frames: 121
+      frame_rate: 24.0
+      num_inference_steps: 20
+      video_cfg_scale: 1.5
+      audio_cfg_scale: 3.0
+      video_modality_scale: 1.0
+      audio_modality_scale: 1.0
+      video_rescale_scale: 0.0
+      audio_rescale_scale: 0.0
+      max_sequence_length: 1024
+      output_type: pt
+    val_kwargs:
+      pipeline:
+        _target_: verl_omni.pipelines.ltx2_omni_nft.config.LTXDiffusionPipelineConfig
+        height: 256
+        width: 384
+        num_frames: 121
+        frame_rate: 24.0
+        num_inference_steps: 40
+        video_cfg_scale: 3.0
+        audio_cfg_scale: 7.0
+        video_modality_scale: 3.0
+        audio_modality_scale: 3.0
+        video_rescale_scale: 0.7
+        audio_rescale_scale: 0.7
+        output_type: pt
+      algo:
+        noise_level: 0.0
+
+reward:
+  reward_model:
+    enable: false
+    enable_resource_pool: false
+  accelerator_workers:
+    enabled: false
+  reward_manager:
+    name: MultiVisualRewardManager
+  aggregation: preserve_components
+  models:
+    video_align:
+      backend: native
+      offload: true
+      executor:
+        model: verl_omni.utils.reward_score.videoalign:VideoAlignModel
+    hpsv3:
+      backend: native
+      offload: true
+      executor:
+        model: verl_omni.utils.reward_score.hpsv3_reward:HPSv3Model
+        kwargs:
+          use_sequential_position_ids: true
+    audiobox:
+      backend: native
+      offload: true
+      executor:
+        model: verl_omni.utils.reward_score.audiobox:AudioBoxModel
+    clap:
+      backend: native
+      offload: true
+      executor:
+        model: verl_omni.utils.reward_score.clap:CLAPModel
+    desync:
+      backend: native
+      offload: true
+      executor:
+        model: verl_omni.utils.reward_score.desync:DeSyncModel
+  reward_functions:
+    video_align:
+      path: pkg://verl_omni.utils.reward_score.videoalign
+      name: compute_score
+      model: video_align
+      prompt_key: video
+      score_weights: [0.5, 0.0, 0.5]
+      score_means: [3.6757, 0.0, 2.8105]
+      score_stds: [2.2476, 1.0, 2.5121]
+      weight: 1.0
+      required: true
+      routing_weights: {video: 1.0, audio: 0.0}
+    hpsv3:
+      path: pkg://verl_omni.utils.reward_score.hpsv3_reward
+      name: compute_score_hpsv3
+      model: hpsv3
+      prompt_key: video
+      num_frames: 5
+      top_fraction: 0.3
+      score_cap: 15.0
+      reward_scale: 1.0
+      max_batch_size: 5
+      weight: 1.0
+      required: true
+      routing_weights: {video: 1.5, audio: 0.0}
+    audiobox:
+      path: pkg://verl_omni.utils.reward_score.audiobox
+      name: compute_score
+      model: audiobox
+      axis_weights: {CE: 1.0, CU: 1.0, PC: -1.0, PQ: 1.0}
+      score_scale: 0.025
+      weight: 1.0
+      required: true
+      routing_weights: {video: 0.0, audio: 0.5}
+    clap:
+      path: pkg://verl_omni.utils.reward_score.clap
+      name: compute_score
+      model: clap
+      prompt_key: audio
+      score_scale: 0.5
+      score_offset: 0.5
+      score_min: 0.0
+      score_max: 1.0
+      weight: 1.0
+      required: true
+      routing_weights: {video: 0.0, audio: 1.0}
+    desync:
+      path: pkg://verl_omni.utils.reward_score.desync
+      name: compute_score
+      model: desync
+      weight: 1.0
+      required: true
+      routing_weights: {video: 1.0, audio: 1.0}

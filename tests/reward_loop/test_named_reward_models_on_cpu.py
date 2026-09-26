@@ -20,11 +20,14 @@ import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
 import torch
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 from verl.protocol import DataProto
+from verl.trainer.ppo.metric_utils import process_validation_metrics
+from verl.trainer.ppo.reward import extract_reward
 
 from verl_omni.reward_loop import reward_model as reward_model_module
 from verl_omni.reward_loop import reward_model_executor as executor_module
@@ -69,6 +72,44 @@ def _config(models=None):
 
 def _parsed_models(config):
     return [(name, parse_reward_model_config(name, model)) for name, model in config.reward.models.items()]
+
+
+@pytest.mark.asyncio
+async def test_component_rewards_publish_standard_reward_extras():
+    data = DataProto.from_dict(tensors={"responses": torch.zeros(2, 3, 2, 2, dtype=torch.uint8)})
+
+    class Worker:
+        def __init__(self, name, scores):
+            async def compute(chunk):
+                return [
+                    {"reward_score": score, "reward_extra_info": {f"reward/{name}": score}}
+                    for score in scores[: len(chunk)]
+                ]
+
+            self.compute_score_batch = SimpleNamespace(remote=compute)
+
+    manager = object.__new__(OmniRewardLoopManager)
+    manager._preserve_reward_components = True
+    manager.config = SimpleNamespace(reward=SimpleNamespace(reward_functions={"video_align": {}, "audiobox": {}}))
+    manager._reward_worker_groups = {
+        "video_align": [Worker("video_align", [0.25, 0.5])],
+        "audiobox": [Worker("audiobox", [0.75, 1.0])],
+    }
+    result = await manager._compute_named_model_scores(data)
+    reward_tensor, reward_extras = extract_reward(result)
+
+    torch.testing.assert_close(reward_tensor, torch.tensor([[0.75, 0.25], [1.0, 0.5]]))
+    assert result.meta_info["reward_names"] == ["audiobox", "video_align"]
+    assert set(result.meta_info["reward_extra_keys"]) == {"reward/audiobox", "reward/video_align", "reward/combined"}
+    assert reward_extras["reward/audiobox"].tolist() == pytest.approx([0.75, 1.0])
+    assert reward_extras["reward/video_align"].tolist() == pytest.approx([0.25, 0.5])
+    validation_metrics = process_validation_metrics(
+        np.asarray(["omninft", "omninft"], dtype=object),
+        ["prompt-0", "prompt-1"],
+        {"reward": reward_tensor.sum(dim=1).tolist(), **reward_extras},
+    )
+    assert validation_metrics["omninft"]["reward/audiobox"]["mean@1"] == pytest.approx(0.875)
+    assert validation_metrics["omninft"]["reward/video_align"]["mean@1"] == pytest.approx(0.375)
 
 
 def test_engine_models_require_parent_pool():
@@ -1044,6 +1085,7 @@ async def test_named_model_groups_merge_scores_and_extra_info():
     )
     manager = object.__new__(OmniRewardLoopManager)
     manager.reward_manager_cls = _RewardManager
+    manager._preserve_reward_components = False
     manager._reward_worker_groups = {
         "shared": [
             _Worker(
@@ -1106,6 +1148,7 @@ async def test_named_model_groups_score_concurrently():
     )
     manager = object.__new__(OmniRewardLoopManager)
     manager.reward_manager_cls = _RewardManager
+    manager._preserve_reward_components = False
     manager._reward_worker_groups = {
         "engine": [_Worker("engine", 0.25)],
         "native": [_Worker("native", 0.75)],
@@ -1184,3 +1227,95 @@ async def test_async_compute_rm_score_serializes_lifecycle_brackets():
     release_first_score.set()
     assert await asyncio.gather(first, second) == ["first", "second"]
     assert calls == ["wake_up", "score:first", "sleep", "wake_up", "score:second", "sleep"]
+
+
+@pytest.mark.parametrize(
+    "trainer_type, loss_mode",
+    [("direct_preference", "dpo"), ("policy_gradient", "flow_grpo"), ("direct_preference", "diffusion_nft")],
+)
+def test_component_rewards_reject_scalar_consumers_before_worker_setup(monkeypatch, trainer_type, loss_mode):
+    from verl_omni.reward_loop import reward_loop as loop_module
+
+    config = _config({"quality": {"backend": "engine"}})
+    config.reward.aggregation = "preserve_components"
+    config.algorithm.trainer_type = trainer_type
+    config.actor_rollout_ref.actor.diffusion_loss.loss_mode = loss_mode
+
+    def unexpected_setup(*args, **kwargs):
+        pytest.fail("Unsupported component rewards must fail before allocating model resources")
+
+    monkeypatch.setattr(loop_module, "MultiRewardModelManager", unexpected_setup)
+    with pytest.raises(ValueError, match="preserve_components.*weighted_sum"):
+        OmniRewardLoopManager(config)
+
+
+def test_component_rewards_require_named_models():
+    config = _config()
+    config.reward.aggregation = "preserve_components"
+    with pytest.raises(ValueError, match="requires named reward.models"):
+        OmniRewardLoopManager(config)
+
+
+def test_component_rewards_accept_registered_omninft_loss(monkeypatch):
+    from verl_omni.reward_loop import reward_loop as loop_module
+
+    config = _config({"quality": {"backend": "engine"}})
+    config.reward.aggregation = "preserve_components"
+    config.algorithm.trainer_type = "direct_preference"
+    config.actor_rollout_ref.actor.diffusion_loss.loss_mode = "omni_nft"
+    config.reward.reward_manager.name = "MultiVisualRewardManager"
+    config.reward.reward_functions = OmegaConf.create({"quality": {"path": "unused", "name": "compute_score"}})
+    monkeypatch.setattr(
+        loop_module, "MultiRewardModelManager", lambda *args, **kwargs: SimpleNamespace(models={"quality": object()})
+    )
+    initialized = []
+    monkeypatch.setattr(OmniRewardLoopManager, "_init_reward_loop_workers", lambda self: initialized.append(self))
+    manager = OmniRewardLoopManager(config)
+    assert initialized == [manager]
+    assert manager._preserve_reward_components is True
+
+
+def test_component_rewards_reject_policy_gradient_omninft_configuration():
+    config = _config({"quality": {"backend": "engine"}})
+    config.reward.aggregation = "preserve_components"
+    config.algorithm.trainer_type = "policy_gradient"
+    config.actor_rollout_ref.actor.diffusion_loss.loss_mode = "omni_nft"
+    with pytest.raises(ValueError, match="OmniNFT direct-preference trainer"):
+        OmniRewardLoopManager(config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra, message",
+    [
+        ({}, "Missing required component"),
+        ({"reward/quality": float("nan")}, "must be finite"),
+        ({"reward/quality": float("inf")}, "must be finite"),
+    ],
+)
+async def test_component_rewards_reject_missing_or_nonfinite_scores(extra, message):
+    data = DataProto.from_dict(tensors={"responses": torch.zeros(1, 3, 2, 2, dtype=torch.uint8)})
+    manager = object.__new__(OmniRewardLoopManager)
+    manager._preserve_reward_components = True
+    manager.config = SimpleNamespace(reward=SimpleNamespace(reward_functions={"quality": {}}))
+    compute = AsyncMock(return_value=[{"reward_score": 0.0, "reward_extra_info": extra}])
+    manager._reward_worker_groups = {"quality": [SimpleNamespace(compute_score_batch=SimpleNamespace(remote=compute))]}
+    with pytest.raises(ValueError, match=message):
+        await manager._compute_named_model_scores(data)
+
+
+def test_reward_manager_accepts_scalar_default(monkeypatch):
+    from verl_omni.reward_loop import reward_loop as loop_module
+
+    config = _config({"quality": {"backend": "engine"}})
+    config.reward.aggregation = "weighted_sum"
+    config.reward.reward_manager.name = "MultiVisualRewardManager"
+    config.reward.reward_functions = OmegaConf.create({"quality": {"path": "unused", "name": "compute_score"}})
+    monkeypatch.setattr(
+        loop_module, "MultiRewardModelManager", lambda *args, **kwargs: SimpleNamespace(models={"quality": object()})
+    )
+    initialized = []
+    monkeypatch.setattr(OmniRewardLoopManager, "_init_reward_loop_workers", lambda self: initialized.append(self))
+    manager = OmniRewardLoopManager(config)
+    assert initialized == [manager]
+    assert manager._preserve_reward_components is False
