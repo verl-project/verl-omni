@@ -13,12 +13,12 @@
 # limitations under the License.
 
 """
-This test script validates single-turn return of `CompositeAgentLoopWorker`,
-especially returns from LLM part, e.g.,
-`rollout_llm_log_probs`,
-`llm_response_ids`,
-`text_encoder_responses`,
-`llm_rm_scores` (optional)
+Smoke-test ``CompositeAgentLoopWorker`` end-to-end on Qwen-Image.
+
+``generate_sequences`` returns two ``DataProto`` objects:
+
+- AR part: ``n`` rows with ``responses``, ``rollout_ar_log_probs``, etc.
+- Diffusion part: ``n * m`` rows with image ``responses`` and DiT trajectory fields.
 """
 
 import gc
@@ -30,12 +30,11 @@ import numpy as np
 import pytest
 import ray
 import torch
-from omegaconf import DictConfig
-from verl.experimental.agent_loop.agent_loop import AgentLoopManager
+from omegaconf import DictConfig, OmegaConf
 from verl.protocol import DataProto
 from verl.workers.rollout.llm_server import LLMServerManager
 
-from verl_omni.agent_loop.composite_agent_loop import CompositeAgentLoopWorker
+from verl_omni.agent_loop.composite_agent_loop import CompositeAgentLoopManager
 
 from ..utils.gpu_test_topology import resolve_diffusion_agent_loop_gpu_topology
 
@@ -46,26 +45,21 @@ class _FakeRemoteComputeScore:
 
     async def remote(self, data: DataProto) -> dict:
         self.received_data = data
-        return {"reward_score": 1.0, "reward_extra_info": {"dit_msg": "dummy_dit_reward_info"}}
-
-
-class _FakeARRemoteComputeScore:
-    def __init__(self):
-        self.received_data: DataProto | None = None
-
-    async def remote(self, data: DataProto) -> dict:
-        self.received_data = data
-        return {"reward_score": 1.0, "reward_extra_info": {"ar_msg": "dummy_ar_reward_info"}}
+        return {  # fix to use weights dit:1.0, ar: 0.0 for combined score
+            "reward_score": 1.5,
+            "reward_extra_info": {
+                "reward/combined": 1.5,
+                "reward/dit": 1.5,
+                "reward/dit/dit_msg": "dummy_dit_reward_info",
+                "reward/ar": 1.0,
+                "reward/ar/ar_msg": "dummy_ar_reward_info",
+            },
+        }
 
 
 class _FakeRewardLoopWorkerHandle:
     def __init__(self):
         self.compute_score = _FakeRemoteComputeScore()
-
-
-class _FakeARRewardLoopWorkerHandle:
-    def __init__(self):
-        self.compute_score = _FakeARRemoteComputeScore()
 
 
 def _assert_non_empty_tensor(value, field_name: str) -> None:
@@ -74,27 +68,36 @@ def _assert_non_empty_tensor(value, field_name: str) -> None:
     assert value.numel() > 0, f"{field_name} should not be empty"
 
 
-def _assert_text_encoder_outputs(result: DataProto, *, batch_size: int, max_token_len: int) -> None:
-    """Validate Qwen-Image text-encoder returns by rollout."""
-    llm_response_ids = result.batch["llm_response_ids"]
-    llm_all_log_probs = result.batch.get("rollout_llm_log_probs")
-    llm_attention_mask = result.batch["llm_response_attention_mask"]
-    text_encoder_responses = result.non_tensor_batch["text_encoder_responses"]  # list[str]
-    _assert_non_empty_tensor(llm_response_ids, "llm_response_ids")
-    _assert_non_empty_tensor(llm_all_log_probs, "llm_all_log_probs")
-    _assert_non_empty_tensor(llm_attention_mask, "llm_response_attention_mask")
+def _assert_ar_outputs(result: DataProto, *, batch_size: int, prompt_len: int, max_token_len: int) -> None:
+    """Validate Qwen-Image (AR) text-encoder returns by rollout."""
+    ar_input_ids = result.batch["input_ids"]
+    ar_attention_mask = result.batch["attention_mask"]
+    ar_response_ids = result.batch["responses"]
+    ar_response_mask = result.batch["response_mask"]
+    ar_all_log_probs = result.batch.get("rollout_ar_log_probs")
+    text_encoder_responses = result.non_tensor_batch["text_encoder_responses"]
+    _assert_non_empty_tensor(ar_input_ids, "input_ids")
+    _assert_non_empty_tensor(ar_response_ids, "responses")
+    _assert_non_empty_tensor(ar_all_log_probs, "rollout_ar_log_probs")
+    _assert_non_empty_tensor(ar_attention_mask, "attention_mask")
+    _assert_non_empty_tensor(ar_response_mask, "response_mask")
 
-    assert llm_response_ids.shape == (batch_size, max_token_len)
-    if llm_all_log_probs is not None:
-        assert llm_all_log_probs.shape[1] <= max_token_len
-        assert llm_all_log_probs.shape == (batch_size, llm_all_log_probs.shape[1], llm_all_log_probs.shape[-1])
-    assert llm_attention_mask.shape == (batch_size, max_token_len)
-    assert llm_attention_mask.dtype == torch.long
-    assert llm_attention_mask.min() >= 0 and llm_attention_mask.max() <= 1
+    # check padding
+    assert ar_input_ids.shape == (batch_size, prompt_len + max_token_len)
+    assert ar_response_ids.shape == (batch_size, max_token_len)
+    if ar_all_log_probs is not None:
+        assert ar_all_log_probs.shape[1] == max_token_len
+        assert ar_all_log_probs.shape == (batch_size, ar_all_log_probs.shape[1], ar_all_log_probs.shape[-1])
+    assert ar_attention_mask.shape == (batch_size, prompt_len + max_token_len)
+    assert ar_attention_mask.dtype == torch.long
+    assert ar_attention_mask.min() >= 0 and ar_attention_mask.max() <= 1
+    assert ar_response_mask.shape == (batch_size, max_token_len)
+    assert ar_response_mask.dtype == torch.long
+    assert ar_response_mask.min() >= 0 and ar_response_mask.max() <= 1
     assert len(text_encoder_responses) == batch_size
 
 
-def _assert_qwen_image_outputs(result: DataProto, *, batch_size: int, height: int, width: int) -> None:
+def _assert_diffusion_outputs(result: DataProto, *, batch_size: int, height: int, width: int) -> None:
     """Validate Qwen-Image diffusion output is a batched RGB image tensor."""
     responses = result.batch["responses"]
     _assert_non_empty_tensor(responses, "responses")
@@ -155,18 +158,21 @@ def init_config() -> DictConfig:
         config.actor_rollout_ref.rollout.step_execution = False
         # Keep the 2-GPU TP smoke light; CI EOFError on worker launch is usually OOM.
         # Keep enough inference steps for sde_window_range=[0, 5] / sde_window_size=2.
-        config.actor_rollout_ref.rollout.n = 2
+        config.actor_rollout_ref.rollout.n = 2  # dit part
+        config.actor_rollout_ref.rollout.m = 2  # ar part
         config.actor_rollout_ref.rollout.pipeline.height = 256
         config.actor_rollout_ref.rollout.pipeline.width = 256
         config.actor_rollout_ref.rollout.pipeline.num_inference_steps = 10
         config.actor_rollout_ref.rollout.calculate_log_probs = True
-        config.actor_rollout_ref.rollout.llm_calculate_log_probs = True  # new
-        config.actor_rollout_ref.rollout.max_new_tokens = 20  # new
-        config.actor_rollout_ref.rollout.temperature = 0.8  # new
-        config.actor_rollout_ref.rollout.top_k = 5  # new
-        config.actor_rollout_ref.rollout.top_p = 0.9  # new
+        config.actor_rollout_ref.rollout.ar_calculate_log_probs = True  # ar part
+        config.actor_rollout_ref.rollout.ar.response_length = 20  # ar part
+        config.actor_rollout_ref.rollout.ar.temperature = 0.8  # ar part
+        config.actor_rollout_ref.rollout.ar.top_k = 0  # ar part
+        config.actor_rollout_ref.rollout.ar.top_p = 1.0  # ar part
         config.actor_rollout_ref.rollout.agent.num_workers = min(2, requested_gpus)
-        config.actor_rollout_ref.rollout.agent.default_agent_loop = "diffusion_single_turn_agent"
+        config.actor_rollout_ref.rollout.agent.default_agent_loop = (
+            "composite_single_turn_agent"  # new single-turn agent
+        )
         tokenizer_max_length = 1024
         prompt_template_encode_start_idx = 34
         max_length = tokenizer_max_length + prompt_template_encode_start_idx
@@ -179,7 +185,10 @@ def init_config() -> DictConfig:
         config.actor_rollout_ref.rollout.pipeline.max_sequence_length = max_length
         config.actor_rollout_ref.rollout.nnodes = 1
 
-        config.reward.reward_manager.name = "naive"
+        config.reward.reward_manager.name = "MultiVisualRewardManager"
+        # CompositeAgentLoopWorker requires AR weight 0 so MultiVisualRewardManager
+        # does not double-count AR into the combined DiT score.
+        OmegaConf.update(config, "reward.reward_functions.ar.weight", 0.0, force_add=True)
         config.trainer.n_gpus_per_node = requested_gpus
 
         config.data.max_prompt_length = max_length
@@ -210,14 +219,13 @@ def test_single_turn(init_config, agent_reward_loop: bool):
         }
     )
     try:
-        AgentLoopManager.agent_loop_workers_class = ray.remote(CompositeAgentLoopWorker)
+        dit_reward_handle = _FakeRewardLoopWorkerHandle()
         llm_server_manager = LLMServerManager.create(config=init_config)
-        agent_loop_manager = AgentLoopManager.create(
+        agent_loop_manager = CompositeAgentLoopManager.create(
             config=init_config,
             llm_client=llm_server_manager.get_client(),
-            reward_loop_worker_handles=[_FakeRewardLoopWorkerHandle(), _FakeARRewardLoopWorkerHandle()]
-            if agent_reward_loop
-            else None,
+            reward_loop_worker_handles=[dit_reward_handle] if agent_reward_loop else None,
+            allow_without_composite_trainer=True,
         )
 
         system_prompt = (
@@ -255,14 +263,28 @@ def test_single_turn(init_config, agent_reward_loop: bool):
                 "reward_model": np.array([{"style": "rule", "ground_truth": ""}] * len(raw_prompts)),
             },
         )
-        n = init_config.actor_rollout_ref.rollout.n
-        batch = batch.repeat(n)
         batch.meta_info["global_steps"] = 0
-        result = agent_loop_manager.generate_sequences(prompts=batch)
-        batch_size = len(raw_prompts) * n
-        assert len(result) == batch_size
+        ar_n = init_config.actor_rollout_ref.rollout.m
+        diffusion_n = init_config.actor_rollout_ref.rollout.n
+        batch = batch.repeat(ar_n)
 
-        expected_batch_keys = [
+        ar_result, diffusion_result = agent_loop_manager.generate_sequences(prompts=batch)
+        ar_batch_size = len(raw_prompts) * ar_n
+        diffusion_batch_size = len(raw_prompts) * ar_n * diffusion_n
+        assert len(ar_result) == ar_batch_size
+        assert len(diffusion_result) == diffusion_batch_size
+
+        ar_expected_batch_keys = [
+            "prompts",
+            "responses",
+            "input_ids",
+            "position_ids",
+            "attention_mask",
+            "response_mask",
+            "rollout_ar_log_probs",
+        ]
+        ar_expected_non_tensor_batch_keys = ["text_encoder_responses"]
+        diffusion_expected_batch_keys = [
             "responses",
             "all_latents",
             "all_timesteps",
@@ -271,31 +293,77 @@ def test_single_turn(init_config, agent_reward_loop: bool):
             "negative_prompt_embeds",
             "negative_prompt_embeds_mask",
             "rollout_log_probs",
-            "rollout_llm_log_probs",
-            "llm_response_attention_mask",
         ]
-        expected_non_tensor_batch_keys = ["text_encoder_responses"]
+        diffusion_expected_non_tensor_batch_keys = []
         if agent_reward_loop:
-            expected_batch_keys += ["rm_scores", "llm_rm_scores"]
-            expected_non_tensor_batch_keys += ["dit_msg", "ar_msg"]
+            ar_expected_batch_keys += ["rm_scores"]
+            ar_expected_non_tensor_batch_keys += ["reward/ar", "reward/ar/ar_msg"]
+            diffusion_expected_batch_keys += ["rm_scores"]
+            diffusion_expected_non_tensor_batch_keys += ["reward/dit/dit_msg"]
 
-        for key in expected_batch_keys:
-            assert key in result.batch, f"Key {key} not found in result batch with keys {list(result.batch.keys())}."
+        for key in ar_expected_batch_keys:
+            assert key in ar_result.batch, (
+                f"Key {key} not found in AR result batch with keys {list(ar_result.batch.keys())}."
+            )
 
-        for key in expected_non_tensor_batch_keys:
-            assert key in result.non_tensor_batch, (
-                f"Key {key} not found in result non-tensor batch with keys {list(result.non_tensor_batch.keys())}."
+        for key in ar_expected_non_tensor_batch_keys:
+            assert key in ar_result.non_tensor_batch, (
+                f"Key {key} not found in AR non-tensor batch with keys {list(ar_result.non_tensor_batch.keys())}."
+            )
+
+        for key in diffusion_expected_batch_keys:
+            assert key in diffusion_result.batch, (
+                f"Key {key} not found in diffusion result batch with keys {list(diffusion_result.batch.keys())}."
+            )
+
+        for key in diffusion_expected_non_tensor_batch_keys:
+            assert key in diffusion_result.non_tensor_batch, (
+                "Key "
+                f"{key} not found in diffusion non-tensor batch with keys "
+                f"{list(diffusion_result.non_tensor_batch.keys())}."
+            )
+
+        if agent_reward_loop:
+            # Fake scores reward/ar=1.0 vs reward/combined=1.5. AR must use the AR
+            # extras (mean of identical 1.0s), not the combined/DiT score.
+            torch.testing.assert_close(
+                ar_result.batch["rm_scores"],
+                torch.full((ar_batch_size, 1), 1.0, dtype=torch.float32),
+            )
+            torch.testing.assert_close(
+                diffusion_result.batch["rm_scores"],
+                torch.full((diffusion_batch_size, 1), 1.5, dtype=torch.float32),
+            )
+            np.testing.assert_allclose(
+                np.asarray(ar_result.non_tensor_batch["reward/ar"], dtype=np.float64),
+                np.full(ar_batch_size, 1.0),
+            )
+            assert list(ar_result.non_tensor_batch["reward/ar/ar_msg"]) == ["dummy_ar_reward_info"] * ar_batch_size
+            assert "reward/combined" not in ar_result.non_tensor_batch
+            assert "reward/dit" not in ar_result.non_tensor_batch
+            assert "reward/ar" not in diffusion_result.non_tensor_batch
+            assert "reward/ar/ar_msg" not in diffusion_result.non_tensor_batch
+            assert list(diffusion_result.non_tensor_batch["reward/dit/dit_msg"]) == (
+                ["dummy_dit_reward_info"] * diffusion_batch_size
             )
 
         height = init_config.actor_rollout_ref.rollout.pipeline.height
         width = init_config.actor_rollout_ref.rollout.pipeline.width
-        max_new_tokens = init_config.actor_rollout_ref.rollout.max_new_tokens
+        prompt_len = init_config.actor_rollout_ref.rollout.prompt_length
+        max_new_tokens = init_config.actor_rollout_ref.rollout.ar.response_length
 
-        _assert_text_encoder_outputs(result, batch_size=batch_size, max_token_len=max_new_tokens)
-        _assert_qwen_image_outputs(result, batch_size=batch_size, height=height, width=width)
+        _assert_ar_outputs(ar_result, batch_size=ar_batch_size, prompt_len=prompt_len, max_token_len=max_new_tokens)
+        _assert_diffusion_outputs(
+            diffusion_result,
+            batch_size=diffusion_batch_size,
+            height=height,
+            width=width,
+        )
 
-        num_turns = result.non_tensor_batch["__num_turns__"]
-        assert np.all(num_turns == 2)
+        ar_num_turns = ar_result.non_tensor_batch["__num_turns__"]
+        diffusion_num_turns = diffusion_result.non_tensor_batch["__num_turns__"]
+        assert np.all(ar_num_turns == 2)
+        assert np.all(diffusion_num_turns == 2)
     finally:
         ray.shutdown()
         gc.collect()
