@@ -56,6 +56,52 @@ def test_tq_conversion_forwards_field_projection_and_unpacks_extra_fields(monkey
     assert data.non_tensor_batch["reward_extra_info"].tolist() == [{"ocr": 0.25}, {"ocr": 0.75}]
 
 
+def test_canonicalize_orders_rows_prompt_major_and_keeps_tag_alignment():
+    meta = SimpleNamespace(
+        partition_id="train",
+        keys=[
+            "aaa_2_0",
+            "bbb_0_0",
+            "aaa_0_0",
+            "legacy",
+            "bbb_1_0",
+            "aaa_1_0",
+        ],
+        tags=[
+            {"prompt_index": 0, "seq_len": 1},
+            {"prompt_index": 1, "seq_len": 2},
+            {"prompt_index": 0, "seq_len": 3},
+            {"seq_len": 4},
+            {"prompt_index": 1, "seq_len": 5},
+            {"prompt_index": 0, "seq_len": 6},
+        ],
+    )
+
+    ordered = tq_utils.canonicalize_diffusion_tq_meta(meta)
+
+    assert list(ordered.keys) == [
+        "aaa_0_0",
+        "aaa_1_0",
+        "aaa_2_0",
+        "bbb_0_0",
+        "bbb_1_0",
+        "legacy",
+    ]
+    # Tags travel with their keys so later tag-indexed consumers stay aligned.
+    assert [tag["seq_len"] for tag in ordered.tags] == [3, 6, 1, 2, 5, 4]
+    assert ordered.partition_id == "train"
+    # The input meta is left untouched (callers may still hold it).
+    assert meta.keys[0] == "aaa_2_0"
+
+
+def test_canonicalize_passthrough_for_singleton_batches():
+    meta = SimpleNamespace(partition_id="val", keys=["only_0_0"], tags=[{"prompt_index": 0}])
+
+    ordered = tq_utils.canonicalize_diffusion_tq_meta(meta)
+
+    assert list(ordered.keys) == ["only_0_0"]
+
+
 @pytest.mark.parametrize("algorithm", ["policy_gradient", "direct_preference"])
 def test_metric_projection_is_subset_of_persisted_and_rollout_fields(algorithm):
     rollout_fields = {"uid", "extra_fields"}
