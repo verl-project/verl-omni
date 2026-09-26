@@ -161,6 +161,7 @@ def test_minimax_h3_smoke_config_enables_sp_for_each_task(task, train_batch_size
         reward_stub_path="/tmp/reward.py",
         output_dir="/tmp/output",
         task=task,
+        actor_backend="fsdp2",
         num_gpus=4,
         actor_sp=2,
         rollout_tp=2,
@@ -181,3 +182,26 @@ def test_minimax_h3_smoke_config_enables_sp_for_each_task(task, train_batch_size
 def test_minimax_h3_smoke_config_rejects_invalid_sp_partition() -> None:
     with pytest.raises(ValueError, match="must be divisible"):
         _validate_actor_sp(num_gpus=4, actor_sp=3)
+
+
+def test_minimax_h3_smoke_config_rejects_veomni_actor_sp() -> None:
+    with pytest.raises(ValueError, match="SP=1 only"):
+        _hydra_overrides(
+            tiny_model_dir="/tmp/model",
+            train_parquet="/tmp/train.parquet",
+            val_parquet="/tmp/val.parquet",
+            reward_stub_path="/tmp/reward.py",
+            output_dir="/tmp/output",
+            task="t2va",
+            actor_backend="veomni",
+            num_gpus=4,
+            actor_sp=2,
+            rollout_tp=2,
+            text_encoder_tp=1,
+            total_training_steps=1,
+            ray_num_cpus=4,
+            height=160,
+            width=288,
+            num_frames=97,
+            num_inference_steps=4,
+        )

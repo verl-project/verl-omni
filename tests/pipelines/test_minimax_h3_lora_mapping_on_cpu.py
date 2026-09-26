@@ -19,8 +19,8 @@ import pytest
 import torch
 
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
-    _LORA_STACKED_PARAMS_MAPPING,
     _LORA_VLLM_TARGET_MODULES,
+    H3_LORA_STACKED_PARAMS_MAPPING,
     MiniMaxH3RolloutWeightSyncMixin,
 )
 
@@ -160,15 +160,15 @@ class TestVllmManagerInterplay:
 
     def test_packed_sublayer_names_match(self, match):
         # The manager's packed fallback checks prefix + sub-suffix from the mapping.
-        sub_suffixes = [sub.strip(".").split(".")[-1] for _, sub, _ in _LORA_STACKED_PARAMS_MAPPING]
+        sub_suffixes = [sub.strip(".").split(".")[-1] for _, sub, _ in H3_LORA_STACKED_PARAMS_MAPPING]
         assert sub_suffixes == ["to_q", "to_k", "to_v", "fc1_0", "fc1_1"]
         for prefix, subs in (("attn", ["to_q", "to_k", "to_v"]), ("mlp", ["fc1_0", "fc1_1"])):
             for sub in subs:
                 assert match(f"transformer.blocks.0.{prefix}.{sub}", _LORA_VLLM_TARGET_MODULES)
 
     def test_stacked_mapping_declares_packed_slices(self):
-        packed = [packed for packed, _, _ in _LORA_STACKED_PARAMS_MAPPING]
-        shard_ids = [shard for _, _, shard in _LORA_STACKED_PARAMS_MAPPING]
+        packed = [packed for packed, _, _ in H3_LORA_STACKED_PARAMS_MAPPING]
+        shard_ids = [shard for _, _, shard in H3_LORA_STACKED_PARAMS_MAPPING]
         assert packed == [".qkv_proj"] * 3 + [".fc1"] * 2
         assert shard_ids == ["q", "k", "v", "0", "1"]
 
@@ -177,7 +177,7 @@ class TestInstallLoraLayout:
     def test_sets_stacked_params_mapping_once(self):
         mixin = _make_mixin()
         mixin._install_lora_layout()
-        assert mixin.transformer.stacked_params_mapping == _LORA_STACKED_PARAMS_MAPPING
+        assert mixin.transformer.stacked_params_mapping == H3_LORA_STACKED_PARAMS_MAPPING
         # Idempotent: a pre-existing mapping is not clobbered.
         mixin.transformer.stacked_params_mapping = ["custom"]
         mixin._install_lora_layout()

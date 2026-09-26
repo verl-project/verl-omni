@@ -37,6 +37,7 @@ from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.workers.config import DiffusionModelConfig
 
+from . import veomni_training_adapter as veomni
 from .common import (
     combine_log_probs,
     configure_flow_scheduler,
@@ -45,7 +46,7 @@ from .common import (
     sample_h3_transition,
     split_joint_latents,
 )
-from .weight_sync import H3_LORA_TARGETS
+from .weight_sync import resolve_h3_lora_target_layout
 
 __all__ = ["MiniMaxH3FlowGRPO"]
 
@@ -84,19 +85,7 @@ class MiniMaxH3FlowGRPO(DiffusionModelBase):
         if model_config.lora_rank <= 0:
             return
 
-        target_modules = model_config.target_modules
-        requested = {target_modules} if isinstance(target_modules, str) else set(target_modules or [])
-        unsupported = {
-            target
-            for target in requested
-            if not any(target == supported or target.endswith("." + supported) for supported in H3_LORA_TARGETS)
-        }
-        if not requested or unsupported:
-            raise ValueError(
-                "MiniMax H3 LoRA supports only transformer/refiner attention and MLP projections "
-                f"{sorted(H3_LORA_TARGETS)}, got unsupported targets {sorted(unsupported or requested)}. "
-                "Other targets cannot be synchronized to the rollout model."
-            )
+        resolve_h3_lora_target_layout(model_config.target_modules)
 
     @classmethod
     def build_scheduler(cls, model_config: DiffusionModelConfig) -> H3SchedulerPair:
@@ -276,7 +265,14 @@ class MiniMaxH3FlowGRPO(DiffusionModelBase):
         audio_update_mask = model_inputs.pop("_h3_audio_update_mask")
         target_only_trajectory = bool(model_inputs.pop("_h3_target_only_trajectory"))
         sp_size = model_inputs.pop("_h3_sp_size", 1)
-        video_velocity, audio_velocity = h3_ulysses_forward(module, model_inputs, sp_size)
+        if veomni.is_veomni_module(module):
+            video_velocity, audio_velocity = veomni.predict_veomni(
+                module,
+                model_inputs,
+                use_gradient_checkpointing=model_config.enable_gradient_checkpointing,
+            )
+        else:
+            video_velocity, audio_velocity = h3_ulysses_forward(module, model_inputs, sp_size)
         video = model_inputs["hidden_states"].float()
         audio = model_inputs["audio_hidden_states"].float()
         if target_only_trajectory:

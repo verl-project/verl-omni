@@ -59,6 +59,7 @@ Layout produced under ``<output-dir>``::
         video_vae/                   # local tiny remote-code stub
         audio_vae/                   # local tiny remote-code stub
       transformer/                   # Diffusers actor DiT config + weights
+      veomni_transformer/            # VeOmni actor fused DiT config + weights
 
 Usage::
 
@@ -95,7 +96,7 @@ _SEED = 42
 _VIDEO_LATENT_CHANNELS = 24
 _AUDIO_LATENT_CHANNELS = 32
 _PATCH_VOLUME = 4  # MiniMax-H3 uses a (1, 2, 2) video patch.
-_CHECKPOINT_FORMAT_VERSION = 5
+_CHECKPOINT_FORMAT_VERSION = 6
 _VLLM_TEXT_VOCAB_SIZE = 512
 _VLLM_TEXT_NUM_LAYERS = 1
 
@@ -513,6 +514,67 @@ def _write_expanded_transformer(source_dir: Path, target_dir: Path, *, config: d
     (target_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n")
 
 
+def _write_veomni_transformer(source_dir: Path, target_dir: Path, *, config: dict) -> None:
+    """Convert the tiny Diffusers actor weights to VeOmni's fused H3 layout."""
+    source_weights = source_dir / "diffusion_pytorch_model.safetensors"
+    with safe_open(source_weights, framework="pt", device="cpu") as handle:
+        source = {name: handle.get_tensor(name) for name in handle.keys()}
+
+    def rename(name: str) -> str:
+        replacements = {
+            "proj_in": "video_patch_proj",
+            "audio_proj_in": "audio_patch_proj",
+            "context_embedder": "condition_proj",
+            "time_embedder.linear_1": "time_embedder.proj_in",
+            "time_embedder.linear_2": "time_embedder.proj_out",
+            "norm_out.norm": "final_layer.norm",
+            "norm_out.linear": "final_layer.adaln_proj.linear",
+            "proj_out": "final_layer.video_out",
+            "audio_proj_out": "final_layer.audio_out",
+        }
+        for source_name, target_name in replacements.items():
+            if name == source_name or name.startswith(source_name + "."):
+                return target_name + name[len(source_name) :]
+        return (
+            name.replace("token_refiner.refiner_blocks.", "token_refiner.blocks.")
+            .replace("transformer_blocks.", "blocks.")
+            .replace(".attn.norm_q.", ".attn.q_norm.")
+            .replace(".attn.norm_k.", ".attn.k_norm.")
+            .replace(".attn.to_out.0.", ".attn.out_proj.")
+            .replace(".ff.net.2.", ".mlp.fc2.")
+        )
+
+    heads = int(config["num_attention_heads"])
+    head_dim = int(config["attention_head_dim"])
+    fused = {}
+    consumed = set()
+    for name, tensor in source.items():
+        if name in consumed:
+            continue
+        if name.endswith((".attn.to_q.weight", ".attn.to_k.weight", ".attn.to_v.weight")):
+            block = name.rsplit(".attn.to_", 1)[0]
+            names = [f"{block}.attn.to_{part}.weight" for part in ("q", "k", "v")]
+            projections = [source[key].reshape(heads, head_dim, -1) for key in names]
+            fused[f"{rename(block)}.attn.qkv_proj.weight"] = torch.stack(projections, dim=1).reshape(
+                heads * 3 * head_dim, -1
+            )
+            consumed.update(names)
+        elif name.endswith(".ff.net.0.proj.weight"):
+            up, gate = tensor.chunk(2, dim=0)
+            target = rename(name).replace(".ff.net.0.proj.weight", ".mlp.fc1.weight")
+            fused[target] = torch.cat((gate, up))
+            consumed.add(name)
+        else:
+            fused[rename(name)] = tensor
+            consumed.add(name)
+    if consumed != set(source):
+        raise RuntimeError(f"Unconverted tiny H3 weights: {sorted(set(source) - consumed)}")
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    save_file(fused, target_dir / "model.safetensors")
+    (target_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n")
+
+
 def _write_video_vae(component_dir: Path) -> None:
     component_dir.mkdir(parents=True, exist_ok=True)
     config = {
@@ -625,6 +687,8 @@ def _checkpoint_is_complete(output_dir: Path) -> bool:
         output_dir / "FL2VA" / "audio_vae" / "config.json",
         output_dir / "transformer" / "config.json",
         output_dir / "transformer" / "diffusion_pytorch_model.safetensors",
+        output_dir / "veomni_transformer" / "config.json",
+        output_dir / "veomni_transformer" / "model.safetensors",
         output_dir / "Ref2VA" / "model_index.json",
         output_dir / "Ref2VA" / "transformer" / "config.json",
         output_dir / "Ref2VA" / "transformer" / "diffusion_pytorch_model.safetensors",
@@ -698,6 +762,11 @@ def ensure_tiny_minimax_h3_checkpoint(
         output / "transformer",
         config=actor_config,
         seed=_SEED + 1,
+    )
+    _write_veomni_transformer(
+        output / "transformer",
+        output / "veomni_transformer",
+        config=_make_fused_transformer_config(actor_config),
     )
     (output / "tiny_checkpoint.json").write_text(
         json.dumps(
