@@ -11,8 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU tests for MultiVisualRewardManager."""
+"""CPU tests for modality-neutral multi-reward aggregation."""
 
+import inspect
 import os
 from unittest.mock import MagicMock
 
@@ -22,7 +23,7 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 from verl import DataProto
 
-from verl_omni.reward_loop.reward_manager.multi import MultiVisualRewardManager, _filter_kwargs
+from verl_omni.reward_loop.reward_manager.multi import MultiRewardManager, MultiVisualRewardManager, _filter_kwargs
 from verl_omni.reward_loop.reward_manager.visual import VisualRewardManager
 
 # Path to this file — load_extern_object will import dummy functions from here.
@@ -30,7 +31,7 @@ DUMMY_REWARDS_PATH = "tests/reward_loop/test_multi_reward_manager_on_cpu.py"
 
 
 # ---------------------------------------------------------------------------
-# Dummy reward functions (loaded by MultiVisualRewardManager via load_extern_object)
+# Dummy reward functions (loaded by MultiRewardManager via load_extern_object)
 # ---------------------------------------------------------------------------
 
 
@@ -71,6 +72,13 @@ async def reward_uses_named_engine_router(reward_router_address, model_name):
     assert reward_router_address == "engine-router"
     assert model_name == "ocr-model"
     return {"score": 0.6, "backend": "engine-function"}
+
+
+async def reward_uses_legacy_router(reward_router_address, model_name, sampling_params):
+    assert reward_router_address == "legacy-router"
+    assert model_name == "legacy-model"
+    assert sampling_params == {"max_tokens": 321, "seed": 17}
+    return 0.65
 
 
 async def reward_uses_native_model(reward_model, ground_truth, solution_image):
@@ -190,7 +198,7 @@ class TestFilterKwargs:
 
 
 # ---------------------------------------------------------------------------
-# MultiVisualRewardManager.run_single
+# MultiRewardManager.run_single
 # ---------------------------------------------------------------------------
 
 
@@ -206,7 +214,7 @@ class TestVisualRewardManagerDefaults:
         assert result["reward_extra_info"]["acc"] == pytest.approx(result["reward_score"])
 
 
-class TestMultiVisualRewardManagerRunSingle:
+class TestMultiRewardManagerRunSingle:
     @pytest.mark.parametrize("manager_factory", [_build_visual_latent_manager, _build_latent_multi_manager])
     def test_float_latent_response_is_forwarded_to_reward(self, manager_factory):
         manager = manager_factory()
@@ -248,7 +256,7 @@ class TestMultiVisualRewardManagerRunSingle:
         )
         manager.compute_score = reward_asserts_float_latent_contract
         manager.is_async_reward_score = True
-        if isinstance(manager, MultiVisualRewardManager):
+        if isinstance(manager, MultiRewardManager):
             manager._sub_rewards[0]["fn"] = reward_asserts_float_latent_contract
             manager._sub_rewards[0]["is_async"] = True
 
@@ -424,8 +432,32 @@ class TestMultiVisualRewardManagerRunSingle:
 
         assert result["reward_score"] == pytest.approx(128)
 
+    def test_legacy_visual_router_preserves_sampling_params(self):
+        config = _make_config(
+            {"legacy": {"path": DUMMY_REWARDS_PATH, "name": "reward_uses_legacy_router", "weight": 1.0}}
+        )
+        config.reward.reward_model.model_path = "legacy-model"
+        config.reward.reward_model.rollout.response_length = 321
+        config.reward.reward_model.rollout.full_determinism = True
+        config.reward.reward_model.rollout.seed = 17
+        manager = MultiVisualRewardManager(
+            config,
+            MagicMock(),
+            compute_score=None,
+            reward_router_address="legacy-router",
+            reward_model_tokenizer=MagicMock(),
+        )
 
-class TestMultiVisualRewardManagerInit:
+        result = manager.loop.run_until_complete(manager.run_single(_make_single_data()))
+
+        assert result["reward_score"] == pytest.approx(0.65)
+
+
+class TestMultiRewardManagerInit:
+    def test_shared_manager_is_an_input_agnostic_base(self):
+        assert inspect.isabstract(MultiRewardManager)
+        assert issubclass(MultiVisualRewardManager, MultiRewardManager)
+
     def test_empty_reward_functions_raises(self):
         with pytest.raises(ValueError, match="non-empty"):
             _build_manager({})

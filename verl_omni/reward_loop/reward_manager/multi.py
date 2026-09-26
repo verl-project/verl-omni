@@ -11,18 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Multi-reward manager that aggregates multiple reward functions via weighted sum."""
+"""Input-agnostic multi-reward execution and weighted aggregation."""
 
 import inspect
 import logging
+from abc import ABC, abstractmethod
 
+import torch
 from verl import DataProto
+from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.import_utils import load_extern_object
 
 from verl_omni.workers.config.reward import get_reward_model_entries, resolve_reward_model_name
 
 from .media import _reward_extra_info
-from .visual import VisualRewardManager, _validate_visual_response
+from .visual import _validate_visual_response
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +33,7 @@ logger = logging.getLogger(__name__)
 def _multi_reward_placeholder(**kwargs):
     """Sentinel function used as the upstream custom_reward_function placeholder.
 
-    This is never called directly; MultiVisualRewardManager overrides run_single.
+    This is never called directly; MultiRewardManager overrides run_single.
     """
     raise RuntimeError("_multi_reward_placeholder should never be called directly")
 
@@ -49,19 +52,22 @@ def _filter_kwargs(all_kwargs: dict, sig: inspect.Signature) -> dict:
     return {k: v for k, v in all_kwargs.items() if k in params}
 
 
-class MultiVisualRewardManager(VisualRewardManager):
-    """Reward manager that loads and aggregates multiple reward functions.
+class MultiRewardManager(RewardManagerBase, ABC):
+    """Load and aggregate reward functions without owning an input modality.
 
     Each sub-reward function is called with filtered kwargs (based on its signature),
     and the final reward is a weighted sum of all sub-rewards.
 
     A sub-reward may reference a named model. The selected executor supplies
     inference access, while the configured reward function owns score semantics.
+    Input-specific managers implement :meth:`_build_reward_kwargs` and delegate
+    scorer execution and aggregation to this class.
     """
 
     def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
-        # Initialize parent with the placeholder (never actually called)
-        super().__init__(config, tokenizer, _multi_reward_placeholder, reward_router_address, reward_model_tokenizer)
+        RewardManagerBase.__init__(self, config, tokenizer, _multi_reward_placeholder)
+        self.reward_router_address = reward_router_address
+        self.reward_model_tokenizer = reward_model_tokenizer
 
         self._engine_reward_executors = {}
         self._native_reward_executors = {}
@@ -69,7 +75,7 @@ class MultiVisualRewardManager(VisualRewardManager):
         reward_functions_cfg = config.reward.reward_functions
         reward_models_cfg = get_reward_model_entries(config)
         if not reward_functions_cfg:
-            raise ValueError("MultiVisualRewardManager requires non-empty reward.reward_functions config")
+            raise ValueError("MultiRewardManager requires non-empty reward.reward_functions config")
 
         self._sub_rewards = []
         total_weight = 0.0
@@ -131,44 +137,17 @@ class MultiVisualRewardManager(VisualRewardManager):
                 f"Check reward.reward_functions config."
             )
 
-    def set_reward_executors(self, engine_reward_executors, native_reward_executors) -> None:
+    def set_reward_executors(self, engine_reward_executors: dict | None, native_reward_executors: dict | None) -> None:
         """Attach per-worker executors for configured engine/native models."""
         self._engine_reward_executors = engine_reward_executors or {}
         self._native_reward_executors = native_reward_executors or {}
 
-    async def run_single(self, data: DataProto) -> dict:
-        assert len(data) == 1, "Only support single data item"
-        data_item = data[0]
-        response_visual = data_item.batch["responses"]
-        _validate_visual_response(response_visual, self.config, is_validate=data_item.meta_info.get("validate", False))
-        data_source = data_item.non_tensor_batch["data_source"]
-        ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
-        extra_info = _reward_extra_info(data_item)
+    @abstractmethod
+    async def _build_reward_kwargs(self, data_item: DataProto) -> dict:
+        """Build scorer kwargs for one sample in a modality-specific subclass."""
 
-        num_turns = data_item.non_tensor_batch.get("__num_turns__", None)
-        rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
-        extra_info["num_turns"] = num_turns
-        extra_info["rollout_reward_scores"] = rollout_reward_scores
-
-        extra_reward_kwargs = (
-            {
-                "reward_router_address": self.reward_router_address,
-                "reward_model_tokenizer": self.reward_model_tokenizer,
-                "model_name": self.config.reward.reward_model.model_path,
-            }
-            if self.reward_router_address is not None
-            else {}
-        )
-
-        # Build the full kwargs dict that any sub-function might need
-        all_kwargs = {
-            "data_source": data_source,
-            "solution_image": response_visual,
-            "ground_truth": ground_truth,
-            "extra_info": extra_info,
-            **extra_reward_kwargs,
-        }
-
+    async def _run_multi_reward(self, all_kwargs: dict) -> dict:
+        """Execute configured reward terms and preserve their weighted outputs."""
         combined_score = 0.0
         reward_extra_info = {}
 
@@ -227,3 +206,50 @@ class MultiVisualRewardManager(VisualRewardManager):
 
         reward_extra_info["reward/combined"] = combined_score
         return {"reward_score": combined_score, "reward_extra_info": reward_extra_info}
+
+    async def run_single(self, data: DataProto) -> dict:
+        """Prepare one sample through the subclass input contract, then aggregate."""
+        if len(data) != 1:
+            raise ValueError(f"{type(self).__name__} scores one sample at a time, got batch size {len(data)}.")
+        return await self._run_multi_reward(await self._build_reward_kwargs(data[0]))
+
+
+class MultiVisualRewardManager(MultiRewardManager):
+    """Visual input contract backed by the shared multi-reward aggregator."""
+
+    @classmethod
+    def assemble_rm_scores(cls, data: DataProto, scores: list[float]) -> torch.Tensor:
+        """Keep the historical per-sample visual score layout."""
+        return torch.tensor(scores, dtype=torch.float32).unsqueeze(-1)
+
+    async def _build_reward_kwargs(self, data_item: DataProto) -> dict:
+        """Preserve the existing visual manager input and router contract."""
+        response_visual = data_item.batch["responses"]
+        _validate_visual_response(
+            response_visual,
+            self.config,
+            is_validate=data_item.meta_info.get("validate", False),
+        )
+        batch = data_item.non_tensor_batch
+        extra_info = _reward_extra_info(data_item)
+        extra_info["num_turns"] = batch.get("__num_turns__", None)
+        extra_info["rollout_reward_scores"] = batch.get("reward_scores", {})
+
+        reward_kwargs = {
+            "data_source": batch["data_source"],
+            "solution_image": response_visual,
+            "ground_truth": batch["reward_model"]["ground_truth"],
+            "extra_info": extra_info,
+        }
+        if self.reward_router_address is not None:
+            rm_rollout = self.config.reward.reward_model.rollout
+            sampling_params = {"max_tokens": getattr(rm_rollout, "response_length", None) or 4096}
+            if rm_rollout.get("full_determinism", False):
+                sampling_params["seed"] = rm_rollout.get("seed", 42)
+            reward_kwargs.update(
+                reward_router_address=self.reward_router_address,
+                reward_model_tokenizer=self.reward_model_tokenizer,
+                model_name=self.config.reward.reward_model.model_path,
+                sampling_params=sampling_params,
+            )
+        return reward_kwargs

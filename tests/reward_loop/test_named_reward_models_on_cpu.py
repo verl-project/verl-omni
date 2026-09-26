@@ -33,7 +33,7 @@ from verl_omni.reward_loop.reward_loop import (
     OmniRewardLoopWorker,
     _validate_named_reward_manager_cls,
 )
-from verl_omni.reward_loop.reward_manager import MultiVisualRewardManager, VisualRewardManager
+from verl_omni.reward_loop.reward_manager import MultiRewardManager, MultiVisualRewardManager, VisualRewardManager
 from verl_omni.reward_loop.reward_model import (
     EngineManagedRewardModel,
     MultiRewardModelManager,
@@ -240,10 +240,12 @@ def test_native_only_model_uses_parent_pool_and_batch_scoring():
     assert not streaming_reward_enabled(config)
 
 
-def test_named_models_require_explicit_multi_visual_reward_manager():
+def test_named_models_require_multi_reward_manager():
     _validate_named_reward_manager_cls(MultiVisualRewardManager)
 
-    with pytest.raises(ValueError, match="currently requires.*MultiVisualRewardManager"):
+    with pytest.raises(ValueError, match="requires a MultiRewardManager subclass"):
+        _validate_named_reward_manager_cls(MultiRewardManager)
+    with pytest.raises(ValueError, match="requires a MultiRewardManager subclass"):
         _validate_named_reward_manager_cls(VisualRewardManager)
 
 
