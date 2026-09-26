@@ -359,7 +359,7 @@ def test_trainer_factory_uses_upstream_replay_buffer(trainer_mode, drop_incomple
 @pytest.mark.parametrize(
     ("trainer_mode", "expected_poll_interval"),
     [
-        ("sync", 0.1),
+        ("sync", 0.05),
         ("separate_async", 2.0),
     ],
 )

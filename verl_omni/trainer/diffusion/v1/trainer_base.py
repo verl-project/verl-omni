@@ -226,7 +226,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # to overlap with the wait, so poll fast unless configured otherwise.
         poll_interval = sampler_config.get("poll_interval", None)
         if poll_interval is None:
-            poll_interval = 2.0 if self.trainer_mode == "separate_async" else 0.1
+            poll_interval = 2.0 if self.trainer_mode == "separate_async" else 0.05
         return replay_buffer_cls(
             trainer_mode=self.trainer_mode,
             trainer_config=self.config.trainer.v1.get(self.trainer_mode, {}),
