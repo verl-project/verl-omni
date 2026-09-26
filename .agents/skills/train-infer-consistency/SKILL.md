@@ -10,8 +10,8 @@ this skill connects their inputs and outputs without repeating their procedures.
 
 | Stage | Skill |
 | --- | --- |
-| Collect dumps | [verl-omni-msprobe-dump](https://gitcode.com/Ascend/msagent/tree/master/skills/accuracy/verl-omni-msprobe-dump) |
-| Analyze differences | [rl-consistency-analysis](https://gitcode.com/Ascend/msagent/tree/master/skills/accuracy/rl-consistency-analysis) |
+| Collect dumps | [verl-omni-msprobe-dump](https://github.com/Ascend/msagent/tree/master/skills/accuracy/verl-omni-msprobe-dump) |
+| Analyze differences | [rl-consistency-analysis](https://github.com/Ascend/msagent/tree/master/skills/accuracy/rl-consistency-analysis) |
 
 ## Prerequisite — MSProbe
 
