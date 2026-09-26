@@ -1,6 +1,6 @@
 # CI/CD Layers
 
-Last updated: 08/04/2026.
+Last updated: 09/17/2026.
 
 VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or convergence validation can evolve independently.
 
@@ -12,7 +12,9 @@ VeRL-Omni uses layered CI/CD checks so fast CPU feedback and expensive GPU or co
 | L4 convergence tests | Validate real recipe convergence | Weekly, release candidate, or manual | Production GPU cluster | Release readiness gate | Reward/loss curves and convergence reports |
 
 L3 has one runnable scheduled workflow for the Qwen-Image FlowGRPO
-single-sample regression. L4 remains a planned layer.
+single-sample regression. L4 has declarative real-model recipes, a runnable
+runner, and a release-readiness report; whether a specific L4 case can run is
+decided per case by its declared hardware and asset requirements.
 
 ## L1 CPU API Tests
 
@@ -76,6 +78,50 @@ should be treated as a regression signal rather than a required merge gate.
 L4 validates production-like recipes with real weights and real datasets. These checks are release-focused and should compare convergence curves against reviewed baselines.
 
 L4 is not a replacement for L1 or L2. A recipe can converge while an API regression still exists, and a unit test can pass while a long-running recipe no longer converges.
+
+The layer lives in `tests/convergence/`. Each case is a declarative recipe under
+`tests/convergence/recipes/` that names an existing example launcher, the real
+checkpoints and dataset shards it needs, the hardware it requires, the tracked
+reward/loss metric and its direction, the scoring window, the tolerance, and the
+baseline artifact. See `[tests/convergence/README.md](../../tests/convergence/README.md)`
+for the full schema.
+
+Run it with:
+
+```bash
+# Static check only; never starts training.
+MODE=preflight bash tests/convergence/run_l4_convergence.sh
+
+# Release owners only, on the release runner.
+MODE=baseline bash tests/convergence/run_l4_convergence.sh
+
+# Comparison against the reviewed baselines plus the release report.
+MODE=verify bash tests/convergence/run_l4_convergence.sh
+```
+
+The GitHub workflow is `.github/workflows/l4_weekly_convergence.yml`. It runs
+weekly at 22:00 Asia/Shanghai on Saturday, on `workflow_dispatch` with
+`mode=preflight|baseline|verify`, and on pull requests labelled
+`L4-convergence-ci`.
+
+L4 fails closed by design:
+
+- A case whose checkpoints, dataset shards, or GPU capacity are missing is
+  reported as `skipped` with the exact unmet requirement, and no training starts.
+- A case with no reviewed baseline is `invalid`; the current run never becomes its
+  own baseline.
+- A run whose weights, dataset, algorithm, precision, scoring window, step budget,
+  or GPU shape differs from the baseline is `incomparable`, never "no regression".
+- `release_readiness.json` and `release_readiness.md` report `ready` only when
+  every gated case passed against a reviewed baseline. `blocked` means a gated
+  case regressed; `incomplete` means the evidence does not exist. Both exit
+  non-zero.
+
+Because the L4 recipes need production-class hardware and real checkpoints, the
+current GPU CI runner is expected to report `incomplete` until a cluster is
+attached. That is the intended behaviour: an L4 gate that cannot produce evidence
+must not report success. Baselines live in the `l4-convergence-baseline` artifact
+(retained 90 days), keyed by branch, mirroring the L3 nightly policy.
 
 ## Contributor Expectations
 
