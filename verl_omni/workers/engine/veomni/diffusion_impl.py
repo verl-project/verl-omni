@@ -562,7 +562,7 @@ class VeOmniDiffusionEngine(BaseEngine):
             grad_norm = grad_norm.full_tensor()
 
         if not torch.isfinite(grad_norm):
-            logger.warning("grad_norm is not finite: %s", grad_norm)
+            logger.warning("grad_norm is not finite: %s; skipping this optimizer step.", grad_norm)
             self.optimizer.zero_grad()
         else:
             self.optimizer.step()

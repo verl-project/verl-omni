@@ -76,6 +76,7 @@ from verl_omni.trainer.diffusion.diffusion_trainer_utils import (
     NoOpCheckpointManager,
     _to_diffusion_worker_tensordict,
     old_policy_decay,
+    track_nonfinite_grad_streak,
     validate_distillation_config,
     worker_group_port_ranges,
 )
@@ -1356,6 +1357,7 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         self.global_steps += 1
         last_val_metrics = None
         self.max_steps_duration = 0
+        self._nonfinite_grad_streak = 0
 
         # Profiler step state machine. Mirrors verl/trainer/ppo/ray_trainer.py.
         prev_step_profile = False
@@ -1592,6 +1594,8 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
                 # compute variance proxy metrics
                 gradient_norm = metrics.get("actor/grad_norm", None)
                 metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
+                self._nonfinite_grad_streak = track_nonfinite_grad_streak(self._nonfinite_grad_streak, gradient_norm)
+                metrics["train/nonfinite_grad_steps"] = self._nonfinite_grad_streak
 
                 logger.log(data=metrics, step=self.global_steps)
 
@@ -1800,6 +1804,7 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         self.global_steps += 1
         last_val_metrics = None
         self.max_steps_duration = 0
+        self._nonfinite_grad_streak = 0
 
         # Profiler step state machine. Mirrors verl/trainer/ppo/ray_trainer.py.
         prev_step_profile = False
@@ -2000,9 +2005,11 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
                 )
                 metrics.update(compute_timing_metrics_diffusion(timing_raw=timing_raw, num_images=num_images))
                 metrics.update(compute_throughput_metrics_diffusion(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
+                gradient_norm = metrics.get("actor/grad_norm", None)
                 if "advantages" in batch.batch:
-                    gradient_norm = metrics.get("actor/grad_norm", None)
                     metrics.update(compute_variance_proxy_metrics(batch=batch, gradient_norm=gradient_norm))
+                self._nonfinite_grad_streak = track_nonfinite_grad_streak(self._nonfinite_grad_streak, gradient_norm)
+                metrics["train/nonfinite_grad_steps"] = self._nonfinite_grad_streak
 
                 logger.log(data=metrics, step=self.global_steps)
 
