@@ -28,7 +28,10 @@ checkpoint config instead of its production-only 5120-wide constant.
 
 Usage:
     python tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py \
-        --task all --num-gpus 2 --actor-sp 2 --total-steps 2
+        --task all --actor-backend fsdp2 --num-gpus 2 --actor-sp 2 --total-steps 2
+
+    python tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py \
+        --task t2va --actor-backend veomni --num-gpus 2 --total-steps 2
 
 The GPU-smoke harness passes ``--task t2va`` explicitly to keep CI within its
 time budget; FL2VA and Ref2VA remain available for targeted manual validation.
@@ -135,6 +138,7 @@ def _hydra_overrides(
     reward_stub_path: str,
     output_dir: str,
     task: str,
+    actor_backend: str,
     num_gpus: int,
     actor_sp: int,
     rollout_tp: int,
@@ -148,6 +152,8 @@ def _hydra_overrides(
 ) -> list[str]:
     """Build a minimal task-specific MiniMax H3 FlowGRPO Hydra invocation."""
     _validate_actor_sp(num_gpus, actor_sp)
+    if actor_backend == "veomni" and actor_sp != 1:
+        raise ValueError("The VeOmni MiniMax H3 actor supports Ulysses SP=1 only; use --actor-backend fsdp2.")
     micro_bsz_per_gpu = 1
     # The Ref2VA rollout path requires exactly one output per request, while
     # T2VA and FL2VA use two responses to exercise grouped advantages.
@@ -156,8 +162,14 @@ def _hydra_overrides(
     train_batch_size = mini_bsz * n_resp_per_prompt
     partition_dir = "Ref2VA" if task == "ref2va" else "FL2VA"
     rollout_model = f"{tiny_model_dir}/{partition_dir}"
-    actor_transformer = f"{tiny_model_dir}/transformer"
-    h3_lora_targets = "['to_q','to_k','to_v','to_out.0','ff.net.0.proj','ff.net.2']"
+    if actor_backend == "veomni":
+        actor_transformer = f"{tiny_model_dir}/veomni_transformer"
+        actor_subfolder = "../veomni_transformer"
+        h3_lora_targets = "['qkv_proj','out_proj','fc1','fc2']"
+    else:
+        actor_transformer = f"{tiny_model_dir}/transformer"
+        actor_subfolder = "transformer"
+        h3_lora_targets = "['to_q','to_k','to_v','to_out.0','ff.net.0.proj','ff.net.2']"
 
     overrides = [
         # data
@@ -173,37 +185,55 @@ def _hydra_overrides(
         "algorithm.sample_source=online",
         "algorithm.adv_estimator=flow_grpo",
         "algorithm.global_std=True",
+        *(["diffusion/model_engine=veomni_diffusion"] if actor_backend == "veomni" else []),
         # model
         f"actor_rollout_ref.model.path={rollout_model}",
         f"actor_rollout_ref.model.config_path={actor_transformer}",
         "+actor_rollout_ref.model.architecture=MiniMaxH3Pipeline",
         "actor_rollout_ref.model.algorithm=flow_grpo",
-        "actor_rollout_ref.model.transformer_subfolder=transformer",
+        f"actor_rollout_ref.model.transformer_subfolder={actor_subfolder}",
         "actor_rollout_ref.model.attn_backend=native",
         "actor_rollout_ref.model.enable_gradient_checkpointing=True",
         "actor_rollout_ref.model.lora_rank=8",
         "actor_rollout_ref.model.lora_alpha=16",
+        *(["actor_rollout_ref.model.lora_init_weights=true"] if actor_backend == "veomni" else []),
         f"actor_rollout_ref.model.target_modules={h3_lora_targets}",
-        "actor_rollout_ref.model.fsdp_layer_prefixes=['transformer_blocks.','token_refiner.refiner_blocks.']",
-        (
-            "+actor_rollout_ref.actor.fsdp_config.wrap_policy."
-            "transformer_layer_cls_to_wrap=[MiniMaxH3TransformerBlock,MiniMaxH3TokenRefinerBlock]"
-        ),
         # actor
-        "actor_rollout_ref.actor.strategy=fsdp2",
+        f"actor_rollout_ref.actor.strategy={actor_backend}",
         "actor_rollout_ref.actor.optim.lr=1e-4",
         "actor_rollout_ref.actor.optim.weight_decay=1e-4",
         "actor_rollout_ref.actor.optim.betas=[0.9,0.999]",
-        "actor_rollout_ref.actor.optim.override_optimizer_config={eps: 1e-8}",
+        (
+            "actor_rollout_ref.actor.optim.eps=1e-8"
+            if actor_backend == "veomni"
+            else "actor_rollout_ref.actor.optim.override_optimizer_config={eps: 1e-8}"
+        ),
         "actor_rollout_ref.actor.optim.clip_grad=1.0",
         f"actor_rollout_ref.actor.ppo_mini_batch_size={mini_bsz}",
         f"actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu={micro_bsz_per_gpu}",
         "actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_grpo",
         "actor_rollout_ref.actor.use_kl_loss=False",
-        "actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16",
-        "actor_rollout_ref.actor.fsdp_config.param_offload=True",
-        "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True",
-        f"actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size={actor_sp}",
+        *(
+            [
+                "actor_rollout_ref.actor.veomni_config.strategy=veomni",
+                "actor_rollout_ref.actor.veomni_config.attn_implementation=eager",
+                "actor_rollout_ref.actor.veomni_config.param_offload=True",
+                "actor_rollout_ref.actor.veomni_config.optimizer_offload=True",
+                "actor_rollout_ref.actor.veomni_config.ulysses_parallel_size=1",
+            ]
+            if actor_backend == "veomni"
+            else [
+                "actor_rollout_ref.model.fsdp_layer_prefixes=['transformer_blocks.','token_refiner.refiner_blocks.']",
+                (
+                    "+actor_rollout_ref.actor.fsdp_config.wrap_policy."
+                    "transformer_layer_cls_to_wrap=[MiniMaxH3TransformerBlock,MiniMaxH3TokenRefinerBlock]"
+                ),
+                "actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16",
+                "actor_rollout_ref.actor.fsdp_config.param_offload=True",
+                "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True",
+                f"actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size={actor_sp}",
+            ]
+        ),
         # rollout
         "actor_rollout_ref.rollout.name=vllm_omni",
         "actor_rollout_ref.rollout.max_num_seqs=1",
@@ -247,6 +277,15 @@ def _hydra_overrides(
         "actor_rollout_ref.rollout.val_kwargs.algo.noise_level=0.0",
         f"actor_rollout_ref.rollout.text_encoder_tp_size={text_encoder_tp}",
         f"actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu={micro_bsz_per_gpu}",
+        *(
+            [
+                "actor_rollout_ref.ref.veomni_config.strategy=veomni",
+                "actor_rollout_ref.ref.veomni_config.attn_implementation=eager",
+                "actor_rollout_ref.ref.veomni_config.ulysses_parallel_size=1",
+            ]
+            if actor_backend == "veomni"
+            else []
+        ),
         # reward: local stub only; no CLAP, ImageBind, or reward-model weights.
         "reward.num_workers=1",
         "reward.reward_model.enable=False",
@@ -287,6 +326,7 @@ def _hydra_overrides(
 def run_smoke(
     *,
     task: str,
+    actor_backend: str,
     tiny_model_dir: str,
     data_dir: str,
     output_dir: str,
@@ -361,6 +401,7 @@ def run_smoke(
         reward_stub_path=reward_stub_path,
         output_dir=output_dir,
         task=task,
+        actor_backend=actor_backend,
         num_gpus=num_gpus,
         actor_sp=actor_sp,
         rollout_tp=rollout_tp,
@@ -374,9 +415,12 @@ def run_smoke(
     )
     cmd = [sys.executable, "-m", "verl_omni.trainer.main_diffusion", *overrides]
     child_env = _tiny_patch_environment(tiny_model_dir, task)
+    if actor_backend == "veomni":
+        child_env.setdefault("MINIMAX_H3_ATTENTION_IMPLEMENTATION", "torch")
     print(
-        f"[3/3] launching FlowGRPO {task.upper()} main_diffusion (num_gpus={num_gpus}, actor_sp={actor_sp}, "
-        f"tp={rollout_tp}, te_tp={text_encoder_tp}, steps={total_training_steps})",
+        f"[3/3] launching FlowGRPO {task.upper()} main_diffusion (backend={actor_backend}, "
+        f"num_gpus={num_gpus}, actor_sp={actor_sp}, tp={rollout_tp}, te_tp={text_encoder_tp}, "
+        f"steps={total_training_steps})",
         flush=True,
     )
     print("  cmd:", " ".join(cmd), flush=True)
@@ -399,6 +443,7 @@ def _parse_args() -> argparse.Namespace:
         "--output-dir",
         default=str(_REPO_ROOT / "outputs" / "run_flowgrpo_minimax_h3_tiny"),
     )
+    parser.add_argument("--actor-backend", choices=("fsdp2", "veomni"), default="fsdp2")
     parser.add_argument("--num-gpus", type=int, default=int(os.environ.get("NUM_GPUS", 2)))
     parser.add_argument("--actor-sp", type=int, default=int(os.environ.get("ACTOR_SP", 1)))
     parser.add_argument("--rollout-tp", type=int, default=int(os.environ.get("ROLLOUT_TP", 1)))
@@ -422,6 +467,7 @@ def main() -> None:
         print(f"===== MiniMax-H3 FlowGRPO {task.upper()} smoke ({index}/{len(tasks)}) =====", flush=True)
         rc = run_smoke(
             task=task,
+            actor_backend=args.actor_backend,
             tiny_model_dir=args.tiny_model_dir,
             data_dir=os.path.join(args.data_dir, task),
             output_dir=os.path.join(args.output_dir, task),
@@ -440,7 +486,7 @@ def main() -> None:
         if rc != 0:
             sys.exit(rc)
     completed_tasks = " + ".join(task.upper() for task in tasks)
-    print(f"MiniMax-H3 tiny FlowGRPO {completed_tasks} smoke PASSED.")
+    print(f"MiniMax-H3 tiny FlowGRPO {completed_tasks} ({args.actor_backend}) smoke PASSED.")
 
 
 if __name__ == "__main__":

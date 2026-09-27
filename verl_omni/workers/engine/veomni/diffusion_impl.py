@@ -382,12 +382,14 @@ class VeOmniDiffusionEngine(BaseEngine):
         return embeds, mask
 
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
+        from verl_omni.workers.engine.fsdp.diffusers_impl import DiffusersFSDPEngine
+
         latents = micro_batch["all_latents"]
         timesteps = micro_batch["all_timesteps"]
         prompt_embeds = micro_batch["prompt_embeds"]
         prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
-        negative_prompt_embeds = micro_batch["negative_prompt_embeds"]
-        negative_prompt_embeds_mask = micro_batch["negative_prompt_embeds_mask"]
+        negative_prompt_embeds = micro_batch.get("negative_prompt_embeds")
+        negative_prompt_embeds_mask = micro_batch.get("negative_prompt_embeds_mask")
         sp_size = self.ulysses_sequence_parallel_size if self.use_ulysses_sp else 1
 
         if prompt_embeds.is_nested:
@@ -406,6 +408,7 @@ class VeOmniDiffusionEngine(BaseEngine):
                 negative_prompt_embeds, negative_prompt_embeds_mask, sp_size
             )
 
+        DiffusersFSDPEngine._unpad_condition_rows(self, micro_batch)
         return prepare_model_inputs(
             module=self.module,
             model_config=self.model_config,
@@ -677,7 +680,9 @@ class VeOmniDiffusionEngine(BaseEngine):
                 if "lora_" not in name
             }
 
-        return convert_weight_keys(params, peft_model), lora_config.to_peft_dict()
+        if not getattr(peft_model, "_checkpoint_conversion_mapping", None):
+            params = convert_weight_keys(params, peft_model)
+        return params, lora_config.to_peft_dict()
 
     def get_per_tensor_param(self, **kwargs):
         load_model_to_gpu(self.module, get_device_id())
@@ -690,7 +695,9 @@ class VeOmniDiffusionEngine(BaseEngine):
             )
         else:
             params = self.module.state_dict()
-            params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
+            module = getattr(self.module, "_fsdp_wrapped_module", self.module)
+            if not getattr(module, "_checkpoint_conversion_mapping", None):
+                params = convert_weight_keys(params, module)
 
         if self._is_offload_param:
             offload_model_to_cpu(self.module)

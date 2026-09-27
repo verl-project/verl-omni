@@ -617,8 +617,10 @@ _TOPLEVEL_RENAMES = (
 )
 
 
-def _diffusers_to_vllm_name(name: str) -> str:
-    """Rename a diffusers transformer param to its fused-vllm counterpart (no reshape)."""
+def diffusers_to_vllm_name(name: str) -> str:
+    """Rename a Diffusers or VeOmni H3 parameter to its fused vLLM-Omni counterpart."""
+    if name.startswith("dit."):
+        return name.removeprefix("dit.")
     name = name.replace("token_refiner.refiner_blocks.", "token_refiner.blocks.")
     name = name.replace("transformer_blocks.", "blocks.")
     name = name.replace(".attn.norm_q.", ".attn.q_norm.")
@@ -658,7 +660,7 @@ def validate_lora_target_modules(target_modules) -> set[str]:
     return requested
 
 
-_LORA_STACKED_PARAMS_MAPPING = [
+H3_LORA_STACKED_PARAMS_MAPPING = [
     (".qkv_proj", ".to_q", "q"),
     (".qkv_proj", ".to_k", "k"),
     (".qkv_proj", ".to_v", "v"),
@@ -669,10 +671,10 @@ _LORA_STACKED_PARAMS_MAPPING = [
 
 def _map_lora_module_to_vllm(module: str) -> str:
     """Map a diffusers LoRA target module path to its fused-vllm path (fc1 handled separately)."""
-    return _diffusers_to_vllm_name(module + ".")[:-1]
+    return diffusers_to_vllm_name(module + ".")[:-1]
 
 
-class _PromptTokenOverride:
+class H3PromptTokenOverride:
     """Return the Agent Loop token IDs when the upstream pipeline tokenizes the prompt.
 
     Ref2VA prompts mix images, videos and standalone audio, so the upstream pipeline
@@ -694,6 +696,31 @@ class _PromptTokenOverride:
         return getattr(self._tokenizer, name)
 
 
+def prepare_h3_token_id_prompt(request: Any) -> torch.Tensor | None:
+    """Set the upstream prompt placeholder and return Agent Loop token IDs."""
+    prompts = getattr(request, "prompts", None)
+    custom_prompt = prompts[0] if prompts and isinstance(prompts[0], dict) else getattr(request, "prompt", None)
+    if not isinstance(custom_prompt, dict):
+        return None
+
+    token_ids = prompt_ids_from_payload(custom_prompt)
+    if token_ids is None:
+        return None
+    extra_args = getattr(getattr(request, "sampling_params", None), "extra_args", None) or {}
+    if extra_args.get(MINIMAX_H3_TOKEN_ID_NATIVE_KEY) is not True:
+        raise ValueError(
+            "MiniMax H3 token-ID-native rollout requires "
+            "actor_rollout_ref.rollout.agent.default_agent_loop="
+            "minimax_h3_diffusion_single_turn_agent."
+        )
+
+    prompt_ids = torch.as_tensor(token_ids, dtype=torch.long).detach().cpu().reshape(-1)
+    if prompt_ids.numel() == 0:
+        raise ValueError("MiniMax H3 requires non-empty prompt_ids.")
+    custom_prompt["prompt"] = "[pretokenized]"
+    return prompt_ids
+
+
 class MiniMaxH3RolloutWeightSyncMixin:
     """Map Diffusers H3 weights and token-id-native prompts to vLLM-Omni."""
 
@@ -706,7 +733,7 @@ class MiniMaxH3RolloutWeightSyncMixin:
         if task == "ref2va":
             # Let the upstream pipeline build every reference span; the override keeps the Agent Loop text token IDs.
             tokenizer = self.tokenizer
-            self.tokenizer = _PromptTokenOverride(tokenizer, prompt, prompt_ids)
+            self.tokenizer = H3PromptTokenOverride(tokenizer, prompt, prompt_ids)
             try:
                 return super().encode_prompt(task=task, prompt=prompt, image=image, images=images, **kwargs)
             finally:
@@ -774,15 +801,15 @@ class MiniMaxH3RolloutWeightSyncMixin:
                 if len(slot) == 3:
                     heads_qkv = [slot[c].view(heads, head_dim, -1) for c in ("q", "k", "v")]
                     qkv = torch.stack(heads_qkv, dim=1).reshape(heads * 3 * head_dim, -1)
-                    translated.append((f"transformer.{_diffusers_to_vllm_name(block)}.attn.qkv_proj.weight", qkv))
+                    translated.append((f"transformer.{diffusers_to_vllm_name(block)}.attn.qkv_proj.weight", qkv))
                     del partials[block]
                 continue
             if inner.endswith(".ff.net.0.proj.weight"):
                 swapped = torch.cat([tensor[ff_half:], tensor[:ff_half]], dim=0)
-                vname = _diffusers_to_vllm_name(inner).replace(".ff.net.0.proj.", ".mlp.fc1.")
+                vname = diffusers_to_vllm_name(inner).replace(".ff.net.0.proj.", ".mlp.fc1.")
                 translated.append((f"transformer.{vname}", swapped))
                 continue
-            translated.append((f"transformer.{_diffusers_to_vllm_name(inner)}", tensor))
+            translated.append((f"transformer.{diffusers_to_vllm_name(inner)}", tensor))
         needs_rope = not getattr(self, "_rope_inv_freq_loaded", False)
         if needs_rope:
             rope_len = arch.rope_inv_freq_len
@@ -804,7 +831,7 @@ class MiniMaxH3RolloutWeightSyncMixin:
         """Install H3 QKV and FC1 LoRA slice metadata."""
         transformer = getattr(self, "transformer", None)
         if transformer is not None and not getattr(transformer, "stacked_params_mapping", None):
-            transformer.stacked_params_mapping = list(_LORA_STACKED_PARAMS_MAPPING)
+            transformer.stacked_params_mapping = list(H3_LORA_STACKED_PARAMS_MAPPING)
 
     def map_lora_update_to_engine(
         self, tensors: dict[str, torch.Tensor], peft_config: dict
@@ -831,7 +858,7 @@ class MiniMaxH3RolloutWeightSyncMixin:
                 continue
             module = module[min(anchors) :]
             if ".ff.net.0.proj" in module:
-                base = _diffusers_to_vllm_name(module + ".")[:-1].replace(".ff.net.0.proj", ".mlp.fc1")
+                base = diffusers_to_vllm_name(module + ".")[:-1].replace(".ff.net.0.proj", ".mlp.fc1")
                 if is_lora_b:
                     swapped = torch.cat([tensor[ff_half:], tensor[:ff_half]], dim=0)
                     mapped[f"transformer.{base}_0{suffix}"] = swapped[:ff_half].contiguous()
@@ -849,27 +876,4 @@ class MiniMaxH3RolloutWeightSyncMixin:
 
     def _ensure_prompt_text(self, request: Any) -> None:
         """Expose pre-tokenized IDs and satisfy the upstream non-empty-text check."""
-        self._h3_prompt_ids = None
-        prompts = getattr(request, "prompts", None)
-        if not prompts or not isinstance(prompts[0], dict):
-            return
-        custom_prompt = prompts[0]
-        token_ids = prompt_ids_from_payload(custom_prompt)
-        if token_ids is None:
-            return
-        sampling_params = getattr(request, "sampling_params", None)
-        extra_args = getattr(sampling_params, "extra_args", None) or {}
-        if extra_args.get(MINIMAX_H3_TOKEN_ID_NATIVE_KEY) is not True:
-            raise ValueError(
-                "MiniMax H3 token-ID-native rollout requires "
-                "actor_rollout_ref.rollout.agent.default_agent_loop="
-                "minimax_h3_diffusion_single_turn_agent."
-            )
-        if isinstance(token_ids, torch.Tensor):
-            token_ids = token_ids.detach().cpu().tolist()
-        if token_ids and isinstance(token_ids[0], list):
-            token_ids = token_ids[0]
-        self._h3_prompt_ids = torch.as_tensor([int(token) for token in token_ids], dtype=torch.long)
-        if self._h3_prompt_ids.numel() == 0:
-            raise ValueError("MiniMax H3 requires non-empty prompt_ids.")
-        custom_prompt["prompt"] = "[pretokenized]"
+        self._h3_prompt_ids = prepare_h3_token_id_prompt(request)

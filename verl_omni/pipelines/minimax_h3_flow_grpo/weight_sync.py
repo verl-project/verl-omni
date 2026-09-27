@@ -14,38 +14,17 @@
 
 """Map Diffusers MiniMax H3 weights to vLLM-Omni's fused DiT layout."""
 
-from collections.abc import Iterable
-from typing import Any
+from collections.abc import Iterable, Sequence
 
 import torch
 
-from verl_omni.pipelines.minimax_h3_diffusion_nft.common import MINIMAX_H3_TOKEN_ID_NATIVE_KEY
-from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
-
-# Diffusers and vLLM-Omni use different names for the same H3 modules. QKV
-# and GEGLU projections also have different tensor layouts and are handled
-# separately in ``load_weights`` below.
-_TOPLEVEL_RENAMES = (
-    ("audio_proj_in", "audio_patch_proj"),
-    ("audio_proj_out", "final_layer.audio_out"),
-    ("proj_in", "video_patch_proj"),
-    ("proj_out", "final_layer.video_out"),
-    ("context_embedder", "condition_proj"),
-    ("time_embedder.linear_1", "time_embedder.proj_in"),
-    ("time_embedder.linear_2", "time_embedder.proj_out"),
-    ("norm_out.linear", "final_layer.adaln_proj.linear"),
-    ("norm_out.norm", "final_layer.norm"),
+from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
+    H3_LORA_STACKED_PARAMS_MAPPING,
+    H3PromptTokenOverride,
+    diffusers_to_vllm_name,
+    prepare_h3_token_id_prompt,
 )
 
-# These virtual sublayer names let vLLM-Omni load independent Diffusers LoRAs
-# into its fused qkv_proj and fc1 modules.
-_LORA_STACKED_PARAMS_MAPPING = [
-    (".qkv_proj", ".to_q", "q"),
-    (".qkv_proj", ".to_k", "k"),
-    (".qkv_proj", ".to_v", "v"),
-    (".fc1", ".fc1_0", "0"),
-    (".fc1", ".fc1_1", "1"),
-]
 _LORA_TARGET_MAPPING = {
     "to_q": ("to_q",),
     "to_k": ("to_k",),
@@ -55,39 +34,50 @@ _LORA_TARGET_MAPPING = {
     "ff.net.2": ("fc2",),
 }
 H3_LORA_TARGETS = frozenset(_LORA_TARGET_MAPPING)
+H3_VEOMNI_LORA_TARGETS = frozenset({"qkv_proj", "out_proj", "fc1", "fc2"})
+_VEOMNI_LORA_TARGET_MAPPING = {
+    "qkv_proj": ("to_q", "to_k", "to_v"),
+    "out_proj": ("out_proj",),
+    "fc1": ("fc1_0", "fc1_1"),
+    "fc2": ("fc2",),
+}
 
 
-def _diffusers_to_vllm_name(name: str) -> str:
-    """Rename an unfused Diffusers H3 parameter without changing its tensor."""
-    name = name.replace("token_refiner.refiner_blocks.", "token_refiner.blocks.")
-    name = name.replace("transformer_blocks.", "blocks.")
-    name = name.replace(".attn.norm_q.", ".attn.q_norm.")
-    name = name.replace(".attn.norm_k.", ".attn.k_norm.")
-    name = name.replace(".attn.to_out.0.", ".attn.out_proj.")
-    name = name.replace(".ff.net.2.", ".mlp.fc2.")
-    for source, target in _TOPLEVEL_RENAMES:
-        if name.startswith(source + "."):
-            return target + name[len(source) :]
-    return name
+def _normalize_h3_lora_targets(target_modules: object) -> set[str]:
+    if isinstance(target_modules, str):
+        return {target_modules}
+    if isinstance(target_modules, Sequence | set | frozenset):
+        return {str(target) for target in target_modules}
+    raise ValueError(f"MiniMax H3 LoRA requires explicit target_modules, got {target_modules!r}.")
 
 
-def _lora_target_suffix(target: str) -> str | None:
-    return next((suffix for suffix in H3_LORA_TARGETS if target == suffix or target.endswith("." + suffix)), None)
+def _target_suffix(target: str, supported_targets: frozenset[str]) -> str | None:
+    return next(
+        (suffix for suffix in supported_targets if target == suffix or target.endswith("." + suffix)),
+        None,
+    )
 
 
-class _PromptTokenOverride:
-    def __init__(self, tokenizer: Any, prompt: str, prompt_ids: torch.Tensor) -> None:
-        self._tokenizer = tokenizer
-        self._prompt = prompt
-        self._prompt_ids = prompt_ids.detach().cpu().reshape(-1).tolist()
+def resolve_h3_lora_target_layout(target_modules: object) -> tuple[str, set[str]]:
+    """Normalize H3 LoRA targets and identify the Diffusers or VeOmni layout."""
+    requested = _normalize_h3_lora_targets(target_modules)
+    if requested and all(_target_suffix(target, H3_VEOMNI_LORA_TARGETS) is not None for target in requested):
+        return "veomni", requested
+    if requested and all(_target_suffix(target, H3_LORA_TARGETS) is not None for target in requested):
+        return "diffusers", requested
 
-    def __call__(self, text: str, *args, **kwargs):
-        if text == self._prompt:
-            return {"input_ids": list(self._prompt_ids)}
-        return self._tokenizer(text, *args, **kwargs)
+    supported = sorted(H3_LORA_TARGETS | H3_VEOMNI_LORA_TARGETS)
+    raise ValueError(
+        "MiniMax H3 LoRA supports only one complete projection naming layout from "
+        f"{supported}; got {sorted(requested)}. Other targets cannot be synchronized to the rollout model."
+    )
 
-    def __getattr__(self, name: str):
-        return getattr(self._tokenizer, name)
+
+def _split_lora_weight_name(name: str) -> tuple[str, str] | None:
+    for suffix in (".lora_A.weight", ".lora_B.weight"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)], suffix
+    return None
 
 
 # TODO: Remove this MiniMax H3-specific mapping once vLLM-Omni natively
@@ -108,38 +98,15 @@ class MiniMaxH3WeightSyncMixin:
             return super().encode_prompt(task=task, prompt=prompt, **kwargs)
 
         tokenizer = self.tokenizer
-        self.tokenizer = _PromptTokenOverride(tokenizer, prompt, prompt_ids)
+        self.tokenizer = H3PromptTokenOverride(tokenizer, prompt, prompt_ids)
         try:
             return super().encode_prompt(task=task, prompt=prompt, **kwargs)
         finally:
             self.tokenizer = tokenizer
 
-    def _ensure_prompt_text(self, request: Any) -> None:
+    def _ensure_prompt_text(self, request: object) -> None:
         """Expose Agent Loop IDs while satisfying upstream's text check."""
-        self._h3_prompt_ids = None
-        prompts = getattr(request, "prompts", None)
-        custom_prompt = prompts[0] if prompts and isinstance(prompts[0], dict) else getattr(request, "prompt", None)
-        if not isinstance(custom_prompt, dict):
-            return
-        token_ids = prompt_ids_from_payload(custom_prompt)
-        if token_ids is None:
-            return
-        sampling_params = getattr(request, "sampling_params", None)
-        extra_args = getattr(sampling_params, "extra_args", None) or {}
-        if extra_args.get(MINIMAX_H3_TOKEN_ID_NATIVE_KEY) is not True:
-            raise ValueError(
-                "MiniMax H3 token-ID-native rollout requires "
-                "actor_rollout_ref.rollout.agent.default_agent_loop="
-                "minimax_h3_diffusion_single_turn_agent."
-            )
-        if isinstance(token_ids, torch.Tensor):
-            token_ids = token_ids.detach().cpu().reshape(-1).tolist()
-        elif token_ids and isinstance(token_ids[0], list):
-            token_ids = token_ids[0]
-        self._h3_prompt_ids = torch.as_tensor([int(token) for token in token_ids], dtype=torch.long)
-        if self._h3_prompt_ids.numel() == 0:
-            raise ValueError("MiniMax H3 requires non-empty prompt_ids.")
-        custom_prompt["prompt"] = "[pretokenized]"
+        self._h3_prompt_ids = prepare_h3_token_id_prompt(request)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load full weights through vLLM-Omni's TP-aware parameter loaders."""
@@ -160,7 +127,7 @@ class MiniMaxH3WeightSyncMixin:
 
             if inner.endswith((".attn.to_q.weight", ".attn.to_k.weight", ".attn.to_v.weight")):
                 block, projection = inner.rsplit(".attn.to_", 1)
-                target_name = f"{_diffusers_to_vllm_name(block)}.attn.qkv_proj.weight"
+                target_name = f"{diffusers_to_vllm_name(block)}.attn.qkv_proj.weight"
                 params = component_params.get(target_component)
                 if params is None:
                     params = component_params[target_component] = dict(
@@ -175,7 +142,7 @@ class MiniMaxH3WeightSyncMixin:
                 continue
 
             if inner.endswith(".ff.net.0.proj.weight"):
-                target_name = _diffusers_to_vllm_name(inner).replace(".ff.net.0.proj.", ".mlp.fc1.")
+                target_name = diffusers_to_vllm_name(inner).replace(".ff.net.0.proj.", ".mlp.fc1.")
                 params = component_params.get(target_component)
                 if params is None:
                     params = component_params[target_component] = dict(
@@ -191,7 +158,7 @@ class MiniMaxH3WeightSyncMixin:
                 loaded.add(f"{component}.{target_name}")
                 continue
 
-            translated.append((f"{target_component}.{_diffusers_to_vllm_name(inner)}", tensor))
+            translated.append((f"{target_component}.{diffusers_to_vllm_name(inner)}", tensor))
 
         # Native H3 loading still handles all parameters that only need renaming.
         if translated:
@@ -201,8 +168,17 @@ class MiniMaxH3WeightSyncMixin:
     def install_h3_lora_layout(self) -> None:
         """Expose H3's fused QKV and GEGLU layout to the LoRA manager."""
         transformer = getattr(self, self._h3_weight_component_name(), None)
-        if transformer is not None and not getattr(transformer, "stacked_params_mapping", None):
-            transformer.stacked_params_mapping = list(_LORA_STACKED_PARAMS_MAPPING)
+        if transformer is None:
+            return
+        existing = list(getattr(transformer, "stacked_params_mapping", ()) or ())
+
+        def _leaf_pair(item: tuple) -> tuple[str, str]:
+            return tuple(str(name).strip(".").split(".")[-1] for name in item[:2])
+
+        known = {_leaf_pair(item) for item in existing if len(item) >= 2}
+        transformer.stacked_params_mapping = existing + [
+            item for item in H3_LORA_STACKED_PARAMS_MAPPING if _leaf_pair(item) not in known
+        ]
 
     def map_lora_update_to_engine(
         self,
@@ -210,34 +186,83 @@ class MiniMaxH3WeightSyncMixin:
         peft_config: dict,
     ) -> tuple[dict[str, torch.Tensor], dict]:
         """Map Diffusers LoRA tensors and targets to fused H3 modules."""
-        target_modules = peft_config.get("target_modules") if peft_config is not None else None
-        if isinstance(target_modules, str):
-            requested_targets = {target_modules}
-        elif isinstance(target_modules, list | tuple | set | frozenset):
-            requested_targets = {str(target) for target in target_modules}
-        else:
-            raise ValueError(f"MiniMax H3 LoRA sync requires explicit target_modules, got {target_modules!r}.")
-
-        target_suffixes = {target: _lora_target_suffix(target) for target in requested_targets}
-        unsupported = sorted(target for target, suffix in target_suffixes.items() if suffix is None)
-        if not requested_targets or unsupported:
-            raise ValueError(
-                "MiniMax H3 LoRA sync supports only attention Q/K/V/output and GEGLU projections; "
-                f"unsupported targets: {unsupported or sorted(requested_targets)}."
-            )
-
+        target_layout, requested_targets = resolve_h3_lora_target_layout(
+            peft_config.get("target_modules") if peft_config is not None else None
+        )
         component = self._h3_weight_component_name()
+        if target_layout == "veomni":
+            transformer = getattr(self, component)
+            heads = transformer.arch.num_attention_heads
+            head_dim = transformer.arch.attention_head_dim
+            ff_half = transformer.arch.ffn_hidden_size
+            mapped = {}
+            for name, tensor in tensors.items():
+                prefix, separator, inner = name.partition(".")
+                if separator and prefix == "transformer":
+                    inner = inner.removeprefix("base_model.model.")
+                    name = f"{component}.{diffusers_to_vllm_name(inner)}"
+                lora_weight = _split_lora_weight_name(name)
+                if lora_weight is None:
+                    mapped[name] = tensor
+                    continue
+                module, suffix = lora_weight
+                is_lora_a = suffix == ".lora_A.weight"
+                if module.endswith(".attn.qkv_proj"):
+                    base = module[: -len("qkv_proj")]
+                    if is_lora_a:
+                        projections = (tensor, tensor, tensor)
+                    else:
+                        expected = heads * 3 * head_dim
+                        if tensor.shape[0] != expected:
+                            raise ValueError(
+                                f"MiniMax H3 qkv_proj LoRA B rows must be {expected}, got {tensor.shape[0]} for {name}."
+                            )
+                        grouped = tensor.view(heads, 3, head_dim, -1)
+                        projections = tuple(grouped[:, index].reshape(heads * head_dim, -1) for index in range(3))
+                    for target, projection in zip(("to_q", "to_k", "to_v"), projections, strict=True):
+                        mapped[f"{base}{target}{suffix}"] = projection.contiguous()
+                    continue
+                if module.endswith(".mlp.fc1"):
+                    base = module[: -len("fc1")]
+                    if is_lora_a:
+                        projections = (tensor, tensor)
+                    else:
+                        if tensor.shape[0] != 2 * ff_half:
+                            raise ValueError(
+                                f"MiniMax H3 fc1 LoRA B rows must be {2 * ff_half}, got {tensor.shape[0]} for {name}."
+                            )
+                        projections = tensor.chunk(2, dim=0)
+                    for target, projection in zip(("fc1_0", "fc1_1"), projections, strict=True):
+                        mapped[f"{base}{target}{suffix}"] = projection.contiguous()
+                    continue
+                mapped[name] = tensor
+            new_config = dict(peft_config)
+            new_config["target_modules"] = sorted(
+                {
+                    mapped_target
+                    for target in requested_targets
+                    for supported in (_target_suffix(target, H3_VEOMNI_LORA_TARGETS),)
+                    if supported is not None
+                    for mapped_target in _VEOMNI_LORA_TARGET_MAPPING[supported]
+                }
+            )
+            return mapped, new_config
+
+        target_suffixes = {
+            target: suffix
+            for target in requested_targets
+            if (suffix := _target_suffix(target, H3_LORA_TARGETS)) is not None
+        }
         ff_half = getattr(self, component).arch.ffn_hidden_size
         mapped: dict[str, torch.Tensor] = {}
         for name, tensor in tensors.items():
-            is_lora_a = name.endswith(".lora_A.weight")
-            is_lora_b = name.endswith(".lora_B.weight")
-            if not (is_lora_a or is_lora_b):
+            lora_weight = _split_lora_weight_name(name)
+            if lora_weight is None:
                 mapped[name] = tensor
                 continue
 
-            suffix = ".lora_A.weight" if is_lora_a else ".lora_B.weight"
-            module = name[: -len(suffix)]
+            module, suffix = lora_weight
+            is_lora_b = suffix == ".lora_B.weight"
             anchors = [
                 offset
                 for offset in (module.find("transformer_blocks."), module.find("token_refiner.refiner_blocks."))
@@ -248,7 +273,7 @@ class MiniMaxH3WeightSyncMixin:
             module = module[min(anchors) :]
 
             if ".ff.net.0.proj" in module:
-                base = _diffusers_to_vllm_name(module + ".")[:-1].replace(".ff.net.0.proj", ".mlp.fc1")
+                base = diffusers_to_vllm_name(module + ".")[:-1].replace(".ff.net.0.proj", ".mlp.fc1")
                 if is_lora_b:
                     if tensor.shape[0] != 2 * ff_half:
                         raise ValueError(
@@ -265,20 +290,25 @@ class MiniMaxH3WeightSyncMixin:
                     mapped[f"{component}.{base}_1{suffix}"] = tensor
                 continue
 
-            vllm_module = _diffusers_to_vllm_name(module + ".")[:-1]
+            vllm_module = diffusers_to_vllm_name(module + ".")[:-1]
             mapped[f"{component}.{vllm_module}{suffix}"] = tensor
 
         # Configure only the fused submodules requested by the Actor recipe.
         new_config = dict(peft_config)
         new_config["target_modules"] = sorted(
-            {
-                mapped
-                for suffix in target_suffixes.values()
-                if suffix is not None
-                for mapped in _LORA_TARGET_MAPPING[suffix]
-            }
+            {mapped for suffix in target_suffixes.values() for mapped in _LORA_TARGET_MAPPING[suffix]}
         )
         return mapped, new_config
 
+    @staticmethod
+    def _validate_diffusion_lora_binding(*, lora_model, bound_lora_names) -> None:
+        """Reject partial or no-op adapter binding in the rollout engine."""
+        unbound = set(lora_model.loras) - set(bound_lora_names)
+        if unbound:
+            raise ValueError(
+                f"MiniMax H3 LoRA has {len(unbound)} unbound modules; refusing a partial or no-op sync. "
+                f"First unbound names: {sorted(unbound)[:5]}"
+            )
 
-__all__ = ["H3_LORA_TARGETS", "MiniMaxH3WeightSyncMixin"]
+
+__all__ = ["H3_LORA_TARGETS", "H3_VEOMNI_LORA_TARGETS", "MiniMaxH3WeightSyncMixin"]

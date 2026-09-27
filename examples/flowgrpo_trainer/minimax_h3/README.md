@@ -4,9 +4,10 @@ Last updated: 09/23/2026
 
 These recipes train `MiniMaxAI/MiniMax-H3` LoRA adapters with FlowGRPO for
 text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
-reference-to-audio-video (Ref2VA) generation. The launchers configure a
-Diffusers H3 Actor and vLLM-Omni rollout for joint video and audio generation,
-with CLAP and ImageBind as the default rewards.
+reference-to-audio-video (Ref2VA) generation. The default launchers configure
+a Diffusers H3 Actor and vLLM-Omni rollout for joint video and audio generation,
+with CLAP and ImageBind as the default rewards. T2VA also provides a VeOmni
+Actor launcher.
 
 T2VA supports NVIDIA GPUs and Ascend NPUs. The FL2VA and full multimodal
 Ref2VA paths target NVIDIA GPUs.
@@ -195,6 +196,66 @@ bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh \
   actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA
 ```
 
+### NVIDIA GPU (VeOmni Actor, T2VA / FL2VA / Ref2VA)
+
+These launchers use VeOmni **0.1.12** and the native fused H3 DiT with
+vLLM-Omni rollout. VeOmni main runtime migration and multi-sample Actor
+packing are separate work; keep Actor micro-batch size and Ulysses SP at 1.
+Each launcher defines its full training command and writes timestamped logs
+under `OUTPUT_DIR/logs`.
+
+```bash
+uv pip install veomni==0.1.12 --no-deps
+export IMAGEBIND_MODEL_PATH=/path/to/imagebind_huge.pth
+
+MODEL_PATH="$MODEL_ROOT/FL2VA" \
+DATA_DIR="$HOME/data/vid_prompt/verl_omni" \
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora_veomni.sh
+
+MODEL_PATH="$MODEL_ROOT/FL2VA" \
+DATA_DIR="$HOME/data/fl2va/verl_omni" \
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_fl2va_lora_veomni.sh
+
+MODEL_PATH="$MODEL_ROOT" \
+DATA_DIR="$HOME/data/minimax_h3_ref2va" \
+bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_ref2va_lora_veomni.sh
+```
+
+The Actor reads fused weights/config from `FL2VA/transformer` or
+`Ref2VA/transformer`, **not** the Diffusers `transformer` / `transformer_ref`
+directories at the repository root. `ACTOR_CONFIG_PATH` can override the
+config location. LoRA targets are `qkv_proj`, `out_proj`, `fc1`, and `fc2`;
+the sync adapter expands them into vLLM-Omni's logical Q/K/V and GEGLU slices
+and rejects partially bound updates.
+
+FL2VA fixes frame zero in both training and validation. Ref2VA uses a
+512-pixel reference short edge, 12288-token embedding budget and video flow
+shift of 12; its `MODEL_PATH` is the repository root. All three scripts use
+`NUM_GPUS`; Ref2VA defaults to rollout/text-encoder TP 4, the others to TP 2.
+Trailing Hydra overrides take precedence over recipe defaults.
+
+The Actor defaults to `flash_attention_3_hub`, matching rollout's
+`FLASH_ATTN_3_HUB`, without a local flash-attn installation. VeOmni 0.1.12
+ignores the configured H3 backend, so an instance-local attention bridge
+selects the requested kernel for both DiT and token-refiner blocks. It does
+not change global attention selection or fall back silently when a kernel
+is unavailable. `MINIMAX_H3_ATTENTION_IMPLEMENTATION` does not select the
+patched Actor backend; use `veomni_config.attn_implementation` instead.
+
+The bridge in `verl_omni/workers/engine/veomni/patch.py` has a removal TODO tied to
+[VeOmni #1239](https://github.com/ByteDance-Seed/VeOmni/pull/1239): remove it
+once the required VeOmni dependency includes that fix and this integration
+uses the native attention setup. The separate Qwen/Hub compatibility shim
+has its own upstream dependencies.
+
+For hardware without FA3, append these overrides to any VeOmni launcher:
+
+```bash
+actor_rollout_ref.actor.veomni_config.attn_implementation=eager \
+actor_rollout_ref.ref.veomni_config.attn_implementation=eager \
+actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA
+```
+
 ### NVIDIA GPU (FL2VA)
 
 ```bash
@@ -341,7 +402,7 @@ Common environment overrides are:
 | `ROLLOUT_TP` | vLLM-Omni DiT tensor parallel size |
 | `TEXT_ENCODER_TP` | H3 text-encoder tensor parallel size |
 | `MAX_PROMPT_EMBEDS` | Prompt/reference-row padding cap; defaults to 12288 |
-| `REF_IMAGE_SHORT_EDGE` | Ref2VA training image short edge; defaults to 2048 |
+| `REF_IMAGE_SHORT_EDGE` | Ref2VA training image short edge; defaults to 512 for VeOmni, 2048 for FSDP |
 | `VAL_REF_IMAGE_SHORT_EDGE` | Ref2VA validation image short edge; defaults to the training value |
 | `REWARD_NUM_WORKERS` | Number of reward workers |
 | `REWARD_DEVICE` | Reward device type, such as `cuda` or `npu` |

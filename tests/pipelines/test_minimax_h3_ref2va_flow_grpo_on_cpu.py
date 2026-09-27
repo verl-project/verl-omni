@@ -254,8 +254,13 @@ def test_ref2va_rollout_keeps_all_reference_rows_fixed(monkeypatch):
     torch.testing.assert_close(trajectory["all_log_probs"], torch.full((1, 3), 0.4))
 
 
-def test_ref2va_actor_replays_full_layout_and_scores_only_targets(monkeypatch):
-    from verl_omni.workers.engine.fsdp.diffusers_impl import PPODiffusersFSDPEngine
+@pytest.mark.parametrize("backend", ["fsdp2", "veomni"])
+def test_ref2va_actor_replays_full_layout_and_scores_only_targets(monkeypatch, backend):
+    if backend == "veomni":
+        pytest.importorskip("veomni")
+        from verl_omni.workers.engine.veomni.diffusion_impl import VeOmniDiffusionEngine as Engine
+    else:
+        from verl_omni.workers.engine.fsdp.diffusers_impl import PPODiffusersFSDPEngine as Engine
 
     pipeline, _ = _run_ref_rollout(monkeypatch)
     trajectory = pipeline._flow_grpo_trajectory
@@ -271,7 +276,7 @@ def test_ref2va_actor_replays_full_layout_and_scores_only_targets(monkeypatch):
     )
     micro_batch = TensorDict(trajectory, batch_size=[1])
 
-    engine = object.__new__(PPODiffusersFSDPEngine)
+    engine = object.__new__(Engine)
     engine.module = MagicMock()
     engine.model_config = SimpleNamespace(
         architecture="MiniMaxH3Pipeline",
