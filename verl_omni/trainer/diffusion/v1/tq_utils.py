@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 import logging
 import os
 from typing import Any, Literal
@@ -228,24 +229,31 @@ def canonicalize_diffusion_tq_meta(batch_meta: KVBatchMeta) -> KVBatchMeta:
     Upstream ``_materialize_batch`` emits trajectory keys in TransferQueue
     ``kv_list`` iteration order, which is storage-arbitrary and differs per
     run, while the v0 trainer produced rows prompt-major in dataset order
-    (``prompt_index * rollout.n + session``). Rows whose tag lacks
-    ``prompt_index`` (written before this ordering existed) fall back to uid
-    order, which is deterministic but not dataset order.
+    (``prompt_index * rollout.n + session``). ``prompt_index`` is unique only
+    within one generation batch, so rows carry ``(gen_batch_seq,
+    prompt_index)`` — the per-run generation-batch number plus the position
+    inside it — which stays unique across every path that can mix batches in
+    one sample (DAPO speculative refills, incomplete-group replacement,
+    multi-chunk generation dispatches). Rows whose tag predates the pair fall
+    back to uid order, which is deterministic but not dataset order.
     """
     if len(batch_meta.keys) < 2:
         return batch_meta
 
     def sort_key(i: int) -> tuple:
         uid, session, output = _parse_tq_key(batch_meta.keys[i])
-        tag = batch_meta.tags[i] if i < len(batch_meta.tags) else {}
+        tag = batch_meta.tags[i]
         prompt_index = tag.get("prompt_index") if isinstance(tag, dict) else None
-        if prompt_index is None:
-            return (1, 0, uid, session, output)
-        return (0, int(prompt_index), uid, session, output)
+        gen_batch_seq = tag.get("gen_batch_seq") if isinstance(tag, dict) else None
+        if prompt_index is None or gen_batch_seq is None:
+            return (1, uid, session, output)
+        return (0, int(gen_batch_seq), int(prompt_index), session, output)
 
     perm = sorted(range(len(batch_meta.keys)), key=sort_key)
-    return KVBatchMeta(
-        partition_id=batch_meta.partition_id,
+    # replace() carries fields/extra_info over so future consumers reading
+    # them (e.g. a kv_batch_get driven by batch_meta.fields) see real values.
+    return dataclasses.replace(
+        batch_meta,
         keys=[batch_meta.keys[i] for i in perm],
         tags=[batch_meta.tags[i] for i in perm],
     )

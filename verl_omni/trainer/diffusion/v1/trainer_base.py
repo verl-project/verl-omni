@@ -821,6 +821,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             sampler=create_rl_sampler(self.config.data, self.train_dataset),
         )
         self.train_dataloader_it = None
+        # Per-run monotonic generation-batch number; pairs with the batch-local
+        # ``index`` so TQ row ordering survives multi-batch sampling paths.
+        self._gen_batch_seq = 0
         val_batch_size = self.config.data.val_batch_size or len(self.val_dataset)
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
@@ -1055,6 +1058,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         batch_dict["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
         batch_dict["index"] = np.arange(len(batch_dict["raw_prompt"]))
+        batch_dict["gen_batch_seq"] = np.full(len(batch_dict["raw_prompt"]), self._gen_batch_seq)
+        self._gen_batch_seq += 1
         return tu.get_tensordict(batch_dict)
 
     def _generation_batch_size(self) -> int:
@@ -1400,6 +1405,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 [str(uuid.uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object
             )
             batch_dict["index"] = np.arange(len(batch_dict["raw_prompt"]))
+            batch_dict["gen_batch_seq"] = np.full(len(batch_dict["raw_prompt"]), self._gen_batch_seq)
+            self._gen_batch_seq += 1
             batch = tu.get_tensordict(batch_dict)
             tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
             tu.assign_non_tensor_data(batch, "validate", True)

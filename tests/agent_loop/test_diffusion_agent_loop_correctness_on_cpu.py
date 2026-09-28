@@ -280,15 +280,18 @@ async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkey
         trajectory={"step": 7},
         validate=False,
         index=3,
+        gen_batch_seq=5,
     )
 
     assert [put["keys"] for put in puts] == [["sample_0_0", "sample_2_0"], ["sample_1_0"]]
     assert "rm_scores" in puts[1]["fields"][0]
     assert all("rm_scores" not in put["fields"][0] for put in puts[:1])
     assert all(tag["global_steps"] == 7 for put in puts for tag in put["tags"])
-    # The dataset position rides in the tag so the trainer can restore the
-    # v0 prompt-major row order.
+    # The prompt identity rides in the tags so the trainer can restore the
+    # v0 prompt-major row order: batch-local position plus the per-run
+    # generation-batch number.
     assert all(tag["prompt_index"] == 3 for put in puts for tag in put["tags"])
+    assert all(tag["gen_batch_seq"] == 5 for put in puts for tag in put["tags"])
 
 
 def test_tq_batch_restores_non_tensor_trajectory_metadata(monkeypatch):

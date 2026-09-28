@@ -139,10 +139,10 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             for session_id in range(n):
                 run_sampling_params = dict(sampling_params)
                 if rollout_base_seed is not None and not trajectory["validate"]:
-                    # Seed from the global prompt index: each worker only sees a
-                    # chunk of the batch, so a chunk-local position would reuse
-                    # the same seed offsets in every worker and roll out
-                    # duplicated noise.
+                    # Seed from the position within the generation batch (v0
+                    # semantics): each worker only sees a chunk of the batch, so
+                    # a chunk-local position would reuse the same seed offsets
+                    # in every worker and roll out duplicated noise.
                     run_sampling_params["seed"] = _derive_rollout_seed(rollout_base_seed, prompt_index * n + session_id)
                 task = asyncio.create_task(
                     self._run_agent_loop(
@@ -278,11 +278,17 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 "min_global_steps": step,
                 "max_global_steps": step,
             }
-            # Dataset position of the prompt group; the trainer reorders TQ
-            # rows by this so driver batches keep the v0 prompt-major order.
+            # Identity of the prompt group for the trainer's v0 prompt-major
+            # row reordering: position inside its generation batch plus the
+            # per-run generation-batch number. ``index`` alone repeats across
+            # generation batches (DAPO refills, incomplete-group replacement,
+            # multi-chunk dispatches), so the pair is what stays unique.
             prompt_index = kwargs.get("index")
             if prompt_index is not None:
                 tag["prompt_index"] = int(prompt_index)
+            gen_batch_seq = kwargs.get("gen_batch_seq")
+            if gen_batch_seq is not None:
+                tag["gen_batch_seq"] = int(gen_batch_seq)
             rows.setdefault(tuple(field.keys()), []).append((key, field, tag))
 
         for group_rows in rows.values():
