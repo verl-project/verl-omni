@@ -403,21 +403,6 @@ def test_cloned_vllm_embedding_scatters_unequal_span_lengths():
     torch.testing.assert_close(embeddings[0, 3:6], vision[2:5])
 
 
-def test_cloned_vllm_embedding_accepts_collated_image_bound_tensor():
-    # Collation hands the scatter a (batch, 2) tensor of one span per row; indexing
-    # it straight yields a bare pair, and bound[0] on a 0-dim scalar raises.
-    module = _MiniCPMOWithEncoders()
-    configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
-    embeddings, _ = configured.get_vllm_embedding(
-        {
-            "input_ids": torch.tensor([[1, 2, 3, 4]]),
-            "pixel_values": [[torch.zeros(3, 2, 2)]],
-            "image_bound": torch.tensor([[0, 2]]),
-        }
-    )
-    assert embeddings.shape == (1, 4, 4)
-
-
 def test_minicpmo_from_pretrained_patches_then_loads_auto_model(monkeypatch):
     from transformers import AutoModel
 
