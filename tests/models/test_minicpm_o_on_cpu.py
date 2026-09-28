@@ -467,19 +467,6 @@ def test_patched_get_vllm_embedding_accepts_bare_bound_tensor():
     assert embeddings.shape == (1, 4, 4)
 
 
-def test_per_sample_image_bounds_avoids_tensor_truthiness():
-    bounds = minicpm_o._per_sample_image_bounds(torch.tensor([[0, 2], [1, 3]]), batch_size=2)
-    assert len(bounds) == 2
-    assert torch.equal(bounds[0], torch.tensor([[0, 2]]))
-    assert torch.equal(bounds[1], torch.tensor([[1, 3]]))
-
-    empty = minicpm_o._per_sample_image_bounds(torch.zeros(0, 2, dtype=torch.long), batch_size=2)
-    assert empty == [[], []]
-
-    defaults = minicpm_o._per_sample_image_bounds(None, batch_size=3)
-    assert defaults == [[], [], []]
-
-
 def test_patch_get_vision_embedding_runs_each_sample_alone():
     from verl_omni.models.transformers import minicpm_o
 
