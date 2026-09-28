@@ -17,6 +17,7 @@ import os
 import numpy as np
 import pytest
 import torch
+from tensordict import TensorDict
 
 from verl_omni.trainer.diffusion import diffusion_algos
 
@@ -430,6 +431,68 @@ def test_prepare_diffusion_nft_actor_batch() -> None:
     assert result.batch["returns"].shape == (B, num_train)
     assert result.batch["sample_level_rewards"].shape == (B, num_train)
     assert ((result.batch["reward_prob"] >= 0) & (result.batch["reward_prob"] <= 1)).all()
+
+
+def test_prepare_omni_nft_actor_batch_restores_single_component_axis() -> None:
+    from types import SimpleNamespace
+
+    from verl import DataProto
+
+    batch_size, num_timesteps = 4, 6
+    scores = torch.tensor([[1.0], [0.0], [0.2], [0.8]])
+    batch = DataProto.from_dict(
+        tensors={
+            "video_latents_clean": torch.randn(batch_size, 4, 2),
+            "audio_latents_clean": torch.randn(batch_size, 4, 2),
+            "train_timesteps": torch.randint(0, 1000, (batch_size, num_timesteps)),
+            "rm_scores": scores,
+        },
+        non_tensors={"uid": np.array(["p0", "p0", "p1", "p1"], dtype=object)},
+        meta_info={"reward_names": ["quality"]},
+    )
+    config = SimpleNamespace(
+        algorithm=SimpleNamespace(
+            norm_adv_by_std_in_grpo=True,
+            global_std=True,
+            adv_mode="continuous",
+            timestep_fraction=0.5,
+        ),
+        actor_rollout_ref=SimpleNamespace(
+            actor=SimpleNamespace(
+                diffusion_loss=SimpleNamespace(adv_clip_max=5.0),
+                data_loader_seed=42,
+            )
+        ),
+        reward=SimpleNamespace(
+            reward_functions={
+                "quality": {"routing_weights": {"video": 1.0, "audio": 1.0}},
+            }
+        ),
+    )
+
+    result = diffusion_algos.OmniNFTLoss.prepare_actor_batch(batch, scores.squeeze(-1), config)
+
+    selected_timesteps = max(1, int(num_timesteps * config.algorithm.timestep_fraction))
+    centered = torch.tensor([[0.5], [-0.5], [-0.3], [0.3]])
+    expected_prob = 0.5 + 0.5 * centered / (scores.std(correction=0) + 1e-4) / 5.0
+    torch.testing.assert_close(result.batch["reward_prob"], expected_prob[:, None, :].expand(-1, selected_timesteps, 2))
+    assert result.batch["reward_prob"].shape == (batch_size, selected_timesteps, 2)
+    assert result.batch["sample_level_rewards"].shape == (batch_size, 1)
+    metric_prefix = diffusion_algos.OmniNFTLoss._REWARD_METRIC_PREFIX
+    actor_data = TensorDict(
+        {
+            key: value[:1]
+            for key, value in result.batch.items()
+            if isinstance(key, str) and key.startswith(metric_prefix)
+        },
+        batch_size=1,
+    )
+    metrics = diffusion_algos.OmniNFTLoss._collect_reward_metrics(actor_data)
+    assert metrics["actor/reward/quality/mean"] == pytest.approx(0.5)
+    assert metrics["actor/reward/quality/std"] == pytest.approx(scores.std(correction=0).item())
+    assert metrics["actor/reward/quality/min"] == pytest.approx(0.0)
+    assert metrics["actor/reward/quality/max"] == pytest.approx(1.0)
+    assert metrics["actor/reward/sum/mean"] == pytest.approx(0.5)
 
 
 def test_prepare_online_dpo_actor_batch() -> None:
