@@ -10,14 +10,12 @@
 #   - data.train_batch_size == parameter_sync_step * actor.ppo_mini_batch_size.
 #
 # Data preparation (run once):
-#   pip install math-verify
 #   python examples/gspo_trainer/data_process/mmk12.py \
 #       --local_dataset_path <path_to_raw_mmk12> \
 #       --local_save_dir ~/data/mmk12
 #
 # Runtime dependencies (all Ray worker nodes):
-#   pip install math-verify    # required by mmk12_reward.py
-#   pip install qwen-vl-utils  # required for multimodal data processing
+#   uv pip install -e ".[omni]"  # multimodal data processing (qwen-vl-utils)
 
 set -x
 

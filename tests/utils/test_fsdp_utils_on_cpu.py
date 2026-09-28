@@ -138,3 +138,28 @@ def test_layered_collects_fsdp_leaf_lora_when_peft_dump_is_empty(monkeypatch):
     )
     assert list(params) == ["transformer_blocks.0.attn.lora_A.weight"]
     torch.testing.assert_close(params["transformer_blocks.0.attn.lora_A.weight"], torch.ones(2, 4))
+
+
+def test_collect_strips_nested_fsdp_wrapper_tokens_for_vllm(monkeypatch):
+    """Qwen-Image e2e: nested FSDP wraps leak into PEFT dump keys; vLLM rejects them."""
+    from collections import OrderedDict
+
+    import verl_omni.utils.fsdp_utils as fsdp_utils
+
+    dirty = "transformer_blocks.0._fsdp_wrapped_module.attn.to_q.lora_A.default._fsdp_wrapped_module.weight"
+    monkeypatch.setattr(fsdp_utils, "fsdp_version", lambda _: 1)
+    monkeypatch.setattr(
+        fsdp_utils,
+        "_layered_summon_lora_params_diffusers",
+        lambda *args, **kwargs: OrderedDict({dirty: torch.ones(2, 4)}),
+    )
+
+    params = collect_lora_params(
+        nn.Linear(4, 4, bias=False),
+        layered_summon=True,
+        base_sync_done=True,
+        is_diffusers=True,
+    )
+    assert list(params) == ["transformer_blocks.0.attn.to_q.lora_A.weight"]
+    assert all("_fsdp_wrapped_module" not in name for name in params)
+    assert all(".default." not in name for name in params)

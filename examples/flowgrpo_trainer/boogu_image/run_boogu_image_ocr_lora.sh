@@ -75,6 +75,7 @@ REQUEST_BATCH_MAX_WAIT_MS=${REQUEST_BATCH_MAX_WAIT_MS:-10}
 IMAGE_RESOLUTION=${IMAGE_RESOLUTION:-512}
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
     data.train_batch_size=32 \

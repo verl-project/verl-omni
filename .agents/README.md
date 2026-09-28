@@ -3,16 +3,15 @@
 Repo-local guidance for AI-assisted contributions, complementing the mandatory
 contribution policy in [`AGENTS.md`](../AGENTS.md) / [`CLAUDE.md`](../CLAUDE.md).
 
-Every claim in these files was checked against the tree it describes — the
-pre-commit hook scripts, the registry declarations, the manager call sites, the CI
-workflow — not against prose in the docs. Where the repo and its own documentation
-disagree, these files record the repo and say so.
+Check enforcement claims against the current hook scripts, config and call sites.
+Distinguish automated gates from review conventions; a passing hook covers only
+its configured scope. External templates are references, not additional policies.
 
 ## Division of labour
 
 - **[`docs/contributing/`](../docs/contributing/) is authoritative for procedures.**
-  Seven `integrating_*` guides, each ending in a final checklist, plus a testing
-  guide and a symptom-first pitfalls reference. Nothing here restates them.
+  Integration guides, testing procedures and the pitfalls reference live there.
+  Link to them instead of maintaining another copy here.
   When you add a new guide there, also list it in
   [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 - **`skills/`** are **routers and deltas**: they classify the task, name the guide
@@ -29,7 +28,7 @@ thing, the guide wins and the file links to it.
 
 | Rule                              | Applies to                                                    | Key point |
 | --------------------------------- | ------------------------------------------------------------- | --------- |
-| [code-style](rules/code-style.md) | everywhere                                                    | what each pre-commit hook enforces, how sparsely this tree comments, and the four reuse mechanisms to use instead of copying |
+| [code-style](rules/code-style.md) | everywhere                                                    | automated scope versus conventions; runtime boundaries, shell recipes, contextual reuse and performance |
 | [pipelines](rules/pipelines.md)   | `verl_omni/pipelines/**`                                      | dispatch is by registry key and registration is an import side effect; training adapters are never instantiated |
 | [reward](rules/reward.md)         | `verl_omni/utils/reward_score/**`, `verl_omni/reward_loop/**` | scorers are selected by config, not by the `data_source` dispatcher; managers call by keyword |
 | [config](rules/config.md)         | `verl_omni/trainer/config/**`, `verl_omni/workers/config/**`  | inherit verl's `BaseConfig`, declare `_mutable_fields`, regenerate the YAMLs |
@@ -43,6 +42,8 @@ thing, the guide wins and the file links to it.
 | [add-pipeline](skills/add-pipeline/SKILL.md)         | routing a model / algorithm integration to the right guide under `docs/contributing/` |
 | [add-reward-score](skills/add-reward-score/SKILL.md) | a new reward scorer plus the config overrides that select it    |
 | [run-cpu-tests](skills/run-cpu-tests/SKILL.md)       | what the CPU job does that `testing_guide.md`'s local commands don't |
+| [self-review](skills/code-review/SKILL.md)           | report-only review: purpose, code quality, goal completeness, and validation/accountability; severity separate from category |
+| [profile](skills/profile/SKILL.md)                  | select a profiler and capture the relevant processes/workload |
 | [train-infer-consistency](skills/train-infer-consistency/SKILL.md) | rollout / actor consistency collection and analysis using MindStudio skills |
 
 `commit-and-pr` holds the authoritative module list; other files link to it rather

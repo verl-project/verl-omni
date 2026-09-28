@@ -67,6 +67,7 @@ TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-64}
 ENGINE=vllm_omni
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     trainer.device=$DEVICE \
     algorithm.adv_estimator=dance_grpo \
     actor_rollout_ref.model.algorithm=dance_grpo \

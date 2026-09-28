@@ -40,6 +40,7 @@ from verl_omni.pipelines.request_batch import (
     split_diffusion_output_by_request as _split_diffusion_output_by_request,
 )
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
+from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.pipelines.sd3_flow_grpo.common import (
     SD3_CLIP_TOKENS_KEY,
@@ -106,7 +107,9 @@ def _extract_extra_prompt_ids(prompts: list, key: str = "extra_prompt_ids") -> d
     for prompt in prompts:
         if not isinstance(prompt, dict):
             return None
-        extra = prompt.get(key)
+        extra = (prompt.get("extra_args") or {}).get(key)
+        if prompt.get(key) is not None:
+            raise ValueError(f"SD3 {key} must be nested under extra_args, not at the prompt top level")
         if not extra:
             return None
         per_prompt.append(extra)
@@ -374,7 +377,7 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
         negative_prompt = req_negative_prompt if req_negative_prompt is not None else negative_prompt
 
         if extra_prompt_ids is None and prompt is None:
-            if any(isinstance(p, dict) and p.get("prompt_token_ids") is not None for p in req_prompts):
+            if any(isinstance(p, dict) and prompt_ids_from_payload(p) is not None for p in req_prompts):
                 raise ValueError(
                     "SD3 rollout received tokenized prompts without per-text-encoder token ids; decoding "
                     "token ids back to text inside the pipeline is not supported. Configure "

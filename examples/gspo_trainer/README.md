@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
-Last updated: 09/14/2026
+Last updated: 09/25/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
@@ -22,19 +22,20 @@ Both **GPU** and **NPU** training platforms are supported:
 
 For the base environment setup, see the [installation guide](../../docs/start/install.md).
 
+For **Megatron full-parameter audio-only RL**, see the
+[AudioMCQ separate-async recipe](qwen3_omni/README.md), including an
+offline toy-model smoke and the configurable full-model run. That path is
+experimental and is not reproducible from the current public pins; the FSDP
+recipes above remain the supported default.
+
 ## Installation
 
 Follow the [installation guide](../../docs/start/install.md) to set up the base
-environment. In short:
+environment, then add the `[omni]` and `[fa2]` extras — the omni trainer's
+actor defaults to flash attention 2:
 
 ```bash
-git clone https://github.com/verl-project/verl-omni.git && cd verl-omni
-uv venv --python 3.12 --seed && source .venv/bin/activate
-uv pip install -e ".[gpu]" --torch-backend=auto
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train,dev]"
-# flash-attn is required for GPU training
-uv pip install flash-attn>=2.8.3
+uv pip install -e ".[omni,fa2]"
 ```
 
 > **Tested with** `transformers==5.13.1`, `accelerate==1.14.0`, `peft==0.19.1`.
@@ -171,13 +172,7 @@ in [`examples/gspo_trainer/data_process/mmk12.py`](https://github.com/verl-proje
 ### Run training
 
 The MMK12 reward scorer grades responses with
-[`math_verify`](https://github.com/huggingface/math-verify). Multimodal data
-processing also requires [`qwen-vl-utils`](https://github.com/QwenLM/Qwen2.5-VL)
-for vision info extraction. Install both explicitly:
-
-```bash
-pip install math-verify qwen-vl-utils
-```
+[`math_verify`](https://github.com/huggingface/math_verify).
 
 Then launch the MMK12 V1 training script:
 
@@ -271,7 +266,7 @@ Image and audio paths are decoded by Qwen's `qwen_omni_utils.process_mm_info`
 through
 [`QwenOmniRLHFDataset`](../../verl_omni/utils/dataset/omni_rl_datasets.py). Install
 the official media loader without changing the NPU engine stack with
-`pip install -e ".[audio]"`. `ffmpeg` is only required when the dataset carries
+`uv pip install -e ".[audio]"`. `ffmpeg` is only required when the dataset carries
 compressed audio (mp3/m4a/aac/ogg) or http(s) audio URLs — those go through
 `audioread`/ffmpeg. Plain local WAV files decode via `librosa`/`soundfile`
 (libsndfile) and need no ffmpeg.
@@ -408,10 +403,9 @@ Video sampling uses 1 FPS, 32--128 visual tokens per frame (`25088--100352` pixe
 Install the Qwen Omni media loader with:
 
 ```bash
-pip install -e ".[audio]"
+uv pip install -e ".[audio]"
 ```
 
-The `audio` extra already installs `qwen-omni-utils>=0.0.9`.
 Install the system FFmpeg package on the conversion host and every Ray worker;
 both `ffmpeg` and `ffprobe` must be available in `PATH`. For Ubuntu/Debian:
 
@@ -499,9 +493,9 @@ python -m pip install --no-deps --force-reinstall \
     "verl @ git+https://github.com/verl-project/verl.git@a0feb78fe8229fde644aec3bbec20b5dc4583509"
 ```
 
-Restart the training processes and Ray workers after updating. Installing
-`.[train]` again may restore the repository's older pin; apply the recipe-specific
-verl update after that installation.
+Restart the training processes and Ray workers after updating. Reinstalling
+the repository (`uv pip install -e .`) may restore the repository's older pin;
+apply the recipe-specific verl update after that installation.
 
 Launch with the original full model checkpoint:
 
@@ -619,6 +613,38 @@ step 392). `rollout_corr/log_ppl_diff` stayed near zero (~0.002).
 binary `<answer>` exact-match reward): `critic/rewards/mean` rose from ~0.73 to
 ~0.94, `val-core/avqa_r1_6k/reward/mean@1` reached **0.877**.
 `rollout_corr/log_ppl_diff` stayed near zero (~0.007).
+
+## VeOmni full-parameter Thinker training
+
+[`run_qwen3_omni_thinker_gspo_veomni.sh`](qwen3_omni/run_qwen3_omni_thinker_gspo_veomni.sh)
+uses VeOmni **0.1.12** (PyPI) with FSDP2 and expert parallelism for the
+actor/reference, and vLLM-Omni for text rollout. Follow the
+[installation guide](../../docs/start/install.md#optional-engine-backends) on
+every node and prepare the MMK12 parquet files above. The Ray cluster must
+already span the requested nodes.
+
+```bash
+MODEL_PATH=Qwen/Qwen3-Omni-30B-A3B-Instruct \
+TRAIN_FILE=$HOME/data/mmk12/train.parquet \
+VAL_FILE=$HOME/data/mmk12/test.parquet \
+NUM_GPUS=8 NNODES=2 ACTOR_EP=8 \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_veomni.sh
+```
+
+The full text backbone is trainable; vision/audio encoders remain frozen.
+Supported inputs are **text and images**, with packed inputs and Ulysses size 1.
+Audio/video inputs, Talker training, LoRA and direct-preference training are
+not supported. Defaults use rollout TP=2 and actor EP=8; EP must divide the
+GPU world size and expert count.
+
+The recipe uses LR `2e-6` with cosine decay to zero and no warmup. Validation
+explicitly sets `temperature=0.0`. Hydra overrides go last, for example
+`trainer.total_training_steps=2` or `--cfg job` to inspect the configuration.
+This recipe does not claim numerical equivalence to PR #231 or the LoRA
+curves above.
+
+See the [VeOmni integration guide](../../docs/contributing/integrating_an_omni_model.md#veomni-backend-optional)
+for backend configuration and adapter integration.
 
 ## Logging
 

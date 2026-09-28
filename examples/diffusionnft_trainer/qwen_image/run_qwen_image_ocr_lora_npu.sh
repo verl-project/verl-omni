@@ -22,6 +22,7 @@ REWARD_ENGINE=vllm
 
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     data.train_files="$ocr_train_path" \
     data.val_files="$ocr_test_path" \
     data.train_max_samples=7200 \

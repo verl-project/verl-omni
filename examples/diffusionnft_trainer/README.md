@@ -30,7 +30,7 @@ extend to the MiniMax H3 recipes above.
 Follow the [installation guide](../../docs/start/install.md) to set up the base environment, then install the OCR reward dependency:
 
 ```bash
-pip install Levenshtein
+uv pip install -e ".[ocr]"
 ```
 
 The provided script is configured for a single node with `4` GPUs.

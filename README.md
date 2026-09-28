@@ -15,6 +15,7 @@
 It originated from the multi-modal generation RL effort in `verl`, and now has a dedicated home so it can evolve in a more focused way.
 
 ## News 🔥
+- **[2026-09]** The [v1 trainer](docs/start/diffusion_v1.md) (TransferQueue + ReplayBuffer) is now the default for diffusion models; the legacy v0 trainer is deprecated, while offline DPO remains on v0 by design.
 - **[2026-08]** **[DiffusionOPD](docs/algo/diffusion_opd.md)** (on-policy distillation, including multi-teacher MOPD) is now supported.
 - **[2026-08]** 🔥 **MiniMax-H3** now supports T2VA, FL2VA, and Ref2VA with both [FlowGRPO](examples/flowgrpo_trainer/minimax_h3/README.md) and [DiffusionNFT](examples/diffusionnft_trainer/minimax_h3/README.md).
 - **[2026-08]** 🎉 We have released [v0.2.0](https://github.com/verl-project/verl-omni/releases/tag/v0.2.0) for faster diffusion rl and more stable Qwen3-Omni multimodal training. Blog: [VeRL-Omni v0.2.0](https://verl-project.github.io/posts/2026-08-17-verl-omni-v0-2-0/)

@@ -15,11 +15,12 @@
 from dataclasses import dataclass, field
 
 from verl.base_config import BaseConfig
-from verl.workers.config import FSDPActorConfig
+from verl.workers.config import FSDPActorConfig, VeOmniActorConfig
 
 __all__ = [
     "OmniLossConfig",
     "OmniActorConfig",
+    "OmniVeOmniActorConfig",
 ]
 
 
@@ -82,6 +83,16 @@ class OmniLossConfig(BaseConfig):
             raise ValueError(f"Omni DPO beta must be positive, got {self.beta}.")
 
 
+def _validate_omni_actor(config: "OmniActorConfig | OmniVeOmniActorConfig") -> None:
+    """Shared validation for the omni actor configs, which differ only by training engine."""
+    if config.trainer_type not in ["direct_preference", "policy_gradient"]:
+        raise ValueError(
+            f"Invalid omni trainer_type={config.trainer_type}; expected ['direct_preference', 'policy_gradient']."
+        )
+    if config.trainer_type == "direct_preference" and config.omni_loss is None:
+        raise ValueError(f"{type(config).__name__}.omni_loss is required for direct_preference training.")
+
+
 @dataclass
 class OmniActorConfig(FSDPActorConfig):
     """FSDP actor config for omni model training."""
@@ -91,9 +102,22 @@ class OmniActorConfig(FSDPActorConfig):
 
     def __post_init__(self):
         super().__post_init__()
-        if self.trainer_type not in ["direct_preference", "policy_gradient"]:
-            raise ValueError(
-                f"Invalid omni trainer_type={self.trainer_type}; expected ['direct_preference', 'policy_gradient']."
-            )
-        if self.trainer_type == "direct_preference" and self.omni_loss is None:
-            raise ValueError("OmniActorConfig.omni_loss is required for direct_preference training.")
+        _validate_omni_actor(self)
+
+
+@dataclass
+class OmniVeOmniActorConfig(VeOmniActorConfig):
+    """VeOmni actor config for omni model training.
+
+    ``OmniActorConfig`` extends verl's FSDP actor config, so it cannot carry the
+    ``veomni`` engine block. This is the same pair of omni-only fields grafted
+    onto ``VeOmniActorConfig`` instead, which is what ``model_engine=veomni``
+    composes for ``actor_rollout_ref.actor``.
+    """
+
+    trainer_type: str = "direct_preference"  # "direct_preference" or "policy_gradient"
+    omni_loss: OmniLossConfig = field(default_factory=OmniLossConfig)
+
+    def __post_init__(self):
+        super().__post_init__()
+        _validate_omni_actor(self)

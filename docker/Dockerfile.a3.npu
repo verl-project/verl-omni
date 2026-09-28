@@ -169,9 +169,10 @@ RUN git clone \
         ${VERL_OMNI_REPO} \
         /workspace/src/verl-omni && \
     cd /workspace/src/verl-omni && \
-    python3 -m pip install -e ".[ocr]" \
+    python3 -m pip install --no-deps -e . \
         --extra-index-url ${ASCEND_PIP_INDEX_URL} \
-        --extra-index-url ${PYTORCH_CPU_INDEX_URL}
+        --extra-index-url ${PYTORCH_CPU_INDEX_URL} \
+    && python3 -m pip install Levenshtein
 
 RUN python3 -m pip install --force-reinstall \
         torch==2.10.0+cpu \

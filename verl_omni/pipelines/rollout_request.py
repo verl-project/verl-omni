@@ -20,16 +20,17 @@ every strategy re-derived the same conventions on its own. :class:`OmniRolloutRe
 gives both the AR and diffusion strategies a single typed object to consume so
 the request shape is declared in one place.
 
-This module keeps the *interpretation* of the request (how the fields map onto
-the engine ``OmniCustomPrompt`` / vLLM prompt dict) inside each strategy; it does
-not change the wire keys the pipelines already read.
+Diffusion prompts use the upstream ``prompt_ids`` spelling. Media and processor
+kwargs stay at the top level, as required by the pinned engine's MiniMax/Bagel
+implementations; extra-encoder IDs live only in ``extra_args``. AR transport
+continues to use vLLM's distinct ``prompt_token_ids`` contract.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Optional, get_args
+from typing import Any, Optional, TypedDict, get_args
 
 from verl_omni.pipelines.rollout_media import Modality
 
@@ -44,6 +45,33 @@ _CONDITION_IMAGE_KEYS: tuple[str, ...] = (
     "extra_args.multi_modal_data.image",
     "additional_information.condition_images",
 )
+
+
+class DiffusionEnginePrompt(TypedDict, total=False):
+    """Pinned diffusion prompt, including upstream runtime multimodal extensions."""
+
+    prompt_ids: list[int] | list[list[int]]
+    prompt_mask: Any
+    negative_prompt_ids: list[int] | list[list[int]]
+    negative_prompt_mask: Any
+    multi_modal_data: dict[str, Any]
+    mm_processor_kwargs: Mapping[str, Any]
+    extra_args: dict[str, Any]
+
+
+def prompt_ids_from_payload(payload: Mapping[str, Any], default: Any = None) -> Any:
+    """Read diffusion IDs or the token transport used by an upstream AR stage.
+
+    This is the only adapter boundary accepting the AR spelling. Two conflicting
+    spellings are an error, not a priority choice.
+    """
+    canonical = payload.get("prompt_ids")
+    tokens = payload.get("prompt_token_ids")
+    if canonical is not None and tokens is not None and not _alias_values_match(canonical, tokens):
+        raise ValueError("Conflicting prompt_ids and AR-stage prompt_token_ids")
+    if canonical is not None:
+        return canonical
+    return tokens if tokens is not None else default
 
 
 @dataclass(frozen=True)
@@ -136,6 +164,27 @@ class OmniRolloutRequest:
             ),
             media=tuple(media),
         )
+
+    def to_diffusion_prompt(self) -> DiffusionEnginePrompt:
+        """Lower to the pinned diffusion contract without duplicate media fields."""
+        result: DiffusionEnginePrompt = {"prompt_ids": self.prompt.token_ids}
+        if self.prompt.mask is not None:
+            result["prompt_mask"] = self.prompt.mask
+        if self.prompt.negative_token_ids is not None:
+            result["negative_prompt_ids"] = self.prompt.negative_token_ids
+        extra_args = {}
+        if self.prompt.extra_token_ids is not None:
+            extra_args["extra_prompt_ids"] = self.prompt.extra_token_ids
+        if self.prompt.negative_extra_token_ids is not None:
+            extra_args["negative_extra_prompt_ids"] = self.prompt.negative_extra_token_ids
+        if extra_args:
+            result["extra_args"] = extra_args
+        media = self.multi_modal_data()
+        if media:
+            result["multi_modal_data"] = media
+        if self.prompt.mm_processor_kwargs is not None:
+            result["mm_processor_kwargs"] = self.prompt.mm_processor_kwargs
+        return result
 
     def multi_modal_data(self) -> dict[str, Any]:
         """Assemble the vLLM ``multi_modal_data`` dict from the media streams.

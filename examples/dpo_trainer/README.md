@@ -41,16 +41,20 @@ then `examples/flowgrpo_trainer/data_process/qwenimage_ocr.py` to write
 
 #### NVIDIA GPU
 
+The default is CUDA V1 sync (TransferQueue + ReplayBuffer; `trainer.use_v1=true`
+since v0.3.0):
+
 ```bash
-bash examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora.sh \
+bash examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora_v1.sh \
   data.train_files=$WORKSPACE/data/ocr/qwen_image/train.parquet \
   data.val_files=$WORKSPACE/data/ocr/qwen_image/test.parquet
 ```
 
-For CUDA V1 sync (TransferQueue + ReplayBuffer), use `examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora_v1.sh`.
+The legacy v0 script below is **deprecated** (a `DeprecationWarning` is emitted
+at launch) and remains only until the v0 trainer is removed:
 
 ```bash
-bash examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora_v1.sh \
+bash examples/dpo_trainer/qwen_image/run_qwen_image_online_dpo_lora.sh \
   data.train_files=$WORKSPACE/data/ocr/qwen_image/train.parquet \
   data.val_files=$WORKSPACE/data/ocr/qwen_image/test.parquet
 ```

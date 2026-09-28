@@ -1,3 +1,4 @@
+# DEPRECATED (v0): superseded by run_qwen_image_online_dpo_lora_v1.sh (V1 sync, the default since v0.3.0).
 # Qwen-Image online DPO training with vllm-omni rollout and OCR reward (2-GPU actor/rollout)
 set -x
 
@@ -19,6 +20,7 @@ ENGINE=vllm_omni
 REWARD_ENGINE=vllm
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     algorithm.trainer_type=direct_preference \
     algorithm.sample_source=online \
     algorithm.paired_preference=true \

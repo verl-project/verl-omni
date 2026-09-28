@@ -47,6 +47,7 @@ ROLLOUT_NUM_WORKERS=$((TOTAL_GPUS / ROLLOUT_TP))
 #   actor_rollout_ref.rollout.seed=42
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
     data.train_batch_size=$TRAIN_BATCH_SIZE  \

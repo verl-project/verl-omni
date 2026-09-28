@@ -226,10 +226,11 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             field["rm_scores"] = torch.tensor([internal.reward_score], dtype=torch.float32)
 
         extra = internal.extra_fields
-        for tensor_key in extra.keys():
-            value = extra.get(tensor_key)
+        for extra_key, value in extra.items():
             if isinstance(value, torch.Tensor):
-                field[tensor_key] = value.squeeze(0) if value.dim() >= 1 and value.shape[0] == 1 else value
+                field[extra_key] = value.squeeze(0) if value.dim() >= 1 and value.shape[0] == 1 else value
+            elif extra_key == "audio_sample_rate":
+                field[extra_key] = value
 
         # Non-tensor dataset fields forwarded as-is.
         for non_tensor_key in ["reward_model", "data_source", "extra_info", "raw_prompt"]:

@@ -13,12 +13,13 @@
 # limitations under the License.
 
 from . import model
-from .actor import OmniActorConfig, OmniLossConfig
+from .actor import OmniActorConfig, OmniLossConfig, OmniVeOmniActorConfig
 from .distillation import OmniDistillationTeacherModelConfig
 from .model import *  # noqa: F401
 
 __all__ = list(model.__all__) + [
     "OmniLossConfig",
     "OmniActorConfig",
+    "OmniVeOmniActorConfig",
     "OmniDistillationTeacherModelConfig",
 ]

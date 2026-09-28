@@ -28,6 +28,7 @@ from verl_omni.pipelines.flux_dance_grpo.vllm_omni_rollout_adapter import (
     _pad_token_ids,
     _sample_sde_windows,
 )
+from verl_omni.pipelines.rollout_request import OmniRolloutRequest
 
 
 class _PipelineConfig(dict):
@@ -128,9 +129,32 @@ def test_pad_token_ids_truncates_and_pads() -> None:
 
 def test_extra_prompt_ids_require_both_configured_tokenizers() -> None:
     with pytest.raises(ValueError, match=r"extra_tokenizers\.clip and \.t5"):
-        _extract_extra_prompt_ids([{"extra_prompt_ids": {"clip": [1, 2]}}])
+        _extract_extra_prompt_ids([{"extra_args": {"extra_prompt_ids": {"clip": [1, 2]}}}])
     with pytest.raises(TypeError, match=r"extra_prompt_ids\['t5'\]"):
-        _extract_extra_prompt_ids([{"extra_prompt_ids": {"clip": [1, 2], "t5": "invalid"}}])
+        _extract_extra_prompt_ids([{"extra_args": {"extra_prompt_ids": {"clip": [1, 2], "t5": "invalid"}}}])
+
+
+def test_extra_prompt_ids_round_trip_through_canonical_wire() -> None:
+    prompts = [
+        OmniRolloutRequest.from_generate_kwargs(
+            prompt_ids=[index], extra_prompt_ids={"clip": [index, 2], "t5": [index, 3]}
+        ).to_diffusion_prompt()
+        for index in (4, 5)
+    ]
+    assert _extract_extra_prompt_ids(prompts) == {"clip": [[4, 2], [5, 2]], "t5": [[4, 3], [5, 3]]}
+
+
+def test_top_level_encoder_ids_are_rejected() -> None:
+    with pytest.raises(ValueError, match="nested under extra_args"):
+        _extract_extra_prompt_ids([{"extra_prompt_ids": {"clip": [1], "t5": [2]}}])
+
+
+@pytest.mark.parametrize("key", ["prompt_ids", "prompt_token_ids"])
+def test_generic_ids_without_encoder_ids_fail_instead_of_returning_empty_output(key) -> None:
+    pipeline = object.__new__(FluxDanceGRPOPipelineWithLogProb)
+    request = SimpleNamespace(request_id="flux-request", prompt={key: [1, 2]})
+    with pytest.raises(ValueError, match="extra_tokenizers"):
+        pipeline.forward(request)
 
 
 def test_rollout_and_actor_use_identical_non_dyadic_sigma_schedule() -> None:

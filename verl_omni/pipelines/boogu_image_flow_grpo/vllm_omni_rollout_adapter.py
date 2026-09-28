@@ -43,7 +43,7 @@ from verl_omni.pipelines.request_batch import (
     split_diffusion_output_by_request as _split_diffusion_output_by_request,
 )
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
-from verl_omni.pipelines.rollout_request import condition_images_from_payload
+from verl_omni.pipelines.rollout_request import condition_images_from_payload, prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 from .common import (
@@ -115,6 +115,25 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
             subfolder="scheduler",
             local_files_only=local_files_only,
         )
+
+    # TODO: Remove after upgrading the vllm-omni pin to map live LoRA keys and targets
+    # natively for Boogu-Image (https://github.com/vllm-project/vllm-omni/issues/8001).
+    @staticmethod
+    def map_lora_update_to_engine(lora_tensors: dict, peft_config: dict) -> tuple[dict, dict]:
+        """Map diffusers output/joint-attention LoRA names to the native layout."""
+        tensors = {
+            name.replace("transformer.base_model.model.", "transformer.", 1)
+            .replace(".to_out.0.", ".to_out.")
+            .replace(".img_instruct_attn.processor.", ".img_instruct_attn."): tensor
+            for name, tensor in lora_tensors.items()
+        }
+        config = dict(peft_config)
+        targets = config.get("target_modules")
+        if isinstance(targets, list | tuple | set):
+            config["target_modules"] = [
+                target[:-2] if target == "to_out.0" or target.endswith(".to_out.0") else target for target in targets
+            ]
+        return tensors, config
 
     # ------------------------------------------------------------------
     # Prompt encoding from pre-tokenised IDs
@@ -218,7 +237,7 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
         if prompts:
             p0 = prompts[0]
             if isinstance(p0, dict):
-                prompt_ids = p0.get("prompt_token_ids", None)
+                prompt_ids = prompt_ids_from_payload(p0)
                 prompt_mask = p0.get("prompt_mask", None)
                 negative_prompt_ids = p0.get("negative_prompt_ids", None)
                 negative_prompt_mask = p0.get("negative_prompt_mask", None)
@@ -240,7 +259,7 @@ class BooguImagePipelineWithLogProb(QwenImageTokenIdPromptMixin, BooguImagePipel
         """
         prompt_ids, token_lengths = _collate_prompt_rows(
             prompts,
-            ("prompt_token_ids", "prompt_ids"),
+            ("prompt_ids",),
             None,
             device=self.device,
             field_name="prompt_token_ids",

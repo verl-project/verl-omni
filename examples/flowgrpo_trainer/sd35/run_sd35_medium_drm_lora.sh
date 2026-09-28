@@ -29,6 +29,7 @@ validation_data_dir=$output_root/runs/$run_name/validation
 export WANDB_MODE=online
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     algorithm.adv_estimator=flow_grpo \
     data.train_files=$train_path \
     data.val_files=$test_path \

@@ -27,7 +27,9 @@ See {doc}`start/models` for the full model catalogue and which algorithms run on
 :caption: Getting Started
 
 start/install.md
+start/engine_backends.md
 start/install_npu.md
+start/install_rocm.md
 start/models.md
 start/flowgrpo_quickstart.md
 start/multi_node_training.md
@@ -85,6 +87,7 @@ examples/flux1/dancegrpo_trainer_flux1.md
 examples/diffusionnft_trainer.md
 examples/grpoguard_trainer.md
 examples/gspo_trainer.md
+examples/qwen3_omni/gspo_trainer_qwen3_omni.md
 examples/mixgrpo_trainer.md
 examples/diffusionopd_trainer.md
 examples/flowgrpo_trainer_sd35_drm.md
@@ -142,6 +145,7 @@ contributing/integrating_a_stepwise_continuous_batching_model.md
 contributing/integrating_a_new_policy_gradient_algorithm_for_diffusion_model.md
 contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md
 contributing/gpu_smoke_tests.md
+contributing/npu_smoke_tests.md
 contributing/common_pitfalls.md
 ```
 

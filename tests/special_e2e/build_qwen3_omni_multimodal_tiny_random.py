@@ -140,6 +140,9 @@ def _build_tiny_config(vocab_size: int):
     text.num_experts_per_tok = 2
     text.moe_intermediate_size = 128
     text.vocab_size = vocab_size
+    # Transformers 5 puts this default on Thinker, while vLLM-Omni still
+    # reads it from the text config. Persist the same untied-embedding choice.
+    text.tie_word_embeddings = config.thinker_config.tie_word_embeddings
     # The default config leaves rope_scaling unset, but the M-RoPE rotary
     # embedding requires it. mrope_section must sum to head_dim // 2 (= 16 here).
     text.rope_scaling = {"rope_type": "default", "mrope_section": [8, 4, 4]}
@@ -305,7 +308,7 @@ def _write_chat_template_config(output_dir: str) -> None:
 
 
 def _checkpoint_has_required_mm_token_ids(output_dir: str) -> bool:
-    """Return True when thinker_config carries the multimodal token ids generation needs."""
+    """Check generation token IDs and the text-config field vLLM-Omni requires."""
     import json
 
     config_path = os.path.join(output_dir, "config.json")
@@ -314,6 +317,8 @@ def _checkpoint_has_required_mm_token_ids(output_dir: str) -> bool:
     with open(config_path, encoding="utf-8") as f:
         cfg = json.load(f)
     thinker = cfg.get("thinker_config") or {}
+    if not isinstance(thinker.get("text_config", {}).get("tie_word_embeddings"), bool):
+        return False
     required = (
         "image_token_id",
         "video_token_id",

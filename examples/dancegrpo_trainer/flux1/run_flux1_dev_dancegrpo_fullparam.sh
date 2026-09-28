@@ -48,6 +48,7 @@ if (( NUM_GPUS % ROLLOUT_TP != 0 )); then
 fi
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     trainer.device=npu \
     trainer.nnodes=1 \
     trainer.n_gpus_per_node=$NUM_GPUS \

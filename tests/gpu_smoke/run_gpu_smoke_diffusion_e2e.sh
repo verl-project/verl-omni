@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ci-e2e-diffusion GPU smoke tests (4-GPU): end-to-end diffusion training paths.
-# Includes FlowGRPO / online DPO / DiffusionNFT (v0), synchronous separate,
-# FlowGRPO v1 separate_async, and two-teacher OPD on the v1 sync and
-# separate_async trainers.
+# Includes Qwen-Image-Edit FlowGRPO v1 sync, FlowGRPO / online DPO /
+# DiffusionNFT (v0), synchronous separate, FlowGRPO v1 separate_async, and
+# two-teacher OPD on the v1 sync and separate_async trainers.
 
 set -euo pipefail
 
@@ -32,7 +32,7 @@ run_qwen_image_edit_flowgrpo_e2e() {
         bash tests/special_e2e/run_flowgrpo_qwen_image_edit.sh "${diffusion_trainer_args[@]}"
 }
 
-run_test 0 "Qwen-Image-Edit FlowGRPO trainer e2e" \
+run_test 0 "Qwen-Image-Edit FlowGRPO v1 sync trainer e2e" \
     run_qwen_image_edit_flowgrpo_e2e
 
 run_test 1 "FlowGRPO trainer e2e" \
@@ -59,9 +59,9 @@ run_test 6 "FlowGRPO synchronous separate trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_flowgrpo_qwen_image_separate.sh "${diffusion_trainer_args[@]}"
 
-run_test 7 "MiniMax-H3 FlowGRPO T2VA trainer e2e" \
-    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ROLLOUT_TP=2 TOTAL_TRAINING_STEPS=1 \
-    python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task t2va
+run_test 7 "MiniMax-H3 FlowGRPO T2VA FSDP-SP trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" ACTOR_SP=2 ROLLOUT_TP=2 \
+    TOTAL_TRAINING_STEPS=1 python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task t2va
 
 run_test 8 "Diffusion OPD v1 sync colocated teachers e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" SMOKE=sync \

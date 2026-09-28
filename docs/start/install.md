@@ -1,13 +1,37 @@
 # Installation
 
-Last updated: 09/21/2026
+Last updated: 09/24/2026
 
-For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`.
+For Ascend NPU, see the {doc}`NPU installation guide <install_npu>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`.
 
 ## Requirements
 
 * **Python**: Version >= 3.11
-* **CUDA**: Version >= 12.8
+* **CUDA**: Version >= 13.0
+* **NVIDIA driver**: 580+ natively; datacenter GPUs with older drivers (535+) can use [CUDA forward compatibility](#older-nvidia-drivers-cuda-forward-compatibility) instead.
+
+### Older NVIDIA drivers (CUDA forward compatibility)
+
+On datacenter GPUs with a pre-CUDA-13.0 driver (535+), install NVIDIA's
+`cuda-compat` forward-compatibility package and point the loader at it
+(see [NVIDIA's forward-compatibility guide](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html)):
+
+```bash
+conda create -n verl-omni python=3.12 -c conda-forge
+conda activate verl-omni
+conda install -c conda-forge cuda-compat
+
+# the compat libcuda must take precedence over the driver's own
+export LD_LIBRARY_PATH=${CONDA_PREFIX}/cuda-compat:${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}
+export LIBRARY_PATH=${CONDA_PREFIX}/cuda-compat:${CONDA_PREFIX}/lib:${LIBRARY_PATH:-}
+```
+
+Set both exports in every shell and launcher that runs training or rollout
+(e.g. in the training script) — without them CUDA initialization fails with
+"the NVIDIA driver on your system is too old". Forward compatibility is a
+**datacenter-only fallback** for clusters whose driver cannot be upgraded and is
+**not guaranteed** across all driver branches and workloads; for production (and
+consumer GPUs) prefer a **native 580+ driver**.
 
 ## Install
 
@@ -16,48 +40,39 @@ git clone https://github.com/verl-project/verl-omni.git
 cd verl-omni
 ```
 
-1. Create a Python virtual environment
+1. Create a Python virtual environment — on a pre-CUDA-13.0 driver, use the conda environment from the [forward-compatibility section](#older-nvidia-drivers-cuda-forward-compatibility) above instead
 
 ```bash
 uv venv --python 3.12 --seed
 source .venv/bin/activate
 ```
 
-2. Install the platform backend
+2. Install vLLM
+
+```bash
+uv pip install vllm==0.28.0 --torch-backend=auto
+```
+
+3. Install the rollout engine and training stack
 
 ```bash
 uv pip install -e ".[gpu]" --torch-backend=auto
 ```
 
-This installs `vllm` for the CUDA PyTorch stack and `kernels` for FA3 backend.
+In the cuda-compat environment, pass `--python "$CONDA_PREFIX/bin/python"` and use `--torch-backend=cu130` instead of `auto`.
 
-3. Install vLLM-Omni and VeRL-Omni
-
-```bash
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train]"
-```
-
-This installs `vllm-omni`, then `verl` and `verl-omni`.
+> **Use uv, not pip.** If `pip install` fails with `ResolutionImpossible` ("Cannot install verl-omni ... conflicting dependencies"), rerun the command with `uv pip install` — pip cannot reconcile the core `verl`/`vllm-omni` pins against this repo's ranges, while uv applies the `[tool.uv] override-dependencies` in `pyproject.toml`.
 
 ### Extras
 
 | Extra       | Adds                                                          | When                     |
 | ----------- | ------------------------------------------------------------- | ------------------------ |
-| `gpu`       | `vllm==0.28.0`, `kernels==0.16.0`, `liger-kernel`             | CUDA rollout + actor FA3 |
-| `vllm-omni` | `vllm-omni==0.28.0rc1`                                        | Optional PyPI baseline only; CI/docs use the git pin above |
-| `train`     | `verl` @ [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | RL training              |
-| `dev`       | `pytest`, `pre-commit`, `Levenshtein`, …                      | Local development / CI   |
-| `ocr`       | `Levenshtein`                                                 | OCR reward (FlowGRPO)    |
-
-## Optional Dependencies
-
-| Extra                 | Install                                                   | When needed                             |
-| --------------------- | --------------------------------------------------------- | --------------------------------------- |
-| OCR reward            | `uv pip install -e ".[ocr]"`                              | FlowGRPO training with OCR-based reward |
-| Multimodal training   | `pip install qwen-vl-utils math-verify`                   | Vision-language training (e.g. MMK12)   |
-| Dev tools             | `uv pip install -e ".[dev]"`                              | Linting and unit tests                  |
-| VeOmni engine backend | See [Optional engine backends](#optional-engine-backends) | VeOmni instead of default FSDP2         |
+| `gpu`       | `kernels==0.16.0`, `liger-kernel`, `cupy-cuda13x` | CUDA rollout + actor FA3 |
+| `omni`      | omni-trainer runtime (`librosa`, `torchaudio`, `av`, …)       | Omni-modality training   |
+| `fa2`       | `flash-attn` (source build, needs a CUDA toolkit)             | Omni trainer FA2 default |
+| `audio`     | `qwen-omni-utils`, `audioread`                                 | Audio parsing (omni data) |
+| `dev`       | `pytest`, `pre-commit`, …                                     | Local development / CI   |
+| `ocr`       | `Levenshtein`                                                 | OCR reward               |
 
 ### Flash Attention 3
 
@@ -83,31 +98,15 @@ actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN_HUB
 
 ### Flash Attention 2 (omni trainer)
 
-The omni trainer's actor is a transformers LLM; following verl's practice for LLM training, it defaults to `flash_attention_2`, which requires the local `flash-attn` package — see verl's [installation docs](https://verl.readthedocs.io/en/latest/start/install.html).
-
-## Optional engine backends
-
-VeRL-Omni defaults to **FSDP2** as the training engine for the policy and reference models. The diffusion trainer can alternatively be switched to [**VeOmni**](https://github.com/ByteDance-Seed/VeOmni). The engine is selected at the Hydra command line — see [`examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/run_qwen_image_ocr_veomni.sh) for a complete recipe.
-
-### Installing VeOmni alongside vLLM 0.28.0
-
-VeOmni 0.1.12's `gpu` extra pins `torch==2.11.0+cu130`, which conflicts with the `torch==2.13.0` pulled in by `vllm==0.28.0`. A plain `uv pip install veomni[gpu,dit]==0.1.12` therefore fails dependency resolution.
-
-Install it without dependency resolution so the existing torch/vllm stack is preserved, and add the small set of runtime extras that the verl-omni VeOmni engine actually needs (this is the same recipe CI uses):
+The omni trainer's actor is a transformers LLM; following verl's practice for LLM training, it defaults to `flash_attention_2`, which requires the local `flash-attn` package:
 
 ```bash
-uv pip install veomni==0.1.12 --no-deps
-uv pip install torchcodec librosa soundfile av audioread
+uv pip install -e ".[fa2]"
 ```
 
-Verify the engine is importable:
+### Optional engine backends
 
-```bash
-python -c "import veomni; print('veomni', veomni.__version__)"
-python -c "from veomni.distributed.offloading import load_model_to_gpu, load_optimizer, offload_model_to_cpu, offload_optimizer; print('VeOmni offloading helpers OK')"
-```
-
-VeOmni's torch pin has not been validated against torch 2.13 yet — the `--no-deps` install above is expected to work for import/offloading, but a full VeOmni-engine training run on the vLLM 0.28 stack is still pending GPU validation. If you want VeOmni's full `[gpu,dit]` extras (flash-attn variants, liger-kernel, cuda-python, etc.), install them in a separate environment not pinned to vllm 0.28.0; verl-omni does not need them.
+VeRL-Omni defaults to FSDP2; the diffusion trainer and Qwen3-Omni Thinker can alternatively use VeOmni — see {doc}`Optional engine backends <engine_backends>`.
 
 ## Post-Installation Verification
 
@@ -123,7 +122,7 @@ python -c "import verl_omni; print('VeRL-Omni ready')"
 
 CUDA Dockerfile: [`docker/Dockerfile.cuda`](https://github.com/verl-project/verl-omni/blob/main/docker/Dockerfile.cuda)
 
-The CUDA image is intended for NVIDIA GPU training and rollout. The default CUDA base image uses **CUDA 13.0.2** on Ubuntu 22.04. You can override the CUDA version with `--build-arg CUDA_VERSION=...` if needed.
+The CUDA image is intended for NVIDIA GPU training and rollout. The base image is pinned to **CUDA 13.0.2** to match the cu130-pinned Python stack; changing it requires updating the torch backend and the pyproject pins together.
 
 Build context is controlled by the repo-root [`.dockerignore`](https://github.com/verl-project/verl-omni/blob/main/.dockerignore); keep large local folders such as `.venv`, `data/`, and `checkpoints/` out of the context.
 

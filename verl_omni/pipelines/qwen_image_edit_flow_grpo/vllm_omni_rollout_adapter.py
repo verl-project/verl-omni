@@ -34,12 +34,13 @@ from verl_omni.pipelines.diffusion_rollout_output import (
 )
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.qwen_image_flow_grpo.common import (
+    QwenImageLoRAMixin,
     QwenImageTokenIdPromptMixin,
     apply_true_cfg,
     coalesce_not_none,
 )
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
-from verl_omni.pipelines.rollout_request import condition_images_from_payload
+from verl_omni.pipelines.rollout_request import condition_images_from_payload, prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 
 __all__ = ["QwenImageEditPlusPipelineWithLogProb"]
@@ -124,7 +125,7 @@ def _condition_images_for_prompt_encoding(custom_prompt: dict) -> list[Any]:
 
 
 @VllmOmniPipelineBase.register("QwenImageEditPlusPipeline", algorithm="flow_grpo")
-class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImageEditPlusPipeline):
+class QwenImageEditPlusPipelineWithLogProb(QwenImageLoRAMixin, QwenImageTokenIdPromptMixin, QwenImageEditPlusPipeline):
     """Qwen-Image-Edit-Plus rollout pipeline for FlowGRPO."""
 
     #: Declares the primary rollout media stream so downstream consumers read
@@ -386,7 +387,7 @@ class QwenImageEditPlusPipelineWithLogProb(QwenImageTokenIdPromptMixin, QwenImag
             raise ValueError("Qwen-Image-Edit requires at least one condition image")
 
         if isinstance(custom_prompt, dict):
-            prompt_ids = custom_prompt.get("prompt_token_ids", prompt_ids)
+            prompt_ids = prompt_ids_from_payload(custom_prompt, prompt_ids)
             prompt_mask = custom_prompt.get("prompt_mask", prompt_mask)
             negative_prompt_ids = custom_prompt.get("negative_prompt_ids", negative_prompt_ids)
             negative_prompt_mask = custom_prompt.get("negative_prompt_mask", negative_prompt_mask)

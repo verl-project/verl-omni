@@ -1,3 +1,4 @@
+# DEPRECATED (v0): superseded by run_qwen_image_ocr_lora_v1.sh (V1 sync, the default since v0.3.0).
 # Qwen-Image DiffusionNFT LoRA RL, vllm_omni rollout
 set -x
 
@@ -21,6 +22,7 @@ REWARD_ENGINE=vllm
 
 
 python3 -m verl_omni.trainer.main_diffusion \
+    trainer.use_v1=false \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
     data.train_max_samples=7200 \

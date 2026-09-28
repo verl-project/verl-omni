@@ -224,8 +224,9 @@ trainer:
   device: cuda
 
   # Whether to use the V1 trainer (TransferQueue + ReplayBuffer architecture).
-  # When False, the legacy (v0) diffusion trainer is used.
-  use_v1: false
+  # True by default since v0.3.0; False selects the deprecated legacy (v0)
+  # diffusion trainer (offline DPO stays on v0 by design).
+  use_v1: true
 
   # V1 trainer mode configs (mirrors verl/trainer/config/ppo_trainer.yaml `trainer.v1`).
   v1:

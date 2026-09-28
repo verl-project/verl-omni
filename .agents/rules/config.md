@@ -116,4 +116,7 @@ fields, no inline comments.
 
 Adding a field with a default is safe. Renaming or removing one breaks existing
 user YAML and requires a `[BREAKING]` PR title
-([commit-and-pr](../skills/commit-and-pr/SKILL.md)); deprecate before removing.
+([commit-and-pr](../skills/commit-and-pr/SKILL.md)). Deprecate first: the notice
+names the replacement and the release that removes the old path, and the removal
+lands after that release as its own `[BREAKING]` PR (#522 removed the Qwen3-Omni
+legacy path its notice scheduled for v0.3.0).

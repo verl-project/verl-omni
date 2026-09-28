@@ -117,7 +117,9 @@ def _build_tiny_config(vocab_size: int):
     text.head_dim = 32
     text.num_experts = 4
     text.num_experts_per_tok = 2
-    text.moe_intermediate_size = 128
+    # With rollout TP=2, FlashInfer's SM100 MoE kernel requires the local
+    # intermediate dimension to remain a multiple of 128.
+    text.moe_intermediate_size = 256
     text.vocab_size = vocab_size
     # The default config leaves rope_scaling unset, but the M-RoPE rotary
     # embedding requires it. mrope_section must sum to head_dim // 2 (= 16 here).

@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from hydra import compose, initialize_config_dir
-from verl.trainer.ppo.v1.trainer_base import get_trainer_cls
+from verl.trainer.ppo.v1.trainer_base import PPOTrainer, get_trainer_cls
 from verl.trainer.ppo.v1.trainer_separate_async import PPOTrainerSeparateAsync
 
 from verl_omni.trainer.omni.ray_omni_trainer_separate_async import OmniPPOTrainerSeparateAsync
@@ -64,6 +64,25 @@ def test_parameter_sync_step_follows_validated_key():
         )
     )
     assert trainer.parameter_sync_step == 2
+
+
+def test_omni_separate_async_inherits_verl_tq_checkpoint_and_hybrid_switch():
+    # Omni does not override save/load; after TransferQueue 0.1.9 the pin's
+    # TQ checkpoint path (verl#7037) is live. Dynamic GPU lending on v1 is
+    # hybrid_rollout.enable_switch (verl#7373), default off.
+    assert OmniPPOTrainerSeparateAsync._save_checkpoint is PPOTrainer._save_checkpoint
+    assert OmniPPOTrainerSeparateAsync._load_checkpoint is PPOTrainer._load_checkpoint
+    trainer = OmniPPOTrainerSeparateAsync(_compose_config())
+    assert trainer.hybrid_rollout_config.enable_switch is False
+
+
+def test_pin_ships_dynamic_resource_controller():
+    # verl#6556 is in the pin; v1 trainers do not construct it (see RFC #52).
+    from verl.experimental.fully_async_policy.dynamic_schedule import DynamicResourceController, build_policy
+
+    policy = build_policy("default", deactivate_ratio=0.3, only_hybrid=False)
+    assert DynamicResourceController is not None
+    assert policy is not None
 
 
 def test_init_tokenizer_wires_omni_model_config():
