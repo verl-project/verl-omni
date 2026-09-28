@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""MiniCPM omni training adapter."""
+"""MiniCPM omni pipeline adapters."""
 
+from .omni_rollout_adapter import MiniCPMORolloutAdapter
+from .reward_decode import MiniCPMNaiveRewardManager
 from .thinker_training_adapter import MiniCPMThinkerAdapter
 
-__all__ = ["MiniCPMThinkerAdapter"]
+__all__ = ["MiniCPMNaiveRewardManager", "MiniCPMORolloutAdapter", "MiniCPMThinkerAdapter"]
