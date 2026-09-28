@@ -19,7 +19,7 @@ Prepare an Atlas 800T A2 server with 8 NPUs, and install the necessary software 
 3. Install the FlowGRPO-specific reward dependency:
 
 ```bash
-uv pip install Levenshtein
+uv pip install -e ".[ocr]"
 ```
 
 ## Launch Training

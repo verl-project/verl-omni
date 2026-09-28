@@ -1,7 +1,7 @@
 (separate_async_omni)=
 # Separate-Async RL Training for Qwen3-Omni
 
-Last updated: 09/08/2026
+Last updated: 09/25/2026
 
 `trainer.v1.trainer_mode=omni_separate_async` runs training and rollout on
 separate GPU pools for omni AR models (Qwen3-Omni thinker). Standalone rollout
@@ -28,7 +28,8 @@ for staleness; the replay buffer's
 
 ## GPU layout
 
-`trainer.n_gpus_per_node × trainer.nnodes` GPUs run the FSDP actor;
+`trainer.n_gpus_per_node × trainer.nnodes` GPUs run the actor (FSDP2 LoRA by
+default, or Megatron for the full-parameter AudioMCQ recipe);
 `actor_rollout_ref.rollout.n_gpus_per_node × actor_rollout_ref.rollout.nnodes`
 additional GPUs run standalone rollout replicas
 (`n_gpus_per_node / tensor_model_parallel_size` replicas per node). Single-node
@@ -41,13 +42,23 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_sep
 ```
 
 The example splits 4 GPUs into 2 trainer + 2 rollout (one TP=2 replica) and
-uses GSPO + GRPO advantages with LoRA. Key overrides:
+uses GSPO + GRPO advantages with LoRA. Full-parameter Megatron uses the same
+`trainer.v1.trainer_mode=omni_separate_async` path:
+
+```bash
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_audiomcq_separate_async.sh
+```
+
+That launcher is Thinker-only, BSHD, PP=CP=1, AudioMCQ. It is experimental and
+not clean-checkout reproducible yet; see
+[`examples/gspo_trainer/qwen3_omni/README.md`](../../examples/gspo_trainer/qwen3_omni/README.md).
+FSDP LoRA remains the default. Key overrides:
 
 | knob | default | meaning |
 |---|---|---|
 | `trainer.v1.separate_async.num_warmup_batches` | 4 | prompt batches submitted before the first step |
 | `trainer.v1.separate_async.parameter_sync_step` | 4 | push weights to standalone replicas every N steps |
-| `actor_rollout_ref.rollout.checkpoint_engine.backend` | — | must be non-naive (`nccl`, `nixl`, `mooncake`) |
+| `trainer.v1.separate_async.hybrid_rollout.enable_switch` | false | lend colocated trainer GPUs to generation when the replay buffer is short |
 
 Constraints enforced at startup: rollout GPUs > 0, a non-naive checkpoint
 backend, and `data.train_batch_size == parameter_sync_step * ppo_mini_batch_size`.
@@ -58,6 +69,31 @@ example sets `parameter_sync_step=8` so `128 == 8 * 16`.
 LoRA recipes should set `actor_rollout_ref.model.lora.merge=False` so weight
 sync ships only adapter tensors (applied on the replicas via the LoRA-aware
 checkpoint engine manager).
+
+## Checkpoint recovery and dynamic GPU lending
+
+`OmniPPOTrainerSeparateAsync` does not override save/load. After TransferQueue
+0.1.9 it inherits verl's async queue snapshot (verl#7037): resume restores
+queued prompt groups and re-issues pending/running ones. Sync mode does not
+write a queue snapshot.
+
+Dynamic GPU lending on this v1 trainer is
+`trainer.v1.separate_async.hybrid_rollout.enable_switch` (verl#7373), default
+off. That is the analog of verl's fully_async_policy
+`DynamicResourceController` (verl#6556, -15.3% on an LLM). `main_omni` does
+not construct that controller; `async_training.use_dynamic_resource_scheduling=true`
+raises and points at `hybrid_rollout.enable_switch`. Omni VL/audio fully-async
+rollout (upstream #399 / #413) is a separate stack.
+
+To lend colocated trainer GPUs when the replay buffer is short:
+
+```bash
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_separate_async_v1.sh \
+    trainer.v1.separate_async.hybrid_rollout.enable_switch=true
+```
+
+This override is not GPU-verified on omni yet. `enable_switch=true` requires
+`sync_compatible=false`.
 
 ## Monitor
 

@@ -21,7 +21,7 @@ import numpy as np
 import torch
 import torchvision.transforms as T
 from verl.utils.import_utils import import_external_libs
-from vllm_omni.inputs.data import OmniCustomPrompt, OmniDiffusionSamplingParams
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.lora.request import LoRARequest
 
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
@@ -167,34 +167,13 @@ class DiffusionStrategy(OmniStrategyBase):
         request: OmniRolloutRequest,
         sampling_params: dict[str, Any],
         lora_request: Optional[LoRARequest],
-    ) -> tuple[OmniCustomPrompt, list[Any]]:
-        prompt_ids = request.prompt.token_ids
-        prompt_mask = request.prompt.mask
-        negative_prompt_ids = request.prompt.negative_token_ids
-        extra_prompt_ids = request.prompt.extra_token_ids
-        negative_extra_prompt_ids = request.prompt.negative_extra_token_ids
-        mm_processor_kwargs = request.prompt.mm_processor_kwargs
-        multi_modal_data = request.multi_modal_data()
-
+    ) -> tuple[dict[str, Any], list[Any]]:
         default_params_list = self.server.engine.default_sampling_params_list
-
-        custom_prompt: OmniCustomPrompt = {"prompt_token_ids": prompt_ids}
-        if prompt_mask is not None:
-            custom_prompt["prompt_mask"] = prompt_mask
-        if len(default_params_list) > 1:
+        custom_prompt = dict(request.to_diffusion_prompt())
+        if self.server.engine.engine.get_stage_metadata(0).stage_type != "diffusion":
+            # Match AsyncOmniEngine's stage-0 preprocessing gate, independently of stage count.
+            custom_prompt["prompt_token_ids"] = custom_prompt.pop("prompt_ids")
             custom_prompt["modalities"] = ["image"]
-        if negative_prompt_ids is not None:
-            custom_prompt["negative_prompt_ids"] = negative_prompt_ids
-        if extra_prompt_ids is not None:
-            custom_prompt["extra_prompt_ids"] = extra_prompt_ids
-        if negative_extra_prompt_ids is not None:
-            custom_prompt["negative_extra_prompt_ids"] = negative_extra_prompt_ids
-        if multi_modal_data:
-            custom_prompt["multi_modal_data"] = multi_modal_data
-            custom_prompt["extra_args"] = {"multi_modal_data": multi_modal_data}
-        if mm_processor_kwargs:
-            # Reference fps / sampling_rate must reach the pipeline (mirrors ARStrategy).
-            custom_prompt["mm_processor_kwargs"] = mm_processor_kwargs
 
         sampling_kwargs: dict[str, Any] = {}
         extra_args: dict[str, Any] = {}

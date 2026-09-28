@@ -13,9 +13,11 @@
 # limitations under the License.
 """Shared MiniMax H3 latent-layout and weight-sync helpers."""
 
+import inspect
 import json
 import os
 import threading
+import types
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -23,6 +25,8 @@ from typing import Any
 
 import numpy as np
 import torch
+
+from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 
 VIDEO_ROW_WIDTH = 96
 AUDIO_ROW_WIDTH = 32
@@ -56,6 +60,8 @@ __all__ = [
     "prepare_h3_processor_files",
     "ref2va_reference_image_short_edge",
     "validate_ref2va_reference_image_short_edge",
+    "pad_h3_layout_for_ulysses",
+    "h3_ulysses_forward",
     "keyframe_indices_to_anchors",
     "serialize_ref_blocks",
     "build_packed_sequence",
@@ -67,6 +73,148 @@ __all__ = [
 
 
 MINIMAX_H3_TOKEN_ID_NATIVE_KEY = "minimax_h3_token_id_native"
+
+
+_H3_FORWARD_PARAMETERS = (
+    "self",
+    "hidden_states",
+    "audio_hidden_states",
+    "encoder_hidden_states",
+    "timestep",
+    "timestep_indices",
+    "token_tags",
+    "position_ids",
+    "video_indices",
+    "audio_indices",
+    "text_indices",
+    "attention_kwargs",
+    "return_dict",
+)
+_H3_BLOCK_FORWARD_PARAMETERS = ("self", "hidden_states", "temb", "adaln_indices", "rotary_emb", "attention_mask")
+
+
+def pad_h3_layout_for_ulysses(model_inputs: dict[str, Any], sp_size: int | None) -> dict[str, Any]:
+    """Pad H3's packed layout to a multiple of ``sp_size`` and mask the padding keys.
+
+    Padding rows are appended after every real row, are absent from the modality
+    index tensors, and are excluded as attention keys, so real rows see exactly
+    the unpadded attention and padding outputs are never selected.
+    """
+    if sp_size is None or sp_size == 1:
+        return model_inputs
+    if sp_size <= 0:
+        raise ValueError(f"MiniMax H3 Actor SP size must be positive, got {sp_size}.")
+    position_ids = model_inputs["position_ids"]
+    seq_len = int(position_ids.shape[0])
+    pad = -seq_len % sp_size
+    if pad == 0:
+        return model_inputs
+    padded = dict(model_inputs)
+    padded["position_ids"] = torch.nn.functional.pad(position_ids, (0, 0, 0, pad))
+    padded["token_tags"] = torch.nn.functional.pad(model_inputs["token_tags"], (0, pad), value=TEXT_TAG)
+    padded["timestep_indices"] = torch.nn.functional.pad(model_inputs["timestep_indices"], (0, pad))
+    # [1, 1, 1, S] is consumed as-is by native SDPA and normalized to key padding by varlen FA backends.
+    attention_mask = torch.zeros((1, 1, 1, seq_len + pad), dtype=torch.bool, device=position_ids.device)
+    attention_mask[..., :seq_len] = True
+    padded["attention_mask"] = attention_mask
+    return padded
+
+
+# TODO(NancyFyong): Remove this copied forward and its installer when
+# https://github.com/huggingface/diffusers/pull/14868 ships in the pinned Diffusers version.
+def _h3_masked_forward(
+    self,
+    hidden_states: torch.Tensor,
+    audio_hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    timestep: torch.Tensor,
+    timestep_indices: torch.Tensor,
+    token_tags: torch.Tensor,
+    position_ids: torch.Tensor,
+    video_indices: torch.Tensor,
+    audio_indices: torch.Tensor,
+    text_indices: torch.Tensor,
+    attention_kwargs: dict[str, Any] | None = None,
+    return_dict: bool = True,
+    attention_mask: torch.Tensor | None = None,
+):
+    """Diffusers 0.40 ``MiniMaxH3Transformer3DModel.forward`` plus a block attention mask."""
+    from diffusers.models.modeling_utils import get_parameter_dtype
+    from diffusers.models.transformers.transformer_minimax_h3 import (
+        MINIMAX_H3_MODALITY_NUM,
+        MiniMaxH3TransformerOutput,
+    )
+
+    sequence_length = position_ids.shape[0]
+    if token_tags.shape != (sequence_length,) or timestep_indices.shape != (sequence_length,):
+        raise ValueError("MiniMax H3 token_tags and timestep_indices must match position_ids.")
+    rotary_emb = self.rope(position_ids)
+
+    video_embeds = self.proj_in(hidden_states.to(get_parameter_dtype(self.proj_in)))
+    audio_embeds = self.audio_proj_in(audio_hidden_states.to(get_parameter_dtype(self.audio_proj_in)))
+    text_embeds = self.context_embedder(encoder_hidden_states.to(get_parameter_dtype(self.context_embedder)))
+    text_embeds = self.token_refiner(text_embeds)
+
+    hidden_states = text_embeds.new_zeros((text_embeds.shape[0], sequence_length, text_embeds.shape[-1]))
+    hidden_states = hidden_states.index_copy(1, text_indices, text_embeds)
+    hidden_states = hidden_states.index_copy(1, video_indices, video_embeds.to(text_embeds.dtype))
+    hidden_states = hidden_states.index_copy(1, audio_indices, audio_embeds.to(text_embeds.dtype))
+
+    temb = self.time_proj(timestep)
+    temb = self.time_embedder(temb.to(get_parameter_dtype(self.time_embedder)))
+    adaln_indices = timestep_indices * MINIMAX_H3_MODALITY_NUM + token_tags
+
+    for block in self.transformer_blocks:
+        if torch.is_grad_enabled() and self.gradient_checkpointing:
+            hidden_states = self._gradient_checkpointing_func(
+                block, hidden_states, temb, adaln_indices, rotary_emb, attention_mask
+            )
+        else:
+            hidden_states = block(hidden_states, temb, adaln_indices, rotary_emb, attention_mask)
+
+    hidden_states = self.norm_out(hidden_states, temb, timestep_indices).to(get_parameter_dtype(self.proj_out))
+    video_output = self.proj_out(hidden_states).index_select(1, video_indices)
+    audio_output = self.audio_proj_out(hidden_states).index_select(1, audio_indices)
+    if not return_dict:
+        return (video_output, audio_output)
+    return MiniMaxH3TransformerOutput(sample=video_output, audio_sample=audio_output)
+
+
+def _install_h3_attention_mask_forward(module: torch.nn.Module) -> None:
+    """Let the root H3 call carry a block attention mask, failing closed on Diffusers drift."""
+    if getattr(module, "_verl_omni_h3_attention_mask_forward", False):
+        return
+    from diffusers.models.transformers.transformer_minimax_h3 import (
+        MiniMaxH3Transformer3DModel,
+        MiniMaxH3TransformerBlock,
+    )
+    from diffusers.utils.peft_utils import apply_lora_scale
+
+    if not isinstance(module, MiniMaxH3Transformer3DModel):
+        raise TypeError(f"MiniMax H3 SP padding requires MiniMaxH3Transformer3DModel, got {type(module).__name__}.")
+    forward_params = tuple(inspect.signature(MiniMaxH3Transformer3DModel.forward).parameters)
+    block_params = tuple(inspect.signature(MiniMaxH3TransformerBlock.forward).parameters)
+    if forward_params != _H3_FORWARD_PARAMETERS or block_params != _H3_BLOCK_FORWARD_PARAMETERS:
+        raise RuntimeError(
+            "MiniMax H3 SP padding was validated against the Diffusers 0.40 transformer forward; "
+            f"found forward={forward_params} and block={block_params}. Revalidate the masked forward."
+        )
+    module.forward = types.MethodType(apply_lora_scale("attention_kwargs")(_h3_masked_forward), module)
+    module._verl_omni_h3_attention_mask_forward = True
+
+
+def h3_ulysses_forward(module: torch.nn.Module, model_inputs: dict[str, Any], sp_size: int | None = 1):
+    """Run the H3 transformer, padding the packed layout when Actor Ulysses SP needs it.
+
+    Standard Ulysses shards the packed sequence equally, so non-divisible layouts are
+    padded here and the padding rows are masked as attention keys. Variable-length
+    (Ulysses Anything) training is not supported yet because Diffusers lacks its
+    backward; see https://github.com/huggingface/diffusers/pull/14834.
+    """
+    model_inputs = pad_h3_layout_for_ulysses(model_inputs, sp_size)
+    if "attention_mask" in model_inputs:
+        _install_h3_attention_mask_forward(module)
+    return module(**model_inputs)
 
 
 def validate_ref2va_reference_image_short_edge(value: int | str | None = None) -> int:
@@ -706,7 +854,7 @@ class MiniMaxH3RolloutWeightSyncMixin:
         if not prompts or not isinstance(prompts[0], dict):
             return
         custom_prompt = prompts[0]
-        token_ids = custom_prompt.get("prompt_token_ids")
+        token_ids = prompt_ids_from_payload(custom_prompt)
         if token_ids is None:
             return
         sampling_params = getattr(request, "sampling_params", None)
@@ -723,5 +871,5 @@ class MiniMaxH3RolloutWeightSyncMixin:
             token_ids = token_ids[0]
         self._h3_prompt_ids = torch.as_tensor([int(token) for token in token_ids], dtype=torch.long)
         if self._h3_prompt_ids.numel() == 0:
-            raise ValueError("MiniMax H3 requires non-empty prompt_token_ids.")
+            raise ValueError("MiniMax H3 requires non-empty prompt_ids.")
         custom_prompt["prompt"] = "[pretokenized]"

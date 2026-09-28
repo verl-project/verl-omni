@@ -1,6 +1,6 @@
 # MiniMax H3 T2VA, FL2VA, and Ref2VA FlowGRPO
 
-Last updated: 09/14/2026
+Last updated: 09/23/2026
 
 These recipes train `MiniMaxAI/MiniMax-H3` LoRA adapters with FlowGRPO for
 text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
@@ -13,34 +13,9 @@ Ref2VA paths target NVIDIA GPUs.
 
 ## Install
 
-Follow the project [installation guide](../../../docs/start/install.md). In
-particular, install the platform backend, the repository-pinned vLLM-Omni
-revision, and the training dependencies in that order. Run the commands below
-from the verl-omni repository root.
-
-For NVIDIA GPU:
-
-```bash
-uv pip install -e ".[gpu]" --torch-backend=auto
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train,dev]"
-```
-
-For Ascend NPU:
-
-```bash
-uv pip install vllm==0.28.0
-uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@$(cat .github/vllm_ascend_pin.txt)"
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train,dev]"
-```
-
-Install the tested Diffusers revision that provides
-`MiniMaxH3Transformer3DModel`:
-
-```bash
-uv pip install "diffusers @ git+https://github.com/huggingface/diffusers.git@d6726f38a0c5ca6c06a8f227fb7bade3486ed98d"
-```
+Follow the project [installation guide](../../../docs/start/install.md) for
+NVIDIA GPU, or the [NPU installation guide](../../../docs/start/install_npu.md)
+for Ascend NPU.
 
 ## Prepare the checkpoint
 
@@ -178,6 +153,28 @@ measure fidelity to the supplied references.
 
 
 ## Launch
+
+### Actor FSDP sequence parallelism
+
+The NVIDIA T2VA, FL2VA, and Ref2VA launchers accept `ACTOR_SP` (default `1`).
+Set it to a divisor of the GPU count to shard each Actor's joint
+text/video/audio sequence with Diffusers Ulysses context parallelism:
+
+```bash
+ACTOR_SP=2 bash examples/flowgrpo_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh
+```
+
+This uses the same standard equal-partition Ulysses path as Qwen-Image and
+changes Actor FSDP data parallelism to `NUM_GPUS / ACTOR_SP`; it does not change
+rollout `ROLLOUT_TP` or text-encoder `TEXT_ENCODER_TP`. `ACTOR_SP` must divide
+the model's attention-head count (56 for the released H3 checkpoint). When a
+packed layout's length is not a multiple of `ACTOR_SP`, the adapter appends
+padding rows and masks them as attention keys; real rows attend exactly as
+without padding and padding outputs are discarded, so arbitrary prompt and
+reference lengths are supported. Use an attention backend that accepts key
+masks under context parallelism (`native`, `flash_varlen_hub`, or
+`_flash_3_varlen_hub`). Keep timestep staging disabled. FlowGRPO micro-batches must still share one packed layout; sequence
+parallelism does not relax that replay contract.
 
 ### NVIDIA GPU
 

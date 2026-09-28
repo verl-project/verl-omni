@@ -214,7 +214,7 @@ class QwenImagePipelineWithDualLogProb(QwenImagePipelineWithLogProb):
         prompts = request_batch.prompts
         prompt_token_ids, prompt_token_lengths = _collate_prompt_rows(
             prompts,
-            ("prompt_token_ids", "prompt_ids"),
+            ("prompt_ids",),
             prompt_token_ids,
             device=self.device,
             field_name="prompt_token_ids",

@@ -31,12 +31,11 @@ references below for the algorithm and multi-codebook design details.
 
 ## Install
 
-Install the engine before the training stack:
+Follow the project [installation guide](../../../docs/start/install.md), then
+add the `[omni]` extra and the pinned Qwen3-TTS package:
 
 ```bash
-uv pip install -e ".[gpu]" --torch-backend=auto
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[omni,train,dev]"
+uv pip install -e ".[omni]"
 uv pip install --no-deps --reinstall \
   "qwen-tts @ https://github.com/QwenLM/Qwen3-TTS/archive/$(cat .github/qwen_tts_pin.txt).tar.gz"
 ```
@@ -47,7 +46,8 @@ newer, while this repository intentionally caps Transformers at 5.14.1. The
 commit archive keeps the exact revision installable even when its source branch
 is no longer advertised by the upstream Git remote. The `--no-deps` flag
 preserves the repository-wide cap; the `omni` extra owns the
-runtime dependencies, including `torchaudio==2.11.0` to match vLLM's Torch pin,
+runtime dependencies, including `torchaudio>=2.11.0` (vLLM's own
+`torchaudio==2.11.0` requirement governs the version in the GPU env),
 and CI tests the exact Qwen3-TTS revision from `.github/qwen_tts_pin.txt` on this
 stack. The released `qwen-tts==0.1.1` source targets Transformers 4.57.3 and
 cannot be imported unchanged here. The adapter registers the upstream config

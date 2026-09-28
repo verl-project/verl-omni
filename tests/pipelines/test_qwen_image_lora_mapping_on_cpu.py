@@ -71,7 +71,7 @@ _QWEN_TARGETS = [
 ]
 
 
-def _export_qwen_actor(monkeypatch):
+def _export_qwen_actor(monkeypatch, backend):
     from diffusers import QwenImageTransformer2DModel
     from peft import LoraConfig, get_peft_model
 
@@ -84,21 +84,32 @@ def _export_qwen_actor(monkeypatch):
         joint_attention_dim=32,
         axes_dims_rope=(8, 12, 12),
     )
-    model = get_peft_model(model, LoraConfig(r=4, lora_alpha=8, target_modules=_QWEN_TARGETS))
+    if backend == "veomni":
+        lora = pytest.importorskip("veomni.lora")
+        from tests.workers.veomni_lora_helpers import export_veomni_params, make_veomni_engine
+
+        model = lora.VeOmniLoraModel(model, lora.VeOmniLoraConfig(r=4, lora_alpha=8, target_modules=_QWEN_TARGETS))
+    else:
+        model = get_peft_model(model, LoraConfig(r=4, lora_alpha=8, target_modules=_QWEN_TARGETS))
     with torch.no_grad():
         for index, (name, param) in enumerate(model.named_parameters()):
             if ".lora_" in name:
                 param.fill_((index + 1) / 128)
-    _patch_sync_helpers(monkeypatch)
-    engine = _make_engine(model, lora_config={})
-    params, config = engine.get_per_tensor_param(base_sync_done=True)
-    params = dict(params)
+    if backend == "veomni":
+        engine = make_veomni_engine(model, lora_rank=4)
+        params, config = export_veomni_params(engine, monkeypatch, base_sync_done=True)
+    else:
+        _patch_sync_helpers(monkeypatch)
+        engine = _make_engine(model, lora_config={})
+        params, config = engine.get_per_tensor_param(base_sync_done=True)
+        params = dict(params)
     assert len(params) == 24
-    return params, config
+    # The rollout receives copied transport tensors, not live actor Parameters.
+    return {name: tensor.detach().clone() for name, tensor in params.items()}, config
 
 
-@pytest.fixture
-def runtime_manager(monkeypatch):
+@pytest.fixture(params=["fsdp2", "veomni"])
+def runtime_manager(monkeypatch, request):
     import vllm.distributed.parallel_state as parallel_state
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm_omni.diffusion.data import OmniDiffusionConfig
@@ -130,7 +141,7 @@ def runtime_manager(monkeypatch):
         torch.nn.Module.__init__(pipeline)
         pipeline.transformer = transformer
         manager = DiffusionLoRAManager(pipeline, device=torch.device("cpu"), dtype=torch.float32)
-        params, config = _export_qwen_actor(monkeypatch)
+        params, config = _export_qwen_actor(monkeypatch, request.param)
         yield manager, params, config
 
 

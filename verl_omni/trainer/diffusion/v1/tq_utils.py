@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 import logging
 import os
 from typing import Any, Literal
@@ -128,7 +129,8 @@ def diffusion_tq_batch_to_dataproto(
         responses, rollout_log_probs, rm_scores, embeds, ...) and whose
         ``non_tensor_batch`` carries uid/reward_model/data_source/extra_fields.
     """
-    keys = list(batch_meta.keys)
+    sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
+    keys = [batch_meta.keys[i] for i in sort_idx]
     partition_id = batch_meta.partition_id
 
     data = tq.kv_batch_get(
@@ -189,8 +191,10 @@ def put_dataproto_fields_to_tq(
         output[field] = data.batch[field]
     if not output:
         return
+    sort_idx = sort_diffusion_tq_keys(list(batch_meta.keys))
+    sorted_keys = [batch_meta.keys[i] for i in sort_idx]
     tq.kv_batch_put(
-        keys=list(batch_meta.keys),
+        keys=sorted_keys,
         partition_id=batch_meta.partition_id,
         fields=tu.get_tensordict(output),
     )
@@ -205,11 +209,51 @@ def sort_diffusion_tq_keys(keys: list[str]) -> list[int]:
     Returns:
         Permutation indices that reorder ``keys`` by ``(uid, rollout, output)``.
     """
-    sort_keys = []
-    for key in keys:
-        parts = key.rsplit("_", 2)
-        if len(parts) == 3:
-            sort_keys.append((parts[0], int(parts[1]), int(parts[2])))
-        else:
-            sort_keys.append((key, 0, 0))
-    return sorted(range(len(keys)), key=lambda i: sort_keys[i])
+    return sorted(range(len(keys)), key=lambda i: _parse_tq_key(keys[i]))
+
+
+def _parse_tq_key(key: str) -> tuple[str, int, int]:
+    """Split a ``{uid}_{session}_{output}`` TransferQueue key."""
+    parts = key.rsplit("_", 2)
+    if len(parts) == 3:
+        try:
+            return parts[0], int(parts[1]), int(parts[2])
+        except ValueError:
+            return key, 0, 0
+    return key, 0, 0
+
+
+def canonicalize_diffusion_tq_meta(batch_meta: KVBatchMeta) -> KVBatchMeta:
+    """Return a copy of ``batch_meta`` with rows in v0 rollout order.
+
+    Upstream ``_materialize_batch`` emits trajectory keys in TransferQueue
+    ``kv_list`` iteration order, which is storage-arbitrary and differs per
+    run, while the v0 trainer produced rows prompt-major in dataset order
+    (``prompt_index * rollout.n + session``). ``prompt_index`` is unique only
+    within one generation batch, so rows carry ``(gen_batch_seq,
+    prompt_index)`` — the per-run generation-batch number plus the position
+    inside it — which stays unique across every path that can mix batches in
+    one sample (DAPO speculative refills, incomplete-group replacement,
+    multi-chunk generation dispatches). Rows whose tag predates the pair fall
+    back to uid order, which is deterministic but not dataset order.
+    """
+    if len(batch_meta.keys) < 2:
+        return batch_meta
+
+    def sort_key(i: int) -> tuple:
+        uid, session, output = _parse_tq_key(batch_meta.keys[i])
+        tag = batch_meta.tags[i]
+        prompt_index = tag.get("prompt_index") if isinstance(tag, dict) else None
+        gen_batch_seq = tag.get("gen_batch_seq") if isinstance(tag, dict) else None
+        if prompt_index is None or gen_batch_seq is None:
+            return (1, uid, session, output)
+        return (0, int(gen_batch_seq), int(prompt_index), session, output)
+
+    perm = sorted(range(len(batch_meta.keys)), key=sort_key)
+    # replace() carries fields/extra_info over so future consumers reading
+    # them (e.g. a kv_batch_get driven by batch_meta.fields) see real values.
+    return dataclasses.replace(
+        batch_meta,
+        keys=[batch_meta.keys[i] for i in perm],
+        tags=[batch_meta.tags[i] for i in perm],
+    )

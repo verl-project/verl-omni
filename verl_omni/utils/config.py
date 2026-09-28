@@ -51,3 +51,24 @@ def validate_config(config: Any) -> None:
             raise ValueError("trainer.total_training_steps must be a positive integer or null.") from exc
         if total_steps <= 0:
             raise ValueError("trainer.total_training_steps must be a positive integer or null.")
+
+    _validate_dynamic_resource_scheduling(config)
+
+
+def _validate_dynamic_resource_scheduling(config: Any) -> None:
+    """Refuse the fully_async_policy scheduler on v1/v0 entrypoints.
+
+    ``async_training.use_dynamic_resource_scheduling`` drives verl's
+    ``DynamicResourceController`` (verl#6556) on the MessageQueue
+    ``fully_async_policy`` stack. ``main_omni`` / ``main_diffusion`` /
+    ``main_diffusion_v1`` never construct that controller, so the flag would
+    be a silent no-op. The v1 analog is ``hybrid_rollout.enable_switch``.
+    """
+    if not _select(config, "async_training.use_dynamic_resource_scheduling", False):
+        return
+    raise ValueError(
+        "async_training.use_dynamic_resource_scheduling=true is the fully_async_policy "
+        "DynamicResourceController (verl#6556) and is not wired on main_omni / "
+        "main_diffusion / main_diffusion_v1. For v1 separate_async, set "
+        "trainer.v1.separate_async.hybrid_rollout.enable_switch=true instead."
+    )

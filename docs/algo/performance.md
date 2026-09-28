@@ -182,7 +182,7 @@ Reference wandb curve [here](https://wandb.ai/andyzhou/VeRL-Omni-demo/runs/8p8y9
 > Apples-to-apples comparison: the **VeOmni** and **FSDP1** actor engines run the *same* FlowGRPO recipe — same algorithm, data, and hyper-parameters — on the *same* hardware (64 × NVIDIA H100), differing only in the training engine. lr 3e-5, clip_ratio 1e-5, optimizer state fp32; other parameters match the LoRA setting.
 
 - **FSDP1** — `run_qwen_image_ocr.sh`
-- **VeOmni** — `run_qwen_image_ocr_veomni.sh` (see the [install guide](../start/install.md) "Optional engine backends")
+- **VeOmni** — `run_qwen_image_ocr_veomni.sh` (see the [optional engine backends](engine_backends.md))
 
 ### Settings and Throughput
 

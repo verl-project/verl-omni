@@ -633,6 +633,16 @@ def test_actor_accepts_a_shared_replicated_h3_layout() -> None:
     module.assert_not_called()
 
 
+def test_actor_threads_the_ulysses_size_to_the_padding_runner() -> None:
+    payload = _trajectory()
+    payload["sp_size"] = 2
+
+    _, (model_inputs, _) = _prepare_actor_payload(payload)
+
+    assert model_inputs["position_ids"].shape[0] == 7
+    assert model_inputs["_h3_sp_size"] == 2
+
+
 @pytest.mark.parametrize(
     ("mutate", "error_type", "message"),
     [

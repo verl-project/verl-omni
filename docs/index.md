@@ -27,6 +27,7 @@ See {doc}`start/models` for the full model catalogue and which algorithms run on
 :caption: Getting Started
 
 start/install.md
+start/engine_backends.md
 start/install_npu.md
 start/install_rocm.md
 start/models.md
@@ -86,6 +87,7 @@ examples/flux1/dancegrpo_trainer_flux1.md
 examples/diffusionnft_trainer.md
 examples/grpoguard_trainer.md
 examples/gspo_trainer.md
+examples/qwen3_omni/gspo_trainer_qwen3_omni.md
 examples/mixgrpo_trainer.md
 examples/diffusionopd_trainer.md
 examples/flowgrpo_trainer_sd35_drm.md
@@ -143,6 +145,7 @@ contributing/integrating_a_stepwise_continuous_batching_model.md
 contributing/integrating_a_new_policy_gradient_algorithm_for_diffusion_model.md
 contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md
 contributing/gpu_smoke_tests.md
+contributing/npu_smoke_tests.md
 contributing/common_pitfalls.md
 ```
 
@@ -207,7 +210,10 @@ the matching checks:
 | `ci-core` | Core GPU smoke (2 GPUs) (training, reward, rollout modules) |
 | `ci-e2e-omni` | Omni trainer e2e GPU smoke (2 GPUs) |
 | `ci-e2e-diffusion` | Diffusion trainer e2e GPU smoke (4 GPUs) |
-| `ready-for-ci` | Selective GPU smoke suite in parallel (Up to 8 GPUs) |
+| `ready-for-ci` | Selective GPU smoke suite in parallel (Up to 8 GPUs), plus the full NPU smoke suite when the PR matches the NPU path filter |
+| `ci-npu` | Full NPU smoke suite (8 NPUs) |
+| `ci-npu-rollout` | NPU rollout smoke only |
+| `ci-npu-flowgrpo` | NPU FlowGRPO smoke only |
 
 Labels are removed automatically when new commits are pushed; re-apply the
 label after each update. 

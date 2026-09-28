@@ -34,12 +34,10 @@ The converted parquet stores absolute image and audio paths. Every Ray worker
 must mount the converted dataset and its media files at the same absolute path
 used during conversion.
 
-Install the audio and multimodal processing dependencies on every Ray worker,
-then launch:
+Install the audio dependencies on every Ray worker, then launch:
 
 ```bash
-pip install -e ".[audio]"
-pip install qwen-vl-utils
+uv pip install -e ".[audio]"
 ```
 
 ```bash

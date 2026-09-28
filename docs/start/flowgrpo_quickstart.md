@@ -11,11 +11,10 @@ In this example, we post-train a `Stable Diffusion 3.5 Medium` policy with FlowG
 
 ## Prerequisite
 
-- Install VeRL-Omni and its dependencies following the {doc}`installation guide <install>`. Also install the FlowGRPO-specific reward dependency and TransferQueue (required by the default V1 trainer):
+- Install VeRL-Omni and its dependencies following the {doc}`installation guide <install>`, plus the FlowGRPO-specific reward dependency:
 
 ```bash
-pip install Levenshtein
-pip install TransferQueue==0.1.9
+uv pip install -e ".[ocr]"
 ```
 
 - Use a machine with `3` GPUs for the provided example script (`2` for actor + rollout, `1` for the reward model in its own resource pool).

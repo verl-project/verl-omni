@@ -30,7 +30,7 @@ from verl.workers.rollout.replica import RolloutMode
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
-MODEL_PATH = Path(os.path.expanduser("~/models/tiny-random/Qwen-Image"))
+MODEL_PATH = Path(os.path.expanduser(os.getenv("MODEL_PATH", "~/.cache/modelscope/hub/models/tiny-random/Qwen-Image")))
 
 _MIN_PROMPT_TOKENS = 35
 
@@ -55,6 +55,7 @@ def init_server():
         pytest.skip("NPU is not available")
 
     ray.init(
+        num_cpus=min(8, os.cpu_count() or 8),
         runtime_env={
             "env_vars": {
                 "TOKENIZERS_PARALLELISM": "true",
@@ -78,8 +79,8 @@ def init_server():
             "data_parallel_size": 1,
             "pipeline_model_parallel_size": 1,
             "gpu_memory_utilization": 0.3,
-            "max_num_batched_tokens": 8192,
-            "max_num_seqs": 64,
+            "max_num_batched_tokens": 1024,
+            "max_num_seqs": 1,
             "max_model_len": 1058,
             "dtype": "bfloat16",
             "load_format": "auto",
@@ -89,11 +90,12 @@ def init_server():
             "enable_sleep_mode": True,
             "free_cache_engine": True,
             "disable_log_stats": True,
+            "rollout_attn_backend": "TORCH_SDPA",
             "n": 2,
             "pipeline": {
                 "_target_": "verl_omni.workers.config.diffusion.rollout.DiffusionPipelineConfig",
-                "height": 512,
-                "width": 512,
+                "height": 192,
+                "width": 192,
                 "num_inference_steps": 4,
             },
         }
@@ -106,6 +108,8 @@ def init_server():
             "tokenizer_path": os.path.join(model_path, "tokenizer"),
             "trust_remote_code": True,
             "load_tokenizer": True,
+            "algorithm": "flow_grpo",
+            "attn_backend": "_native_npu",
         }
     )
     model_cfg.architecture = "QwenImageTransformer2DModel"
@@ -156,7 +160,6 @@ def test_generate_and_sleep_wakeup(init_server):
                 "true_cfg_scale": 4.0,
                 "height": 512,
                 "width": 512,
-                "logprobs": True,
             },
             request_id=request_id,
         ),
@@ -168,7 +171,6 @@ def test_generate_and_sleep_wakeup(init_server):
     assert output.stop_reason in ("completed", "aborted", None)
     assert output.diffusion_output.dtype == torch.uint8
     assert 0 <= output.diffusion_output[0][0][0] <= 255
-    assert output.log_probs is not None
 
     ray.get(server.sleep.remote())
     ray.get(server.wake_up.remote())

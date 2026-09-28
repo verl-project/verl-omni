@@ -14,8 +14,9 @@
 # limitations under the License.
 """MiniMax-H3 T2VA, FL2VA, and Ref2VA FlowGRPO GPU smoke runner.
 
-Assembles one minimal ``verl_omni.trainer.main_diffusion`` invocation per task
-with a self-contained tiny random-weight MiniMax-H3 checkpoint, synthetic
+Assembles one minimal ``verl_omni.trainer.main_diffusion_v1`` invocation per
+task (V1 sync trainer) with a self-contained tiny random-weight MiniMax-H3
+checkpoint, synthetic
 parquet data, a deterministic test-local joint video/audio reward, CPS
 reverse-SDE rollout transitions and log-probabilities, and a one-step
 policy-gradient actor update. FL2VA uses an embedded PNG first-frame condition
@@ -28,7 +29,7 @@ checkpoint config instead of its production-only 5120-wide constant.
 
 Usage:
     python tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py \
-        --task all --num-gpus 2 --total-steps 2
+        --task all --num-gpus 2 --actor-sp 2 --total-steps 2
 
 The GPU-smoke harness passes ``--task t2va`` explicitly to keep CI within its
 time budget; FL2VA and Ref2VA remain available for targeted manual validation.
@@ -36,6 +37,7 @@ time budget; FL2VA and Ref2VA remain available for targeted manual validation.
 Env overrides:
     MODEL_PATH  Tiny H3 checkpoint (default ``~/models/tiny-random/minimax-h3``)
     DATA_DIR    Dummy task parquet root (default ``~/data/dummy_h3_flowgrpo``)
+    ACTOR_SP    Actor Ulysses sequence-parallel size (default ``1``)
 """
 
 from __future__ import annotations
@@ -76,6 +78,11 @@ def _require_minimax_h3_diffusers() -> None:
             "MiniMax H3 FlowGRPO requires Diffusers >=0.40.0 with "
             f"MiniMaxH3Transformer3DModel; found {diffusers.__version__}."
         )
+
+
+def _validate_actor_sp(num_gpus: int, actor_sp: int) -> None:
+    if actor_sp <= 0 or num_gpus % actor_sp:
+        raise ValueError(f"num_gpus={num_gpus} must be divisible by actor_sp={actor_sp}.")
 
 
 def _fixup_ld_library_path() -> None:
@@ -130,6 +137,7 @@ def _hydra_overrides(
     output_dir: str,
     task: str,
     num_gpus: int,
+    actor_sp: int,
     rollout_tp: int,
     text_encoder_tp: int,
     total_training_steps: int,
@@ -140,6 +148,7 @@ def _hydra_overrides(
     num_inference_steps: int,
 ) -> list[str]:
     """Build a minimal task-specific MiniMax H3 FlowGRPO Hydra invocation."""
+    _validate_actor_sp(num_gpus, actor_sp)
     micro_bsz_per_gpu = 1
     # The Ref2VA rollout path requires exactly one output per request, while
     # T2VA and FL2VA use two responses to exercise grouped advantages.
@@ -195,7 +204,7 @@ def _hydra_overrides(
         "actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16",
         "actor_rollout_ref.actor.fsdp_config.param_offload=True",
         "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True",
-        "actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=1",
+        f"actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size={actor_sp}",
         # rollout
         "actor_rollout_ref.rollout.name=vllm_omni",
         "actor_rollout_ref.rollout.max_num_seqs=1",
@@ -248,7 +257,7 @@ def _hydra_overrides(
         # trainer
         "trainer.logger=console",
         "trainer.project_name=verl-test",
-        f"trainer.experiment_name=flowgrpo-minimax-h3-tiny-{task}",
+        f"trainer.experiment_name=flowgrpo-minimax-h3-tiny-v1-{task}",
         f"trainer.default_local_dir={output_dir}/checkpoints",
         f"trainer.validation_data_dir={output_dir}/validation_data",
         f"trainer.rollout_data_dir={output_dir}/rollout_data",
@@ -262,6 +271,8 @@ def _hydra_overrides(
         "trainer.resume_mode=disable",
         "trainer.total_epochs=1",
         f"trainer.total_training_steps={total_training_steps}",
+        "trainer.use_v1=true",
+        "trainer.v1.trainer_mode=sync",
         f"ray_kwargs.ray_init.num_cpus={ray_num_cpus}",
     ]
     if task == "fl2va":
@@ -283,6 +294,7 @@ def run_smoke(
     data_dir: str,
     output_dir: str,
     num_gpus: int,
+    actor_sp: int,
     rollout_tp: int,
     text_encoder_tp: int,
     total_training_steps: int,
@@ -305,6 +317,7 @@ def run_smoke(
     print(f"[1/3] ensuring tiny MiniMax-H3 checkpoint at {tiny_model_dir}", flush=True)
     ensure_tiny_minimax_h3_checkpoint(tiny_model_dir, skip_if_exists=not force_rebuild)
 
+    _validate_actor_sp(num_gpus, actor_sp)
     micro_bsz_per_gpu = 1
     # Match the rollout n in ``_hydra_overrides``: Ref2VA supports one output per
     # request, while T2VA and FL2VA sample two responses per prompt.
@@ -352,6 +365,7 @@ def run_smoke(
         output_dir=output_dir,
         task=task,
         num_gpus=num_gpus,
+        actor_sp=actor_sp,
         rollout_tp=rollout_tp,
         text_encoder_tp=text_encoder_tp,
         total_training_steps=total_training_steps,
@@ -361,11 +375,11 @@ def run_smoke(
         num_frames=num_frames,
         num_inference_steps=num_inference_steps,
     )
-    cmd = [sys.executable, "-m", "verl_omni.trainer.main_diffusion", *overrides]
+    cmd = [sys.executable, "-m", "verl_omni.trainer.main_diffusion_v1", *overrides]
     child_env = _tiny_patch_environment(tiny_model_dir, task)
     print(
-        f"[3/3] launching FlowGRPO {task.upper()} main_diffusion (num_gpus={num_gpus}, tp={rollout_tp}, "
-        f"te_tp={text_encoder_tp}, steps={total_training_steps})",
+        f"[3/3] launching FlowGRPO {task.upper()} main_diffusion_v1 (num_gpus={num_gpus}, actor_sp={actor_sp}, "
+        f"tp={rollout_tp}, te_tp={text_encoder_tp}, steps={total_training_steps})",
         flush=True,
     )
     print("  cmd:", " ".join(cmd), flush=True)
@@ -389,10 +403,16 @@ def _parse_args() -> argparse.Namespace:
         default=str(_REPO_ROOT / "outputs" / "run_flowgrpo_minimax_h3_tiny"),
     )
     parser.add_argument("--num-gpus", type=int, default=int(os.environ.get("NUM_GPUS", 2)))
+    parser.add_argument("--actor-sp", type=int, default=int(os.environ.get("ACTOR_SP", 1)))
     parser.add_argument("--rollout-tp", type=int, default=int(os.environ.get("ROLLOUT_TP", 1)))
     parser.add_argument("--text-encoder-tp", type=int, default=1)
     parser.add_argument("--total-steps", type=int, default=int(os.environ.get("TOTAL_TRAINING_STEPS", 2)))
-    parser.add_argument("--ray-num-cpus", type=int, default=int(os.environ.get("RAY_NUM_CPUS", 16)))
+    # Ray CPU budget: the V1 trainer force-enables TransferQueue (1 controller
+    # + 8 SimpleStorageUnit actors, num_cpus=1 each) before the placement group
+    # is created, and that group reserves num_gpus * max_colocate_count(=3)
+    # CPUs. With 4 GPUs the floor is 1 (runner) + 9 (transfer queue) + 12
+    # (placement group) = 22 CPUs; 16 left pg.ready() unsatisfiable forever.
+    parser.add_argument("--ray-num-cpus", type=int, default=int(os.environ.get("RAY_NUM_CPUS", 40)))
     # H3 requires 4-15 output seconds; 97 frames at 24 fps is 4.04 seconds.
     parser.add_argument("--height", type=int, default=160)
     parser.add_argument("--width", type=int, default=288)
@@ -414,6 +434,7 @@ def main() -> None:
             data_dir=os.path.join(args.data_dir, task),
             output_dir=os.path.join(args.output_dir, task),
             num_gpus=args.num_gpus,
+            actor_sp=args.actor_sp,
             rollout_tp=args.rollout_tp,
             text_encoder_tp=args.text_encoder_tp,
             total_training_steps=args.total_steps,

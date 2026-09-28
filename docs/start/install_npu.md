@@ -1,6 +1,6 @@
 # Installation (NPU)
 
-Last updated: 09/09/2026
+Last updated: 09/24/2026
 
 For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`.
 
@@ -34,10 +34,10 @@ uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.gi
 
 ```bash
 uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train]"
+uv pip install -e .
 ```
 
-This installs `vllm-omni`, then `verl` and `verl-omni`.
+This installs `vllm-omni` and `verl-omni` with its core dependencies.
 
 > **Ascend PyTorch version alignment:** VeRL-Omni does not require every NPU
 > environment to use one fixed `torch` version such as 2.10.0. Choose a
@@ -52,20 +52,10 @@ This installs `vllm-omni`, then `verl` and `verl-omni`.
 
 | Extra       | Adds                                                          | When                     |
 | ----------- | ------------------------------------------------------------- | ------------------------ |
-| `vllm-omni` | `vllm-omni==0.28.0rc1`                                        | Optional PyPI baseline only; CI/docs use the git pin above |
-| `train`     | `verl` @ [`.github/verl_pin.txt`](../../.github/verl_pin.txt) | RL training              |
-| `dev`       | `pytest`, `pre-commit`, `Levenshtein`, …                      | Local development / CI   |
-| `ocr`       | `Levenshtein`                                                 | OCR reward (FlowGRPO)    |
+| `dev`       | `pytest`, `pre-commit`, …                                     | Local development / CI   |
+| `ocr`       | `Levenshtein`                                                 | OCR reward               |
 
-The CUDA `gpu` extra (`vllm`, `kernels`, `liger-kernel`) is not used on NPU. NPU recipes override the attention backend with `actor_rollout_ref.model.attn_backend=_native_npu`.
-
-## Optional Dependencies
-
-| Extra               | Install                                 | When needed                             |
-| ------------------- | --------------------------------------- | --------------------------------------- |
-| OCR reward          | `uv pip install -e ".[ocr]"`            | FlowGRPO training with OCR-based reward |
-| Multimodal training | `pip install qwen-vl-utils math-verify` | Vision-language training (e.g. MMK12)   |
-| Dev tools           | `uv pip install -e ".[dev]"`            | Linting and unit tests                  |
+The CUDA `gpu` extra is not used on NPU. NPU recipes override the attention backend with `actor_rollout_ref.model.attn_backend=_native_npu`.
 
 ## Post-Installation Verification
 

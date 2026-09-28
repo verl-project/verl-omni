@@ -154,7 +154,7 @@ First install the OCR reward dependency after setting up the base VeRL-Omni
 environment:
 
 ```bash
-pip install Levenshtein
+uv pip install -e ".[ocr]"
 ```
 
 Obtain the raw OCR dataset from the original Flow-GRPO repository

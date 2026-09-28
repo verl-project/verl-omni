@@ -356,6 +356,35 @@ def test_trainer_factory_uses_upstream_replay_buffer(trainer_mode, drop_incomple
     assert type(replay_buffer) is expected_type
 
 
+@pytest.mark.parametrize(
+    ("trainer_mode", "expected_poll_interval"),
+    [
+        ("sync", 0.05),
+        ("separate_async", 2.0),
+    ],
+)
+def test_trainer_factory_poll_interval_defaults_by_mode(trainer_mode, expected_poll_interval):
+    config = _make_config(drop_incomplete_groups=False, trainer_mode=trainer_mode)
+    trainer = SimpleNamespace(config=config, trainer_mode=trainer_mode, _add_prompts_to_generate=lambda count: count)
+
+    replay_buffer = PolicyGradientDiffusionTrainerV1._build_replay_buffer(trainer)
+
+    assert replay_buffer.poll_interval == expected_poll_interval
+
+
+def test_trainer_factory_respects_explicit_poll_interval():
+    for trainer_mode, expected in (("sync", 0.5), ("separate_async", 0.5)):
+        config = _make_config(drop_incomplete_groups=False, trainer_mode=trainer_mode)
+        config.trainer.v1.sampler.poll_interval = 0.5
+        trainer = SimpleNamespace(
+            config=config, trainer_mode=trainer_mode, _add_prompts_to_generate=lambda count: count
+        )
+
+        replay_buffer = PolicyGradientDiffusionTrainerV1._build_replay_buffer(trainer)
+
+        assert replay_buffer.poll_interval == expected
+
+
 def test_sample_rejects_non_exact_refill_result(monkeypatch):
     fake_tq = _FakeTransferQueue({})
     fake_tq.add_group("failed", status="failure", trajectories=0)

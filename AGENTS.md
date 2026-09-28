@@ -43,10 +43,9 @@ If work is duplicate/trivial busywork, **do not proceed**. Return a short explan
 ### Environment setup
 
 ```bash
-# GPU (two steps — engine stack first, then rollout + train)
-uv pip install -e ".[gpu]" --torch-backend=auto
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train,dev]"
+# GPU
+uv pip install vllm==0.28.0 --torch-backend=auto
+uv pip install -e ".[gpu,dev]" --torch-backend=auto
 
 pre-commit install
 ```

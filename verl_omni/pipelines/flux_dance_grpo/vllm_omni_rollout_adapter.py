@@ -33,6 +33,7 @@ from verl_omni.pipelines.diffusion_rollout_output import rollout_output, wrap_ro
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 from verl_omni.pipelines.request_batch import split_diffusion_output_by_request
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
+from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.pipelines.wan22_dance_grpo.common import seed_from_prompt_ids
 
@@ -75,9 +76,14 @@ def _extract_extra_prompt_ids(prompts: list[Any]) -> dict[str, list[list[int]]] 
         return None
     per_prompt: list[dict[str, Any]] = []
     for prompt in prompts:
-        if not isinstance(prompt, dict) or not prompt.get("extra_prompt_ids"):
+        if not isinstance(prompt, dict):
             return None
-        per_prompt.append(prompt["extra_prompt_ids"])
+        if prompt.get("extra_prompt_ids") is not None:
+            raise ValueError("FLUX extra_prompt_ids must be nested under extra_args, not at the prompt top level")
+        extra = (prompt.get("extra_args") or {}).get("extra_prompt_ids")
+        if not extra:
+            return None
+        per_prompt.append(extra)
 
     for index, extra in enumerate(per_prompt):
         missing = [key for key in FLUX_ENCODER_TOKEN_KEYS if key not in extra]
@@ -362,11 +368,11 @@ class FluxDanceGRPOPipelineWithLogProb(FluxPipeline):
             if any(
                 request.request_id != DUMMY_DIFFUSION_REQUEST_ID
                 and isinstance(prompt, dict)
-                and prompt.get("prompt_token_ids") is not None
+                and prompt_ids_from_payload(prompt) is not None
                 for request, prompt in zip(request_batch.requests, prompts, strict=False)
             ):
                 raise ValueError(
-                    "FLUX received only the generic prompt_token_ids. Configure "
+                    "FLUX received only the generic prompt_ids. Configure "
                     "actor_rollout_ref.model.extra_tokenizers.clip={path: tokenizer, max_length: 77} "
                     "and .t5={path: tokenizer_2, max_length: 512}."
                 )
