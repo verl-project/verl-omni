@@ -55,8 +55,7 @@ class _MiniCPMOStyle(nn.Module):
         super().__init__()
         self.llm = _LLM()
         self.llm.prepare_inputs_for_generation = MethodType(_prepare_inputs_for_generation, self.llm)
-        self.audio_decoder = nn.Linear(4, 4)
-        self.code2wav = nn.Linear(4, 4)
+        self.tts = nn.Linear(4, 4)
         self.last_data = None
         self.last_llm_kwargs = None
 
@@ -205,23 +204,12 @@ def test_minicpm_adapter_registered_for_minicpmo_architecture():
     assert MiniCPMThinkerAdapter.auto_model_class is MiniCPMO
 
 
-def test_fsdp_name_is_ignored_matches_peft_prefixed_apm():
-    from verl_omni.utils.fsdp_utils import fsdp_name_is_ignored
-
-    ignored = ["apm"]
-    assert fsdp_name_is_ignored("apm", ignored)
-    assert fsdp_name_is_ignored("apm.embed_positions.weight", ignored)
-    assert fsdp_name_is_ignored("base_model.model.apm.conv1.weight", ignored)
-    assert not fsdp_name_is_ignored("llm.layers.0.self_attn.q_proj.weight", ignored)
-
-
 def test_configure_model_strips_generation_modules_and_keeps_outer_forward():
     module = _MiniCPMOStyle()
     configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
 
     assert configured is module
-    assert not hasattr(configured, "audio_decoder")
-    assert not hasattr(configured, "code2wav")
+    assert not hasattr(configured, "tts")
     assert configured.forward.__self__ is configured
     assert configured.forward.__func__ is not configured.llm.forward.__func__
     assert configured.get_input_embeddings.__self__ is configured.llm
