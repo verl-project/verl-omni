@@ -1,7 +1,7 @@
 (tuning_guide)=
 # Performance Tuning Guide
 
-Last updated: 09/14/2026
+Last updated: 09/20/2026
 
 This page is the starting point for tuning a VeRL-Omni diffusion RL run. It
 does not repeat the detail already covered by the more specific pages —
@@ -113,6 +113,16 @@ Symptoms that show up regardless of which stage causes them:
   [Diffusion V1 training](../start/diffusion_v1.md) for `sync` vs.
   `separate_async` mode and how the replay buffer moves trajectories into
   the training loop.
+- Trim the replay buffer's polling cadence with
+  `trainer.v1.sampler.poll_interval` (default `1.0`): each wait loop polls
+  TransferQueue for finished prompt groups, so a large interval adds dead
+  wall-clock time after rollout lands, and a very small one adds metadata
+  syncs. Halving it typically pays off when `parameter_sync_step > 1`
+  because every local update waits once.
+- Check what actually crosses TransferQueue per step. The rollout dump and
+  validation reads are field-projected (latents/embeds stay in
+  TransferQueue), and trajectory writes are batched per prompt group; if you
+  add custom reads, pass `select_fields` rather than fetching full rows.
 
 **Step time dominated by reward scoring**
 - Confirm with a profiler trace (recipe 6 in [profiler.md](profiler.md)) before

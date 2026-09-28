@@ -31,12 +31,43 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 def diffusion_persisted_tq_fields(
     algorithm: Literal["policy_gradient", "direct_preference"],
 ) -> list[str]:
-    """Return trainer-computed fields persisted after a diffusion update."""
+    """Return trainer-computed fields persisted after a diffusion update.
+
+    ``old_log_probs`` is not persisted: every consumer recomputes it from the
+    actor (or falls back to ``rollout_log_probs`` in bypass mode), so writing
+    the [batch, num_timesteps] tensor back would be dead TQ traffic.
+    """
     if algorithm == "policy_gradient":
-        return ["old_log_probs", "advantages", "returns", "sample_level_scores", "sample_level_rewards"]
+        return ["advantages", "returns", "sample_level_scores", "sample_level_rewards"]
     if algorithm == "direct_preference":
         return ["sample_level_scores", "sample_level_rewards"]
     raise ValueError(f"Unsupported diffusion trainer algorithm: {algorithm}")
+
+
+# Fields consumed by the post-step rollout-dump read. Selecting them
+# explicitly keeps the dump from re-pulling the trainer-only compute payloads
+# (all_latents, prompt_embeds, ...) which dominate row size. Absent optional
+# fields (e.g. audio on image pipelines) are silently skipped by
+# TransferQueue's field selection.
+DIFFUSION_DUMP_TQ_FIELDS = (
+    "prompts",
+    "responses",
+    "rm_scores",
+    "reward_model",
+    "data_source",
+    "extra_info",
+    "raw_prompt",
+    "__num_turns__",
+    "uid",
+    "extra_fields",
+    "tool_extra_fields",
+    "image",
+    "video",
+    "output",
+    "audio",
+    "audio_sample_rate",
+    "media_kind",
+)
 
 
 def diffusion_metric_tq_fields(

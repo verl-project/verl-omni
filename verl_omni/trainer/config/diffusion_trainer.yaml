@@ -300,6 +300,11 @@ trainer:
       # Maximum replacement rounds for incomplete groups within one training sample call.
       max_incomplete_group_refill_rounds: 3
 
+      # Seconds between replay-buffer polls while waiting for finished prompt groups
+      # (each poll also syncs TransferQueue metadata). Lower values cut the dead
+      # wait after rollout lands at the cost of more frequent metadata syncs.
+      poll_interval: 1.0
+
       # Custom sampler config.
       custom_sampler:
 
