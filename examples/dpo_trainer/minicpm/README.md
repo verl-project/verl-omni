@@ -58,8 +58,9 @@ Key defaults in the launch script:
 - `actor_rollout_ref.model.exclude_modules`: skip LoRA on `vpm` / `apm` and
   generation-only modules.
 - `actor_rollout_ref.actor.strategy=fsdp2`: required. `get_fsdp_ignored_module_names`
-  returns `["apm"]`, and the engine rejects a non-empty ignore list under
-  `strategy=fsdp`. The Whisper encoder adds its `embed_positions` to
+  returns `["apm", "vpm", "resampler"]`, and the engine rejects a non-empty ignore
+  list under `strategy=fsdp`. The Whisper encoder adds its `embed_positions` to
   `inputs_embeds`, which errors once that tensor is a DTensor, so `apm` is passed
-  as root `ignored_params` and stays unsharded. Ignored parameters must stay
-  frozen, which is why `apm` is also LoRA-excluded.
+  as root `ignored_params` and stays unsharded; the frozen vision towers ride
+  along so an unsharded forward cannot desync the ranks. Ignored parameters must
+  stay frozen, which is why `apm` and `vpm` are also LoRA-excluded.

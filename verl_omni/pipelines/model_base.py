@@ -488,10 +488,6 @@ class OmniModelBase(ABC):
     The registry key is ``(architecture, stage)`` where *architecture*
     matches the HF config ``architectures[0]`` and *stage* is
     ``thinker``, ``talker``, or ``all``.
-
-    Set ``auto_model_class`` to a Transformers auto/model class with
-    ``from_pretrained``. Leave it ``None`` to keep the default
-    ``AutoModelForMultimodalLM`` path.
     """
 
     _registry: dict[tuple[str, str], type["OmniModelBase"]] = {}

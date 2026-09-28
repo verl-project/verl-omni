@@ -48,13 +48,43 @@ class _LLM(nn.Module):
         self.embed = embeddings
 
 
-class _MiniCPMOStyle(nn.Module):
-    """Mirrors remote MiniCPMO.forward(self, data, **kwargs)."""
+class _WhisperAttnStub(nn.Module):
+    """WhisperAttention before the 3-tuple patch: returns (hidden, attn_weights)."""
+
+    def forward(self, hidden_states, **kwargs):
+        del kwargs
+        return hidden_states, None
+
+
+class _WhisperLayerStub(nn.Module):
+    """MiniCPMWhisperEncoderLayer: unpacks three values from its self-attn."""
 
     def __init__(self):
         super().__init__()
+        self.self_attn = _WhisperAttnStub()
+
+    def forward(self, hidden_states, **kwargs):
+        hidden_states, _, _ = self.self_attn(hidden_states, **kwargs)
+        return hidden_states
+
+
+class _MiniCPMOStyle(nn.Module):
+    """The remote MiniCPMO's shape: towers, the inner LLM, and its four embedders."""
+
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(version="4.5")
         self.llm = _LLM()
+        self.llm.model = nn.Module()
+        self.llm.model.embed_tokens = self.llm.embed
+        self.llm.config = SimpleNamespace()
         self.llm.prepare_inputs_for_generation = MethodType(_prepare_inputs_for_generation, self.llm)
+        # apm carries both the Whisper conv stack and its encoder layers.
+        self.apm = nn.Module()
+        self.apm.conv1 = nn.Linear(4, 4)
+        self.apm.layers = nn.ModuleList([_WhisperLayerStub()])
+        self.vpm = nn.Linear(4, 4)
+        self.resampler = nn.Linear(4, 4)
         self.tts = nn.Linear(4, 4)
         self.last_data = None
         self.last_llm_kwargs = None
@@ -63,6 +93,21 @@ class _MiniCPMOStyle(nn.Module):
         self.last_data = data
         self.last_llm_kwargs = kwargs
         return self.llm(input_ids=data["input_ids"], **kwargs)
+
+    def get_vision_embedding(self, data):
+        del data
+        return []
+
+    def get_vllm_embedding(self, data):
+        return self.llm.model.embed_tokens(data["input_ids"]), []
+
+    def get_audio_embedding(self, data, chunk_length=-1, dummy=True, **kwargs):
+        del data, chunk_length, dummy, kwargs
+        return []
+
+    def get_omni_embedding(self, data, input_embeddings, chunk_length=-1, stream_input=False, **kwargs):
+        del data, chunk_length, stream_input, kwargs
+        return input_embeddings
 
 
 def test_configure_model_packs_hf_kwargs_into_minicpmo_data():
@@ -179,8 +224,71 @@ def test_split_minicpm_forward_kwargs_collapses_empty_audio_placeholders():
     assert data["audio_feature_lens"] == []
 
 
-def test_split_minicpm_forward_kwargs_rejects_packed_rmpad_batch():
-    with pytest.raises(ValueError, match="use_remove_padding=false"):
+def test_split_minicpm_forward_kwargs_keeps_object_array_batches_per_sample():
+    # The flagged padded-batch shape: DataProto collates ragged media into an
+    # object-dtype ndarray. Without the unwrap, both samples' slices were read as
+    # one sample's and every image landed on batch row 0.
+    import numpy as np
+
+    pixel = np.empty(2, dtype=object)
+    pixel[0] = [torch.zeros(3, 2, 2), torch.zeros(3, 2, 2)]
+    pixel[1] = [torch.zeros(3, 2, 2)]
+    sizes = np.empty(2, dtype=object)
+    sizes[0] = np.array([[2, 2], [2, 2]], dtype=np.int64)
+    sizes[1] = np.array([[2, 2]], dtype=np.int64)
+
+    data, _ = split_minicpm_forward_kwargs(
+        {
+            "input_ids": torch.ones(2, 4, dtype=torch.long),
+            "position_ids": torch.arange(4).repeat(2, 1),
+            "pixel_values": pixel,
+            "tgt_sizes": sizes,
+        }
+    )
+    assert [len(sample) for sample in data["pixel_values"]] == [2, 1]
+    assert all(tuple(slice_.shape) == (3, 2, 2) for sample in data["pixel_values"] for slice_ in sample)
+    assert [sample.tolist() for sample in data["tgt_sizes"]] == [[[2, 2], [2, 2]], [[2, 2]]]
+
+
+def test_split_minicpm_forward_kwargs_accepts_normalized_audio_tensor():
+    # The wrapped forward re-enters the split with audio_features already normalized
+    # to (n_clips, n_mels, frames); the emptiness check must not compare a tensor
+    # against [] (an elementwise comparison on some torch versions).
+    data, _ = split_minicpm_forward_kwargs(
+        {
+            "input_ids": torch.ones(2, 6, dtype=torch.long),
+            "position_ids": torch.arange(6).repeat(2, 1),
+            "audio_features": torch.zeros(2, 80, 10),
+            "audio_feature_lens": [torch.tensor([10]), torch.tensor([10])],
+        }
+    )
+    assert isinstance(data["audio_features"], torch.Tensor)
+    assert tuple(data["audio_features"].shape) == (2, 80, 10)
+    assert [lens.tolist() for lens in data["audio_feature_lens"]] == [[10], [10]]
+
+
+def test_split_minicpm_forward_kwargs_wraps_flat_slice_pack_as_one_sample():
+    # One image's slice grid arrives as a bare list of (C, H, W) tensors with a
+    # single input_ids row; splitting it into N samples drops every slice after
+    # the first at the scatter. Its tgt_sizes arrive as a bare (n_slices, 2) tensor.
+    slices = [torch.zeros(3, 2, 2) for _ in range(3)]
+    data, _ = split_minicpm_forward_kwargs(
+        {
+            "input_ids": torch.ones(1, 8, dtype=torch.long),
+            "position_ids": torch.arange(8).unsqueeze(0),
+            "pixel_values": slices,
+            "tgt_sizes": torch.tensor([[1, 4], [2, 2], [1, 2]], dtype=torch.int32),
+        }
+    )
+    assert len(data["pixel_values"]) == 1
+    assert [tuple(s.shape) for s in data["pixel_values"][0]] == [(3, 2, 2)] * 3
+    assert len(data["tgt_sizes"]) == 1
+    assert data["tgt_sizes"][0].shape == (3, 2)
+    assert data["tgt_sizes"][0].tolist() == [[1, 4], [2, 2], [1, 2]]
+
+
+def test_split_minicpm_forward_kwargs_rejects_unprepared_packed_batch():
+    with pytest.raises(ValueError, match="without going through MiniCPMThinkerAdapter.prepare_model_inputs"):
         split_minicpm_forward_kwargs(
             {
                 "input_ids": torch.ones(1, 8, dtype=torch.long),
@@ -216,14 +324,14 @@ def test_configure_model_strips_generation_modules_and_keeps_outer_forward():
     assert configured.set_input_embeddings.__self__ is configured.llm
     assert configured.prepare_inputs_for_generation.__self__ is configured.llm
     assert configured._no_split_modules == ["Qwen3DecoderLayer", "MiniCPMODecoderLayer"]
-    assert MiniCPMThinkerAdapter.get_fsdp_ignored_module_names(_model_config()) == ["apm"]
+    assert MiniCPMThinkerAdapter.get_fsdp_ignored_module_names(_model_config()) == ["apm", "vpm", "resampler"]
 
 
 class _MiniCPMOWithEncoders(_MiniCPMOStyle):
+    """Counts tower invocations to prove the empty rows skip the encoder."""
+
     def __init__(self):
         super().__init__()
-        self.vpm = nn.Linear(4, 4)
-        self.apm = nn.Linear(4, 4)
         self.vision_calls = 0
 
     def get_vision_embedding(self, data):
@@ -252,15 +360,13 @@ def test_patched_get_vision_embedding_skips_dummy_encoder_when_no_images():
 
 def test_cloned_vllm_embedding_scatter_supports_backward():
     module = _MiniCPMOWithEncoders()
-    module.llm.model = nn.Module()
-    module.llm.model.embed_tokens = module.llm.embed
-    module.llm.config = SimpleNamespace()
     configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
     input_ids = torch.tensor([[1, 2, 3, 4]])
     embeddings, _ = configured.get_vllm_embedding(
         {
             "input_ids": input_ids,
             "pixel_values": [[torch.zeros(3, 2, 2)]],
+            "tgt_sizes": [torch.tensor([[1, 1]], dtype=torch.int32)],
             "image_bound": [torch.tensor([[0, 2]])],
         }
     )
@@ -268,16 +374,43 @@ def test_cloned_vllm_embedding_scatter_supports_backward():
     assert configured.llm.embed.weight.grad is not None
 
 
-def test_cloned_vllm_embedding_accepts_collated_image_bound_tensor():
-    module = _MiniCPMOWithEncoders()
-    module.llm.model = nn.Module()
-    module.llm.model.embed_tokens = module.llm.embed
-    module.llm.config = SimpleNamespace()
+def test_cloned_vllm_embedding_scatters_unequal_span_lengths():
+    # Per-slice grids give spans of different token counts; torch.stack of the
+    # per-span aranges raised on the first mixed-length batch.
+    class _FiveTokenVision(_MiniCPMOWithEncoders):
+        def get_vision_embedding(self, data):
+            del data
+            self.vision_calls += 1
+            return [torch.arange(5 * 4, dtype=torch.float32).reshape(1, 5, 4)]
+
+    module = _FiveTokenVision()
     configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
-    input_ids = torch.tensor([[1, 2, 3, 4]])
+    vision = torch.arange(5 * 4, dtype=torch.float32).reshape(5, 4)
+    id_embedding = configured.llm.embed(torch.tensor([[7, 7, 7, 7, 7, 7]])).detach()
+
     embeddings, _ = configured.get_vllm_embedding(
         {
-            "input_ids": input_ids,
+            "input_ids": torch.tensor([[7, 7, 7, 7, 7, 7]]),
+            "pixel_values": [[torch.zeros(3, 2, 2)]],
+            "tgt_sizes": [torch.tensor([[2, 2]], dtype=torch.int32)],
+            # Spans of lengths 2 and 3, with position 2 left to the id embedding.
+            "image_bound": [torch.tensor([[0, 2], [3, 6]])],
+        }
+    )
+    torch.testing.assert_close(embeddings[0, 0], vision[0])
+    torch.testing.assert_close(embeddings[0, 1], vision[1])
+    torch.testing.assert_close(embeddings[0, 2], id_embedding[0, 2])  # non-span position untouched
+    torch.testing.assert_close(embeddings[0, 3:6], vision[2:5])
+
+
+def test_cloned_vllm_embedding_accepts_collated_image_bound_tensor():
+    # Collation hands the scatter a (batch, 2) tensor of one span per row; indexing
+    # it straight yields a bare pair, and bound[0] on a 0-dim scalar raises.
+    module = _MiniCPMOWithEncoders()
+    configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
+    embeddings, _ = configured.get_vllm_embedding(
+        {
+            "input_ids": torch.tensor([[1, 2, 3, 4]]),
             "pixel_values": [[torch.zeros(3, 2, 2)]],
             "image_bound": torch.tensor([[0, 2]]),
         }
@@ -299,10 +432,19 @@ def test_minicpmo_from_pretrained_patches_then_loads_auto_model(monkeypatch):
     def fake_patch(*args, **kwargs):
         patch_calls.append((args, kwargs))
 
+    siglip_calls = []
+
+    def fake_siglip_patch(*args, **kwargs):
+        siglip_calls.append((args, kwargs))
+
     monkeypatch.setattr(AutoModel, "from_pretrained", fake_from_pretrained)
     monkeypatch.setattr(
-        "verl_omni.models.transformers.minicpm_o.patch_remote_auto_model_init",
+        "verl_omni.models.transformers.minicpm_o.patch_minicpm_auto_model_init",
         fake_patch,
+    )
+    monkeypatch.setattr(
+        "verl_omni.models.transformers.minicpm_o.patch_minicpm_siglip_flash_attn_support",
+        fake_siglip_patch,
     )
     config = _model_config()
 
@@ -314,24 +456,123 @@ def test_minicpmo_from_pretrained_patches_then_loads_auto_model(monkeypatch):
     )
 
     assert module is loaded
-    assert patch_calls == [
-        (
-            ("/fake/minicpm",),
-            {"trust_remote_code": True, "config": config.hf_config},
-        )
-    ]
+    assert patch_calls == [(("/fake/minicpm",), {"config": config.hf_config})]
     assert calls[0][0] == ("/fake/minicpm",)
     assert calls[0][1]["torch_dtype"] is torch.bfloat16
     assert calls[0][1]["trust_remote_code"] is True
     assert calls[0][1]["config"] is config.hf_config
     assert "init_tts" not in calls[0][1]
+    assert siglip_calls == [(("/fake/minicpm",), {"config": config.hf_config})]
+
+
+def test_minicpmo_from_pretrained_requires_trust_remote_code():
+    # The checkpoint defines its classes in remote code, and the patches resolve
+    # them through it, so a False value must fail here rather than confuse the load.
+    import pytest
+
+    with pytest.raises(ValueError, match="trust_remote_code must be True"):
+        MiniCPMO.from_pretrained("/fake/minicpm", config=None, trust_remote_code=False)
 
 
 def test_configure_model_applies_remote_whisper_compat(monkeypatch):
     from verl_omni.models.transformers import minicpm_o
 
     seen = []
-    monkeypatch.setattr(minicpm_o, "patch_remote_whisper_self_attn", lambda module: seen.append(module))
+    monkeypatch.setattr(minicpm_o, "patch_minicpm_whisper_self_attn", lambda module: seen.append(module))
     module = _MiniCPMOStyle()
     MiniCPMThinkerAdapter.configure_model(module, _model_config())
     assert seen == [module]
+
+
+def test_rollout_adapter_registers_thinker_only_text_pipeline():
+    from verl_omni.pipelines.minicpm.omni_rollout_adapter import MiniCPMORolloutAdapter
+    from verl_omni.pipelines.model_base import OmniRolloutPipelineBase
+
+    assert OmniRolloutPipelineBase.get_class("minicpmo_4_5") is MiniCPMORolloutAdapter
+    stages = MiniCPMORolloutAdapter.build_stage_configs("thinker_only")
+    assert len(stages) == 1
+    assert stages[0].engine_output_type == "text"
+    assert stages[0].final_output_type == "text"
+    # AVQA feeds both encoders; the adapter must not disable audio like the
+    # text-only RFC design did.
+    assert stages[0].requires_multimodal_data is True
+    assert MiniCPMORolloutAdapter.get_pipeline_id("thinker_only") == "minicpmo_4_5_thinker_only"
+    assert MiniCPMORolloutAdapter.get_stage_engine_extras(0, "thinker_only") == {
+        "model_arch": "MiniCPMO45OmniLLMForConditionalGeneration",
+        # Mirrors the upstream MiniCPM-o deploy profiles: the AR async
+        # scheduler's placeholder accounting underflows under KV-cache
+        # preemption (assert in vllm async_scheduler.py).
+        "async_scheduling": False,
+    }
+    assert MiniCPMORolloutAdapter.get_engine_hf_overrides("thinker_only") == {}
+    with pytest.raises(ValueError, match="thinker_only only"):
+        MiniCPMORolloutAdapter.build_stage_configs("full")
+
+
+def test_ensure_pipeline_registered_checks_the_plugin_entry_point_first(monkeypatch):
+    """A stale plugin entry point must surface before the engine cores spawn."""
+    from verl_omni.pipelines.minicpm import omni_rollout_adapter
+
+    calls: list[str] = []
+    monkeypatch.setattr(omni_rollout_adapter, "assert_entry_point_installed", lambda: calls.append("assert"))
+    monkeypatch.setattr(omni_rollout_adapter, "register_pipeline", lambda pipeline: calls.append("register"))
+
+    omni_rollout_adapter.MiniCPMORolloutAdapter.ensure_pipeline_registered()
+    assert calls == ["assert", "register"]
+
+
+def test_configure_model_applies_omni_embedding_splice_patch():
+    class _WithOmniEmbedding(_MiniCPMOStyle):
+        def get_omni_embedding(self, data, input_embeddings, chunk_length=-1, stream_input=False):
+            return input_embeddings
+
+    module = _WithOmniEmbedding()
+    configured = MiniCPMThinkerAdapter.configure_model(module, _model_config())
+    assert getattr(configured, "_verl_omni_get_omni_embedding_patched", False)
+
+
+def test_merge_packed_media_stashes_per_example_slice_counts():
+    data = {
+        "pixel_values": [[torch.zeros(3, 2, 2)] * 2, [], [torch.zeros(3, 2, 2)] * 3],
+        "tgt_sizes": [
+            torch.tensor([[1, 1]] * 2, dtype=torch.int32),
+            torch.zeros(0, 2, dtype=torch.int32),
+            torch.tensor([[1, 1]] * 3, dtype=torch.int32),
+        ],
+        "audio_feature_lens": [[], [], []],
+        "image_bound": [[[0, 2]], [], [[2, 5]]],
+        "audio_bounds": [[], [], []],
+    }
+    from verl_omni.pipelines.minicpm.thinker_training_adapter import _merge_packed_media
+
+    _merge_packed_media(data)
+
+    assert data["packed_vision_slices"] == [2, 0, 3]
+    assert len(data["pixel_values"]) == 1  # folded into one pseudo-row
+    assert len(data["pixel_values"][0]) == 5
+
+
+def test_from_pretrained_applies_training_config_invariants(monkeypatch):
+    from transformers import AutoModel
+
+    from verl_omni.pipelines.minicpm.thinker_training_adapter import MiniCPMO
+
+    loaded = object()
+    captured = {}
+
+    def fake_from_pretrained(path, *args, **kwargs):
+        captured.update(kwargs)
+        return loaded
+
+    monkeypatch.setattr(AutoModel, "from_pretrained", staticmethod(fake_from_pretrained))
+    monkeypatch.setattr("verl_omni.models.transformers.minicpm_o.patch_minicpm_auto_model_init", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "verl_omni.models.transformers.minicpm_o.patch_minicpm_siglip_flash_attn_support", lambda *a, **k: None
+    )
+
+    config = SimpleNamespace(init_tts=True, use_cache=True, stream_input=True)
+    result = MiniCPMO.from_pretrained("/fake/model", config=config, trust_remote_code=True)
+
+    assert result is loaded
+    assert captured["config"] is config
+    assert (config.init_tts, config.use_cache, config.stream_input) == (False, False, False)
