@@ -665,16 +665,6 @@ class OmniModelBase(ABC):
         pass
 
     @classmethod
-    def build_module(cls, model_config, torch_dtype: torch.dtype) -> Optional[torch.nn.Module]:
-        """Optionally load the trainable module for this omni architecture.
-
-        Return ``None`` to use ``AutoModelForMultimodalLM``. This method is
-        skipped when ``auto_model_class`` is set; the engine loads through
-        that class instead.
-        """
-        return None
-
-    @classmethod
     def configure_model(cls, module, model_config):
         """Configure the model after loading and before FSDP wrapping.
 
