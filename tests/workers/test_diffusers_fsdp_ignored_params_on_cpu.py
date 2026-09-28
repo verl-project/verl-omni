@@ -55,6 +55,7 @@ def _engine(strategy="fsdp2"):
 def _adapter_cls(ignored_names):
     adapter_cls = MagicMock()
     adapter_cls.preserve_fp32_modules.return_value = True
+    adapter_cls.fsdp2_sharding_units.return_value = None
     adapter_cls.get_fsdp_ignored_module_names.return_value = ignored_names or []
     return adapter_cls
 

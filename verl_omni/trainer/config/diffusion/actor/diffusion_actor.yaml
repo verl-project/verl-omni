@@ -53,6 +53,12 @@ diffusion_loss:
   # Whether Flow-DPPO normalizes mean drift by the scheduler SDE noise scale
   add_kl_coefficient: true
 
+  # UniGRPO image-side velocity-MSE regularizer weight (0 disables the MSE term)
+  mse_weight: 1.5e-5
+
+  # UniGRPO image-side GRPO-Guard RatioNorm; false uses the plain Flow-GRPO ratio
+  ratio_norm: true
+
 # Rollout Correction config.  Fields mirror RolloutCorrectionConfig.
 # rollout_is defaults to null (off); override for IS diagnostics.
 rollout_correction:
