@@ -1,0 +1,90 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# Frozen image-gen / judge tool knobs.
+# Composed as top-level ``agentic_image_gen`` on omni_trainer.
+# OmniAgentLoopWorker / Manager bind this node (``bind_agentic_image_gen``).
+
+# vLLM-Omni OpenAI image generations base URL (``/v1/images/generations``).
+vllm_omni_url: ""
+
+# Bundled Qwen-Image HTTP service URL.
+qwen_image_url: ""
+
+# Optional vLLM-Omni image seed (null omits seed from the payload).
+qwen_image_seed: null
+
+# Derive a per-rollout/per-pass seed from qwen_image_seed (GRPO diversity).
+qwen_image_diversify_seed: true
+
+# vLLM-Omni image height pixels.
+qwen_image_height: 512
+
+# vLLM-Omni image width pixels.
+qwen_image_width: 512
+
+# vLLM-Omni num_inference_steps.
+qwen_image_steps: 20
+
+# vLLM-Omni true_cfg_scale.
+qwen_image_true_cfg_scale: 4.0
+
+# Generic diffusion tool HTTP endpoint (POST ``{"prompt"}`` → base64 images).
+diffusion_tool_url: ""
+
+# Optional bearer token for diffusion tool / vLLM-Omni image calls.
+diffusion_tool_token: null
+
+# HTTP timeout seconds for diffusion tool / vLLM-Omni image calls.
+diffusion_tool_timeout: 900
+
+# Frozen VL judge sidecar OpenAI chat base URL (``/v1/chat/completions``).
+vllm_url: ""
+
+# Optional model id for the judge OpenAI chat payload.
+vllm_model: ""
+
+# Max new tokens for judge / reflect VLM calls.
+reflect_max_new_tokens: 1024
+
+# Extra judge parse retries after the first attempt.
+judge_parse_retries: 1
+
+# HTTP timeout seconds for judge / reflect VLM calls.
+reflect_vlm_timeout: 120
+
+# Enable long chain-of-thought on the judge chat template (usually off).
+judge_enable_thinking: false
+
+# Min C and A for client-side good_enough=YES (0.80 = 0.8 discrete grid band).
+good_enough_threshold: 0.80
+
+# Block further generate_image after good_enough=YES.
+block_generate_after_yes: true
+
+# Block further generate_image after max successful passes.
+block_generate_after_max_passes: true
+
+# Cap on successful generate_image passes per rollout.
+max_generate_image_passes: 3
+
+# Teacher-force the first generate_image tool call (curriculum).
+force_first_generate: false
+
+# Steps at p=1.0 before linear anneal of force-first.
+force_first_warmup_steps: 10
+
+# Step at which force-first probability reaches 0.
+force_first_end_step: 20
+
+# Insert a forced reflection turn after a successful judge_image.
+force_reflection_after_judge: true
+
+# Rewrite a premature first-turn judge_image call into generate_image.
+rewrite_judge_before_generate: true
+
+# Optional dump root for traj / hermes / images (null → repo ``outputs/e2e``).
+e2e_root: null

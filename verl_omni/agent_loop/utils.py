@@ -12,7 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Shared helpers for agent-loop rollout seeding (diffusion + composite loops).
+
+``ImageGenToolAgentLoop`` helpers are in ``verl_omni.tools.agent_helper.image_gen_utils``,
+not here, so diffusion loops do not import Hydra ``agentic_image_gen`` readers.
+"""
+
+from __future__ import annotations
+
 from typing import Any, Optional
+
+__all__ = [
+    "derive_rollout_seed",
+    "maybe_per_rollout_seeds",
+    "messages_to_text",
+]
 
 
 def messages_to_text(messages: Any) -> str:
@@ -38,7 +52,7 @@ def messages_to_text(messages: Any) -> str:
     return "\n".join(part for part in parts if part).strip()
 
 
-def _derive_rollout_seed(base_seed: int, rollout_index: int) -> int:
+def derive_rollout_seed(base_seed: int, rollout_index: int) -> int:
     """Map per-step rollout base and expanded row index to a vLLM seed.
     Row index is 0 .. num_prompts * rollout.n - 1 after interleaved repeat."""
     max_seed = (1 << 63) - 1
@@ -59,10 +73,10 @@ def maybe_per_rollout_seeds(meta_info: dict, batch_size: int, global_indices=Non
     base = int(base)
 
     if global_indices is None:
-        return [_derive_rollout_seed(base, i) for i in range(batch_size)]
+        return [derive_rollout_seed(base, i) for i in range(batch_size)]
 
     indices = [int(idx) for idx in list(global_indices)]
     if len(indices) != batch_size:
         raise ValueError(f"Expected {batch_size} global rollout indices, got {len(indices)}")
 
-    return [_derive_rollout_seed(base, idx) for idx in indices]
+    return [derive_rollout_seed(base, idx) for idx in indices]
