@@ -112,16 +112,9 @@ def patch_minicpm_siglip_flash_attn_support(model_path: str, config: Any = None)
 
 
 def patch_minicpm_whisper_self_attn(module) -> None:
-    """Patch MiniCPM-o ``apm`` Whisper self-attn after remote-code ``from_pretrained``.
-
-    Walks ``module.apm.layers[*].self_attn``. No-op when ``apm`` is missing, so
-    checkpoints without an audio tower still load.
-    """
-    layers = getattr(getattr(module, "apm", None), "layers", None)
-    if not layers:
-        return
-    for layer in layers:
-        _wrap_whisper_attn_forward(getattr(layer, "self_attn", None))
+    """Patch MiniCPM-o ``apm`` Whisper self-attn after remote-code ``from_pretrained``."""
+    for layer in module.apm.layers:
+        _wrap_whisper_attn_forward(layer.self_attn)
 
 
 def patch_minicpm_get_vision_embedding(module) -> None:
@@ -178,31 +171,6 @@ def patch_minicpm_get_vision_embedding(module) -> None:
     setattr(module, marker, True)
 
 
-def _per_sample_image_bounds(image_bound: Any, batch_size: int) -> list:
-    """Normalize ``data['image_bound']`` to one span list per batch row.
-
-    Collation can hand the scatter a ``(batch_size, 2)`` tensor of one span per
-    row, which indexes to a bare pair rather than a list of spans. Neither case
-    may be probed with truthiness: ``bool()`` on a multi-element tensor raises.
-    """
-    import torch
-
-    if image_bound is None:
-        return [[] for _ in range(batch_size)]
-    if isinstance(image_bound, (list | tuple)):
-        if len(image_bound) == 0:
-            return [[] for _ in range(batch_size)]
-        return list(image_bound)
-    if isinstance(image_bound, torch.Tensor):
-        if image_bound.numel() == 0:
-            return [[] for _ in range(batch_size)]
-        if image_bound.ndim == 2 and image_bound.shape == (batch_size, 2):
-            return [image_bound[i : i + 1] for i in range(batch_size)]
-        if batch_size == 1:
-            return [image_bound]
-    return [[] for _ in range(batch_size)]
-
-
 def patch_minicpm_get_vllm_embedding(module) -> None:
     """Clone text embeddings before the vision scatter.
 
@@ -230,7 +198,9 @@ def patch_minicpm_get_vllm_embedding(module) -> None:
 
         rows = []
         batch_size = len(data["input_ids"])
-        image_bound = _per_sample_image_bounds(data.get("image_bound"), batch_size)
+        image_bound = data.get("image_bound")
+        if image_bound is None:
+            image_bound = [[] for _ in range(batch_size)]
         for i in range(batch_size):
             row = vllm_embedding[i].clone()
             cur_vs_hs = vision_hidden_states[i] if i < len(vision_hidden_states) else []
