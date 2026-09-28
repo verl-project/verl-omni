@@ -96,6 +96,7 @@ examples/qwen3_tts/grpo_trainer_qwen3_tts.md
 examples/qwen_image/flowgrpo_trainer_qwen_image.md
 examples/qwen_image_edit/flowgrpo_trainer_qwen_image_edit.md
 examples/ltx2/flowgrpo_trainer_ltx2.md
+examples/ltx2/omninft_trainer_ltx2.md
 examples/minimax_h3/diffusionnft_trainer_minimax_h3.md
 examples/boogu_image/flowgrpo_trainer_boogu_image.md
 examples/minimax_h3/flowgrpo_trainer_minimax_h3.md

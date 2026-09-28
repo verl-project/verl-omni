@@ -65,6 +65,9 @@ class _ScoreRequest:
     max_batch_size: int
     reward_scale: float
     future: asyncio.Future
+    num_frames: int | None = None
+    top_fraction: float = 1.0
+    score_cap: float | None = None
 
     @property
     def batch_key(self):
@@ -226,11 +229,13 @@ class _Qwen2VLRewardModelBT(Qwen2VLForConditionalGeneration):
         reward_token="special",
         special_token_ids=None,
         rm_head_type="ranknet",
+        use_sequential_position_ids: bool = False,
     ):
         super().__init__(config)
         self.output_dim = output_dim
         self.reward_token = reward_token
         self.special_token_ids = special_token_ids
+        self.use_sequential_position_ids = use_sequential_position_ids
 
         if rm_head_type == "ranknet":
             self.rm_head = nn.Sequential(
@@ -262,6 +267,14 @@ class _Qwen2VLRewardModelBT(Qwen2VLForConditionalGeneration):
         mm_token_type_ids=None,
         **kwargs,
     ):
+        # Original HPSv3/VideoReward forwards used the text decoder's sequential
+        # fallback. Supply it explicitly while delegating visual merging to HF.
+        if self.use_sequential_position_ids and position_ids is None:
+            tokens = inputs_embeds if inputs_embeds is not None else input_ids
+            batch_size, seq_length = tokens.shape[:2]
+            past_length = past_key_values.get_seq_length() if past_key_values is not None else 0
+            position_ids = torch.arange(seq_length, device=tokens.device) + past_length
+            position_ids = position_ids.view(1, 1, -1).expand(3, batch_size, -1)
         outputs = self.model(
             input_ids=input_ids,
             pixel_values=pixel_values,
@@ -276,9 +289,9 @@ class _Qwen2VLRewardModelBT(Qwen2VLForConditionalGeneration):
             use_cache=use_cache,
             **kwargs,
         )
-        hidden_states = outputs.last_hidden_state
-        with torch.autocast(device_type="cuda", dtype=torch.float32):
-            logits = self.rm_head(hidden_states)  # [B, L, N]
+        hidden_states = outputs[0]
+        head_dtype = next(self.rm_head.parameters()).dtype
+        logits = self.rm_head(hidden_states.to(head_dtype))  # [B, L, N]
 
         if input_ids is not None:
             batch_size = input_ids.shape[0]
@@ -313,7 +326,14 @@ def _remap_state_dict(state_dict, model_keys):
 
 
 class _HPSv3Inferencer:
-    def __init__(self, checkpoint_path: str, base_config: str = _BASE_MODEL, device: str = "npu"):
+    def __init__(
+        self,
+        checkpoint_path: str,
+        base_config: str = _BASE_MODEL,
+        device: str = "npu",
+        *,
+        use_sequential_position_ids: bool = False,
+    ):
         logger.info("Creating HPSv3 model")
         config = AutoConfig.from_pretrained(base_config, trust_remote_code=True)
 
@@ -328,6 +348,7 @@ class _HPSv3Inferencer:
             reward_token="special",
             special_token_ids=special_token_ids,
             rm_head_type="ranknet",
+            use_sequential_position_ids=use_sequential_position_ids,
         )
         model.resize_token_embeddings(len(processor.tokenizer))
         model.to(torch.bfloat16)
@@ -467,8 +488,7 @@ def _score_batch(requests: list[_ScoreRequest]) -> list[dict | Exception]:
 
     for index, request in enumerate(requests):
         try:
-            frame_interval = request.extra_info.get("frame_interval", 4)
-            pil_images = _extract_frames(request.solution_image, frame_interval=frame_interval)
+            pil_images = _select_reward_frames(request.solution_image, request.extra_info, request.num_frames)
             if not pil_images:
                 raise ValueError("HPSv3 reward requires at least one image frame")
             grouped_frames.setdefault(request.batch_key, []).extend(
@@ -507,7 +527,7 @@ def _score_batch(requests: list[_ScoreRequest]) -> list[dict | Exception]:
         if not raw_reward_values:
             results[index] = RuntimeError("HPSv3 reward produced no frame scores")
             continue
-        avg_raw = sum(raw_reward_values) / len(raw_reward_values)
+        avg_raw = _aggregate_frame_scores(raw_reward_values, request.top_fraction, request.score_cap)
         results[index] = {"score": avg_raw * request.reward_scale, "hpsv3_raw": avg_raw}
 
     final_results: list[dict | Exception] = []
@@ -603,14 +623,50 @@ async def compute_score_hpsv3(
     reward_scale: float = 0.1,
     device: str = None,
     max_batch_size: int = _DEFAULT_MAX_BATCH_SIZE,
+    *,
+    reward_model=None,
+    batch=None,
+    prompt_key: str | None = None,
+    num_frames: int | None = None,
+    top_fraction: float = 1.0,
+    score_cap: float | None = None,
     **kwargs,
 ) -> dict:
-    """Compute HPSv3 reward by batching frames from ready concurrent requests."""
+    """Score frames using cached or executor-owned HPSv3 inference.
+
+    Defaults retain interval sampling (extra_info.frame_interval, default 4),
+    mean aggregation, reward_scale=0.1, and the cached cross-request queue.
+    num_frames selects that many uniformly spaced frames, allowing repeats.
+    Cap individual scores before averaging the largest ceil(N * top_fraction).
+    prompt_key selects batch.reward_inputs.text[prompt_key]; otherwise use
+    ground_truth. Managed inference batches frames within this sample only.
+    """
+    del data_source, kwargs
+    if num_frames is not None and num_frames <= 0:
+        raise ValueError("num_frames must be positive.")
+    if not 0 < top_fraction <= 1:
+        raise ValueError("top_fraction must be in (0, 1].")
+    if isinstance(max_batch_size, bool) or not isinstance(max_batch_size, int) or max_batch_size <= 0:
+        raise ValueError(f"max_batch_size must be a positive integer, got {max_batch_size!r}")
+    prompt = ground_truth or ""
+    if prompt_key is not None:
+        if batch is None or len(batch) != 1:
+            raise ValueError("HPSv3 prompt_key requires a single-sample batch.")
+        prompt = batch[0].non_tensor_batch["reward_inputs"]["text"][prompt_key]
+    if reward_model is not None:
+        images = _select_reward_frames(solution_image, extra_info, num_frames)
+        if not images:
+            raise ValueError("HPSv3 reward requires at least one image frame")
+        raw_scores = []
+        for start in range(0, len(images), max_batch_size):
+            frames = images[start : start + max_batch_size]
+            logits = await reward_model.infer(frames, [prompt] * len(frames))
+            raw_scores.extend(logits[:, 0].detach().float().cpu().tolist())
+        raw_score = _aggregate_frame_scores(raw_scores, top_fraction, score_cap)
+        return {"score": raw_score * reward_scale, "hpsv3_raw": raw_score}
     checkpoint_path = os.getenv("custom_reward_model_path", model_name)
     assert checkpoint_path is not None, "HPSv3 checkpoint path must be provided via reward.reward_model.model_path"
     device = device or get_device_name()
-    if isinstance(max_batch_size, bool) or not isinstance(max_batch_size, int) or max_batch_size <= 0:
-        raise ValueError(f"max_batch_size must be a positive integer, got {max_batch_size!r}")
 
     loop = asyncio.get_running_loop()
     state = _get_batching_state()
@@ -618,7 +674,7 @@ async def compute_score_hpsv3(
     await _ensure_consumer(state)
     await state.queue.put(
         _ScoreRequest(
-            prompt=ground_truth or "",
+            prompt=prompt,
             solution_image=solution_image,
             extra_info=extra_info,
             checkpoint_path=checkpoint_path,
@@ -626,7 +682,70 @@ async def compute_score_hpsv3(
             max_batch_size=max_batch_size,
             reward_scale=reward_scale,
             future=future,
+            num_frames=num_frames,
+            top_fraction=top_fraction,
+            score_cap=score_cap,
         )
     )
     await _ensure_consumer(state)
     return await future
+
+
+def _select_reward_frames(solution_image, extra_info, num_frames):
+    if num_frames is None:
+        return _extract_frames(solution_image, frame_interval=extra_info.get("frame_interval", 4))
+    # Uniform sampling uses the standard single-sample CHW/TCHW contract.
+    video = solution_image.unsqueeze(0) if solution_image.ndim == 3 else solution_image
+    indices = torch.linspace(0, video.shape[0] - 1, num_frames).round().long().tolist()
+    return [_frame_to_pil(video[index]) for index in indices]
+
+
+def _aggregate_frame_scores(scores, top_fraction, score_cap):
+    if score_cap is None and top_fraction == 1.0:
+        return sum(scores) / len(scores)
+    values = torch.tensor(scores, dtype=torch.float32)
+    if score_cap is not None:
+        values = values.clamp(max=score_cap)
+    count = max(1, math.ceil(len(scores) * top_fraction))
+    return values.topk(count).values.mean().item()
+
+
+def _frame_to_pil(frame: torch.Tensor) -> Image.Image:
+    frame = frame.detach().cpu()
+    if frame.ndim != 3:
+        raise ValueError(f"HPSv3 video frame must have shape [C,H,W], got {tuple(frame.shape)}.")
+    if frame.shape[0] not in (1, 3):
+        raise ValueError(f"HPSv3 video must have 1 or 3 channels, got {frame.shape[0]}.")
+    if frame.dtype.is_floating_point:
+        if not torch.isfinite(frame).all():
+            raise ValueError("HPSv3 video must contain only finite values.")
+        frame = frame.clamp(0, 1).mul(255).round().to(torch.uint8)
+    elif frame.dtype != torch.uint8:
+        raise ValueError("HPSv3 video must be floating-point or uint8.")
+    if frame.shape[0] == 1:
+        frame = frame.expand(3, -1, -1)
+    return Image.fromarray(frame.permute(1, 2, 0).numpy(), mode="RGB")
+
+
+class HPSv3Model:
+    """Executor-owned HPSv3 inference using the shared loader and preprocessing."""
+
+    def __init__(
+        self, model_path: str, device, base_model_path: str = _BASE_MODEL, use_sequential_position_ids: bool = False
+    ):
+        self._inferencer = _HPSv3Inferencer(
+            checkpoint_path=model_path,
+            base_config=base_model_path,
+            device=device,
+            use_sequential_position_ids=use_sequential_position_ids,
+        )
+        self._infer_lock = threading.Lock()
+
+    def close(self) -> None:
+        self._inferencer = None
+
+    @torch.inference_mode()
+    def infer(self, images: list[Image.Image], prompts: list[str]) -> torch.Tensor:
+        """Return raw frame logits; sampling and aggregation belong to the scorer."""
+        with self._infer_lock:
+            return self._inferencer.reward(images, prompts).detach().cpu()

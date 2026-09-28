@@ -288,6 +288,34 @@ class TestDiffusionModelConfigPolicyAdapters:
                 omega_conf_to_dataclass(cfg)
 
 
+def test_ltx2_omninft_example_config_composes_into_global_training_config():
+    from pathlib import Path
+
+    from hydra import compose, initialize_config_dir
+    from hydra.utils import instantiate
+
+    import verl_omni
+
+    repo_root = Path(verl_omni.__file__).resolve().parent.parent
+    config_dir = repo_root / "examples/omninft_trainer/ltx2"
+    with initialize_config_dir(config_dir=str(config_dir), version_base=None):
+        cfg = compose(config_name="ltx2_omninft")
+
+    assert "recipe" not in cfg
+    assert cfg.algorithm.trainer_type == "direct_preference"
+    assert cfg.actor_rollout_ref.model.algorithm == "omni_nft"
+    assert cfg.actor_rollout_ref.actor.diffusion_loss.loss_mode == "omni_nft"
+    assert cfg.reward.aggregation == "preserve_components"
+    assert cfg.actor_rollout_ref.model.model_type == "omni_nft_model"
+    assert cfg.actor_rollout_ref.rollout.max_num_seqs == 1
+    assert cfg.actor_rollout_ref.rollout.pipeline.output_type == "pt"
+    assert cfg.actor_rollout_ref.rollout.val_kwargs.pipeline.output_type == "pt"
+    loss_config = instantiate(cfg.actor_rollout_ref.actor.diffusion_loss)
+    assert loss_config.loss_mode == "omni_nft"
+    for reward in cfg.reward.reward_functions.values():
+        assert set(reward.routing_weights) == {"video", "audio"}
+
+
 # ---------------------------------------------------------------------------
 # FSDPDiffusionActorConfig (instantiation via Hydra / omega_conf)
 # ---------------------------------------------------------------------------
