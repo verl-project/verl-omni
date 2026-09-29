@@ -21,10 +21,11 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import torch
 import torch.nn as nn
 from vllm_omni.diffusion.data import DiffusionParallelConfig, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.autoencoders.distributed_vae_executor import DistributedVaeMixin
-from vllm_omni.diffusion.distributed.sp_plan import SequenceParallelInput
+from vllm_omni.diffusion.distributed.sp_plan import SequenceParallelInput, SequenceParallelOutput
 from vllm_omni.engine.arg_utils import OmniEngineArgs
 from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
 
@@ -88,7 +89,8 @@ def test_explicit_parallel_config_keeps_etp_and_other_fields(monkeypatch, as_obj
     parallel = {"tensor_parallel_size": 4, "text_encoder_tp_size": 4, "vae_patch_parallel_size": 4}
     if as_object:
         parallel = DiffusionParallelConfig.from_dict(parallel)
-    engine_args = _prepare(monkeypatch, parallel=parallel)
+    config = DiffusionRolloutConfig(tensor_model_parallel_size=4, vae_patch_parallel_size=4)
+    engine_args = _prepare(monkeypatch, config=config, parallel=parallel)
     stages = AsyncOmniEngine._create_default_diffusion_stage_cfg(engine_args)
     od_config = OmniDiffusionConfig(parallel_config=stages[0]["engine_args"]["parallel_config"])
     assert od_config.parallel_config.text_encoder_tp_size == 4
@@ -97,7 +99,8 @@ def test_explicit_parallel_config_keeps_etp_and_other_fields(monkeypatch, as_obj
 
 def test_missing_nested_etp_is_filled_without_mutating_input(monkeypatch):
     parallel = {"tensor_parallel_size": 4, "vae_patch_parallel_size": 4}
-    engine_args = _prepare(monkeypatch, typed=4, parallel=parallel)
+    config = DiffusionRolloutConfig(tensor_model_parallel_size=4, text_encoder_tp_size=4, vae_patch_parallel_size=4)
+    engine_args = _prepare(monkeypatch, config=config, parallel=parallel)
     stages = AsyncOmniEngine._create_default_diffusion_stage_cfg(engine_args)
     assert stages[0]["engine_args"]["parallel_config"].text_encoder_tp_size == 4
     assert "text_encoder_tp_size" not in parallel
@@ -191,6 +194,19 @@ def test_nested_vae_conflict_is_not_silently_ignored(monkeypatch):
     config = DiffusionRolloutConfig(tensor_model_parallel_size=2, vae_patch_parallel_size=2)
     with pytest.raises(ValueError, match="Conflicting.*vae_patch_parallel_size"):
         _prepare_parallel(monkeypatch, config, nested={"vae_patch_parallel_size": 1})
+
+
+@pytest.mark.parametrize("field,value", [("vae_patch_parallel_size", 4), ("vae_parallel_mode", "spatial_shard_height")])
+@pytest.mark.parametrize("as_object", [False, True])
+@pytest.mark.parametrize("cli_matches_nested", [False, True])
+def test_nested_vae_cannot_override_typed_defaults(monkeypatch, field, value, as_object, cli_matches_nested):
+    config = DiffusionRolloutConfig(tensor_model_parallel_size=4)
+    nested = {"tensor_parallel_size": 4, field: value}
+    if as_object:
+        nested = DiffusionParallelConfig.from_dict(nested)
+    cli = {field: value} if cli_matches_nested else {}
+    with pytest.raises(ValueError, match=f"Conflicting {field}"):
+        _prepare_parallel(monkeypatch, config, nested=nested, **cli)
 
 
 def test_legacy_sp_cannot_bypass_resource_allocation(monkeypatch):
@@ -334,7 +350,7 @@ def _parallel_setup(pipeline, **parallel):
 def test_parallel_setup_installs_sp_hooks_and_vae_parallel():
     pipeline = _SPPipeline()
     od_config, hooks_applied = _parallel_setup(pipeline, ulysses_degree=2, vae_patch_parallel_size=2)
-    assert hooks_applied is True
+    assert hooks_applied is False
     for dit in (pipeline.transformer, pipeline.transformers_ref):
         assert dit.sp_prepare._hook_registry.get_hook("sp_input---sp_prepare") is not None
     pipeline.vae.set_parallel_size.assert_called_once_with(2, mode="tile")
@@ -365,12 +381,80 @@ def test_parallel_setup_rejects_unsupported_components(component, replacement, p
     assert getattr(pipeline.transformer.sp_prepare, "_hook_registry", None) is None
 
 
-def test_parallel_setup_fails_closed_without_sp_hooks(monkeypatch):
-    from vllm_omni.diffusion import registry
+def test_parallel_setup_rejects_empty_sp_plan():
+    pipeline = _SPPipeline()
+    pipeline.transformer._sp_plan = {}
+    with pytest.raises(ValueError, match="sequence parallelism"):
+        _parallel_setup(pipeline, ulysses_degree=2)
+    assert getattr(pipeline.transformer.sp_prepare, "_hook_registry", None) is None
 
-    monkeypatch.setattr(registry, "_apply_sequence_parallel_if_enabled", lambda *_: None)
-    with pytest.raises(RuntimeError, match="hooks were not applied to _SPPipeline.transformer"):
-        _parallel_setup(_SPPipeline(), ulysses_degree=2)
+
+def test_parallel_setup_preserves_partial_installation_error():
+    pipeline = _SPPipeline()
+    pipeline._dit_modules = ["transformer"]
+    pipeline.transformer._sp_plan = {
+        **pipeline.transformer._sp_plan,
+        "missing_module": SequenceParallelOutput(gather_dim=0, expected_dims=2),
+    }
+    with pytest.raises(ValueError, match="missing_module.*not a submodule"):
+        _parallel_setup(pipeline, ulysses_degree=2)
+    assert pipeline.transformer.sp_prepare._hook_registry.get_hook("sp_input---sp_prepare") is not None
+
+
+@pytest.mark.parametrize("entrypoint", ["forward", "denoise_step", "post_decode"])
+@pytest.mark.parametrize("degree", ["ulysses_degree", "ring_degree"])
+@pytest.mark.parametrize("previous_flag", [False, True])
+def test_parallel_setup_scopes_fresh_runtime_context(monkeypatch, entrypoint, degree, previous_flag):
+    from vllm_omni.diffusion.forward_context import get_forward_context, set_forward_context
+    from vllm_omni.diffusion.hooks import sequence_parallel
+
+    monkeypatch.setattr(sequence_parallel, "sp_shard", lambda value, dim, **_: value.chunk(2, dim=dim)[0])
+    monkeypatch.setattr(sequence_parallel, "sp_gather", lambda value, dim, **_: torch.cat([value, value], dim=dim))
+    active = []
+
+    class DiT(_SPDiT):
+        _sp_plan = {**_SPDiT._sp_plan, "sp_finish": SequenceParallelOutput(gather_dim=0, expected_dims=2)}
+
+        def __init__(self):
+            super().__init__()
+            self.sp_finish = nn.Identity()
+
+        def forward(self, value):
+            active.append(get_forward_context().sp_active)
+            value = self.sp_prepare(value)
+            active.append(get_forward_context().sp_active)
+            value = self.sp_finish(value)
+            active.append(get_forward_context().sp_active)
+            return value
+
+    class Pipeline(_SPPipeline):
+        def forward(self, value, *, fail=False):
+            active.append(get_forward_context().sp_active)
+            if fail:
+                raise RuntimeError("forward failed")
+            return self.transformer(value)
+
+        denoise_step = forward
+        post_decode = forward
+
+    pipeline = Pipeline()
+    pipeline.transformer = DiT()
+    od_config, _ = _parallel_setup(pipeline, **{degree: 2})
+    for fail in (False, True, False):
+        with set_forward_context(omni_diffusion_config=od_config):
+            ctx = get_forward_context()
+            assert not ctx.sp_plan_hooks_applied
+            ctx.sp_plan_hooks_applied = previous_flag
+            if fail:
+                with pytest.raises(RuntimeError, match="forward failed"):
+                    getattr(pipeline, entrypoint)(torch.ones(4, 2), fail=True)
+                assert active == [False]
+            else:
+                torch.testing.assert_close(getattr(pipeline, entrypoint)(torch.ones(4, 2)), torch.ones(4, 2))
+                assert active == [False, False, True, False]
+            assert ctx.sp_plan_hooks_applied is previous_flag
+            assert ctx._sp_shard_depth == 0
+            active.clear()
 
 
 def test_registered_pipelines_apply_parallel_setup_once_after_construction(monkeypatch):
@@ -395,11 +479,48 @@ def test_registered_pipelines_apply_parallel_setup_once_after_construction(monke
             super().__init__(od_config=od_config)
             events.append("child")
 
-    Parent(od_config=None)
+    config = object()
+    Parent(od_config=config)
     assert events == ["parent", "setup"]
     events.clear()
-    Child(od_config=None)
+    Child(od_config=config)
     assert events == ["parent", "child", "setup"]
+
+
+@pytest.mark.parametrize("positional", [False, True])
+def test_registered_pipeline_requires_keyword_config(monkeypatch, positional):
+    from verl_omni.pipelines import model_base
+
+    monkeypatch.setattr(model_base.VllmOmniPipelineBase, "_registry", {})
+
+    @model_base.VllmOmniPipelineBase.register("Toy", algorithm="flow_grpo")
+    class Pipeline:
+        def __init__(self, od_config=None):
+            pass
+
+    with pytest.raises(TypeError, match="od_config.*keyword"):
+        Pipeline(*([object()] if positional else []))
+
+
+def test_registering_pipeline_twice_does_not_repeat_setup(monkeypatch):
+    from verl_omni.pipelines import model_base
+
+    monkeypatch.setattr(model_base.VllmOmniPipelineBase, "_registry", {})
+    setup = Mock()
+    monkeypatch.setattr(model_base, "apply_rollout_parallel_setup", setup)
+
+    @model_base.VllmOmniPipelineBase.register("Alias", algorithm="flow_grpo")
+    @model_base.VllmOmniPipelineBase.register("Toy", algorithm="flow_grpo")
+    class Pipeline:
+        def __init__(self, *, od_config):
+            pass
+
+    for _ in range(2):
+        pipeline = Pipeline(od_config=object())
+        assert setup.call_args.args[0] is pipeline
+    assert setup.call_count == 2
+    assert model_base.VllmOmniPipelineBase.get_class("Alias", "flow_grpo") is Pipeline
+    assert model_base.VllmOmniPipelineBase.get_class("Toy", "flow_grpo") is Pipeline
 
 
 @pytest.mark.parametrize("algorithm", ["flow_grpo", "diffusion_nft"])

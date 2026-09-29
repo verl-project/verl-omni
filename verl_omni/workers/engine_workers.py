@@ -69,6 +69,7 @@ from verl_omni.workers.config import (
     OmniModelConfig,
 )
 from verl_omni.workers.config.diffusion import DiffusionDistillationTeacherModelConfig
+from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size
 from verl_omni.workers.rollout.vllm_rollout.zmq_utils import make_update_zmq_handle, make_update_zmq_id
 from verl_omni.workers.utils.losses import diffusion_loss, omni_loss
 
@@ -819,8 +820,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             infer_tp = (
                 rollout_config.tensor_model_parallel_size
                 * rollout_config.data_parallel_size
-                * getattr(rollout_config, "ulysses_degree", 1)
-                * getattr(rollout_config, "ring_degree", 1)
+                * get_rollout_sequence_parallel_size(rollout_config)
             )
             infer_pp = rollout_config.pipeline_model_parallel_size
             infer_world_size = infer_tp * infer_pp

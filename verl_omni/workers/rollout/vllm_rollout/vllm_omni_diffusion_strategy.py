@@ -144,10 +144,8 @@ class DiffusionStrategy(OmniStrategyBase):
                 value = cli_value
             if key != "vae_use_tiling" and parallel_config is not None:
                 nested_value = parallel_config.get(key)
-                if nested_value is not None:
-                    if nested_value != value and (value != default or cli_value not in (None, default)):
-                        raise ValueError(f"Conflicting {key} in rollout config and parallel_config.")
-                    value = nested_value
+                if nested_value is not None and (nested_value != getattr(config, key) or nested_value != value):
+                    raise ValueError(f"Conflicting {key} in rollout config and parallel_config.")
                 parallel_config[key] = value
             engine_args[key] = value
 

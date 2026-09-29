@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
+from omegaconf import OmegaConf
 from verl.utils.device import get_visible_devices_keyword
 from verl.workers.rollout import utils as verl_rollout_utils
 
@@ -107,13 +108,22 @@ async def test_manager_replica_and_worker_slices(monkeypatch, tp, usp, ring, sta
             self.resource_shape = [self.gpus_per_replica_node] * self.nnodes
             await self.launch_servers()
 
-    rollout = DiffusionRolloutConfig(
-        name="vllm_omni",
-        tensor_model_parallel_size=tp,
-        ulysses_degree=usp,
-        ring_degree=ring,
-        n_gpus_per_node=4,
-        nnodes=2,
+    rollout = OmegaConf.create(
+        {
+            "_target_": "verl_omni.workers.config.DiffusionRolloutConfig",
+            "name": "vllm_omni",
+            "tensor_model_parallel_size": tp,
+            "ulysses_degree": usp,
+            "ring_degree": ring,
+            "data_parallel_size": 1,
+            "pipeline_model_parallel_size": 1,
+            "n_gpus_per_node": 4,
+            "nnodes": 2,
+            "disable_log_stats": True,
+            "prometheus": {"enable": False},
+            "disaggregation": {"enabled": False},
+            "engine_kwargs": {},
+        }
     )
     workers = list(range(8))
     group = None if standalone else SimpleNamespace(world_size=8, workers=workers)
@@ -135,6 +145,11 @@ async def test_manager_replica_and_worker_slices(monkeypatch, tp, usp, ring, sta
         else:
             assert replica.workers == workers[rank * width : (rank + 1) * width]
     assert len(manager.server_handles) == len(manager.server_addresses) == 8 // width
+    configs = [replica.config for replica in manager.get_replicas()]
+    assert len({id(config) for config in configs}) == len(configs)
+    configs[0].engine_kwargs["replica_local"] = True
+    assert "replica_local" not in rollout.engine_kwargs
+    assert all("replica_local" not in config.engine_kwargs for config in configs[1:])
 
 
 @pytest.mark.parametrize("tp,usp,ring", [(2, 1, 1), (1, 4, 1), (2, 2, 1), (1, 1, 4), (1, 8, 1)])
@@ -200,6 +215,7 @@ async def test_sp_pool_divisibility_fails_before_launch():
     [
         {"name": "vllm"},
         {"data_parallel_size": 2},
+        {"name": "trtllm"},
         {"engine_kwargs": {"vllm_omni": {"output_mode": "ar"}}},
         {"disaggregation": {"enabled": True}},
     ],
@@ -209,6 +225,11 @@ def test_sp_rejects_unsupported_modes(overrides):
     config.update(overrides)
     with pytest.raises(ValueError, match="sequence parallelism"):
         DiffusionRolloutConfig(**config)
+
+
+def test_sp_rejects_pipeline_parallelism():
+    with pytest.raises(NotImplementedError, match="pipeline_model_parallel_size"):
+        DiffusionRolloutConfig(name="vllm_omni", ulysses_degree=4, pipeline_model_parallel_size=2)
 
 
 def test_http_profiler_uses_sp_footprint(monkeypatch):
@@ -239,38 +260,77 @@ def test_http_profiler_uses_sp_footprint(monkeypatch):
     assert server.config.profiler.ranks == [4]
 
 
-async def test_manager_start_rank_and_metrics(monkeypatch):
+@pytest.mark.parametrize("standalone", [False, True])
+@pytest.mark.parametrize(
+    "prometheus_enabled,insight_enabled", [(False, False), (True, False), (False, True), (True, True)]
+)
+@pytest.mark.parametrize("start_rank", [None, 5])
+@pytest.mark.parametrize("fail_init", [False, True])
+async def test_manager_start_rank_and_metrics_match_pinned_lifecycle(
+    monkeypatch, standalone, prometheus_enabled, insight_enabled, start_rank, fail_init
+):
     from verl.workers.config.rollout import PrometheusConfig
+    from verl.workers.rollout import llm_server as upstream
 
     from verl_omni.workers.rollout import replica as replica_module
 
-    rollout = DiffusionRolloutConfig(
-        name="vllm_omni",
-        tensor_model_parallel_size=1,
-        ulysses_degree=4,
-        nnodes=1,
-        n_gpus_per_node=8,
-        disable_log_stats=False,
-        prometheus=PrometheusConfig(enable=True),
-    )
-    cfg = SimpleNamespace(actor_rollout_ref=SimpleNamespace(rollout=rollout, model=None))
-    manager = replica_module.DiffusionLLMServerManager(cfg, start_rank=3)
-    manager.rollout_replica_class = Mock(
-        side_effect=lambda **kw: SimpleNamespace(
-            replica_rank=kw["replica_rank"],
-            init_standalone=AsyncMock(),
-            _server_handle=f"h{kw['replica_rank']}",
-            _server_address=f"a{kw['replica_rank']}",
+    trace = Mock()
+    monkeypatch.setattr(replica_module, "update_prometheus_config", trace.prometheus)
+    monkeypatch.setattr(upstream, "update_prometheus_config", trace.prometheus)
+    monkeypatch.setattr(replica_module.RLInsightLogger, "enabled", lambda: insight_enabled)
+    monkeypatch.setattr(replica_module.RLInsightLogger, "register_rollout_metrics", trace.insight)
+    group = None if standalone else SimpleNamespace(world_size=8, workers=list(range(8)))
+    results = []
+    for manager_class, tp, usp in ((upstream.LLMServerManager, 4, 1), (replica_module.DiffusionLLMServerManager, 1, 4)):
+        rollout = DiffusionRolloutConfig(
+            name="vllm_omni",
+            tensor_model_parallel_size=tp,
+            ulysses_degree=usp,
+            nnodes=1,
+            n_gpus_per_node=8,
+            disable_log_stats=False,
+            prometheus=PrometheusConfig(enable=prometheus_enabled),
         )
-    )
-    prometheus, insight = Mock(), Mock()
-    monkeypatch.setattr(replica_module, "update_prometheus_config", prometheus)
-    monkeypatch.setattr(replica_module.RLInsightLogger, "enabled", lambda: True)
-    monkeypatch.setattr(replica_module.RLInsightLogger, "register_rollout_metrics", insight)
-    await manager._initialize_llm_servers()
-    assert [r.replica_rank for r in manager.get_replicas()] == [3, 4]
-    prometheus.assert_called_once_with(rollout.prometheus, ["a3", "a4"], "vllm_omni")
-    assert insight.call_args.kwargs["labels"] == [{"replica": 3}, {"replica": 4}]
+        cfg = SimpleNamespace(actor_rollout_ref=SimpleNamespace(rollout=rollout, model=None))
+        manager = manager_class(cfg, worker_group=group, start_rank=3)
+
+        def make_replica(*, replica_rank, config, model_config, gpus_per_node, expected_config=rollout):
+            trace.construct(replica_rank, config is expected_config, model_config, gpus_per_node)
+
+            async def init(*args):
+                trace.init(replica_rank, *args)
+                if fail_init:
+                    raise RuntimeError("launch failed")
+
+            return SimpleNamespace(
+                replica_rank=replica_rank,
+                init_standalone=init,
+                init_hybrid=init,
+                _server_handle=f"h{replica_rank}",
+                _server_address=f"a{replica_rank}",
+            )
+
+        manager.rollout_replica_class = make_replica
+        if fail_init:
+            with pytest.raises(RuntimeError, match="launch failed"):
+                await manager._initialize_llm_servers(start_rank=start_rank)
+            trace.prometheus.assert_not_called()
+            trace.insight.assert_not_called()
+        else:
+            await manager._initialize_llm_servers(start_rank=start_rank)
+            first = 3 if start_rank is None else start_rank
+            assert [r.replica_rank for r in manager.get_replicas()] == [first, first + 1]
+            assert manager.server_handles == [f"h{first}", f"h{first + 1}"]
+            assert manager.server_addresses == [f"a{first}", f"a{first + 1}"]
+            if prometheus_enabled:
+                trace.prometheus.assert_called_once_with(rollout.prometheus, manager.server_addresses, "vllm_omni")
+            if insight_enabled:
+                trace.insight.assert_called_once_with(
+                    manager.server_addresses, "vllm_omni", labels=[{"replica": first}, {"replica": first + 1}]
+                )
+        results.append(list(trace.mock_calls))
+        trace.reset_mock()
+    assert results[0] == results[1]
 
 
 async def test_inherited_standalone_allocates_all_sp_ranks(monkeypatch):

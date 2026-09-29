@@ -47,7 +47,7 @@ class DiffusionLLMServerManager(LLMServerManager):
         if get_rollout_sequence_parallel_size(self.rollout_config) == 1:
             return await super()._initialize_llm_servers(start_rank=start_rank)
 
-        # The pinned manager has no replica-size hook; only its SP allocation is overridden.
+        # TODO: remove once verl exposes a replica-size hook. The lifecycle test compares against the pin.
         config = omega_conf_to_dataclass(self.rollout_config, dataclass_type=DiffusionRolloutConfig)
         start_rank = self.start_rank if start_rank is None else start_rank
         replica_size = get_rollout_world_size(config)
@@ -60,7 +60,7 @@ class DiffusionLLMServerManager(LLMServerManager):
         self.rollout_replicas = [
             self.rollout_replica_class(
                 replica_rank=start_rank + rank,
-                config=config,
+                config=self.rollout_config,
                 model_config=self.model_config,
                 gpus_per_node=config.n_gpus_per_node,
             )
