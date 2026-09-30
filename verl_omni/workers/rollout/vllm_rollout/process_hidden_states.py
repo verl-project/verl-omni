@@ -61,12 +61,24 @@ def apply_hidden_states_patches() -> None:
     if _applied:
         return
 
-    from vllm_omni.worker.gpu_ar_model_runner import GPUARModelRunner
+    try:
+        from vllm_omni.worker.gpu_ar_model_runner import GPUARModelRunner
+    except ImportError:
+        pass  # non-CUDA deployment; the NPU patch below still applies
+    else:
+        _patch_runner(GPUARModelRunner)
 
-    _patch_runner(GPUARModelRunner)
     _patch_npu_runner()
     _applied = True
     logger.info("vllm_omni hidden-states patches applied")
+
+
+def _is_step_hidden_states(hidden_states, scheduler_output) -> bool:
+    """Validate ``execute_model_state.hidden_states`` before use."""
+    if not isinstance(hidden_states, torch.Tensor) or hidden_states.ndim != 2:
+        return False
+    total = sum(int(n) for n in scheduler_output.num_scheduled_tokens.values())
+    return hidden_states.shape[0] == total
 
 
 def _patch_npu_runner() -> None:
@@ -86,14 +98,27 @@ def _patch_npu_runner() -> None:
 
     def _sample_with_hidden_states(self, grammar_output):
         state = self.execute_model_state
-        scheduler_output = state[0] if state is not None else None
-        hidden_states = state[4] if state is not None else None
+        if state is None:
+            return original_sample(self, grammar_output)
+
+        scheduler_output = getattr(state, "scheduler_output", None)
+        hidden_states = getattr(state, "hidden_states", None)
+        if scheduler_output is None or hidden_states is None:
+            raise RuntimeError(
+                "vllm_omni hidden-states patch: execute_model_state lacks the expected "
+                f"scheduler_output / hidden_states fields (got {type(state).__name__}); "
+                "the NPU AR runner's state layout changed — update the patch for the new "
+                "vllm-omni pin."
+            )
+        if not _is_step_hidden_states(hidden_states, scheduler_output):
+            raise RuntimeError(
+                "vllm_omni hidden-states patch: execute_model_state.hidden_states is not the expected "
+                f"[num_scheduled_tokens, D] tensor (got {type(hidden_states).__name__} "
+                f"of shape {tuple(hidden_states.shape)}). The NPU AR runner's state layout "
+                "changed; update the patch for the new vllm-omni pin."
+            )
 
         output = original_sample(self, grammar_output)
-
-        if scheduler_output is None or hidden_states is None:
-            return output
-
         payloads = _collect_hidden_states_payloads(self, scheduler_output, hidden_states)
         if not payloads:
             return output
@@ -235,6 +260,11 @@ def _merge_into_multimodal_outputs(output, hidden_payloads: dict[str, dict]) -> 
             entry = dict(entry)
             entry.update(payload)
             mm[idx] = entry
+        else:
+            raise RuntimeError(
+                f"cannot attach teacher_hidden_states to req {req_id}: multimodal_outputs[{idx}] "
+                f"already holds a {type(entry).__name__}, expected None or dict."
+            )
 
     output.multimodal_outputs = mm
 
