@@ -180,8 +180,8 @@ KL over the **whole** teacher distribution — no sampling noise, no truncation:
 - `nitrobrew_reverse_kl` — `KL(p_S ‖ p_T)`. Mode-seeking.
 
 Materializing teacher logits as `[N, V]` is what makes this expensive: `N` is
-every prompt + response token in the batch and `V` is the full vocabulary
-(151 936 for Qwen3-Omni). The kernel never builds that tensor.
+every prompt + response token in the batch and `V` is the full vocabulary.
+The kernel never builds that tensor.
 
 ### How it works
 
@@ -202,16 +202,21 @@ every prompt + response token in the batch and `V` is the full vocabulary
    `z_chunk = h @ W[chunk].T` for 1024 entries at a time and folds it into a
    single online-softmax pass, so peak extra memory is `O(N × 1024)` instead of
    `O(N × V)`; the backward recomputes each chunk instead of storing it
-   (`verl_omni/trainer/distillation/nitrobrew_loss.py`).
+   (`verl_omni/trainer/distillation/nitrobrew_loss.py`). Only the teacher side
+   is chunked: `student_logits` arrives as a full `[N, V]` tensor (the actor's
+   `lm_head` output) and its gradient is a full `[N, V]` buffer that the
+   backward fills chunk by chunk — autograd requires the gradient to match
+   the input's shape. What is saved is the teacher's `[N, V]` float32 logits
+   and its softmax intermediates.
 4. **Tokens are grouped by teacher.** Each token routes to its teacher through
    the same `teacher_key` as the log-prob path, and each group runs the kernel
    with that teacher's unembedding. A single teacher degenerates to one group.
    A token whose teacher has no registered unembedding raises instead of
    silently dropping out of the loss.
 
-`nitrobrew` is supervised — `use_policy_gradient=true` is rejected at config
-validation — so the whole-vocab signal is backpropagated directly rather than
-folded into the policy-gradient reward.
+The full-vocabulary modes are supervised — `use_policy_gradient=true` is
+rejected at config validation — so the whole-vocab signal is backpropagated
+directly rather than folded into the policy-gradient reward.
 
 ### What it changes outside the loss
 

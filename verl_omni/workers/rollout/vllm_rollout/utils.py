@@ -95,14 +95,11 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         # (NPUARModelRunner runs in a StageEngineCoreProc spawned by vLLM-Omni,
         # so patches installed on the server actor do not propagate). The worker
         # extension materializes inside that sub-process, so install it here.
-        try:
-            from verl_omni.workers.rollout.vllm_rollout.process_hidden_states import (
-                apply_hidden_states_patches,
-            )
+        from verl_omni.workers.rollout.vllm_rollout.process_hidden_states import (
+            apply_hidden_states_patches,
+        )
 
-            apply_hidden_states_patches()
-        except Exception as exc:  # pragma: no cover - defensive across envs
-            logger.warning("hidden-states patch install failed in worker ext: %r", exc)
+        apply_hidden_states_patches()
 
         return super().__new__(cls)
 

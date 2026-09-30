@@ -104,12 +104,15 @@ class OmniDistillationLossConfig(DistillationLossConfig):
                     f"Only vanilla policy loss is currently supported when use_policy_gradient is True, "
                     f"but got {self.policy_loss_mode}."
                 )
-            if self.use_policy_gradient and self.loss_mode in ("nitrobrew",):
+            if self.use_policy_gradient:
                 raise ValueError(
                     "nitrobrew full-vocabulary KL is most effective as a supervised distillation loss "
                     "(use_policy_gradient=False), so the whole-vocab signal is backpropagated directly. "
                     "Set distillation.distillation_loss.use_policy_gradient=false."
                 )
+            # Hidden modes synthesize loss_settings above; the remaining parent validations are either
+            # duplicated above (policy_loss_mode) or top-k/estimator-specific, so super().__post_init__()
+            # is not called on this path.
             return
 
         # Non-hidden modes delegate to verl's registry + validations.
