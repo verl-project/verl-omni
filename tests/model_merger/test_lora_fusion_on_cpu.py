@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 import torch
 from model_fixtures import run_forward, tiny_transformer
-from peft import LoraConfig
+from peft import LoraConfig, get_peft_model
 from peft.tuners.tuners_utils import BaseTunerLayer
 from safetensors.torch import load_file, save_file
 from test_architectures_on_cpu import _case, _h3_native_state, _h3_pipeline_case, _tensor_outputs
@@ -78,7 +78,7 @@ def _lora_case(tmp_path, architecture, *, pipeline=False, lora_only=False):
                 if "lora_" not in name:
                     parameter.add_(0.005)
     _write_lora_source(Path(config.local_dir), actor, lora_only)
-    return config, actor
+    return replace(config, fuse_lora=True), actor
 
 
 def _peft_merged_state(actor, adapter_name="default"):
@@ -116,6 +116,24 @@ def test_lora_component_matches_peft_merge_and_actor_forward(tmp_path, architect
     loaded = type(actor).from_pretrained(result.output_dir, local_files_only=True)
     assert not any(isinstance(module, BaseTunerLayer) for module in loaded.modules())
     torch.testing.assert_close(run_forward(loaded, architecture), expected, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("lora_only", [False, True], ids=["full_state", "lora_only"])
+def test_lora_fusion_accepts_fsdp_wrapped_peft_state(tmp_path, lora_only):
+    config, actor = _lora_case(tmp_path, "QwenImagePipeline", lora_only=lora_only)
+    rank_file = Path(config.local_dir) / "model_world_size_1_rank_0.pt"
+    state = torch.load(rank_file, weights_only=False)
+    wrapped = {
+        "_fsdp_wrapped_module.base_model.model." + key.replace(".lora_", "._fsdp_wrapped_module.lora_"): value
+        for key, value in state.items()
+    }
+    torch.save(wrapped, rank_file)
+    result = merge_model(config)
+    assert not (result.output_dir / "lora_adapter").exists()
+    assert validate_artifact(result.output_dir)["lora_fusion"]["base_weights"] == (
+        "base_model" if lora_only else "checkpoint"
+    )
+    torch.testing.assert_close(_published_state(result.output_dir), _peft_merged_state(actor), rtol=0, atol=0)
 
 
 @pytest.fixture(scope="module")
@@ -215,10 +233,17 @@ def test_adapter_name_selects_one_adapter(tmp_path):
     assert not Path(missing.target_dir).exists()
 
 
+def test_fuse_lora_requires_lora_checkpoint(tmp_path):
+    config, _ = _case(tmp_path, "QwenImagePipeline")
+    with pytest.raises(ValueError, match="--fuse-lora requires a LoRA checkpoint"):
+        merge_model(replace(config, fuse_lora=True))
+    assert not Path(config.target_dir).exists()
+
+
 @pytest.mark.parametrize(
     ("fault", "message"),
     [
-        ("no_metadata", "require lora_train_meta.json"),
+        ("no_metadata", "lora_train_meta.json"),
         ("bad_metadata", "positive integer r"),
         ("unpaired", "Unpaired LoRA"),
         ("old_unpaired", "Unpaired LoRA"),
@@ -231,7 +256,7 @@ def test_adapter_name_selects_one_adapter(tmp_path):
         ("lora_bias", "Unsupported adapter tensor"),
         ("embedding", "Unsupported adapter tensor"),
         ("unknown_adapter", "Unsupported adapter tensor"),
-        ("no_adapter", "not found in checkpoint"),
+        ("no_adapter", "lora_train_meta.json"),
         ("no_base_layer", "lacks a base_layer weight"),
         ("duplicate_base", "Ambiguous LoRA base tensor"),
         ("partial", "Incomplete transformer state"),
@@ -324,6 +349,37 @@ def test_lora_fusion_accumulates_in_fp32_before_casting(dtype):
     assert not torch.equal(expected, base + 2 * (b @ a))
 
 
+@pytest.mark.parametrize("adapter_dtype", ["fp32", "base"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_lora_fusion_matches_peft_merge_in_low_precision(dtype, adapter_dtype):
+    # PEFT keeps adapters in fp32 by default, which merges like fuse_lora. With adapters in the base dtype,
+    # merge() on CPU rounds the update to that dtype before adding it, while fuse_lora rounds the sum once.
+    generator = torch.Generator().manual_seed(11)
+    layer = torch.nn.Sequential(torch.nn.Linear(64, 48, bias=False)).to(dtype)
+    config = LoraConfig(r=RANK, lora_alpha=ALPHA, target_modules=["0"])
+    model = get_peft_model(layer, config, autocast_adapter_dtype=adapter_dtype == "fp32")
+    with torch.no_grad():
+        for value in model.parameters():
+            value.copy_((torch.randn(value.shape, generator=generator) * 0.1).to(value.dtype))
+
+    def lora_layer(peft_model):
+        return next(item for item in peft_model.modules() if isinstance(item, BaseTunerLayer))
+
+    source = lora_layer(model)
+    base = source.base_layer.weight.detach().clone()
+    lora_a = source.lora_A["default"].weight.detach().clone()
+    lora_b = source.lora_B["default"].weight.detach().clone()
+    assert lora_a.dtype == lora_b.dtype == (torch.float32 if adapter_dtype == "fp32" else dtype)
+
+    merged = copy.deepcopy(model)
+    lora_layer(merged).merge()
+    expected = lora_layer(merged).base_layer.weight
+    fused = fuse_lora(base, lora_a, lora_b, ALPHA / RANK)
+    # Rounding the update first can move a result by at most a couple of ulps of the largest weight.
+    atol = 2 * torch.finfo(dtype).eps * fused.float().abs().max().item()
+    torch.testing.assert_close(fused, expected, rtol=0, atol=0 if adapter_dtype == "fp32" else atol)
+
+
 @pytest.mark.parametrize("dtype, magnitude", [(torch.float32, 1e30), (torch.float16, 1e3)])
 def test_lora_fusion_overflow_fails_closed(dtype, magnitude):
     base = torch.zeros(8, 8, dtype=dtype)
@@ -362,7 +418,7 @@ def fsdp2_lora_cases(tmp_path_factory):
         else:
             config, _ = _case(root, architecture, pipeline=True, dual_wan=architecture == "WanPipeline")
         shutil.rmtree(config.local_dir)
-        cases[architecture] = config
+        cases[architecture] = replace(config, fuse_lora=True)
 
     env = os.environ.copy()
     env.update(
@@ -448,8 +504,11 @@ def test_adapter_name_cli_and_validation(monkeypatch):
     common = ["--backend", "fsdp", "--local_dir", "actor", "--base_model", "base", "--trust-checkpoint"]
     monkeypatch.setattr(sys, "argv", ["model_merger", "merge", *common, "--adapter-name", "old"])
     assert generate_config_from_args(parse_args()).adapter_name == "old"
+    monkeypatch.setattr(sys, "argv", ["model_merger", "merge", *common, "--fuse-lora"])
+    assert generate_config_from_args(parse_args()).fuse_lora is True
     monkeypatch.setattr(sys, "argv", ["model_merger", "merge", *common])
-    assert generate_config_from_args(parse_args()).adapter_name == "default"
+    config = generate_config_from_args(parse_args())
+    assert config.adapter_name == "default" and config.fuse_lora is False
     with pytest.raises(ValueError, match="adapter_name"):
         ModelMergerConfig(
             operation="merge",

@@ -120,6 +120,9 @@ checkpoint:
   # What to include in saved checkpoints
   save_contents: ['model', 'optimizer', 'extra']
 
+  # Save only LoRA model weights with the FSDP checkpoint saver
+  save_lora_only: false
+
   # For more flexibility, you can specify the contents to load from the checkpoint.
   # .xxx refers to the local variable xxx from the same level of hierarchy similar to python pkg
   load_contents: ${.save_contents}

@@ -33,6 +33,7 @@ def validate_artifact(target: str | Path) -> dict:
     """Check portable output hashes, indexes and tensor metadata without source checkpoints."""
     root = Path(target)
     manifest = read_json(root / MANIFEST_NAME)
+    adapter = manifest.get("artifact_type") == "peft_adapter"
     if (
         type(manifest.get("schema_version")) is not int
         or manifest["schema_version"] != 1
@@ -41,8 +42,9 @@ def validate_artifact(target: str | Path) -> dict:
             "diffusers_pipeline",
             "diffusers_transformer",
             "minimax_h3_pipeline",
+            "peft_adapter",
         }
-        or manifest.get("architecture") not in _TRANSFORMERS
+        or (manifest.get("architecture") != "peft" if adapter else manifest.get("architecture") not in _TRANSFORMERS)
     ):
         raise ValueError("Unsupported merge manifest")
     component = manifest.get("trained_components")
@@ -57,10 +59,17 @@ def validate_artifact(target: str | Path) -> dict:
         raise ValueError("Unsupported pipeline artifact")
     if native_h3 != (manifest["architecture"] == "MiniMaxH3Pipeline" and pipeline):
         raise ValueError("Invalid native MiniMax H3 artifact")
-    config = read_json(root / directory / "config.json")
-    expected_class = "MiniMaxH3DiTModel" if native_h3 else _TRANSFORMERS[manifest["architecture"]]
-    if config.get("_class_name") != expected_class:
-        raise ValueError("Transformer config conflicts with manifest")
+    if adapter:
+        config = read_json(root / "adapter_config.json")
+        if config.get("peft_type") != "LORA" or config.get("task_type") is not None:
+            raise ValueError("Expected a diffusion PEFT LoRA configuration")
+        if manifest.get("weight_layout") != "peft":
+            raise ValueError("Unsupported adapter weight layout")
+    else:
+        config = read_json(root / directory / "config.json")
+        expected_class = "MiniMaxH3DiTModel" if native_h3 else _TRANSFORMERS[manifest["architecture"]]
+        if config.get("_class_name") != expected_class:
+            raise ValueError("Transformer config conflicts with manifest")
     if pipeline and read_json(root / "model_index.json").get("_class_name") != manifest["architecture"]:
         raise ValueError("Pipeline config conflicts with manifest")
     files = manifest.get("files")
@@ -77,7 +86,8 @@ def validate_artifact(target: str | Path) -> dict:
         raise ValueError("Output file inventory mismatch or external symlink")
     if inventory(root, [root / name for name in files]) != files:
         raise ValueError("Output checksum mismatch")
-    mapping = weight_files(root / directory, "model.safetensors" if native_h3 else None)
+    weights_name = "adapter_model.safetensors" if adapter else ("model.safetensors" if native_h3 else None)
+    mapping = weight_files(root / directory, weights_name)
     if set(mapping) != set(manifest.get("tensors", {})):
         raise ValueError("Output tensor inventory mismatch")
     for path in set(mapping.values()):

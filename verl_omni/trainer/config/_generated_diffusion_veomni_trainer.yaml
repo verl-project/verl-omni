@@ -125,6 +125,7 @@ actor_rollout_ref:
       - model
       - optimizer
       - extra
+      save_lora_only: false
       load_contents: ${.save_contents}
       async_save: false
   ref:

@@ -1,6 +1,6 @@
 # Offline diffusion model publishing
 
-Last updated: 09/26/2026
+Last updated: 09/30/2026
 
 `verl_omni.model_merger` converts an existing FSDP actor checkpoint into a local
 transformer or self-contained inference pipeline. It follows verl's
@@ -51,9 +51,8 @@ Supported checkpoint representations:
 - Ordinary full-shaped tensors in a multi-rank checkpoint only when every replica
   is exactly equal. Plain dim-0 shards are not guessed or concatenated.
 
-LoRA checkpoints are fused into a complete transformer; see
-[LoRA checkpoints](#lora-checkpoints). Not supported yet: standalone LoRA adapter
-export, FSDP1 `ShardedTensor`,
+LoRA checkpoints can export an adapter or fuse it into complete model weights;
+see [LoRA checkpoints](#lora-checkpoints). Not supported yet: FSDP1 `ShardedTensor`,
 HSDP/FSDP+TP, quantized weights, unaudited custom pipelines, architectures
 outside the audited table, BAGEL and Omni publishing. Standard Transformers can
 continue using `python -m verl.model_merger`; delegation through this entrypoint
@@ -69,6 +68,7 @@ output directory whose parent already exists.
 ```text
 actor/
   fsdp_config.json
+  lora_train_meta.json  # LoRA checkpoints only
   model_world_size_2_rank_0.pt
   model_world_size_2_rank_1.pt
   huggingface/config.json
@@ -196,12 +196,22 @@ loading is performed for unsupported serialization.
 
 ## LoRA checkpoints
 
-A checkpoint whose directory contains `lora_train_meta.json` (written by
-`FSDPCheckpointManager` for LoRA training) is published as a complete model: the
-selected adapter is folded into its base weights as
-`W + (lora_alpha / r) * B @ A`, computed in fp32 and cast back to the base weight
-dtype before the `--dtype` policy. The output layouts, verification and loaders
-are the same as for full training; no PEFT/LoRA support is needed to load it.
+By default, the `merge` command detects LoRA weights and writes
+`lora_adapter/adapter_config.json` and `lora_adapter/adapter_model.safetensors`.
+Full checkpoints also export the base model in the selected `pipeline` or
+`transformer` layout, without fusing LoRA into its weights. LoRA-only checkpoints
+export just the adapter; `--base_model` identifies the original model and does
+not need to be available locally. To verify the adapter files, run the `test`
+command with `--test_hf_dir "$OUTPUT/lora_adapter"`.
+
+Pass `--fuse-lora` to publish a complete model instead. The selected adapter is
+folded into its base weights as `W + (lora_alpha / r) * B @ A`, computed in fp32
+and cast back to the base weight dtype before the `--dtype` policy. The sum is
+rounded once. PEFT `merge()` on CPU instead rounds the update to the adapter
+dtype before adding it, so bf16/fp16 adapters (for example trained with
+`lora_dtype`) can differ by about one ulp of the largest weight; fp32 adapters
+match exactly. The output layouts, verification and loaders are the same as for
+full training; no PEFT/LoRA support is needed to load the fused model.
 
 ```bash
 python -m verl_omni.model_merger merge \
@@ -209,21 +219,30 @@ python -m verl_omni.model_merger merge \
   --local_dir "$LORA_ACTOR_CHECKPOINT" \
   --target_dir "$OUTPUT" \
   --base_model "$BASE_PIPELINE" \
-  --adapter_name default \
+  --adapter-name default \
+  --fuse-lora \
   --trust-checkpoint
 ```
 
-Two checkpoint layouts are accepted:
+Fusion accepts two checkpoint layouts and requires a locally available `--base_model`:
 
 - **Full state** (default save): `*.base_layer.*` base tensors, adapter tensors and
   all other transformer tensors. Base weights come from the checkpoint and the
   renamed tensor set must match the transformer schema exactly.
 - **LoRA-only** (`checkpoint.save_lora_only=True`): only adapter tensors. Every
   base tensor is read from `--base_model`, which must therefore be the base used
-  for training. A native MiniMax H3 pipeline base uses the fused native layout and
-  is rejected here; export the standalone transformer from a Diffusers H3 base.
+  for training. This layout is valid only when adapter initialization leaves
+  the base weights unchanged, as with default `gaussian` (`lora_init_weights`)
+  and PEFT's `true`/`false`. PEFT's `pissa` (including `pissa_niter_*`), `olora`,
+  `corda` and `loftq` rewrite the base weights before training, and
+  `save_lora_only` drops the rewritten weights. `lora_train_meta.json` does not
+  record the initialization, so the merger cannot detect this and fusing onto the
+  original base publishes the wrong model; use the full-state layout for those
+  initializations, and check any other initialization against PEFT first. A native
+  MiniMax H3 pipeline base uses the fused native layout and is rejected here;
+  export the standalone transformer from a Diffusers H3 base.
 
-`--adapter_name` (default `default`) selects exactly one adapter. Other adapters,
+`--adapter-name` (default `default`) selects exactly one adapter. Other adapters,
 such as DiffusionNFT's `old`, are not fused and are listed in the manifest's
 `lora_fusion.excluded_adapters`. `lora_train_meta.json` records the `default`
 adapter's positive integer `r` and `lora_alpha`; every adapter created by
@@ -240,8 +259,10 @@ external `lora_adapter_path` that used them would be fused with the wrong scale.
 The manifest `lora_fusion` record lists the adapter, `r`, `lora_alpha`, scaling,
 base-weight source, fused modules and excluded adapters, and the source
 fingerprint includes `lora_train_meta.json`. VeOmni LoRA checkpoints are not
-supported. Design and follow-up standalone adapter export are tracked in
-[RFC #675](https://github.com/verl-project/verl-omni/issues/675).
+supported. See [RFC #675](https://github.com/verl-project/verl-omni/issues/675).
+For adapter export, rank and alpha come from `lora_train_meta.json`, target
+modules are inferred from the weights, and named adapters must share the saved
+configuration. RS-LoRA and per-layer rank/alpha patterns are not supported.
 
 ## Verification and failure semantics
 
