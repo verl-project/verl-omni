@@ -47,7 +47,8 @@ class DiffusionLLMServerManager(LLMServerManager):
         if get_rollout_sequence_parallel_size(self.rollout_config) == 1:
             return await super()._initialize_llm_servers(start_rank=start_rank)
 
-        # TODO: remove once verl exposes a replica-size hook. The lifecycle test compares against the pin.
+        # TODO: replace this lifecycle override with the replica-size hook once the verl pin includes
+        # https://github.com/verl-project/verl/pull/8070. The lifecycle test compares against the current pin.
         config = omega_conf_to_dataclass(self.rollout_config, dataclass_type=DiffusionRolloutConfig)
         start_rank = self.start_rank if start_rank is None else start_rank
         replica_size = get_rollout_world_size(config)
