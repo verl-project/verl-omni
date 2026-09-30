@@ -1,4 +1,16 @@
-# Boogu-Image lora RL, vllm_omni rollout
+#!/usr/bin/env bash
+# Boogu-Image LoRA RL with FlowGRPO (V1 trainer: TransferQueue + ReplayBuffer +
+# sync mode).
+#
+# This is the v1 counterpart of run_boogu_image_ocr_lora.sh. It uses the new
+# `verl_omni.trainer.main_diffusion_v1` entrypoint, which selects
+# `PolicyGradientDiffusionTrainerV1Sync` via `trainer.v1.trainer_mode=sync` and
+# wires verl's `AgentLoopManagerTQ` with `DiffusionAgentLoopWorkerTQ`.
+# TransferQueue is force-enabled inside the runner, so it does not need to be
+# set on the CLI.
+#
+# GPU layout is a mechanical clone of the v0 recipe: 4 colocated
+# actor/rollout/reward GPUs (no standalone reward pool).
 #
 # Prerequisites (on top of the standard install):
 #   pip install "boogu-image @ git+https://github.com/boogu-project/Boogu-Image.git"
@@ -42,6 +54,9 @@
 #       but here it costs nothing measurable: update_actor took 1265s with it and
 #       1200s without, so this step is compute-bound, not bound by parameter
 #       movement. Keeping it on is what leaves room for the colocated 8B GenRM.
+#
+# Reference (legacy v0 script):
+# verl-omni/examples/flowgrpo_trainer/boogu_image/run_boogu_image_ocr_lora.sh
 set -x
 
 # Set WORKSPACE to any writable directory; defaults to $HOME
@@ -81,8 +96,7 @@ REQUEST_BATCH_MAX_WAIT_MS=${REQUEST_BATCH_MAX_WAIT_MS:-10}
 # old-log-prob, and actor forward.
 IMAGE_RESOLUTION=${IMAGE_RESOLUTION:-512}
 
-python3 -m verl_omni.trainer.main_diffusion \
-    trainer.use_v1=false \
+python3 -m verl_omni.trainer.main_diffusion_v1 \
     data.train_files=$ocr_train_path \
     data.val_files=$ocr_test_path \
     data.train_batch_size=32 \
@@ -131,7 +145,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     reward.custom_reward_function.name=compute_score_ocr \
     trainer.logger='["console", "wandb"]' \
     trainer.project_name=flow_grpo \
-    trainer.experiment_name=boogu_image_ocr_lora \
+    trainer.experiment_name=boogu_image_ocr_lora_v1 \
     trainer.log_val_generations=8 \
     trainer.val_before_train=True \
     trainer.n_gpus_per_node=$NUM_GPUS_ACTOR_ROLLOUT_REWARD \
@@ -139,4 +153,6 @@ python3 -m verl_omni.trainer.main_diffusion \
     trainer.save_freq=30 \
     trainer.test_freq=30 \
     trainer.total_epochs=15 \
-    trainer.total_training_steps=300 "$@"
+    trainer.total_training_steps=300 \
+    trainer.use_v1=true \
+    trainer.v1.trainer_mode=sync "$@"

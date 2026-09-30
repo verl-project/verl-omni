@@ -1,6 +1,6 @@
 # Train Boogu-Image with FlowGRPO
 
-Last updated: 08/19/2026
+Last updated: 09/03/2026
 
 RL post-training for [Boogu-Image-0.1-Base](https://huggingface.co/Boogu/Boogu-Image-0.1-Base)
 (text-to-image) and [Boogu-Image-0.1-Edit](https://huggingface.co/Boogu/Boogu-Image-0.1-Edit)
@@ -44,6 +44,20 @@ prompt distribution and collapses rewards.
 ```bash
 bash examples/flowgrpo_trainer/boogu_image/run_boogu_image_ocr_lora.sh
 ```
+
+### GPU (V1 sync)
+
+```bash
+bash examples/flowgrpo_trainer/boogu_image/run_boogu_image_ocr_lora_v1.sh
+```
+
+This is the v1 counterpart of the GPU recipe. It uses
+`verl_omni.trainer.main_diffusion_v1` with `trainer.use_v1=true` and
+`trainer.v1.trainer_mode=sync`. TransferQueue is force-enabled by the
+entrypoint. All other Hydra overrides match the v0 script, including the
+colocated 4-GPU actor/rollout/reward layout. See
+[Diffusion V1 training](../../../docs/start/diffusion_v1.md) for the shared
+v1 contract.
 
 Model-specific constraints baked into the recipe:
 
