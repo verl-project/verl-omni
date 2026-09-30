@@ -38,6 +38,7 @@ class ModelMergerConfig:
         hf_upload: Whether upload is enabled. Computed from operation and hf_upload_path.
         base_model: Compatible pretrained component or complete pipeline used for packaging.
         output_format: Publish a complete ``pipeline`` or standalone ``transformer``.
+        adapter_name: Registered adapter selected from the training checkpoint.
         dtype: Output tensor dtype or ``preserve``.
         max_shard_size: Maximum pending output safetensors shard size in bytes.
         trust_checkpoint: Acknowledge that rank checkpoints are trusted pickle inputs.
@@ -55,6 +56,7 @@ class ModelMergerConfig:
     hf_upload: bool = field(init=False)
     base_model: str | None = None
     output_format: str = "pipeline"
+    adapter_name: str = "default"
     dtype: str = "preserve"
     max_shard_size: int = 2 * 1024**3
     trust_checkpoint: bool = False
@@ -149,7 +151,7 @@ def parse_args() -> argparse.Namespace:
         "--base-model",
         dest="base_model",
         required=True,
-        help="Compatible component or complete base pipeline",
+        help="Compatible base pipeline/component, or original base identifier for adapter output",
     )
     merge.add_argument("--hf_upload_path", default=None, help="Optional Hugging Face repository ID")
     merge.add_argument("--private", action="store_true", help="Create a private Hugging Face repository")
@@ -170,6 +172,7 @@ def parse_args() -> argparse.Namespace:
         help="Output shard budget in bytes",
     )
     merge.add_argument("--trust-checkpoint", action="store_true", help="Acknowledge trusted pickle inputs")
+    merge.add_argument("--adapter-name", default="default", help="Registered adapter to export")
 
     test = commands.add_parser("test", parents=[base], help="Test a published artifact")
     test.add_argument("--test_hf_dir", required=True, help="Published artifact directory to test")
@@ -194,6 +197,7 @@ def generate_config_from_args(args: argparse.Namespace) -> ModelMergerConfig:
             test_hf_dir=None,
             base_model=args.base_model,
             output_format=args.output_format,
+            adapter_name=args.adapter_name,
             dtype=args.dtype,
             max_shard_size=args.max_shard_size,
             trust_checkpoint=args.trust_checkpoint,

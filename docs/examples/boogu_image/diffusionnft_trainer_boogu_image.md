@@ -1,0 +1,1 @@
+../../../examples/diffusionnft_trainer/boogu_image/README.md

@@ -63,8 +63,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     local_dataset_path = os.path.expanduser(args.input_dir)
-
-    data_source = "flow_grpo/ocr"
+    data_source = "ocr"
 
     if local_dataset_path is not None:
         dataset = datasets.load_dataset(local_dataset_path)

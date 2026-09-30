@@ -23,11 +23,13 @@ estimated FLOPs (matching the upstream LLM counter).
 """
 
 import math
+import os
 import warnings
 
 import pytest
 
 from verl_omni.utils.mfu import (
+    BooguImageFlops,
     DiffusionFlopsCounter,
     DiffusionModelFlops,
     QwenImageFlops,
@@ -810,3 +812,573 @@ class TestDiffusionFlopsCounterApi:
                 num_timesteps=1,
                 num_forward_passes=1,
             )
+
+
+# ---------------------------------------------------------------------------
+# Boogu-Image: mixed double-/single-stream MM-DiT
+# ---------------------------------------------------------------------------
+
+# Real Boogu-Image-0.1-Base transformer config (mirrors
+# ``.../Boogu-Image-0.1-Base/transformer/config.json`` so the test does not
+# depend on the checkpoint being present). Note ``out_channels`` is null in the
+# checkpoint, and there is no ``attention_head_dim`` -- the width comes from
+# ``hidden_size``.
+BOOGU_IMAGE_CONFIG: dict = {
+    "_class_name": "BooguImageTransformer2DModel",
+    "hidden_size": 3360,
+    "in_channels": 16,
+    "out_channels": None,
+    "num_attention_heads": 28,
+    "num_kv_heads": 7,
+    "num_layers": 40,
+    "num_double_stream_layers": 8,
+    "num_refiner_layers": 2,
+    "patch_size": 2,
+    "multiple_of": 256,
+    "ffn_dim_multiplier": None,
+    "instruction_feature_configs": {
+        "instruction_feat_dim": 4096,
+        "num_instruction_feat_layers": 1,
+        "reduce_type": "mean",
+    },
+}
+
+
+def _boogu_counter() -> DiffusionFlopsCounter:
+    return DiffusionFlopsCounter("BooguImagePipeline", BOOGU_IMAGE_CONFIG)
+
+
+def _reference_boogu_image_flops(
+    config: dict,
+    latent_seqlens: list[int],
+    prompt_seqlens: list[int],
+    delta_time: float,
+    *,
+    num_timesteps: int,
+    num_forward_passes: int,
+    ref_seqlens: list[int] | None = None,
+) -> float:
+    """Independent, deliberately verbose reference re-implementation.
+
+    Re-derived from the ``BooguImageTransformer2DModel`` / ``BooguImageTransformerBlock``
+    / ``BooguImageDoubleStreamTransformerBlock`` sources rather than from
+    ``BooguImageFlops.estimate_flops``, so a regression in the production
+    formula is caught even if both were edited at once.
+    """
+    hidden_size = int(config["hidden_size"])
+    heads = int(config["num_attention_heads"])
+    kv_heads = int(config["num_kv_heads"])
+    head_dim = hidden_size // heads
+    kv_dim = head_dim * kv_heads
+    num_layers = int(config["num_layers"])
+    num_double = int(config["num_double_stream_layers"])
+    num_single = num_layers - num_double
+    refiners = int(config["num_refiner_layers"])
+    patch = int(config["patch_size"])
+    in_channels = int(config["in_channels"])
+    out_channels = int(config["out_channels"] or in_channels)
+    multiple_of = int(config["multiple_of"])
+    mod_dim = min(hidden_size, 1024)
+    instr_dim = int(config["instruction_feature_configs"]["instruction_feat_dim"])
+
+    if ref_seqlens is None:
+        ref_seqlens = [0] * len(latent_seqlens)
+    noise_seqlens = [latent_len - ref_len for latent_len, ref_len in zip(latent_seqlens, ref_seqlens, strict=False)]
+
+    img_tot = sum(latent_seqlens)
+    noise_tot = sum(noise_seqlens)
+    ref_tot = sum(ref_seqlens)
+    txt_tot = sum(prompt_seqlens)
+    batch_size = max(len(latent_seqlens), len(prompt_seqlens))
+
+    # SwiGLU FFN width: 4*dim rounded up to a multiple of `multiple_of`.
+    inner = 4 * hidden_size
+    if config.get("ffn_dim_multiplier"):
+        inner = int(config["ffn_dim_multiplier"] * inner)
+    inner = multiple_of * ((inner + multiple_of - 1) // multiple_of)
+
+    # Forward FLOPs. Factor 2 below is FLOPs per MAC; the 3x backward
+    # expansion is applied at the end.
+    flops_fwd = 0.0
+    ffn_n = 3 * hidden_size * inner  # linear_1 / linear_2 / linear_3
+
+    # --- single-stream blocks (refiners on their own stream, then the fused
+    # single-stream stage) ---
+    # attn: to_q (dim^2) + to_k/to_v (dim*kv_dim each) + to_out[0] (dim^2)
+    attn_n = 2 * hidden_size * hidden_size + 2 * hidden_size * kv_dim
+    one_stream_block = attn_n + ffn_n
+
+    # noise_refiner (noise only) + ref_image_refiner (reference only).
+    flops_fwd += 2 * refiners * one_stream_block * (noise_tot + ref_tot)
+    # context_refiner runs on the instruction stream, modulation disabled.
+    flops_fwd += 2 * refiners * one_stream_block * txt_tot
+    # single_stream_layers run on the fused [instruct + img] sequence.
+    flops_fwd += 2 * num_single * one_stream_block * (img_tot + txt_tot)
+
+    # --- double-stream blocks ---
+    # Image side: joint QKV/out (img_to_q/img_to_k/img_to_v/img_out plus the
+    # shared to_out[0]) + image self-attention + image FFN.
+    img_joint_n = 3 * hidden_size * hidden_size + 2 * hidden_size * kv_dim
+    img_self_n = 2 * hidden_size * hidden_size + 2 * hidden_size * kv_dim
+    flops_fwd += 2 * num_double * (img_joint_n + img_self_n + ffn_n) * img_tot
+    # Instruction side: joint QKV/out + instruction FFN (no self-attention).
+    instruct_joint_n = 3 * hidden_size * hidden_size + 2 * hidden_size * kv_dim
+    flops_fwd += 2 * num_double * (instruct_joint_n + ffn_n) * txt_tot
+
+    # --- modulation: LuminaRMSNormZero (min(dim,1024) -> 4*dim) per sample ---
+    # Single-stream blocks carry one; double-stream blocks carry five
+    # (img_norm1/2/3 + instruct_norm1/2).
+    mod_per_sample = (num_single + 2 * refiners) * (4 * hidden_size * mod_dim)
+    mod_per_sample += num_double * 5 * (4 * hidden_size * mod_dim)
+    flops_fwd += 2 * mod_per_sample * batch_size
+
+    # --- once-per-call projections ---
+    patch_in = patch * patch * in_channels * hidden_size
+    flops_fwd += 2 * patch_in * noise_tot  # x_embedder
+    flops_fwd += 2 * patch_in * ref_tot  # ref_image_patch_embedder
+    flops_fwd += 2 * instr_dim * hidden_size * txt_tot  # caption_embedder
+    flops_fwd += 2 * hidden_size * patch * patch * out_channels * (img_tot + txt_tot)  # norm_out.linear_2
+    flops_fwd += (
+        2 * (256 * mod_dim + mod_dim * mod_dim + mod_dim * hidden_size) * batch_size
+    )  # timestep MLP + norm_out.linear_1
+
+    # --- attention: the factor 4 is 2 FLOPs/MAC * 2 matmuls; the 3x backward
+    # expansion is folded into `flops_fwd_bwd` below (not here), matching the
+    # registry-wide `12 * layers * heads * head_dim * seqlen**2` convention.
+    def sq(values):
+        return sum(int(v) ** 2 for v in values)
+
+    joint_sq = sum((int(i) + int(p)) ** 2 for i, p in zip(latent_seqlens, prompt_seqlens, strict=False))
+    attn_flops = (
+        4.0
+        * heads
+        * head_dim
+        * (
+            (num_single + num_double) * joint_sq  # fused + joint full attention
+            + num_double * sq(latent_seqlens)  # double-stream image self-attention
+            + refiners * sq(prompt_seqlens)  # context_refiner
+            + refiners * sq(noise_seqlens)  # noise_refiner
+            + refiners * sq(ref_seqlens)  # ref_image_refiner
+        )
+    )
+
+    flops_fwd_bwd = 3 * (flops_fwd + attn_flops)
+    return flops_fwd_bwd * num_timesteps * num_forward_passes / delta_time / 1e12
+
+
+class TestBooguImageFlopsRegistry:
+    def test_boogu_image_is_registered(self):
+        from verl_omni.utils.mfu import BooguImageFlops
+
+        assert "BooguImagePipeline" in _REGISTRY
+        assert _REGISTRY["BooguImagePipeline"] is BooguImageFlops
+        assert _REGISTRY["BooguImagePipelineWithLogProb"] is BooguImageFlops
+
+    def test_boogu_no_longer_warns_and_reports_nonzero(self):
+        """Regression: Boogu used to warn and report MFU 0."""
+        with warnings.catch_warnings(record=True) as warned:
+            warnings.simplefilter("always")
+            counter = _boogu_counter()
+        assert not any("no FLOPs estimator registered" in str(w.message) for w in warned)
+        est, promised = counter.estimate_flops(
+            latent_seqlens=[1024] * 4,
+            prompt_seqlens=[128] * 4,
+            delta_time=30.0,
+            num_timesteps=10,
+            num_forward_passes=1,
+        )
+        assert est > 0
+        assert promised > 0
+
+
+class TestBooguImageFlopsLatents:
+    """Boogu patchifies *inside* the transformer, so the counter sees raw
+    ``(B, C, H, W)`` VAE latents rather than diffusers-packed ``(B, L, C')``.
+    ``get_latent_seqlens`` must divide by ``patch_size**2`` and add the
+    reference latents that TI2I concatenates onto the same image stream.
+    """
+
+    def test_patchify_division(self):
+        # 512x512 -> VAE latent 64x64 -> patchified 32x32 = 1024 tokens.
+        data = {"latents_clean": _Tensor((4, 16, 64, 64))}
+        assert _boogu_counter().collect_meta(data)["latent_seqlens"] == [1024] * 4
+
+    def test_base_default_would_overcount_by_patch_volume(self):
+        # Guards the reason the override exists: without the division the
+        # counter would report 64*64 = 4096 on a 2x2 patch grid.
+        data = {"latents_clean": _Tensor((4, 16, 64, 64))}
+        assert DiffusionModelFlops(BOOGU_IMAGE_CONFIG).get_latent_seqlens(data) == [4096] * 4
+
+    def test_edit_concatenates_reference_into_latent_stream(self):
+        # One 512x512 reference per sample adds another 1024 tokens.
+        data = {
+            "latents_clean": _Tensor((2, 16, 64, 64)),
+            "condition_image_latents": _Tensor((2, 16, 64, 64)),
+        }
+        meta = _boogu_counter().collect_meta(data)
+        assert meta["latent_seqlens"] == [2048] * 2
+        assert meta["ref_seqlens"] == [1024] * 2
+
+    def test_t2i_has_zero_reference_seqlens(self):
+        data = {"latents_clean": _Tensor((2, 16, 64, 64))}
+        meta = _boogu_counter().collect_meta(data)
+        assert meta["latent_seqlens"] == [1024] * 2
+        assert meta["ref_seqlens"] == [0] * 2
+        assert len(meta["ref_seqlens"]) == len(meta["latent_seqlens"])
+
+    def test_rollout_stacked_all_latents(self):
+        # FlowGRPO trajectory (B, T_steps, C, H, W) collapses to one token
+        # count per sample, still patchified.
+        data = {"all_latents": _Tensor((2, 10, 16, 64, 64))}
+        assert _boogu_counter().collect_meta(data)["latent_seqlens"] == [1024] * 2
+
+    def test_prompt_seqlens_from_mask(self):
+        data = {
+            "latents_clean": _Tensor((2, 16, 64, 64)),
+            "prompt_embeds_mask": _Tensor((2, 512)),
+        }
+        assert _boogu_counter().collect_meta(data)["prompt_seqlens"] == [512] * 2
+
+    def test_collect_diffusion_flops_meta_carries_ref_seqlens(self):
+        counter = _boogu_counter()
+        data = {
+            "latents_clean": _Tensor((2, 16, 64, 64)),
+            "condition_image_latents": _Tensor((2, 16, 64, 64)),
+            "prompt_embeds_mask": _Tensor((2, 128)),
+            "train_timesteps": _Tensor((2, 10)),
+        }
+        meta = collect_diffusion_flops_meta(counter, data)
+        assert meta is not None
+        assert meta["num_timesteps"] == 10
+        assert meta["latent_seqlens"] == [2048] * 2
+        assert meta["ref_seqlens"] == [1024] * 2
+        # The DP all-gather is generic over list-valued fields, so the new key
+        # rides along without extra plumbing.
+        assert len(meta["ref_seqlens"]) == len(meta["latent_seqlens"])
+
+
+class TestBooguImageFlopsScaling:
+    def _kwargs(self, **overrides):
+        defaults = dict(
+            latent_seqlens=[2048, 2048],
+            prompt_seqlens=[512, 384],
+            delta_time=2.0,
+            num_timesteps=10,
+            num_forward_passes=1,
+            ref_seqlens=[1024, 1024],
+        )
+        defaults.update(overrides)
+        return defaults
+
+    def test_linear_in_num_timesteps(self):
+        counter = _boogu_counter()
+        est_a, _ = counter.estimate_flops(**self._kwargs(num_timesteps=10))
+        est_b, _ = counter.estimate_flops(**self._kwargs(num_timesteps=30))
+        assert math.isclose(est_b / est_a, 3.0, rel_tol=1e-9)
+
+    def test_linear_in_num_forward_passes(self):
+        counter = _boogu_counter()
+        est_a, _ = counter.estimate_flops(**self._kwargs(num_forward_passes=1))
+        est_b, _ = counter.estimate_flops(**self._kwargs(num_forward_passes=2))
+        assert math.isclose(est_b / est_a, 2.0, rel_tol=1e-9)
+
+    def test_inverse_in_delta_time(self):
+        counter = _boogu_counter()
+        est_a, _ = counter.estimate_flops(**self._kwargs(delta_time=2.0))
+        est_b, _ = counter.estimate_flops(**self._kwargs(delta_time=4.0))
+        assert math.isclose(est_a / est_b, 2.0, rel_tol=1e-9)
+
+    def test_zero_for_non_positive_inputs(self):
+        counter = _boogu_counter()
+        assert counter.estimate_flops(**self._kwargs(delta_time=0.0))[0] == 0.0
+        assert counter.estimate_flops(**self._kwargs(num_timesteps=0))[0] == 0.0
+        assert counter.estimate_flops(**self._kwargs(num_forward_passes=0))[0] == 0.0
+
+    def test_attention_is_quadratic_in_joint_seqlen(self):
+        counter = _boogu_counter()
+        est_small, _ = counter.estimate_flops(
+            latent_seqlens=[512],
+            prompt_seqlens=[512],
+            delta_time=1.0,
+            num_timesteps=1,
+            num_forward_passes=1,
+            ref_seqlens=[0],
+        )
+        est_large, _ = counter.estimate_flops(
+            latent_seqlens=[1024],
+            prompt_seqlens=[1024],
+            delta_time=1.0,
+            num_timesteps=1,
+            num_forward_passes=1,
+            ref_seqlens=[0],
+        )
+        ratio = est_large / est_small
+        # Attention is quadratic, dense is linear -> between 2x and 4x.
+        assert 2.0 < ratio < 4.0, ratio
+
+    def test_edit_costs_more_than_t2i_same_output_size(self):
+        """The TI2I arm carries the reference tokens through every image-side
+        linear, so it must cost strictly more than T2I at the same resolution."""
+        counter = _boogu_counter()
+        common = dict(prompt_seqlens=[512] * 2, delta_time=1.0, num_timesteps=10, num_forward_passes=1)
+        t2i, _ = counter.estimate_flops(latent_seqlens=[1024] * 2, ref_seqlens=[0] * 2, **common)
+        edit, _ = counter.estimate_flops(latent_seqlens=[2048] * 2, ref_seqlens=[1024] * 2, **common)
+        assert edit > t2i
+        # Not a 2x blow-up: the instruction stream and every refiners/instruct
+        # term is unchanged by the extra reference latents.
+        assert edit < 2.0 * t2i
+
+    def test_reference_seqlens_default_to_zero(self):
+        """Omitting ``ref_seqlens`` (e.g. a T2I caller) must match an explicit
+        all-zero list rather than raising."""
+        counter = _boogu_counter()
+        common = dict(prompt_seqlens=[128] * 2, delta_time=1.0, num_timesteps=1, num_forward_passes=1)
+        implicit, _ = counter.estimate_flops(latent_seqlens=[1024] * 2, **common)
+        explicit, _ = counter.estimate_flops(latent_seqlens=[1024] * 2, ref_seqlens=[0] * 2, **common)
+        assert implicit == explicit
+        assert implicit > 0
+
+    def test_mismatched_ref_seqlens_length_is_tolerated(self):
+        """A short/long ``ref_seqlens`` must not raise mid-training."""
+        counter = _boogu_counter()
+        est, _ = counter.estimate_flops(
+            latent_seqlens=[1024] * 2,
+            prompt_seqlens=[128] * 2,
+            delta_time=1.0,
+            num_timesteps=1,
+            num_forward_passes=1,
+            ref_seqlens=[64],
+        )
+        assert est > 0
+
+    def test_matches_hand_rolled_reference(self):
+        counter = _boogu_counter()
+        kwargs = self._kwargs()
+        est, _ = counter.estimate_flops(**kwargs)
+        ref = _reference_boogu_image_flops(BOOGU_IMAGE_CONFIG, **kwargs)
+        assert math.isclose(est, ref, rel_tol=1e-9), (est, ref)
+
+    def test_matches_reference_across_shapes(self):
+        counter = _boogu_counter()
+        scenarios = [
+            # T2I, single sample, no reference.
+            dict(
+                latent_seqlens=[1024],
+                prompt_seqlens=[512],
+                delta_time=0.5,
+                num_timesteps=1,
+                num_forward_passes=1,
+                ref_seqlens=[0],
+            ),
+            # TI2I with a half-resolution reference, raggedy prompt lengths.
+            dict(
+                latent_seqlens=[1024 + 256, 4096 + 1024],
+                prompt_seqlens=[512, 128],
+                delta_time=8.0,
+                num_timesteps=50,
+                num_forward_passes=2,
+                ref_seqlens=[256, 1024],
+            ),
+            # Wide batch, CFG (two forward passes), no reference at all.
+            dict(
+                latent_seqlens=[4096] * 8,
+                prompt_seqlens=[256] * 8,
+                delta_time=12.0,
+                num_timesteps=10,
+                num_forward_passes=2,
+                ref_seqlens=[0] * 8,
+            ),
+        ]
+        for kwargs in scenarios:
+            est, _ = counter.estimate_flops(**kwargs)
+            ref = _reference_boogu_image_flops(BOOGU_IMAGE_CONFIG, **kwargs)
+            assert math.isclose(est, ref, rel_tol=1e-9), (kwargs, est, ref)
+
+
+class TestBooguImageFlopsParamCount:
+    """Ground-truth correctness: the formula's implied per-token parameter
+    counts must match the actual ``numel()`` of the corresponding Linear weights
+    in an instantiated ``BooguImageTransformer2DModel`` (modulo the elementwise
+    RMSNorm scales and biases the convention ignores).
+    """
+
+    @pytest.fixture(scope="class")
+    def tiny_boogu_image(self):
+        pytest.importorskip("boogu")
+        # Force the non-flash CPU attention path before the module reads the env.
+        os.environ.setdefault("device", "cpu")
+        from boogu.models.transformers.transformer_boogu import BooguImageTransformer2DModel
+
+        # ``hidden_size // num_attention_heads`` must equal
+        # ``sum(axes_dim_rope)``: 64 // 4 == 4 + 6 + 6.
+        return BooguImageTransformer2DModel(
+            patch_size=2,
+            in_channels=8,
+            hidden_size=64,
+            num_layers=3,
+            num_double_stream_layers=1,
+            num_refiner_layers=1,
+            num_attention_heads=4,
+            num_kv_heads=2,
+            multiple_of=8,
+            axes_dim_rope=(4, 6, 6),
+            axes_lens=(64, 64, 64),
+            instruction_feature_configs={
+                "instruction_feat_dim": 32,
+                "reduce_type": "mean",
+                "num_instruction_feat_layers": 1,
+            },
+        )
+
+    def _linear_weight_numel(self, *modules):
+        """Sum Linear weight params only (skip Dropout / RMSNorm scales)."""
+        return sum(m.weight.numel() for m in modules)
+
+    def _config_dict(self, model) -> dict:
+        return dict(model.config)
+
+    def test_single_stream_block_matches_formula(self, tiny_boogu_image):
+        block = tiny_boogu_image.single_stream_layers[0]
+        cfg = self._config_dict(tiny_boogu_image)
+        flops = BooguImageFlops(cfg)
+
+        weights = self._linear_weight_numel(
+            block.attn.to_q,
+            block.attn.to_k,
+            block.attn.to_v,
+            block.attn.to_out[0],
+            block.feed_forward.linear_1,
+            block.feed_forward.linear_2,
+            block.feed_forward.linear_3,
+        )
+        assert weights == flops.single_stream_n, (weights, flops.single_stream_n)
+
+    def test_context_refiner_has_no_modulation_params(self, tiny_boogu_image):
+        """``context_refiner`` is the same block with ``modulation=False``, so it
+        has four RMSNorms instead of a ``LuminaRMSNormZero`` projection."""
+        refiner = tiny_boogu_image.context_refiner[0]
+        single = tiny_boogu_image.single_stream_layers[0]
+        assert sum(p.numel() for p in refiner.feed_forward.parameters()) == sum(
+            p.numel() for p in single.feed_forward.parameters()
+        )
+        # The modulation projection is the whole difference.
+        expected_delta = sum(p.numel() for p in single.norm1.parameters()) - sum(
+            p.numel() for p in refiner.norm1.parameters()
+        )
+        assert expected_delta > 0
+        assert sum(p.numel() for p in single.parameters()) - sum(p.numel() for p in refiner.parameters()) == (
+            expected_delta
+        )
+
+    def test_double_stream_img_side_matches_formula(self, tiny_boogu_image):
+        block = tiny_boogu_image.double_stream_layers[0]
+        cfg = self._config_dict(tiny_boogu_image)
+        flops = BooguImageFlops(cfg)
+        processor = block.img_instruct_attn.processor
+
+        img_joint = self._linear_weight_numel(
+            processor.img_to_q, processor.img_to_k, processor.img_to_v, processor.img_out
+        ) + self._linear_weight_numel(block.img_instruct_attn.to_out[0])
+        img_self = self._linear_weight_numel(
+            block.img_self_attn.to_q,
+            block.img_self_attn.to_k,
+            block.img_self_attn.to_v,
+            block.img_self_attn.to_out[0],
+        )
+        img_ffn = self._linear_weight_numel(
+            block.img_feed_forward.linear_1, block.img_feed_forward.linear_2, block.img_feed_forward.linear_3
+        )
+
+        assert img_joint + img_self + img_ffn == flops.double_stream_img_n, (
+            img_joint + img_self + img_ffn,
+            flops.double_stream_img_n,
+        )
+
+    def test_double_stream_instruct_side_matches_formula(self, tiny_boogu_image):
+        block = tiny_boogu_image.double_stream_layers[0]
+        cfg = self._config_dict(tiny_boogu_image)
+        flops = BooguImageFlops(cfg)
+        processor = block.img_instruct_attn.processor
+
+        instruct_joint = self._linear_weight_numel(
+            processor.instruct_to_q, processor.instruct_to_k, processor.instruct_to_v, processor.instruct_out
+        ) + self._linear_weight_numel(block.img_instruct_attn.to_out[0])
+        instruct_ffn = self._linear_weight_numel(
+            block.instruct_feed_forward.linear_1,
+            block.instruct_feed_forward.linear_2,
+            block.instruct_feed_forward.linear_3,
+        )
+
+        assert instruct_joint + instruct_ffn == flops.double_stream_instruct_n, (
+            instruct_joint + instruct_ffn,
+            flops.double_stream_instruct_n,
+        )
+
+    def test_gqa_kv_projection_is_narrower_than_q(self, tiny_boogu_image):
+        """Pins the GQA assumption the estimator encodes: the K/V projections
+        scale with ``head_dim * num_kv_heads``, not with ``dim``. On the real
+        Boogu config that ratio is a quarter; the tiny fixture uses 4/2."""
+        block = tiny_boogu_image.single_stream_layers[0]
+        cfg = self._config_dict(tiny_boogu_image)
+        dim = int(cfg["hidden_size"])
+        head_dim = dim // int(cfg["num_attention_heads"])
+        kv_dim = head_dim * int(cfg["num_kv_heads"])
+        assert kv_dim < dim
+
+        assert block.attn.to_q.weight.numel() == dim * dim
+        assert block.attn.to_k.weight.numel() == dim * kv_dim
+        assert block.attn.to_v.weight.numel() == dim * kv_dim
+
+        # The shipped checkpoint is 28 heads / 7 KV heads -> kv_dim = dim // 4.
+        real = BooguImageFlops(BOOGU_IMAGE_CONFIG)
+        assert real.kv_dim == real.num_attention_heads * real.head_dim // 4
+
+
+class TestBooguImageFlopsConfigDerivation:
+    """The estimator derives geometry from fields Boogu's config carries, which
+    differs from the Qwen-Image family (``hidden_size`` instead of
+    ``attention_head_dim``; a rounded-up ``4*dim`` instead of an explicit
+    ``ffn_dim``)."""
+
+    def test_dim_comes_from_hidden_size_not_attention_head_dim(self):
+        offsets = BooguImageFlops(BOOGU_IMAGE_CONFIG)
+        # The base-class `dim` property would read attention_head_dim (absent -> 0).
+        assert DiffusionModelFlops(BOOGU_IMAGE_CONFIG).dim == 0
+        # Boogu: 3360 = 28 heads * 120 head_dim.
+        assert offsets.num_attention_heads == 28
+        assert offsets.head_dim == 120
+        assert offsets.kv_dim == 7 * 120
+
+    def test_ffn_inner_dim_is_4x_rounded_up_to_multiple_of(self):
+        from verl_omni.utils.mfu.boogu_image import _ffn_inner_dim
+
+        # 4 * 3360 = 13440 -> rounded up to 13568 (53 * 256).
+        assert _ffn_inner_dim(3360, BOOGU_IMAGE_CONFIG) == 13568
+        # Exactly-divisible widths are untouched (4 * 64 = 256, a multiple of 8).
+        assert _ffn_inner_dim(64, {"multiple_of": 8}) == 256
+        # Rounding up: 4 * 21 = 84 -> 88 (11 * 8).
+        assert _ffn_inner_dim(21, {"multiple_of": 8}) == 88
+        # ffn_dim_multiplier pre-scales, then rounds.
+        assert _ffn_inner_dim(64, {"multiple_of": 8, "ffn_dim_multiplier": 0.5}) == 128
+
+    def test_instruction_feat_dim_reduce_modes(self):
+        from verl_omni.utils.mfu.boogu_image import _instruction_feat_dim
+
+        mean_cfg = {"instruction_feature_configs": {"instruction_feat_dim": 4096, "reduce_type": "mean"}}
+        cat_cfg = {
+            "instruction_feature_configs": {
+                "instruction_feat_dim": 4096,
+                "reduce_type": "concat",
+                "num_instruction_feat_layers": 3,
+            }
+        }
+        assert _instruction_feat_dim(mean_cfg) == 4096
+        assert _instruction_feat_dim(cat_cfg) == 3 * 4096
+        # Unknown reduce_type degrades to `mean` rather than raising.
+        assert _instruction_feat_dim({"instruction_feature_configs": {"reduce_type": "mystery"}}) == 4096
+
+    def test_layer_split_from_num_double_stream_layers(self):
+        offsets = BooguImageFlops(BOOGU_IMAGE_CONFIG)
+        assert offsets.num_double_stream_layers == 8
+        assert offsets.num_single_stream_layers == 32
+        assert offsets.num_refiner_layers == 2

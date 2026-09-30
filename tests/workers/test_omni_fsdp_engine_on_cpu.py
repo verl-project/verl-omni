@@ -882,6 +882,45 @@ class TestAdapterNameForwarding:
         assert dict(per_tensor_param).keys() == {"w"}
 
 
+class TestDeltaShardExportGate:
+    """The omni engine's inherited shard export is valid only for full-weight,
+    non-QAT runs; the other export paths rename/revalue tensors (RFC #38 audit)."""
+
+    def test_shard_export_fails_closed_under_qat(self):
+        omni_impl = _get_omni_impl_module()
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine._qat_enabled = True
+        with pytest.raises(NotImplementedError, match="QAT"):
+            engine.get_per_tensor_param_shard()
+
+    def test_shard_export_fails_closed_under_lora(self):
+        omni_impl = _get_omni_impl_module()
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine._qat_enabled = False
+        engine.module = types.SimpleNamespace(peft_config={"default": object()})
+        with pytest.raises(NotImplementedError, match="full-weight"):
+            engine.get_per_tensor_param_shard()
+
+    def test_shard_export_delegates_to_verl_when_full_weight(self, monkeypatch):
+        """Full-weight, non-QAT: the inherited export yields identity-named local
+        shards matching the plain state_dict (the audit's positive case)."""
+        omni_impl = _get_omni_impl_module()
+        from verl.workers.engine.fsdp import transformer_impl
+
+        monkeypatch.setattr(transformer_impl, "get_device_id", lambda: torch.device("cpu"))
+
+        engine = object.__new__(omni_impl.OmniFSDPEngine)
+        engine._qat_enabled = False
+        engine._uses_fsdp2_cpu_offload_policy = False
+        engine._is_offload_param = False
+        engine.module = torch.nn.Linear(3, 2, bias=False)
+
+        ((name, local, spec),) = list(engine.get_per_tensor_param_shard()[0])
+        assert name == "weight"  # no conversion mapping, no prefix on the omni path
+        assert spec.full_shape == (2, 3)
+        assert torch.equal(local, engine.module.weight.reshape(-1).to(torch.bfloat16))
+
+
 def _fsdp2_engine(omni_impl, module, ignored_names, strategy="fsdp2"):
     """A bare engine whose adapter returns ``ignored_names`` from the model-base hook."""
     engine = object.__new__(omni_impl.OmniFSDPEngine)

@@ -1,6 +1,6 @@
 # Offline diffusion model publishing
 
-Last updated: 09/15/2026
+Last updated: 09/28/2026
 
 `verl_omni.model_merger` converts an existing FSDP actor checkpoint into a local
 transformer or self-contained inference pipeline. It follows verl's
@@ -51,7 +51,7 @@ Supported checkpoint representations:
 - Ordinary full-shaped tensors in a multi-rank checkpoint only when every replica
   is exactly equal. Plain dim-0 shards are not guessed or concatenated.
 
-Not supported yet: adapter-bearing/LoRA checkpoints, FSDP1 `ShardedTensor`,
+Not supported yet: FSDP1 `ShardedTensor`,
 HSDP/FSDP+TP, quantized weights, unaudited custom pipelines, architectures
 outside the audited table, BAGEL and Omni publishing. Standard Transformers can
 continue using `python -m verl.model_merger`; delegation through this entrypoint
@@ -67,6 +67,7 @@ output directory whose parent already exists.
 ```text
 actor/
   fsdp_config.json
+  lora_train_meta.json  # LoRA checkpoints only
   model_world_size_2_rank_0.pt
   model_world_size_2_rank_1.pt
   huggingface/config.json
@@ -191,6 +192,24 @@ Mapped-page residency, reconstruction, serializer/verification copies and source
 metadata consume additional memory. MiniMax H3 QKV conversion temporarily holds
 three source projections plus the fused output tensor. No fallback to eager
 loading is performed for unsupported serialization.
+
+### LoRA checkpoints
+
+The same `merge` command detects LoRA weights and writes
+`lora_adapter/adapter_config.json` and `lora_adapter/adapter_model.safetensors`.
+Full checkpoints also export the base model in the selected `pipeline` or
+`transformer` layout, without fusing LoRA into its weights. LoRA-only checkpoints
+export just the adapter; `--base_model` identifies the original model and does
+not need to be available locally.
+
+Use `--adapter-name` to select an adapter (default: `default`). Rank and alpha
+are read from `lora_train_meta.json`, and target modules are inferred from the
+weights. This supports standard LoRA with uniform rank/alpha; named adapters
+must share the saved configuration. RS-LoRA and per-layer rank/alpha patterns
+are not supported.
+
+To verify the adapter files,
+run the `test` command with `--test_hf_dir "$OUTPUT/lora_adapter"`.
 
 ## Verification and failure semantics
 

@@ -271,11 +271,11 @@ def _install_tracking_hook() -> None:
 
 def _install_driver_hook() -> None:
     try:
-        from verl_omni.trainer.diffusion.ray_diffusion_trainer import PolicyGradientRayTrainer
+        from verl_omni.trainer.diffusion.v1.trainer_base import PolicyGradientDiffusionTrainerV1
     except Exception:
         return
 
-    original_update_actor = PolicyGradientRayTrainer._update_actor
+    original_update_actor = PolicyGradientDiffusionTrainerV1._update_actor
     if getattr(original_update_actor, _WRAPPED_ATTR, False):
         return
 
@@ -313,7 +313,7 @@ def _install_driver_hook() -> None:
         return original_update_actor(self, batch, *args, **kwargs)
 
     setattr(update_actor_with_dump, _WRAPPED_ATTR, True)
-    PolicyGradientRayTrainer._update_actor = update_actor_with_dump
+    PolicyGradientDiffusionTrainerV1._update_actor = update_actor_with_dump
 
 
 def _install_training_worker_hook() -> None:

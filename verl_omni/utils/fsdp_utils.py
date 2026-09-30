@@ -184,9 +184,9 @@ def _load_json(path: Path) -> dict:
         return json.load(f)
 
 
-def _to_peft_lora_key(key: str) -> str:
+def _to_peft_lora_key(key: str, adapter_name: str = "default") -> str:
     """Normalize an FSDP LoRA tensor name to PEFT ``adapter_model.safetensors`` format."""
-    peft_key = key.replace("_fsdp_wrapped_module.", "").replace(".default.weight", ".weight")
+    peft_key = _lora_checkpoint_key(key, adapter_name)
     if peft_key.startswith("base_model.model."):
         return peft_key
     return f"base_model.model.{peft_key}"
@@ -246,40 +246,38 @@ def _discover_fsdp_rank_paths(input_dir: Path, world_size: int) -> list[Path]:
     return rank_paths
 
 
-def _merge_fsdp_lora_tensors(rank_paths: list[Path]) -> tuple[OrderedDict[str, torch.Tensor], list[str]]:
+def _merge_fsdp_lora_tensors(
+    rank_paths: list[Path], adapter_name: str = "default"
+) -> tuple[OrderedDict[str, torch.Tensor], list[str]]:
+    from verl_omni.model_merger.fsdp_model_merger import reconstruct_tensor
+
     print(f"Loading rank 0/{len(rank_paths) - 1}: {rank_paths[0].name}")
     rank0_state = torch.load(rank_paths[0], map_location="cpu", weights_only=False, mmap=True)
-    lora_keys = sorted(key for key in rank0_state.keys() if "lora_" in key)
+    lora_keys = sorted(key for key in rank0_state if _lora_checkpoint_key(key, adapter_name) is not None)
     if not lora_keys:
-        raise RuntimeError(f"No lora_ keys found in {rank_paths[0]}")
+        raise ValueError(f"No LoRA weights for adapter {adapter_name!r} in {rank_paths[0]}")
 
     print(f"Found {len(lora_keys)} LoRA tensors")
-    lora_shards = {key: [_local_tensor(rank0_state[key])] for key in lora_keys}
-    placements = {key: getattr(rank0_state[key], "placements", None) for key in lora_keys}
+    lora_shards = {key: [rank0_state[key]] for key in lora_keys}
     del rank0_state
 
     for rank, rank_path in enumerate(rank_paths[1:], start=1):
         print(f"Loading rank {rank}/{len(rank_paths) - 1}: {rank_path.name}")
         rank_state = torch.load(rank_path, map_location="cpu", weights_only=False, mmap=True)
         for key in lora_keys:
-            lora_shards[key].append(_local_tensor(rank_state[key]))
+            lora_shards[key].append(rank_state[key])
         del rank_state
 
     lora_params = OrderedDict()
     target_modules = set()
     for key in lora_keys:
-        placement = placements[key]
-        if placement is None:
-            merged = torch.cat(lora_shards[key], dim=0).contiguous()
-        elif len(placement) == 1 and placement[0].is_shard():
-            merged = torch.cat(lora_shards[key], dim=placement[0].dim).contiguous()
-        else:
-            merged = lora_shards[key][0].contiguous()
+        shards = lora_shards.pop(key)
+        merged = reconstruct_tensor(shards, tuple(shards[0].shape))
 
-        module_key = key.rsplit(".lora_", maxsplit=1)[0]
+        peft_key = _to_peft_lora_key(key, adapter_name)
+        module_key = peft_key.rsplit(".lora_", maxsplit=1)[0]
         target_parts = [part for part in module_key.split(".") if part != "base_layer"]
-        target_module = target_parts[-1]
-        peft_key = _to_peft_lora_key(key)
+        target_module = ".".join(target_parts[-2:]) if target_parts[-1].isdigit() else target_parts[-1]
         lora_params[peft_key] = merged
         target_modules.add(target_module)
 
@@ -309,6 +307,8 @@ def export_fsdp_lora_adapter(
     input_dir: str | Path,
     output_dir: str | Path | None = None,
     base_model_name_or_path: str | None = None,
+    *,
+    adapter_name: str = "default",
 ) -> dict:
     """Export PEFT LoRA adapter weights from a verl FSDP checkpoint directory.
 
@@ -326,6 +326,7 @@ def export_fsdp_lora_adapter(
             ``<input_dir>/lora_adapter``.
         base_model_name_or_path: Optional value to write into the PEFT
             ``adapter_config.json`` as ``base_model_name_or_path``.
+        adapter_name: Registered adapter selected from the checkpoint.
 
     Returns:
         A summary dictionary with:
@@ -345,7 +346,7 @@ def export_fsdp_lora_adapter(
     print(f"Input directory: {input_dir}")
     print(f"Output: {output_dir}")
 
-    lora_params, target_modules = _merge_fsdp_lora_tensors(rank_paths)
+    lora_params, target_modules = _merge_fsdp_lora_tensors(rank_paths, adapter_name)
     peft_config = _build_peft_lora_config(lora_meta, target_modules, base_model_name_or_path)
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -499,6 +500,8 @@ def _layered_summon_lora_params_diffusers(
                     sub_lora_params = get_peft_model_state_dict(
                         peft_model, state_dict=submodule.state_dict(), adapter_name=adapter_name
                     )
+                    if not sub_lora_params:
+                        sub_lora_params = _lora_params_by_name(submodule, adapter_name)
                     sub_lora_params = {
                         f"{block_prefix}.{param_name}": _param_to_cpu(param)
                         for param_name, param in sub_lora_params.items()

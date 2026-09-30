@@ -27,6 +27,14 @@ MODEL_PATH=${MODEL_PATH:-${HOME}/models/tiny-random/Boogu-Image}
 SOURCE_MODEL=${SOURCE_MODEL:-Boogu/Boogu-Image-0.1-Base}
 TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_PATH}/processor}
 
+# Boogu's rollout transformer carries only the attention projections and the
+# feed-forward halves. FSDP layered-summon does not transport top-level modules
+# (`x_embedder`, `caption_embedder`, the patch embedders) to the rollout, so
+# `all-linear` names targets that can never bind; validate_boogu_lora_targets()
+# rejects such a list instead of letting the sync fail silently. Same list as the
+# recipe: examples/flowgrpo_trainer/boogu_image/run_boogu_image_ocr_lora.sh.
+BOOGU_LORA_TARGETS="['to_q','to_k','to_v','to_out.0','img_to_q','img_to_k','img_to_v','img_out','instruct_to_q','instruct_to_k','instruct_to_v','instruct_out','feed_forward.linear_1','feed_forward.linear_2','feed_forward.linear_3','img_feed_forward.linear_1','img_feed_forward.linear_2','img_feed_forward.linear_3']"
+
 case "${MODE}" in
     t2i)
         DATA_DIR=${DATA_DIR:-${HOME}/data/dummy_diffusion}
@@ -102,7 +110,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.rollout_attn_backend=${ROLLOUT_ATTN_BACKEND} \
     actor_rollout_ref.model.lora_rank=8 \
     actor_rollout_ref.model.lora_alpha=16 \
-    actor_rollout_ref.model.target_modules=all-linear \
+    actor_rollout_ref.model.target_modules="${BOOGU_LORA_TARGETS}" \
     actor_rollout_ref.model.fsdp_layer_prefixes="['double_stream_layers.','single_stream_layers.','context_refiner.','noise_refiner.','ref_image_refiner.']" \
     actor_rollout_ref.actor.optim.lr=1e-4 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \

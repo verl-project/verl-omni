@@ -34,6 +34,7 @@ from transformers import Qwen2_5_VLConfig, Qwen2_5_VLForConditionalGeneration, Q
 from verl_omni.model_merger import ModelMergerConfig, merge_model, utils, validate_artifact
 from verl_omni.model_merger.base_model_merger import generate_config_from_args, parse_args, run_model_merger
 from verl_omni.model_merger.fsdp_model_merger import model_rank_files, reconstruct_tensor
+from verl_omni.utils.fsdp_utils import _merge_fsdp_lora_tensors
 
 
 def test_cli_common_arguments_live_in_base_model_merger(monkeypatch):
@@ -638,3 +639,60 @@ def test_duplicate_json_keys_fail(tmp_path):
     path.write_text('{"world_size": 1, "world_size": 2}')
     with pytest.raises(ValueError, match="Duplicate"):
         utils.read_json(path)
+
+
+def test_full_lora_checkpoint_exports_pipeline_and_adapter(case):
+    from peft import LoraConfig, PeftModel
+
+    config, base_state, original = case
+    original.add_adapter(LoraConfig(r=2, lora_alpha=4, target_modules=["to_q", "to_v"]))
+    with torch.no_grad():
+        for name, parameter in original.named_parameters():
+            if "lora_B" in name:
+                parameter.normal_()
+    source = Path(config.local_dir)
+    torch.save(original.state_dict(), source / "model_world_size_1_rank_0.pt")
+    utils.write_json(source / "lora_train_meta.json", {"r": 2, "lora_alpha": 4, "task_type": "CAUSAL_LM"})
+    result = merge_model(config)
+    validate_artifact(result.output_dir)
+    adapter = result.output_dir / "lora_adapter"
+    validate_artifact(adapter)
+    pipeline = QwenImagePipeline.from_pretrained(result.output_dir, local_files_only=True)
+    for key, value in pipeline.transformer.state_dict().items():
+        torch.testing.assert_close(value, base_state[key], rtol=0, atol=0)
+    restored = PeftModel.from_pretrained(pipeline.transformer, adapter)
+    with torch.no_grad():
+        torch.testing.assert_close(_forward(restored), _forward(original), rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "layout", ["rows", "columns", "empty", "scalar", "replica_mismatch", "partial", "hsdp", "mixed", "plain_mismatch"]
+)
+def test_lora_export_uses_checkpoint_layout(dtensor_ranks, tmp_path, layout):
+    from copy import deepcopy
+
+    from torch.distributed.tensor import Partial, Replicate, Shard
+
+    full, ranks = dtensor_ranks
+    key = layout if layout in full else "scalar" if layout == "replica_mismatch" else "rows"
+    values = [deepcopy(rank[key]) for rank in ranks]
+    if layout == "replica_mismatch":
+        values[1]._local_tensor.add_(1)
+    elif layout == "partial":
+        values[0]._spec.placements = (Partial(),)
+    elif layout == "hsdp":
+        values[0]._spec.placements = (Shard(0), Replicate())
+    elif layout == "mixed":
+        values[1] = values[1].to_local()
+    elif layout == "plain_mismatch":
+        values = [full[key], full[key] + 1]
+    paths = [tmp_path / f"rank_{rank}.pt" for rank in range(2)]
+    for path, value in zip(paths, values, strict=True):
+        torch.save({"block.to_out.0.lora_A.default.weight": value}, path)
+    if layout in full:
+        weights, targets = _merge_fsdp_lora_tensors(paths)
+        assert targets == ["to_out.0"]
+        torch.testing.assert_close(weights["base_model.model.block.to_out.0.lora_A.weight"], full[key], rtol=0, atol=0)
+    else:
+        with pytest.raises(ValueError):
+            _merge_fsdp_lora_tensors(paths)

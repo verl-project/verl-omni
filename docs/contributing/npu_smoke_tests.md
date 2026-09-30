@@ -237,8 +237,10 @@ pre-commit run --all-files
 
 workflow 在相关文件发生变化时响应以下事件：
 
-- push 到 `main` 或 `v0.*`。
-- 针对 `main` 或 `v0.*` 的 pull request 被创建、同步、重新打开或添加标签。
+- push 到 `main` 或 `v0.*`，运行完整测试集合。
+- 针对 `main` 或 `v0.*` 的 pull request 被打上 CI 标签。创建、同步或重新打开 PR 不会启动 NPU runner。新提交会自动去掉名称里含 `ci` 的标签，需要重新打标。
+
+没有下表中的标签时，PR 不会占用 NPU runner。PR 还必须改动 workflow 的 path filter（例如 `verl_omni/**`、`tests/npu_smoke/**`、`tests/workers/**`、`tests/special_e2e/**`）。
 
 PR 标签与请求范围：
 

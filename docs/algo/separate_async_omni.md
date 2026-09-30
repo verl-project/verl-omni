@@ -1,7 +1,7 @@
 (separate_async_omni)=
 # Separate-Async RL Training for Qwen3-Omni
 
-Last updated: 09/25/2026
+Last updated: 09/28/2026
 
 `trainer.v1.trainer_mode=omni_separate_async` runs training and rollout on
 separate GPU pools for omni AR models (Qwen3-Omni thinker). Standalone rollout
@@ -58,6 +58,7 @@ FSDP LoRA remains the default. Key overrides:
 |---|---|---|
 | `trainer.v1.separate_async.num_warmup_batches` | 4 | prompt batches submitted before the first step |
 | `trainer.v1.separate_async.parameter_sync_step` | 4 | push weights to standalone replicas every N steps |
+| `actor_rollout_ref.rollout.checkpoint_engine.backend` | — | must be non-naive (`nccl`, `nixl`, `mooncake`, `omni_delta_sharded`) |
 | `trainer.v1.separate_async.hybrid_rollout.enable_switch` | false | lend colocated trainer GPUs to generation when the replay buffer is short |
 
 Constraints enforced at startup: rollout GPUs > 0, a non-naive checkpoint
@@ -69,6 +70,25 @@ example sets `parameter_sync_step=8` so `128 == 8 * 16`.
 LoRA recipes should set `actor_rollout_ref.model.lora.merge=False` so weight
 sync ships only adapter tensors (applied on the replicas via the LoRA-aware
 checkpoint engine manager).
+
+`omni_delta_sharded` (RFC #38) broadcasts only the weights that changed since
+the last sync instead of the full model (a verl-omni subclass of verl's
+`DeltaShardedCheckpointEngine`; verl gates the raw `delta_sharded` name to
+sglang rollouts): a dense seed sync, then sparse
+(position, value) flushes with a per-flush checksum, applied in place on the
+replicas. It requires full-weight training, so it composes with neither the
+LoRA path above nor QAT; both raise at startup. It also raises at the first
+sync on fused-MoE rollout models such as the Qwen3-Omni thinker: the
+full-weight path reloads `RoutedExperts` modules through vLLM's
+checkpoint-layout restore, which the sparse in-place apply does not reproduce.
+The omni engine audit behind the other gates: `OmniFSDPEngine` inherits verl's
+shard export (`state_dict` + `convert_weight_keys`, identity coordinates),
+which matches its own full export only for full-weight, non-QAT runs. The
+adapter export (`collect_lora_params`) and the merged-LoRA export
+(`normalize_peft_param_name`) produce different names, and QAT's
+`quantize_with_fusion` renames and repacks after conversion, so the engine
+additionally fails closed on those paths. Like the diffusion side, the omni
+delta path is CPU-test-covered but not yet GPU-verified.
 
 ## Checkpoint recovery and dynamic GPU lending
 

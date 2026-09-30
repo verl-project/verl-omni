@@ -13,6 +13,9 @@
 # limitations under the License.
 from verl.workers.rollout.base import _ROLLOUT_REGISTRY
 
+# The subclass only remaps SP replica/IPC ranks; weight sync keeps verl's
+# ServerAdapter transport, including the omni_delta_sharded named_tensors wire
+# (see verl_omni/workers/checkpoint_engine.py).
 _ROLLOUT_REGISTRY[("vllm_omni", "async")] = (
     "verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server.vLLMOmniServerAdapter"
 )
