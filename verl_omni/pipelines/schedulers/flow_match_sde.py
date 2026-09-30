@@ -204,7 +204,14 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
                 sigma = self.sigmas[sigma_idx]
                 sigma_prev = self.sigmas[sigma_idx + 1]
             else:
-                sigma_idx = torch.tensor([self.index_for_timestep(t) for t in timestep])
+                # Vectorized first-match lookup against the schedule. The per-row
+                # `index_for_timestep` loop runs one data-dependent `nonzero()` per batch
+                # element, which hard-synchronizes the device on every training
+                # denoising step and prevents cross-timestep launch overlap.
+                matches = self.timesteps.reshape(1, -1) == timestep.reshape(-1, 1)
+                # Async assertion (no host sync on CUDA): every row must hit the schedule.
+                torch._assert(matches.any(dim=1).all(), "timestep not found in scheduler.timesteps")
+                sigma_idx = matches.to(torch.int64).argmax(dim=1)
                 sigma = self.sigmas[sigma_idx].view(-1, *([1] * (len(sample.shape) - 1)))
                 sigma_prev = self.sigmas[sigma_idx + 1].view(-1, *([1] * (len(sample.shape) - 1)))
 
