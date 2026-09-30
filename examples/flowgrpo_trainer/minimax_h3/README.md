@@ -1,6 +1,6 @@
 # MiniMax H3 T2VA, FL2VA, and Ref2VA FlowGRPO
 
-Last updated: 09/23/2026
+Last updated: 09/30/2026
 
 These recipes train `MiniMaxAI/MiniMax-H3` LoRA adapters with FlowGRPO for
 text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
@@ -166,9 +166,10 @@ unchanged. For TP=4 with parallel VAE decode, use
 Pure Ulysses uses `ROLLOUT_TP=1 ROLLOUT_USP=4 ROLLOUT_RING=1`, with
 `TEXT_ENCODER_TP=4 VAE_PATCH_PARALLEL_SIZE=4 VAE_USE_TILING=True`. Local rollout
 subclasses account for SP ranks without patching verl; TP remains the actual
-engine TP degree. GPU validation is pending. H3 requires
-VAE mode `tile`, VAE parallel size `1` or the full DiT group, CFG parallel size
-`1`, and no hybrid Ulysses x Ring. Encoder TP must divide 8.
+engine TP degree. GPU acceptance for this topology on the current PR head
+remains pending. H3 requires VAE mode `tile`, VAE parallel size `1` or the full
+DiT group, CFG parallel size `1`, and no hybrid Ulysses x Ring. Encoder TP must
+be `1` or the full DiT group and must divide 8.
 
 Other GPU launchers can use the typed Hydra fields directly, without these
 T2VA environment shortcuts. See the
@@ -309,7 +310,7 @@ metrics local. Checkpoints and logs are written under
 | --- | --- |
 | Devices | 8 GPU / 16 NPU |
 | Rollout DiT TP | 2 GPU / 4 NPU |
-| Text-encoder TP | Same as rollout TP |
+| Text-encoder TP | Same as rollout TP with SP disabled |
 | Training batch size | 32 |
 | PPO mini-batch / per-device micro-batch | 16 / 1 |
 | Rollouts per prompt | 8 |
@@ -327,13 +328,18 @@ and Actor micro-batch 1. It enables layerwise rollout offload and FSDP2 Actor
 parameter/optimizer offload because reference presentations can be much longer
 than T2VA prompts.
 
-Without sequence parallelism, `NUM_GPUS` must be divisible by `ROLLOUT_TP`.
-`TEXT_ENCODER_TP` defaults to `ROLLOUT_TP` and is forwarded as `actor_rollout_ref.rollout.text_encoder_tp_size`
+Without sequence parallelism, `NUM_GPUS` must be divisible by `ROLLOUT_TP`
+and `TEXT_ENCODER_TP` defaults to `ROLLOUT_TP`. The GPU T2VA launcher includes
+sequence parallelism in that default: `ROLLOUT_TP * ROLLOUT_USP * ROLLOUT_RING`.
+`TEXT_ENCODER_TP` is forwarded as `actor_rollout_ref.rollout.text_encoder_tp_size`
 (without `+`), using the same diffusion engine path as NFT. With the pinned
-backend, ETP must be 1 or exactly equal to rollout TP.
-For example, `ROLLOUT_TP=4 TEXT_ENCODER_TP=4` shards the encoder across all four
-DiT ranks, while `TEXT_ENCODER_TP=1` disables encoder sharding. ETP is independent
-of CPU/layerwise offload. This applies to the GPU, V1 sync, and NPU launchers.
+backend, ETP must be `1` or the complete DiT group size
+`ROLLOUT_TP * ROLLOUT_USP * ROLLOUT_RING`, and must divide 8 for H3.
+For example, `ROLLOUT_TP=1 ROLLOUT_USP=4 ROLLOUT_RING=1 TEXT_ENCODER_TP=4`
+shards the encoder across all four DiT ranks. Without SP,
+`ROLLOUT_TP=4 TEXT_ENCODER_TP=4` also uses four ranks; `TEXT_ENCODER_TP=1`
+disables encoder sharding. ETP is independent of CPU/layerwise offload.
+The V1 sync and NPU launchers retain their TP-only environment defaults.
 
 The legacy `+actor_rollout_ref.rollout.engine_kwargs.vllm_omni.text_encoder_tp_size`
 override remains supported; conflicting values fail at startup. The fix for
