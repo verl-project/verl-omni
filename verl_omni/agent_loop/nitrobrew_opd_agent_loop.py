@@ -70,8 +70,7 @@ def use_hidden_states_from_config(config) -> bool:
 
 
 def lift_teacher_hidden_states(field: dict[str, Any]) -> dict[str, Any]:
-    """Move teacher hidden states from ``extra_fields`` onto the field dict.
-    """
+    """Move teacher hidden states from ``extra_fields`` onto the field dict."""
     extra = field.get("extra_fields")
     if not isinstance(extra, dict):
         return field
@@ -103,8 +102,7 @@ class AsyncTeacherHiddenStatesManager:
         _ = OmegaConf  # noqa: F401  (import kept for config compat elsewhere)
 
     def resolve_teacher_key(self, routing_key: str | None) -> str:
-        """Map a per-request routing key to a configured teacher key.
-        """
+        """Map a per-request routing key to a configured teacher key."""
         if len(self.teacher_model_configs) == 1:
             return next(iter(self.teacher_model_configs))
         if routing_key is None:

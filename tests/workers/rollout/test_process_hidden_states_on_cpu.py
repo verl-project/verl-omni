@@ -21,15 +21,18 @@ semantics are covered by assertion on the shapes flowing through
 ``extract_hidden_states``.
 """
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
 
+from verl_omni.workers.rollout.vllm_rollout import process_hidden_states as phs
 from verl_omni.workers.rollout.vllm_rollout.process_hidden_states import (
     RETURN_FLAG_KEY,
     TEACHER_HIDDEN_STATES_KEY,
     _collect_hidden_states_payloads,
+    _is_step_hidden_states,
     _merge_into_multimodal_outputs,
     extract_hidden_states,
     request_wants_hidden_states,
@@ -130,3 +133,57 @@ def test_extract_hidden_states_none_cases():
     assert extract_hidden_states(SimpleNamespace(outputs=[SimpleNamespace()])) is None
     assert extract_hidden_states(SimpleNamespace(outputs=[SimpleNamespace(multimodal_output=None)])) is None
     assert extract_hidden_states(SimpleNamespace(outputs=[SimpleNamespace(multimodal_output={})])) is None
+
+
+def test_merge_raises_on_incompatible_entry():
+    output = SimpleNamespace(req_ids=["r0"], req_id_to_index={"r0": 0}, multimodal_outputs=[object()])
+    payloads = {"r0": {TEACHER_HIDDEN_STATES_KEY: torch.zeros(5, 4)}}
+    with pytest.raises(RuntimeError, match="expected None or dict"):
+        _merge_into_multimodal_outputs(output, payloads)
+
+
+class TestStepHiddenStatesValidation:
+    def _sched(self, tokens):
+        return SimpleNamespace(num_scheduled_tokens=tokens)
+
+    def test_accepts_2d_tensor_matching_scheduled_total(self):
+        assert _is_step_hidden_states(torch.zeros(5, 4), self._sched({"r0": 5}))
+        assert _is_step_hidden_states(torch.zeros(7, 4), self._sched({"r0": 5, "r1": 2}))
+
+    def test_rejects_invalid_states(self):
+        assert not _is_step_hidden_states(torch.zeros(4, 4), self._sched({"r0": 5}))  # wrong row count
+        assert not _is_step_hidden_states([5, 4], self._sched({"r0": 5}))  # not a tensor
+        assert not _is_step_hidden_states(torch.zeros(2, 5, 4), self._sched({"r0": 5}))  # wrong ndim
+
+
+class TestPatchInstallIsolation:
+    """GPU import failure must not skip the NPU patch; structural failures raise."""
+
+    def _fake_gpu_module(self, has_runner_attr):
+        mod = ModuleType("vllm_omni.worker.gpu_ar_model_runner")
+
+        class _Runner:
+            pass
+
+        if has_runner_attr:
+            _Runner._build_omni_model_runner_output_from_snapshot = lambda self, **kwargs: None
+        mod.GPUARModelRunner = _Runner
+        return mod
+
+    def test_gpu_import_failure_still_patches_npu(self, monkeypatch):
+        monkeypatch.setattr(phs, "_applied", False)
+        # None in sys.modules makes `from ... import GPUARModelRunner` raise ImportError.
+        monkeypatch.setitem(sys.modules, "vllm_omni.worker.gpu_ar_model_runner", None)
+        npu_calls = []
+        monkeypatch.setattr(phs, "_patch_npu_runner", lambda: npu_calls.append(1))
+        phs.apply_hidden_states_patches()
+        assert npu_calls == [1]
+
+    def test_structural_gpu_patch_failure_raises(self, monkeypatch):
+        monkeypatch.setattr(phs, "_applied", False)
+        monkeypatch.setitem(
+            sys.modules, "vllm_omni.worker.gpu_ar_model_runner", self._fake_gpu_module(has_runner_attr=False)
+        )
+        monkeypatch.setattr(phs, "_patch_npu_runner", lambda: None)
+        with pytest.raises(AttributeError):
+            phs.apply_hidden_states_patches()

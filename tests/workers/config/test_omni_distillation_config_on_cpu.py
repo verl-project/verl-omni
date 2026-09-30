@@ -128,6 +128,12 @@ class TestOmniHiddenStateLossConfig:
         with pytest.raises(ValueError, match="use_policy_gradient"):
             OmniDistillationLossConfig(loss_mode="nitrobrew", use_policy_gradient=True)
 
+    def test_reverse_kl_forbids_policy_gradient(self):
+        from verl_omni.workers.config.omni.distillation import OmniDistillationLossConfig
+
+        with pytest.raises(ValueError, match="use_policy_gradient"):
+            OmniDistillationLossConfig(loss_mode="nitrobrew_reverse_kl", use_policy_gradient=True)
+
     def test_kd_temperature_default(self):
         from verl_omni.workers.config.omni.distillation import OmniDistillationLossConfig
 
