@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,71 @@ def _flatten_tensors(value: Any, prefix: str = "") -> dict[str, torch.Tensor]:
             child = f"{prefix}.{index}" if prefix else str(index)
             flat.update(_flatten_tensors(item, child))
     return flat
+
+
+def _row_group_keys(payload: Any) -> list[int] | None:
+    """Return the run-stable row group key for a payload, or None if unavailable.
+
+    The training batch is ordered by ``uid``, which is a fresh ``uuid4()`` per
+    run, so the same prompt lands at a different offset every run. ``extra_info``
+    carries the dataset position (``repeat_index``), which is stable across runs
+    and therefore lets two independent runs be compared row-for-row.
+    """
+    non_tensor = payload.get("non_tensor") or {}
+    extra = non_tensor.get("extra_info")
+    if extra is None:
+        return None
+    try:
+        rows = list(extra)
+    except TypeError:
+        return None
+    keys: list[int] = []
+    for row in rows:
+        if isinstance(row, Mapping):
+            value = row.get("repeat_index")
+        else:
+            value = getattr(row, "repeat_index", None)
+        if value is None:
+            return None
+        try:
+            keys.append(int(value))
+        except (TypeError, ValueError):
+            return None
+    return keys or None
+
+
+def _sort_rows(keys: list[int]) -> list[int]:
+    # Stable sort keeps the per-prompt session order (already ascending) intact.
+    return sorted(range(len(keys)), key=lambda i: keys[i])
+
+
+def _apply_row_order(payload: Any, order: list[int]) -> Any:
+    aligned = dict(payload)
+    batch = payload.get("batch") or {}
+    aligned["batch"] = {
+        key: (
+            value[order]
+            if isinstance(value, torch.Tensor) and value.ndim >= 1 and value.shape[0] == len(order)
+            else value
+        )
+        for key, value in batch.items()
+    }
+    return aligned
+
+
+def _align_rows(baseline_payload: Any, current_payload: Any) -> tuple[Any, Any, str | None]:
+    """Reorder both payloads onto their shared run-stable row order."""
+    baseline_keys = _row_group_keys(baseline_payload)
+    current_keys = _row_group_keys(current_payload)
+    if baseline_keys is None or current_keys is None:
+        return baseline_payload, current_payload, None
+    if sorted(baseline_keys) != sorted(current_keys):
+        return baseline_payload, current_payload, None
+    return (
+        _apply_row_order(baseline_payload, _sort_rows(baseline_keys)),
+        _apply_row_order(current_payload, _sort_rows(current_keys)),
+        "extra_info.repeat_index",
+    )
 
 
 def _tensor_metrics(
@@ -146,12 +212,21 @@ def compare(args: argparse.Namespace) -> tuple[bool, dict]:
         results["missing_in_baseline"].append(rel_path)
         passed = False
 
+    unaligned: list[str] = []
     for rel_path in sorted(set(current_files) & set(baseline_files)):
         baseline_payload = torch.load(baseline_files[rel_path], map_location="cpu", weights_only=False)
         current_payload = torch.load(current_files[rel_path], map_location="cpu", weights_only=False)
+        baseline_payload, current_payload, row_alignment = _align_rows(baseline_payload, current_payload)
+        if row_alignment is None:
+            unaligned.append(rel_path)
         baseline_tensors = _flatten_tensors(baseline_payload)
         current_tensors = _flatten_tensors(current_payload)
-        file_result = {"tensors": {}, "missing_in_current": [], "missing_in_baseline": []}
+        file_result = {
+            "tensors": {},
+            "missing_in_current": [],
+            "missing_in_baseline": [],
+            "row_alignment": row_alignment,
+        }
 
         for key in sorted(set(baseline_tensors) - set(current_tensors)):
             file_result["missing_in_current"].append(key)
@@ -180,6 +255,7 @@ def compare(args: argparse.Namespace) -> tuple[bool, dict]:
 
         results["files"][rel_path] = file_result
 
+    results["unaligned_files"] = unaligned
     results["passed"] = passed
     return passed, results
 
@@ -232,6 +308,13 @@ def _print_conclusion(passed: bool, results: dict, report_path: Path) -> None:
     print(f"[DUMP] Compared tensors: {tensor_count}")
     print(f"[DUMP] Failed items: {len(failures)}")
     print(f"[DUMP] Thresholds: {results.get('thresholds', {})}")
+    unaligned = results.get("unaligned_files") or []
+    if unaligned:
+        print(
+            "[DUMP] WARNING: row order not realigned for "
+            f"{len(unaligned)} file(s) (missing/differing extra_info.repeat_index): "
+            f"{unaligned[:3]}"
+        )
     print(f"[DUMP] Report: {report_path}")
     if failures:
         print("[DUMP] First failures:")

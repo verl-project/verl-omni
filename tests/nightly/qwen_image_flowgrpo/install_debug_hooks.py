@@ -305,7 +305,10 @@ def _install_driver_hook() -> None:
             "batch": _tensor_dict_subset(batch.batch, payload_keys),
             "non_tensor": {
                 key: batch.non_tensor_batch[key]
-                for key in ("uid", "data_source", _DEBUG_STEP_KEY)
+                # "extra_info" carries the run-stable dataset position
+                # (repeat_index) that compare_dumps.py uses to realign rows,
+                # because "uid" is a per-run uuid4.
+                for key in ("uid", "data_source", "extra_info", _DEBUG_STEP_KEY)
                 if key in batch.non_tensor_batch
             },
         }
