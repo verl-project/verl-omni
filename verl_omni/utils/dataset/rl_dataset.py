@@ -133,9 +133,14 @@ class RLHFDataset(_UpstreamRLHFDataset):
                     content_list.append({"type": "text", "text": segment})
             message["content"] = content_list
 
-        assert image_offset == len(images), f"image_offset {image_offset} != len(images) {len(images)}"
-        assert video_offset == len(videos), f"video_offset {video_offset} != len(videos) {len(videos)}"
-        assert audio_offset == len(audios), f"audio_offset {audio_offset} != len(audios) {len(audios)}"
+        if key == self.negative_prompt_key:
+            assert image_offset <= len(images), f"image_offset {image_offset} > len(images) {len(images)}"
+            assert video_offset <= len(videos), f"video_offset {video_offset} > len(videos) {len(videos)}"
+            assert audio_offset <= len(audios), f"audio_offset {audio_offset} > len(audios) {len(audios)}"
+        else:
+            assert image_offset == len(images), f"image_offset {image_offset} != len(images) {len(images)}"
+            assert video_offset == len(videos), f"video_offset {video_offset} != len(videos) {len(videos)}"
+            assert audio_offset == len(audios), f"audio_offset {audio_offset} != len(audios) {len(audios)}"
         return messages
 
     def __getitem__(self, item):

@@ -27,6 +27,7 @@ from verl.utils.device import get_device_name
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
+from verl_omni.pipelines.utils import scheduler_num_train_timesteps
 from verl_omni.workers.config import DiffusionModelConfig
 
 from .common import (
@@ -151,7 +152,7 @@ class BooguImage(DiffusionModelBase):
     ) -> tuple[dict, Optional[dict]]:
         """Build one step's inputs, mapping scheduler sigma to Boogu ``t=1-sigma``."""
         hidden_states = latents[:, step]
-        num_train_timesteps = _scheduler_num_train_timesteps(model_config.local_path)
+        num_train_timesteps = scheduler_num_train_timesteps(model_config.local_path)
         timestep = boogu_timestep_from_scheduler(timesteps[:, step], num_train_timesteps).to(hidden_states.dtype)
         freqs_cis = get_boogu_freqs_cis(module.config.axes_dim_rope, module.config.axes_lens)
         image_latents = micro_batch.get("condition_image_latents", None)
@@ -223,13 +224,3 @@ class BooguImage(DiffusionModelBase):
             return_sqrt_dt=True,
         )
         return log_prob, prev_sample_mean, std_dev_t, sqrt_dt
-
-
-@lru_cache(maxsize=8)
-def _scheduler_num_train_timesteps(model_path: str) -> int:
-    config_path = os.path.join(model_path, "scheduler", "scheduler_config.json")
-    try:
-        with open(config_path) as f:
-            return int(json.load(f).get("num_train_timesteps", 1000))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-        return 1000

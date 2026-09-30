@@ -1,6 +1,6 @@
 # Diffusion V1 training
 
-Last updated: 09/24/2026
+Last updated: 09/28/2026
 
 This guide runs the diffusion V1 trainer in synchronous or separate-asynchronous
 mode using the provided Stable Diffusion 3.5 Medium FlowGRPO OCR recipes.
@@ -158,6 +158,117 @@ bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1_separate_async.s
 `sync_compatible=true` pauses standalone generation during actor updates. It
 requires `num_warmup_batches=0`; set it to `false` to retain rollout/training
 overlap.
+
+### Weight-sync backends
+
+Separate-async mode requires a non-naive
+`actor_rollout_ref.rollout.checkpoint_engine.backend` for the trainer ->
+standalone rollout weight sync. `nccl` (the default in the recipes above)
+broadcasts the full model every sync. `omni_delta_sharded` instead broadcasts
+only the weights that changed since the last sync: the first (seed) sync
+streams the full export, steady syncs ship sparse (position, value) updates,
+and the rollout verifies a per-flush checksum and applies them in place. RL
+updates are highly sparse in BF16, so steady-state payloads shrink to the
+per-step changed ratio while the rollout weights stay bit-identical to a full
+broadcast.
+
+The backend is a verl-omni subclass of verl's `DeltaShardedCheckpointEngine`
+(verl gates the raw `delta_sharded` name to sglang rollouts, so
+`omni_delta_sharded` resolves through verl's `CheckpointEngineRegistry`). The
+subclass re-declares the wire as the stock `named_tensors` bucketed stream and
+flattens each flush's sentinel tensors into it, so verl's unmodified
+`CheckpointEngineWorker` and vLLM `ServerAdapter` drive the whole sync; the
+vllm-omni worker extension routes the stream by sniffing the first bucket and
+applies flushes in place through verl's delta loader.
+
+`omni_delta_sharded` is gated: it requires `separate_async` mode and full-weight
+training (LoRA configs raise at startup, since adapter sync is already small),
+QAT exports are refused, and fused-MoE rollout models raise at the first sync
+(the sparse in-place apply does not reproduce their checkpoint-layout reload).
+The SD3.5-Medium full-weight recipe is:
+
+```bash
+bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_v1_separate_async_delta.sh
+```
+
+This backend is covered by CPU unit tests only so far; the sparsity preflight
+and a bit-exact GPU smoke against the `nccl` backend are pending (RFC #38).
+The same recipe doubles as the A/B harness: `CKPT_BACKEND=nccl` runs the
+identical full-weight configuration over a full broadcast.
+
+```bash
+CKPT_BACKEND=nccl bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_v1_separate_async_delta.sh
+```
+
+Watch `checkpoint_engine/changed_ratio` and `checkpoint_engine/payload_mbytes`
+in the trainer metrics to confirm the sparsity premise holds for a given model
+and optimizer before relying on the speedup.
+
+### Model-agnostic LoRA policy snapshots
+
+With FSDP2, a single `default` LoRA adapter, and sequence parallel size 1,
+separate-async CPU snapshots retain only the trainable parameters regardless of
+model architecture. This includes any trainable parameters outside the LoRA
+layers. The cycle-start `π_old` and current-actor restoration semantics are
+unchanged; no new configuration is required.
+
+This reduces the snapshot payload, not the cost of materializing the actor
+when manual parameter offload is enabled. FSDP1 and other backends, multiple
+policy adapters, native FSDP2 CPU offload policy, and full-parameter training
+retain full snapshots. Changing the trainable parameter set or shard layout
+within a snapshot's lifetime is unsupported and fails before restore. Qwen-Image
+is the validation fixture, not an eligibility restriction. FSDP snapshot copy
+and restore failures are reported across actor ranks before the RPC returns.
+A failed save preserves the previous snapshot. A restore can fail after some
+local shards were copied: the training step fails rather than continuing with
+mixed weights; this does not provide transactional rollback or recovery from
+a failed process or accelerator collective.
+
+For steady-state, unmerged LoRA weight synchronization with manual actor
+parameter offload, the actor first gathers independent CPU adapter tensors and
+offloads parameters and runs synchronized cache cleanup before waking rollout weights.
+This avoids overlapping actor and colocated rollout weight residency. It trades
+gather/wakeup overlap for GPU memory headroom; it does not change snapshot
+contents or guarantee that every model/configuration fits. First base sync,
+merged LoRA and non-offloaded paths retain their existing synchronization order.
+
+To measure snapshot overhead with a locally available pretrained Qwen-Image
+checkpoint, run the standalone benchmark outside fast CI:
+
+```bash
+torchrun --standalone --nproc-per-node=2 scripts/benchmark_trainable_snapshot.py \
+    --model /path/to/Qwen-Image --output /tmp/qwen-snapshot-60-offload \
+    --run-id qwen-image-depth60-offload-20260911-a \
+    --checkpoint-revision FULL_MODEL_COMMIT --source-revision FULL_CODE_COMMIT \
+    --checkpoint-manifest /path/to/transformer-shards.manifest \
+    --layers 60 --lora-rank 64 --sync-steps 3 --warmup 2 --repeats 10 --offload
+```
+
+Use a fresh output directory for each run. Omit `--offload` for GPU-resident
+parameters. Depths 10 and 30 select prefixes of the original pretrained
+transformer, preserving its width; these are not full-model quality benchmarks.
+The script requires Linux/glibc and exactly two CUDA ranks. Budget host memory
+for two retained snapshots, temporary cloning, and manual offload, in addition
+to model loading; the tiny regression's memory allocation is not sufficient.
+Both source and model directories must be Git checkouts at the declared
+revisions. The manifest has one `path|bytes|sha256` row per transformer shard,
+obtained from that revision's Git LFS pointers. Every shard is hashed before
+loading; the source/metrics bundle is also digested. The fixed matrix uses
+depth 10/30/60, rank 64, seed 20260911, sync steps 3, two warmup pairs and ten
+timed pairs. Change the experiment contract before adding another setting.
+Before CUDA or NCCL initialization, rank zero creates the output directory,
+verifies all pinned metadata and shard hashes, and atomically publishes a
+self-identifying run manifest plus preflight status. Other ranks independently
+verify their imported source checkouts and wait up to 900 seconds for that
+same run ID. Every partial and final result references the manifest digest.
+
+The benchmark loads once per depth/offload run and alternates full/trainable
+snapshot pairs. `summary.json` reports the slowest-rank latency per pair;
+`result-rank*.json` retains raw timings, exact tensor payloads, and a separate
+5-ms sampled RSS/GPU-memory pass. RSS is allocator-sensitive and sampled, not
+an exact peak. Bootstrap intervals describe repeats in that allocation, not
+independent runs. Forward/backward, rollout and reward are excluded, so
+`training_cycle_fraction` is unavailable and no end-to-end speedup is implied.
 
 ### Hybrid rollout switching
 

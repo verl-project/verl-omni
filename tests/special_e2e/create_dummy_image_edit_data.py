@@ -12,11 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Create a small synthetic parquet dataset for Qwen-Image-Edit e2e testing.
+Create a small synthetic parquet dataset for image-edit e2e testing.
 
 Generates data with an images column and a <image> placeholder in the prompt,
 matching RLHFDataset's multimodal input convention. Uses jpeg_compressibility
 reward so no external reward model is needed.
+
+The negative prompt is selectable because the two model families genuinely
+disagree on it, and each harness should mirror its own model's real converter:
+
+- ``with-image`` (default): the negative instruction also carries
+  ``Picture 1: <image>``. This matches
+  ``examples/flowgrpo_trainer/qwen_image_edit/prepare_data.py``, so it stays the
+  default to keep the Qwen-Image-Edit harness faithful to its converter.
+- ``text-only``: the negative instruction is empty and references no media.
+  This matches ``examples/flowgrpo_trainer/data_process/boogu_image_edit_ocr.py``
+  (guided TI2I encodes the negative branch without the reference image,
+  ``use_input_images_4_neg_instruct=False``). The Boogu harnesses select it so
+  they exercise the same row shape the real recipe trains on -- a fixture that
+  only ever emitted ``with-image`` rows is why the Boogu edit e2e passed while
+  the real recipe's ``text-only`` parquet could not be loaded.
 """
 
 import argparse
@@ -57,7 +72,27 @@ def _create_dummy_image(width: int = 256, height: int = 256, seed: int = 0) -> b
     return buf.getvalue()
 
 
-def build_rows(split: str, n: int, image_width: int = 256, image_height: int = 256):
+# Negative-prompt conventions. See the module docstring for which converter each mirrors.
+NEGATIVE_PROMPT_WITH_IMAGE = "with-image"
+NEGATIVE_PROMPT_TEXT_ONLY = "text-only"
+NEGATIVE_PROMPT_CHOICES = (NEGATIVE_PROMPT_WITH_IMAGE, NEGATIVE_PROMPT_TEXT_ONLY)
+
+
+def build_rows(
+    split: str,
+    n: int,
+    image_width: int = 256,
+    image_height: int = 256,
+    negative_prompt_mode: str = NEGATIVE_PROMPT_WITH_IMAGE,
+):
+    if negative_prompt_mode not in NEGATIVE_PROMPT_CHOICES:
+        raise ValueError(f"negative_prompt_mode must be one of {NEGATIVE_PROMPT_CHOICES}, got {negative_prompt_mode!r}")
+    # `text-only` must reference no media: the row carries one condition image and the negative
+    # branch consumes none, which RLHFDataset permits precisely because an `<image>` placeholder
+    # there is never expanded into image features. Spelling it as `"Picture 1: <image> "` keeps
+    # the placeholder count equal to the image count and so silently passes a check it should
+    # not -- see the module docstring.
+    negative_user_content = "Picture 1: <image> " if negative_prompt_mode == NEGATIVE_PROMPT_WITH_IMAGE else ""
     rows = []
     for i in range(n):
         prompt_text = USER_PROMPTS[i % len(USER_PROMPTS)]
@@ -71,7 +106,7 @@ def build_rows(split: str, n: int, image_width: int = 256, image_height: int = 2
                 ],
                 "negative_prompt": [
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": "Picture 1: <image> "},
+                    {"role": "user", "content": negative_user_content},
                 ],
                 "images": [{"bytes": condition_img_bytes}],
                 "reward_model": {"style": "rule", "ground_truth": ""},
@@ -92,12 +127,37 @@ def main():
     parser.add_argument("--val_size", type=int, default=4, help="Number of validation samples")
     parser.add_argument("--image-width", type=int, default=256, help="Condition image width (px)")
     parser.add_argument("--image-height", type=int, default=256, help="Condition image height (px)")
+    parser.add_argument(
+        "--negative-prompt-mode",
+        choices=NEGATIVE_PROMPT_CHOICES,
+        default=NEGATIVE_PROMPT_WITH_IMAGE,
+        help=(
+            "Negative-prompt convention to emit. 'with-image' mirrors the Qwen-Image-Edit "
+            "converter; 'text-only' mirrors the Boogu-Image-Edit converter (see module docstring)."
+        ),
+    )
     args = parser.parse_args()
 
     os.makedirs(args.local_save_dir, exist_ok=True)
 
-    train_df = pd.DataFrame(build_rows("train", args.train_size, args.image_width, args.image_height))
-    val_df = pd.DataFrame(build_rows("test", args.val_size, args.image_width, args.image_height))
+    train_df = pd.DataFrame(
+        build_rows(
+            "train",
+            args.train_size,
+            args.image_width,
+            args.image_height,
+            negative_prompt_mode=args.negative_prompt_mode,
+        )
+    )
+    val_df = pd.DataFrame(
+        build_rows(
+            "test",
+            args.val_size,
+            args.image_width,
+            args.image_height,
+            negative_prompt_mode=args.negative_prompt_mode,
+        )
+    )
 
     train_path = os.path.join(args.local_save_dir, "train.parquet")
     val_path = os.path.join(args.local_save_dir, "test.parquet")

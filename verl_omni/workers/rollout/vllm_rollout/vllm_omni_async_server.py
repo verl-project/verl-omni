@@ -197,6 +197,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             self._temp_deploy_ctx = None
 
         self.engine = engine_client
+        if isinstance(self._generate_strategy, ARStrategy):
+            # attach engine-level monkey patches
+            await self.collective_rpc(method="monkey_patch_model")
         self._server_port, self._server_task = await run_uvicorn(app, args, self._server_address)
 
     async def run_headless(self, args: argparse.Namespace):
@@ -536,6 +539,11 @@ class vLLMOmniReplica(vLLMReplica):
             replica_rank, config, model_config, gpus_per_node, is_reward_model, is_teacher_model, name_suffix
         )
         self.server_class = ray.remote(vLLMOmniHttpServer)
+
+    # The rollout worker actor class is verl's default
+    # (ray.remote(CheckpointEngineWorker)): the omni_delta_sharded backend
+    # passes verl's sglang-only "delta_sharded" gate by name and resolves
+    # through CheckpointEngineRegistry like any other backend.
 
     def _get_server_name_prefix(self) -> str:
         return "vllm_omni_"

@@ -6,7 +6,7 @@
 
 <a href="https://deepwiki.com/verl-project/verl-omni"><img src="https://devin.ai/assets/deepwiki-badge.png" alt="Ask DeepWiki.com" style="height:20px;"></a>
 [![Docs](https://img.shields.io/badge/docs-Read%20the%20Docs-8A2BE2)](https://verl-omni.readthedocs.io/en/latest/index.html)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE) <a href="docs/assets/WeChat.jpg"><img src="https://img.shields.io/badge/微信-green?logo=wechat"></a> <a href="https://join.slack.com/t/verl-project/shared_invite/zt-47rq3rljo-PMM7921PnFVf67be0tqYJg"><img src="https://img.shields.io/badge/Slack-verl-blueviolet?logo=slack"></a> <a href="https://drive.google.com/file/d/1EGVFZdvRgSBymMlZa62FObbzEhMoLA0F/view?usp=sharing"><img src="https://img.shields.io/badge/Slides-verl--omni-orange?logo=google-drive&logoColor=white"></a>
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE) <a href="docs/assets/WeChat.jpg"><img src="https://img.shields.io/badge/微信-green?logo=wechat"></a> <a href="https://join.slack.com/t/verl-project/shared_invite/zt-4bb32of1g-c~szeecZ2fufGeSadsIefw"><img src="https://img.shields.io/badge/Slack-verl-blueviolet?logo=slack"></a> <a href="https://drive.google.com/file/d/1EGVFZdvRgSBymMlZa62FObbzEhMoLA0F/view?usp=sharing"><img src="https://img.shields.io/badge/Slides-verl--omni-orange?logo=google-drive&logoColor=white"></a>
 
 </div>
 
@@ -141,10 +141,14 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
-    <td><b>Boogu-Image</b></td>
-    <td>Diffusion generator</td>
-    <td>Text/Image → Image</td>
+    <td rowspan="2"><b>Boogu-Image</b></td>
+    <td rowspan="2">Diffusion generator</td>
+    <td rowspan="2">Text/Image → Image</td>
     <td>FlowGRPO (+ CPS/SDE)</td>
+    <td>✅</td>
+  </tr>
+  <tr>
+    <td>DiffusionNFT</td>
     <td>✅</td>
   </tr>
   <tr>
@@ -253,12 +257,3 @@ If you find the project helpful, please cite and star ⭐
 }
 ```
 
-## Star History
-
-<a href="https://www.star-history.com/?repos=verl-project%2Fverl-omni&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=verl-project/verl-omni&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=verl-project/verl-omni&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=verl-project/verl-omni&type=date&legend=top-left" />
- </picture>
-</a>

@@ -13,4 +13,8 @@
 # limitations under the License.
 from verl.workers.rollout.base import _ROLLOUT_REGISTRY
 
+# verl's vLLM ServerAdapter, unchanged: the omni_delta_sharded backend streams
+# its flushes over the stock named_tensors bucketed wire (see
+# verl_omni/workers/checkpoint_engine.py), so the rollout side needs no omni
+# adapter subclass at any pin.
 _ROLLOUT_REGISTRY[("vllm_omni", "async")] = "verl.workers.rollout.vllm_rollout.ServerAdapter"

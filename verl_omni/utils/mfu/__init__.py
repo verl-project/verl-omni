@@ -15,11 +15,13 @@
 """Diffusion Model FLOPs Utilization (MFU) utilities."""
 
 from verl_omni.utils.mfu import (  # noqa: F401 — register built-in architectures
+    boogu_image,
     minimax_h3,
     qwen_image,
     stable_diffusion_3,
     wan,
 )
+from verl_omni.utils.mfu.boogu_image import BooguImageFlops
 from verl_omni.utils.mfu.diffusion_flops_counter import (
     DiffusionFlopsCounter,
     DiffusionModelFlops,
@@ -37,6 +39,7 @@ from verl_omni.utils.mfu.wan import WanFlops
 __all__ = [
     "DiffusionModelFlops",
     "DiffusionFlopsCounter",
+    "BooguImageFlops",
     "MiniMaxH3Flops",
     "QwenImageFlops",
     "StableDiffusion3Flops",

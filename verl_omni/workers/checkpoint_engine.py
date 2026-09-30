@@ -12,8 +12,67 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import ray
-from verl.checkpoint_engine import CheckpointEngineManager
+from verl.checkpoint_engine import CheckpointEngineManager, CheckpointEngineRegistry
 from verl.utils.ray_utils import auto_await
+
+# verl's CheckpointEngineWorker gates the "delta_sharded" backend to sglang
+# rollouts (its own consumer rides the sglang custom weight loader / the vLLM
+# weight-transfer engine of newer pins), and at this pin verl's vLLM
+# ServerAdapter only streams the named_tensors bucketed wire (the delta_flush
+# dispatch arrives with verl#7227). verl-omni therefore registers a thin
+# subclass of verl's DeltaShardedCheckpointEngine under its own backend name:
+# the subclass re-declares the wire as named_tensors and flattens the flush
+# stream into sentinel-named pairs, so verl's unmodified worker AND verl's
+# unmodified vLLM ServerAdapter drive the whole sync -- no worker subclass, no
+# gate widening, no adapter subclass. Importing this module performs the
+# registration (see verl_omni/__init__.py).
+try:
+    from verl.checkpoint_engine import DeltaShardedCheckpointEngine
+
+    if DeltaShardedCheckpointEngine is not None:
+
+        class OmniDeltaShardedCheckpointEngine(DeltaShardedCheckpointEngine):
+            """verl's delta engine presenting its flushes on the stock named_tensors wire.
+
+            ``receive_weights`` flattens the ``(named, is_last)`` flush stream into
+            ``(name#<flush>, tensor)`` pairs: the stock bucketed sender keys each
+            bucket's metadata dict by tensor name, so the suffix keeps same-named
+            sentinels (``__delta_spec__`` / ``__positions__`` / ``__values__``) of
+            separate flushes sharing a bucket from overwriting each other's entry;
+            the omni rollout worker parses the suffix back off. Everything else --
+            the seed/steady state machine, snapshot priming, sparse gather, wire
+            encoding -- is verl's, inherited unchanged.
+            """
+
+            wire_format = "named_tensors"
+
+            def receive_weights(self, global_steps: int | None = None):
+                """Yield the flush stream flattened into ``(name#flush, tensor)`` pairs.
+
+                Every rank must drain this generator to the end: the receive loop's
+                collective broadcasts deadlock otherwise. Dropping the per-flush
+                ``is_last`` is safe -- flush boundaries are keyed off the sentinel
+                ordering, and the bucketed channel marks its final bucket after this
+                generator is drained, which is what completes the receiver.
+                """
+                yield from _flatten_flush_stream(super().receive_weights(global_steps))
+
+        CheckpointEngineRegistry.register("omni_delta_sharded")(OmniDeltaShardedCheckpointEngine)
+except ImportError:  # verl records the failure; Registry.get reports it on use
+    pass
+
+
+def _flatten_flush_stream(flushes):
+    """Yield ``(name#flush, tensor)`` from ``(named_tensors, is_last)`` flushes.
+
+    ``is_last`` is dropped on purpose: the bucketed sender marks the final
+    bucket after this generator is drained, and that is what completes the
+    receiver. The suffix keeps same-named sentinels of separate flushes that
+    share a bucket from overwriting each other.
+    """
+    for flush_idx, (named, _is_last) in enumerate(flushes):
+        for name, tensor in named:
+            yield f"{name}#{flush_idx}", tensor
 
 
 class OmniCheckpointEngineManager(CheckpointEngineManager):

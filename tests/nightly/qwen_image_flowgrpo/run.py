@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Nightly entrypoint for the Qwen-Image FlowGRPO single-sample regression."""
+"""Nightly entrypoint for the Qwen-Image FlowGRPO V1 regression."""
 
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ def _patch_ray_init() -> None:
 def main() -> None:
     install_debug_hooks.install_debug_hooks()
     _patch_ray_init()
-    runpy.run_module("verl_omni.trainer.main_diffusion", run_name="__main__", alter_sys=True)
+    runpy.run_module("verl_omni.trainer.main_diffusion_v1", run_name="__main__", alter_sys=True)
 
 
 if __name__ == "__main__":
