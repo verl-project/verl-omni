@@ -29,9 +29,16 @@ from verl_omni.utils.fs import resolve_model_local_dir
 
 from .rollout import DiffusionPipelineConfig, DiffusionRolloutAlgoConfig
 
-__all__ = ["DiffusionModelConfig"]
+__all__ = ["DiffusionModelARConfig", "DiffusionModelConfig"]
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DiffusionModelARConfig(BaseConfig):
+    # LoRA configs reuse diffusion model's
+
+    override_config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -83,6 +90,9 @@ class DiffusionModelConfig(BaseConfig):
     # custom chat template for the model
     custom_chat_template: Optional[str] = None
 
+    # AR use only
+    use_remove_padding: bool = False
+
     external_lib: Optional[str] = None
 
     enable_gradient_checkpointing: bool = True
@@ -131,8 +141,14 @@ class DiffusionModelConfig(BaseConfig):
     # ``<local_path>/<transformer_subfolder>``.
     config_path: Optional[str] = None
 
+    # Subfolder containing the diffusion text encoder weights/config.
+    text_encoder_subfolder: str = "text_encoder"
+
     # Subfolder containing the diffusion transformer weights/config.
     transformer_subfolder: str = "transformer"
+
+    # Trainable AR config
+    ar: DiffusionModelARConfig = field(default_factory=DiffusionModelARConfig)
 
     def __post_init__(self):
         import_external_libs(self.external_lib)

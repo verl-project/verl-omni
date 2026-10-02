@@ -147,3 +147,16 @@ optim:
 
   # Prioritized. None, 0 or Negative values mean delegating to lr_warmup_steps_ratio.
   lr_warmup_steps: -1
+
+# AR config
+ar:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.workers.config.diffusion.actor.DiffusionActorARConfig
+
+  # Whether to calculate entropy for AR loss
+  calculate_entropy: False
+
+  # Entropy coefficient for AR part
+  entropy_coeff: 0.0
+

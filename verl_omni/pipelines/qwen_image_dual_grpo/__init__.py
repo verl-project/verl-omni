@@ -11,6 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .vllm_omni_rollout_adapter import QwenImagePipelineWithDualLogProb
+from .diffusers_training_adapter import QwenImageDualGRPO, QwenImageDualGRPOFSDP
+from .vllm_omni_rollout_adapter import QwenImagePipelineWithDualLogProb, QwenImagePipelineWithDualLogProbFSDP
 
-__all__ = ["QwenImagePipelineWithDualLogProb"]
+__all__ = [
+    "QwenImageDualGRPO",
+    "QwenImageDualGRPOFSDP",
+    "QwenImagePipelineWithDualLogProb",
+    "QwenImagePipelineWithDualLogProbFSDP",
+]
