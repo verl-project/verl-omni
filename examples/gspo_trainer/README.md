@@ -674,3 +674,5 @@ examples/gspo_trainer/
 │   └── run_minicpmo_4_5_thinker_gspo_lora_avqa_v1.sh ← V1 launch script (MiniCPM-o 4.5, LoRA r=32, audio + image)
 └── README.md                                         ← (this file)
 ```
+
+For the GPU Megatron Geo3K image-conditioned recipe, see the [Qwen3-Omni guide](qwen3_omni/README.md#geo3k-image-conditioned-megatron-separate-async).

@@ -17,6 +17,7 @@ defaults and accept CLI overrides.
 | AVQA LoRA | FSDP2 / GPU | [AVQA LoRA](run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh) |
 | AVQA full-parameter | FSDP2 / NPU | [AVQA NPU](run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh) |
 | NExT-QA full-parameter | FSDP2 / NPU | [NExT-QA NPU](run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh) |
+| Geo3K full-parameter, separate-async | Megatron / GPU | [Geo3K](run_qwen3_omni_megatron_geo3k_separate_async.sh) |
 | AudioMCQ full-parameter, separate-async | Megatron / GPU | [AudioMCQ](run_qwen3_omni_megatron_audiomcq_separate_async.sh) |
 
 The remaining sections describe the **Megatron AudioMCQ** recipe, its dependency
@@ -188,3 +189,62 @@ disabled. The old development `fully_async_policy` run does not validate these
 V1 lifecycle paths or Decoupled PPO (`bypass_mode=false`). A successful toy smoke
 establishes structural coverage, not full-model learning or TP4 numerical
 parity; evaluate the need for a new full-model run after reviewing the changes.
+
+## Geo3K image-conditioned Megatron separate-async
+
+The [standalone Geo3K launcher](run_qwen3_omni_megatron_geo3k_separate_async.sh)
+reuses `verl_omni/trainer/config/omni_megatron_trainer.yaml` and the existing
+Qwen3-Omni Megatron adapter. It trains the Thinker language model with frozen
+vision/audio towers; it neither calls the AudioMCQ launcher nor changes the
+shared optimizer, snapshot or synchronization implementations. The dependency
+prerequisites and BSHD/PP1/CP1 limitations in the AudioMCQ section also apply.
+
+Prepare [Geometry3K](https://huggingface.co/datasets/hiyouga/geometry3k) with the
+converter below. Check the dataset card and original Geometry3K license before
+use. The converter preserves encoded image bytes and source question whitespace,
+validates image-placeholder counts, and records the original split and row index.
+It explicitly requests `<think>...</think>\boxed{...}`, as consumed by verl's
+built-in `hiyouga/geometry3k` reward (90% answer accuracy, 10% strict format).
+
+```bash
+python examples/gspo_trainer/data_process/geo3k.py --local_save_dir /data/geo3k
+MODEL_PATH=/models/Qwen3-Omni-30B-A3B-Instruct \
+TRAIN_FILE=/data/geo3k/train.parquet VAL_FILE=/data/geo3k/test.parquet \
+OUTPUT_DIR=/outputs/geo3k \
+bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_geo3k_separate_async.sh
+```
+
+The converter preserves source image bytes and refuses to replace existing
+parquet outputs unless `--overwrite` is explicitly supplied.
+
+Defaults use one eight-GPU node: four TP4/EP4 actor GPUs and four TP4 rollout
+GPUs. The objective is GRPO advantages with GSPO sequence clipping
+(`clip_ratio_low=0.0003`, `clip_ratio_high=0.0004`), sequence-mean token-mean
+aggregation, no reference-policy KL and no LR warmup. LR is `1e-6`, each update
+uses 16 prompts with 8 samples, and prompt/response limits are 1024/3072 tokens.
+Old-policy and actor microbatches both remain one; dynamic batching and remove
+padding are disabled. Precision-aware optimization offloads FP32 optimizer states
+to CPU. The sampler drops trajectories beyond its threshold of one; that setting
+does not by itself prove zero policy lag. Defaults request 150 updates, complete
+validation before training and every 10 updates, and no checkpoints. Each launch
+retains its command, resolved configuration, TensorBoard, training log and
+validation/rollout generations in a unique directory. CLI overrides remain last.
+
+An H800 eight-GPU development run used this formulation and completed 129 actual
+updates before the user requested a stop (exit `-15`, not natural success).
+Complete 601-question validation ran at steps 0/30/60/90/120, rather than every
+10. Official correct counts were 361/366/372/390/393 and strict-format counts
+443/516/536/543/544; all reward regrades matched. Final measured answer accuracy
+improved by 32 questions (5.32 percentage points), while format validity also
+contributed to the composite score. This run used development dependencies,
+CPU optimizer offload and deployment-specific overrides; it does not validate
+an unmodified installation of every repository pin or the final default launcher.
+No step-129 or step-150 fixed validation is claimed. Reference KL was disabled;
+rollout-correction KL is a separate metric. Short CPU/tiny-model tests establish
+input and gradient behavior, not full distributed convergence.
+
+```bash
+python -m pytest -q tests/utils/test_geo3k_data_process_on_cpu.py \
+  tests/pipelines/test_geo3k_toy_image_on_cpu.py \
+  tests/trainer/omni/test_geo3k_megatron_config_on_cpu.py
+```
