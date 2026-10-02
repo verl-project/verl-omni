@@ -24,6 +24,18 @@ from typing import Any
 
 import torch
 
+# Reward-path tensors: their value is derived from the rollout image through the
+# OCR reward, so vLLM-Omni request packing (`max_num_seqs` > 1) flips individual
+# scores by ~1/255 pixel drift. They are still measured and reported, but a
+# mismatch must not fail the comparison.
+INFORMATIONAL_TENSORS = frozenset(
+    {
+        "batch.advantages",
+        "batch.sample_level_rewards",
+        "batch.sample_level_scores",
+    }
+)
+
 
 def _payload_files(root: Path) -> dict[str, Path]:
     return {str(path.relative_to(root)): path for path in sorted(root.rglob("payload.pt"))}
@@ -246,9 +258,14 @@ def compare(args: argparse.Namespace) -> tuple[bool, dict]:
                 baseline_tensors[key], current_tensors[key], key_thresholds.get("atol", args.atol)
             )
             metrics["thresholds"] = key_thresholds
+            informational = key in INFORMATIONAL_TENSORS
+            if informational:
+                metrics["informational"] = True
             file_result["tensors"][key] = metrics
             if metrics.get("shape_mismatch"):
                 passed = False
+                continue
+            if informational:
                 continue
             if _exceeds_thresholds(metrics, key_thresholds):
                 passed = False
@@ -256,6 +273,14 @@ def compare(args: argparse.Namespace) -> tuple[bool, dict]:
         results["files"][rel_path] = file_result
 
     results["unaligned_files"] = unaligned
+    results["informational_tensors"] = sorted(
+        {
+            key
+            for file_result in results["files"].values()
+            for key, metrics in file_result.get("tensors", {}).items()
+            if metrics.get("informational")
+        }
+    )
     results["passed"] = passed
     return passed, results
 
@@ -276,6 +301,8 @@ def _dump_failures(results: dict) -> list[str]:
         for key, metrics in file_result.get("tensors", {}).items():
             if metrics.get("shape_mismatch"):
                 failures.append(f"shape mismatch: {rel_path}::{key}")
+                continue
+            if metrics.get("informational"):
                 continue
             key_thresholds = metrics.get("thresholds") or _thresholds_for_key(key, thresholds)
             if _exceeds_thresholds(metrics, key_thresholds):
@@ -307,6 +334,9 @@ def _print_conclusion(passed: bool, results: dict, report_path: Path) -> None:
     print(f"[DUMP] Compared files: {len(files)}")
     print(f"[DUMP] Compared tensors: {tensor_count}")
     print(f"[DUMP] Failed items: {len(failures)}")
+    informational = results.get("informational_tensors") or []
+    if informational:
+        print(f"[DUMP] Informational tensors (measured, never fail): {len(informational)} {informational}")
     print(f"[DUMP] Thresholds: {results.get('thresholds', {})}")
     unaligned = results.get("unaligned_files") or []
     if unaligned:

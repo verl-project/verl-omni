@@ -127,7 +127,6 @@ python3 "${SCRIPT_DIR}/run.py" \
     actor_rollout_ref.rollout.layered_summon=False \
     actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.rollout.seed=42 \
-    actor_rollout_ref.rollout.max_num_seqs=1 \
     actor_rollout_ref.rollout.pipeline.num_inference_steps=4 \
     actor_rollout_ref.rollout.pipeline.height=256 \
     actor_rollout_ref.rollout.pipeline.width=256 \

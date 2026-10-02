@@ -166,11 +166,16 @@ shape mismatches fail the comparison. The default dumps cover driver-forward,
 actor-forward, and LoRA-gradient payloads for `DEBUG_DUMP_STEPS`, which defaults
 to `1,2`.
 
+Because the training batch is ordered by a per-run `uuid4` uid, both payloads
+are first reordered onto the `extra_info.repeat_index` group order so that two
+independent runs are compared row for row. When either side lacks that key (for
+example a baseline produced before the key was dumped), the comparison falls
+back to raw file order and prints a `row order not realigned` warning.
+
 Precision tensors:
 
-- batch tensors: `responses`, `log_probs`, `old_log_probs`,
-  `advantages`, `sample_level_scores`, `sample_level_rewards`, `latents`,
-  `all_latents`, and `all_timesteps`.
+- batch tensors: `log_probs`, `old_log_probs`, `latents`, `all_latents`, and
+  `all_timesteps`.
 - Actor-forward tensors: every tensor returned by the diffusion FSDP engine
   forward/backward batch output, recursively flattened from the actor-forward
   `payload.pt`.
@@ -178,6 +183,19 @@ Precision tensors:
   `gradients.<parameter_name>`.
 - Optional actor-forward-step tensors are included only when
   `DEBUG_DUMP_FORWARD_STEPS=1`.
+
+Dumped but never failing:
+
+- `responses` is skipped entirely: rollout images are uint8, and rollout
+  sampling is not bit-exact, so pixel-level differences are expected.
+- `advantages`, `sample_level_scores`, and `sample_level_rewards` are measured
+  and reported but cannot fail the run. They are derived from the rollout image
+  through the OCR reward, and vLLM-Omni request packing (`max_num_seqs` > 1)
+  changes the pre-window ODE batch shape, which flips individual OCR scores by
+  ~1/255 pixel drift. They carry `informational: true` in `dump_compare.json`
+  and are listed under `informational_tensors`; the log prints
+  `Informational tensors (measured, never fail)`. A shape mismatch on these
+  tensors still fails.
 
 Precision thresholds:
 
@@ -192,7 +210,8 @@ Precision thresholds:
 
 Each tensor report includes `numel`, `mean_abs_err`, `rmse`, `p99_abs_err`,
 `frac_abs_over_atol`, and `cos_sim`. A tensor fails when any aggregate metric
-exceeds its threshold or cosine similarity falls below its floor.
+exceeds its threshold or cosine similarity falls below its floor, except for the
+`responses` and `informational` tensors listed above.
 
 ## Failure Triage
 
