@@ -22,11 +22,12 @@ Both **GPU** and **NPU** training platforms are supported:
 
 For the base environment setup, see the [installation guide](../../docs/start/install.md).
 
-For **Megatron full-parameter audio-only RL**, see the
-[AudioMCQ separate-async recipe](qwen3_omni/README.md), including an
-offline toy-model smoke and the configurable full-model run. That path is
-experimental and is not reproducible from the current public pins; the FSDP
-recipes above remain the supported default.
+For **Megatron full-parameter separate-async RL**, see the
+[AudioMCQ and image+audio AVQA recipes](qwen3_omni/README.md). The AudioMCQ
+recipe includes an offline toy-model smoke; the AVQA recipe adds a strict
+train/validation media split. Both are experimental and are not reproducible
+from the current public pins; the FSDP recipes above remain the supported
+default.
 
 ## Installation
 

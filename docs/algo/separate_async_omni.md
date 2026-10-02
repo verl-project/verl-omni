@@ -1,7 +1,7 @@
 (separate_async_omni)=
 # Separate-Async RL Training for Qwen3-Omni
 
-Last updated: 09/28/2026
+Last updated: 09/29/2026
 
 `trainer.v1.trainer_mode=omni_separate_async` runs training and rollout on
 separate GPU pools for omni AR models (Qwen3-Omni thinker). Standalone rollout
@@ -29,7 +29,7 @@ for staleness; the replay buffer's
 ## GPU layout
 
 `trainer.n_gpus_per_node × trainer.nnodes` GPUs run the actor (FSDP2 LoRA by
-default, or Megatron for the full-parameter AudioMCQ recipe);
+default, or Megatron for the full-parameter AudioMCQ and AVQA recipes);
 `actor_rollout_ref.rollout.n_gpus_per_node × actor_rollout_ref.rollout.nnodes`
 additional GPUs run standalone rollout replicas
 (`n_gpus_per_node / tensor_model_parallel_size` replicas per node). Single-node
@@ -52,6 +52,9 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_audiomcq_separate_
 That launcher is Thinker-only, BSHD, PP=CP=1, AudioMCQ. It is experimental and
 not clean-checkout reproducible yet; see
 [`examples/gspo_trainer/qwen3_omni/README.md`](../../examples/gspo_trainer/qwen3_omni/README.md).
+The same trainer mode also has an image+audio AVQA Megatron launcher using
+shared configuration. Development-environment GPU results and the remaining
+public-dependency limitations are documented in that README.
 FSDP LoRA remains the default. Key overrides:
 
 | knob | default | meaning |
