@@ -525,10 +525,11 @@ class TestMiniMaxH3TokenIdNativePrompt:
         pipeline._encode_text_hidden = lambda ids, vision_kwargs: ids[:, None].float()
 
         hidden, tags = pipeline.encode_prompt(
-            task="t2va",
-            prompt="[pretokenized]",
-            image=None,
-            prepared_videos=None,
+            SimpleNamespace(
+                prompt="[pretokenized]",
+                media=SimpleNamespace(task="t2va"),
+                images=[],
+            )
         )
 
         assert hidden[:, 0].tolist() == [101.0, 17.0, 202.0]

@@ -13,6 +13,7 @@
 # limitations under the License.
 import argparse
 import asyncio
+import json
 import logging
 import os
 from dataclasses import asdict
@@ -34,7 +35,7 @@ from verl.workers.rollout.vllm_rollout.utils import (
 )
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
 from vllm.entrypoints.openai.api_server import build_app
-from vllm_omni.engine.arg_utils import OmniEngineArgs, orchestrator_field_names
+from vllm_omni.engine.arg_utils import OmniEngineArgs, OrchestratorArgs, orchestrator_field_names
 from vllm_omni.entrypoints import AsyncOmni
 from vllm_omni.entrypoints.openai.api_server import omni_init_app_state
 from vllm_omni.lora.request import LoRARequest
@@ -51,6 +52,82 @@ logger.setLevel(logging.INFO)
 
 # Sentinel: ``None`` is a valid cached value (LoRA not loaded).
 _LORA_REQUEST_CACHE_MISS = object()
+
+# Lazily-computed upstream argument defaults, used to forward only explicitly
+# set engine arguments (see ``_drop_defaulted_engine_args``).
+_ENGINE_ARGS_DEFAULTS: dict | None = None
+
+
+def _is_defaulted_value(key: str, value: Any, default: Any) -> bool:
+    """Check a single engine argument against its upstream default.
+
+    Beyond plain equality, two parser-level normalizations need handling:
+
+    - ``argparse`` applies ``type=json.loads`` to string defaults, so JSON
+      flags surface as ``{}`` (dict) while the dataclass default stays
+      ``"{}"`` (string). Compare through ``json.loads`` for string defaults.
+    - Some string flags default to ``""`` in the CLI while the dataclass
+      default is ``None`` (e.g. ``reasoning_parser_plugin``). An empty value
+      for an optional field carries no information and is dropped.
+    """
+    if value == default:
+        return True
+    if default is None and value in ("", {}, []):
+        return True
+    if isinstance(default, str) and isinstance(value, dict | list):
+        try:
+            return json.loads(default) == value
+        except (ValueError, TypeError):
+            return False
+    return False
+
+
+def _restore_raw_compilation_config(engine_args: dict, args: Any) -> None:
+    """Restore the raw user ``compilation_config`` mapping in place.
+
+    vLLM's ``EngineArgs.__post_init__`` expands a user ``dict`` into a live
+    ``CompilationConfig`` whose runtime fields (``traced_files``,
+    ``compilation_time``, ...) the new strict stage config rejects on
+    rebuild. The raw mapping validates cleanly (missing fields take vLLM
+    defaults), so it is what must travel to ``AsyncOmni``.
+    """
+    raw_compilation_config = getattr(args, "compilation_config", None)
+    if raw_compilation_config is None:
+        engine_args.pop("compilation_config", None)
+    else:
+        if isinstance(raw_compilation_config, str):
+            raw_compilation_config = json.loads(raw_compilation_config)
+        engine_args["compilation_config"] = raw_compilation_config
+
+
+def _drop_defaulted_engine_args(engine_args: dict) -> dict:
+    """Keep only explicitly-set engine arguments.
+
+    vllm-omni (12e9280+) rejects top-level engine arguments that no stage of
+    the pipeline owns ("... has explicit engine argument(s) with no structured
+    config owner"). Upstream's own CLI only forwards explicitly-passed flags
+    (``TrackingNamespace.get_explicit_kwargs_dict``), while verl builds the
+    server namespace from the full rollout config, materializing hundreds of
+    defaults: ``OmniEngineArgs`` MEL defaults (diffusion-only knobs, private
+    runtime internals such as ``_api_process_count``) plus ``OrchestratorArgs``
+    parser defaults (``ulysses_mode="strict"``, ``cache_backend="none"``,
+    ``step_execution=False``, ... — the ownership check flags every non-None
+    value, including ``False``). Dropping every value that equals the upstream
+    default reproduces the explicit-only semantics: defaults apply on their
+    own, and only real overrides travel. ``model`` is always kept since it
+    identifies the deployment.
+    """
+    global _ENGINE_ARGS_DEFAULTS
+    if _ENGINE_ARGS_DEFAULTS is None:
+        defaults = asdict(OmniEngineArgs(model=""))
+        defaults.update(asdict(OrchestratorArgs()))
+        _ENGINE_ARGS_DEFAULTS = defaults
+    defaults = _ENGINE_ARGS_DEFAULTS
+    return {
+        key: value
+        for key, value in engine_args.items()
+        if key == "model" or key not in defaults or not _is_defaulted_value(key, value, defaults[key])
+    }
 
 
 class vLLMOmniHttpServer(vLLMHttpServer):
@@ -165,6 +242,18 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             value = getattr(args, key, None)
             if value is not None:
                 engine_args[key] = value
+
+        # vLLM's ``EngineArgs.__post_init__`` expands a user ``dict`` into a
+        # live ``CompilationConfig`` whose runtime fields (``traced_files``,
+        # ``compilation_time``, ...) the new strict stage config rejects on
+        # rebuild. Restore the raw user mapping so only real overrides travel.
+        _restore_raw_compilation_config(engine_args, args)
+
+        # Forward only explicitly-set arguments: the new upstream rejects
+        # defaulted engine arguments that no pipeline stage owns (see
+        # ``_drop_defaulted_engine_args``). Strategy-specific arguments are
+        # added afterwards by ``prepare_engine_args`` and are unaffected.
+        engine_args = _drop_defaulted_engine_args(engine_args)
 
         deploy_config = getattr(args, "deploy_config", None)
         if deploy_config:

@@ -251,9 +251,9 @@ def ref2va_reference_image_short_edge(value: int | str | None = None) -> Iterato
     """Temporarily apply the Ref2VA image size while serializing concurrent requests."""
     short_edge = validate_ref2va_reference_image_short_edge(value)
 
-    from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import _reference_image_shape
+    from vllm_omni.model_executor.models.minimax_h3 import preprocessing as _h3_preprocessing
 
-    resize_globals = _reference_image_shape.__globals__
+    resize_globals = vars(_h3_preprocessing)
     constant = "MINIMAX_H3_REFERENCE_IMAGE_SHORT_EDGE"
     if constant not in resize_globals:
         raise RuntimeError("vLLM-Omni no longer exposes the MiniMax H3 reference image size constant.")
@@ -714,24 +714,29 @@ class _PromptTokenOverride:
 class MiniMaxH3RolloutWeightSyncMixin:
     """Map Diffusers H3 weights and token-id-native prompts to vLLM-Omni."""
 
-    def encode_prompt(self, *, task: str, prompt: str, image=None, images=None, **kwargs):
-        """Encode Agent Loop IDs while letting vLLM-Omni build reference vision spans."""
+    def encode_prompt(self, prepared):
+        """Encode Agent Loop IDs while letting vLLM-Omni build reference vision spans.
+
+        Newer vllm-omni passes a single ``PreparedEncoderInputs`` (prompt text +
+        media + condition labels) instead of ``(task, prompt, image, images)``.
+        """
         prompt_ids = getattr(self, "_h3_prompt_ids", None)
-        if prompt_ids is None or task not in {"t2va", "fl2va", "ref2va"}:
-            return super().encode_prompt(task=task, prompt=prompt, image=image, images=images, **kwargs)
+        media = getattr(prepared, "media", None) if prepared is not None else None
+        task = getattr(media, "task", None)
+        if prompt_ids is None or prepared is None or task not in {"t2va", "fl2va", "ref2va"}:
+            return super().encode_prompt(prepared)
 
         if task == "ref2va":
             # Let the upstream pipeline build every reference span; the override keeps the Agent Loop text token IDs.
             tokenizer = self.tokenizer
-            self.tokenizer = _PromptTokenOverride(tokenizer, prompt, prompt_ids)
+            self.tokenizer = _PromptTokenOverride(tokenizer, prepared.prompt, prompt_ids)
             try:
-                return super().encode_prompt(task=task, prompt=prompt, image=image, images=images, **kwargs)
+                return super().encode_prompt(prepared)
             finally:
                 self.tokenizer = tokenizer
 
-        from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import (
-            _broadcast_tensor,
-            _dit_rank_world,
+        from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import _broadcast_tensor, _dit_rank_world
+        from vllm_omni.model_executor.models.minimax_h3.preprocessing import (
             minimax_h3_multi_image_presentation,
         )
 
@@ -740,7 +745,7 @@ class MiniMaxH3RolloutWeightSyncMixin:
         tags = None
         ids = None
         vision_kwargs: dict[str, torch.Tensor] = {}
-        condition_images = list(images) if images is not None else ([image] if image is not None else [])
+        condition_images = list(getattr(prepared, "images", None) or [])
         if rank == 0:
             if task == "t2va":
                 ids = prompt_ids

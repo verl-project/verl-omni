@@ -84,11 +84,40 @@ class VLLMOmniHijack:
                 lora_path = get_adapter_absolute_path(lora_request.lora_path)
                 logger.debug("Resolved LoRA path: %s", lora_path)
 
-                peft_helper = PEFTHelper.from_local_dir(
-                    lora_path,
-                    max_position_embeddings=None,  # no need in diffusion
-                    tensorizer_config_dict=lora_request.tensorizer_config_dict,
-                )
+                # Honor the pipeline-owned loader hook introduced in newer
+                # vllm-omni (``_load_diffusion_lora_adapter``); pipelines with
+                # custom checkpoint layouts load through it.
+                model_loader = getattr(self.pipeline, "_load_diffusion_lora_adapter", None)
+                loaded = None
+                if callable(model_loader):
+                    loaded = model_loader(
+                        lora_request=lora_request,
+                        lora_path=lora_path,
+                        dtype=self.dtype,
+                    )
+                if loaded is None:
+                    peft_helper = PEFTHelper.from_local_dir(
+                        lora_path,
+                        max_position_embeddings=None,  # no need in diffusion
+                        tensorizer_config_dict=lora_request.tensorizer_config_dict,
+                    )
+                else:
+                    lora_model, peft_helper = loaded
+                    logger.info(
+                        "Loaded PEFT config: r=%d, lora_alpha=%d, target_modules=%s",
+                        peft_helper.r,
+                        peft_helper.lora_alpha,
+                        peft_helper.target_modules,
+                    )
+                    logger.info(
+                        "Loaded LoRA model: id=%d, num_modules=%d, modules=%s",
+                        lora_model.id,
+                        len(lora_model.loras),
+                        list(lora_model.loras.keys()),
+                    )
+                    for lora in lora_model.loras.values():
+                        lora.optimize()  # ref: _create_merged_loras_inplace, internal scaling
+                    return lora_model, peft_helper
 
             logger.info(
                 "Loaded PEFT config: r=%d, lora_alpha=%d, target_modules=%s",

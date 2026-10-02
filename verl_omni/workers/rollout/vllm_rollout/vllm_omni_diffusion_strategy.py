@@ -38,6 +38,54 @@ _GPU_WORKER_EXTENSION = "verl_omni.workers.rollout.vllm_rollout.utils.vLLMOmniCo
 _NPU_WORKER_EXTENSION = "verl_omni.workers.rollout.vllm_rollout.npu_utils.vLLMOmniNPUColocateWorkerExtension"
 
 
+def _diffusion_ingress_allowed_fields() -> frozenset[str]:
+    """Mirror vllm-omni's diffusion ingress allowlist.
+
+    Newer vllm-omni strictly rejects any diffusion engine kwarg without an
+    owner (``validate_omni_diffusion_kwargs``), while verl forwards the full
+    ``OmniEngineArgs`` namespace -- including vLLM LLM-only fields such as
+    ``block_size`` -- into ``AsyncOmni(**engine_args)``. Recompute upstream's
+    own ``allowed_fields`` here so diffusion startup only forwards owned keys.
+    The formula must stay in sync with
+    ``normalize_and_validate_diffusion_engine_ingress_kwargs``; the CPU
+    strategy test guards the contract.
+    """
+    from dataclasses import fields
+    from typing import Any, cast
+
+    from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    from vllm_omni.config import VllmOmniOrchestratorConfig
+    from vllm_omni.config.omni_config import (
+        _DIFFUSION_DEFAULT_FACTORY_FIELDS,
+        _DIFFUSION_OWNED_STAGE_ENGINE_FIELDS,
+        _DIFFUSION_SHARED_ONLY_ENGINE_FIELDS,
+        _DIFFUSION_STAGE_METADATA_FIELDS,
+        _NON_STAGE_ENGINE_CLI_FIELDS,
+        _PIPELINE_DEPLOY_CLI_FIELDS,
+        _STAGE_DEPLOY_ENGINE_FIELDS,
+    )
+    from vllm_omni.diffusion.data import OmniDiffusionConfig
+    from vllm_omni.engine.arg_utils import orchestrator_field_names
+
+    diffusion_fields = frozenset(field.name for field in fields(OmniDiffusionConfig))
+    stage_consumed_fields = (
+        diffusion_fields
+        | _DIFFUSION_OWNED_STAGE_ENGINE_FIELDS
+        | frozenset(_STAGE_DEPLOY_ENGINE_FIELDS)
+        | frozenset(_PIPELINE_DEPLOY_CLI_FIELDS)
+        | _DIFFUSION_STAGE_METADATA_FIELDS
+        | _DIFFUSION_DEFAULT_FACTORY_FIELDS
+    ) - _DIFFUSION_SHARED_ONLY_ENGINE_FIELDS
+    externally_consumed_fields = (
+        _DIFFUSION_SHARED_ONLY_ENGINE_FIELDS
+        | _NON_STAGE_ENGINE_CLI_FIELDS
+        | frozenset(field.name for field in fields(FrontendArgs))
+        | orchestrator_field_names()
+        | frozenset(field.name for field in fields(cast(Any, VllmOmniOrchestratorConfig)))
+    )
+    return stage_consumed_fields | externally_consumed_fields
+
+
 def _diffusion_output_type(sampling_params: dict[str, Any]) -> str:
     output_type = sampling_params.get("output_type")
     if output_type is None:
@@ -191,7 +239,6 @@ class DiffusionStrategy(OmniStrategyBase):
         )
         # TODO (mike): read custom_pipeline from engine_args.
         if pipeline_path is not None:
-            engine_args["enable_dummy_pipeline"] = True
             engine_args["custom_pipeline_args"] = {"pipeline_class": pipeline_path}
 
             pipeline_cls = VllmOmniPipelineBase.get_class(
@@ -213,6 +260,45 @@ class DiffusionStrategy(OmniStrategyBase):
 
         engine_args["enable_prompt_embed_cache"] = self.server.config.enable_prompt_embed_cache
         engine_args["prompt_embed_cache_size"] = self.server.config.prompt_embed_cache_size
+
+        # vllm-omni (12e9280+) validates that enable_prefix_caching requires
+        # diffusion_kv_mode='paged_scheduler' (OmniConfig), and separately that
+        # prefix caching cannot be combined with sleep mode (sleep discards KV
+        # pages without invalidating cached prefixes). Sleep mode frees the
+        # rollout weights so the actor can train on the same GPUs, so when
+        # sleep is enabled it wins and prefix caching is switched off.
+        sleep_enabled = getattr(self.server.config, "enable_sleep_mode", False)
+        prefix_caching = bool(getattr(self.server.config, "enable_prefix_caching", False))
+        if prefix_caching and sleep_enabled:
+            prefix_caching = False
+            engine_args["enable_prefix_caching"] = False
+        if prefix_caching:
+            engine_args.setdefault("diffusion_kv_mode", "paged_scheduler")
+        if engine_args.get("diffusion_kv_mode") == "paged_scheduler":
+            pipeline_cfg = getattr(self.server.config, "pipeline", None)
+            if getattr(pipeline_cfg, "guidance_scale", None) is None:
+                pipeline_cfg = getattr(self.server.model_config, "pipeline", None)
+            guidance = getattr(pipeline_cfg, "guidance_scale", 1.0)
+            try:
+                use_cfg = float(guidance) != 1.0
+            except (TypeError, ValueError):
+                use_cfg = True
+            engine_args.setdefault("diffusion_kv_max_rows_per_request", 2 if use_cfg else 1)
+
+        # Newer vllm-omni rejects unowned diffusion ingress fields, but the
+        # shared server forwards the full OmniEngineArgs namespace (including
+        # vLLM LLM-only fields like block_size that diffusion never consumed).
+        # Strip them here; keys added later in run_server (step_execution,
+        # seed, diffusion_attention_config) are all within the allowlist.
+        allowed = _diffusion_ingress_allowed_fields()
+        dropped = sorted(key for key in engine_args if key not in allowed)
+        for key in dropped:
+            del engine_args[key]
+        if dropped:
+            logger.info(
+                "Dropping vLLM LLM-only engine args rejected by diffusion ingress: %s",
+                dropped,
+            )
 
     def preprocess_input(
         self,

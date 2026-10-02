@@ -106,27 +106,36 @@ def test_reference_row_minibatch_padding_rejects_count_mismatch():
 
 
 def test_reference_image_short_edge_environment_override_is_restored(monkeypatch):
-    from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import _reference_image_shape
+    import vllm_omni.model_executor.models.minimax_h3.preprocessing as h3_preprocessing
+    from vllm_omni.model_executor.models.minimax_h3.preprocessing import (
+        resolve_minimax_h3_reference_image_shape,
+    )
 
     constant = "MINIMAX_H3_REFERENCE_IMAGE_SHORT_EDGE"
-    monkeypatch.setitem(_reference_image_shape.__globals__, constant, 2048)
+    monkeypatch.setitem(vars(h3_preprocessing), constant, 2048)
     monkeypatch.setenv("REF_IMAGE_SHORT_EDGE", "1024")
     image = Image.new("RGB", (640, 400))
 
     with ref2va_reference_image_short_edge() as short_edge:
         assert short_edge == 1024
-        assert min(_reference_image_shape(image)) == 1024
-    assert min(_reference_image_shape(image)) == 2048
+        assert min(resolve_minimax_h3_reference_image_shape(image)) == 1024
+    assert min(resolve_minimax_h3_reference_image_shape(image)) == 2048
 
 
 def test_request_short_edge_overrides_environment_temporarily(monkeypatch):
-    from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import MiniMaxH3Pipeline, _reference_image_shape
+    import vllm_omni.model_executor.models.minimax_h3.preprocessing as h3_preprocessing
+    from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import MiniMaxH3Pipeline
+    from vllm_omni.model_executor.models.minimax_h3.preprocessing import (
+        resolve_minimax_h3_reference_image_shape,
+    )
 
     constant = "MINIMAX_H3_REFERENCE_IMAGE_SHORT_EDGE"
-    monkeypatch.setitem(_reference_image_shape.__globals__, constant, 2048)
+    monkeypatch.setitem(vars(h3_preprocessing), constant, 2048)
     monkeypatch.setenv("REF_IMAGE_SHORT_EDGE", "512")
     image = Image.new("RGB", (640, 400))
-    monkeypatch.setattr(MiniMaxH3Pipeline, "forward", lambda _self, _request: min(_reference_image_shape(image)))
+    monkeypatch.setattr(
+        MiniMaxH3Pipeline, "forward", lambda _self, _request: min(resolve_minimax_h3_reference_image_shape(image))
+    )
     pipeline = object.__new__(MiniMaxH3DiffusionNFTPipeline)
     object.__setattr__(pipeline, "_ensure_prompt_text", MagicMock())
     object.__setattr__(pipeline, "_nft_capture", None)
@@ -138,14 +147,17 @@ def test_request_short_edge_overrides_environment_temporarily(monkeypatch):
     )
 
     assert pipeline.forward(request) == 1024
-    assert min(_reference_image_shape(image)) == 2048
+    assert min(resolve_minimax_h3_reference_image_shape(image)) == 2048
 
 
 def test_reference_image_short_edge_serializes_concurrent_overrides(monkeypatch):
-    from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import _reference_image_shape
+    import vllm_omni.model_executor.models.minimax_h3.preprocessing as h3_preprocessing
+    from vllm_omni.model_executor.models.minimax_h3.preprocessing import (
+        resolve_minimax_h3_reference_image_shape,
+    )
 
     constant = "MINIMAX_H3_REFERENCE_IMAGE_SHORT_EDGE"
-    monkeypatch.setitem(_reference_image_shape.__globals__, constant, 2048)
+    monkeypatch.setitem(vars(h3_preprocessing), constant, 2048)
     image = Image.new("RGB", (640, 400))
     first_entered = Event()
     release_first = Event()
@@ -157,13 +169,13 @@ def test_reference_image_short_edge_serializes_concurrent_overrides(monkeypatch)
         with ref2va_reference_image_short_edge(512):
             first_entered.set()
             release_first.wait(timeout=2)
-            results.append(min(_reference_image_shape(image)))
+            results.append(min(resolve_minimax_h3_reference_image_shape(image)))
 
     def second_request():
         second_started.set()
         with ref2va_reference_image_short_edge(1024):
             second_entered.set()
-            results.append(min(_reference_image_shape(image)))
+            results.append(min(resolve_minimax_h3_reference_image_shape(image)))
 
     first = Thread(target=first_request)
     second = Thread(target=second_request)
@@ -179,7 +191,7 @@ def test_reference_image_short_edge_serializes_concurrent_overrides(monkeypatch)
     second.join(timeout=2)
 
     assert results == [512, 1024]
-    assert min(_reference_image_shape(image)) == 2048
+    assert min(resolve_minimax_h3_reference_image_shape(image)) == 2048
 
 
 @pytest.mark.parametrize("value", ["invalid", "255", "1000", "2049"])
@@ -333,15 +345,6 @@ def test_ref2va_prompt_keeps_original_ids_with_all_reference_modalities(monkeypa
 
     monkeypatch.setattr(pipeline_module, "_dit_rank_world", lambda: (None, 0, 1))
     monkeypatch.setattr(pipeline_module, "_broadcast_tensor", lambda value, **kwargs: value)
-    monkeypatch.setattr(
-        pipeline_module,
-        "sample_reference_video_frames",
-        lambda path: {
-            "frames": [__import__("numpy").zeros((4, 4, 3), dtype="uint8")] * 4,
-            "block_timestamps": [0.2, 1.0],
-        },
-        raising=False,
-    )
 
     class Tokenizer:
         special = {"<|vision_start|>": 11, "<|image_pad|>": 12, "<|vision_end|>": 13, "<|video_pad|>": 14}
@@ -382,13 +385,16 @@ def test_ref2va_prompt_keeps_original_ids_with_all_reference_modalities(monkeypa
     stub._distribute_encode_inputs = lambda ids, vision_kwargs: received.update(vision_kwargs) or ids
     stub._encode_text_hidden = lambda ids, vision_kwargs: ids[:, None].float()
 
-    hidden, tags = stub.encode_prompt(
-        task="ref2va",
+    frames = __import__("numpy").zeros((4, 4, 3), dtype="uint8")
+    prepared = SimpleNamespace(
         prompt="[pretokenized]",
+        media=SimpleNamespace(task="ref2va"),
         images=[object(), object()],
-        prepared_videos=[{"prepared_path": "/tmp/reference.mp4", "input_has_audio": True}],
+        qwen_videos=[(frames, {"has_audio": True})],
+        video_timestamps=[[0.2, 1.0]],
         condition_labels=[("image", 1), ("image", 2), ("audio", 1), ("video", 1), ("audio", 2)],
     )
+    hidden, tags = stub.encode_prompt(prepared)
 
     # The Agent Loop text IDs survive verbatim at the tail after the reference spans.
     assert hidden[-3:, 0].tolist() == [501.0, 502.0, 503.0]
@@ -399,7 +405,7 @@ def test_ref2va_prompt_keeps_original_ids_with_all_reference_modalities(monkeypa
 
 def test_ref2va_encode_prompt_restores_the_tokenizer_after_encoding():
     class Parent:
-        def encode_prompt(self, *, task, prompt, image=None, images=None, **kwargs):
+        def encode_prompt(self, prepared):
             # The upstream path sees the temporary token override that returns the
             # Agent Loop IDs for the pretokenized prompt, not the real tokenizer.
             assert self.tokenizer("[pretokenized]") == {"input_ids": [9, 9]}
@@ -413,7 +419,8 @@ def test_ref2va_encode_prompt_restores_the_tokenizer_after_encoding():
     combined = Combined()
     original = combined.tokenizer
 
-    result = combined.encode_prompt(task="ref2va", prompt="[pretokenized]")
+    prepared = SimpleNamespace(prompt="[pretokenized]", media=SimpleNamespace(task="ref2va"))
+    result = combined.encode_prompt(prepared)
 
     assert result == ("hidden", "tags")
     assert combined.tokenizer is original
