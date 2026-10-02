@@ -24,12 +24,15 @@ from typing import Any
 
 import torch
 
-# Reward-path tensors: their value is derived from the rollout image through the
-# OCR reward, so vLLM-Omni request packing (`max_num_seqs` > 1) flips individual
-# scores by ~1/255 pixel drift. They are still measured and reported, but a
-# mismatch must not fail the comparison.
+# Tensors that are measured and reported but never allowed to fail the run.
+# `batch.responses` is uint8 rollout pixel output and rollout sampling is not
+# bit-exact, so pixel-level differences are expected. The reward-path tensors
+# derive from that image through the OCR reward, so vLLM-Omni request packing
+# (`max_num_seqs` > 1) flips individual scores by ~1/255 pixel drift. A shape
+# mismatch on any of them still fails.
 INFORMATIONAL_TENSORS = frozenset(
     {
+        "batch.responses",
         "batch.advantages",
         "batch.sample_level_rewards",
         "batch.sample_level_scores",
@@ -248,11 +251,6 @@ def compare(args: argparse.Namespace) -> tuple[bool, dict]:
             passed = False
 
         for key in sorted(set(baseline_tensors) & set(current_tensors)):
-            # Rollout uint8 images: rollout sampling is hard to make bit-exact, and even
-            # small float drift can flip pixel values, so skip precision compare here.
-            # TODO: re-enable batch.responses compare once rollout randomness is controllable.
-            if key == "batch.responses":
-                continue
             key_thresholds = _thresholds_for_key(key, thresholds)
             metrics = _tensor_metrics(
                 baseline_tensors[key], current_tensors[key], key_thresholds.get("atol", args.atol)

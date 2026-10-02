@@ -186,16 +186,18 @@ Precision tensors:
 
 Dumped but never failing:
 
-- `responses` is skipped entirely: rollout images are uint8, and rollout
-  sampling is not bit-exact, so pixel-level differences are expected.
-- `advantages`, `sample_level_scores`, and `sample_level_rewards` are measured
-  and reported but cannot fail the run. They are derived from the rollout image
-  through the OCR reward, and vLLM-Omni request packing (`max_num_seqs` > 1)
-  changes the pre-window ODE batch shape, which flips individual OCR scores by
-  ~1/255 pixel drift. They carry `informational: true` in `dump_compare.json`
-  and are listed under `informational_tensors`; the log prints
-  `Informational tensors (measured, never fail)`. A shape mismatch on these
-  tensors still fails.
+- `responses` is rollout pixel output: uint8 images, and rollout sampling is
+  not bit-exact, so pixel-level differences are expected.
+- `advantages`, `sample_level_scores`, and `sample_level_rewards` are derived
+  from the rollout image through the OCR reward, and vLLM-Omni request packing
+  (`max_num_seqs` > 1) changes the pre-window ODE batch shape, which flips
+  individual OCR scores by ~1/255 pixel drift.
+
+The tensors above are measured and reported but cannot fail the run. They carry
+`informational: true` in `dump_compare.json` and are listed under
+`informational_tensors`; the log prints
+`Informational tensors (measured, never fail)`. A shape mismatch on these
+tensors still fails.
 
 Precision thresholds:
 
@@ -211,7 +213,7 @@ Precision thresholds:
 Each tensor report includes `numel`, `mean_abs_err`, `rmse`, `p99_abs_err`,
 `frac_abs_over_atol`, and `cos_sim`. A tensor fails when any aggregate metric
 exceeds its threshold or cosine similarity falls below its floor, except for the
-`responses` and `informational` tensors listed above.
+`informational` tensors listed above.
 
 ## Failure Triage
 
