@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 09/14/2026
+Last updated: 09/23/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -164,6 +164,22 @@ final_reward = sum(term.weight * term.score)
 error and contributes zero. Model setup and lifecycle failures are always
 fatal.
 
+## Component rewards and consumer support
+
+`reward.aggregation` defaults to `weighted_sum`. This reward-only change prepares
+component assembly but rejects `preserve_components` at initialization, before
+reward workers start. No current trainer supports component rewards; the
+companion OmniNFT integration (#664) will enable the mode alongside its consumer
+and compatibility checks. Setting an OmniNFT loss name alone does not enable it.
+
+For a supporting consumer, component mode returns `rm_scores` with shape `[B, K]`.
+Columns follow the sorted reward-function names in `meta_info["reward_names"]`.
+Every term must have `required: true` and `weight: 1.0`; missing or non-finite
+components are rejected before actor update. Per-term `reward/<name>` metrics
+remain available. Summing the columns produces an unweighted diagnostic total,
+not a modality-weighted training objective. `routing_weights` is reserved for
+the companion OmniNFT consumer and is not forwarded to scorers.
+
 ## Use engine only
 
 This example serves one model with two-way tensor parallelism:
@@ -243,6 +259,14 @@ share one deployment through their `model` field. In this PR, every
 Future FSDP support will need an explicit replica-group schema because a flat
 device list cannot distinguish full replicas from ranks within one sharded
 replica.
+
+For native CLAP, AudioBox, and DeSync scorers, a single-sample `batch` supplies
+decoded `audio` and `audio_sample_rate` when present; these values override
+`extra_info`. Without `batch`, the scorers read `extra_info`. HPSv3 and
+VideoAlign accept uint8 video frames or finite floating-point frames in
+`[0, 1]`; values outside that range are rejected. HPSv3 applies the same
+conversion and validation to both default interval sampling and explicit
+`num_frames` uniform sampling.
 
 ### Wrap a Transformers model for native mode
 

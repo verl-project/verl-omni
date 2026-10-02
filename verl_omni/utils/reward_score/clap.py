@@ -18,11 +18,24 @@ import asyncio
 import logging
 import os
 import threading
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from verl.utils.device import get_device_name
+
+if __package__:
+    from .reward_utils import audio_info_from_batch, get_audio, resample_audio
+else:
+    # File-path scorers have no parent package. Load the sibling without
+    # importing verl_omni's engine/pipeline registration side effects.
+    from verl.utils.import_utils import load_module
+
+    _reward_utils = load_module(str(Path(__file__).with_name("reward_utils.py")))
+    audio_info_from_batch = _reward_utils.audio_info_from_batch
+    get_audio = _reward_utils.get_audio
+    resample_audio = _reward_utils.resample_audio
 
 _CLAP_SAMPLE_RATE = 48_000
 _DEFAULT_MODEL = "laion/larger_clap_general"
@@ -52,24 +65,7 @@ def _get_batching_state() -> _BatchingState:
     return state
 
 
-def _get_audio(extra_info: dict) -> tuple[torch.Tensor, int]:
-    audio = extra_info.get("audio")
-    if audio is None:
-        raise KeyError("CLAP reward requires decoded audio in extra_info['audio'].")
-    audio = torch.as_tensor(audio).detach().float().cpu()
-    while audio.ndim > 2 and audio.shape[0] == 1:
-        audio = audio[0]
-    if audio.ndim == 2:
-        audio = audio.mean(dim=0)
-    elif audio.ndim != 1:
-        raise ValueError(f"Expected audio shape (T,) or (C,T), got {tuple(audio.shape)}.")
-
-    sample_rate = extra_info.get("audio_sample_rate", _CLAP_SAMPLE_RATE)
-    if isinstance(sample_rate, torch.Tensor):
-        sample_rate = sample_rate.item()
-    if sample_rate is None:
-        raise KeyError("CLAP reward requires extra_info['audio_sample_rate'].")
-    return audio, int(sample_rate)
+_get_audio = get_audio  # Keep the existing helper name for external scorer tests.
 
 
 def _load_clap(model_name_or_path: str, device: str):
@@ -86,21 +82,11 @@ def _load_clap(model_name_or_path: str, device: str):
 def _score_batch(requests) -> list[tuple[float, int] | Exception]:
     """Prepare and score ready requests in model- and device-specific batches."""
     results = [None] * len(requests)
-    try:
-        import torchaudio.functional as audio_functional
-    except Exception as e:
-        return [e] * len(requests)
-
     grouped_requests = {}
     for index, (prompt, extra_info, model_name_or_path, device, _) in enumerate(requests):
         try:
             waveform, source_rate = _get_audio(extra_info)
-            if source_rate != _CLAP_SAMPLE_RATE:
-                waveform = audio_functional.resample(
-                    waveform.unsqueeze(0),
-                    orig_freq=source_rate,
-                    new_freq=_CLAP_SAMPLE_RATE,
-                ).squeeze(0)
+            waveform = resample_audio(waveform, source_rate, _CLAP_SAMPLE_RATE)
             key = (model_name_or_path, device)
             grouped_requests.setdefault(key, []).append(
                 (index, prompt, waveform.numpy().astype(np.float32), source_rate)
@@ -220,17 +206,99 @@ async def compute_score(
     extra_info: dict,
     device: str | None = None,
     model_name_or_path: str = _DEFAULT_MODEL,
+    *,
+    reward_model=None,
+    batch=None,
+    prompt_key: str | None = None,
+    score_scale: float = 1.0,
+    score_offset: float = 0.0,
+    score_min: float | None = None,
+    score_max: float | None = None,
     **kwargs,
 ) -> dict:
-    """Compute cosine similarity between generated audio and its text prompt."""
-    del data_source, solution_image, kwargs
-    device = device or get_device_name()
+    """Score text/audio alignment through the local cache or a managed model.
 
-    loop = asyncio.get_running_loop()
-    state = _get_batching_state()
-    future = loop.create_future()
-    await _ensure_consumer(state)
-    await state.queue.put((ground_truth or "", extra_info, model_name_or_path, device, future))
-    await _ensure_consumer(state)
-    score, source_rate = await future
+    Defaults preserve the existing cached, batched cosine scorer. A supplied
+    reward_model owns inference and lifecycle. A single-sample batch takes
+    precedence over extra_info for decoded audio and its sample rate.
+    prompt_key selects reward_inputs.text[prompt_key] from batch;
+    without it, ground_truth supplies the text. Apply scale/offset to cosine,
+    then optional lower/upper bounds. No recipe or checkpoint is hardcoded.
+    """
+    del data_source, solution_image, kwargs
+    prompt = ground_truth or ""
+    extra_info = audio_info_from_batch(extra_info, batch, scorer="CLAP")
+    if prompt_key is not None:
+        if batch is None:
+            raise ValueError("CLAP prompt_key requires a single-sample batch.")
+        prompt = batch[0].non_tensor_batch["reward_inputs"]["text"][prompt_key]
+
+    if reward_model is None:
+        device = device or get_device_name()
+        loop = asyncio.get_running_loop()
+        state = _get_batching_state()
+        future = loop.create_future()
+        await _ensure_consumer(state)
+        await state.queue.put((prompt, extra_info, model_name_or_path, device, future))
+        await _ensure_consumer(state)
+        score, source_rate = await future
+    else:
+        waveform, source_rate = _get_audio(extra_info)
+        waveform = resample_audio(waveform, source_rate, _CLAP_SAMPLE_RATE)
+        output = await reward_model.infer([waveform.numpy().astype(np.float32, copy=False)], [prompt])
+        audio_embeddings = F.normalize(output["audio_embeddings"].float(), p=2, dim=-1)
+        text_embeddings = F.normalize(output["text_embeddings"].float(), p=2, dim=-1)
+        score = (audio_embeddings * text_embeddings).sum(dim=-1).item()
+
+    score = score * score_scale + score_offset
+    if score_min is not None:
+        score = max(score, score_min)
+    if score_max is not None:
+        score = min(score, score_max)
     return {"score": score, "source_sample_rate": source_rate}
+
+
+class CLAPModel:
+    """Raw CLAP inference adapter owned by a native reward executor."""
+
+    def __init__(self, model_path: str, device, model_kwargs=None, processor_kwargs=None) -> None:
+        from transformers import AutoProcessor, ClapModel
+
+        self.device = torch.device(device)
+        self.model = ClapModel.from_pretrained(model_path, **(model_kwargs or {})).to(self.device).eval()
+        self.processor = AutoProcessor.from_pretrained(model_path, **(processor_kwargs or {}))
+        self._infer_lock = threading.Lock()
+
+    def close(self) -> None:
+        """Drop model/processor references; reuse requires constructing a new adapter."""
+        self.model = None
+        self.processor = None
+        self.device = None
+
+    @torch.inference_mode()
+    def infer(self, waveforms: list[np.ndarray], prompts: list[str]) -> dict[str, torch.Tensor]:
+        """Encode aligned mono 48 kHz arrays and text without gradients.
+
+        The processor pads/truncates the batch; its tensor outputs move to the
+        active device. Return detached CPU ``audio_embeddings`` and
+        ``text_embeddings``, each ``[B, D]`` in model-output dtype. Cosine
+        normalization and score scaling are performed by the scorer.
+        """
+        with self._infer_lock:
+            inputs = self.processor(
+                text=prompts,
+                audio=waveforms,
+                sampling_rate=_CLAP_SAMPLE_RATE,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+            )
+            inputs = {
+                key: value.to(self.device) if isinstance(value, torch.Tensor) else value
+                for key, value in inputs.items()
+            }
+            outputs = self.model(**inputs)
+            return {
+                "audio_embeddings": outputs.audio_embeds.detach().cpu(),
+                "text_embeddings": outputs.text_embeds.detach().cpu(),
+            }
