@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 09/14/2026
+Last updated: 09/22/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -15,12 +15,16 @@ The framework deliberately separates inference from scoring:
 - a named model owns resources, inference access, and lifecycle;
 - a reward function converts one training sample into model inputs and converts
   the model output into a score;
-- `MultiVisualRewardManager` combines scores with a weighted sum.
+- `MultiRewardManager` owns model-aware scorer dispatch, per-term outputs,
+  failure handling, and weighted aggregation without owning an input modality.
+- An input-specific subclass prepares scorer arguments. The current named-model
+  recipes use the visual contract supplied by `MultiVisualRewardManager`.
 
 PickScore is an example of this contract, not a special case in the framework.
 
-Named models currently use the visual sample contract. Select the manager
-explicitly; the framework does not rewrite a user-provided manager:
+Named models require a `MultiRewardManager` subclass with an input contract.
+Current maintained recipes use the visual subclass explicitly; the framework
+does not rewrite a user-provided manager:
 
 ```yaml
 reward:
@@ -28,7 +32,9 @@ reward:
     name: MultiVisualRewardManager
 ```
 
-Audio and other modality-specific multi-reward managers are follow-up work.
+Consolidating audio, text, and other input contracts behind the shared manager
+is separate follow-up work. Until then, modality-specific managers and their
+existing recipes remain unchanged.
 
 ## Backend selection
 
@@ -409,7 +415,8 @@ through `exp()` again.
 
 ## Current limitations
 
-- Named-model aggregation currently uses the visual reward manager contract.
+- Named-model aggregation currently uses the visual input contract implemented
+  by `MultiVisualRewardManager`; the aggregation core itself is modality-neutral.
 - Native models are replicated; FSDP and tensor parallelism are not supported.
 - CPU-native placement is not supported.
 - Native routing uses a static even split rather than dynamic load balancing.
