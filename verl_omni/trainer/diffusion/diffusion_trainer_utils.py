@@ -13,6 +13,7 @@
 # limitations under the License.
 """Shared helpers for diffusion Ray trainers."""
 
+import math
 from collections.abc import Sequence
 from typing import Any, Optional
 
@@ -64,6 +65,13 @@ def worker_group_port_ranges(master_port_range: Optional[Sequence[int]], num_gro
             f"trainer.ray_master_port_range={master_port_range} has fewer ports than worker groups ({num_groups})."
         )
     return [[lo + i * stride, hi if i == num_groups - 1 else lo + (i + 1) * stride] for i in range(num_groups)]
+
+
+def track_nonfinite_grad_streak(streak: int, grad_norm: Optional[float]) -> int:
+    """Update the consecutive-non-finite-gradient streak, for visibility only (see #388 item A3)."""
+    if grad_norm is None or math.isfinite(grad_norm):
+        return 0
+    return streak + 1
 
 
 def validate_distillation_config(config) -> None:
