@@ -65,3 +65,5 @@ class PolicyGradientDiffusionTrainerV1Sync(PolicyGradientDiffusionTrainerV1):
     def on_sample_end(self):
         # sleep all replicas to discard weights and (no-op) KV cache
         self.checkpoint_manager.sleep_replicas()
+        if self.curr_step_profile:
+            self._stop_rollout_profiling()
