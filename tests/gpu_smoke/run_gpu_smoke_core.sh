@@ -47,4 +47,8 @@ run_test 8 "trainable FSDP2 snapshot restore" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" REQUIRE_TRAINABLE_SNAPSHOT_GPU=1 \
     python3 -m pytest -s tests/workers/test_trainable_snapshot_gpu.py
 
+run_test 9 "MiniMax H3 shared weight sync TP2" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    torchrun --standalone --nproc_per_node=2 --module tests.special_e2e.minimax_h3_shared_sync_tp2
+
 gpu_smoke_summary

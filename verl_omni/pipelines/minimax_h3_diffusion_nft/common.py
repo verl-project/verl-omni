@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Shared MiniMax H3 latent-layout and weight-sync helpers."""
+"""Shared MiniMax H3 layout, weight loading and NFT rollout policies."""
 
 import inspect
 import json
@@ -69,7 +69,12 @@ __all__ = [
     "build_layout_from_meta",
     "build_ref2va_layout_from_meta",
     "build_row_timesteps",
+    "MINIMAX_H3_TOKEN_ID_NATIVE_KEY",
+    "messages_to_text",
     "MiniMaxH3RolloutWeightSyncMixin",
+    "validate_lora_target_modules",
+    "_LORA_STACKED_PARAMS_MAPPING",
+    "_LORA_VLLM_TARGET_MODULES",
 ]
 
 
@@ -137,7 +142,7 @@ def pad_h3_layout_for_ulysses(model_inputs: dict[str, Any], sp_size: int | None)
     return padded
 
 
-# TODO(NancyFyong): Remove this copied forward and its installer when
+# TODO: Remove this copied forward and its installer when
 # https://github.com/huggingface/diffusers/pull/14868 ships in the pinned Diffusers version.
 def _h3_masked_forward(
     self,
@@ -621,74 +626,6 @@ def build_row_timesteps(
     return torch.unique(row_timesteps, sorted=True, return_inverse=True)
 
 
-_TOPLEVEL_RENAMES = (
-    ("audio_proj_in", "audio_patch_proj"),
-    ("audio_proj_out", "final_layer.audio_out"),
-    ("proj_in", "video_patch_proj"),
-    ("proj_out", "final_layer.video_out"),
-    ("context_embedder", "condition_proj"),
-    ("time_embedder.linear_1", "time_embedder.proj_in"),
-    ("time_embedder.linear_2", "time_embedder.proj_out"),
-    ("norm_out.linear", "final_layer.adaln_proj.linear"),
-    ("norm_out.norm", "final_layer.norm"),
-)
-
-
-def _diffusers_to_vllm_name(name: str) -> str:
-    """Rename a diffusers transformer param to its fused-vllm counterpart (no reshape)."""
-    name = name.replace("token_refiner.refiner_blocks.", "token_refiner.blocks.")
-    name = name.replace("transformer_blocks.", "blocks.")
-    name = name.replace(".attn.norm_q.", ".attn.q_norm.")
-    name = name.replace(".attn.norm_k.", ".attn.k_norm.")
-    name = name.replace(".attn.to_out.0.", ".attn.out_proj.")
-    name = name.replace(".ff.net.2.", ".mlp.fc2.")
-    for old, new in _TOPLEVEL_RENAMES:  # audio_* listed first so they win over proj_in/out
-        if name.startswith(old + "."):
-            return new + name[len(old) :]
-    return name
-
-
-_LORA_VLLM_TARGET_MODULES = ["to_q", "to_k", "to_v", "out_proj", "fc1_0", "fc1_1", "fc2"]
-_SUPPORTED_DIFFUSERS_LORA_TARGETS = frozenset({"to_q", "to_k", "to_v", "to_out.0", "ff.net.0.proj", "ff.net.2"})
-
-
-def validate_lora_target_modules(target_modules) -> set[str]:
-    """Validate H3 LoRA targets against the sync-safe whitelist (single source of truth).
-
-    ``all-linear`` and top-level modules are rejected because FSDP layered-summon does
-    not transport them to rollout. Returns the normalized set; raises on violations.
-    """
-    if isinstance(target_modules, str):
-        requested = {target_modules}
-    elif isinstance(target_modules, list | tuple | set | frozenset):
-        requested = {str(target) for target in target_modules}
-    else:
-        raise ValueError(f"MiniMax H3 LoRA requires an explicit target_modules list; got {target_modules!r}.")
-    unsupported = requested - _SUPPORTED_DIFFUSERS_LORA_TARGETS
-    if not requested or unsupported:
-        raise ValueError(
-            "MiniMax H3 LoRA supports only transformer/refiner block targets "
-            f"{sorted(_SUPPORTED_DIFFUSERS_LORA_TARGETS)}, got {sorted(requested)}. "
-            "`all-linear` and other top-level modules are not synced to rollout "
-            "(FSDP layered-summon does not transport them)."
-        )
-    return requested
-
-
-_LORA_STACKED_PARAMS_MAPPING = [
-    (".qkv_proj", ".to_q", "q"),
-    (".qkv_proj", ".to_k", "k"),
-    (".qkv_proj", ".to_v", "v"),
-    (".fc1", ".fc1_0", "0"),
-    (".fc1", ".fc1_1", "1"),
-]
-
-
-def _map_lora_module_to_vllm(module: str) -> str:
-    """Map a diffusers LoRA target module path to its fused-vllm path (fc1 handled separately)."""
-    return _diffusers_to_vllm_name(module + ".")[:-1]
-
-
 class _PromptTokenOverride:
     """Return the Agent Loop token IDs when the upstream pipeline tokenizes the prompt.
 
@@ -711,8 +648,201 @@ class _PromptTokenOverride:
         return getattr(self._tokenizer, name)
 
 
-class MiniMaxH3RolloutWeightSyncMixin:
-    """Map Diffusers H3 weights and token-id-native prompts to vLLM-Omni."""
+_TOPLEVEL_RENAMES = (
+    ("audio_proj_in", "audio_patch_proj"),
+    ("audio_proj_out", "final_layer.audio_out"),
+    ("proj_in", "video_patch_proj"),
+    ("proj_out", "final_layer.video_out"),
+    ("context_embedder", "condition_proj"),
+    ("time_embedder.linear_1", "time_embedder.proj_in"),
+    ("time_embedder.linear_2", "time_embedder.proj_out"),
+    ("norm_out.linear", "final_layer.adaln_proj.linear"),
+    ("norm_out.norm", "final_layer.norm"),
+)
+
+_LORA_STACKED_PARAMS_MAPPING = [
+    (".qkv_proj", ".to_q", "q"),
+    (".qkv_proj", ".to_k", "k"),
+    (".qkv_proj", ".to_v", "v"),
+    (".fc1", ".fc1_0", "0"),
+    (".fc1", ".fc1_1", "1"),
+]
+_LORA_TARGET_MAPPING = {
+    "to_q": ("to_q",),
+    "to_k": ("to_k",),
+    "to_v": ("to_v",),
+    "to_out.0": ("out_proj",),
+    "ff.net.0.proj": ("fc1_0", "fc1_1"),
+    "ff.net.2": ("fc2",),
+}
+H3_LORA_TARGETS = frozenset(_LORA_TARGET_MAPPING)
+_LORA_VLLM_TARGET_MODULES = [target for targets in _LORA_TARGET_MAPPING.values() for target in targets]
+
+
+def _diffusers_to_vllm_name(name: str) -> str:
+    """Rename an unfused Diffusers H3 parameter without changing its tensor."""
+    name = name.replace("token_refiner.refiner_blocks.", "token_refiner.blocks.")
+    name = name.replace("transformer_blocks.", "blocks.")
+    name = name.replace(".attn.norm_q.", ".attn.q_norm.")
+    name = name.replace(".attn.norm_k.", ".attn.k_norm.")
+    name = name.replace(".attn.to_out.0.", ".attn.out_proj.")
+    name = name.replace(".ff.net.2.", ".mlp.fc2.")
+    for source, target in _TOPLEVEL_RENAMES:
+        if name.startswith(source + "."):
+            return target + name[len(source) :]
+    return name
+
+
+def validate_lora_target_modules(target_modules) -> set[str]:
+    """Retain NFT's exact-target whitelist, also used by its Actor validation."""
+    if isinstance(target_modules, str):
+        requested = {target_modules}
+    elif isinstance(target_modules, list | tuple | set | frozenset):
+        requested = {str(target) for target in target_modules}
+    else:
+        raise ValueError(f"MiniMax H3 LoRA requires an explicit target_modules list; got {target_modules!r}.")
+    unsupported = requested - H3_LORA_TARGETS
+    if not requested or unsupported:
+        raise ValueError(
+            "MiniMax H3 LoRA supports only transformer/refiner block targets "
+            f"{sorted(H3_LORA_TARGETS)}, got {sorted(requested)}. "
+            "`all-linear` and other top-level modules are not synced to rollout "
+            "(FSDP layered-summon does not transport them)."
+        )
+    return requested
+
+
+def map_lora_tensors(
+    tensors: dict[str, torch.Tensor], component: str, ff_half: int, *, strict: bool
+) -> dict[str, torch.Tensor]:
+    """Share the tensor mapping while preserving the adapters' payload validation."""
+    mapped: dict[str, torch.Tensor] = {}
+    for name, tensor in tensors.items():
+        is_lora_a = name.endswith(".lora_A.weight")
+        is_lora_b = name.endswith(".lora_B.weight")
+        if not (is_lora_a or is_lora_b):
+            mapped[name] = tensor
+            continue
+        suffix = ".lora_A.weight" if is_lora_a else ".lora_B.weight"
+        module = name[: -len(suffix)]
+        anchors = [
+            offset
+            for offset in (module.find("transformer_blocks."), module.find("token_refiner.refiner_blocks."))
+            if offset >= 0
+        ]
+        if not anchors:
+            if strict:
+                raise ValueError(f"MiniMax H3 cannot map LoRA tensor outside supported DiT blocks: {name}.")
+            mapped[name] = tensor
+            continue
+        module = module[min(anchors) :]
+        vllm_module = _diffusers_to_vllm_name(module + ".")[:-1]
+        if ".ff.net.0.proj" in module:
+            base = vllm_module.replace(".ff.net.0.proj", ".mlp.fc1")
+            if is_lora_b:
+                if strict and tensor.shape[0] != 2 * ff_half:
+                    raise ValueError(
+                        f"MiniMax H3 fc1 LoRA B rows must be {2 * ff_half}, got {tensor.shape[0]} for {name}."
+                    )
+                # Diffusers stores [up, gate]; native logical slices are [gate, up].
+                swapped = torch.cat([tensor[ff_half:], tensor[:ff_half]], dim=0)
+                mapped[f"{component}.{base}_0{suffix}"] = swapped[:ff_half].contiguous()
+                mapped[f"{component}.{base}_1{suffix}"] = swapped[ff_half:].contiguous()
+            else:
+                mapped[f"{component}.{base}_0{suffix}"] = tensor
+                mapped[f"{component}.{base}_1{suffix}"] = tensor
+            continue
+        mapped[f"{component}.{vllm_module}{suffix}"] = tensor
+    return mapped
+
+
+class MiniMaxH3WeightSyncBase:
+    """Load fused projections through native TP-aware loaders for both algorithms.
+
+    The two class attributes preserve existing NFT/FlowGRPO component and RoPE
+    policies; they are not runtime configuration options.
+    """
+
+    _h3_sync_components = ("transformer", "transformers_ref")
+    _h3_initialize_rope = False
+
+    def _h3_weight_component_name(self) -> str:
+        return "transformer"
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Translate names and load logical QKV/GEGLU shards without retaining buckets."""
+        translated: list[tuple[str, torch.Tensor]] = []
+        loaded: set[str] = set()
+        component_params: dict[str, dict[str, torch.Tensor]] = {}
+        for name, tensor in weights:
+            component, separator, inner = name.partition(".")
+            if separator != "." or component not in self._h3_sync_components:
+                translated.append((name, tensor))
+                continue
+            target_component = self._h3_weight_component_name() if component == "transformer" else component
+            inner = inner.replace(".base_layer", "")
+            if "lora_" in inner:
+                continue
+
+            is_qkv = inner.endswith((".attn.to_q.weight", ".attn.to_k.weight", ".attn.to_v.weight"))
+            is_fc1 = inner.endswith(".ff.net.0.proj.weight")
+            if is_qkv or is_fc1:
+                if is_qkv:
+                    block, projection = inner.rsplit(".attn.to_", 1)
+                    target_name = f"{_diffusers_to_vllm_name(block)}.attn.qkv_proj.weight"
+                else:
+                    target_name = _diffusers_to_vllm_name(inner).replace(".ff.net.0.proj.", ".mlp.fc1.")
+                if target_component not in component_params:
+                    component_params[target_component] = dict(getattr(self, target_component).named_parameters())
+                param = component_params[target_component][target_name]
+                if is_qkv:
+                    param.weight_loader(param, tensor, projection[0])
+                else:
+                    up, gate = tensor.chunk(2, dim=0)
+                    param.weight_loader(param, gate, 0)
+                    param.weight_loader(param, up, 1)
+                loaded.add(f"{component}.{target_name}")
+                continue
+            translated.append((f"{target_component}.{_diffusers_to_vllm_name(inner)}", tensor))
+
+        needs_rope = self._h3_initialize_rope and not getattr(self, "_rope_inv_freq_loaded", False)
+        if needs_rope:
+            rope_len = self.transformer.arch.rope_inv_freq_len
+            inv_freq = 10000.0 ** (-(torch.arange(0, 2 * rope_len, 2, dtype=torch.float32) / (2 * rope_len)))
+            # Keep prefix groups contiguous for the native pipeline loader.
+            insert_at = next(
+                (i for i, (name, _) in enumerate(translated) if not name.startswith("transformer.")), len(translated)
+            )
+            translated.insert(insert_at, ("transformer.rope.inv_freq", inv_freq))
+        if translated or self._h3_initialize_rope:
+            loaded.update(super().load_weights(translated))
+        if needs_rope and "transformer.rope.inv_freq" in loaded:
+            self._rope_inv_freq_loaded = True
+        return loaded
+
+    def install_h3_lora_layout(self) -> None:
+        """Complete native QKV/GEGLU metadata without discarding existing mappings."""
+        transformer = getattr(self, self._h3_weight_component_name(), None)
+        if transformer is None:
+            return
+        existing = getattr(transformer, "stacked_params_mapping", None) or ()
+        # Native H3 already declares scoped QKV entries, but not the FC1 slices.
+        # The manager matches leaf names, so scoped and unscoped entries are equivalent.
+        present = {(packed.rsplit(".", 1)[-1], sub.rsplit(".", 1)[-1], str(shard)) for packed, sub, shard in existing}
+        missing = [
+            (packed, sub, shard)
+            for packed, sub, shard in _LORA_STACKED_PARAMS_MAPPING
+            if (packed.rsplit(".", 1)[-1], sub.rsplit(".", 1)[-1], str(shard)) not in present
+        ]
+        if missing:
+            transformer.stacked_params_mapping = [*existing, *missing]
+
+
+class MiniMaxH3RolloutWeightSyncMixin(MiniMaxH3WeightSyncBase):
+    """Keep NFT's prompt encoding, transformer selection and first-sync RoPE policy."""
+
+    _h3_sync_components = ("transformer",)
+    _h3_initialize_rope = True
 
     def encode_prompt(self, *, task: str, prompt: str, image=None, images=None, **kwargs):
         """Encode Agent Loop IDs while letting vLLM-Omni build reference vision spans."""
@@ -769,97 +899,16 @@ class MiniMaxH3RolloutWeightSyncMixin:
         tags = _broadcast_tensor(tags, dtype=torch.long, device=self.device)
         return hidden, tags
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Translate Diffusers weights into the fused vLLM H3 layout."""
-        arch = self.transformer.arch
-        heads, head_dim, ff_half = arch.num_attention_heads, arch.attention_head_dim, arch.ffn_hidden_size
-        partials = getattr(self, "_qkv_buffer", None)
-        if partials is None:
-            partials = self._qkv_buffer = {}
-        translated: list[tuple[str, torch.Tensor]] = []
-        for name, tensor in weights:
-            if not name.startswith("transformer."):
-                translated.append((name, tensor))
-                continue
-            inner = name[len("transformer.") :].replace(".base_layer", "")
-            if "lora_" in inner:
-                continue
-            if inner.endswith((".attn.to_q.weight", ".attn.to_k.weight", ".attn.to_v.weight")):
-                block, comp = inner.rsplit(".attn.to_", 1)
-                slot = partials.setdefault(block, {})
-                slot[comp[0]] = tensor
-                if len(slot) == 3:
-                    heads_qkv = [slot[c].view(heads, head_dim, -1) for c in ("q", "k", "v")]
-                    qkv = torch.stack(heads_qkv, dim=1).reshape(heads * 3 * head_dim, -1)
-                    translated.append((f"transformer.{_diffusers_to_vllm_name(block)}.attn.qkv_proj.weight", qkv))
-                    del partials[block]
-                continue
-            if inner.endswith(".ff.net.0.proj.weight"):
-                swapped = torch.cat([tensor[ff_half:], tensor[:ff_half]], dim=0)
-                vname = _diffusers_to_vllm_name(inner).replace(".ff.net.0.proj.", ".mlp.fc1.")
-                translated.append((f"transformer.{vname}", swapped))
-                continue
-            translated.append((f"transformer.{_diffusers_to_vllm_name(inner)}", tensor))
-        needs_rope = not getattr(self, "_rope_inv_freq_loaded", False)
-        if needs_rope:
-            rope_len = arch.rope_inv_freq_len
-            inv_freq = 10000.0 ** (-(torch.arange(0, 2 * rope_len, 2, dtype=torch.float32) / (2 * rope_len)))
-            # vllm-omni 0.27 requires each weight-prefix group to be contiguous;
-            # the rope table must stay inside the "transformer." run.
-            insert_at = next(
-                (i for i, (n, _) in enumerate(translated) if not n.startswith("transformer.")),
-                len(translated),
-            )
-            translated.insert(insert_at, ("transformer.rope.inv_freq", inv_freq))
-
-        loaded = super().load_weights(translated)
-        if needs_rope and "transformer.rope.inv_freq" in loaded:
-            self._rope_inv_freq_loaded = True
-        return loaded
-
     def _install_lora_layout(self) -> None:
-        """Install H3 QKV and FC1 LoRA slice metadata."""
-        transformer = getattr(self, "transformer", None)
-        if transformer is not None and not getattr(transformer, "stacked_params_mapping", None):
-            transformer.stacked_params_mapping = list(_LORA_STACKED_PARAMS_MAPPING)
+        self.install_h3_lora_layout()
 
     def map_lora_update_to_engine(
         self, tensors: dict[str, torch.Tensor], peft_config: dict
     ) -> tuple[dict[str, torch.Tensor], dict]:
-        """Translate LoRA deltas to the fused vLLM H3 layout."""
+        """Retain NFT's target expansion and permissive payload handling."""
         target_modules = peft_config.get("target_modules") if peft_config is not None else None
         validate_lora_target_modules(target_modules)
-
-        ff_half = self.transformer.arch.ffn_hidden_size
-        mapped: dict[str, torch.Tensor] = {}
-        for name, tensor in tensors.items():
-            is_lora_a = name.endswith(".lora_A.weight")
-            is_lora_b = name.endswith(".lora_B.weight")
-            if not (is_lora_a or is_lora_b):
-                mapped[name] = tensor
-                continue
-            suffix = ".lora_A.weight" if is_lora_a else ".lora_B.weight"
-            module = name[: -len(suffix)]
-            anchors = [
-                a for a in (module.find("transformer_blocks."), module.find("token_refiner.refiner_blocks.")) if a >= 0
-            ]
-            if not anchors:
-                mapped[name] = tensor
-                continue
-            module = module[min(anchors) :]
-            if ".ff.net.0.proj" in module:
-                base = _diffusers_to_vllm_name(module + ".")[:-1].replace(".ff.net.0.proj", ".mlp.fc1")
-                if is_lora_b:
-                    swapped = torch.cat([tensor[ff_half:], tensor[:ff_half]], dim=0)
-                    mapped[f"transformer.{base}_0{suffix}"] = swapped[:ff_half].contiguous()
-                    mapped[f"transformer.{base}_1{suffix}"] = swapped[ff_half:].contiguous()
-                else:
-                    mapped[f"transformer.{base}_0{suffix}"] = tensor
-                    mapped[f"transformer.{base}_1{suffix}"] = tensor
-                continue
-            vllm_module = _map_lora_module_to_vllm(module)
-            mapped[f"transformer.{vllm_module}{suffix}"] = tensor
-
+        mapped = map_lora_tensors(tensors, "transformer", self.transformer.arch.ffn_hidden_size, strict=False)
         new_config = dict(peft_config) if peft_config is not None else {}
         new_config["target_modules"] = list(_LORA_VLLM_TARGET_MODULES)
         return mapped, new_config

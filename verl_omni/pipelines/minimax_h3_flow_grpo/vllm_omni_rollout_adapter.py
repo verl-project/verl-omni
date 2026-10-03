@@ -62,11 +62,23 @@ from .common import (
     configure_flow_scheduler,
     flatten_joint_latents,
     h3_sigma_schedules,
+    h3_transition_count,
     sample_h3_transition,
 )
 from .weight_sync import MiniMaxH3WeightSyncMixin
 
 __all__ = ["MiniMaxH3PipelineWithLogProb"]
+
+
+def _iter_tensors(value: Any):
+    if isinstance(value, torch.Tensor):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _iter_tensors(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_tensors(item)
 
 
 def _pad_first_dim(value: torch.Tensor, target: int) -> torch.Tensor:
@@ -240,7 +252,29 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
         audio_condition_lengths: list[int] | None = None,
         keyframe_frame_indices: list[int] | None = None,
         base_schedule: Sequence[float] | None = None,
+        pad_seq_len: int | None = None,
+        locked_audio_rows: torch.Tensor | None = None,
+        video_edit_clean_rows: torch.Tensor | None = None,
+        video_edit_mask_rows: torch.Tensor | None = None,
+        video_edit_restore_mask_rows: torch.Tensor | None = None,
+        audio_edit_clean_rows: torch.Tensor | None = None,
+        audio_edit_mask_rows: torch.Tensor | None = None,
+        audio_edit_restore_mask_rows: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # vLLM-Omni's request path always forwards these; FlowGRPO rollouts never use them.
+        unsupported = {
+            "pad_seq_len": pad_seq_len,
+            "locked_audio_rows": locked_audio_rows,
+            "video_edit_clean_rows": video_edit_clean_rows,
+            "video_edit_mask_rows": video_edit_mask_rows,
+            "video_edit_restore_mask_rows": video_edit_restore_mask_rows,
+            "audio_edit_clean_rows": audio_edit_clean_rows,
+            "audio_edit_mask_rows": audio_edit_mask_rows,
+            "audio_edit_restore_mask_rows": audio_edit_restore_mask_rows,
+        }
+        used = sorted(name for name, value in unsupported.items() if value is not None)
+        if used:
+            raise NotImplementedError(f"MiniMax H3 FlowGRPO rollout does not support {', '.join(used)}.")
         target_video_rows, target_audio_rows = self._initial_noise(
             seed=seed,
             latent_t=latent_t,
@@ -360,7 +394,8 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
         audio_scheduler = FlowMatchSDEDiscreteScheduler()
         configure_flow_scheduler(video_scheduler, video_sigmas, self.device)
         configure_flow_scheduler(audio_scheduler, audio_sigmas, self.device)
-        num_transitions = num_steps - 1
+        # Take the step count from the schedule, not from num_steps: its boundary count is an upstream convention.
+        num_transitions = h3_transition_count(video_sigmas, audio_sigmas)
         if self._flow_grpo_window_size is None:
             selected = set(range(num_transitions))
         else:
@@ -548,6 +583,9 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
             "ref_block_count",
         )
         replay_fields = tuple(key for key in replay_fields if key in trajectory)
+        # With model-level CPU offload, vLLM-Omni leaves a meta placeholder on ranks that do not reply;
+        # DiffusionOutput(to_cpu=True) cannot copy it. The trajectory tensors above are already on CPU.
+        has_meta_output = any(isinstance(item, torch.Tensor) and item.is_meta for item in _iter_tensors(output.output))
         return with_rollout_data(
             output,
             trajectory_latents=trajectory["all_latents"],
@@ -558,5 +596,5 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
                 "prompt_embeds_mask": trajectory["prompt_embeds_mask"],
             },
             rl={key: trajectory[key] for key in replay_fields},
-            to_cpu=True,
+            to_cpu=not has_meta_output,
         )

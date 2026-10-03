@@ -19,10 +19,7 @@ import torch
 from tensordict import TensorDict
 from verl.utils import tensordict_utils as tu
 
-from verl_omni.pipelines.model_base import DiffusionModelBase
-from verl_omni.workers.config import DiffusionModelConfig
-
-from .common import (
+from verl_omni.pipelines.minimax_h3_diffusion_nft.common import (
     build_layout_from_meta,
     build_ref2va_layout_from_meta,
     build_row_timesteps,
@@ -36,6 +33,8 @@ from .common import (
     unpack_video_audio_rows,
     validate_lora_target_modules,
 )
+from verl_omni.pipelines.model_base import DiffusionModelBase
+from verl_omni.workers.config import DiffusionModelConfig
 
 __all__ = ["MiniMaxH3DiffusionNFT"]
 
@@ -46,7 +45,7 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
 
     @classmethod
     def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:
-        """Reject LoRA targets the rollout weight sync cannot transport (shares common.py whitelist)."""
+        """Reject LoRA targets the rollout weight sync cannot transport (shares the weight-sync whitelist)."""
         if model_config.lora_rank > 0:
             validate_lora_target_modules(model_config.target_modules)
 
