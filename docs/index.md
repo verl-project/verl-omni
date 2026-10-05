@@ -100,6 +100,7 @@ examples/minimax_h3/diffusionnft_trainer_minimax_h3.md
 examples/boogu_image/diffusionnft_trainer_boogu_image.md
 examples/boogu_image/flowgrpo_trainer_boogu_image.md
 examples/minimax_h3/flowgrpo_trainer_minimax_h3.md
+examples/minicpm_o/opd_trainer_minicpm_o.md
 ```
 
 ```{toctree}

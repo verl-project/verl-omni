@@ -84,7 +84,12 @@ class MiniCPMO:
         patch_minicpm_auto_model_init(pretrained_model_name_or_path, config=config)
         # The remote vision tower declares only the pre-5 FA2 support flag.
         patch_minicpm_siglip_flash_attn_support(pretrained_model_name_or_path, config=config)
-        return AutoModel.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+        model = AutoModel.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+        if hasattr(model, "resampler"):
+            # Transformers initializes non-persistent buffers it cannot load to zero.
+            resampler = model.resampler
+            resampler._set_2d_pos_cache(resampler.max_size, device=resampler.pos_embed.device)
+        return model
 
 
 @OmniModelBase.register("MiniCPMO", stage="thinker")
@@ -117,6 +122,8 @@ class MiniCPMThinkerAdapter(OmniModelBase):
         """
         # Base strips each submodule named by get_strip_modules (the TTS stage).
         module = super().configure_model(module, model_config)
+        # Whole-model dtype casts must not quantize the non-persistent RoPE frequencies.
+        _keep_rotary_frequencies_dtype(module)
         # The media towers are batch-sensitive; each patch fixes one deviation.
         _apply_remote_code_patches(module)
         # verl calls module(**hf_kwargs); the remote forward takes (data, **kwargs).
@@ -214,6 +221,26 @@ class MiniCPMThinkerAdapter(OmniModelBase):
             # would contradict the packed layout.
             llm_kwargs.pop("attention_mask", None)
         return {"data": data, **llm_kwargs}
+
+
+def _keep_rotary_frequencies_dtype(module) -> None:
+    """Make the inner LLM's rotary embeddings ignore dtype casts of their buffers."""
+    from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
+
+    for child in module.llm.modules():
+        if isinstance(child, Qwen3RotaryEmbedding):
+            child._verl_omni_original_apply = child._apply
+            child._apply = types.MethodType(_rotary_apply_keeping_dtype, child)
+
+
+def _rotary_apply_keeping_dtype(self, fn, recurse=True):
+    def keep_dtype(tensor):
+        converted = fn(tensor)
+        if converted.dtype != tensor.dtype:
+            return tensor.to(device=converted.device)
+        return converted
+
+    return self._verl_omni_original_apply(keep_dtype, recurse=recurse)
 
 
 def _apply_remote_code_patches(module) -> None:

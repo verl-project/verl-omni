@@ -30,13 +30,12 @@ class OmniDistillationTeacherModelConfig(DistillationTeacherModelConfig):
     """Teacher config that also accepts ``inference.name == "vllm_omni"``."""
 
     def _validate_topk_logprobs(self, use_topk: bool, topk: Optional[int]) -> None:
+        if self.inference.name != "vllm_omni":
+            return super()._validate_topk_logprobs(use_topk, topk)
         if not use_topk:
             return
-        if topk is None:
-            raise ValueError("topk must be specified when use_topk is True.")
-
-        if self.inference.name != "vllm_omni":
-            raise ValueError(f"the inference.name should be 'vllm_omni', got {self.inference.name}")
+        if topk is None or topk <= 0:
+            raise ValueError("topk must be positive when requesting teacher top-k log probabilities.")
         engine_kwargs = self.inference.engine_kwargs
         omni_engine_kwargs = dict(engine_kwargs.get("vllm_omni", {}))
         max_logprobs = omni_engine_kwargs.get("max_logprobs")

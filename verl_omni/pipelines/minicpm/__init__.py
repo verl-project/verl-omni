@@ -11,10 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""MiniCPM omni pipeline adapters."""
+"""MiniCPM-o 4.5 pipeline adapters: GSPO thinker training and simplex OPD rollout."""
 
-from .omni_rollout_adapter import MiniCPMORolloutAdapter
+from .agent_loop import MiniCPMAgentLoopManager, MiniCPMSimplexAgentLoop
+from .omni_rollout_adapter import MiniCPMORolloutAdapter, MiniCPMRolloutAdapter
 from .reward_decode import MiniCPMNaiveRewardManager
 from .thinker_training_adapter import MiniCPMThinkerAdapter
 
-__all__ = ["MiniCPMNaiveRewardManager", "MiniCPMORolloutAdapter", "MiniCPMThinkerAdapter"]
+__all__ = [
+    "MiniCPMAgentLoopManager",
+    "MiniCPMNaiveRewardManager",
+    "MiniCPMORolloutAdapter",
+    "MiniCPMRolloutAdapter",
+    "MiniCPMSimplexAgentLoop",
+    "MiniCPMThinkerAdapter",
+]
