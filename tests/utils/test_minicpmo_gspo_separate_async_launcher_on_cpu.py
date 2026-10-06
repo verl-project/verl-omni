@@ -49,7 +49,7 @@ def test_launcher_selects_the_separate_async_trainer():
     assert "actor_rollout_ref.rollout.checkpoint_engine.backend=nccl" in settings
 
 
-def test_launcher_batch_identity_and_staleness_pin():
+def test_launcher_batch_identity_and_staleness_floor():
     # The upstream assert: 128 == parameter_sync_step * ppo_mini_batch_size, as in both parents.
     train_batch = int(_setting_value("data.train_batch_size"))
     sync_step = int(_setting_value("trainer.v1.separate_async.parameter_sync_step"))
@@ -57,8 +57,9 @@ def test_launcher_batch_identity_and_staleness_pin():
     threshold = int(_setting_value("trainer.v1.sampler.max_off_policy_threshold"))
 
     assert train_batch == sync_step * mini_batch
-    # At most one weight version of staleness: threshold == one sync cycle.
-    assert threshold == sync_step
+    # The threshold counts outer weight-version spans (weights sync once per outer
+    # step), and one-batch-ahead samples span 2 — the admission floor.
+    assert threshold >= 2
 
 
 def test_launcher_splits_gpu_pools():
