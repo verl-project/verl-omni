@@ -245,6 +245,7 @@ For version requirements and detailed setup instructions, see
 | Offline DPO (LoRA) | `examples/dpo_trainer/qwen3_omni/qwen3_omni/run_qwen3_omni_omni_preference_lora.sh` | 4×H800 |
 | [GSPO OPD (image, NPU)](../algo/omni_opd.md) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh` | 32×NPU (2 x Atlas 800T A3) |
 | GSPO (AudioMCQ, Megatron, separate-async) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_audiomcq_separate_async.sh` | 32×A100 80GB (4 train + 4 rollout GPUs/node). Experimental; not reproducible from the current public pins. See the [AudioMCQ recipe](../../examples/gspo_trainer/qwen3_omni/README.md). |
+| GSPO (AVQA image+audio, Megatron, separate-async) | `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_avqa_separate_async.sh` | 8 GPUs by default (4 actor + 4 rollout); optional 6-GPU layout. Validated on H200 with development dependencies; experimental, public-pin reproducibility remains unverified. See the [AVQA recipe](../../examples/gspo_trainer/qwen3_omni/README.md). |
 
 The default GSPO actor (FSDP2, 30B + LoRA r=32 with offloading) and vLLM-Omni rollout (TP=2)
 colocate on the same 4 GPUs. Megatron full-parameter is a separate-async variant, not a replacement for FSDP2 LoRA. The rollout deploy config is auto-generated from

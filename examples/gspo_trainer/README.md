@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
-Last updated: 10/02/2026
+Last updated: 10/06/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on multimodal reasoning tasks, using FSDP for the actor and `vllm-omni` as
@@ -22,11 +22,12 @@ Both **GPU** and **NPU** training platforms are supported:
 
 For the base environment setup, see the [installation guide](../../docs/start/install.md).
 
-For **Megatron full-parameter audio-only RL**, see the
-[AudioMCQ separate-async recipe](qwen3_omni/README.md), including an
-offline toy-model smoke and the configurable full-model run. That path is
-experimental and is not reproducible from the current public pins; the FSDP
-recipes above remain the supported default.
+For **Megatron full-parameter separate-async RL**, see the
+[AudioMCQ and image+audio AVQA recipes](qwen3_omni/README.md). The AudioMCQ
+recipe includes an offline toy-model smoke; the AVQA recipe adds a strict
+train/validation media split. Both are experimental and are not reproducible
+from the current public pins; the FSDP recipes above remain the supported
+default.
 
 ## Installation
 
@@ -603,7 +604,7 @@ colocated script; only the disaggregation lines differ:
 | `trainer.v1.trainer_mode` | `omni_sync` | `omni_separate_async` | trainer selection |
 | GPU split | 4 colocated | 2 train + 2 rollout (`rollout.nnodes=1`, `n_gpus_per_node=2`) | disaggregation |
 | Rollout topology | TP=2, colocated | `tensor_model_parallel_size=1` → two standalone replicas | independent rollout capacity |
-| `model.lora.merge` | `True` (merged full-weight IPC sync) | `True` — merged full weights via the NCCL engine | accuracy parity with the colocated reference; `False` (adapter deltas, ~100 MB vs ~19 GB per sync) is the later perf flip |
+| `model.lora.merge` | `True` (merged full-weight IPC sync) | `True` — merged full weights via the NCCL engine | accuracy parity with the colocated reference (see the sync note below) |
 | `rollout.checkpoint_engine.backend` | — (naive colocated sync) | `nccl` | required non-naive backend |
 | `actor.fsdp_config.param_offload` / `optimizer_offload` | `true` — vacate shared GPUs for the rollout | `false` — dropped, not inherited | trainer GPUs are dedicated |
 | `rollout.gpu_memory_utilization` | 0.7 | 0.7 | the hybrid-replica wake on the trainer GPUs must fit next to the resident actor |

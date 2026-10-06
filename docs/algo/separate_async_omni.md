@@ -1,7 +1,7 @@
 (separate_async_omni)=
 # Separate-Async RL Training for Omni AR Models
 
-Last updated: 10/02/2026
+Last updated: 10/06/2026
 
 `trainer.v1.trainer_mode=omni_separate_async` runs training and rollout on
 separate GPU pools for omni AR models (Qwen3-Omni thinker, MiniCPM-o 4.5
@@ -30,7 +30,7 @@ for staleness; the replay buffer's
 ## GPU layout
 
 `trainer.n_gpus_per_node × trainer.nnodes` GPUs run the actor (FSDP2 LoRA by
-default, or Megatron for the full-parameter AudioMCQ recipe);
+default, or Megatron for the full-parameter AudioMCQ and AVQA recipes);
 `actor_rollout_ref.rollout.n_gpus_per_node × actor_rollout_ref.rollout.nnodes`
 additional GPUs run standalone rollout replicas
 (`n_gpus_per_node / tensor_model_parallel_size` replicas per node). Single-node
@@ -53,6 +53,9 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_audiomcq_separate_
 That launcher is Thinker-only, BSHD, PP=CP=1, AudioMCQ. It is experimental and
 not clean-checkout reproducible yet; see
 [`examples/gspo_trainer/qwen3_omni/README.md`](../../examples/gspo_trainer/qwen3_omni/README.md).
+The same trainer mode also has an image+audio AVQA Megatron launcher using
+shared configuration. Development-environment GPU results and the remaining
+public-dependency limitations are documented in that README.
 FSDP LoRA remains the default. Key overrides:
 
 | knob | default | meaning |
@@ -79,15 +82,16 @@ bash examples/gspo_trainer/minicpm/run_minicpmo_4_5_thinker_gspo_lora_avqa_separ
 
 LoRA recipes should set `actor_rollout_ref.model.lora.merge=False` so weight
 sync ships only adapter tensors (applied on the replicas via the LoRA-aware
-checkpoint engine manager). The actor-side peft keys resolve onto both rollout
-classes without a remap — Qwen3-Omni through transformers'
-`_checkpoint_conversion_mapping` strip, MiniCPM-o natively because the actor's
-`MiniCPMO.llm.*` tree matches the `llm.`-prefixed registration in
-`MiniCPMO45OmniLLMForConditionalGeneration` (pinned by
-`tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py`). The MiniCPM AVQA
-recipe currently ships `merge=True` — merged full weights through the same
-NCCL manager — to keep its first run directly comparable with the colocated
-reference; flipping to adapter deltas later is config-only.
+checkpoint engine manager).
+
+The actor-side peft keys resolve onto both rollout classes without a remap —
+Qwen3-Omni through transformers' `_checkpoint_conversion_mapping` strip,
+MiniCPM-o natively because the actor's `MiniCPMO.llm.*` tree matches the
+`llm.`-prefixed registration in `MiniCPMO45OmniLLMForConditionalGeneration`
+(pinned by `tests/pipelines/test_minicpm_lora_sync_names_on_cpu.py`). The
+MiniCPM AVQA recipe currently ships `merge=True` — merged full weights through
+the same NCCL manager — to keep its first run directly comparable with the
+colocated reference; flipping to adapter deltas later is config-only.
 
 `omni_delta_sharded` (RFC #38) broadcasts only the weights that changed since
 the last sync instead of the full model (a verl-omni subclass of verl's
