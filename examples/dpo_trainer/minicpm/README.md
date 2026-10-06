@@ -64,3 +64,19 @@ Key defaults in the launch script:
   as root `ignored_params` and stays unsharded; the frozen vision towers ride
   along so an unsharded forward cannot desync the ranks. Ignored parameters must
   stay frozen, which is why `apm` and `vpm` are also LoRA-excluded.
+
+## Validation accounting
+
+Two defaults decide how many pairs `val/reward_accuracy` is actually averaged over,
+and both must hold for metrics to be comparable between runs:
+
+- `VAL_MAX_SAMPLES` defaults to `VAL_BATCH_SIZE * 4`, i.e. 2 modalities x 2 full
+  batches. `ModalityGroupedBatchSampler` runs with `drop_last=true` so that no
+  DataLoader batch mixes image and audio rows, which discards the trailing partial
+  chunk of each modality. Requesting a count that is not a multiple of
+  `2 * VAL_BATCH_SIZE`, or whose per-modality share exceeds that modality's test
+  rows, therefore scores fewer pairs than `val_max_samples` implies.
+- `DATA_SEED` pins `data.seed`. `data.shuffle` defaults to `true`, so
+  `balance_max_samples_by_modality` draws the `val_max_samples` subset with
+  `np.random.default_rng(seed)`; with the default `data.seed=null` every run
+  evaluates a different subset. Pin it before comparing two runs' metrics.

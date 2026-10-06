@@ -42,7 +42,13 @@ class _CharTokenizer:
 
     def apply_chat_template(self, messages, tokenize=False, **kwargs):
         del tokenize, kwargs
-        return "".join(f"{message['role']}:{message['content']}\n" for message in messages)
+        rendered = []
+        for index, message in enumerate(messages):
+            content = message["content"]
+            if message["role"] == "assistant" and index == len(messages) - 1:
+                content = content.lstrip("\n")
+            rendered.append(f"{message['role']}:{content}\n")
+        return "".join(rendered)
 
     def __call__(
         self, text, add_special_tokens=False, return_offsets_mapping=False, return_tensors=None, padding=False
@@ -108,6 +114,26 @@ def test_minicpm_transform_labels_only_final_assistant_answer():
     assert "tgt_sizes" in output
     assert "image_bound" in output
     assert "audio_bounds" in output
+
+
+def test_minicpm_transform_strips_leading_newlines_from_final_answer():
+    sample = {
+        "conversations": [
+            ["user", ("text", "question")],
+            ["assistant", ("text", "\n\nleading newline")],
+        ]
+    }
+
+    output = process_minicpm_sample(sample, processor=_MiniCPMProcessor())[0]
+    input_text = "".join(chr(token_id) for token_id in output["input_ids"].tolist())
+    labelled_chars = "".join(
+        chr(token_id)
+        for token_id, label in zip(output["input_ids"].tolist(), output["labels"].tolist(), strict=True)
+        if label != IGNORE_INDEX
+    )
+
+    assert labelled_chars == "leading newline"
+    assert "\n\nleading newline" not in input_text
 
 
 def test_sample_pixel_slices_unwraps_processor_batch_list():

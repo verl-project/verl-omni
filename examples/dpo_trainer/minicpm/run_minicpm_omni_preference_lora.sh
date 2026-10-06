@@ -41,9 +41,13 @@ ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-sdpa}
 LR=${LR:-1.0e-6}
 SAVE_FREQ=${SAVE_FREQ:-100}
 TEST_FREQ=${TEST_FREQ:-100}
-VAL_MAX_SAMPLES=${VAL_MAX_SAMPLES:-96}
+# Validation must cover a whole number of same-modality batches (2 modalities x 2
+# batches). ModalityGroupedBatchSampler drops partial chunks under drop_last=true, so a
+# value that is not a multiple of 2 * VAL_BATCH_SIZE silently scores fewer pairs.
+VAL_MAX_SAMPLES=${VAL_MAX_SAMPLES:-$((VAL_BATCH_SIZE * 4))}
 MAX_LENGTH=${MAX_LENGTH:-4096}
 MAX_SLICE_NUMS=${MAX_SLICE_NUMS:-1}
+DATA_SEED=${DATA_SEED:-42}
 
 IMAGE_RATIO=${IMAGE_RATIO:-1.0}
 AUDIO_RATIO=${AUDIO_RATIO:-1.0}
@@ -76,6 +80,7 @@ python3 -m verl_omni.trainer.main_omni \
     data.train_batch_size="${TRAIN_BATCH_SIZE}" \
     data.val_batch_size="${VAL_BATCH_SIZE}" \
     data.val_max_samples="${VAL_MAX_SAMPLES}" \
+    data.seed="${DATA_SEED}" \
     +data.balance_max_samples_by_modality=true \
     +data.base_transform=minicpm \
     +data.pad_mode=no_padding \

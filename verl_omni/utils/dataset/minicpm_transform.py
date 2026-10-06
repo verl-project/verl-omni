@@ -110,7 +110,15 @@ def _conversation_to_message(conversation: Sequence[Any]) -> dict[str, str]:
 
 def _build_minicpm_messages(sample: dict[str, Any]) -> list[dict[str, str]]:
     conversations = sample["conversations"] if ("conversations" in sample and sample["conversations"]) else sample
-    return [_conversation_to_message(conversation) for conversation in conversations]
+    messages = [_conversation_to_message(conversation) for conversation in conversations]
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index]["role"] == "assistant":
+            # MiniCPM's chat template lstrip()s "\n" off the last assistant content only, so an
+            # answer starting with a newline renders differently marked than unmarked and the
+            # marker offset check would raise. Normalising here keeps both renders identical.
+            messages[index]["content"] = messages[index]["content"].lstrip("\n")
+            break
+    return messages
 
 
 def _mark_final_assistant_content(
