@@ -36,6 +36,53 @@ additional GPUs run standalone rollout replicas
 (`n_gpus_per_node / tensor_model_parallel_size` replicas per node). Single-node
 replicas only for AR omni today (`run_headless` is not implemented upstream).
 
+### Balancing the actor and rollout pools
+
+Steady state pipelines one batch ahead — while the trainer consumes batch *n*,
+the standalone replicas generate batch *n+1* — so the step time is bounded by
+the **slower** pool plus the weight-sync overhead. Multimodal prefill usually
+makes generation the dominant phase (the reason to disaggregate at all), so
+rebalance toward rollout first when one pool starves the other:
+
+- **Actor pool** (`trainer.n_gpus_per_node × trainer.nnodes`): FSDP2 shards
+  parameters, optimizer states and activations across the pool — more GPUs
+  mean more memory headroom and more training throughput. A 4.5B LoRA actor
+  runs resident on 2 GPUs; a 30B one on the same pool keeps the offload flags
+  (the hybrid-replica wake does not fit next to a resident 30B actor — see
+  the offload section below).
+- **Rollout pool** (`rollout.n_gpus_per_node × rollout.nnodes`): every replica
+  holds the whole model, TP-sharded — the model size sets the minimum
+  `tensor_model_parallel_size`, and rollout GPUs beyond that minimum buy
+  additional replicas (`n_gpus_per_node / TP` per node): more batches in
+  flight, not a faster single batch. A replica never spans nodes.
+
+Measured reference shapes, both on a single node of 4 × H800 80GB with the
+`128 = 8 × 16` batch identity — the two validated end-points of the
+small-actor/large-actor spectrum, not an A/B pair:
+
+| recipe | rollout pool | param_offload | s/step | tokens/s |
+| --- | --- | --- | --- | --- |
+| MiniCPM-o 4.5 AVQA | two TP=1 replicas | off | ~285 | ~1,130 |
+| Qwen3-Omni 30B AVQA | one TP=2 replica | on | ~730 | ~740 |
+
+Every shipped recipe starts from a half/half split (2+2 for the LoRA recipes,
+4+4 and 16+16 for the Megatron ones) and rebalances from there: a trainer that
+waits on the replay buffer means rollout is the bottleneck (add rollout GPUs
+or replicas); replicas idling between batches mean the trainer is (add trainer
+GPUs, or cut the swap cost per the offload section below). Watch
+`training/off_policy/*` and `timing_s/update_weights` (see Monitor) to tell
+the two apart. If the multi-replica shape stalls around weight syncs, fall
+back to one wider replica (`rollout.tensor_model_parallel_size=2`).
+
+Three knobs change the balance without re-splitting GPUs: lending colocated
+trainer GPUs to generation when the buffer runs short
+(`trainer.v1.separate_async.hybrid_rollout.enable_switch=true`, not yet
+GPU-verified on omni), sync
+frequency (`parameter_sync_step` — how often weights travel, not how fast
+either pool runs), and reward placement — GPU reward models live on the
+standalone pool or their own, never the trainer pool (colocated reward models
+are rejected at startup).
+
 ## Run
 
 ```bash

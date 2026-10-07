@@ -144,7 +144,8 @@ tuning surfaces differ accordingly:
 - **Layout.** Colocated vs. disaggregated reward still applies, but AR runs
   add the separate-async option for the actor/rollout split itself —
   [Separate-Async Omni Training](../algo/separate_async_omni.md) documents
-  that layout and when to prefer it. The megatron separate-async recipes in
+  that layout, when to prefer it, and how to balance the two pools. The
+  megatron separate-async recipes in
   the [Qwen3-Omni README](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/README.md)
   are the reference setups (experimental; see the reproducibility notes in
   [models catalogue](../start/models.md)).
@@ -168,9 +169,11 @@ tuning surfaces differ accordingly:
   while diffusion V1 is not — see the caveat in
   [profiler.md](profiler.md).
 
-No omni-specific throughput numbers are documented yet; treat every knob
-above as requiring measurement on your own workload before drawing
-conclusions.
+The only measured omni throughput reference points are the two separate-async
+actor/rollout splits in
+[Separate-Async Omni Training](../algo/separate_async_omni.md) (a 4.5B and a
+30B actor on 4 × H800); beyond those, treat every knob above as requiring
+measurement on your own workload before drawing conclusions.
 
 ## See also
 
