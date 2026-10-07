@@ -448,12 +448,16 @@ def test_ref2va_rollout_publishes_fixed_size_reference_replay_fields(monkeypatch
     monkeypatch.setattr(
         MiniMaxH3Pipeline,
         "forward",
-        lambda self, request: DiffusionOutput(output=(torch.zeros(1), torch.zeros(1))),
+        lambda self, request: DiffusionOutput(
+            output=(torch.zeros(1, 5, 8, 8, 3, dtype=torch.uint8), torch.zeros(1, 2, 160))
+        ),
     )
     request = MagicMock(
         prompts=[{"prompt_token_ids": [1, 2]}],
         sampling_params=SimpleNamespace(
             num_outputs_per_prompt=1,
+            frame_rate=24,
+            output_type="pt",
             extra_args={MINIMAX_H3_TOKEN_ID_NATIVE_KEY: True},
         ),
     )

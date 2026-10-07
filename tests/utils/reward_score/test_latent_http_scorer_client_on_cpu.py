@@ -22,6 +22,9 @@ import pytest
 import torch
 from safetensors.torch import load as load_tensors
 
+from verl_omni.pipelines.rollout_artifacts import MediaArtifact
+from verl_omni.pipelines.rollout_media import MediaSpec
+
 
 def _load_client_module():
     module_path = Path(__file__).parents[3] / "verl_omni/utils/reward_score/latent_http_scorer_client.py"
@@ -39,6 +42,9 @@ def _reward_inputs():
         "solution_image": torch.zeros(16, 2, 2),
         "ground_truth": "",
         "extra_info": {
+            "media_artifacts": {
+                "image_latent": MediaArtifact(MediaSpec("image", "latent", "CHW"), torch.zeros(16, 2, 2))
+            },
             "prompt_embeds": torch.arange(32, dtype=torch.float32).reshape(4, 8),
             "pooled_prompt_embeds": torch.arange(8, dtype=torch.float32),
         },
@@ -46,7 +52,7 @@ def _reward_inputs():
     }
 
 
-def test_serialize_request_uses_solution_latent_and_protocol_fields():
+def test_serialize_request_uses_named_latent_and_protocol_fields():
     inputs = _reward_inputs()
     payload = client._serialize_request(
         inputs["solution_image"],
@@ -64,10 +70,13 @@ def test_serialize_request_uses_solution_latent_and_protocol_fields():
     torch.testing.assert_close(tensors["seeds"], torch.tensor([7]))
 
 
-def test_serialize_request_prefers_explicit_clean_latent():
+def test_serialize_request_prefers_named_latent_over_legacy_fields():
     inputs = _reward_inputs()
     explicit_latent = torch.ones(16, 2, 2)
-    inputs["extra_info"]["latents_clean"] = explicit_latent
+    inputs["extra_info"]["latents_clean"] = torch.full_like(explicit_latent, 99)
+    inputs["extra_info"]["media_artifacts"]["image_latent"] = MediaArtifact(
+        MediaSpec("image", "latent", "CHW"), explicit_latent
+    )
 
     tensors = load_tensors(
         client._serialize_request(

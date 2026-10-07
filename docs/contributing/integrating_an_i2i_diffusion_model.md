@@ -324,6 +324,12 @@ Multiple aliases must contain equivalent images; conflicting values raise
 instead of silently selecting one. With no images, the parser returns `[]`.
 Validate the supported number of images and aspect ratios before encoding.
 
+Distinct preprocessing views are not aliases. In the token-native
+Qwen-Image-Edit adapter, read raw `multi_modal_data.image` directly to match the
+processor grid used to expand the prompt tokens; the engine's resized
+`additional_information.condition_images` must not be substituted or compared
+as an equivalent alias. VAE condition tensors and sizes remain separate fields.
+
 ### 4.2 Encode prompts with image features when required
 
 For a VLM-based model such as Qwen-Image-Edit, the prompt contains image

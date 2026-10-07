@@ -101,7 +101,7 @@ def test_export_video_encodes_rgb_and_audio_in_one_ffmpeg_invocation(monkeypatch
 
 
 @pytest.mark.parametrize("layout", ["tchw", "cthw", "thwc"])
-def test_video_tensor_to_rgb24_normalizes_supported_layouts(monkeypatch, layout):
+def test_video_tensor_to_rgb24_requires_canonical_or_declared_layout(monkeypatch, layout):
     tracking = _load_tracking_module(monkeypatch)
     canonical = torch.arange(2 * 3 * 4 * 5, dtype=torch.uint8).reshape(2, 3, 4, 5)
     video = {
@@ -110,7 +110,15 @@ def test_video_tensor_to_rgb24_normalizes_supported_layouts(monkeypatch, layout)
         "thwc": canonical.permute(0, 2, 3, 1),
     }[layout]
 
-    frames, width, height = tracking._video_tensor_to_rgb24(video)
+    from verl_omni.pipelines.rollout_artifacts import MediaArtifact
+    from verl_omni.pipelines.rollout_media import MediaSpec
+
+    if layout != "tchw":
+        with pytest.raises(ValueError, match="T, 3, H, W"):
+            tracking._video_tensor_to_rgb24(video)
+    declared = MediaArtifact(MediaSpec("video", "decoded", layout.upper(), fps=24), video)
+    canonical_artifact = declared.normalized(context="adapter", name="video_preview")
+    frames, width, height = tracking._video_tensor_to_rgb24(canonical_artifact)
 
     assert (width, height) == (5, 4)
     assert frames.tobytes() == canonical.permute(0, 2, 3, 1).contiguous().numpy().tobytes()
@@ -152,10 +160,11 @@ def test_wandb_wrapper_forwards_audio_to_video_export(monkeypatch):
         captured.append((output, path, kwargs))
 
     monkeypatch.setattr(tracking, "_export_video", fake_export)
-    clip = torch.zeros(5, 3, 8, 10)
+    clip = torch.zeros(5, 3, 8, 10, dtype=torch.uint8)
     audio = torch.zeros(1, 800)
     wrapped, temp_dir, media_to_log = tracking.wrap_val_samples_for_wandb(
         [("prompt", clip, 0.5, audio, 48_000)],
+        media_kinds=["video"],
         fps=24,
     )
 
@@ -183,6 +192,8 @@ def test_wandb_wrapper_skips_media_failure_and_continues(monkeypatch, tmp_path):
     clip = torch.zeros(5, 3, 8, 10, dtype=torch.uint8)
     wrapped, temp_dir, media_to_log = tracking.wrap_val_samples_for_wandb(
         [("first", clip, 0.5), ("second", clip, 0.6)],
+        media_kinds=["video", "video"],
+        fps=24,
         output_dir=str(tmp_path),
     )
 

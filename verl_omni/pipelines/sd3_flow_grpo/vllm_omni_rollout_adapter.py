@@ -28,11 +28,10 @@ from vllm_omni.diffusion.models.sd3.pipeline_sd3 import StableDiffusion3Pipeline
 from vllm_omni.diffusion.request import DUMMY_DIFFUSION_REQUEST_ID, OmniDiffusionRequest
 from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
-from verl_omni.pipelines.diffusion_rollout_output import (
-    rollout_output,
-    wrap_rollout_postprocessor,
-)
+from verl_omni.pipelines.diffusion_media_output import with_visual_artifacts
+from verl_omni.pipelines.diffusion_rollout_output import rollout_output
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.request_batch import requested_outputs_for_batch
 from verl_omni.pipelines.request_batch import (
     sample_per_sample_sde_windows as _sample_per_sample_sde_windows,
 )
@@ -40,6 +39,7 @@ from verl_omni.pipelines.request_batch import (
     split_diffusion_output_by_request as _split_diffusion_output_by_request,
 )
 from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
+from verl_omni.pipelines.rollout_postprocessing import install_rollout_postprocessor
 from verl_omni.pipelines.rollout_request import prompt_ids_from_payload
 from verl_omni.pipelines.schedulers import FlowMatchSDEDiscreteScheduler
 from verl_omni.pipelines.sd3_flow_grpo.common import (
@@ -150,24 +150,7 @@ def _resolve_output_type(sampling_params, default: str) -> Literal["image", "lat
     return _validate_output_type(_coalesce_not_none(output_type, default))
 
 
-_SD3_IMAGE_POST_PROCESS_FUNC = pipeline_sd3.get_sd3_image_post_process_func
-
-
-def get_latent_post_process_func(od_config):
-    """Postprocess SD3 media while preserving rollout metadata."""
-    image_postprocess = _SD3_IMAGE_POST_PROCESS_FUNC(od_config)
-
-    def postprocess(output):
-        if isinstance(output, torch.Tensor) and output.ndim >= 3 and output.shape[-3] == 16:
-            return output
-        return image_postprocess(output)
-
-    return wrap_rollout_postprocessor(postprocess)
-
-
-# vLLM-Omni resolves this module-level factory before initializing the custom
-# pipeline, so install the SD3-specific override while registering this adapter.
-pipeline_sd3.get_sd3_image_post_process_func = get_latent_post_process_func
+install_rollout_postprocessor(pipeline_sd3, "get_sd3_image_post_process_func")
 
 
 @VllmOmniPipelineBase.register("StableDiffusion3Pipeline", algorithm="flow_grpo")
@@ -193,9 +176,12 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
 
     supports_request_batch = True
 
-    #: Declares the primary rollout media stream so downstream consumers read
-    #: the modality from the adapter instead of inferring it from tensor rank.
-    diffusion_io_spec = DiffusionIOSpec(primary=MediaSpec("image"))
+    diffusion_io_spec = DiffusionIOSpec(
+        artifacts={
+            "image_preview": MediaSpec("image", "decoded", "CHW"),
+            "image_latent": MediaSpec("image", "latent", "CHW"),
+        }
+    )
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         super().__init__(od_config=od_config, prefix=prefix)
@@ -391,6 +377,7 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
             prompt = [prompt]
 
         sampling_params = request_batch.sampling_params_list[0]
+        requested_outputs = requested_outputs_for_batch(request_batch)
         height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
         num_inference_steps = sampling_params.num_inference_steps or num_inference_steps
@@ -408,6 +395,7 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
         sde_type = _coalesce_not_none(sampling_params.extra_args.get("sde_type", None), sde_type)
         logprobs = _coalesce_not_none(sampling_params.extra_args.get("logprobs", None), logprobs)
         output_type = _resolve_output_type(sampling_params, output_type)
+        decode = output_type != "latent" or "image_preview" in requested_outputs
 
         req_num_outputs = getattr(sampling_params, "num_outputs_per_prompt", None)
         if req_num_outputs and req_num_outputs > 0:
@@ -497,8 +485,16 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
         )
 
         if request_batch.requests[0].request_id == DUMMY_DIFFUSION_REQUEST_ID and sde_window[0][0] == sde_window[0][1]:
-            output = self._decode_latents(latents, output_type)
-            result = DiffusionOutput(output=output, to_cpu=True)
+            output = self._decode_latents(latents, "image") if decode else None
+            result = with_visual_artifacts(
+                DiffusionOutput(output=output, to_cpu=True),
+                decoded=output,
+                latents=latents,
+                latent_layout="CHW",
+                output_type=output_type,
+                context=f"pipeline={type(self).__name__}, request_id={request_batch.requests[0].request_id}",
+                requested=requested_outputs,
+            )
             outputs = _split_diffusion_output_by_request(
                 result,
                 request_batch,
@@ -523,7 +519,7 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
         )
 
         self._current_timestep = None
-        output = self._decode_latents(latents, output_type)
+        output = self._decode_latents(latents, "image") if decode else None
         rl = {}
         if output_type == "both":
             rl["latents_clean"] = latents.float()
@@ -543,6 +539,15 @@ class StableDiffusion3PipelineWithLogProb(SD3TokenIdPromptMixin, StableDiffusion
             },
             rl=rl,
             to_cpu=True,
+        )
+        result = with_visual_artifacts(
+            result,
+            decoded=output,
+            latents=latents,
+            latent_layout="CHW",
+            output_type=output_type,
+            context=f"pipeline={type(self).__name__}, request_id={[r.request_id for r in request_batch.requests]}",
+            requested=requested_outputs,
         )
         outputs = _split_diffusion_output_by_request(
             result,

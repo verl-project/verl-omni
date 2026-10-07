@@ -63,6 +63,8 @@ class DiffusionPipelineConfig(BaseConfig):
     width: int = 512
     num_inference_steps: int = 10
     output_type: str = "image"
+    # Additional named artifacts required by rewards/logging, including previews with a latent primary.
+    requested_outputs: Optional[list[str]] = None
     true_cfg_scale: float = 1.0
     max_sequence_length: int = 512
     guidance_scale: Optional[float] = None

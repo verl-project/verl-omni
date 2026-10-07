@@ -14,13 +14,14 @@
 import asyncio
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.tracking import RLInsightLogger
 from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.rollout.replica import RolloutReplicaRegistry
 from verl.workers.rollout.utils import update_prometheus_config
 
+from verl_omni.pipelines.rollout_artifacts import MediaArtifact
 from verl_omni.workers.config import DiffusionRolloutConfig
 from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size, get_rollout_world_size
 
@@ -28,6 +29,12 @@ from verl_omni.workers.rollout.base import get_rollout_sequence_parallel_size, g
 class DiffusionOutput(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    artifacts: dict[str, MediaArtifact] = Field(default_factory=dict)
+    """Named per-sample media; empty only for legacy adapters or aborts."""
+    preview_artifact: str | None = None
+    """Explicit decoded preview selection for dump/W&B consumers."""
+    primary_artifact: str | None = None
+    """Explicit compatibility response selection (never inferred from shape)."""
     diffusion_output: Any
     """Generated uint8 pixel tensor (CHW/TCHW) in [0, 255], or floating-point latents."""
     log_probs: Optional[Any] = None

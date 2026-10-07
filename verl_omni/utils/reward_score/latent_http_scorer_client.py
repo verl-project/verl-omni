@@ -50,9 +50,14 @@ def _serialize_request(
     noise_level: float,
     noise_seed: int | None,
 ) -> bytes:
-    latents = extra_info.get("latents_clean")
-    if latents is None and isinstance(solution_image, torch.Tensor) and solution_image.shape[-3] == 16:
-        latents = solution_image
+    from verl_omni.pipelines.rollout_artifacts import ArtifactContractError, select_artifact
+
+    artifact = select_artifact(
+        extra_info.get("media_artifacts", {}), name="image_latent", modality="image", representation="latent"
+    )
+    if artifact.spec.layout != "CHW":
+        raise ArtifactContractError(f"SD3 latent scorer expects native CHW, got {artifact.spec.layout}")
+    latents = artifact.data
 
     tensors = {
         "latents": _batched_tensor(latents, "latents_clean", expected_rank=4),

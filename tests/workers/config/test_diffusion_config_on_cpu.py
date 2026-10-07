@@ -33,6 +33,27 @@ from verl_omni.workers.config.diffusion.rollout import (
 # ---------------------------------------------------------------------------
 
 
+def test_requested_artifacts_are_available_in_rollout_validation_and_model_configs():
+    from pathlib import Path
+
+    from hydra import compose, initialize_config_dir
+    from verl.utils.config import omega_conf_to_dataclass
+
+    config_dir = str(Path(__file__).resolve().parents[3] / "verl_omni/trainer/config")
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        config = compose(
+            config_name="diffusion_trainer",
+            overrides=[
+                "actor_rollout_ref.rollout.pipeline.requested_outputs=[image_preview]",
+            ],
+        )
+    assert list(config.actor_rollout_ref.rollout.val_kwargs.pipeline.requested_outputs) == ["image_preview"]
+    assert list(config.actor_rollout_ref.model.pipeline.requested_outputs) == ["image_preview"]
+    pipeline = omega_conf_to_dataclass(config.actor_rollout_ref.rollout.pipeline)
+    assert pipeline.requested_outputs == ["image_preview"]
+    assert DiffusionPipelineConfig().requested_outputs is None
+
+
 class TestDiffusionLossConfig:
     def test_defaults(self):
         cfg = DiffusionLossConfig()

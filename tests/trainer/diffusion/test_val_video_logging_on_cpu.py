@@ -60,7 +60,7 @@ def _run_val_logging(
     n = outputs.shape[0] if hasattr(outputs, "shape") else len(outputs)
     inputs = [f"prompt {i}" for i in range(n)]
     scores = [float(i) for i in range(n)]
-    BaseRayDiffusionTrainer._maybe_log_val_generations(stub, inputs, outputs, scores)
+    BaseRayDiffusionTrainer._maybe_log_val_generations(stub, inputs, outputs, scores, media_kinds=["video"] * n)
     return val_logger
 
 

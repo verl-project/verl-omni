@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Helpers for vllm-omni 0.26's native rollout output contract.
+"""Construct native rollout trajectory fields and payload/metadata envelopes.
 
 Trajectories use ``DiffusionOutput.trajectory_*``. Prompt embeddings and
 algorithm-specific tensors use the canonical payload/metadata envelope.
@@ -20,14 +20,13 @@ Only ``trajectory_*`` and ``rl`` / ``prompt_embeddings`` reach training; ``metad
 
 from __future__ import annotations
 
-import functools
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
 from vllm_omni.diffusion.data import DiffusionOutput
 
-_MEDIA_KEYS = ("image", "video", "output", "audio")
+_MEDIA_KEYS = frozenset(("image", "video", "output", "audio"))
 
 
 def rollout_output(
@@ -81,33 +80,6 @@ def with_rollout_data(
     )
 
 
-def wrap_rollout_postprocessor(postprocess: Callable[..., Any]) -> Callable[..., Any]:
-    """Adapt a media-only upstream postprocessor to preserve rollout payload and metadata."""
-
-    @functools.wraps(postprocess)
-    def wrapped(data: Any, **kwargs: Any) -> Any:
-        if not _is_envelope(data):
-            return postprocess(data, **kwargs)
-
-        payload = data["payload"]
-        metadata = dict(data.get("metadata") or {})
-        media_key = next((key for key in _MEDIA_KEYS if key in payload), None)
-        if media_key is None:
-            raise ValueError("Diffusion output envelope has no media payload.")
-
-        processed = postprocess(payload[media_key], **kwargs)
-        if _is_envelope(processed):
-            return {
-                "payload": dict(processed["payload"]),
-                "metadata": {**dict(processed.get("metadata") or {}), **metadata},
-            }
-        if isinstance(processed, Mapping):
-            return {"payload": dict(processed), "metadata": metadata}
-        return {"payload": {media_key: processed}, "metadata": metadata}
-
-    return wrapped
-
-
 def _is_envelope(value: Any) -> bool:
     return isinstance(value, Mapping) and isinstance(value.get("payload"), Mapping)
 
@@ -131,7 +103,9 @@ def _unwrap_output(output: Any, default_key: str) -> tuple[Any, str, dict[str, A
     if not _is_envelope(output):
         return output, default_key, {}
     payload = output["payload"]
-    for key in _MEDIA_KEYS:
-        if key in payload:
-            return payload[key], key, dict(output.get("metadata") or {})
-    raise ValueError("Diffusion output envelope has no media payload.")
+    if len(payload) != 1:
+        raise ValueError("Cannot unwrap multiple diffusion payload keys without dropping media; use named artifacts.")
+    (key,) = payload
+    if key not in _MEDIA_KEYS:
+        raise ValueError("Diffusion output envelope has no media payload.")
+    return payload[key], key, dict(output.get("metadata") or {})

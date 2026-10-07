@@ -325,6 +325,12 @@ async def compute_score_pickscore(
     device: str | None = None,
     **kwargs,
 ) -> dict:
+    from verl_omni.utils.reward_score.reward_utils import visual_reward_frames
+
+    frames = visual_reward_frames(solution_image, extra_info)
+    if len(frames) != 1:
+        raise ValueError("PickScore requires a single decoded image")
+    solution_image = frames[0]
     await _ensure_consumer(device)
 
     prompt = ground_truth if ground_truth else ""
@@ -345,9 +351,14 @@ async def compute_score_pickscore_native(
     score_divisor: float = 26.0,
 ) -> dict:
     """Compute PickScore from outputs produced by a native named reward model."""
-    del data_source, extra_info
+    from verl_omni.utils.reward_score.reward_utils import visual_reward_frames
+
+    del data_source
+    frames = visual_reward_frames(solution_image, extra_info)
+    if len(frames) != 1:
+        raise ValueError("PickScore requires a single decoded image")
     prompt = ground_truth or ""
-    image = _to_pil_hwc(solution_image)
+    image = _to_pil_hwc(frames[0])
     outputs = await reward_model.infer(prompts=[prompt], images=[image])
     output = outputs[0]
     raw_score = _pairwise_pickscore(
@@ -376,7 +387,12 @@ async def compute_score_pickscore_engine(
     ``logit_scale`` is explicit because vLLM CLIP pooling does not restore the
     PickScore checkpoint's parameter.
     """
-    del data_source, extra_info
+    from verl_omni.utils.reward_score.reward_utils import visual_reward_frames
+
+    del data_source
+    frames = visual_reward_frames(solution_image, extra_info)
+    if len(frames) != 1:
+        raise ValueError("PickScore requires a single decoded image")
     if not reward_router_address:
         raise ValueError("PickScore engine reward requires reward_router_address")
     if not model_name:
@@ -385,7 +401,7 @@ async def compute_score_pickscore_engine(
     from verl_omni.utils.reward_score.reward_utils import pil_image_to_base64
 
     prompt = ground_truth or ""
-    image = _to_pil_hwc(solution_image)
+    image = _to_pil_hwc(frames[0])
     loop = asyncio.get_running_loop()
     image_url = await loop.run_in_executor(None, pil_image_to_base64, image)
     text_payload = {"model": model_name, "input": prompt, "encoding_format": "float"}

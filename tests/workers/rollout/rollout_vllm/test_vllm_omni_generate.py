@@ -36,6 +36,7 @@ from transformers import AutoTokenizer
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.replica import RolloutMode
 
+from verl_omni.utils.reward_score.reward_utils import image_tensor_to_pil, visual_reward_frames
 from verl_omni.workers.rollout.replica import DiffusionOutput
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
 
@@ -209,6 +210,7 @@ def _build_rollout_cfg(*, step_execution: bool = False) -> Any:
             "height": _SMOKE_SIZE,
             "width": _SMOKE_SIZE,
             "num_inference_steps": _SMOKE_STEPS,
+            "requested_outputs": ["image_preview", "image_latent"],
         },
     }
     if not step_execution:
@@ -334,6 +336,26 @@ def _generate_concurrent(
     return ray.get(refs, timeout=600)
 
 
+def _assert_named_media_output(output: DiffusionOutput, *, output_type: str = "image") -> None:
+    """Check named streams through the real engine and their pixel-reward projection."""
+    assert set(output.artifacts) == {"image_preview", "image_latent"}
+    assert output.primary_artifact == ("image_latent" if output_type == "latent" else "image_preview")
+    assert output.preview_artifact == "image_preview"
+    preview = output.artifacts["image_preview"]
+    latent = output.artifacts["image_latent"]
+    assert (preview.spec.modality, preview.spec.representation, preview.spec.layout) == ("image", "decoded", "CHW")
+    assert preview.data.dtype == torch.uint8
+    assert (latent.spec.modality, latent.spec.representation, latent.spec.layout) == ("image", "latent", "LC")
+    assert latent.data.is_floating_point()
+    assert all(artifact.data.device.type == "cpu" for artifact in output.artifacts.values())
+    torch.testing.assert_close(output.diffusion_output, output.artifacts[output.primary_artifact].data)
+    frames = visual_reward_frames(
+        output.diffusion_output, {"media_artifacts": output.artifacts, "preview_artifact": output.preview_artifact}
+    )
+    torch.testing.assert_close(frames, preview.data.unsqueeze(0))
+    assert image_tensor_to_pil(preview.data).size == (preview.data.shape[2], preview.data.shape[1])
+
+
 def _assert_valid_diffusion_output(output: DiffusionOutput, *, index: int, expect_logprobs: bool = False) -> None:
     assert isinstance(output, DiffusionOutput), f"Request {index}: expected DiffusionOutput"
     assert len(output.diffusion_output) == 3, f"Request {index}: expected 3 channels (CHW)"
@@ -362,17 +384,23 @@ def test_generate(init_server):
     print(f"All {len(_PROMPTS)} concurrent requests returned valid DiffusionOutput")
 
 
-def test_generate_request_level_batch(init_server):
+@pytest.mark.parametrize("output_type", ["image", "latent"])
+def test_generate_request_level_batch(init_server, output_type):
     """Concurrent generate under request-level batching (max_num_seqs>1 + wait_ms)."""
     results = _generate_concurrent(
         init_server,
         _PROMPTS,
         logprobs_first_only=False,
+        sampling_overrides={"output_type": output_type, "requested_outputs": ["image_preview", "image_latent"]},
     )
 
     assert len(results) == len(_PROMPTS)
     for i, output in enumerate(results):
-        _assert_valid_diffusion_output(output, index=i, expect_logprobs=True)
+        _assert_named_media_output(output, output_type=output_type)
+        if output_type != "latent":
+            _assert_valid_diffusion_output(output, index=i, expect_logprobs=True)
+        else:
+            _assert_non_empty_tensor(output.log_probs, "log_probs")
 
     print(f"All {len(_PROMPTS)} request-level-batched generates returned valid DiffusionOutput")
 
@@ -403,6 +431,7 @@ def test_flow_grpo_step_execution_contract(init_step_execution_server):
     assert len(output.diffusion_output) == 3
     assert output.stop_reason in ("completed", "aborted", None)
 
+    _assert_named_media_output(output)
     _assert_flow_grpo_step_execution_contract(output)
 
 
@@ -429,6 +458,7 @@ def test_diffusion_nft_step_execution_contract(init_training_step_execution_serv
 
     assert isinstance(output, DiffusionOutput)
     assert len(output.diffusion_output) == 3
+    _assert_named_media_output(output)
     _assert_training_step_execution_contract(
         output,
         algorithm="DiffusionNFT",
@@ -459,6 +489,7 @@ def test_dpo_step_execution_contract(init_training_step_execution_server):
 
     assert isinstance(output, DiffusionOutput)
     assert len(output.diffusion_output) == 3
+    _assert_named_media_output(output)
     _assert_training_step_execution_contract(
         output,
         algorithm="DPO",

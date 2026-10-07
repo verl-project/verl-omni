@@ -42,6 +42,8 @@ def _dump(
     dump_path, outputs, *, max_samples=None, global_steps=0, audios=None, audio_sample_rates=None, media_kind=None
 ):
     """Invoke the unbound ``_dump_generations`` with a minimal stub ``self``."""
+    if media_kind is None:
+        media_kind = "video" if outputs.ndim == 5 else "image"
     n = outputs.shape[0]
     stub = SimpleNamespace(global_steps=global_steps)
     inputs = [f"prompt {i}" for i in range(n)]

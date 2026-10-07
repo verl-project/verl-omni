@@ -19,23 +19,17 @@ from verl_omni.pipelines.rollout_media import resolve_is_video
 
 
 class TestResolveIsVideo:
-    def test_declared_video_wins_over_rank(self):
-        # A per-sample video and a batched image can both have rank four.
-        assert resolve_is_video(ndim=4, media_kind="video") is True
-
-    def test_declared_image_wins_over_rank(self):
-        assert resolve_is_video(ndim=5, media_kind="image") is False
-
-    def test_declared_audio_is_not_video(self):
-        assert resolve_is_video(ndim=2, media_kind="audio") is False
+    @pytest.mark.parametrize("kind,is_video", [("video", True), ("image", False), ("audio", False)])
+    def test_reads_declared_kind(self, kind, is_video):
+        assert resolve_is_video(kind) is is_video
 
     def test_unknown_media_kind_is_rejected(self):
         with pytest.raises(ValueError, match="Unsupported media kind"):
-            resolve_is_video(ndim=5, media_kind="depth")
+            resolve_is_video("depth")
 
-    def test_falls_back_to_rank_when_undeclared(self):
-        assert resolve_is_video(ndim=5, media_kind=None) is True
-        assert resolve_is_video(ndim=4, media_kind=None) is False
+    def test_undeclared_media_kind_is_rejected(self):
+        with pytest.raises(ValueError, match="Explicit media_kind required"):
+            resolve_is_video(None)
 
 
 if __name__ == "__main__":

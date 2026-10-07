@@ -112,7 +112,6 @@ def init_server():
             "attn_backend": "_native_npu",
         }
     )
-    model_cfg.architecture = "QwenImageTransformer2DModel"
 
     ServerCls = ray.remote(vLLMOmniHttpServer)
     server = ServerCls.options(

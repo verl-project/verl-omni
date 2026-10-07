@@ -64,15 +64,11 @@ def _to_pil(image) -> Image.Image:
     return image
 
 
-def _prepare_solution_frames(solution_image: np.ndarray | torch.Tensor, frame_interval: int):
-    """Normalize an image/video tensor or array into an iterable of frames."""
-    if solution_image.ndim == 3:  # image
-        if isinstance(solution_image, torch.Tensor):
-            return solution_image.unsqueeze(0)
-        return np.expand_dims(solution_image, axis=0)
-    if solution_image.ndim == 4:  # video
-        return solution_image[::frame_interval]
-    raise ValueError(f"Expected image/video with 3 or 4 dimensions, got shape {solution_image.shape}")
+def _prepare_solution_frames(solution_image, frame_interval: int, *, extra_info: dict):
+    """Select canonical frames from the declared decoded visual artifact."""
+    from verl_omni.utils.reward_score.reward_utils import visual_reward_frames
+
+    return visual_reward_frames(solution_image, extra_info, frame_interval)
 
 
 def _build_unified_reward_prompt(caption: str) -> str:
@@ -181,7 +177,7 @@ async def compute_score_unified_reward(
     extra_info = extra_info or {}
     caption = extra_info.get("prompt") or extra_info.get("raw_prompt") or ground_truth or ""
     frame_interval = extra_info.get("frame_interval", 1)
-    solution_image = _prepare_solution_frames(solution_image, frame_interval)
+    solution_image = _prepare_solution_frames(solution_image, frame_interval, extra_info=extra_info)
 
     model_name = model_name or DEFAULT_UNIFIED_REWARD_MODEL_PATH
     loop = get_event_loop()

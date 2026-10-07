@@ -11,179 +11,231 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU integration tests for the MiniMax H3 rollout output contract.
-
-Simulates the full server-side processing of H3's joint (video, audio)
-rollout output — the exact path that crashed during GPU smoke testing —
-without needing a GPU or the real vLLM-Omni engine.
-"""
+"""CPU integration for H3's declared native/decoded outputs and downstream export."""
 
 from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm_omni.diffusion.data import DiffusionOutput
+from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
+from vllm_omni.outputs import OmniRequestOutput
 
-server_module = pytest.importorskip("verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server")
-tracking_module = pytest.importorskip("verl_omni.utils.tracking")
-# The strategy resolves H3's audio sample rate from the adapter-declared
-# DiffusionIOSpec, so the pipeline adapter must be imported/registered.
-pytest.importorskip("verl_omni.pipelines.minimax_h3_flow_grpo.vllm_omni_rollout_adapter")
-
-_VIDEO_T, _VIDEO_C, _VIDEO_H, _VIDEO_W = 107, 3, 384, 640
-_AUDIO_SR = 32000
-_AUDIO_SAMPLES = 4 * _AUDIO_SR
+from verl_omni.pipelines.minimax_h3_diffusion_nft.vllm_omni_rollout_adapter import MiniMaxH3DiffusionNFTPipeline
+from verl_omni.pipelines.minimax_h3_flow_grpo.vllm_omni_rollout_adapter import MiniMaxH3PipelineWithLogProb
+from verl_omni.pipelines.rollout_artifacts import MediaArtifact
+from verl_omni.pipelines.rollout_media import MediaSpec
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import DiffusionStrategy
 
 
-def _make_h3_final_res(batch_size: int = 1):
-    """Build a fake OmniRequestOutput matching H3's rollout output."""
-    video = torch.randint(0, 256, (batch_size, _VIDEO_C, _VIDEO_T, _VIDEO_H, _VIDEO_W), dtype=torch.uint8)
-    audio = torch.randn(batch_size, _AUDIO_SAMPLES)
-    metadata = {
-        "rl": {
-            "latents_clean": torch.randn(10, 96),
-            "train_timesteps": torch.randn(1, 9),
-            "latent_meta": torch.zeros(1, 6, dtype=torch.long),
-        },
-        "prompt_embeddings": {
-            "prompt_embeds": torch.randn(1, 5, 8),
-            "prompt_embeds_mask": torch.ones(1, 5, dtype=torch.long),
-        },
-    }
-    envelope = {"payload": {"image": (video, audio)}, "metadata": metadata}
-    # The engine extracts the payload into images; multimodal_output keeps the envelope.
-    return SimpleNamespace(
-        images=[(video, audio)],
-        multimodal_output=envelope,
-        trajectory_latents=None,
-        trajectory_timesteps=None,
-        trajectory_log_probs=None,
-        request_output=None,
+def _make_h3_final_res(monkeypatch, algorithm, output_type="pt", extra_args=None, fps=24):
+    video = torch.zeros(1, 5, 8, 12, 3, dtype=torch.uint8)
+    audio = torch.ones(1, 2, 320)
+    video_latent = torch.ones(1, 24, 2, 2, 2, dtype=torch.float16)
+    audio_latent = torch.full((2, 32, 8), 2, dtype=torch.bfloat16)
+    prompt_embeds = torch.ones(1, 5, 8)
+    latent_meta = torch.tensor([[2, 16, 2, 2, 2, 8]])
+    joint = torch.ones(1, 704)
+    pipeline_cls = MiniMaxH3DiffusionNFTPipeline if algorithm == "diffusion_nft" else MiniMaxH3PipelineWithLogProb
+    pipeline = object.__new__(pipeline_cls)
+    request = SimpleNamespace(
+        request_id="h3-test",
+        prompts=[{"prompt": "H3 prompt"}],
+        sampling_params=SimpleNamespace(
+            frame_rate=fps,
+            output_type=output_type,
+            extra_args=extra_args or {},
+            num_outputs_per_prompt=1,
+            max_sequence_length=5,
+        ),
+    )
+
+    def forward(self, request):
+        if algorithm == "diffusion_nft":
+            self._nft_capture = {
+                "video_latent": video_latent,
+                "audio_latent": audio_latent,
+                "text_embeddings": prompt_embeds[0],
+                "text_tags": torch.ones(5, dtype=torch.long),
+                "condition_video_rows": torch.zeros(0, 96),
+                "keyframe_frame_indices": [],
+                "task": "t2va",
+                "latent_t": 2,
+                "latent_h": 2,
+                "latent_w": 2,
+                "audio_t": 8,
+                "num_steps": 10,
+                "video_shift": 12.0,
+            }
+        else:
+            self._flow_grpo_final_latents = (video_latent, audio_latent)
+            self._flow_grpo_trajectory = {
+                "all_latents": joint.unsqueeze(1),
+                "all_next_latents": (joint + 1).unsqueeze(1),
+                "all_timesteps": torch.tensor([[0.25]]),
+                "all_log_probs": torch.tensor([[0.4]]),
+                "latent_meta": latent_meta,
+                "prompt_embeds": prompt_embeds,
+                "prompt_embeds_mask": torch.ones(1, 5, dtype=torch.long),
+            }
+        return DiffusionOutput(output=(video, audio))
+
+    monkeypatch.setattr(MiniMaxH3Pipeline, "forward", forward)
+    if algorithm == "diffusion_nft":
+        result = pipeline.forward(request)
+    else:
+        result = pipeline.forward(
+            SimpleNamespace(requests=[request], prompts=request.prompts, sampling_params=request.sampling_params)
+        )
+    return OmniRequestOutput.from_diffusion(
+        images=result.output["payload"]["video"],
+        multimodal_output={"metadata": result.output["metadata"]},
+        trajectory_latents=result.trajectory_latents,
+        trajectory_timesteps=result.trajectory_timesteps,
+        trajectory_log_probs=result.trajectory_log_probs,
+        request_id="h3-test",
     )
 
 
-def _server():
-    server = object.__new__(server_module.vLLMOmniHttpServer)
-    server.global_steps = 3
-    # Keys the adapter-declared DiffusionIOSpec (audio sample rate 32000).
-    server.model_config = SimpleNamespace(architecture="MiniMaxH3Pipeline", algorithm="flow_grpo")
-    server._to_tensor = __import__("torchvision").transforms.PILToTensor()
-    return server
-
-
-class TestH3RolloutOutputContract:
-    """Verify the server correctly processes H3's (video, audio) tuple output."""
-
-    def test_tuple_extracted_video_tensor(self):
-        """Video stream routes to the tensor path as uint8."""
-        server = _server()
-        final_res = _make_h3_final_res()
-        sampling_params = {"output_type": "pt"}
-        result = _run_generate(server, final_res, sampling_params)
-        assert result.diffusion_output is not None
-        assert isinstance(result.diffusion_output, torch.Tensor)
-        assert result.diffusion_output.dtype == torch.uint8
-
-    def test_audio_forwarded_to_extra_fields(self):
-        """Audio from the tuple reaches extra_fields for CLAP/ImageBind."""
-        server = _server()
-        final_res = _make_h3_final_res()
-        sampling_params = {"output_type": "pt"}
-        result = _run_generate(server, final_res, sampling_params)
-        assert "audio" in result.extra_fields
-        assert result.extra_fields["audio"] is not None
-        assert "audio_sample_rate" in result.extra_fields
-        assert result.extra_fields["audio_sample_rate"] == _AUDIO_SR
-        # The real MiniMax H3 adapter declares primary=video, which reaches
-        # downstream consumers so they need not infer the modality from rank.
-        assert result.extra_fields["media_kind"] == "video"
-
-    def test_rl_metadata_reaches_extra_fields(self):
-        """rl and prompt_embeddings groups flatten into extra_fields."""
-        server = _server()
-        final_res = _make_h3_final_res()
-        sampling_params = {"output_type": "pt"}
-        result = _run_generate(server, final_res, sampling_params)
-        for key in ("latents_clean", "train_timesteps", "latent_meta", "prompt_embeds", "prompt_embeds_mask"):
-            assert key in result.extra_fields, f"missing {key} in extra_fields"
-
-    def test_channels_first_video_in_reward_utils(self):
-        """video_tensor_to_pil_frames handles [C,T,H,W] channels-first input."""
-        from verl_omni.utils.reward_score.reward_utils import video_tensor_to_pil_frames
-
-        video_cthw = torch.randint(0, 256, (_VIDEO_C, _VIDEO_T, 64, 64), dtype=torch.uint8)
-        frames = video_tensor_to_pil_frames(video_cthw)
-        assert len(frames) == _VIDEO_T
-
-    def test_5d_wandb_video(self):
-        """wrap_val_samples_for_wandb handles H3's [B,C,T,H,W] video."""
-        from verl_omni.utils.tracking import wrap_val_samples_for_wandb
-
-        video = torch.randint(0, 256, (1, _VIDEO_C, _VIDEO_T, 64, 64), dtype=torch.uint8)
-        samples = [("a test prompt", video, 0.5, None, None)]
-        wrapped, tmpdir, media = wrap_val_samples_for_wandb(samples, fps=24, output_dir=None)
-        assert len(wrapped) == 1
-        assert tmpdir is not None
-        import shutil
-
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-    @pytest.mark.parametrize(
-        ("shape", "expect"),
-        [
-            # Channels-first [N, C, T, H, W] must be normalized to [N, T, C, H, W].
-            ((2, _VIDEO_C, 9, 32, 48), (9, _VIDEO_C, 32, 48)),
-            # Already [N, T, C, H, W]; must be left untouched.
-            ((2, 9, _VIDEO_C, 32, 48), (9, _VIDEO_C, 32, 48)),
-        ],
-        ids=["channels_first", "already_normalized"],
+def _generate(monkeypatch, algorithm="diffusion_nft", output_type="pt", extra_args=None, fps=24):
+    server = SimpleNamespace(
+        global_steps=3, model_config=SimpleNamespace(architecture="MiniMaxH3Pipeline", algorithm=algorithm)
     )
-    def test_dump_generations_normalizes_5d_layout(self, shape, expect, monkeypatch, tmp_path):
-        """_dump_generations must hand ``_export_video`` per-sample ``[T, C, H, W]``.
+    final_res = _make_h3_final_res(monkeypatch, algorithm, output_type, extra_args, fps)
+    return DiffusionStrategy(server).process_output(
+        final_res,
+        None,
+        {"output_type": (extra_args or {}).get("output_type", output_type), "logprobs": algorithm == "flow_grpo"},
+    )
 
-        Both batched layouts must converge on the same per-sample shape; assert on the
-        tensor reaching the exporter so a transposed guard cannot slip through.
-        """
-        from verl_omni.trainer.diffusion import ray_diffusion_trainer as rdt
 
-        seen = []
+@pytest.mark.parametrize("algorithm", ["diffusion_nft", "flow_grpo"])
+def test_named_video_has_canonical_shape_and_preserves_native_latents(monkeypatch, algorithm):
+    result = _generate(monkeypatch, algorithm)
+    assert result.diffusion_output.shape == (5, 3, 8, 12)
+    assert result.diffusion_output.dtype == torch.uint8
+    video_latent = result.artifacts["video_latent"].data
+    assert video_latent.shape == (24, 2, 2, 2)
+    torch.testing.assert_close(video_latent, torch.ones_like(video_latent, dtype=torch.float16))
+    audio_latent = result.artifacts["audio_latent"]
+    assert audio_latent.spec.layout == "CLT" and audio_latent.data.shape == (2, 32, 8)
+    torch.testing.assert_close(audio_latent.data, torch.full_like(audio_latent.data, 2, dtype=torch.bfloat16))
 
-        def _fake_export(output, output_path, **kwargs):
-            seen.append(tuple(output.shape))
-            open(output_path, "wb").close()
 
-        monkeypatch.setattr(rdt, "_export_video", _fake_export)
+@pytest.mark.parametrize("algorithm", ["diffusion_nft", "flow_grpo"])
+def test_named_audio_is_not_unbatched_a_second_time(monkeypatch, algorithm):
+    result = _generate(monkeypatch, algorithm)
+    torch.testing.assert_close(result.extra_fields["audio"], torch.ones(2, 320))
+    assert result.extra_fields["audio_sample_rate"] == 32000
+    assert result.extra_fields["media_kind"] == "video"
 
-        outputs = torch.randint(0, 256, shape, dtype=torch.uint8)
-        stand_in = SimpleNamespace(global_steps=1)
-        rdt.BaseRayDiffusionTrainer._dump_generations(
-            stand_in,
-            inputs=["p0", "p1"],
-            outputs=outputs,
-            gts=["g0", "g1"],
-            scores=[0.1, 0.2],
+
+@pytest.mark.parametrize("algorithm", ["diffusion_nft", "flow_grpo"])
+def test_training_fields_remain_separate_from_media(monkeypatch, algorithm):
+    result = _generate(monkeypatch, algorithm)
+    if algorithm == "diffusion_nft":
+        assert result.extra_fields["latents_clean"].shape == (704,)
+        assert result.extra_fields["train_timesteps"].shape == (9,)
+    else:
+        assert result.extra_fields["all_latents"].shape == (1, 704)
+        torch.testing.assert_close(result.extra_fields["all_next_latents"], torch.full((1, 704), 2.0))
+        torch.testing.assert_close(result.log_probs, torch.tensor([0.4]))
+    for key in ("latent_meta", "prompt_embeds", "prompt_embeds_mask"):
+        assert key in result.extra_fields
+    assert set(result.artifacts) == {"video_preview", "audio", "video_latent", "audio_latent"}
+
+
+@pytest.mark.parametrize("algorithm", ["diffusion_nft", "flow_grpo"])
+@pytest.mark.parametrize(
+    "output_type, override, primary",
+    [("pt", None, "video_preview"), ("latent", None, "video_latent"), ("pt", "latent", "video_latent")],
+)
+@pytest.mark.parametrize("fps", [None, 23.976])
+def test_adapter_selects_primary_and_preserves_decoded_preview(
+    monkeypatch, algorithm, output_type, override, primary, fps
+):
+    extra = {"requested_outputs": ["video_preview", "audio"]}
+    if override is not None:
+        extra["output_type"] = override
+    result = _generate(monkeypatch, algorithm, output_type=output_type, extra_args=extra, fps=fps)
+    assert result.primary_artifact == primary
+    assert result.preview_artifact == "video_preview"
+    assert result.artifacts["video_preview"].spec.fps == (24 if fps is None else fps)
+    torch.testing.assert_close(result.diffusion_output, result.artifacts[primary].data)
+
+
+@pytest.mark.parametrize("algorithm", ["diffusion_nft", "flow_grpo"])
+def test_adapter_rejects_missing_requested_artifact(monkeypatch, algorithm):
+    with pytest.raises(ValueError, match="requested artifacts absent.*missing"):
+        _generate(monkeypatch, algorithm, extra_args={"requested_outputs": ["missing"]})
+
+
+def test_rewards_reject_undeclared_channels_first_input():
+    from verl_omni.utils.reward_score.reward_utils import video_tensor_to_pil_frames
+
+    video = torch.zeros(3, 5, 8, 12, dtype=torch.uint8)
+    with pytest.raises(ValueError, match="T, 3, H, W"):
+        video_tensor_to_pil_frames(video)
+    artifact = MediaArtifact(MediaSpec("video", "decoded", "CTHW", fps=24), video)
+    assert len(video_tensor_to_pil_frames(artifact.normalized(context="adapter", name="video_preview").data)) == 5
+
+
+def test_named_video_is_exported_to_real_mp4(monkeypatch):
+    import shutil
+
+    from verl_omni.utils.tracking import wrap_val_samples_for_wandb
+
+    preview = _generate(monkeypatch).artifacts["video_preview"]
+    wrapped, temp, media = wrap_val_samples_for_wandb([("prompt", preview, 0.5)])
+    try:
+        assert wrapped[0][1] == "val/videos/sample_1"
+        assert media and temp is not None
+    finally:
+        if temp is not None:
+            shutil.rmtree(temp)
+
+
+@pytest.mark.parametrize("layout,shape", [("CTHW", (3, 9, 8, 12)), ("TCHW", (9, 3, 8, 12))])
+def test_dump_consumes_adapter_normalized_preview(layout, shape, monkeypatch, tmp_path):
+    from verl_omni.trainer.diffusion import ray_diffusion_trainer as trainer
+
+    previews = [
+        MediaArtifact(MediaSpec("video", "decoded", layout, fps=24), torch.zeros(shape, dtype=torch.uint8)).normalized(
+            context="adapter", name="video_preview"
+        )
+        for _ in range(2)
+    ]
+    seen = []
+
+    def export(output, path, **kwargs):
+        seen.append(tuple(output.data.shape))
+        open(path, "wb").close()
+
+    monkeypatch.setattr(trainer, "_export_video", export)
+    trainer.BaseRayDiffusionTrainer._dump_generations(
+        SimpleNamespace(global_steps=1),
+        inputs=["a", "b"],
+        outputs=torch.zeros(2, 16, 2, 2),
+        gts=[None, None],
+        scores=[1, 2],
+        reward_extra_infos_dict={},
+        dump_path=str(tmp_path),
+        previews=previews,
+    )
+    assert seen == [(9, 3, 8, 12)] * 2
+
+
+def test_dump_rejects_undeclared_extra_batch_axis(tmp_path):
+    from verl_omni.trainer.diffusion.ray_diffusion_trainer import BaseRayDiffusionTrainer
+
+    with pytest.raises(ValueError, match="requires a rank-5 batch, got rank 6"):
+        BaseRayDiffusionTrainer._dump_generations(
+            SimpleNamespace(global_steps=1),
+            inputs=["a"],
+            outputs=torch.zeros(1, 1, 5, 3, 8, 12, dtype=torch.uint8),
+            gts=[None],
+            scores=[1],
             reward_extra_infos_dict={},
             dump_path=str(tmp_path),
+            media_kind="video",
         )
-
-        assert seen == [expect] * 2, f"{shape} produced per-sample shapes {seen}, expected {expect}"
-
-    def test_dump_generations_6d(self):
-        """_dump_generations handles [N,1,T,C,H,W] 6D outputs."""
-        import tempfile
-        from pathlib import Path
-
-        from verl_omni.utils.tracking import _export_video
-
-        # Simulate the 6D tensor that reaches _dump_generations
-        outputs = torch.randint(0, 256, (2, 1, _VIDEO_T, _VIDEO_C, 64, 64), dtype=torch.uint8)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            for i in range(outputs.shape[0]):
-                squeezed = outputs[i].squeeze(0)  # [T, C, H, W]
-                _export_video(squeezed, str(Path(tmpdir) / f"{i}.mp4"), fps=24)
-                assert (Path(tmpdir) / f"{i}.mp4").exists()
-
-
-def _run_generate(server, final_res, sampling_params):
-    """Run the production diffusion output strategy with a fake engine result."""
-    strategy = server_module.DiffusionStrategy(server)
-    return strategy.process_output(final_res, params=None, sampling_params=sampling_params)

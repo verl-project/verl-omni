@@ -29,8 +29,10 @@ from verl_omni.pipelines.boogu_image_flow_grpo.common import (
     get_boogu_freqs_cis,
 )
 from verl_omni.pipelines.boogu_image_flow_grpo.vllm_omni_rollout_adapter import BooguImagePipelineWithLogProb
+from verl_omni.pipelines.diffusion_media_output import with_visual_artifacts
 from verl_omni.pipelines.diffusion_rollout_output import rollout_output
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.request_batch import requested_outputs_for_batch
 from verl_omni.pipelines.request_batch import split_diffusion_output_by_request as _split_diffusion_output_by_request
 from verl_omni.pipelines.rollout_request import condition_images_from_payload
 
@@ -90,6 +92,7 @@ class BooguImageDiffusionNFTPipeline(BooguImagePipelineWithLogProb):
             return outputs if return_batch else outputs[0]
 
         sampling_params = request_batch.sampling_params_list[0]
+        requested_outputs = requested_outputs_for_batch(request_batch)
         height = sampling_params.height or self.default_sample_size * self.vae_scale_factor
         width = sampling_params.width or self.default_sample_size * self.vae_scale_factor
         num_inference_steps = sampling_params.num_inference_steps or 50
@@ -215,8 +218,8 @@ class BooguImageDiffusionNFTPipeline(BooguImagePipelineWithLogProb):
 
         # Decode the way upstream does: undo the VAE scaling/shift, resize back.
         output_type = sampling_params.output_type or "pil"
-        if output_type == "latent":
-            image = latents
+        if output_type == "latent" and "image_preview" not in requested_outputs:
+            image = None
         else:
             decode_latents = latents.to(dtype=self.vae.dtype)
             if self.vae.config.scaling_factor is not None:
@@ -241,6 +244,15 @@ class BooguImageDiffusionNFTPipeline(BooguImagePipelineWithLogProb):
                 **({"condition_image_latents": condition_image_latents} if condition_image_latents is not None else {}),
             },
             to_cpu=True,
+        )
+        result = with_visual_artifacts(
+            result,
+            decoded=image,
+            latents=latents,
+            latent_layout="CHW",
+            output_type=output_type,
+            context=f"pipeline={type(self).__name__}, request_id={[r.request_id for r in request_batch.requests]}",
+            requested=requested_outputs,
         )
         outputs = _split_diffusion_output_by_request(
             result,

@@ -31,6 +31,18 @@ __all__ = [
 ]
 
 
+def requested_outputs_for_batch(request_batch: Any) -> list[str]:
+    """Keep every request's required artifacts when a shared decode serves a packed batch."""
+    from verl_omni.pipelines.rollout_artifacts import requested_artifact_names
+
+    names = {}
+    for request in request_batch.requests:
+        requested = (request.sampling_params.extra_args or {}).get("requested_outputs")
+        for name in requested_artifact_names(requested, context=f"request_id={request.request_id}"):
+            names[name] = None
+    return list(names)
+
+
 def sample_per_sample_sde_windows(
     *,
     sde_window_size: int | None,
@@ -256,18 +268,33 @@ def collate_prompt_mask(
 
 
 def _slice_batch_value(value: Any, start: int, stop: int, expected_batch_size: int) -> Any:
-    # Slice only when leading size matches the packed batch; leave shared T/L axes alone.
-    if value is None:
-        return None
+    # These fields declare a leading batch axis; a mismatched size is not a shared tensor.
     if isinstance(value, torch.Tensor | np.ndarray):
-        return value[start:stop] if value.ndim > 0 and value.shape[0] == expected_batch_size else value
+        if value.ndim == 0:
+            return value
+        if value.shape[0] != expected_batch_size:
+            raise ValueError(f"Expected rollout batch size {expected_batch_size}, got shape={tuple(value.shape)}")
+        return value[start:stop]
     if isinstance(value, dict):
         return {key: _slice_batch_value(item, start, stop, expected_batch_size) for key, item in value.items()}
     if isinstance(value, tuple):
         return tuple(_slice_batch_value(item, start, stop, expected_batch_size) for item in value)
     if isinstance(value, list):
-        return value[start:stop] if len(value) == expected_batch_size else value
+        if len(value) != expected_batch_size:
+            raise ValueError(f"Expected {expected_batch_size} rollout samples, got {len(value)}")
+        return value[start:stop]
     return value
+
+
+def _slice_rollout_output(output: Any, start: int, stop: int, batch_size: int) -> Any:
+    if not isinstance(output, dict) or "payload" not in output:
+        return _slice_batch_value(output, start, stop, batch_size)
+    metadata = dict(output.get("metadata") or {})
+    for group in ("prompt_embeddings", "rl"):
+        if group in metadata:
+            metadata[group] = _slice_batch_value(metadata[group], start, stop, batch_size)
+    # Declarations, context and other model metadata are request-independent, not batch tensors.
+    return {**output, "payload": _slice_batch_value(output["payload"], start, stop, batch_size), "metadata": metadata}
 
 
 def split_diffusion_output_by_request(
@@ -278,9 +305,9 @@ def split_diffusion_output_by_request(
 ) -> list[Any]:
     """Split a packed ``DiffusionOutput`` into one output per request.
 
-    Tensors whose leading dimension equals ``req.num_reqs * num_outputs_per_prompt``
-    are sliced along the batch axis; shared schedule / sequence axes are left
-    intact. Nested payload/metadata envelopes are sliced recursively.
+    Payload samples, native trajectory fields and training groups explicitly carry
+    a leading batch axis. Static declarations and non-training metadata are shared;
+    no tensor is classified as shared merely because its first dimension differs.
     """
     outputs: list[Any] = []
     expected_batch_size = req.num_reqs * num_outputs_per_prompt
@@ -289,7 +316,7 @@ def split_diffusion_output_by_request(
         stop = (idx + 1) * num_outputs_per_prompt
         outputs.append(
             result.__class__(
-                output=_slice_batch_value(result.output, start, stop, expected_batch_size),
+                output=_slice_rollout_output(result.output, start, stop, expected_batch_size),
                 trajectory_timesteps=_slice_batch_value(result.trajectory_timesteps, start, stop, expected_batch_size),
                 trajectory_latents=_slice_batch_value(result.trajectory_latents, start, stop, expected_batch_size),
                 trajectory_log_probs=_slice_batch_value(result.trajectory_log_probs, start, stop, expected_batch_size),

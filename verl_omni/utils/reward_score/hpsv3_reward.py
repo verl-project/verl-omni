@@ -424,39 +424,11 @@ def _to_pil_hwc(image) -> Image.Image:
     return image
 
 
-def _extract_frames(solution_image, frame_interval: int = 1) -> list[Image.Image]:
-    """Extract image frames, preferring the canonical CHW/TCHW layout."""
-    is_channels_last = solution_image.shape[-1] in (1, 3) if solution_image.ndim >= 3 else False
+def _extract_frames(solution_image, frame_interval: int = 1, *, extra_info: dict) -> list[Image.Image]:
+    """Select the declared decoded visual preview without interpreting its shape."""
+    from verl_omni.utils.reward_score.reward_utils import visual_reward_frames
 
-    if solution_image.ndim == 3:
-        if solution_image.shape[0] not in (1, 3):
-            if is_channels_last:
-                solution_image = solution_image.permute(2, 0, 1)
-            else:
-                raise ValueError(f"Expected CHW or HWC image input, got shape {tuple(solution_image.shape)}")
-        solution_image = solution_image.unsqueeze(0)
-
-    elif solution_image.ndim == 4:
-        if solution_image.shape[1] in (1, 3):
-            # The reward-manager contract is TCHW; sample its leading time axis.
-            solution_image = solution_image[::frame_interval]
-        elif is_channels_last:
-            # Keep the existing channels-last extension for THWC direct callers.
-            solution_image = solution_image[::frame_interval].permute(0, 3, 1, 2)
-        elif solution_image.shape[0] in (1, 3):
-            # Preserve compatibility with the legacy CTHW interpretation.
-            solution_image = solution_image[:, ::frame_interval].permute(1, 0, 2, 3)
-        else:
-            raise ValueError(f"Expected TCHW or THWC video input, got shape {tuple(solution_image.shape)}")
-
-    elif solution_image.ndim == 5:
-        if is_channels_last:
-            solution_image = solution_image.permute(0, 4, 1, 2, 3)
-        solution_image = solution_image[:, :, ::frame_interval]
-        solution_image = solution_image.permute(0, 2, 1, 3, 4)
-        solution_image = solution_image.reshape(-1, *solution_image.shape[2:])
-
-    return [_to_pil_hwc(frame) for frame in solution_image]
+    return [_to_pil_hwc(frame) for frame in visual_reward_frames(solution_image, extra_info, frame_interval)]
 
 
 def _score_batch(requests: list[_ScoreRequest]) -> list[dict | Exception]:
@@ -468,7 +440,11 @@ def _score_batch(requests: list[_ScoreRequest]) -> list[dict | Exception]:
     for index, request in enumerate(requests):
         try:
             frame_interval = request.extra_info.get("frame_interval", 4)
-            pil_images = _extract_frames(request.solution_image, frame_interval=frame_interval)
+            pil_images = _extract_frames(
+                request.solution_image,
+                frame_interval=frame_interval,
+                extra_info=request.extra_info,
+            )
             if not pil_images:
                 raise ValueError("HPSv3 reward requires at least one image frame")
             grouped_frames.setdefault(request.batch_key, []).extend(

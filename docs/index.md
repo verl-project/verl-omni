@@ -49,6 +49,7 @@ examples/config.md
 :maxdepth: 1
 :caption: Advanced Features
 
+advanced/diffusion_media_artifacts.md
 algo/async_reward.md
 algo/named_reward_models.md
 algo/rollout_correction.md
