@@ -39,66 +39,44 @@ replicas only for AR omni today (`run_headless` is not implemented upstream).
 
 ### Balancing the actor and rollout pools
 
-Steady state pipelines one batch ahead — while the trainer consumes batch *n*,
-the standalone replicas generate batch *n+1* — so the step time is bounded by
-the **slower** pool plus the weight-sync overhead. Which pool is slower is a
-property of the workload, so measure before moving GPUs: `timing_s/gen` is
-the trainer's wait for samples (~0 means generation is fully hidden and the
-trainer is the bottleneck), and per-role GPU duty over steady-state wall time
-shows the idle side directly (see Monitor).
+Rollout generates one batch ahead of training, so the step time is bounded by
+the **slower** pool — and which one is slower is a property of the workload,
+so measure before moving GPUs: `timing_s/gen` is the trainer's wait for
+samples (~0 = generation fully hidden, trainer-bound) and per-role GPU duty
+shows the idle side (see Monitor).
 
 - **Actor pool** (`trainer.n_gpus_per_node × trainer.nnodes`): FSDP2 shards
-  parameters, optimizer states and activations across the pool — more GPUs
-  mean more memory headroom and more training throughput. A 4.5B LoRA actor
-  runs resident on 2 GPUs; a 30B one on the same pool keeps the offload flags
-  (the hybrid-replica wake does not fit next to a resident 30B actor — see
-  the offload section below). Sequences per inner update
-  (`ppo_mini_batch_size × rollout.n`) must shard evenly across the pool's DP
-  ranks — a 3-GPU pool cannot host the default 16 × 16 = 256; reshape to
-  `train_batch_size=120, ppo_mini_batch_size=15` (120 = 8 × 15 keeps the
-  sync-step identity).
-- **Rollout pool** (`rollout.n_gpus_per_node × rollout.nnodes`): every replica
-  holds the whole model, TP-sharded — the model size sets the minimum
-  `tensor_model_parallel_size`, and rollout GPUs beyond that minimum buy
-  additional replicas (`n_gpus_per_node / TP` per node): more batches in
-  flight, not a faster single batch. A replica never spans nodes.
+  the actor across the pool — more GPUs mean more headroom and more training
+  throughput. `ppo_mini_batch_size × rollout.n` must shard evenly across the
+  pool's DP ranks (a 3-GPU pool needs the `120 = 8 × 15` batch reshape, not
+  the default 16 × 16 = 256).
+- **Rollout pool** (`rollout.n_gpus_per_node × rollout.nnodes`): each replica
+  holds the whole model, TP-sharded — model size sets the minimum TP, and
+  GPUs beyond that buy more replicas (`n_gpus_per_node / TP` per node): more
+  batches in flight, not a faster single batch. A replica never spans nodes.
 
-Measured on MiniCPM-o 4.5 AVQA (single node, 4 × 80 GB, 45-step probes with
-matched ~90–100-token responses — a **trainer-bound** workload, ~2–3× more
-training than generation GPU-seconds per step):
+Measured on MiniCPM-o 4.5 AVQA (4 × 80 GB, 45-step probes — a trainer-bound
+workload):
 
 | layout | s/step | GPU duty |
 | --- | --- | --- |
-| colocated 4+0 (sleep/wake) | 181.5 | 76–77% on all four |
-| separate-async 3+1 (one TP=1 replica) | 192.2 | 70% / 39% |
-| separate-async 2+2 (two TP=1 replicas) | ~273 | 77% / 16% |
+| colocated 4+0 | 181.5 | 76–77% on all four |
+| separate-async 3+1 | 192.2 | 70% / 39% |
+| separate-async 2+2 | ~273 | 77% / 16% |
 
-Colocated time-multiplexes all four GPUs into each phase, so a trainer-bound
-workload favors it: shrinking the trainer pool costs more than overlap
-recovers (4→3 FSDP GPUs inflates the trainer chain 130→192 s; at 4→2 the
-rollout replicas sit 84% idle while the longer trainer chain sets the step
-time). The ladder flips when generation dominates — the same colocated arm
-stretched to 245 s on long-response batches that separate-async absorbed with
-~0.4 s generation wait — the regime disaggregation exists for. At the
-large-actor end, Qwen3-Omni-30B AVQA on 2+2 (one TP=2 replica, offload on)
-measured ~730 s/step with validation parity against the colocated baseline;
-TP=2 is the shape a 30B model needs on 80 GB cards.
+A trainer-bound workload favors colocated — shrinking the trainer pool costs
+more than overlap recovers — and flips to favoring separation when generation
+dominates, the regime disaggregation exists for. The shipped recipes start
+half/half (2+2 LoRA, 4+4 and 16+16 Megatron); skew from there toward the
+measured slower pool. One TP=2 replica (`rollout.tensor_model_parallel_size=2`,
+the validated Qwen3-Omni 30B shape) is the fallback if the multi-replica
+rollout stalls around weight syncs.
 
-The shipped recipes start from a half/half split (2+2 for the LoRA recipes,
-4+4 and 16+16 for the Megatron ones); the ladder above is when to leave it —
-trainer-bound, skew toward the trainer (or stay colocated);
-generation-bound, skew toward rollout. If the multi-replica shape stalls
-around weight syncs, fall back to one wider replica
-(`rollout.tensor_model_parallel_size=2`).
-
-Three knobs change the balance without re-splitting GPUs: lending colocated
-trainer GPUs to generation when the buffer runs short
-(`trainer.v1.separate_async.hybrid_rollout.enable_switch=true`, not yet
-GPU-verified on omni), sync
-frequency (`parameter_sync_step` — how often weights travel, not how fast
-either pool runs), and reward placement — GPU reward models live on the
-standalone pool or their own, never the trainer pool (colocated reward models
-are rejected at startup).
+Without re-splitting GPUs: lend trainer GPUs to generation when the buffer
+runs short (`trainer.v1.separate_async.hybrid_rollout.enable_switch=true`,
+not yet GPU-verified on omni); `parameter_sync_step` changes how often
+weights travel, not pool speed; GPU reward models live on the standalone pool
+or their own, never the trainer pool.
 
 ## Run
 

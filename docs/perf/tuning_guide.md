@@ -171,9 +171,9 @@ tuning surfaces differ accordingly:
 
 The only measured omni throughput reference points are in
 [Separate-Async Omni Training](../algo/separate_async_omni.md) — the
-MiniCPM-o 4.5 colocated-vs-separate-async split ladder and a Qwen3-Omni 30B
-run, all on a single node of 4 × 80 GB; beyond those, treat every knob above
-as requiring measurement on your own workload before drawing conclusions.
+MiniCPM-o 4.5 colocated-vs-separate-async split ladder on 4 × 80 GB; beyond
+that, treat every knob above as requiring measurement on your own workload
+before drawing conclusions.
 
 ## See also
 
