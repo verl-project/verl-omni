@@ -8,7 +8,7 @@ For the base Flow-GRPO setup, see [Examples - FlowGRPO Trainer](https://verl-omn
 
 The **default CUDA recipe** is the V1 sync launcher:
 
-- [`run_wan22_5b_t2v_hpsv3_v1.sh`](wan22/run_wan22_5b_t2v_hpsv3_v1.sh) — **GPU**, **V1 sync** (`verl_omni.trainer.main_diffusion_v1`)
+- [`run_wan22_5b_t2v_hpsv3_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_v1.sh) — **GPU**, **V1 sync** (`verl_omni.trainer.main_diffusion_v1`)
 
 > **Deprecated:** `run_wan22_5b_t2v_hpsv3_auto.sh` is the legacy v0 launcher
 > (`verl_omni.trainer.main_diffusion`). It remains for NPU auto-detect and

@@ -41,7 +41,7 @@ Consumed tensor inputs must be on CPU and must not require gradients.
 
 The validated scope is `QwenImagePipeline` with `flow_grpo` or `diffusion_nft`
 on GPU, FSDP/FSDP2 and SP=1; see the
-[Qwen-Image README](../../examples/flowgrpo_trainer/qwen_image/README.md#optional-timestep-input-staging).
+[Qwen-Image README](../examples/qwen_image/flowgrpo_trainer_qwen_image.md#optional-timestep-input-staging).
 The shared engine does not enforce a model/device allowlist; trainer config
 validation rejects sequence parallelism. Inference keeps its existing input/output behavior. Training output
 opt-in still works, but retaining those outputs reintroduces trajectory-length
@@ -182,7 +182,7 @@ Reference wandb curve [here](https://wandb.ai/andyzhou/VeRL-Omni-demo/runs/8p8y9
 > Apples-to-apples comparison: the **VeOmni** and **FSDP1** actor engines run the *same* FlowGRPO recipe — same algorithm, data, and hyper-parameters — on the *same* hardware (64 × NVIDIA H100), differing only in the training engine. lr 3e-5, clip_ratio 1e-5, optimizer state fp32; other parameters match the LoRA setting.
 
 - **FSDP1** — `run_qwen_image_ocr.sh`
-- **VeOmni** — `run_qwen_image_ocr_veomni.sh` (see the [optional engine backends](engine_backends.md))
+- **VeOmni** — `run_qwen_image_ocr_veomni.sh` (see the [optional engine backends](../start/engine_backends.md))
 
 ### Settings and Throughput
 

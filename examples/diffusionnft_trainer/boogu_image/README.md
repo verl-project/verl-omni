@@ -6,8 +6,8 @@ RL post-training for [Boogu-Image-0.1-Base](https://huggingface.co/Boogu/Boogu-I
 (text-to-image) with the DiffusionNFT trainer, using a `vllm-omni` rollout and
 `Qwen3-VL-8B-Instruct` as a visual generative reward model on an OCR-style task.
 
-The launcher is [`run_boogu_image_ocr_lora.sh`](run_boogu_image_ocr_lora.sh). It is the Boogu
-sibling of [`../qwen_image/run_qwen_image_ocr_lora.sh`](../qwen_image/run_qwen_image_ocr_lora.sh)
+The launcher is [`run_boogu_image_ocr_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/boogu_image/run_boogu_image_ocr_lora.sh). It is the Boogu
+sibling of [`../qwen_image/run_qwen_image_ocr_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora.sh)
 and differs in the model path, the LoRA targets and FSDP layer prefixes, the guidance knob
 (`pipeline.guidance_scale` rather than Qwen's `true_cfg_scale`), rollout TP=1, and the dataset.
 
@@ -49,7 +49,7 @@ when guidance is active without negative embeddings, rather than silently sampli
 
 ### Edit (TI2I) dataset
 
-[`run_boogu_image_edit_lora.sh`](run_boogu_image_edit_lora.sh) is the TI2I sibling of
+[`run_boogu_image_edit_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/boogu_image/run_boogu_image_edit_lora.sh) is the TI2I sibling of
 the launcher above. It defaults to the edit-specialised
 [`Boogu/Boogu-Image-0.1-Edit`](https://huggingface.co/Boogu/Boogu-Image-0.1-Edit)
 checkpoint rather than `Boogu-Image-0.1-Base`, which the T2I launcher above uses. It reads
@@ -63,7 +63,7 @@ python examples/flowgrpo_trainer/data_process/boogu_image_edit_ocr.py \
 
 Each row pairs the source image in `images` with an "edit this text" instruction and a
 `target_text`. The reward is **PickScore** — the same reward as the verified
-[Qwen-Image-Edit TI2I recipe](../../flowgrpo_trainer/qwen_image_edit/README.md) — which
+[Qwen-Image-Edit TI2I recipe](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image_edit/README.md) — which
 CLIP-encodes `reward_model.ground_truth` as the prompt and scores its similarity to the
 generated image. `ground_truth` is therefore the **instruction**, not the target word; the
 converter writes it that way and keeps `target_text` in `extra_info`. With the OCR GenRM
@@ -98,7 +98,7 @@ whose negative branch does feed the image; do not copy it here.
 
 The name is baked into the parquet at conversion time, so an existing dataset keeps its old key
 until it is regenerated or rewritten in place with
-[`set_data_source.py`](../../flowgrpo_trainer/data_process/set_data_source.py). See
+[`set_data_source.py`](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/data_process/set_data_source.py). See
 [metrics](../../../docs/start/metrics.md) for what the per-step DiffusionNFT keys mean.
 
 ## Launch

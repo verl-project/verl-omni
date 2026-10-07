@@ -109,7 +109,7 @@ with the omni DPO loss.
 ### Dataset
 
 Prepare Omni-Preference parquet files by following
-[`data_process/omni_preference_dpo_dataset.md`](data_process/omni_preference_dpo_dataset.md).
+[`data_process/omni_preference_dpo_dataset.md`](https://github.com/verl-project/verl-omni/blob/main/examples/dpo_trainer/data_process/omni_preference_dpo_dataset.md).
 The training script expects:
 
 ```text
@@ -220,7 +220,7 @@ Evaluation is staged so expensive generation can be resumed and inspected:
 is `<output>.jsonl`. All stages iterate samples in dataset order and use
 `(data_file, index, uid)` as the stable join key.
 
-The repository root [`eval_vlm_as_judge.sh`](qwen3_omni/eval_vlm_as_judge.sh) is the runnable example.
+The repository root [`eval_vlm_as_judge.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/dpo_trainer/qwen3_omni/eval_vlm_as_judge.sh) is the runnable example.
 It keeps reference and trained generation as resumable cache stages, then runs
 the judge stage over the cached outputs. Adjust the path variables, checkpoint
 steps, modalities, and judge address for your environment:

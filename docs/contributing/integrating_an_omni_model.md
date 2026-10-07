@@ -145,7 +145,7 @@ the recipe also disables dynamic micro-batching. Other execution modes require
 their own implementation and validation. Select the shared
 `omni_megatron_trainer.yaml` with `--config-name omni_megatron_trainer`, adding
 recipe-specific CLI overrides rather than a model-specific trainer YAML.
-See the [AudioMCQ recipe](../../examples/gspo_trainer/qwen3_omni/README.md)
+See the [AudioMCQ recipe](../examples/qwen3_omni/gspo_trainer_qwen3_omni.md)
 for the exact launcher and external dependency prerequisites; the documented
 development runs do not establish clean-checkout compatibility with public pins.
 
@@ -311,7 +311,7 @@ concurrency high and tuning `gpu_memory_utilization` instead — preempting
 KV is cheap relative to starving decode.
 
 Reference:
-[`examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh`](../../examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh)
+[`examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh)
 
 ### VeOmni backend (optional)
 

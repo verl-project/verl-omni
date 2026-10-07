@@ -9,17 +9,17 @@ DiffusionNFT is a direct-preference / forward-process algorithm. Unlike PPO-styl
 MiniMax H3 DiffusionNFT recipes support text-to-audio-video (T2VA), first-frame
 image-to-audio-video (FL2VA), and multimodal reference-to-audio-video (Ref2VA):
 
-- [`minimax_h3/run_minimax_h3_t2va_lora.sh`](minimax_h3/run_minimax_h3_t2va_lora.sh)
-- [`minimax_h3/run_minimax_h3_fl2va_lora.sh`](minimax_h3/run_minimax_h3_fl2va_lora.sh)
-- [`minimax_h3/run_minimax_h3_ref2va_lora.sh`](minimax_h3/run_minimax_h3_ref2va_lora.sh)
+- [`minimax_h3/run_minimax_h3_t2va_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh)
+- [`minimax_h3/run_minimax_h3_fl2va_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_fl2va_lora.sh)
+- [`minimax_h3/run_minimax_h3_ref2va_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_ref2va_lora.sh)
 
 They use the dedicated token-ID-native H3 AgentLoop; see the
-[MiniMax H3 recipe README](minimax_h3/README.md) for model staging, data
+[MiniMax H3 recipe README](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/minimax_h3/README.md) for model staging, data
 preparation, and launch instructions.
 
 Boogu-Image-0.1-Base has a DiffusionNFT recipe as well:
-[`boogu_image/run_boogu_image_ocr_lora.sh`](boogu_image/run_boogu_image_ocr_lora.sh). See the
-[Boogu-Image recipe README](boogu_image/README.md) for its guided-CFG and LoRA-target
+[`boogu_image/run_boogu_image_ocr_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/boogu_image/run_boogu_image_ocr_lora.sh). See the
+[Boogu-Image recipe README](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionnft_trainer/boogu_image/README.md) for its guided-CFG and LoRA-target
 constraints.
 
 For the full installation guide, see [Installation](../../docs/start/install.md). For implementation details on adding or extending direct-preference diffusion algorithms, see `docs/contributing/integrating_a_new_direct_preference_algorithm_for_diffusion_model.md`.
@@ -28,7 +28,7 @@ For the full installation guide, see [Installation](../../docs/start/install.md)
 
 For optional Qwen-Image timestep input staging, use
 `actor_rollout_ref.actor.enable_timestep_staging=true` and follow the
-[shared staging contract](../flowgrpo_trainer/qwen_image/README.md#optional-timestep-input-staging).
+[shared staging contract](https://github.com/verl-project/verl-omni/blob/main/examples/flowgrpo_trainer/qwen_image/README.md#optional-timestep-input-staging).
 This validation scope is Qwen-Image with FSDP/FSDP2 on GPU, SP=1; it does not
 extend to the MiniMax H3 recipes above.
 

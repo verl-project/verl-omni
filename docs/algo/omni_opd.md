@@ -169,7 +169,7 @@ runs on its own node with `distillation.nnodes=1`,
 `distillation.n_gpus_per_node=16`.
 
 A complete runnable recipe is
-[`examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh`](../examples/gspo_trainer/README.md#mmk12-on-policy-distillation-opd):
+[`examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/README.md#mmk12-on-policy-distillation-opd):
 GSPO + LoRA training of Qwen3-Omni-30B-A3B-Instruct (noise-perturbed student)
 distilling from the original model on MMK12, where OPD converges faster than
 the self-training baseline. Runtime dependencies on all Ray worker nodes:

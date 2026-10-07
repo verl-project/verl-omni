@@ -10,12 +10,21 @@ CONFIG_SPECS=(
     "omni_megatron_trainer:_generated_omni_megatron_trainer.yaml:--config-name=omni_megatron_trainer.yaml"
 )
 
-VERL_CONFIG_DIR=$(python3 -c "import verl.trainer.config; print(verl.trainer.config.__path__[0])" 2>/dev/null || echo "")
-if [ -n "$VERL_CONFIG_DIR" ]; then
+VERL_PROBE_ERR=$(mktemp)
+if VERL_CONFIG_DIR=$(python3 -c "import verl.trainer.config; print(verl.trainer.config.__path__[0])" 2>"$VERL_PROBE_ERR"); then
     OMNI_EXTRA_ARG="++hydra.searchpath=[file://${VERL_CONFIG_DIR}]"
 else
+    # A failed probe must never silently disable the omni checks in CI.
+    if [ -n "${CI:-}" ]; then
+        echo "✖ 'import verl.trainer.config' failed in CI; cannot verify the omni configs. Probe error:"
+        sed 's/^/  /' "$VERL_PROBE_ERR"
+        rm -f "$VERL_PROBE_ERR"
+        exit 1
+    fi
+    echo "⚠ 'import verl.trainer.config' failed ($(tail -n 1 "$VERL_PROBE_ERR")); the omni config checks will be skipped."
     OMNI_EXTRA_ARG=""
 fi
+rm -f "$VERL_PROBE_ERR"
 
 generate_config() {
     local config_name="$1"
@@ -52,7 +61,7 @@ for spec in "${CONFIG_SPECS[@]}"; do
         if [ -n "$VERL_CONFIG_DIR" ]; then
             extra_arg=" $OMNI_EXTRA_ARG"
         else
-            echo "Skipping ${config_name}: verl is not installed; run 'pip install verl' to enable this check."
+            echo "Skipping ${config_name}: 'import verl.trainer.config' failed; see the warning above."
             continue
         fi
     fi

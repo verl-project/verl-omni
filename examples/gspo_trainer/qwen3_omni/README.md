@@ -4,21 +4,21 @@ Last updated: 09/29/2026
 
 This directory contains both FSDP2 and Megatron recipes. For non-Megatron
 setup, data preparation and training instructions, see the
-[parent GSPO guide](../README.md). The launchers below contain each recipe's
+[parent GSPO guide](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/README.md). The launchers below contain each recipe's
 defaults and accept CLI overrides.
 
 | Recipe | Backend / platform | Launcher |
 | --- | --- | --- |
-| GSM8K LoRA | FSDP2 / GPU | [Thinker LoRA](run_qwen3_omni_thinker_gspo_lora_v1.sh) |
-| MMK12 LoRA | FSDP2 / GPU | [MMK12](run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh) |
-| MMK12 LoRA, separate-async | FSDP2 / GPU | [MMK12 separate-async](run_qwen3_omni_thinker_gspo_lora_mmk12_separate_async_v1.sh) |
-| MMK12 LoRA | FSDP2 / NPU | [MMK12 NPU](run_qwen3_omni_thinker_gspo_lora_mmk12_v1_npu.sh) |
-| MMK12 LoRA with on-policy distillation | FSDP2 / NPU | [MMK12 OPD](run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh) |
-| AVQA LoRA | FSDP2 / GPU | [AVQA LoRA](run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh) |
-| AVQA full-parameter | FSDP2 / NPU | [AVQA NPU](run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh) |
-| NExT-QA full-parameter | FSDP2 / NPU | [NExT-QA NPU](run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh) |
-| AudioMCQ full-parameter, separate-async | Megatron / GPU | [AudioMCQ](run_qwen3_omni_megatron_audiomcq_separate_async.sh) |
-| AVQA image+audio full-parameter, separate-async | Megatron / GPU | [AVQA](run_qwen3_omni_megatron_avqa_separate_async.sh) |
+| GSM8K LoRA | FSDP2 / GPU | [Thinker LoRA](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh) |
+| MMK12 LoRA | FSDP2 / GPU | [MMK12](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh) |
+| MMK12 LoRA, separate-async | FSDP2 / GPU | [MMK12 separate-async](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_separate_async_v1.sh) |
+| MMK12 LoRA | FSDP2 / NPU | [MMK12 NPU](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_npu.sh) |
+| MMK12 LoRA with on-policy distillation | FSDP2 / NPU | [MMK12 OPD](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh) |
+| AVQA LoRA | FSDP2 / GPU | [AVQA LoRA](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh) |
+| AVQA full-parameter | FSDP2 / NPU | [AVQA NPU](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_avqa_v1.sh) |
+| NExT-QA full-parameter | FSDP2 / NPU | [NExT-QA NPU](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu_nextqa_v1.sh) |
+| AudioMCQ full-parameter, separate-async | Megatron / GPU | [AudioMCQ](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_audiomcq_separate_async.sh) |
+| AVQA image+audio full-parameter, separate-async | Megatron / GPU | [AVQA](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_avqa_separate_async.sh) |
 
 The following sections describe the **Megatron AudioMCQ** and **AVQA** recipes,
 their dependency prerequisites and validation limits. For model-adapter development, see the
@@ -186,7 +186,7 @@ parity; evaluate the need for a new full-model run after reviewing the changes.
 
 ## AVQA image+audio full-parameter Megatron separate-async
 
-This [AVQA launcher](run_qwen3_omni_megatron_avqa_separate_async.sh) trains the
+This [AVQA launcher](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_megatron_avqa_separate_async.sh) trains the
 Qwen3-Omni Thinker language model on real image and audio inputs, with its
 vision and audio towers frozen. It uses GRPO advantages, GSPO sequence clipping,
 the repository's exact `choice_reward.py` scorer, and the V1 separate-async
@@ -195,7 +195,7 @@ overrides; it does not invoke another task launcher. It does **not** train the T
 video-training recipe.
 
 Convert the official AVQA-R1 archive with the existing
-[AVQA converter](../data_process/avqa.py). The published AVQA-R1 split used in
+[AVQA converter](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/data_process/avqa.py). The published AVQA-R1 split used in
 our validation contained media bytes shared across train and validation; its
 `problem_id` also restarts in each split. Make a separate strict training
 parquet by excluding every training row whose image **or** audio SHA256 occurs

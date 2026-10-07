@@ -1,6 +1,6 @@
 # Welcome to VeRL-Omni's documentation!
 
-Last updated: 09/28/2026
+Last updated: 10/06/2026
 
 [VeRL-Omni](https://github.com/verl-project/verl-omni) is a general RL training framework focused on multimodal generative models, built on top of [verl](https://github.com/verl-project/verl). It originated from the multi-modal generation RL effort in `verl`, and now has a dedicated home so it can evolve in a more focused way.
 
@@ -32,6 +32,7 @@ start/install_npu.md
 start/install_rocm.md
 start/models.md
 start/flowgrpo_quickstart.md
+start/diffusion_v1.md
 start/multi_node_training.md
 start/model_merger.md
 start/metrics.md
@@ -54,7 +55,6 @@ algo/rollout_correction.md
 algo/separate_async_omni.md
 start/rollout_batching.md
 start/http_scorer.md
-start/diffusion_v1.md
 start/rl_insight.md
 ```
 
@@ -74,32 +74,37 @@ algo/deterministic_post_training.md
 algo/performance.md
 ```
 
+<!-- Examples grouped by task: overview router, image-generation algorithm
+     pages, per-model image pages, video/audio, unified multimodal,
+     omni-modality. The check_example_docs_symlinks sanity test requires every
+     symlinked example page to stay inside this single toctree. -->
 ```{toctree}
 :maxdepth: 2
 :caption: Examples
 
+examples/overview.md
 examples/flowgrpo_trainer.md
 examples/flowdppo_trainer.md
 examples/dpo_trainer.md
-examples/dapo_trainer.md
 examples/dancegrpo_trainer.md
 examples/flux1/dancegrpo_trainer_flux1.md
-examples/diffusionnft_trainer.md
 examples/grpoguard_trainer.md
-examples/gspo_trainer.md
-examples/qwen3_omni/gspo_trainer_qwen3_omni.md
 examples/mixgrpo_trainer.md
+examples/diffusionnft_trainer.md
 examples/diffusionopd_trainer.md
 examples/flowgrpo_trainer_sd35_drm.md
-examples/bagel/flowgrpo_trainer_bagel.md
-examples/qwen3_tts/grpo_trainer_qwen3_tts.md
 examples/qwen_image/flowgrpo_trainer_qwen_image.md
 examples/qwen_image_edit/flowgrpo_trainer_qwen_image_edit.md
 examples/ltx2/flowgrpo_trainer_ltx2.md
-examples/minimax_h3/diffusionnft_trainer_minimax_h3.md
-examples/boogu_image/diffusionnft_trainer_boogu_image.md
-examples/boogu_image/flowgrpo_trainer_boogu_image.md
 examples/minimax_h3/flowgrpo_trainer_minimax_h3.md
+examples/minimax_h3/diffusionnft_trainer_minimax_h3.md
+examples/boogu_image/flowgrpo_trainer_boogu_image.md
+examples/boogu_image/diffusionnft_trainer_boogu_image.md
+examples/bagel/flowgrpo_trainer_bagel.md
+examples/gspo_trainer.md
+examples/qwen3_omni/gspo_trainer_qwen3_omni.md
+examples/dapo_trainer.md
+examples/qwen3_tts/grpo_trainer_qwen3_tts.md
 ```
 
 ```{toctree}

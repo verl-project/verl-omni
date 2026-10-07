@@ -1,6 +1,6 @@
 # Profiling FlowGRPO / diffusion training in VeRL-Omni
 
-Last updated: 09/18/2026.
+Last updated: 10/06/2026.
 
 VeRL-Omni reuses the profiler subsystem from upstream
 [verl](https://github.com/verl-project/verl) (`verl.utils.profiler`) and exposes
@@ -430,8 +430,11 @@ the actor's `analysis=True` does not configure rollout parsing.
 ## Lightweight profiling recipe
 
 Profiling a full FlowGRPO step produces a large trace that is slow to open.
-The `main_diffusion` launchers under `examples/` pass `"$@"` through to the
-`diffusion_trainer` config, and Hydra resolves duplicate overrides
+This recipe uses a `main_diffusion` (v0) launcher on purpose: the diffusion
+V1 trainer (`main_diffusion_v1`) does not yet support step-based profiling,
+so keep profiling recipes on the v0 launchers until V1 gains
+`global_profiler.steps` support. The `main_diffusion` launchers under
+`examples/` pass `"$@"` through to Hydra, which resolves duplicate overrides
 last-wins — so appending overrides to any recipe shrinks its footprint
 without editing the script. The following profiles a single lightweight step
 of the SD3.5 OCR recipe (2 rollouts instead of 8, 4 denoising steps instead
@@ -475,7 +478,7 @@ bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora.sh \
     reward.reward_model.rollout.profiler.tool_config.torch.discrete=True
 ```
 
-Measured on 3×RTX 4090 against the recipe defaults: traces 163 MB → 32 MB,
+Measured on 3×RTX 4090 against the v0 recipe defaults: traces 163 MB → 32 MB,
 profiled step 616 s → 70 s.
 
 The `trainer.*` lines are not optional: the run's last step force-triggers

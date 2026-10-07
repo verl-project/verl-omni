@@ -1,13 +1,14 @@
 (tuning_guide)=
 # Performance Tuning Guide
 
-Last updated: 09/14/2026
+Last updated: 10/06/2026
 
 This page is the starting point for tuning a VeRL-Omni diffusion RL run. It
 does not repeat the detail already covered by the more specific pages —
 instead it gives you a decision order and links to the right page for each
 decision, plus a troubleshooting checklist for the OOM/throughput problems
-that come up across all of them.
+that come up across all of them. For omni-modality (AR) runs, start with
+section 5.
 
 ## Where time actually goes
 
@@ -131,6 +132,45 @@ Symptoms that show up regardless of which stage causes them:
   `VERL_OMNI_DEVICE_FLOPS_TFLOPS`) and a missing DP gather of sequence
   lengths, not the LoRA vs. full-FT FLOPs caveat — that one only matters when
   comparing LoRA against full FT, not as a path to MFU above 1.0.
+
+## 5. Tuning omni-modality (AR) runs
+
+The sections above are written against diffusion RL, where the rollout
+engine generates images/video/audio with a diffusion pipeline. Omni-modality
+runs (Qwen3-Omni thinker with GSPO/DAPO, Qwen3-TTS with GRPO) use the
+`main_omni` entrypoint with an autoregressive vLLM-Omni rollout, and the
+tuning surfaces differ accordingly:
+
+- **Layout.** Colocated vs. disaggregated reward still applies, but AR runs
+  add the separate-async option for the actor/rollout split itself —
+  [Separate-Async Omni Training](../algo/separate_async_omni.md) documents
+  that layout and when to prefer it. The megatron separate-async recipes in
+  the [Qwen3-Omni README](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/README.md)
+  are the reference setups (experimental; see the reproducibility notes in
+  [models catalogue](../start/models.md)).
+- **Rollout.** AR rollout has no denoising-step knob; concurrency is
+  governed by the vLLM-Omni engine (`max_num_seqs`,
+  `engine_kwargs.vllm_omni.*`) — the same knobs introduced in step 2 above,
+  minus the diffusion-specific batching modes. {ref}`rollout_batching`
+  remains the authoritative description of those two modes.
+- **Actor.** The FSDP knobs documented in
+  [Tuning and Improving MFU](diffusion_mfu.md#tuning-and-improving-mfu)
+  (offload flags, sequence parallelism, micro-batch size) apply to the omni
+  actor as well, but the reference measurements on that page are
+  diffusion-specific; the omni recipes in [models catalogue](../start/models.md) list their own
+  validated GPU configs (H100/H200, plus NPU variants).
+- **Reward.** Text and multimodal reward servers are profiled and scaled the
+  same way as diffusion reward pools — see
+  [Async Reward](../algo/async_reward.md) and
+  [HTTP Scorer](../start/http_scorer.md).
+- **Monitoring and profiling.** [RL-Insight](../start/rl_insight.md) works
+  for `main_omni` runs. For step-based profiling, omni PPO V1 is supported
+  while diffusion V1 is not — see the caveat in
+  [profiler.md](profiler.md).
+
+No omni-specific throughput numbers are documented yet; treat every knob
+above as requiring measurement on your own workload before drawing
+conclusions.
 
 ## See also
 
