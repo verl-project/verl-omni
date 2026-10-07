@@ -23,6 +23,7 @@ import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
+from tqdm import tqdm
 from verl.base_config import BaseConfig
 from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics, DictConfigWrap, _agent_loop_registry
 from verl.experimental.agent_loop.utils import resolve_config_path
@@ -245,7 +246,35 @@ class DiffusionAgentLoopWorker:
             tasks.append(
                 asyncio.create_task(self._run_agent_loop(task_sampling_params, validate=is_validate, **kwargs))
             )
-        outputs = await asyncio.gather(*tasks)
+
+        if not self.rollout_config.enable_rollout_progress:
+            outputs = await asyncio.gather(*tasks)
+        else:
+            # One diffusion sample costs seconds to minutes, and a step is mostly
+            # this rollout, so the step-level "Training Progress" bar alone leaves
+            # a healthy run looking stalled between two of its updates.  Count the
+            # samples as they finish so a slow rollout reads as slow rather than
+            # invisible.  The label says which pass, because the same bar covers
+            # the validation pass that runs on the last step.  Each worker counts
+            # only its own share of the batch, so the totals add up across workers.
+            progress = tqdm(
+                total=len(tasks),
+                desc="Validation" if is_validate else "Rollout",
+                unit="sample",
+                dynamic_ncols=True,
+                leave=True,
+            )
+
+            async def _counted(task):
+                try:
+                    return await task
+                finally:
+                    progress.update(1)
+
+            try:
+                outputs = await asyncio.gather(*[_counted(task) for task in tasks])
+            finally:
+                progress.close()
 
         output = self._postprocess(outputs, input_non_tensor_batch=batch.non_tensor_batch)
 
