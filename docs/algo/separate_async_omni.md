@@ -1,7 +1,7 @@
 (separate_async_omni)=
 # Separate-Async RL Training for Qwen3-Omni
 
-Last updated: 09/29/2026
+Last updated: 10/07/2026
 
 `trainer.v1.trainer_mode=omni_separate_async` runs training and rollout on
 separate GPU pools for omni AR models (Qwen3-Omni thinker). Standalone rollout
@@ -42,7 +42,32 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_sep
 ```
 
 The example splits 4 GPUs into 2 trainer + 2 rollout (one TP=2 replica) and
-uses GSPO + GRPO advantages with LoRA. Full-parameter Megatron uses the same
+uses GSPO + GRPO advantages with LoRA.
+
+### Offload on the trainer pool: a throughput/memory trade-off
+
+Decoupled-PPO CPU snapshots own their storage in `OmniDetachActorWorker`, so
+`param_offload`/`optimizer_offload` are **safe at any model size** — pick
+them by memory arithmetic, not correctness. Two constraints rule the
+offload-free shape, and `gpu_memory_utilization` (one knob for the standalone
+and hybrid pools) must satisfy both:
+
+1. The hybrid replicas that briefly share the trainer GPUs (first sampling
+   window, validation) map their full engine budget when they wake, next to
+   the now-resident actor: `utilization × card + actor weights + caches` must
+   fit on the trainer cards.
+2. Every rollout engine needs `utilization × card` to cover its model
+   weights, activation/graph overhead and KV cache; below that floor it dies
+   at init with `No available memory for the cache blocks`.
+
+A bigger actor pushes the first constraint up until the second can no longer
+hold — no utilization works, so keep the colocated offload flags: the actor
+vacates during rollout, both pools get their full budget, and the only cost is
+the CPU↔GPU weight swap per local update. A small actor leaves a wide window:
+drop offload and keep the swaps out of the step time entirely (measured ~1.4×
+faster with a 4.5B actor, validation matching the colocated baseline).
+
+Full-parameter Megatron uses the same
 `trainer.v1.trainer_mode=omni_separate_async` path:
 
 ```bash
