@@ -169,11 +169,11 @@ tuning surfaces differ accordingly:
   while diffusion V1 is not — see the caveat in
   [profiler.md](profiler.md).
 
-The only measured omni throughput reference points are the two separate-async
-actor/rollout splits in
-[Separate-Async Omni Training](../algo/separate_async_omni.md) (a 4.5B and a
-30B actor on 4 × H800); beyond those, treat every knob above as requiring
-measurement on your own workload before drawing conclusions.
+The only measured omni throughput reference points are in
+[Separate-Async Omni Training](../algo/separate_async_omni.md) — the
+MiniCPM-o 4.5 colocated-vs-separate-async split ladder and a Qwen3-Omni 30B
+run, all on a single node of 4 × 80 GB; beyond those, treat every knob above
+as requiring measurement on your own workload before drawing conclusions.
 
 ## See also
 
