@@ -362,6 +362,9 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         negative_extra_prompt_ids: Optional[dict[str, list[int]]] = None,
         priority: int = 0,
     ) -> DiffusionOutput | TokenOutput:
+        # Hold generates while abort_all_requests runs: engine admission only
+        # holds at pause_generation, and resubmissions admitted before it wedge sleep().
+        await self._generation_gate().wait()
         return await self._generate_strategy.generate(
             prompt_ids=prompt_ids,
             sampling_params=sampling_params,
@@ -425,12 +428,32 @@ class vLLMOmniHttpServer(vLLMHttpServer):
     # so the parent's AsyncLLM-specific implementation must be overridden.
     # -----------------------------------------------------------------------
 
+    def _generation_gate(self) -> asyncio.Event:
+        """Lazily created open-by-default admission gate (see ``generate``)."""
+        gate = getattr(self, "_generation_gate_event", None)
+        if gate is None:
+            gate = asyncio.Event()
+            gate.set()
+            self._generation_gate_event = gate
+        return gate
+
     async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort all in-flight requests on the AsyncOmni engine."""
         engine = self.engine
         if getattr(engine, "output_processor", None) is not None:
             return await super().abort_all_requests(reset_prefix_cache)
 
+        # Close the admission window for the whole abort+pause sequence:
+        # resubmissions triggered by early abort ACKs must not be admitted.
+        gate = self._generation_gate()
+        gate.clear()
+        try:
+            result = await self._abort_all_requests_ungated(engine, reset_prefix_cache)
+        finally:
+            gate.set()
+        return result
+
+    async def _abort_all_requests_ungated(self, engine, reset_prefix_cache: bool) -> dict[str, Any]:
         # ``engine.abort`` takes EXTERNAL ids; ``request_states`` is keyed by internal.
         in_flight: list[tuple[str, str, Any]] = []
         seen: set[str] = set()
@@ -464,14 +487,34 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                     self._enqueue_abort_output(internal_id, state)
             raise
 
+        # Requests that entered just before the gate closed missed the first
+        # scan; abort them so none survives into sleep()'s drain barrier.
+        straggler_states: list[tuple[str, str, Any]] = []
+        for state in engine.request_states.values():
+            if state.external_request_id in seen:
+                continue
+            seen.add(state.external_request_id)
+            straggler_states.append((state.request_id, state.external_request_id, state))
+        stragglers = [external_id for _, external_id, _ in straggler_states]
+        if stragglers:
+            try:
+                await asyncio.wait_for(
+                    engine.abort(stragglers), timeout=float(os.getenv("VERL_OMNI_ABORT_ACK_TIMEOUT_S", "120"))
+                )
+            except Exception:
+                for internal_id, _, state in straggler_states:
+                    self._enqueue_abort_output(internal_id, state)
+                raise
+
         if reset_prefix_cache:
             # pause_generation(clear_cache=True) wiped the engine-side mm cache;
             # drop the frontend copy too, or hash-only follow-ups finish empty.
             # TODO (mike): drop after vllm-omni fixes AsyncOmni.reset_mm_cache.
             await self._reset_frontend_mm_cache()
 
-        logger.info("Aborted %d request(s): %s", len(request_ids), request_ids)
-        return {"aborted_count": len(request_ids), "request_ids": request_ids}
+        aborted_ids = request_ids + stragglers
+        logger.info("Aborted %d request(s): %s", len(aborted_ids), aborted_ids)
+        return {"aborted_count": len(aborted_ids), "request_ids": aborted_ids}
 
     def _enqueue_abort_output(self, internal_id: str, req_state: Any) -> None:
         """Synthesize a terminal abort OutputMessage and put it into a per-request queue.
