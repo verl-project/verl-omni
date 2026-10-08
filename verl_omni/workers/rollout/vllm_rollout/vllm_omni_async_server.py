@@ -49,6 +49,13 @@ from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import 
 logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
+
+def _log_failed_mm_clear(task: asyncio.Future) -> None:
+    """Consume a late failure of an abandoned (shielded) mm-cache clear."""
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning("frontend mm cache clear failed: %s", task.exception())
+
+
 # Sentinel: ``None`` is a valid cached value (LoRA not loaded).
 _LORA_REQUEST_CACHE_MISS = object()
 
@@ -283,8 +290,35 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # Diffusion-only engines build no InputProcessor, so renderer is None.
         # TODO (mike): drop after vllm-omni fixes AsyncOmni.reset_mm_cache.
         renderer = self.engine.renderer
-        if renderer is not None:
-            await renderer.clear_mm_cache_async()
+        if renderer is None:
+            return
+        # clear_mm_cache_async serializes through the renderer's single-worker
+        # mm executor, i.e. behind every queued multimodal preprocessing job;
+        # under a rollout backlog that wait is unbounded. Shielded so a timeout
+        # only abandons the wait: the queued clear still runs (FIFO executor)
+        # before any post-resume mm job.
+        timeout = float(os.getenv("VERL_OMNI_MM_CLEAR_TIMEOUT_S", "60"))
+        clear_task = asyncio.ensure_future(renderer.clear_mm_cache_async())
+        clear_task.add_done_callback(_log_failed_mm_clear)
+        try:
+            await asyncio.wait_for(asyncio.shield(clear_task), timeout=timeout)
+        except TimeoutError:
+            logger.warning(
+                "frontend mm cache clear still queued behind mm preprocessing after %.0fs; "
+                "abandoning the wait (the clear itself still runs)",
+                timeout,
+            )
+
+    def _log_admission_state(self, where: str) -> None:
+        engine = self.engine
+        admitting = getattr(engine, "_admitting", None)
+        states = getattr(engine, "request_states", None)
+        logger.info(
+            "%s: admission_slots_held=%s in_flight_requests=%s",
+            where,
+            admitting if admitting is not None else "?",
+            len(states) if states is not None else "?",
+        )
 
     async def sleep(self):
         if self.node_rank != 0 or not self.config.free_cache_engine:
@@ -293,6 +327,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
             logger.info("skip sleep in standalone mode")
             return
         with RLInsightLogger.trace_state("vllm_sleep", state_lane_id=f"replica_{self.replica_rank}"):
+            self._log_admission_state("sleep requested")
             acks = await self.engine.sleep(level=self._resolve_sleep_level())
             self._validate_acks("sleep", acks)
             await self._reset_frontend_mm_cache()
@@ -448,6 +483,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         gate = self._generation_gate()
         gate.clear()
         try:
+            self._log_admission_state("abort window opening")
             result = await self._abort_all_requests_ungated(engine, reset_prefix_cache)
         finally:
             gate.set()

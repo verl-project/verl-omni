@@ -19,6 +19,8 @@ delivers tokens; diffusion sleep/wake ACKs are not engine-checked.
 """
 
 import asyncio
+import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -670,6 +672,43 @@ async def test_no_second_abort_without_stragglers():
 
     assert engine.abort_calls == [["a"]]
     assert result["aborted_count"] == 1
+
+
+class _BackloggedMmRenderer:
+    """Renderer whose mm clear queues behind real jobs on a single-worker executor."""
+
+    def __init__(self, backlog: int, job_s: float):
+        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._backlog = backlog
+        self._job_s = job_s
+        self.clears = 0
+
+    def _clear(self) -> None:
+        self.clears += 1
+
+    async def clear_mm_cache_async(self) -> None:
+        loop = asyncio.get_running_loop()
+        for _ in range(self._backlog):
+            await loop.run_in_executor(self._executor, time.sleep, self._job_s)
+        await loop.run_in_executor(self._executor, self._clear)
+
+
+async def test_mm_clear_queued_behind_backlog_abandons_wait_but_still_runs(monkeypatch):
+    """A frontend mm clear stuck behind preprocessing must not hang the abort,
+    and must still execute afterwards (not be cancelled by the abandoned wait)."""
+    monkeypatch.setenv("VERL_OMNI_MM_CLEAR_TIMEOUT_S", "0.1")
+    engine = _FakeAsyncOmni(states={"i0": _FakeRequestState("i0", "a")})
+    engine.renderer = _BackloggedMmRenderer(backlog=3, job_s=0.2)  # ~0.6s of backlog
+    server = _make_server(engine)
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    result = await asyncio.wait_for(server.abort_all_requests(), timeout=5)
+
+    assert loop.time() - start < 0.5  # abandoned the wait well before the backlog drained
+    assert result["aborted_count"] == 1
+    await _wait_until(lambda: engine.renderer.clears == 1, timeout=5)  # clear still ran
+    engine.renderer._executor.shutdown(wait=True)
 
 
 async def test_straggler_abort_failure_enqueues_terminals_then_raises():
