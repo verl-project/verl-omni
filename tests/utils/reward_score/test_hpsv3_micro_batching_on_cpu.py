@@ -128,7 +128,7 @@ async def test_score_queue_is_bounded(monkeypatch):
 
 
 def test_to_pil_preserves_uint8_pixel_values():
-    image = hpsv3_reward._to_pil_hwc(_image(173))
+    image = hpsv3_reward._frame_to_pil(_image(173))
 
     assert image.mode == "RGB"
     assert image.getpixel((0, 0)) == (173, 173, 173)
@@ -195,6 +195,21 @@ def test_extract_frames_preserves_legacy_cthw_direct_calls():
     frames = hpsv3_reward._extract_frames(video, frame_interval=2)
 
     assert [frame.getpixel((0, 0))[0] for frame in frames] == [1, 3, 5]
+
+
+@pytest.mark.parametrize("num_frames", [None, 2])
+def test_sampling_paths_agree_on_normalized_float_pixels(num_frames):
+    video = _video([0, 255]).float() / 255
+    frames = hpsv3_reward._select_reward_frames(video, {"frame_interval": 1}, num_frames)
+    assert [frame.getpixel((0, 0)) for frame in frames] == [(0, 0, 0), (255, 255, 255)]
+
+
+@pytest.mark.parametrize("num_frames", [None, 2])
+@pytest.mark.parametrize("value", [-0.1, 1.1, float("nan"), float("inf")])
+def test_sampling_paths_reject_invalid_float_pixels(num_frames, value):
+    video = torch.full((2, 3, 4, 4), value)
+    with pytest.raises(ValueError, match="finite|in "):
+        hpsv3_reward._select_reward_frames(video, {"frame_interval": 1}, num_frames)
 
 
 @pytest.mark.asyncio
