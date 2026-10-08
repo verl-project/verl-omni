@@ -1,0 +1,70 @@
+name: CPU reward Ray integration
+
+on:
+  push:
+    branches: [main, v0.*]
+    paths:
+      - "verl_omni/reward_loop/**"
+      - "verl_omni/utils/ray_lifecycle.py"
+      - "verl_omni/workers/config/reward.py"
+      - "tests/reward_loop/test_cpu_native_reward_ray.py"
+      - "tests/utils/test_ray_lifecycle_ray.py"
+      - "pyproject.toml"
+      - ".github/*_pin.txt"
+      - ".github/workflows/cpu_reward_ray_tests.yml"
+  pull_request:
+    branches: [main, v0.*]
+    types: [opened, reopened, synchronize, labeled]
+    paths:
+      - "verl_omni/reward_loop/**"
+      - "verl_omni/utils/ray_lifecycle.py"
+      - "verl_omni/workers/config/reward.py"
+      - "tests/reward_loop/test_cpu_native_reward_ray.py"
+      - "tests/utils/test_ray_lifecycle_ray.py"
+      - "pyproject.toml"
+      - ".github/*_pin.txt"
+      - ".github/workflows/cpu_reward_ray_tests.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  ray_integration:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CUDA_VISIBLE_DEVICES: ""
+      TORCH_COMPILE_DISABLE: "1"
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+      PYTHONPATH: .:tests/reward_loop
+      TMPDIR: /tmp/ray-cpu-reward
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Install CPU dependencies
+        run: |
+          mkdir -p "$TMPDIR"
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu "https://github.com/vllm-project/vllm/releases/download/v0.28.0/vllm-0.28.0+cpu-cp38-abi3-manylinux_2_34_x86_64.whl"
+          pip install uv
+          uv pip install --python "$(command -v python)" -e ".[omni,dev]"
+          pip install --no-deps "qwen-tts @ https://github.com/QwenLM/Qwen3-TTS/archive/$(cat .github/qwen_tts_pin.txt).tar.gz"
+      - name: Run real Ray CPU reward tests
+        run: |
+          pytest -q -p pytest_asyncio.plugin --asyncio-mode=auto \
+            --basetemp="$(mktemp -d /tmp/cr694.XXXXXX)" \
+            --junitxml=cpu-reward-ray.xml \
+            tests/reward_loop/test_cpu_native_reward_ray.py tests/utils/test_ray_lifecycle_ray.py
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cpu-reward-ray-results
+          path: cpu-reward-ray.xml
+          if-no-files-found: ignore

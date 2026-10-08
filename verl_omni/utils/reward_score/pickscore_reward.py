@@ -224,7 +224,12 @@ class PickScoreNativeModel:
             await self._consumer_task
         self._consumer_task = None
         if hasattr(self, "_inferencer"):
+            backend_tokenizer = getattr(self._inferencer.processor.tokenizer, "backend_tokenizer", None)
+            # CLIP's decode wrapper captures a native tokenizer that Python GC cannot traverse.
+            if backend_tokenizer is not None and "decode" in vars(backend_tokenizer):
+                del backend_tokenizer.decode
             del self._inferencer
+            del backend_tokenizer
         gc.collect()
         accelerator = getattr(torch, get_device_name(), None)
         empty_cache = getattr(accelerator, "empty_cache", None)

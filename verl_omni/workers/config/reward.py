@@ -52,9 +52,20 @@ _NATIVE_BACKENDS = {"native"}
 
 @dataclass
 class RewardModelPlacementConfig(BaseConfig):
-    """Bundle indices in the trainer-selected parent resource pool."""
+    """Placement for one native reward replica deployment.
 
+    ``accelerator`` keeps the existing contract: ``devices`` are global logical
+    bundle indices in the trainer-selected parent resource pool.  ``cpu`` uses
+    ordinary Ray CPU actor resources and treats ``devices`` as stable logical
+    replica slots; no GPU parent pool is required.
+    """
+
+    # Accelerator bundle indices, or logical CPU replica slots.
     devices: list[int] = field(default_factory=list)
+    # Ray resource kind used to place complete native replicas.
+    resource: str = "accelerator"
+    # CPU capacity reserved for each CPU replica actor.
+    cpus_per_worker: int = 1
 
     def __post_init__(self) -> None:
         if not isinstance(self.devices, list) or not self.devices:
@@ -63,15 +74,35 @@ class RewardModelPlacementConfig(BaseConfig):
             raise ValueError("Native reward model placement.devices must contain non-negative integers")
         if len(set(self.devices)) != len(self.devices):
             raise ValueError("Native reward model placement.devices must not contain duplicates")
+        if self.resource not in {"accelerator", "cpu"}:
+            raise ValueError("Native reward model placement.resource must be 'accelerator' or 'cpu'")
+        if (
+            isinstance(self.cpus_per_worker, bool)
+            or not isinstance(self.cpus_per_worker, int)
+            or self.cpus_per_worker <= 0
+        ):
+            raise ValueError("Native reward model placement.cpus_per_worker must be a positive integer")
+        if self.resource == "accelerator" and self.cpus_per_worker != 1:
+            raise ValueError("Native reward model placement.cpus_per_worker is only supported for resource='cpu'")
+
+    @property
+    def is_cpu(self) -> bool:
+        """Whether the deployment uses ordinary Ray CPU resources."""
+        return self.resource == "cpu"
 
     @classmethod
     def from_mapping(cls, name: str, value) -> RewardModelPlacementConfig:
         placement = to_mapping(value)
-        _reject_unknown_fields(name, placement, {"devices"}, prefix="placement.")
+        allowed = {"devices", "resource", "cpus_per_worker"}
+        _reject_unknown_fields(name, placement, allowed, prefix="placement.")
         if "devices" not in placement:
-            raise ValueError(f"Native reward model {name!r} requires placement.devices as parent-pool bundle indices")
+            raise ValueError(f"Native reward model {name!r} requires placement.devices")
         try:
-            return cls(devices=placement["devices"])
+            return cls(
+                devices=placement["devices"],
+                resource=placement.get("resource", "accelerator"),
+                cpus_per_worker=placement.get("cpus_per_worker", 1),
+            )
         except (TypeError, ValueError) as exc:
             raise type(exc)(f"Native reward model {name!r} {exc}") from exc
 
@@ -250,6 +281,8 @@ class RewardModelSpec(BaseConfig):
     model_path: str | None = None
     router_address: str | None = None
     executor_config: dict[str, Any] = field(default_factory=dict)
+    # Worker-local executor device; accelerator selection is platform-specific.
+    device_type: str = "accelerator"
 
 
 def to_mapping(value) -> dict[str, Any]:
@@ -325,7 +358,18 @@ def reward_is_enabled(config) -> bool:
 
 def reward_role_required(config) -> bool:
     """Whether the reward loop needs the trainer-selected parent resource pool."""
-    return bool(config.reward.reward_model.get("enable", False) or has_reward_models(config))
+    if config.reward.reward_model.get("enable", False) or has_engine_reward_models(config):
+        return True
+    for model in get_reward_model_entries(config).values():
+        if model.get("backend") != "native":
+            continue
+        placement = model.get("placement") or {}
+        resource = placement.get("resource", "accelerator")
+        if resource not in {"accelerator", "cpu"}:
+            raise ValueError(f"Unsupported native reward placement resource {resource!r}")
+        if resource == "accelerator":
+            return True
+    return False
 
 
 def reward_pool_is_separate(config) -> bool:

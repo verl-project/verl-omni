@@ -83,7 +83,12 @@ class NativeRewardExecutor:
             kwargs = dict(self.spec.executor_config.get("kwargs", {}))
             if self.spec.model_path is not None:
                 kwargs.setdefault("model_path", self.spec.model_path)
-            kwargs.setdefault("device", torch.device(get_device_name(), get_device_id()))
+            if "device" not in kwargs:
+                kwargs["device"] = (
+                    torch.device("cpu")
+                    if self.spec.device_type == "cpu"
+                    else torch.device(get_device_name(), get_device_id())
+                )
             self._model = model_cls(**kwargs)
 
     def reward_kwargs(self) -> dict[str, Any]:
@@ -125,7 +130,8 @@ class NativeRewardExecutor:
                         if inspect.isawaitable(result):
                             await result
                 gc.collect()
-                _empty_accelerator_cache()
+                if self.spec.device_type != "cpu":
+                    _empty_accelerator_cache()
                 return
 
 

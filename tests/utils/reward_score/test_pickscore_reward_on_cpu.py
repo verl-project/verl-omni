@@ -16,6 +16,7 @@
 import asyncio
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -104,6 +105,7 @@ def test_score_encodes_duplicate_prompts_once_and_preserves_pairing():
 class _FakeInferencer:
     def __init__(self):
         self.batches = []
+        self.processor = SimpleNamespace(tokenizer=SimpleNamespace(backend_tokenizer=SimpleNamespace()))
 
     def score(self, prompts, images):
         self.batches.append((list(prompts), list(images)))
@@ -149,6 +151,34 @@ async def test_native_model_batches_inference_and_closes_instance_consumer(monke
 
     await model.close()
     assert not model._consumer_task
+    assert not hasattr(model, "_inferencer")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["wrapped", "unwrapped", "slow"])
+async def test_native_model_close_releases_native_tokenizer_decode_wrapper(monkeypatch, mode):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+
+    backend = Tokenizer(WordLevel({"[UNK]": 0, "hello": 1}, unk_token="[UNK]"))
+    original_decode = backend.decode
+    if mode == "wrapped":
+
+        def decode(*args, **kwargs):
+            return original_decode(*args, **kwargs)
+
+        backend.decode = decode
+    inferencer = _FakeInferencer()
+    if mode == "slow":
+        inferencer.processor.tokenizer = SimpleNamespace()
+    else:
+        inferencer.processor.tokenizer.backend_tokenizer = backend
+    monkeypatch.setattr(pickscore_reward, "_PickScoreInferencer", lambda **kwargs: inferencer)
+    model = pickscore_reward.PickScoreNativeModel(device="cpu")
+    await model.close()
+    await model.close()
+    assert "decode" not in vars(backend)
+    assert backend.decode([1]) == "hello"
     assert not hasattr(model, "_inferencer")
 
 

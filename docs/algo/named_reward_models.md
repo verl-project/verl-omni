@@ -1,6 +1,6 @@
 # Named Reward Models
 
-Last updated: 09/22/2026
+Last updated: 10/05/2026
 
 This guide describes how to configure and extend named model-backed rewards
 under `reward.models` in `verl-omni`. For the general Reward Loop interface and
@@ -250,6 +250,50 @@ Future FSDP support will need an explicit replica-group schema because a flat
 device list cannot distinguish full replicas from ranks within one sharded
 replica.
 
+## Use native on CPU
+
+Small native reward executors can run as ordinary Ray CPU actors without
+allocating a trainer GPU pool. Set `placement.resource=cpu`; `devices` remain
+stable logical replica slots and `cpus_per_worker` reserves the requested CPU
+capacity for each replica:
+
+```yaml
+reward:
+  models:
+    quality:
+      backend: native
+      model_path: /models/quality
+      placement:
+        resource: cpu
+        devices: [0, 1]
+        cpus_per_worker: 2
+      executor:
+        model: my_package.reward_model:CpuRewardModel
+  reward_functions:
+    quality:
+      path: pkg://my_package.reward_score
+      name: compute_quality_score
+```
+
+CPU native models receive `torch.device("cpu")` in their executor unless the
+executor supplies an explicit device. CPU deployments do not consume or split
+the trainer-selected accelerator reward pool, so they can be used alone or
+alongside engine and accelerator-native deployments.
+
+Each scoring phase wakes its worker-local models and, when `offload=true`,
+unloads them after all accepted scoring calls finish. A scoring failure or
+caller cancellation waits up to 30 seconds for accepted calls to finish. If
+calls remain stuck, cleanup has a separate 30-second worker termination
+deadline and confirms the owned actor and subprocesses stopped before unloading.
+Unconfirmed termination raises a cleanup error and skips model unloading.
+Forced termination requires recreating the reward manager; it does not retry
+scoring. Model sleep has a 30-second deadline as well. Repeated cancellation
+does not extend these deadlines.
+
+With `offload=false`, models remain resident. If a deployment explicitly enables
+Ray actor restarts, the next scoring phase initializes a restarted actor again.
+Production worker creation does not enable automatic restarts.
+
 ### Wrap a Transformers model for native mode
 
 A Transformers checkpoint does not need an inference server. Add a small model
@@ -418,7 +462,6 @@ through `exp()` again.
 - Named-model aggregation currently uses the visual input contract implemented
   by `MultiVisualRewardManager`; the aggregation core itself is modality-neutral.
 - Native models are replicated; FSDP and tensor parallelism are not supported.
-- CPU-native placement is not supported.
 - Native routing uses a static even split rather than dynamic load balancing.
 - Named models do not participate in streaming reward computation.
 - vLLM-Omni reward serving is not implemented.

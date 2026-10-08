@@ -120,11 +120,13 @@ class MultiRewardModelManager:
     def _validate_native_device_assignments(
         native_entries: list[tuple[str, NativeRewardModelConfig]],
     ) -> dict[str, tuple[int, ...]]:
-        """Validate that parent-pool bundle indices do not overlap across native models."""
+        """Validate accelerator parent-pool bundle indices across native models."""
         assignments: dict[str, tuple[int, ...]] = {}
         claimed_devices: dict[int, str] = {}
         for name, model in native_entries:
             for device in model.placement.devices:
+                if model.placement.is_cpu:
+                    continue
                 if device in claimed_devices:
                     raise ValueError(
                         f"Native reward model {name!r} placement.devices overlaps parent-pool index {device} "
@@ -142,6 +144,9 @@ class MultiRewardModelManager:
     def _split_model_resource_pools(self, engine_entries, native_entries, base_config):
         if not engine_entries and not native_entries:
             return {}, {}
+        accelerator_native_entries = [(name, model) for name, model in native_entries if not model.placement.is_cpu]
+        if not engine_entries and not accelerator_native_entries:
+            return {}, {}
         if self.resource_pool is None:
             raise ValueError("Named reward models require a parent resource pool selected by the trainer")
 
@@ -154,7 +159,7 @@ class MultiRewardModelManager:
             )
 
         native_pools = {}
-        for name, _ in native_entries:
+        for name, _ in accelerator_native_entries:
             devices = self.native_device_assignments[name]
             highest_device = max(devices)
             if highest_device >= self.resource_pool.world_size:
@@ -241,6 +246,7 @@ class NativeManagedRewardModel(ManagedRewardModel):
         if not isinstance(model, NativeRewardModelConfig):
             model = parse_reward_model_config(name, model)
         offload = model.resolved_offload
+        self.placement = model.placement
         executor_config = {"model": model.executor.model, "kwargs": model.executor.kwargs}
 
         super().__init__(
@@ -249,14 +255,12 @@ class NativeManagedRewardModel(ManagedRewardModel):
                 backend="native",
                 model_path=model.model_path,
                 executor_config=executor_config,
+                device_type=model.placement.resource,
             ),
             offload=offload,
         )
         self._workers = None
-        # Controller-side cache only. Ray actor restart recovery is not part of
-        # the current native lifecycle contract; a restarted worker must be
-        # rebound and woken by a future recovery implementation.
-        self._resident = False
+        self._worker_process_identities = {}
 
     def bind_workers(self, workers) -> None:
         self._workers = list(workers)
@@ -265,19 +269,22 @@ class NativeManagedRewardModel(ManagedRewardModel):
         if self._workers is None:
             raise RuntimeError(f"Native reward model {self.name!r} has no bound workers")
         refs = [getattr(worker, method).remote(self.name) for worker in self._workers]
-        await asyncio.gather(*refs)
+        results = await asyncio.gather(*refs)
+        if method == "wake_up_reward_model":
+            self._worker_process_identities = {
+                id(worker): identity for worker, identity in zip(self._workers, results, strict=True)
+            }
 
     async def wake_up(self) -> None:
-        if not self.offload and self._resident:
-            return
+        # The worker-side executor makes wake_up idempotent. Always send the
+        # lifecycle call so a Ray actor that was restarted since the previous
+        # scoring step is initialized again, even when offload=False.
         await self._run_worker_lifecycle("wake_up_reward_model")
-        self._resident = True
 
     async def sleep(self) -> None:
         if not self.offload:
             return
         await self._run_worker_lifecycle("sleep_reward_model")
-        self._resident = False
 
 
 def _prepare_engine_config(model, base_config, fallback_model=None):
