@@ -17,6 +17,7 @@ import logging
 
 import numpy as np
 import ray
+import torch
 from omegaconf import open_dict
 from tensordict import TensorDict
 from verl.experimental.reward_loop import RewardLoopManager
@@ -108,6 +109,22 @@ class OmniRewardLoopManager(RewardLoopManager):
 
     def __init__(self, config, rm_resource_pool=None, accelerator_resource_pool=None):
         self._score_lock = asyncio.Lock()
+        self._preserve_reward_components = config.reward.get("aggregation") == "preserve_components"
+        if self._preserve_reward_components and not has_reward_models(config):
+            raise ValueError("preserve_components requires named reward.models.")
+        if self._preserve_reward_components:
+            loss_mode = config.actor_rollout_ref.actor.diffusion_loss.loss_mode
+            if config.algorithm.get("trainer_type") != "direct_preference" or loss_mode != "omni_nft":
+                raise ValueError(
+                    "reward.aggregation=preserve_components requires the OmniNFT direct-preference trainer; "
+                    "use reward.aggregation=weighted_sum for this trainer."
+                )
+            from verl_omni.trainer.diffusion.diffusion_algos import get_diffusion_loss_fn
+
+            try:
+                get_diffusion_loss_fn(loss_mode)
+            except ValueError as exc:
+                raise ValueError("preserve_components requires the registered OmniNFT loss.") from exc
         self.accelerator_resource_pool = accelerator_resource_pool
         named_reward_manager_cls = None
         if has_reward_models(config):
@@ -325,14 +342,30 @@ class OmniRewardLoopManager(RewardLoopManager):
             merged_scores.append(total)
             merged_infos.append(info)
 
-        rm_scores = self.reward_manager_cls.assemble_rm_scores(data, merged_scores)
+        meta_info = {}
+        if self._preserve_reward_components:
+            reward_names = sorted(self.config.reward.reward_functions)
+            if not reward_names or not merged_infos:
+                raise ValueError("Component rewards require non-empty reward functions and samples.")
+            try:
+                rm_scores = torch.tensor(
+                    [[info[f"reward/{name}"] for name in reward_names] for info in merged_infos],
+                    dtype=torch.float32,
+                )
+            except KeyError as exc:
+                raise ValueError(f"Missing required component reward: {exc}") from exc
+            if not torch.isfinite(rm_scores).all():
+                raise ValueError("Required component rewards must be finite before actor update.")
+            meta_info["reward_names"] = reward_names
+        else:
+            rm_scores = self.reward_manager_cls.assemble_rm_scores(data, merged_scores)
         batch = TensorDict({"rm_scores": rm_scores}, batch_size=len(data))
         reward_extra_keys = list(dict.fromkeys(key for info in merged_infos for key in info))
         non_tensor_batch = {key: np.array([info.get(key) for info in merged_infos]) for key in reward_extra_keys}
         return DataProto(
             batch=batch,
             non_tensor_batch=non_tensor_batch,
-            meta_info={"reward_extra_keys": reward_extra_keys},
+            meta_info={"reward_extra_keys": reward_extra_keys, **meta_info},
         )
 
     def start_profile(self, **kwargs) -> None:

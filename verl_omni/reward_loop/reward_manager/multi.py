@@ -79,7 +79,7 @@ class MultiRewardManager(RewardManagerBase, ABC):
 
         self._sub_rewards = []
         total_weight = 0.0
-        _reserved_keys = {"path", "name", "weight", "required", "model"}
+        _reserved_keys = {"path", "name", "weight", "required", "model", "routing_weights"}
         for key, entry in reward_functions_cfg.items():
             model_name = resolve_reward_model_name(key, entry, reward_models_cfg)
             path = entry.get("path")
@@ -101,6 +101,8 @@ class MultiRewardManager(RewardManagerBase, ABC):
                 required = required_value
             else:
                 raise TypeError(f"required must be a boolean, got {type(required_value).__name__}")
+            if config.reward.get("aggregation") == "preserve_components" and (not required or weight != 1.0):
+                raise ValueError("Component rewards require required=true and weight=1.0; use routing_weights instead.")
             total_weight += weight
 
             # Collect non-manager fields to pass to compute_score.
@@ -163,6 +165,10 @@ class MultiRewardManager(RewardManagerBase, ABC):
 
             # Merge per-reward extra config fields into kwargs
             sub_kwargs = {**all_kwargs, **extra_args}
+            # Multimodal scorers may explicitly request the complete single sample.
+            # Do not change kwargs received by existing **kwargs-only scorers.
+            if sig is not None and "batch" in sig.parameters:
+                sub_kwargs["batch"] = data
             filtered_kwargs = _filter_kwargs(sub_kwargs, sig) if sig is not None else {}
 
             if model_name is not None:
