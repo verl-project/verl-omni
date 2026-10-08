@@ -19,6 +19,8 @@ delivers tokens; diffusion sleep/wake ACKs are not engine-checked.
 """
 
 import asyncio
+import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -58,6 +60,12 @@ class _FakeAsyncOmni:
         self.sleep_calls: list[dict] = []
         self.wake_calls: list[dict] = []
         self.resumed = 0
+        # Gate/drain test hooks: block abort until released, and/or register
+        # extra request states during the abort window (late arrivals).
+        self.abort_block: asyncio.Event | None = None
+        self.late_states: dict[str, _FakeRequestState] | None = None
+        # Fail only the straggler (second) abort call.
+        self.fail_straggler_abort = False
         # Real-shaped handle: the frontend multimodal cache lives on the
         # renderer, so the fake must expose clear_mm_cache_async there.
         self.mm_clears = 0
@@ -69,8 +77,13 @@ class _FakeAsyncOmni:
 
     async def abort(self, request_ids):
         self.calls.append("abort")
-        self.abort_calls.append(request_ids if isinstance(request_ids, list) else [request_ids])
-        if self.fail_abort:
+        self.abort_calls.append(list(request_ids) if isinstance(request_ids, list) else [request_ids])
+        if self.late_states is not None:
+            self.request_states.update(self.late_states)
+            self.late_states = None
+        if self.abort_block is not None:
+            await self.abort_block.wait()
+        if self.fail_abort or (self.fail_straggler_abort and len(self.abort_calls) >= 2):
             raise RuntimeError("abort rpc failed")
         ids = request_ids if isinstance(request_ids, list) else [request_ids]
         for state in self.request_states.values():
@@ -574,3 +587,141 @@ async def test_failed_wake_skips_admission_resume():
         await server.wake_up()
 
     assert engine.resumed == 0
+
+
+# ---------------------------------------------------------------------------
+# abort admission gate: no generate admitted inside the abort window
+# ---------------------------------------------------------------------------
+
+
+class _RecordingStrategy:
+    """Strategy stand-in recording admitted request ids."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    async def generate(self, **kwargs):
+        self.calls.append(kwargs["request_id"])
+        return SimpleNamespace(request_id=kwargs["request_id"])
+
+
+async def _wait_until(predicate, timeout=5.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        assert loop.time() < deadline, "condition never became true"
+        await asyncio.sleep(0.01)
+
+
+async def test_generate_held_while_abort_window_open():
+    """Resubmissions arriving during the abort ACK wait must not be admitted.
+
+    Engine admission only holds at pause_generation, so without the gate a
+    retry storm is admitted mid-abort, fills the bounded request queue and
+    wedges sleep()'s admission drain barrier.
+    """
+    engine = _FakeAsyncOmni(states={"i0": _FakeRequestState("i0", "a")})
+    engine.abort_block = asyncio.Event()
+    server = _make_server(engine)
+    strategy = _RecordingStrategy()
+    server._generate_strategy = strategy
+
+    abort_task = asyncio.create_task(server.abort_all_requests())
+    await _wait_until(lambda: "abort" in engine.calls)
+    gen_task = asyncio.create_task(server.generate(prompt_ids=[1], sampling_params={}, request_id="r"))
+    await asyncio.sleep(0.05)
+    assert strategy.calls == []  # held at the gate while the abort window is open
+
+    engine.abort_block.set()
+    await asyncio.wait_for(asyncio.gather(abort_task, gen_task), timeout=5)
+    assert strategy.calls == ["r"]  # admitted once the window closed
+    assert engine.calls == ["abort", "pause"]
+
+
+async def test_gate_reopens_when_abort_fails():
+    engine = _FakeAsyncOmni(states={"i0": _FakeRequestState("i0", "a")}, fail_abort=True)
+    server = _make_server(engine)
+    strategy = _RecordingStrategy()
+    server._generate_strategy = strategy
+
+    with pytest.raises(RuntimeError, match="abort rpc failed"):
+        await server.abort_all_requests()
+
+    await asyncio.wait_for(server.generate(prompt_ids=[1], sampling_params={}, request_id="r"), timeout=5)
+    assert strategy.calls == ["r"]
+
+
+async def test_late_registered_requests_aborted_by_drain_pass():
+    """Requests registered after the first scan still get aborted."""
+    engine = _FakeAsyncOmni(states={"i0": _FakeRequestState("i0", "a")})
+    engine.late_states = {"i1": _FakeRequestState("i1", "b")}
+    server = _make_server(engine)
+
+    result = await server.abort_all_requests()
+
+    assert engine.abort_calls == [["a"], ["b"]]
+    assert result["aborted_count"] == 2
+    assert result["request_ids"] == ["a", "b"]
+
+
+async def test_no_second_abort_without_stragglers():
+    engine = _FakeAsyncOmni(states={"i0": _FakeRequestState("i0", "a")})
+    server = _make_server(engine)
+
+    result = await server.abort_all_requests()
+
+    assert engine.abort_calls == [["a"]]
+    assert result["aborted_count"] == 1
+
+
+class _BackloggedMmRenderer:
+    """Renderer whose mm clear queues behind real jobs on a single-worker executor."""
+
+    def __init__(self, backlog: int, job_s: float):
+        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._backlog = backlog
+        self._job_s = job_s
+        self.clears = 0
+
+    def _clear(self) -> None:
+        self.clears += 1
+
+    async def clear_mm_cache_async(self) -> None:
+        loop = asyncio.get_running_loop()
+        for _ in range(self._backlog):
+            await loop.run_in_executor(self._executor, time.sleep, self._job_s)
+        await loop.run_in_executor(self._executor, self._clear)
+
+
+async def test_mm_clear_queued_behind_backlog_abandons_wait_but_still_runs(monkeypatch):
+    """A frontend mm clear stuck behind preprocessing must not hang the abort,
+    and must still execute afterwards (not be cancelled by the abandoned wait)."""
+    monkeypatch.setenv("VERL_OMNI_MM_CLEAR_TIMEOUT_S", "0.1")
+    engine = _FakeAsyncOmni(states={"i0": _FakeRequestState("i0", "a")})
+    engine.renderer = _BackloggedMmRenderer(backlog=3, job_s=0.2)  # ~0.6s of backlog
+    server = _make_server(engine)
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    result = await asyncio.wait_for(server.abort_all_requests(), timeout=5)
+
+    assert loop.time() - start < 0.5  # abandoned the wait well before the backlog drained
+    assert result["aborted_count"] == 1
+    await _wait_until(lambda: engine.renderer.clears == 1, timeout=5)  # clear still ran
+    engine.renderer._executor.shutdown(wait=True)
+
+
+async def test_straggler_abort_failure_enqueues_terminals_then_raises():
+    """Straggler abort failure mirrors batch 1: synthesize terminals, then raise."""
+    engine = _FakeAsyncOmni(states={"i0": _FakeRequestState("i0", "a")})
+    engine.late_states = {"i1": _FakeRequestState("i1", "b")}
+    engine.fail_straggler_abort = True
+    server = _make_server(engine)
+
+    with pytest.raises(RuntimeError, match="abort rpc failed"):
+        await server.abort_all_requests()
+
+    assert engine.abort_calls == [["a"], ["b"]]
+    # Batch 1 got its terminal from the engine; the straggler got a synthetic one.
+    assert engine.request_states["i0"].queue.qsize() == 1
+    assert engine.request_states["i1"].queue.qsize() == 1

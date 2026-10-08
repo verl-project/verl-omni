@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO recipes
 
-Last updated: 09/29/2026
+Last updated: 10/08/2026
 
 This directory contains both FSDP2 and Megatron recipes. For non-Megatron
 setup, data preparation and training instructions, see the
@@ -12,6 +12,7 @@ defaults and accept CLI overrides.
 | GSM8K LoRA | FSDP2 / GPU | [Thinker LoRA](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh) |
 | MMK12 LoRA | FSDP2 / GPU | [MMK12](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1.sh) |
 | MMK12 LoRA, separate-async | FSDP2 / GPU | [MMK12 separate-async](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_separate_async_v1.sh) |
+| MMK12 LoRA, colocate-async | FSDP2 / GPU | [MMK12 colocate-async](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_colocate_async_v1.sh) |
 | MMK12 LoRA | FSDP2 / NPU | [MMK12 NPU](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_npu.sh) |
 | MMK12 LoRA with on-policy distillation | FSDP2 / NPU | [MMK12 OPD](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_v1_opd_npu.sh) |
 | AVQA LoRA | FSDP2 / GPU | [AVQA LoRA](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_avqa_v1.sh) |
@@ -285,3 +286,26 @@ python -m pytest -q tests/utils/test_avqa_data_process_on_cpu.py \
   tests/utils/test_avqa_strict_on_cpu.py \
   tests/trainer/omni/test_avqa_megatron_config_on_cpu.py
 ```
+
+## MMK12 colocate-async (FSDP2)
+
+[This launcher](https://github.com/verl-project/verl-omni/blob/main/examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_colocate_async_v1.sh)
+keeps the MMK12 GSPO+LoRA recipe of the sync reference but selects
+`trainer.v1.trainer_mode=omni_colocate_async` on a single colocated pool:
+rollout of the next batch overlaps training, and at every weight sync the
+engine aborts in-flight requests, sleeps (level 1), reloads weights, wakes and
+resumes; aborted generations continue from the tokens already produced. Use it
+when long-tail completions leave GPUs idle in `omni_sync` but a separate
+rollout pool is not available. The first
+`trainer.v1.colocate_async.num_warmup_batches` batches run synchronously before
+the overlap begins.
+
+Two rollout overrides are deliberate for this mode:
+
+- `engine_kwargs.vllm_omni.mm_processor_cache_gb=0` — the frontend
+  multimodal-processor cache is cleared at every abort/sleep boundary, so a
+  non-zero cache mostly reserves memory (4 GB by default) for hits that the
+  per-step clear makes rare in colocate-async.
+- `enable_prefix_caching=False` — set explicitly because the AR engine's
+  default is silently on; the sleep/wake cycle discards KV anyway.
+
