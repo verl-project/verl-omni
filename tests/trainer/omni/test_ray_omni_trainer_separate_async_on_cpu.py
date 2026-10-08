@@ -22,7 +22,9 @@ from hydra import compose, initialize_config_dir
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer, get_trainer_cls
 from verl.trainer.ppo.v1.trainer_separate_async import PPOTrainerSeparateAsync
 
+from verl_omni.trainer.omni import ray_omni_trainer_separate_async
 from verl_omni.trainer.omni.ray_omni_trainer_separate_async import OmniPPOTrainerSeparateAsync
+from verl_omni.trainer.omni.trainer_base import OmniPPOTrainer
 
 _CONFIG_DIR = str((Path(__file__).parents[3] / "verl_omni" / "trainer" / "config").resolve())
 
@@ -45,6 +47,7 @@ def _compose_config(extra_overrides=()):
 
 def test_registered_and_subclasses_separate_async():
     assert get_trainer_cls("omni_separate_async") is OmniPPOTrainerSeparateAsync
+    assert issubclass(OmniPPOTrainerSeparateAsync, OmniPPOTrainer)
     assert issubclass(OmniPPOTrainerSeparateAsync, PPOTrainerSeparateAsync)
 
 
@@ -187,16 +190,22 @@ class TestLoraAwareWiring:
     def test_setup_installs_lora_aware_checkpoint_manager(self):
         from verl.checkpoint_engine import CheckpointEngineRegistry
 
+        from verl_omni.trainer.omni.trainer_base import OmniPPOTrainer
         from verl_omni.workers.checkpoint_engine import OmniCheckpointEngineManager
 
         trainer = OmniPPOTrainerSeparateAsync(_compose_config())
         with (
-            patch.object(PPOTrainerSeparateAsync, "_setup"),
+            # The base setup copy is mocked out; only the standalone tail is under test.
+            patch.object(OmniPPOTrainer, "_setup"),
+            patch.object(ray_omni_trainer_separate_async, "LLMServerManager"),
             # The nccl backend registers via GPU-only import side effects.
             patch.object(CheckpointEngineRegistry, "get", return_value=MagicMock()),
         ):
+            trainer.llm_server_manager = MagicMock()
+            trainer.llm_server_manager.rollout_replicas = []
             trainer.actor_rollout_wg = MagicMock()
             trainer.standalone_server_manager = MagicMock()
             trainer.standalone_server_manager.get_replicas.return_value = []
+            trainer.add_replicas_to_balancer = MagicMock()
             trainer._setup()
         assert isinstance(trainer.standalone_checkpoint_manager, OmniCheckpointEngineManager)

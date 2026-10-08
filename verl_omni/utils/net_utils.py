@@ -14,6 +14,7 @@
 
 import random
 import socket
+from collections.abc import Sequence
 
 
 def ephemeral_port_range() -> tuple[int, int]:
@@ -47,3 +48,20 @@ def get_non_ephemeral_free_port(address: str = "127.0.0.1") -> int:
                 continue
             return port
     raise RuntimeError(f"No free non-ephemeral port on {address} below {lo}.")
+
+
+def worker_group_port_ranges(master_port_range: Sequence[int] | None, num_groups: int) -> list[list[int] | None]:
+    """Slice a rendezvous port range into one disjoint sub-range per worker group.
+
+    Ports are only bound at ``init_model``, after every group has been spawned, so groups
+    sharing a range would all pick its first free port.
+    """
+    if master_port_range is None:
+        return [None] * num_groups
+    lo, hi = (int(port) for port in master_port_range)
+    stride = (hi - lo) // num_groups
+    if stride < 1:
+        raise ValueError(
+            f"trainer.ray_master_port_range={master_port_range} has fewer ports than worker groups ({num_groups})."
+        )
+    return [[lo + i * stride, hi if i == num_groups - 1 else lo + (i + 1) * stride] for i in range(num_groups)]
