@@ -1,7 +1,7 @@
 (separate_async_omni)=
 # Separate-Async RL Training for Omni AR Models
 
-Last updated: 10/06/2026
+Last updated: 10/07/2026
 
 `trainer.v1.trainer_mode=omni_separate_async` runs training and rollout on
 separate GPU pools for omni AR models (Qwen3-Omni thinker, MiniCPM-o 4.5
@@ -17,8 +17,9 @@ every sample.
 
 - Long-tail completions (large `rollout.n`, high length variance) leave the
   trainer or rollout GPUs idle in `omni_sync`.
-- Multimodal prefill (image/video/audio encoders) makes generation the
-  dominant phase of the step.
+- Multimodal prefill (image/video/audio encoders) can make generation the
+  dominant phase of the step — measure which phase dominates before splitting
+  GPUs (see Balancing below).
 
 Off-policyness is bounded by the one-batch-ahead pipeline: a sample is trained
 at most one weight version after it was generated (at
@@ -36,6 +37,47 @@ additional GPUs run standalone rollout replicas
 (`n_gpus_per_node / tensor_model_parallel_size` replicas per node). Single-node
 replicas only for AR omni today (`run_headless` is not implemented upstream).
 
+### Balancing the actor and rollout pools
+
+Rollout generates one batch ahead of training, so the step time is bounded by
+the **slower** pool — and which one is slower is a property of the workload,
+so measure before moving GPUs: `timing_s/gen` is the trainer's wait for
+samples (~0 = generation fully hidden, trainer-bound) and per-role GPU duty
+shows the idle side (see Monitor).
+
+- **Actor pool** (`trainer.n_gpus_per_node × trainer.nnodes`): FSDP2 shards
+  the actor across the pool — more GPUs mean more headroom and more training
+  throughput. `ppo_mini_batch_size × rollout.n` must shard evenly across the
+  pool's DP ranks (a 3-GPU pool needs the `120 = 8 × 15` batch reshape, not
+  the default 16 × 16 = 256).
+- **Rollout pool** (`rollout.n_gpus_per_node × rollout.nnodes`): each replica
+  holds the whole model, TP-sharded — model size sets the minimum TP, and
+  GPUs beyond that buy more replicas (`n_gpus_per_node / TP` per node): more
+  batches in flight, not a faster single batch. A replica never spans nodes.
+
+Measured on MiniCPM-o 4.5 AVQA (4 × 80 GB, 45-step probes — a trainer-bound
+workload):
+
+| layout | s/step | GPU duty |
+| --- | --- | --- |
+| colocated 4+0 | 181.5 | 76–77% on all four |
+| separate-async 3+1 | 192.2 | 70% / 39% |
+| separate-async 2+2 | ~273 | 77% / 16% |
+
+A trainer-bound workload favors colocated — shrinking the trainer pool costs
+more than overlap recovers — and flips to favoring separation when generation
+dominates, the regime disaggregation exists for. The shipped recipes start
+half/half (2+2 LoRA, 4+4 and 16+16 Megatron); skew from there toward the
+measured slower pool. One TP=2 replica (`rollout.tensor_model_parallel_size=2`,
+the validated Qwen3-Omni 30B shape) is the fallback if the multi-replica
+rollout stalls around weight syncs.
+
+Without re-splitting GPUs: lend trainer GPUs to generation when the buffer
+runs short (`trainer.v1.separate_async.hybrid_rollout.enable_switch=true`,
+not yet GPU-verified on omni); `parameter_sync_step` changes how often
+weights travel, not pool speed; GPU reward models live on the standalone pool
+or their own, never the trainer pool.
+
 ## Run
 
 ```bash
@@ -43,7 +85,32 @@ bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_mmk12_sep
 ```
 
 The example splits 4 GPUs into 2 trainer + 2 rollout (one TP=2 replica) and
-uses GSPO + GRPO advantages with LoRA. Full-parameter Megatron uses the same
+uses GSPO + GRPO advantages with LoRA.
+
+### Offload on the trainer pool: a throughput/memory trade-off
+
+Decoupled-PPO CPU snapshots own their storage in `OmniDetachActorWorker`, so
+`param_offload`/`optimizer_offload` are **safe at any model size** — pick
+them by memory arithmetic, not correctness. Two constraints rule the
+offload-free shape, and `gpu_memory_utilization` (one knob for the standalone
+and hybrid pools) must satisfy both:
+
+1. The hybrid replicas that briefly share the trainer GPUs (first sampling
+   window, validation) map their full engine budget when they wake, next to
+   the now-resident actor: `utilization × card + actor weights + caches` must
+   fit on the trainer cards.
+2. Every rollout engine needs `utilization × card` to cover its model
+   weights, activation/graph overhead and KV cache; below that floor it dies
+   at init with `No available memory for the cache blocks`.
+
+A bigger actor pushes the first constraint up until the second can no longer
+hold — no utilization works, so keep the colocated offload flags: the actor
+vacates during rollout, both pools get their full budget, and the only cost is
+the CPU↔GPU weight swap per local update. A small actor leaves a wide window:
+drop offload and keep the swaps out of the step time entirely (measured ~1.4×
+faster with a 4.5B actor, validation matching the colocated baseline).
+
+Full-parameter Megatron uses the same
 `trainer.v1.trainer_mode=omni_separate_async` path:
 
 ```bash
@@ -139,9 +206,11 @@ This override is not GPU-verified on omni yet. `enable_switch=true` requires
 
 ## Monitor
 
-Watch `training/off_policy/*` metrics (staleness mean/max, dropped samples)
-and `timing_s/update_weights`. If weight sync stalls dominate, raise
-`parameter_sync_step` or shorten `data.max_response_length`.
+Watch `training/off_policy/*` metrics (staleness mean/max, dropped samples),
+`timing_s/gen` (trainer wait for samples; ~0 means generation is fully
+hidden — see Balancing above), and `timing_s/update_weights`. If weight sync
+stalls dominate, raise `parameter_sync_step` or shorten
+`data.max_response_length`.
 
 ## Test
 
