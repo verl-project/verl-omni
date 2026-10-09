@@ -303,7 +303,7 @@ def _collate_tensor_values(key: str, values: Sequence[torch.Tensor | None]) -> t
     padded = []
     for value in values:
         if value is None:
-            value = torch.zeros(max_shape, dtype=present[0].dtype, device=present[0].device)
+            value = torch.full(max_shape, pad_value, dtype=present[0].dtype, device=present[0].device)
         padded.append(_pad_tensor_to_shape(value, max_shape, pad_value))
     return torch.stack(padded, dim=0)
 
@@ -956,7 +956,7 @@ def _offline_mllm_dpo_collate_fn(features, pad_mode: DatasetPadMode | str | None
         for feature in features
         for key, value in feature.items()
         if key != "multi_modal_inputs" and not isinstance(value, torch.Tensor)
-    }
+    } - tensor_keys
 
     batch: dict[str, Any] = {}
     for key in sorted(tensor_keys):

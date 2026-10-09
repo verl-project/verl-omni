@@ -249,6 +249,28 @@ def test_collate_tensor_values_pads_variable_length_sequences():
     torch.testing.assert_close(collated[1], torch.tensor([3, 4, 5]))
 
 
+@pytest.mark.parametrize(("key", "pad_value"), [("labels", -100), ("attention_mask", 0), ("input_ids", 0)])
+def test_collate_tensor_values_fills_missing_rows_with_pad_value(key, pad_value):
+    values = [torch.tensor([5, 6, 7]), None, torch.tensor([8])]
+    collated = dataset_mod._collate_tensor_values(key, values)
+
+    assert collated.shape == (3, 3)
+    torch.testing.assert_close(collated[1], torch.full((3,), pad_value))
+    torch.testing.assert_close(collated[2], torch.tensor([8, pad_value, pad_value]))
+
+
+def test_offline_mllm_dpo_collate_fn_pads_branch_missing_a_tensor_key():
+    features = [
+        {"modality": "image", "input_ids": torch.tensor([1, 2, 3]), "labels": torch.tensor([-100, 2, 3])},
+        {"modality": "image", "input_ids": torch.tensor([1, 2, 3]), "labels": None},
+    ]
+    batch = dataset_mod.offline_mllm_dpo_collate_fn(features, pad_mode="right")
+
+    assert isinstance(batch["labels"], torch.Tensor)
+    torch.testing.assert_close(batch["labels"], torch.tensor([[-100, 2, 3], [-100, -100, -100]]))
+    torch.testing.assert_close(batch["loss_mask"], torch.tensor([[False, True, True], [False, False, False]]))
+
+
 def test_offline_mllm_dpo_collate_fn_rejects_mixed_modalities():
     features = [
         {"modality": "image", "input_ids": torch.tensor([1])},
