@@ -14,7 +14,7 @@ Follow the [installation guide](../../docs/start/install.md) to set up the base 
 uv pip install -e ".[ocr]"
 ```
 
-The provided script is configured for a single node with `4` GPUs.
+The provided scripts default to a single node with `4` GPUs.
 
 ## Prepare the dataset
 
@@ -49,13 +49,23 @@ Launch the example from the repository root:
 bash examples/flowdppo_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
+For the V1 `sync` trainer, use the matching recipe:
+
+```bash
+bash examples/flowdppo_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh
+```
+
+The V1 recipe keeps the V0 Flow-DPPO loss, SDE, LoRA, reward, and batch settings. It uses `main_diffusion_v1`, `model.algorithm=flow_grpo`, and `trainer.v1.trainer_mode=sync`. Set `NUM_GPUS_ACTOR_ROLLOUT_REWARD`, `ROLLOUT_TP`, and `REWARD_TP` for a different GPU layout; for example, `8`, `2`, and `4` respectively.
+
+See the [5090 V0/V1 results](qwen_image/results/20260927-5090-smoke/README.md) for step timing and OCR reward measurements.
+
 The script accepts normal Hydra overrides after the command:
 
 ```bash
 bash examples/flowdppo_trainer/qwen_image/run_qwen_image_ocr_lora.sh trainer.total_training_steps=100
 ```
 
-The script runs `python3 -m verl_omni.trainer.main_diffusion` with Flow-DPPO-specific settings:
+Both scripts use these Flow-DPPO-specific settings:
 
 - `algorithm.adv_estimator=flow_grpo`
 - `actor_rollout_ref.actor.diffusion_loss.loss_mode=flow_dppo`
