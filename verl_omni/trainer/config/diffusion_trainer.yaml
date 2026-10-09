@@ -231,6 +231,36 @@ trainer:
   # V1 trainer mode configs (mirrors verl/trainer/config/ppo_trainer.yaml `trainer.v1`).
   v1:
 
+    # Reporting-only diagnostics; no tuning, stopping, recovery or checkpoint actions.
+    watchdog:
+
+      # Disabled by default; uses existing reduced scalar metrics on the trainer driver.
+      enabled: false
+
+      # Consecutive complete observations required for sustained warnings.
+      window_size: 3
+
+      # Accepted observations skipped for sustained rules after start or resume.
+      warmup_steps: 5
+
+      # Minimum accepted observations between alerts for recovered/recurrent episodes.
+      cooldown_steps: 20
+
+      # Maximum per-prompt reward std for the joint flat-reward/zero-gradient warning.
+      reward_std_max: 1.0e-8
+
+      # Maximum gradient norm for the joint flat-reward/zero-gradient warning.
+      grad_norm_max: 1.0e-12
+
+      # Lower policy-ratio mean bound for ratio-producing diffusion losses.
+      ratio_lower: 0.5
+
+      # Upper policy-ratio mean bound for ratio-producing diffusion losses.
+      ratio_upper: 2.0
+
+      # Optional maximum trajectory staleness in model versions; null disables this rule.
+      max_staleness: null
+
     # Trainer mode: "sync", "separate_async".
     trainer_mode: sync
 

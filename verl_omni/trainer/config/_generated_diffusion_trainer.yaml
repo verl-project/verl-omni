@@ -635,6 +635,16 @@ trainer:
   device: cuda
   use_v1: true
   v1:
+    watchdog:
+      enabled: false
+      window_size: 3
+      warmup_steps: 5
+      cooldown_steps: 20
+      reward_std_max: 1.0e-08
+      grad_norm_max: 1.0e-12
+      ratio_lower: 0.5
+      ratio_upper: 2.0
+      max_staleness: null
     trainer_mode: sync
     sync: {}
     colocate_async:

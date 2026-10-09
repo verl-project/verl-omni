@@ -1,6 +1,6 @@
 # Diffusion V1 training
 
-Last updated: 09/28/2026
+Last updated: 10/09/2026
 
 This guide runs the diffusion V1 trainer in synchronous or separate-asynchronous
 mode using the provided Stable Diffusion 3.5 Medium FlowGRPO OCR recipes.
@@ -127,6 +127,51 @@ bash examples/dancegrpo_trainer/wan22/run_wan22_5b_t2v_hpsv3_v1.sh
 See {doc}`../examples/dancegrpo_trainer` for dataset and HPSv3 setup. The
 legacy v0 auto-detect script (`run_wan22_5b_t2v_hpsv3_auto.sh`) is
 **deprecated** for CUDA and remains for NPU.
+
+## Optional training watchdog
+
+The reporting-only watchdog is disabled by default. Enable it with ordinary Hydra
+overrides, for example:
+
+```bash
+bash examples/flowgrpo_trainer/sd35/run_sd35_medium_ocr_lora_v1.sh \
+  trainer.v1.watchdog.enabled=true \
+  trainer.v1.watchdog.window_size=3 \
+  trainer.v1.watchdog.warmup_steps=5
+```
+
+It reads already reduced scalar metrics after each V1 training step. Warnings
+include the rule, triggering step, consecutive evidence window and scalar values;
+the existing logger also receives `watchdog/alerts`, per-rule
+`watchdog/coverage/<rule>`, `watchdog/warmup_remaining`, `watchdog/ignored_step`
+and `watchdog/processing_time_s`. Coverage zero means evidence is unavailable or
+the loss does not support that rule, not a healthy result.
+
+The rules distinguish numerical failure from sustained risk signals:
+
+- Nonfinite `actor/grad_norm` warns immediately, including during warmup.
+- For `flow_grpo`, `dance_grpo`, `flow_dppo` and `grpo_guard`, a complete window
+  jointly requires zero reward variation in every prompt group, average group
+  size greater than one, reward std at most `reward_std_max` and gradient norm
+  at most `grad_norm_max`. Flat reward alone, singleton groups and a single
+  zero-gradient step are not proof of collapse.
+- Those ratio-producing losses also warn on a complete window of
+  `actor/ratio_mean` outside `[ratio_lower, ratio_upper]`. Other losses, including
+  DiffusionNFT and distillation, do not receive ratio or grouped-reward warnings.
+- `max_staleness=null` disables the staleness rule. Set an explicit budget to
+  warn on sustained `training/off_policy/trajectory_staleness_worst/max` above
+  it. This budget is in model versions, not seconds or the sampler's trajectory
+  span limit.
+
+Defaults are configurable diagnostic heuristics, not CI gates or validated
+collapse thresholds. Sustained rules skip five accepted observations after
+start/resume, then need three consecutive complete observations. Missing or
+invalid prerequisites and forward step gaps break consecutive evidence;
+duplicate/older steps are ignored. An episode emits once and can rearm after a
+known recovery, with `cooldown_steps=20` between reports. Diagnostics reset on
+each `fit`, including checkpoint resume, and are not checkpointed. Only bounded
+scalar history is retained; the watchdog never changes training inputs, RNG,
+optimizer state, checkpoints, scheduling or job lifetime, and needs no LLM service.
 
 ## Run V1 separate-async mode
 
