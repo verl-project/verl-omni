@@ -75,6 +75,11 @@ jobs:
           git config --global http.postBuffer 524288000 || true
           uv pip install --system --break-system-packages -e ".[gpu,dev,audio,omni,ocr]"
           uv pip install --system --break-system-packages --no-deps --reinstall "verl @ git+https://github.com/verl-project/verl.git@main"
+          # Same pinned Boogu-Image install as the gating gpu_smoke job (see
+          # .github/actions/gpu-smoke-prepare/action.yml); --no-deps because
+          # boogu-image's torch/diffusers/kernels pins conflict with this stack.
+          uv pip install --system --break-system-packages --no-deps \
+            "boogu-image @ git+https://github.com/boogu-project/Boogu-Image.git@$(cat .github/boogu_image_pin.txt)"
           if ! command -v python >/dev/null 2>&1; then
             ln -sfn "$(command -v python3)" /usr/local/bin/python
           fi

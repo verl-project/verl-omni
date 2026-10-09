@@ -26,6 +26,15 @@ runs:
         # The released qwen-tts targets Transformers 4.57.3; install the pinned upstream Transformers 5 archive without touching this repo's stack.
         uv pip install --system --break-system-packages --no-deps --reinstall \
           "qwen-tts @ https://github.com/QwenLM/Qwen3-TTS/archive/$(cat .github/qwen_tts_pin.txt).tar.gz"
+        # The Boogu-Image checkpoint's transformer/transformer_boogu.py is a shim that
+        # re-exports BooguImageTransformer2DModel from the `boogu` package, so the
+        # DiffusionNFT trainer cannot load the checkpoint without it and the Boogu
+        # smoke test silently SKIPs (issue #711).
+        # --no-deps is required, not an optimisation: boogu-image declares torch<2.12,
+        # diffusers<0.39 and kernels<0.15, all of which conflict with this stack. None
+        # of the modules the trainer imports need the skipped extras.
+        uv pip install --system --break-system-packages --no-deps \
+          "boogu-image @ git+https://github.com/boogu-project/Boogu-Image.git@$(cat .github/boogu_image_pin.txt)"
         # uv.cu130 ships python3 only; Ray/scripts may still invoke `python`.
         if ! command -v python >/dev/null 2>&1; then
           ln -sfn "$(command -v python3)" /usr/local/bin/python
