@@ -907,6 +907,7 @@ class ModalityGroupedBatchSampler(Sampler[int]):
     def __iter__(self):
         for batch in self._build_batches():
             yield from batch
+        self.epoch += 1
 
     def __len__(self) -> int:
         return self._length

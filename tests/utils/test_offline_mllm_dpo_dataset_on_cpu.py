@@ -402,6 +402,32 @@ def test_modality_grouped_batch_sampler_yields_same_modality_chunks():
         assert len(set(batch_modalities)) == 1
 
 
+def test_modality_grouped_batch_sampler_resamples_each_epoch():
+    modalities = ["image"] * 8 + ["video"] * 8
+    sampler = dataset_mod.ModalityGroupedBatchSampler(
+        data_source=FakeModalityDataset(modalities),
+        batch_size=4,
+        seed=0,
+    )
+
+    # A DataLoader calls iter(sampler) once per epoch and never calls set_epoch.
+    first_epoch = list(sampler)
+    second_epoch = list(sampler)
+    assert first_epoch != second_epoch
+
+    # Explicit set_epoch still reproduces an epoch exactly.
+    sampler.set_epoch(0)
+    assert list(sampler) == first_epoch
+
+    # The per-epoch sequence is deterministic for a given seed.
+    twin = dataset_mod.ModalityGroupedBatchSampler(
+        data_source=FakeModalityDataset(modalities),
+        batch_size=4,
+        seed=0,
+    )
+    assert [list(twin), list(twin)] == [first_epoch, second_epoch]
+
+
 def test_modality_grouped_batch_sampler_respects_weights(monkeypatch):
     dataset = FakeModalityDataset(["image", "video", "audio"])
     sampler = dataset_mod.ModalityGroupedBatchSampler(
