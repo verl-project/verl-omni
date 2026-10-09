@@ -1,6 +1,6 @@
 # Installation (NPU)
 
-Last updated: 09/24/2026
+Last updated: 10/08/2026
 
 For NVIDIA GPU, see the {doc}`GPU installation guide <install>`. For AMD GPU, see the {doc}`ROCm installation guide <install_rocm>`.
 
@@ -23,30 +23,53 @@ uv venv --python 3.12 --seed
 source .venv/bin/activate
 ```
 
-2. Install the platform backend
+2. Install PyTorch
 
 ```bash
-uv pip install vllm==0.28.0
-uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@$(cat .github/vllm_ascend_pin.txt)"
+uv pip install --force-reinstall \
+    torch==2.10.0+cpu torchvision==0.25.0+cpu torchaudio==2.10.0+cpu \
+    --index-url https://download.pytorch.org/whl/cpu/
+uv pip install --force-reinstall torch-npu==2.10.0.post4 \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+    --extra-index-url https://download.pytorch.org/whl/cpu/
 ```
 
-3. Install vLLM-Omni and VeRL-Omni
+3. Install vLLM and vLLM-Ascend
 
 ```bash
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
+source ${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit}/set_env.sh
+source ${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit}/../nnal/atb/set_env.sh
+
+git clone --depth 1 -b v0.28.0 https://github.com/vllm-project/vllm.git
+cd vllm
+VLLM_TARGET_DEVICE=empty uv pip install -e ".[audio]"
+uv pip uninstall -y triton || true
+cd ..
+
+uv pip install "vllm-ascend @ git+https://github.com/vllm-project/vllm-ascend.git@$(cat .github/vllm_ascend_pin.txt)"
+uv pip uninstall -y triton triton-ascend || true
+uv pip install triton-ascend==3.2.2 \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+```
+
+4. Install vLLM-Omni and VeRL-Omni
+
+```bash
+VLLM_OMNI_TARGET_DEVICE=npu \
+    uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
 uv pip install -e .
 ```
 
-This installs `vllm-omni` and `verl-omni` with its core dependencies.
+5. Reinstall PyTorch
 
-> **Ascend PyTorch version alignment:** VeRL-Omni does not require every NPU
-> environment to use one fixed `torch` version such as 2.10.0. Choose a
-> mutually compatible `torch` / `torch-npu` pair for the installed CANN and
-> vLLM-Ascend versions, and pin that pair before installing the engine and
-> training stack. Packages such as `vllm`, `vllm-ascend`, `vllm-omni`, and
-> `verl` may resolve different PyTorch versions while they are installed.
-> Re-apply the selected pair after all four packages are installed if the
-> resolver changed it, then run the version checks below.
+```bash
+uv pip install --force-reinstall \
+    torch==2.10.0+cpu torchvision==0.25.0+cpu torchaudio==2.10.0+cpu \
+    --index-url https://download.pytorch.org/whl/cpu/
+uv pip install --force-reinstall torch-npu==2.10.0.post4 \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+    --extra-index-url https://download.pytorch.org/whl/cpu/
+```
 
 ### Extras
 
@@ -62,6 +85,7 @@ The CUDA `gpu` extra is not used on NPU. NPU recipes override the attention back
 ```bash
 python -c "from importlib.metadata import version; import torch, torch_npu; print('torch', torch.__version__, '| torch-npu', version('torch-npu'), '| NPU', torch.npu.is_available())"
 python -c "import vllm; print('vllm', vllm.__version__)"
+python -c "import triton; from triton.backends import backends; print('triton', triton.__version__, sorted(backends))"
 python -c "from importlib.metadata import version; import vllm_ascend; print('vllm-ascend', version('vllm-ascend'))"
 python -c "from importlib.metadata import version; import vllm_omni; print('vllm-omni', version('vllm-omni'))"
 python -c "import verl; print('verl', verl.__version__)"
