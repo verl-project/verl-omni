@@ -201,6 +201,95 @@ def test_build_preference_branch_rejects_missing_top_level_media():
         dataset_mod._build_preference_branch(sample, sample["chosen"])
 
 
+@pytest.mark.parametrize(
+    ("modality", "path"),
+    [("image", "/tmp/a.png"), ("video", "/tmp/a.mp4"), ("audio", "/tmp/a.wav")],
+)
+def test_build_preference_branch_keeps_repeated_inline_media_paths(modality, path):
+    item = _content_item(modality, **{modality: path})
+    sample = {
+        "prompt": [{"role": "user", "content": [item, item, _content_item("text", text="Compare these.")]}],
+        "chosen": "answer A",
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch[f"{modality}s"] == [path, path]
+
+
+def test_build_preference_branch_keeps_same_media_path_across_messages():
+    item = _content_item("image", image="/tmp/a.png")
+    sample = {
+        "prompt": [
+            {"role": "user", "content": [item]},
+            {"role": "assistant", "content": "Noted."},
+            {"role": "user", "content": [item, _content_item("text", text="Is this the same image?")]},
+        ],
+        "chosen": "answer A",
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/a.png", "/tmp/a.png"]
+
+
+def test_build_preference_branch_does_not_double_count_declared_top_level_media():
+    sample = {
+        "prompt": [{"role": "user", "content": [_content_item("image", image="/tmp/a.png")]}],
+        "chosen": "answer A",
+        "images": ["/tmp/a.png"],
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/a.png"]
+
+
+def test_build_preference_branch_appends_inline_media_missing_from_top_level():
+    sample = {
+        "prompt": [
+            {"role": "user", "content": "<image>What is this?"},
+            {"role": "user", "content": [_content_item("image", image="/tmp/b.png")]},
+        ],
+        "chosen": "answer A",
+        "images": ["/tmp/a.png"],
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/a.png", "/tmp/b.png"]
+
+
+def test_build_preference_branch_orders_media_by_prompt_tokens():
+    sample = {
+        "prompt": [
+            {
+                "role": "user",
+                "content": [
+                    _content_item("image", image="/tmp/b.png"),
+                    _content_item("image", image="/tmp/a.png"),
+                    _content_item("text", text="Which is brighter?"),
+                ],
+            }
+        ],
+        "chosen": "answer A",
+        "images": ["/tmp/a.png"],
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/b.png", "/tmp/a.png"]
+
+
+def test_build_preference_branch_orders_placeholder_after_inline_media():
+    sample = {
+        "prompt": [
+            {"role": "user", "content": [_content_item("image", image="/tmp/b.png")]},
+            {"role": "user", "content": "<image>What is this?"},
+        ],
+        "chosen": "answer A",
+        "images": ["/tmp/a.png"],
+    }
+    branch = dataset_mod._build_preference_branch(sample, sample["chosen"])
+
+    assert branch["images"] == ["/tmp/b.png", "/tmp/a.png"]
+
+
 def test_pair_branch_values_keeps_chosen_rejected_branches_separate():
     chosen = {"input_ids": torch.tensor([1, 2]), "labels": torch.tensor([3, 4])}
     rejected = {"input_ids": torch.tensor([5]), "labels": torch.tensor([7])}
