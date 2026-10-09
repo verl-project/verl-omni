@@ -25,6 +25,7 @@ import torch.nn.functional as F
 from omegaconf import DictConfig
 from tensordict import TensorDict
 from verl import DataProto
+from verl.trainer.ppo.core_algos import get_policy_loss_fn
 from verl.utils import tensordict_utils as tu
 
 from verl_omni.workers.config import DiffusionActorConfig
@@ -1229,3 +1230,83 @@ class DistillFlowMatchingMSELoss(DiffusionLossFn):
             teacher_noise_pred=data["teacher_noise_pred"],
         )
         return DiffusionLossResult(loss=distill_loss, metrics=metrics)
+
+
+@register_diffusion_loss("dual_grpo")
+class DualGRPOLoss(DiffusionLossFn):
+    """Dispatch DualGRPO by forward type: token PPO for AR, FlowGRPO for DiT.
+
+    The AR branch calls verl's registered vanilla policy loss, including its
+    dual-clip cap (``clip_ratio_c``). The DiT branch reuses :class:`FlowGRPOLoss`
+    and ``diffusion_loss.clip_ratio``.
+    """
+
+    required_model_output_keys = ("log_probs",)
+    required_data_keys = ("old_log_probs", "advantages")
+
+    @classmethod
+    def compute_loss(cls, **kwargs: Any) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Not used. DualGRPO selects FlowGRPO or token PPO inside ``__call__``."""
+        raise NotImplementedError("DualGRPOLoss dispatches in __call__ from model_output, not compute_loss.")
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        """Return whether this forward is the text-encoder AR stage.
+
+        DiT forwards include ``prev_sample_mean`` and a rank-1 per-step ``log_probs``.
+        AR forwards return token log-probs aligned with ``responses`` of shape
+        ``(batch, response_length)`` and do not include ``prev_sample_mean``.
+        """
+        if model_output.get("prev_sample_mean", None) is not None:
+            is_ar_token = False
+        else:
+            log_probs = model_output["log_probs"]
+            if log_probs.is_nested or log_probs.ndim == 2:
+                is_ar_token = True
+            else:
+                raise ValueError(
+                    "dual_grpo could not tell an AR token forward from a DiT step forward. "
+                    "DiT outputs include prev_sample_mean; AR outputs are rank-2 token log-probs "
+                    f"matching responses of shape (batch, response_length). Got log_probs shape "
+                    f"{tuple(log_probs.shape)} and model_output keys {sorted(model_output)}."
+                )
+        if is_ar_token:
+            return self._ar_token_ppo(config=config, model_output=model_output, data=data)
+        else:
+            return get_diffusion_loss_fn("flow_grpo")(config=config, model_output=model_output, data=data)
+
+    @staticmethod
+    def _ar_token_ppo(
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        if "response_mask" not in data:
+            raise KeyError(
+                "dual_grpo AR token PPO requires data['response_mask'] aligned with token log-probs. "
+                f"Available data keys: {_format_available_keys(data)}."
+            )
+
+        log_prob = model_output["log_probs"]
+        if log_prob.is_nested:
+            from verl.workers.utils.padding import no_padding_2_padding
+
+            log_prob = no_padding_2_padding(log_prob, data)
+
+        policy_loss_fn = get_policy_loss_fn("vanilla")
+        pg_loss, pg_metrics = policy_loss_fn(
+            old_log_prob=data["old_log_probs"],
+            log_prob=log_prob,
+            advantages=data["advantages"],
+            response_mask=data["response_mask"].to(dtype=torch.bool),
+            loss_agg_mode=config.loss_agg_mode,
+            config=config,
+            rollout_is_weights=data.get("rollout_is_weights", None),
+        )
+        return DiffusionLossResult(loss=pg_loss, metrics=pg_metrics)

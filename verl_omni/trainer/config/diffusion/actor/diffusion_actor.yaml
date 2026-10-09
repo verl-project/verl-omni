@@ -20,6 +20,21 @@ ppo_mini_batch_size: 256
 # Local per-GPU micro batch size
 ppo_micro_batch_size_per_gpu: null
 
+# PPO clip ratio for the AR token policy loss. DiT FlowGRPO uses diffusion_loss.clip_ratio.
+clip_ratio: 0.2
+
+# Lower clip range for the AR token PPO loss
+clip_ratio_low: 0.2
+
+# Upper clip range for the AR token PPO loss
+clip_ratio_high: 0.2
+
+# Dual-clip cap on the probability ratio when the advantage is negative
+clip_ratio_c: 3.0
+
+# Aggregation mode for the AR token PPO loss
+loss_agg_mode: token-mean
+
 # diffusion loss config
 diffusion_loss:
 
@@ -147,3 +162,17 @@ optim:
 
   # Prioritized. None, 0 or Negative values mean delegating to lr_warmup_steps_ratio.
   lr_warmup_steps: -1
+
+# AR config
+ar:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl_omni.workers.config.diffusion.actor.DiffusionActorARConfig
+
+  # Whether to calculate entropy for AR loss
+  calculate_entropy: False
+
+  # Entropy coefficient for AR part
+  entropy_coeff: 0.0
+  
+

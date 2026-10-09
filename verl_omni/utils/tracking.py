@@ -231,3 +231,33 @@ def log_wandb_media(media: dict[str, Any], step: int) -> None:
 
     if wandb.run is not None:
         wandb.log(media, step=step, commit=False)
+
+
+def log_ar_generations_to_wandb(logger_cls, samples, step):
+    import wandb
+
+    """Log samples to wandb as a table"""
+
+    # Create column names for all samples
+    columns = ["step"] + sum([[f"input_{i + 1}", f"output_{i + 1}", f"score_{i + 1}"] for i in range(len(samples))], [])
+
+    if not hasattr(logger_cls, "ar_validation_table"):
+        # Initialize the table on first call
+        logger_cls.ar_validation_table = wandb.Table(columns=columns)
+
+    # Create a new table with same columns and existing data
+    # Workaround for https://github.com/wandb/wandb/issues/2981#issuecomment-1997445737
+    new_table = wandb.Table(columns=columns, data=logger_cls.ar_validation_table.data)
+
+    # Add new row with all data
+    row_data = []
+    row_data.append(step)
+    for sample in samples:
+        row_data.extend(sample)
+
+    new_table.add_data(*row_data)
+
+    # Update reference and log
+    if wandb.run is not None:
+        wandb.log({"ar-val/generations": new_table}, step=step)
+    logger_cls.ar_validation_table = new_table

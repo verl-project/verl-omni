@@ -78,6 +78,11 @@ actor_rollout_ref:
     strategy: fsdp
     ppo_mini_batch_size: 256
     ppo_micro_batch_size_per_gpu: null
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.2
+    clip_ratio_c: 3.0
+    loss_agg_mode: token-mean
     diffusion_loss:
       _target_: verl_omni.workers.config.diffusion.DiffusionLossConfig
       loss_mode: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
@@ -116,6 +121,10 @@ actor_rollout_ref:
       save_lora_only: false
       load_contents: ${.save_contents}
       async_save: false
+    ar:
+      _target_: verl_omni.workers.config.diffusion.actor.DiffusionActorARConfig
+      calculate_entropy: false
+      entropy_coeff: 0.0
     enable_timestep_staging: false
     use_no_sync_for_gradient_accumulation: false
     grad_clip: 1.0
@@ -241,6 +250,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: null
     disable_log_stats: true
     'n': 1
+    m: 1
     seed: 42
     full_determinism: false
     multi_turn:
@@ -254,6 +264,7 @@ actor_rollout_ref:
     val_kwargs:
       _target_: verl_omni.workers.config.diffusion.DiffusionSamplingConfig
       'n': 1
+      m: 1
       pipeline:
         _target_: verl_omni.workers.config.diffusion.DiffusionPipelineConfig
         height: ${oc.select:actor_rollout_ref.rollout.pipeline.height,512}
@@ -276,6 +287,13 @@ actor_rollout_ref:
         sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
         sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
         sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
+      ar:
+        _target_: verl_omni.workers.config.diffusion.DiffusionARConfig
+        temperature: ${oc.select:actor_rollout_ref.rollout.ar.temperature,1.0}
+        top_k: ${oc.select:actor_rollout_ref.rollout.ar.top_k,0}
+        top_p: ${oc.select:actor_rollout_ref.rollout.ar.top_p,1.0}
+        repetition_penalty: ${oc.select:actor_rollout_ref.rollout.ar.repetition_penalty,1.0}
+        response_length: ${oc.select:actor_rollout_ref.rollout.ar.response_length,1024}
     algo:
       _target_: verl_omni.workers.config.diffusion.DiffusionRolloutAlgoConfig
       noise_level: 1.0
@@ -301,13 +319,15 @@ actor_rollout_ref:
       task: null
       frame_indices: null
       aspect_ratio: null
+    ar:
+      _target_: verl_omni.workers.config.diffusion.DiffusionARConfig
+      temperature: 1.0
+      top_k: 0
+      top_p: 1.0
+      repetition_penalty: 1.0
+      response_length: 1024
     calculate_log_probs: false
-    llm_calculate_log_probs: false
-    temperature: 1.0
-    top_k: 0
-    top_p: 1.0
-    repetition_penalty: 1.0
-    max_new_tokens: 256
+    ar_calculate_log_probs: false
     rollout_adapter: default
     agent:
       _target_: verl.workers.config.AgentLoopConfig
@@ -342,6 +362,7 @@ actor_rollout_ref:
     external_lib: null
     enable_gradient_checkpointing: true
     config_path: null
+    text_encoder_subfolder: text_encoder
     transformer_subfolder: transformer
     attn_backend: _flash_3_varlen_hub
     use_regional_compile: false
@@ -364,6 +385,7 @@ actor_rollout_ref:
     lora_dtype: null
     fsdp_layer_prefixes:
     - transformer_blocks.
+    use_remove_padding: false
     mtp:
       _target_: verl.workers.config.MtpConfig
       enable: false
@@ -388,6 +410,21 @@ actor_rollout_ref:
       sde_window_size: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_size,null}
       sde_window_range: ${oc.select:actor_rollout_ref.rollout.algo.sde_window_range,null}
       sde_contiguous: ${oc.select:actor_rollout_ref.rollout.algo.sde_contiguous,true}
+    ar:
+      _target_: verl_omni.workers.config.diffusion.DiffusionModelARConfig
+      override_config: {}
+      optim:
+        _target_: verl_omni.workers.config.diffusion.DiffusionModelAROptimizerConfig
+        lr: null
+        weight_decay: null
+        betas: null
+        clip_grad: null
+        lr_warmup_steps_ratio: null
+        lr_warmup_steps: null
+        lr_scheduler_type: null
+        min_lr_ratio: null
+        num_cycles: null
+        override_optimizer_config: null
     model_type: diffusion_model
   separate: false
   hybrid_engine: true
