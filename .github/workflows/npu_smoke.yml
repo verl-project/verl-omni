@@ -35,9 +35,10 @@ permissions:
 jobs:
   setup_runner:
     # Pull requests run only after a CI label is applied:
-    #   ready-for-ci / ci-npu           -> tests 0 and 1
+    #   ready-for-ci / ci-npu           -> tests 0, 1, and 2
     #   ci-npu-rollout                  -> test 0
     #   ci-npu-flowgrpo                 -> test 1
+    #   ci-npu-dancegrpo                -> test 2
     # Pushes to main and release branches run the full suite.
     if: >-
       github.repository_owner == 'verl-project' &&
@@ -45,7 +46,8 @@ jobs:
        contains(github.event.pull_request.labels.*.name, 'ready-for-ci') ||
        contains(github.event.pull_request.labels.*.name, 'ci-npu') ||
        contains(github.event.pull_request.labels.*.name, 'ci-npu-rollout') ||
-       contains(github.event.pull_request.labels.*.name, 'ci-npu-flowgrpo'))
+       contains(github.event.pull_request.labels.*.name, 'ci-npu-flowgrpo') ||
+       contains(github.event.pull_request.labels.*.name, 'ci-npu-dancegrpo'))
     runs-on: linux-aarch64-a2b4-8
     timeout-minutes: 120
     container:
@@ -81,6 +83,8 @@ jobs:
             mode="rollout"
           elif [[ ",${pr_labels}," == *",ci-npu-flowgrpo,"* ]]; then
             mode="flowgrpo"
+          elif [[ ",${pr_labels}," == *",ci-npu-dancegrpo,"* ]]; then
+            mode="dancegrpo"
           else
             mode="none"
           fi
@@ -97,6 +101,13 @@ jobs:
           else
             python tests/special_e2e/build_qwen_image_tiny_random.py --output-dir "${MODEL_PATH}"
           fi
+      - name: Prepare tiny Wan2.2 checkpoint
+        if: steps.resolve-mode.outputs.mode == 'all' || steps.resolve-mode.outputs.mode == 'dancegrpo'
+        run: |
+          MODEL_PATH="${HOME}/.cache/models/tiny-random/Wan2.2-TI2V-5B-Diffusers"
+          python tests/special_e2e/build_wan22_tiny_random.py \
+            --output-dir "${MODEL_PATH}" \
+            --verify-load
       - name: Upgrade vLLM stack
         if: steps.resolve-mode.outputs.mode != 'none'
         shell: bash
@@ -115,8 +126,8 @@ jobs:
 
           if [[ "${mode}" == "all" ]]; then
             plan_json='{
-              "test_ids": ["0", "1"],
-              "group_count": 2,
+              "test_ids": ["0", "1", "2"],
+              "group_count": 3,
               "num_npus": 8,
               "runner_size": 8
             }'
@@ -130,6 +141,13 @@ jobs:
           elif [[ "${mode}" == "flowgrpo" ]]; then
             plan_json='{
               "test_ids": ["1"],
+              "group_count": 1,
+              "num_npus": 8,
+              "runner_size": 8
+            }'
+          elif [[ "${mode}" == "dancegrpo" ]]; then
+            plan_json='{
+              "test_ids": ["2"],
               "group_count": 1,
               "num_npus": 8,
               "runner_size": 8
