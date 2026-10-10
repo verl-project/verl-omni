@@ -186,6 +186,33 @@ actor_rollout_ref:
 - `actor_rollout_ref.model.fsdp_layer_prefixes`: FSDP layer name prefixes for LoRA layered summon (default `["transformer_blocks."]`).
 - `actor_rollout_ref.model.pipeline` / `algo`: Mirrored from `actor_rollout_ref.rollout.pipeline` / `algo` via `oc.select`; prefer overriding the rollout copies.
 
+#### LoRA config resolution
+
+`verl_omni.utils.config.resolve_lora_config` is the single authority for LoRA
+configuration; trainer entry points and engines read its `LoRASettings` instead of
+the raw keys. Resolution rules:
+
+- The rank is the flat `actor_rollout_ref.model.lora_rank`. A nested
+  `model.lora.rank` set without the flat key raises a `ValueError` ("set
+  `lora_rank`"): every engine gate reads the flat spelling, so a nested-only
+  value would silently run full-parameter training where LoRA was intended.
+  Setting both spellings to different positive values also raises.
+- `merge` is read only from the nested `actor_rollout_ref.model.lora.merge`.
+- The adapter path is the flat `actor_rollout_ref.model.lora_adapter_path`,
+  same rule as rank: a nested-only `lora.adapter_path` raises; setting both
+  spellings to different paths raises a `ValueError`.
+- `alpha` is read only from the flat `actor_rollout_ref.model.lora_alpha`. The
+  nested `lora.alpha` key is Megatron grammar and is unread: composed omni configs
+  currently carry `lora.alpha: 32` next to `lora_alpha: 16` (both injected from
+  verl's default tree), and that disagreement is ignored until one of the two
+  defaults changes.
+- Nested `model.lora` keys beyond `merge`/`rank` are Megatron grammar that verl's
+  default config tree injects into every composed config. They are
+  tolerated-but-unread; any other nested key raises a `ValueError` — remove
+  the override, or bump the verl pin if the key comes from a newer verl default.
+- `actor_rollout_ref.model.policy_state_adapters` accepts only `default`, `old`,
+  and `reference`; `default` is always forced first because it is the trained policy.
+
 ### `actor_rollout_ref.actor` — diffusion actor / loss
 
 ```yaml

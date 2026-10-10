@@ -99,6 +99,7 @@ from verl_omni.trainer.diffusion.v1.tq_utils import (
     put_dataproto_fields_to_tq,
     sort_diffusion_tq_keys,
 )
+from verl_omni.utils.config import resolve_lora_config
 from verl_omni.workers.config.reward import (
     reward_is_enabled,
     reward_pool_is_separate,
@@ -181,9 +182,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                     "`python -m verl_omni.trainer.main_diffusion` (the legacy v0 entrypoint)."
                 )
             self._loss_fn = get_diffusion_loss_fn(loss_mode)
-            self._has_old_adapter = "old" in tuple(
-                config.actor_rollout_ref.model.get("policy_state_adapters", ("default",))
-            )
+            self._has_old_adapter = "old" in resolve_lora_config(config.actor_rollout_ref.model).adapters
             if self._has_old_adapter:
                 self._validate_old_adapter_config()
         else:
@@ -200,10 +199,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self.replay_buffer = self._build_replay_buffer()
 
         # ref_in_actor: reference policy is the actor without lora applied.
-        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        self.ref_in_actor = resolve_lora_config(config.actor_rollout_ref.model).enabled
 
         self.checkpoint_manager = None
         self.global_steps = 0

@@ -31,7 +31,7 @@ from verl_omni.trainer.diffusion.ray_diffusion_trainer import (
     PolicyGradientRayTrainer,
     validate_separate_config,
 )
-from verl_omni.utils.config import validate_config
+from verl_omni.utils.config import resolve_lora_config, validate_config
 from verl_omni.utils.diffusion_attention import validate_attention_consistency
 from verl_omni.utils.rl_insight import enable_rl_insight
 from verl_omni.workers.config.reward import reward_pool_is_separate, reward_role_required
@@ -223,10 +223,7 @@ class TaskRunner:
         actor_rollout_cls = ActorRolloutRefWorker
         ray_worker_group_cls = RayWorkerGroup
 
-        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        ref_in_actor = resolve_lora_config(config.actor_rollout_ref.model).enabled
 
         separate = config.actor_rollout_ref.get("separate", False)
         if separate:
@@ -310,11 +307,7 @@ class TaskRunner:
         if not config.actor_rollout_ref.get("separate", False) or not need_reference_policy(config):
             return
 
-        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
-        if ref_in_actor:
+        if resolve_lora_config(config.actor_rollout_ref.model).enabled:
             return
 
         from verl.trainer.ppo.ray_trainer import Role

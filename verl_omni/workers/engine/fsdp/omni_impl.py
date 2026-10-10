@@ -43,6 +43,7 @@ from verl.workers.engine.base import EngineRegistry
 from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
 from verl.workers.engine.fsdp.utils import get_sharding_strategy
 
+from verl_omni.utils.config import resolve_lora_config
 from verl_omni.utils.fsdp_utils import apply_fsdp2, collect_lora_params
 from verl_omni.workers.config import OmniModelConfig
 
@@ -83,7 +84,7 @@ class OmniFSDPEngine(FSDPEngineWithLMHead):
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
 
         peft_config = None
-        merge_lora = self.model_config.lora.get("merge", False)
+        merge_lora = resolve_lora_config(self.model_config).merge
 
         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
         if hasattr(peft_model, "peft_config"):  # LoRA

@@ -48,6 +48,7 @@ def test_teacher_training_config_derivation(actor_rollout_ref_config, tmp_path):
         load_tokenizer=False,
         transformer_config={},
         lora_rank=32,
+        lora={"rank": 32},
     )
     teacher_training_config = build_teacher_training_config(
         config=actor_rollout_ref_config,
@@ -58,6 +59,8 @@ def test_teacher_training_config_derivation(actor_rollout_ref_config, tmp_path):
     assert teacher_training_config.model_config.path == str(teacher_dir)
     assert teacher_training_config.model_config.lora_rank == 0
     assert teacher_training_config.model_config.lora_adapter_path is None
+    # the nested Megatron grammar is stripped too, so the resolver sees no LoRA at all
+    assert teacher_training_config.model_config.lora == {}
     assert teacher_training_config.model_config.load_tokenizer is False
     assert teacher_training_config.engine_config.forward_only is True
     # ref gives no scoring micro-batch by default, so the actor training micro-batch applies

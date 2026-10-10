@@ -95,8 +95,8 @@ def test_delta_sharded_rejects_legacy_diffusion_trainer():
 @pytest.mark.parametrize(
     "model_override",
     [
-        {"lora": {"rank": 8}},  # adapter sync (merge=false default)
-        {"lora": {"rank": 8, "merge": True}},  # merged full-weight export
+        {"lora_rank": 8},  # adapter sync (merge=false default)
+        {"lora_rank": 8, "lora": {"merge": True}},  # merged full-weight export
         {"lora_rank": 16},  # legacy knob
         {"lora_adapter_path": "/tmp/adapter"},
     ],
@@ -104,6 +104,20 @@ def test_delta_sharded_rejects_legacy_diffusion_trainer():
 def test_delta_sharded_rejects_lora(model_override):
     with pytest.raises(ValueError, match="full-weight"):
         validate_config(_delta_config(actor_rollout_ref={"model": model_override}))
+
+
+def test_delta_sharded_surfaces_lora_rank_conflict():
+    """The LoRA gate reads through resolve_lora_config, so a conflicting
+    flat/nested rank raises the resolver's conflict error, not the delta message."""
+    with pytest.raises(ValueError, match="conflicts with"):
+        validate_config(_delta_config(actor_rollout_ref={"model": {"lora": {"rank": 8}, "lora_rank": 16}}))
+
+
+def test_delta_sharded_surfaces_nested_only_rank():
+    """A nested-only rank is Megatron grammar no engine gates on: the resolver's
+    set-the-flat-key error fires before the delta gate can speak."""
+    with pytest.raises(ValueError, match="set actor_rollout_ref.model.lora_rank"):
+        validate_config(_delta_config(actor_rollout_ref={"model": {"lora": {"rank": 8}}}))
 
 
 @pytest.mark.parametrize(
