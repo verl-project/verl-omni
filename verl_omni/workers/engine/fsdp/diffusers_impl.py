@@ -947,18 +947,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         return step_fields, shared_keys
 
     def _merged_lora_per_tensor_param(self):
-        """Stream merged (base + LoRA) weights for rollout weight sync.
-
-        ``state_dict()`` returns tensors that alias the live FSDP parameter
-        storage, and ``merged_lora_context`` restores the un-merged base
-        weights when it exits. The context therefore must stay open until the
-        consumer has materialized every tensor: ``DTensor.full_tensor()``
-        produces a copy, so yielded tensors remain valid after the restore.
-        Consuming a state_dict captured inside the context after the context
-        has exited would silently send base weights without the adapters.
-
-        Names carry the ``transformer.`` prefix, matching the non-merge export path above.
-        """
+        """Stream merged weights under the transformer prefix; see README Gotchas."""
         device = get_device_id()
         try:
             with merged_lora_context(self.module, backup_adapters=True):
@@ -967,7 +956,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                 for name, param in params.items():
                     yield (
                         f"transformer.{name}",
-                        param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+                        param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True).clone()
                         if isinstance(param, DTensor)
                         # clone: plain tensors also alias module storage, and bucketed
                         # senders may flush after the restore has already run

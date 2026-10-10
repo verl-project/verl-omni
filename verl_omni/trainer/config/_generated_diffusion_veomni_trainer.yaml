@@ -94,6 +94,9 @@ actor_rollout_ref:
       _target_: verl_omni.workers.config.diffusion.DiffusionLossConfig
       loss_mode: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
       clip_ratio: 0.0001
+      text_clip_ratio: 0.2
+      text_clip_ratio_high: 0.28
+      text_loss_weight: 1.0
       adv_clip_max: 5.0
       mix_beta: 0.5
       ref_kl_coef: 0.0
@@ -300,6 +303,9 @@ actor_rollout_ref:
         num_inference_steps: 50
         true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.true_cfg_scale,1.0}
         max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
+        max_think_tokens: ${oc.select:actor_rollout_ref.rollout.pipeline.max_think_tokens,512}
+        think_temperature: 0.3
+        think_top_p: 1.0
         guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
         reference_image_short_edge: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_image_short_edge,null}
         num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
@@ -332,6 +338,9 @@ actor_rollout_ref:
       num_inference_steps: 10
       true_cfg_scale: 1.0
       max_sequence_length: 512
+      max_think_tokens: 512
+      think_temperature: 1.0
+      think_top_p: 0.8
       guidance_scale: null
       reference_image_short_edge: null
       num_frames: 1
@@ -413,6 +422,9 @@ actor_rollout_ref:
       num_inference_steps: ${oc.select:actor_rollout_ref.rollout.pipeline.num_inference_steps,10}
       true_cfg_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.true_cfg_scale,1.0}
       max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
+      max_think_tokens: ${oc.select:actor_rollout_ref.rollout.pipeline.max_think_tokens,512}
+      think_temperature: ${oc.select:actor_rollout_ref.rollout.pipeline.think_temperature,1.0}
+      think_top_p: ${oc.select:actor_rollout_ref.rollout.pipeline.think_top_p,0.8}
       guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
       reference_image_short_edge: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_image_short_edge,null}
       num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}

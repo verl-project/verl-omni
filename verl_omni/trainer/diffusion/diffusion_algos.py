@@ -358,6 +358,45 @@ class FlowGRPOLoss(DiffusionLossFn):
         return DiffusionLossResult(loss=loss, metrics=metrics)
 
 
+@register_diffusion_loss("alphagrpo")
+class AlphaGRPOLoss(FlowGRPOLoss):
+    """Image FlowGRPO plus a masked sequence-ratio text objective."""
+
+    @staticmethod
+    def compute_text_loss(log_probs, old_log_probs, mask, advantages, config):
+        """Keep each sequence ratio paired with its own advantage [B]; see BAGEL README Gotchas."""
+        lengths = mask.sum(-1)
+        if bool((lengths == 0).any()):
+            raise ValueError("AlphaGRPO requires at least one text action per sample.")
+        log_ratio = ((log_probs - old_log_probs).masked_fill(~mask, 0)).sum(-1) / lengths
+        ratio = log_ratio.exp()
+        clipped = ratio.clamp(1 - config.text_clip_ratio, 1 + config.text_clip_ratio_high)
+        advantages = advantages.clamp(-config.adv_clip_max, config.adv_clip_max)
+        loss = torch.maximum(-ratio * advantages, -clipped * advantages).mean()
+        return loss, {
+            "actor/text_pg_loss": loss.detach().item(),
+            "actor/text_ratio_mean": ratio.detach().mean().item(),
+            "actor/text_clipfrac": ((ratio.detach() != clipped.detach()).float().mean().item()),
+        }
+
+    def __call__(self, *, config, model_output, data):
+        result = super().__call__(config=config, model_output=model_output, data=data)
+        if "text_log_probs" in model_output:
+            text_loss, metrics = self.compute_text_loss(
+                model_output["text_log_probs"],
+                data["old_text_log_probs"],
+                data["thinking_mask"],
+                data["advantages"],
+                config.diffusion_loss,
+            )
+            scale = tu.get_non_tensor_data(data, "text_loss_scale", default=None)
+            if scale is None:
+                raise ValueError("AlphaGRPO joint loss requires text_loss_scale from its engine.")
+            result.loss = result.loss + text_loss * config.diffusion_loss.text_loss_weight * scale
+            result.metrics.update(metrics)
+        return result
+
+
 @register_diffusion_loss("flow_dppo")
 class FlowDPPOLoss(DiffusionLossFn):
     """Flow-DPPO policy objective with an exact divergence trust-region mask."""

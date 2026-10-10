@@ -46,11 +46,15 @@ class DiffusionLossConfig(BaseConfig):
     dpo_beta: float = 2000.0
     kl_mask_threshold: float = 1e-5
     add_kl_coefficient: bool = True
+    text_clip_ratio: float = 0.2
+    text_clip_ratio_high: float = 0.28
+    text_loss_weight: float = 1.0
 
     def __post_init__(self):
         """Validate diffusion loss configuration."""
         valid_modes = [
             "flow_grpo",
+            "alphagrpo",
             "flow_dppo",
             "grpo_guard",
             "diffusion_nft",
@@ -64,6 +68,10 @@ class DiffusionLossConfig(BaseConfig):
             raise ValueError(f"Invalid diffusion loss_mode: {self.loss_mode}. Must be one of {valid_modes}")
         if self.adv_clip_max <= 0:
             raise ValueError(f"Diffusion adv_clip_max must be positive, got {self.adv_clip_max}.")
+        if not 0 < self.text_clip_ratio < 1 or self.text_clip_ratio_high <= 0:
+            raise ValueError("Text PPO clip ratios must satisfy 0 < lower < 1 and upper > 0.")
+        if self.text_loss_weight < 0:
+            raise ValueError("text_loss_weight must be nonnegative.")
         if self.mix_beta <= 0:
             raise ValueError(f"mix_beta must be positive, got {self.mix_beta}.")
         if self.adaptive_weight_min <= 0:

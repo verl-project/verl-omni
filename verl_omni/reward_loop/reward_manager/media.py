@@ -33,7 +33,7 @@ def _reward_extra_info(data_item) -> dict:
     """Copy metadata and project generated media, rejecting conflicting sources."""
     extra_info = _metadata_mapping(data_item.non_tensor_batch.get("extra_info"))
     tool_extra_fields = _metadata_mapping(data_item.non_tensor_batch.get("tool_extra_fields"))
-    generated_media_keys = ("audio", "audio_sample_rate", "media_kind")
+    generated_media_keys = ("audio", "audio_sample_rate", "media_kind", "thinking_text")
     for key in generated_media_keys:
         extra_info.pop(key, None)
     extra_info.update({key: value for key, value in tool_extra_fields.items() if key not in generated_media_keys})

@@ -188,6 +188,15 @@ val_kwargs:
     # Maximum text-encoder token sequence length for prompt encoding
     max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
 
+    # AlphaGRPO validation thinking action budget
+    max_think_tokens: ${oc.select:actor_rollout_ref.rollout.pipeline.max_think_tokens,512}
+
+    # AlphaGRPO validation thinking temperature
+    think_temperature: 0.3
+
+    # AlphaGRPO validation nucleus sampling threshold
+    think_top_p: 1.0
+
     # Distilled guidance scale for models with guidance_embeds; null to disable
     guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
 
@@ -286,6 +295,15 @@ pipeline:
 
   # Maximum text-encoder token sequence length for prompt encoding
   max_sequence_length: 512
+
+  # AlphaGRPO thinking action budget
+  max_think_tokens: 512
+
+  # AlphaGRPO text sampling and likelihood temperature
+  think_temperature: 1.0
+
+  # AlphaGRPO nucleus sampling threshold
+  think_top_p: 0.8
 
   # Distilled guidance scale for models with guidance_embeds; null to disable
   guidance_scale: null

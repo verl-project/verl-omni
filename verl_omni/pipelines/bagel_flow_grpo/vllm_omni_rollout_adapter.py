@@ -364,8 +364,6 @@ class BagelPipelineWithLogProb(BagelPipeline):
                 traj_latents = traj_latents[begin : end + 1]
             if traj_timesteps is not None:
                 traj_timesteps = traj_timesteps[begin:end]
-            if traj_log_probs is not None:
-                traj_log_probs = traj_log_probs[begin:end]
 
         # BAGEL trajectories are time-major; add a batch axis for training consumers.
         if traj_latents is not None:
