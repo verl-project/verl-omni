@@ -102,9 +102,14 @@ jobs:
         if: steps.resolve-mode.outputs.mode == 'all' || steps.resolve-mode.outputs.mode == 'ci-npu-e2e'
         run: |
           MODEL_PATH="${HOME}/.cache/models/tiny-random/Wan2.2-TI2V-5B-Diffusers"
-          python tests/special_e2e/build_wan22_tiny_random.py \
-            --output-dir "${MODEL_PATH}" \
-            --verify-load
+
+          if [[ -d "${MODEL_PATH}" ]]; then
+            echo "Reusing existing tiny Wan2.2 checkpoint at ${MODEL_PATH}"
+          else
+            python tests/special_e2e/build_wan22_tiny_random.py \
+              --output-dir "${MODEL_PATH}" \
+              --verify-load
+          fi
       - name: Upgrade vLLM stack
         if: steps.resolve-mode.outputs.mode != 'none'
         shell: bash
